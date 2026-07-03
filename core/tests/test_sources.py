@@ -368,6 +368,45 @@ async def test_member_scoped_page_is_invisible_to_another_member(
     assert await service.search_sources("onboarding checklist", recall_subjects(bob), 8) == ()
 
 
+async def test_a_failing_source_is_isolated_and_released(
+    clean: None, database_url: str, tmp_path: Path
+) -> None:
+    """One bad source must not wedge the run: its fetch raises, but the sibling still syncs and the
+    failing source is released (claim cleared) and backed off (next_sync_at advanced) rather than
+    left claimed to re-fail every lease cycle."""
+    await _workspace()
+    good = tmp_path / "good"
+    good.mkdir()
+    (good / "doc.md").write_text("the wifi password is maple syrup")
+    missing = tmp_path / "missing"  # never created → FolderSource._read raises FileNotFoundError
+    driver, _, _ = _wire(database_url, vec((14, 1.0)), tmp_path / "blobs")
+    await _register_folder(good)
+    await _register_folder(missing)
+
+    async def _row(root: Path) -> sa.RowMapping:
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(
+                        tables.source.c.config,
+                        tables.source.c.claimed_by,
+                        tables.source.c.next_sync_at,
+                    )
+                )
+            ).mappings().all()
+        return next(row for row in rows if row["config"]["root"] == str(root))
+
+    before = (await _row(missing))["next_sync_at"]
+
+    await driver.run()
+
+    assert len(await _pages()) == 1  # the good source synced despite the bad sibling
+    good_row, missing_row = await _row(good), await _row(missing)
+    assert good_row["claimed_by"] is None
+    assert missing_row["claimed_by"] is None  # released, not stuck claimed
+    assert missing_row["next_sync_at"] > before  # backed off, won't re-fail every lease
+
+
 def test_sync_and_page_index_register_as_core_jobs(database_url: str, tmp_path: Path) -> None:
     driver, page_indexer, service = _wire(database_url, (), tmp_path / "blobs")
     memory_indexer = MemoryIndexer(

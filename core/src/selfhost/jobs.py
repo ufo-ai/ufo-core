@@ -26,9 +26,9 @@ JOB_QUEUE_NAME = "jobs"
 JOB_WORKFLOW_NAME = "job"
 CORE_EXTENSION = "core"
 MEMORY_INDEX_JOB = "memory_index"
-MEMORY_INDEX_SCHEDULE = "*/10 * * * * *"
+MEMORY_INDEX_SCHEDULE = "0 * * * * *"
 PAGE_INDEX_JOB = "page_index"
-PAGE_INDEX_SCHEDULE = "*/10 * * * * *"
+PAGE_INDEX_SCHEDULE = "0 * * * * *"
 JOB_QUEUE = Queue(JOB_QUEUE_NAME)
 
 

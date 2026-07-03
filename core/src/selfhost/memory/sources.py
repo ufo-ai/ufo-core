@@ -26,11 +26,12 @@ from selfhost.blob import BlobStore
 from selfhost.config import SourceConfig, SourceEntry
 from selfhost.db import workspace_tx
 from selfhost.memory.service import SHARED_SUBJECT
+from selfhost.o11y import log
 from selfhost.schema import tables
 
 FOLDER_BACKEND = "folder"
 SOURCE_SYNC_JOB = "source_sync"
-SOURCE_SYNC_SCHEDULE = "*/30 * * * * *"
+SOURCE_SYNC_SCHEDULE = "0 * * * * *"
 SOURCE_SYNC_INTERVAL_SECONDS = 60
 CLAIM_LEASE_SECONDS = 300
 DUE_BATCH_MAX_SOURCES = 50
@@ -144,8 +145,17 @@ class SyncDriver:
     async def run(self) -> None:
         claim = uuid4().hex
         for source in await self._claim_due(claim):
-            result = await self._fetch(source)
-            await self._commit(source, result)
+            try:
+                result = await self._fetch(source)
+                await self._commit(source, result)
+            except Exception as error:
+                log(
+                    "source_sync.failed",
+                    source_id=str(source.source_id),
+                    backend=source.backend,
+                    error_class=type(error).__name__,
+                )
+                await self._release(source)
 
     async def _claim_due(self, claim: str) -> tuple[ClaimedSource, ...]:
         now = datetime.now(UTC)
@@ -270,6 +280,23 @@ class SyncDriver:
                 sa.update(tables.source)
                 .values(
                     cursor=next_cursor,
+                    next_sync_at=now + timedelta(seconds=SOURCE_SYNC_INTERVAL_SECONDS),
+                    claimed_by=None,
+                    claim_expires_at=None,
+                    updated_at=sa.func.now(),
+                )
+                .where(tables.source.c.id == source.source_id)
+            )
+
+    async def _release(self, source: ClaimedSource) -> None:
+        """Free a source whose fetch or commit raised: clear its claim and push next_sync_at forward
+        one interval, so one bad source neither blocks its siblings this run nor re-fails on every
+        lease cycle — its cursor is untouched, so the next attempt resumes where it left off."""
+        now = datetime.now(UTC)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.source)
+                .values(
                     next_sync_at=now + timedelta(seconds=SOURCE_SYNC_INTERVAL_SECONDS),
                     claimed_by=None,
                     claim_expires_at=None,
