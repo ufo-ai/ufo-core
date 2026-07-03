@@ -25,6 +25,7 @@ from selfhost.sandbox.session import ExecResult, SandboxHandle, SandboxSession, 
 from selfhost.schema import tables
 from selfhost.schema.records import Agent, TerminalFrame, Turn, Usage
 from selfhost.tools.builtins import BUILTIN_TOOLS
+from selfhost.tools.context import SpawnResult
 from selfhost.tools.registry import ToolRegistry
 
 
@@ -170,6 +171,12 @@ async def _seed_turn(status: str, terminal: TerminalFrame | None, seq: int = 1) 
     )
 
 
+async def _unavailable_spawn(
+    profile: str, payload: dict[str, object], background: bool = False
+) -> SpawnResult:
+    raise RuntimeError("spawn is not wired in this engine test")
+
+
 def _engine(
     turn: Turn,
     model: object,
@@ -193,6 +200,7 @@ def _engine(
         sandbox=SandboxSession(carrier=carrier, handle=handle),
         tools=ToolRegistry(BUILTIN_TOOLS),
         blob=blob,
+        spawn=_unavailable_spawn,
     )
 
 

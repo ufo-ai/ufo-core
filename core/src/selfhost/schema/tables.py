@@ -59,7 +59,7 @@ conversation = sa.Table(
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint("surface", "queue_key"),
-    sa.CheckConstraint("surface in ('cli')", name="conversation_surface"),
+    sa.CheckConstraint("surface in ('cli', 'subagent')", name="conversation_surface"),
 )
 
 turn = sa.Table(
@@ -73,6 +73,8 @@ turn = sa.Table(
     sa.Column("status", sa.Text, nullable=False),
     sa.Column("inbound", sa.Text, nullable=False),
     sa.Column("terminal", sa.JSON(none_as_null=True), nullable=True),
+    sa.Column("parent_turn_id", sa.Uuid, nullable=True),
+    sa.Column("subagent_profile", sa.Text, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint("conversation_id", "seq"),

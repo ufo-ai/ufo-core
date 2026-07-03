@@ -28,7 +28,7 @@ from selfhost.o11y import emit_metric, log, turn_span
 from selfhost.sandbox.session import SandboxSession
 from selfhost.schema import tables
 from selfhost.schema.records import Agent, TerminalFrame, TerminalStatus, Turn, Usage
-from selfhost.tools.context import ToolContext
+from selfhost.tools.context import Spawn, ToolContext
 from selfhost.tools.registry import ToolRegistry
 
 MAX_OUTPUT_TOKENS = 16_000
@@ -67,6 +67,7 @@ class TurnEngine:
     sandbox: SandboxSession
     tools: ToolRegistry
     blob: BlobStore
+    spawn: Spawn
 
     async def run(self) -> TerminalFrame:
         with turn_span(self.turn.id, self.turn.conversation_id):
@@ -74,7 +75,11 @@ class TurnEngine:
             log("turn.started", turn_id=str(self.turn.id), seq=self.turn.seq)
             usage_events: list[Usage] = []
             context = ToolContext(
-                sandbox=self.sandbox, blob=self.blob, turn=self.turn, agent=self.agent
+                sandbox=self.sandbox,
+                blob=self.blob,
+                turn=self.turn,
+                agent=self.agent,
+                spawn=self.spawn,
             )
             try:
                 if not await self._mark_running():

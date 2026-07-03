@@ -1,11 +1,14 @@
-"""The builtin tool set: bash, read, write, edit.
+"""The builtin tool set: bash, read, write, edit, spawn_subagent.
 
-Each handler reaches the workspace only through `ctx.sandbox`, so the carrier's scoping and egress
-rules apply whether a byte arrives via a shell command or a file op. `read` records every path it
-returns so `edit` can refuse to touch a file the turn has not read — the guard that keeps a blind
-string-replace from clobbering content the model never saw."""
+Each file/shell handler reaches the workspace only through `ctx.sandbox`, so the carrier's scoping
+and egress rules apply whether a byte arrives via a shell command or a file op. `read` records every
+path it returns so `edit` can refuse to touch a file the turn has not read — the guard that keeps a
+blind string-replace from clobbering content the model never saw. `spawn_subagent` delegates a typed
+subtask to a child turn through `ctx.spawn`."""
 
-from pydantic import BaseModel
+from typing import Any
+
+from pydantic import BaseModel, Field
 
 from selfhost.tools.context import TextContent, ToolContext, ToolResult
 from selfhost.tools.registry import ToolDef
@@ -32,6 +35,12 @@ class EditInput(BaseModel):
     path: str
     old_string: str
     new_string: str
+
+
+class SpawnSubagentInput(BaseModel):
+    profile: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    background: bool = False
 
 
 async def bash_handler(ctx: ToolContext, args: BashInput) -> ToolResult:
@@ -72,6 +81,15 @@ async def edit_handler(ctx: ToolContext, args: EditInput) -> ToolResult:
     return ToolResult(content=(TextContent(text=f"edited {args.path}"),))
 
 
+async def spawn_subagent_handler(ctx: ToolContext, args: SpawnSubagentInput) -> ToolResult:
+    result = await ctx.spawn(args.profile, args.payload, args.background)
+    if result.output is None:
+        text = f"spawned {args.profile} subagent (turn {result.turn_id})"
+    else:
+        text = result.output.model_dump_json()
+    return ToolResult(content=(TextContent(text=text),))
+
+
 BUILTIN_TOOLS: tuple[ToolDef, ...] = (
     ToolDef(
         name="bash",
@@ -96,5 +114,15 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         description="Replace a unique string in a workspace file that has already been read.",
         input_model=EditInput,
         handler=edit_handler,
+    ),
+    ToolDef(
+        name="spawn_subagent",
+        description=(
+            "Delegate a subtask to a named subagent profile. `payload` must match the profile's "
+            "input schema; foreground (default) returns the profile's validated JSON output, "
+            "background returns the child turn id at once."
+        ),
+        input_model=SpawnSubagentInput,
+        handler=spawn_subagent_handler,
     ),
 )

@@ -1,11 +1,13 @@
 """The capability-scoped view a tool handler receives, and the result it returns.
 
 A handler reaches the outside world only through the fields here: the sandbox for filesystem and
-shell, the blob store for artifacts, and the turn/agent it runs under. `read_paths` is the working
-set that lets `edit` refuse to touch a file the turn has not read first."""
+shell, the blob store for artifacts, the turn/agent it runs under, and `spawn` to delegate a typed
+subtask to a child turn. `read_paths` is the working set that lets `edit` refuse to touch a file
+the turn has not read first."""
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal, Protocol
+from uuid import UUID
 
 from pydantic import BaseModel
 
@@ -28,9 +30,28 @@ class ToolResult(BaseModel):
 
 
 @dataclass(frozen=True)
+class SpawnResult:
+    """What a spawn hands back: the child turn's id, plus the validated typed output when the
+    parent awaited it (foreground). A background spawn returns the id and no output yet."""
+
+    turn_id: UUID
+    output: BaseModel | None
+
+
+class Spawn(Protocol):
+    """Delegate a subtask to a named subagent profile: validate the payload against the profile's
+    input schema, run a child turn, and (foreground) return its schema-validated output."""
+
+    async def __call__(
+        self, profile: str, payload: dict[str, Any], background: bool = False
+    ) -> SpawnResult: ...
+
+
+@dataclass(frozen=True)
 class ToolContext:
     sandbox: SandboxSession
     blob: BlobStore
     turn: Turn
     agent: Agent
+    spawn: Spawn
     read_paths: set[str] = field(default_factory=set)

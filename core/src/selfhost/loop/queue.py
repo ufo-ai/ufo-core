@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 import sqlalchemy as sa
-from dbos import DBOS, Queue
+from dbos import DBOS, DBOSClient, Queue
 
 from selfhost.blob import BlobStore, FilesystemBlobStore
 from selfhost.config import Config
@@ -14,6 +14,7 @@ from selfhost.db import workspace_tx
 from selfhost.hub import Hub, Terminal
 from selfhost.loop.compaction import Compaction
 from selfhost.loop.engine import TurnEngine
+from selfhost.loop.subagents import SubagentRegistry, Subagents, subagent_system_prompt
 from selfhost.loop.transcript import Transcript
 from selfhost.models.anthropic import AnthropicClient, anthropic_sdk_client
 from selfhost.models.interface import ModelClient
@@ -59,6 +60,8 @@ class Runtime:
     hub: Hub
     carrier: Carrier
     proxy: ProxyEndpoint
+    dbos: DBOSClient
+    subagents: SubagentRegistry
 
 
 _runtime: Runtime | None = None
@@ -78,6 +81,15 @@ async def _execute_turn(turn_id: str) -> str:
         raise RuntimeError("runtime not initialized (init_runtime runs in serve)")
     try:
         turn, agent = await _load_turn(UUID(turn_id))
+        subagents = Subagents(client=runtime.dbos, registry=runtime.subagents, parent=turn)
+        if turn.subagent_profile is None:
+            resolved, tools = agent, BUILTIN_REGISTRY
+        else:
+            profile = runtime.subagents.get(turn.subagent_profile)
+            resolved = Agent(prompt=subagent_system_prompt(profile), model=agent.model)
+            tools = ToolRegistry(
+                tuple(tool for tool in BUILTIN_TOOLS if tool.name in profile.tool_names)
+            )
         model = _model_client(agent.model, runtime.config)
         handle = await runtime.carrier.create(
             SandboxSpec(
@@ -89,7 +101,7 @@ async def _execute_turn(turn_id: str) -> str:
         )
         engine = TurnEngine(
             turn=turn,
-            agent=agent,
+            agent=resolved,
             model=model,
             transcript=Transcript(blob=runtime.blob, conversation_id=turn.conversation_id),
             compaction=Compaction(
@@ -100,8 +112,9 @@ async def _execute_turn(turn_id: str) -> str:
             ),
             hub=runtime.hub,
             sandbox=SandboxSession(carrier=runtime.carrier, handle=handle),
-            tools=BUILTIN_REGISTRY,
+            tools=tools,
             blob=runtime.blob,
+            spawn=subagents.spawn,
         )
         frame = await engine.run()
         return frame.status
@@ -161,6 +174,8 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent]:
                     tables.turn.c.status,
                     tables.turn.c.inbound,
                     tables.turn.c.terminal,
+                    tables.turn.c.parent_turn_id,
+                    tables.turn.c.subagent_profile,
                     tables.agent.c.prompt,
                     tables.agent.c.model,
                 )
@@ -177,6 +192,8 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent]:
         status=row.status,
         inbound=row.inbound,
         terminal=None if row.terminal is None else TerminalFrame.model_validate(row.terminal),
+        parent_turn_id=row.parent_turn_id,
+        subagent_profile=row.subagent_profile,
     )
     return turn, Agent(prompt=row.prompt, model=row.model)
 
