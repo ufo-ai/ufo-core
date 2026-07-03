@@ -9,8 +9,8 @@ from selfhost.blob import FilesystemBlobStore
 from selfhost.db import workspace_tx
 from selfhost.hub import InProcessHub
 from selfhost.loop.engine import TurnEngine
-from selfhost.loop.transcript import Transcript
-from selfhost.models import ModelEvent, ModelRequest, TextDelta
+from selfhost.loop.transcript import Conversation, Transcript
+from selfhost.models import Message, ModelEvent, ModelRequest, TextDelta
 from selfhost.schema import tables
 from selfhost.schema.records import Agent, TerminalFrame, Turn, Usage
 
@@ -124,12 +124,17 @@ def _engine(turn: Turn, model: object, tmp_path: Path) -> TurnEngine:
     )
 
 
-async def test_already_terminal_turn_republishes_without_side_effects(
+async def test_already_terminal_turn_republishes_without_clobbering_transcript(
     db: None, tmp_path: Path
 ) -> None:
     stored = TerminalFrame(status="done", text="original")
     turn = await _seed_turn("done", stored)
     engine = _engine(turn, EchoModel(), tmp_path)
+    done_transcript = Conversation(
+        seq=turn.seq,
+        messages=(Message(role="user", content="q"), Message(role="assistant", content="a")),
+    )
+    await engine.transcript.write(done_transcript)
     frame = await engine.run()
     assert frame == stored
     async with workspace_tx() as connection:
@@ -141,10 +146,10 @@ async def test_already_terminal_turn_republishes_without_side_effects(
             )
         ).scalar_one()
     assert billed == 0
-    assert await engine.transcript.read() is None
+    assert await engine.transcript.read() == done_transcript
 
 
-async def test_cancel_winning_mid_round_keeps_cancelled_terminal_and_bills(
+async def test_cancel_winning_mid_round_keeps_cancelled_terminal_bills_and_preserves_inbound(
     db: None, tmp_path: Path
 ) -> None:
     turn = await _seed_turn("queued", None)
@@ -161,4 +166,6 @@ async def test_cancel_winning_mid_round_keeps_cancelled_terminal_and_bills(
         ).one()
     assert row.status == "cancelled"
     assert int(row.amount) == 10
-    assert await engine.transcript.read() is None
+    stored = await engine.transcript.read()
+    assert stored is not None
+    assert stored.messages == (Message(role="user", content="hi"),)

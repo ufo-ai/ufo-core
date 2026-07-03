@@ -49,18 +49,24 @@ class TurnEngine:
             usage_events: list[Usage] = []
             try:
                 if not await self._mark_running():
+                    await self._persist_inbound()
                     return await self._publish_existing_terminal()
-                messages = await self._load_messages()
-                final_messages, answer = await self._model_round(messages, usage_events)
+                final_messages, answer = await self._model_round(
+                    await self._load_messages(), usage_events
+                )
                 frame = await self._commit("done", usage_events, answer=answer)
                 if frame.status == "done":
                     await self._persist_transcript(final_messages, answer)
+                else:
+                    await self._persist_inbound()
                 return frame
             except asyncio.CancelledError:
                 await self._bill_cancelled(usage_events)
+                await self._persist_inbound()
                 raise
             except Exception as error:
                 await self._commit("failed", usage_events, error_class=type(error).__name__)
+                await self._persist_inbound()
                 raise
 
     async def _mark_running(self) -> bool:
@@ -76,9 +82,15 @@ class TurnEngine:
         return updated.rowcount == 1
 
     async def _load_messages(self) -> tuple[Message, ...]:
+        return (*await self._prior_messages(), Message(role="user", content=self.turn.inbound))
+
+    async def _prior_messages(self) -> tuple[Message, ...]:
+        """The conversation before this turn; self-exclusion keeps a replay from reading its own
+        write (seq >= this turn's) back as prior context."""
         stored = await self.transcript.read()
-        prior = () if stored is None or stored.seq >= self.turn.seq else stored.messages
-        return (*prior, Message(role="user", content=self.turn.inbound))
+        if stored is None or stored.seq >= self.turn.seq:
+            return ()
+        return stored.messages
 
     async def _model_round(
         self, messages: tuple[Message, ...], usage_events: list[Usage]
@@ -240,10 +252,18 @@ class TurnEngine:
         return frame
 
     async def _persist_transcript(self, messages: tuple[Message, ...], answer: str) -> None:
-        conversation = Conversation(
-            seq=self.turn.seq,
-            messages=(*messages, Message(role="assistant", content=answer)),
+        await self._write_conversation((*messages, Message(role="assistant", content=answer)))
+
+    async def _persist_inbound(self) -> None:
+        """Preserve the user's message on a non-done terminal so the next turn still sees it; the
+        assistant's error or partial text is never persisted, and the monotonic guard lets a
+        done turn's fuller transcript win over this at the same seq."""
+        await self._write_conversation(
+            (*await self._prior_messages(), Message(role="user", content=self.turn.inbound))
         )
+
+    async def _write_conversation(self, messages: tuple[Message, ...]) -> None:
+        conversation = Conversation(seq=self.turn.seq, messages=messages)
         for attempt in range(TRANSCRIPT_WRITE_ATTEMPTS):
             try:
                 await self.transcript.write(conversation)

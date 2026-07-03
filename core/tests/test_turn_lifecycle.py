@@ -236,7 +236,9 @@ async def test_back_to_back_turns_serialize_per_conversation(surface: AsyncClien
     assert streamed == "echo:3"
 
 
-async def test_failure_commits_terminal_and_bills_nothing(surface: AsyncClient) -> None:
+async def test_failure_commits_terminal_bills_nothing_preserves_inbound(
+    surface: AsyncClient,
+) -> None:
     headers = await _bootstrap()
     turn_id = (await surface.post("/v1/chat", content=b"explode", headers=headers)).json()[
         "turn_id"
@@ -257,7 +259,24 @@ async def test_failure_commits_terminal_and_bills_nothing(surface: AsyncClient) 
         ).scalar_one()
     assert billed == 0
     _, _, blob = _runtime_parts(surface)
-    assert await Transcript(blob=blob, conversation_id=conversation_id).read() is None
+    stored = await _read_transcript(blob, conversation_id, 1)
+    assert [m.content for m in stored.messages] == ["explode"]
+
+
+async def test_next_turn_sees_a_failed_turns_inbound(surface: AsyncClient) -> None:
+    headers = await _bootstrap()
+    first = (await surface.post("/v1/chat", content=b"explode", headers=headers)).json()[
+        "turn_id"
+    ]
+    _, first_terminal = await _consume(surface, headers, first)
+    assert first_terminal["status"] == "failed"
+    second = (await surface.post("/v1/chat", content=b"ok", headers=headers)).json()["turn_id"]
+    _, second_terminal = await _consume(surface, headers, second)
+    assert second_terminal["status"] == "done"
+    _, conversation_id = await _turn_row(second)
+    _, _, blob = _runtime_parts(surface)
+    stored = await _read_transcript(blob, conversation_id, 2)
+    assert [m.content for m in stored.messages][:2] == ["explode", "ok"]
 
 
 async def test_cancel_commits_terminal_while_model_runs(surface: AsyncClient) -> None:
