@@ -7,10 +7,17 @@ integration real — never fakes) and updates spec/contracts in the same commit 
 
 ## U1 — heartbeat
 
-A real streamed chat turn against Anthropic with durable everything, no sandbox yet.
+A real streamed chat turn against Anthropic with durable everything, no sandbox yet — zero
+services: SQLite + filesystem blobs + in-process hub.
 
-- Scaffold: uv workspace (`core/`, `extensions/`, `packs/`), ruff/pytest/CI, `compose.yaml` (Postgres only).
-- `schema/` migration 001: workspace, member, surface_identity, agent, conversation, turn, ledger.
+- Scaffold: uv workspace (`core/`, `extensions/`, `packs/`), ruff/pytest/CI, `compose.yaml`
+  (Postgres, for deploys + the Postgres half of the test matrix only).
+- `schema/` as SQLAlchemy metadata + alembic (the single schema source), dialect-neutral; engines:
+  SQLite/aiosqlite (default, WAL) and Postgres/asyncpg. **Verify DBOS on SQLite against the
+  installed version first** — fail loud if unsupported; do not silently keep Postgres as default.
+- DB-touching tests run on both dialects (SQLite everywhere; Postgres suite gates on the live
+  service, skip when absent).
+- migration 001: workspace, member, surface_identity, agent, conversation, turn, ledger.
 - `config.py` (selfhost.toml, fail-loud), `db.py` (`workspace_tx` boundary + gate), `o11y.py`, `blob.py`
   (FilesystemBlobStore + S3BlobStore), `hub.py` (in-process), `models/` (anthropic, openai),
   `loop/` (DBOS queue partitioned by conversation, TurnEngine minus compaction/tools, transcript
@@ -50,8 +57,10 @@ A real streamed chat turn against Anthropic with durable everything, no sandbox 
 ## U4 — memory + sources
 
 - `memory/`: schema (memory_item, memory_summary, page, chunk), `embed.py`, `index.py`
-  (IndexBackend + pgvector), `service.py` (recall fusion, `{member:<id>, shared}` filter),
-  `pipeline.py` (Condenser seam + default condenser as jobs, batch-at-interval).
+  (IndexBackend + the two dialect-native impls: SQLite FTS5 + local cosine, Postgres tsvector +
+  pgvector — selected by engine dialect, fail-loud), `service.py` (recall fusion,
+  `{member:<id>, shared}` filter), `pipeline.py` (Condenser seam + default condenser as jobs,
+  batch-at-interval).
 - `sources.py`: SourceBackend + `folder` + sync driver job; trigger seam (pages → condense).
 - Builtins `memory_search` (absorbs store_search/load_sessions modes), `memory_update`; auto-inject
   recall at turn load (bounded, best-effort).
@@ -102,7 +111,8 @@ A real streamed chat turn against Anthropic with durable everything, no sandbox 
   lockfile), `selfhost serve` hardening, `runtime_instance` heartbeat + boot guard, extension store
   (`selfhost ext search/install/remove`, digest pinning, disabled = bundle-only).
 - **Proof**: one bundle boots on a clean machine; an extension installs from the store and fires;
-  a second instance with filesystem blobs or in-process hub refuses to boot.
+  a second instance with any dev default (SQLite, filesystem blobs, in-process hub) refuses to
+  boot.
 
 ## U10 — packs + scheduled tasks
 

@@ -26,8 +26,8 @@ test for the extension API — every entry must be expressible without touching 
 | Decision | Value |
 |---|---|
 | Language | Python 3.12+, uv. Monorepo: `core/` + `extensions/*` + `packs/*` (uv workspace). Rust was considered and rejected for core: the salvage is Python, DBOS has no Rust SDK, the loop is I/O-bound, and extensions must be writable by users and agents in the AI ecosystem's default language. A hot data plane (egress proxy) may become a Rust component later without changing this. |
-| Persistence | Postgres (relational state, queues, memory index) + a pluggable blob store (transcripts, compaction records, sandbox workspaces, shared artifacts): **local filesystem by default**, S3-compatible for deploys. One schema; every row carries `workspace_id`; a deploy serves ONE workspace (hosted multi-workspace is the enterprise layer). The S3 API is the cloud-portability seam — any S3-compatible store works, no per-cloud code. |
-| Durable execution | DBOS on Postgres: a turn is a durable workflow, a subagent a child workflow; queues, async cancel, crash recovery. Dequeue poll interval and system-DB retention are configured from day one. |
+| Persistence | One async-SQLAlchemy schema over **SQLite by default** (aiosqlite, WAL — zero services for dev) and **Postgres for deploys** (asyncpg); alembic migrations are the single schema source, dialect-neutral (integers for money/tokens; dialect-only types live inside IndexBackend impls). Plus a pluggable blob store (transcripts, compaction records, sandbox workspaces, shared artifacts): **local filesystem by default**, S3-compatible for deploys — the S3 API is the cloud-portability seam. Every row carries `workspace_id`; a deploy serves ONE workspace (hosted multi-workspace is the enterprise layer). |
+| Durable execution | DBOS on the same database as the schema (SQLite dev / Postgres deploys): a turn is a durable workflow, a subagent a child workflow; queues, async cancel, crash recovery. DBOS-on-SQLite is verified in U1 — fail loud, never silently fall back to requiring Postgres. Dequeue poll interval and system-DB retention are configured from day one. |
 | Streaming | Durable terminal frames in Postgres; live token deltas through a hub interface — in-process in the single-process default, a Redis hub extension for multi-instance deploys. A lost delta costs a redrawn token, never correctness. |
 | Topology | `selfhost serve` is one process on one event loop: surfaces + DBOS workers + jobs. Everything is async-native — a blocking call stalls the whole deploy, so blocking-in-async fails lint. Scale-out = more instances plus a shared hub. |
 | Sandbox | Docker is the default carrier, built into core; carriers are an extension point (E2B is an extension). No unsandboxed mode. |
@@ -74,8 +74,9 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   history compacts as it approaches the model window so a long turn never exceeds it.
 - **Memory** — the store and recall (lexical + vector fusion, subject ∈ {member, shared},
   auto-injected at turn load; `memory_update` writes) are core. Two pluggable seams: the **index
-  backend** (pgvector default; turbopuffer as an extension) behind one lexical/vector/reindex
-  interface, and the **derivation mechanics** — extensions register pipeline stages (source
+  backend** behind one lexical/vector/reindex interface (dialect-native defaults: SQLite FTS5 +
+  local cosine, Postgres tsvector + pgvector; turbopuffer as an extension), and the **derivation
+  mechanics** — extensions register pipeline stages (source
   pages/events → condense — e.g. to markdown — → memory items + graph updates). Core ships a
   default condenser; a gbrain-style pipeline replaces or extends it.
 - **Minimal built-in tools** — `bash`, `read`, `write`, `edit`, `memory_search`, `memory_update`,
@@ -186,11 +187,14 @@ containerized for development:
 
 ```bash
 uv tool install selfhost        # the Python package is the primitive; brew formula = later wrapper
-docker compose up -d            # Postgres, unless selfhost.toml points at an existing one
 selfhost init                   # writes selfhost.toml; onboards workspace + first owner + agent + model key
-selfhost serve                  # one process: surfaces + workers + jobs + proxy
+selfhost serve                  # one process: surfaces + workers + jobs + proxy — SQLite, zero services
 selfhost chat                   # a client; connects to serve's URL from selfhost.toml
 ```
+
+Dev defaults are zero-services: SQLite, filesystem blobs, in-process hub. Docker enters only for
+sandboxes (U2+); Postgres (the checked-in compose or an existing instance) enters only for deploys
+and the Postgres half of the test matrix.
 
 `serve` talks to the host Docker daemon; sandboxes are **sibling containers**, never children.
 Docker is required for sandboxes, not for running selfhost. `chat` is only a client — if nothing
@@ -205,6 +209,7 @@ is instance-aware except the boot guard; the only extension involved is the Redi
 
 | Concern | Multi-instance behavior |
 |---|---|
+| Database | Postgres required; SQLite is single-instance-only. |
 | Turns, queues, jobs | DBOS coordinates through Postgres: any instance pulls; a crashed instance's workflows recover on peers. |
 | Live deltas | Shared hub required (Redis hub extension); terminal frames stay durable in Postgres. |
 | Blobs | S3 backend required; the filesystem backend is single-instance-only. |
@@ -219,8 +224,8 @@ Two invariants make this safe, and they hold even single-instance:
   recreated between turns from the blob store without a turn noticing beyond latency.
 
 Misconfiguration fails loud at boot: instances heartbeat a `runtime_instance` row; an instance that
-sees a live peer while configured with an in-process hub or a filesystem blob store refuses to
-start.
+sees a live peer while configured with any dev default — in-process hub, filesystem blob store, or
+SQLite — refuses to start.
 
 ### Roles — the split that's already paid for
 
