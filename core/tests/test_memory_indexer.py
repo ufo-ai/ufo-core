@@ -1,9 +1,11 @@
 from collections.abc import AsyncIterator
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
 
+from selfhost.blob import FilesystemBlobStore
 from selfhost.db import workspace_tx
 from selfhost.jobs import (
     CORE_EXTENSION,
@@ -15,8 +17,9 @@ from selfhost.jobs import (
 from selfhost.memory.chunk import TextChunker
 from selfhost.memory.embed import EMBED_DIM
 from selfhost.memory.index import index_backend_for
-from selfhost.memory.indexer import MemoryIndexer
+from selfhost.memory.indexer import MemoryIndexer, PageIndexer
 from selfhost.memory.service import MemoryService, member_subject, recall_subjects
+from selfhost.memory.sources import FOLDER_BACKEND, FolderSource, SyncDriver
 from selfhost.schema import tables
 from selfhost.schema.records import MemoryWrite
 
@@ -118,16 +121,21 @@ async def test_member_memory_is_invisible_to_another_member(clean: None, databas
     assert len(mine) == 1 and "alice" in mine[0].body
 
 
-def test_memory_index_registers_as_a_core_job(database_url: str) -> None:
+def test_memory_index_registers_as_a_core_job(database_url: str, tmp_path: Path) -> None:
     embed = StubEmbed(())
-    indexer = MemoryIndexer(
-        index=index_backend_for(database_url, embed), embed=embed, chunker=TextChunker()
+    index = index_backend_for(database_url, embed)
+    blob = FilesystemBlobStore(root=tmp_path)
+    specs = core_jobs(
+        MemoryIndexer(index=index, embed=embed, chunker=TextChunker()),
+        PageIndexer(index=index, embed=embed, chunker=TextChunker(), blob=blob),
+        SyncDriver(
+            backends={FOLDER_BACKEND: FolderSource()},
+            blob=blob,
+            postgres=database_url.startswith("postgresql"),
+        ),
     )
-    specs = core_jobs(indexer)
-    assert [spec.name for spec in specs] == [MEMORY_INDEX_JOB]
+    assert specs[0].name == MEMORY_INDEX_JOB
     assert specs[0].schedule == MEMORY_INDEX_SCHEDULE
     bindings = bindings_from((), specs)
-    key = f"{CORE_EXTENSION}:{MEMORY_INDEX_JOB}"
-    assert [(b.key, b.extension, b.declared) for b in bindings] == [
-        (key, CORE_EXTENSION, frozenset())
-    ]
+    assert f"{CORE_EXTENSION}:{MEMORY_INDEX_JOB}" in {b.key for b in bindings}
+    assert all(b.extension == CORE_EXTENSION and b.declared == frozenset() for b in bindings)

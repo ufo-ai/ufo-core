@@ -64,6 +64,23 @@ class O11yConfig(BaseModel):
     otlp_endpoint: str | None = None
 
 
+class SourceConfig(BaseModel):
+    """The folder backend's parameters — the local directory it syncs. Crosses two boundaries: the
+    config file and the `source.config` JSON column, so it validates at construction both times."""
+
+    model_config = ConfigDict(extra="forbid")
+    root: str
+
+
+class SourceEntry(BaseModel):
+    """One `[[sources]]` block: which backend, with its config. Boot registers each as a source
+    row; the sync driver polls those rows."""
+
+    model_config = ConfigDict(extra="forbid")
+    backend: Literal["folder"]
+    config: SourceConfig
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
     database: DatabaseConfig
@@ -72,6 +89,7 @@ class Config(BaseModel):
     credentials: CredentialsConfig = CredentialsConfig()
     serve: ServeConfig = ServeConfig()
     o11y: O11yConfig = O11yConfig()
+    sources: tuple[SourceEntry, ...] = ()
 
 
 def load_config(path: Path | None = None) -> Config:
