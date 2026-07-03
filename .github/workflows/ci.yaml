@@ -30,11 +30,16 @@ jobs:
       - run: uv sync
       - run: uv run ruff check
       - run: uv run python gates.py
-      # Split the run by dialect: DBOS is a process singleton, and relaunching it across the
-      # sqlite→postgres param in one process hangs the DBOS-driving tests. One process per dialect
-      # launches DBOS exactly once. timeout-minutes bounds the known intermittent DBOS-postgres hang
-      # to a fail-fast red instead of stalling the job.
+      # DBOS is a process singleton, so each pytest invocation must launch it exactly once:
+      #  - split by dialect — relaunching across the sqlite→postgres param in one process hangs;
+      #  - test_turn_lifecycle drives the heaviest DBOS workflows (park/resume, concurrent
+      #    admission) and deadlocks once the ~100 earlier postgres tests accumulate queue state in
+      #    the shared system DB, so it runs on its own (clean ~9s alone; the rest of the suite ~16s).
+      # 118 + 14 = the full 132-test postgres selection, so nothing is dropped. timeout-minutes
+      # bounds a stray DBOS hang to a fail-fast red instead of stalling the job.
       - run: uv run pytest -k "not postgres"
         timeout-minutes: 10
-      - run: uv run pytest -k postgres
+      - run: uv run pytest -k postgres --ignore=core/tests/test_turn_lifecycle.py
         timeout-minutes: 10
+      - run: uv run pytest core/tests/test_turn_lifecycle.py -k postgres
+        timeout-minutes: 5
