@@ -130,4 +130,6 @@ every persisted enum/`Literal` member has a producer; every `LiveFrame` kind has
 Manifest point + the negative cases; a change that breaks it is a public-SDK break ·
 **async (from U1)**: ruff `ASYNC` rules on (blocking call inside `async def` fails lint);
 `requests`/`psycopg2` banned imports; `to_thread` call sites name the no-async-API library they
-wrap.
+wrap · **import boundaries (from U1)**: declared edges between role-owning modules (`surfaces/`,
+`loop/`, jobs, `sandbox/proxy/`); a cross-role in-memory import fails CI — roles talk through
+queues/blob/hub/HTTP only.

@@ -198,6 +198,18 @@ Two invariants make this safe, and they hold even single-instance:
 Misconfiguration fails loud at boot: instances heartbeat a `runtime_instance` row; an instance that
 sees a live peer while configured with an in-process hub or a filesystem blob store refuses to
 start.
+
+### Roles — the split that's already paid for
+
+An instance logically comprises four roles: **surfaces** (HTTP in, streams out), **workers** (turn
+workflows), **jobs** (sync, derivation, reaping), **proxy** (sandbox egress). Core runs all four in
+every instance and defines no per-role deployment — mapping processes now would be speculation.
+What core does fix is the seam that makes the eventual split free: **roles share nothing in
+memory** — cross-role communication is only Postgres/DBOS queues, the blob store, the hub, and the
+proxy's HTTP endpoint (any instance's proxy derives identical rules from DB state; sandboxes are
+co-located with the instance that created them). An import-boundary gate enforces the seam. The
+enterprise k8s layer then splits roles into Deployments with per-role autoscaling by
+configuration, not code change.
 `selfhost bundle` produces a runnable artifact (OCI image + pinned config + lockfile) — the same
 bundle installs OSS, on-prem, or hosted.
 

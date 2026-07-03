@@ -255,3 +255,6 @@ extension may touch; a CI gate fails any `extensions/` import outside `selfhost.
 - Every model/tool/proxy call meters into the ledger in the same commit as its step.
 - One event loop, never blocked: workflows/steps are `async def`; blocking calls in async code
   fail lint; sync I/O exists only off the loop (CLI startup, migrations, build scripts).
+- Roles (surfaces, workers, jobs, proxy) share nothing in memory; cross-role communication is
+  queues, blob store, hub, or HTTP — enforced by the import-boundary gate, so a per-role process
+  split is a config change.
