@@ -16,6 +16,7 @@ POSTGRES_TEST_URL = os.environ.get(
     "postgresql+asyncpg://selfhost:selfhost@127.0.0.1:5541/selfhost_test",
 )
 DELETE_ORDER = (
+    tables.proposal,
     tables.ledger,
     tables.turn,
     tables.conversation,

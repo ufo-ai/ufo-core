@@ -1,5 +1,6 @@
 """Boundary records and the queue contract shared by surfaces and workers."""
 
+from dataclasses import dataclass
 from typing import Literal
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -7,6 +8,11 @@ from pydantic import BaseModel, model_validator
 
 TurnStatus = Literal["queued", "running", "done", "failed", "cancelled"]
 TerminalStatus = Literal["done", "failed", "cancelled"]
+
+ProposalStatus = Literal["pending", "approved", "rejected"]
+PENDING: ProposalStatus = "pending"
+APPROVED: ProposalStatus = "approved"
+REJECTED: ProposalStatus = "rejected"
 
 DEFAULT_AGENT_NAME = "assistant"
 TURN_QUEUE_NAME = "turns"
@@ -63,3 +69,17 @@ class Turn(BaseModel):
         if self.terminal is not None and self.terminal.status != self.status:
             raise ValueError("terminal.status must equal turn.status")
         return self
+
+
+class AgentChange(BaseModel):
+    """A proposed edit to an agent's prompt, based on the prompt digest the proposer diffed
+    against; the digest is re-checked at approval so a moved base rejects the change."""
+
+    agent_id: UUID
+    new_prompt: str
+    from_digest: str
+
+
+@dataclass(frozen=True)
+class ProposalRef:
+    proposal_id: UUID

@@ -112,3 +112,20 @@ credential = sa.Table(
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
 )
+
+proposal = sa.Table(
+    "proposal",
+    metadata,
+    sa.Column("id", sa.Uuid, primary_key=True),
+    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
+    sa.Column("agent_id", sa.Uuid, sa.ForeignKey("agent.id"), nullable=False),
+    sa.Column("extension", sa.Text, nullable=False),
+    sa.Column("from_digest", sa.Text, nullable=False),
+    sa.Column("to_digest", sa.Text, nullable=False),
+    sa.Column("body", sa.JSON, nullable=False),
+    sa.Column("status", sa.Text, nullable=False),
+    sa.Column("approved_by", sa.Uuid, sa.ForeignKey("member.id"), nullable=True),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint("status in ('pending', 'approved', 'rejected')", name="proposal_status"),
+)
