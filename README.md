@@ -9,4 +9,12 @@ for everything else (connectors, data sources, triggers, tools, subagents, onboa
 - `docs/plan.md` — build order. `docs/salvage.md` — file-level port map from the previous repo.
 - `core/` — the axiomatic unit. `extensions/` — first-party extensions. `packs/` — skill packs.
 
-Requires Postgres and Docker.
+```bash
+uv tool install selfhost
+docker compose up -d      # Postgres
+selfhost init             # selfhost.toml + workspace + owner + model key
+selfhost serve            # one host process; sandboxes = sibling Docker containers
+selfhost chat             # second terminal
+```
+
+Requires Postgres and Docker (for sandboxes — selfhost itself runs on the host).

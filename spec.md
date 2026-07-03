@@ -179,6 +179,25 @@ One declarative file, `selfhost.toml`: Postgres URL, blob store (filesystem root
 model keys (env refs), enabled extensions + versions, installed packs, surface config (Slack app,
 web host), sandbox carrier, stream hub, OTLP export target, extension-store toggle, spend defaults.
 
+## Running it
+
+The developer surface is a pip-installable CLI running as a **host process** — selfhost is never
+containerized for development:
+
+```bash
+uv tool install selfhost        # the Python package is the primitive; brew formula = later wrapper
+docker compose up -d            # Postgres, unless selfhost.toml points at an existing one
+selfhost init                   # writes selfhost.toml; onboards workspace + first owner + agent + model key
+selfhost serve                  # one process: surfaces + workers + jobs + proxy
+selfhost chat                   # a client; connects to serve's URL from selfhost.toml
+```
+
+`serve` talks to the host Docker daemon; sandboxes are **sibling containers**, never children.
+Docker is required for sandboxes, not for running selfhost. `chat` is only a client — if nothing
+listens it says to run `selfhost serve`; there is no embedded auto-start. A containerized `serve`
+(the `selfhost bundle` deploy) spawns siblings via the mounted Docker socket, or uses a remote
+carrier extension and needs no host Docker at all.
+
 ## Scale-out
 
 Scale-out is a deployment mode, not a feature: the same bundle with more instances. Nothing in core
@@ -250,3 +269,5 @@ intercom-style website plugin via the websites extension).
   `agents.propose_change`).
 - No second representation of any fact: one transcript store, one schema source, one config file.
 - No tool that another tool or `bash` subsumes.
+- No Docker-in-Docker, ever: sandboxes are sibling containers (host daemon or mounted socket), or
+  a remote carrier.
