@@ -61,7 +61,10 @@ class SourceBackend(Protocol):
 class FolderSource:
     """Reads a local directory into pages: each file becomes one page keyed by its path relative to
     the root, digested by content, scoped to the shared subject. A full scan each sync — the driver
-    skips unchanged pages by digest and tombstones ones whose file is gone."""
+    skips unchanged pages by digest and tombstones pages whose file is gone. A file removed from a
+    present folder tombstones its page; the whole folder going missing instead raises, so the sync
+    fails closed (a transient mount blip can't sweep the index) — purge a folder's docs by emptying
+    it or removing the source, never by deleting the folder."""
 
     async def fetch(self, config: SourceConfig, cursor: str | None) -> SyncResult:
         entries = await asyncio.to_thread(self._read, Path(config.root))
