@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "An agent runtime a developer can run, read, and extend"
 requires-python = ">=3.12"
 dependencies = [
+    "aiobotocore>=3.7.0",
     "anthropic>=0.40",
     "click>=8.1",
     "dbos>=2.24",

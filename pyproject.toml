@@ -6,7 +6,14 @@ line-length = 100
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B", "ASYNC", "PTH", "RUF"]
+select = ["E", "F", "W", "I", "UP", "B", "ASYNC", "PTH", "RUF", "TID"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["selfhost"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"requests" = { msg = "sync HTTP client blocks the loop; use httpx.AsyncClient" }
+"psycopg2" = { msg = "sync driver; use psycopg via selfhost.db" }
 
 [tool.pytest.ini_options]
 testpaths = ["core/tests"]

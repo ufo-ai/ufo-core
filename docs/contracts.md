@@ -45,7 +45,6 @@ class Conversation(BaseModel):     id: UUID; surface: Surface; queue_key: str
 class Turn(BaseModel):             id: UUID; conversation_id: UUID; agent_id: UUID; parent_turn_id: UUID | None
                                    status: Literal["queued", "running", "done", "failed", "cancelled", "parked"]
                                    terminal: TerminalFrame | None
-class TurnStep(BaseModel):         turn_id: UUID; seq: int; kind: Literal["model", "tool"]; usage: Usage | None
 class MemoryItem(BaseModel):       id: UUID; subject: str; body: str; item_class: Literal["fact", "episodic", "semantic"]
                                    embedding_digest: str; superseded_by: UUID | None
 class Page(BaseModel):             id: UUID; source_ref: str; digest: str; body_ref: BlobKey; meta: PageMeta
@@ -252,7 +251,8 @@ extension may touch; a CI gate fails any `extensions/` import outside `selfhost.
 - The sandbox reaches only `conversations/<cid>/workspace/`; the container is disposable cache.
 - Extensions import `selfhost.sdk` only; credentials resolve only for declared slots.
 - Derived state (embeddings, summaries, index rows) is produced by jobs, never inline.
-- Every model/tool/proxy call meters into the ledger in the same commit as its step.
+- Every model/tool/proxy call meters into the ledger in the turn's terminal commit — one write
+  per turn per dimension, idempotent on the turn-keyed ledger id.
 - One event loop, never blocked: workflows/steps are `async def`; blocking calls in async code
   fail lint; sync I/O exists only off the loop (CLI startup, migrations, build scripts).
 - Roles (surfaces, workers, jobs, proxy) share nothing in memory; cross-role communication is

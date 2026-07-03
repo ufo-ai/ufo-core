@@ -10,7 +10,7 @@ integration real — never fakes) and updates spec/contracts in the same commit 
 A real streamed chat turn against Anthropic with durable everything, no sandbox yet.
 
 - Scaffold: uv workspace (`core/`, `extensions/`, `packs/`), ruff/pytest/CI, `compose.yaml` (Postgres only).
-- `schema/` migration 001: workspace, member, surface_identity, agent, conversation, turn, turn_step, ledger.
+- `schema/` migration 001: workspace, member, surface_identity, agent, conversation, turn, ledger.
 - `config.py` (selfhost.toml, fail-loud), `db.py` (`workspace_tx` boundary + gate), `o11y.py`, `blob.py`
   (FilesystemBlobStore + S3BlobStore), `hub.py` (in-process), `models/` (anthropic, openai),
   `loop/` (DBOS queue partitioned by conversation, TurnEngine minus compaction/tools, transcript
