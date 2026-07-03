@@ -16,7 +16,7 @@ Working against the old repo:
 
 | Old file(s) | Lands in | Unit | Transformation |
 |---|---|---|---|
-| `metalcraft_agent/model_clients.py` | `models/` (split anthropic/openai) | U1 | drop OpenRouter routing; keep streaming, usage accounting, image-count trim |
+| `metalcraft_agent/model_clients.py` | `models/` (split anthropic/openai) | U1 | drop OpenRouter routing; keep streaming, usage accounting, image-count trim. Backports from upstream fixes (landed after the U1 port): raise `ModelResponseTruncated` on `finish_reason=length` instead of letting cut-off tool-call JSON fail in json.loads (24723e46); flag errored tool results in-band ("[tool error] " prefix) on the chat-completions path where is_error has no field (24723e46); treat an empty 200 completion as a retryable provider failure, never success (ed876401) |
 | `metalcraft_agent/dbos_turns.py`, `turn_work.py`, `turn_host.py`, `turn_store.py` | `loop/queue.py`, `loop/engine.py` | U1 | de-k8s (no CRD projection/readiness); queue partition key = conversation_id; keep the 0.1s poll + system-DB retention lessons |
 | `metalcraft_agent/turn_engine.py` | `loop/engine.py` (model rounds), `loop/compaction.py` | U1/U5 | drop substring injection scan (spec divergence in old repo); keep round loop, exhaustion policy |
 | `metalcraft_store/thread_store.py` | `loop/transcript.py` | U1 | `<ns>/threads/…` keys → `conversations/<cid>/…`; S3-only → BlobStore |
@@ -43,7 +43,7 @@ Working against the old repo:
 | `metalcraft_agent/tools/files.py` | `tools/builtins/share_file.py`, `load_skill` | U5 | one artifact-share path |
 | `metalcraft_agent/tools/interaction.py` | `tools/builtins/ask_user.py` | U5 | `confirm_action` folds in; `pause_and_wait`/`send_notification` deferred to extensions |
 | `metalcraft_store/{artifact_delivery,artifact_providers}.py`, `gateway/{artifacts,tokens}.py` | `share_file` + web delivery | U5/U6 | TTL token URL over BlobStore; drop provider zoo (fs/S3 only) |
-| `metalcraft_contracts/{slack,slack_members}.py`, `gateway/{ingress,channel_ingress,inbound}.py` (slack parts), `executor/{slack_thread,channel_writeback*}.py`, `jobrunner/channel_event*.py` | `surfaces/slack.py` | U6 | link map ConfigMap → `SurfaceIdentity` rows; drop SAR/dual-principal; keep signature verify, thread keys, writeback claims, idempotency-on-message-identity |
+| `metalcraft_contracts/{slack,slack_members}.py`, `gateway/{ingress,channel_ingress,inbound}.py` (slack parts), `executor/{slack_thread,channel_writeback*}.py`, `jobrunner/channel_event*.py` | `surfaces/slack.py` | U6 | link map ConfigMap → `SurfaceIdentity` rows; drop SAR/dual-principal; keep signature verify, thread keys, writeback claims, idempotency-on-message-identity; include the upstream Slack completions: two-way file attachments — share_file uploads to the thread, inbound Slack files download into the turn (b3edf476) — and Block Kit markdown rendering for replies (4a0bc3af) |
 | `gateway/{streams,queue_sequences}.py` | `surfaces/web.py` + hub tail | U6 | Redis tail → Hub interface |
 | `metalcraft_contracts/{spend_context,spend_status,spend}.py`, spend parts of `contracts/actions.py`, `executor/executor_observer.py` | `accounting.py` | U7 | CRD SpendPolicy → `spend_cap` rows; keep inbound + per-step decide, park/reject; close the scheduled-fire bypass (old bug) |
 | sandbox_proxy metering (`server.py` ledger writes) | `sandbox/proxy/` MeterRule | U7 | same ledger as step metering |
@@ -58,10 +58,10 @@ Working against the old repo:
 | `metalcraft_agent/bua/` (18 files), `browser.py`, `browser_cdp.py`, `tools/browser.py`, `sandbox/browser_runtime.py` | assistant pack browser subagent | U10 |
 | `metalcraft_agent/tools/web.py` | assistant pack (Exa search/fetch) | U10; `search_vertical` folds into `search_web` |
 | `metalcraft_agent/platform_control_tools.py`, `metalcraft_contracts/scheduling.py` | scheduled-tasks extension | U10; CronJob → JobSpec |
-| `executor/sandbox_e2b.py` | e2b carrier extension | post-U10 |
+| `executor/sandbox_e2b.py` | e2b carrier extension | post-U10; include the dead-pooled-connection-as-dropped-stream handling (393d832c) |
 | `metalcraft_store/stream_hub.py` | redis hubs extension | post-U10 |
 | `metalcraft_brain/index.py` (turbopuffer path) | turbopuffer indexes extension | post-U10 |
-| `metalcraft_improve/` + PR #62 offline-replay | self-improvement extension | post-U10; on `trajectories.read` + `propose_change` |
+| `metalcraft_improve/` offline-replay loop, now MERGED on main (8e20fa70: proposer → eval cron → gate w/ consecutive-pass stability → audited CAS promotion, candidate suppression) | self-improvement extension | post-U10; port from main, not a PR. Grounding differences here: the corpus is `trajectories_read` over full transcripts (selfhost cut the system_diagnostic side-channel tool); promotion goes through `propose_change` (governed), never a direct write; the eval cron is a manifest `job`; suppression state lives in the extension's own scoped store |
 | `evals/` harness (deterministic scenario pattern) | eval harness | post-U10 |
 
 ## Leave behind (deliberately, with reasons)

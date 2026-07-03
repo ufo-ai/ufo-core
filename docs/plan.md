@@ -81,11 +81,14 @@ services: SQLite + filesystem blobs + in-process hub.
 ## U6 — surfaces + onboarding
 
 - `surfaces/slack.py` (signature verify, thread conversations, member linking, writeback claims,
-  message-identity idempotency), `surfaces/web.py` (chat UI, hub tail, artifact delivery),
-  onboarding engine (core steps: create workspace/owner/agent, model key; extension steps append).
+  message-identity idempotency, Block Kit markdown replies, two-way file attachments: share_file
+  uploads to the thread, inbound Slack files into the turn), `surfaces/web.py` (chat UI, hub tail,
+  artifact delivery), onboarding engine (core steps: create workspace/owner/agent, model key;
+  extension steps append).
 - **Proof**: the same agent answers in a Slack thread and web; a second member links their Slack
-  identity and gets their own memory subject; onboarding cold-start to first turn works on a
-  clean machine.
+  identity and gets their own memory subject; a file the agent shares lands in the thread and a
+  file a member posts reaches the turn; onboarding cold-start to first turn works on a clean
+  machine.
 
 ## U7 — accounting completion
 
@@ -124,7 +127,8 @@ services: SQLite + filesystem blobs + in-process hub.
 ## Post-U10 backlog (extensions, in likely order)
 
 e2b carrier · redis hub · turbopuffer index · openrouter · GH code review (webhook → review →
-merge) · self-improvement from o11y (PR #62 replay design on `trajectories_read`/`propose_change`) ·
+merge) · self-improvement (port the main-merged offline-replay loop 8e20fa70 onto
+`trajectories_read`/`propose_change`/jobs — corpus is transcripts, promotion is governed) ·
 security review pack · websites extension (serve tool + routes) · startup + support-bot packs ·
 eval harness port · enterprise k8s layer (apiserver rewriter module, multi-workspace hosting).
 
