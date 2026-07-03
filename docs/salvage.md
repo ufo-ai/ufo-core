@@ -4,6 +4,14 @@ The previous repo stays deployed and untouched; code ports **by copy**, arrives 
 repo's constitution (no k8s imports, `workspace_tx` scoping, `selfhost.sdk` seams), and reads as if
 written here. Old paths are relative to `~/src/metalcraft/src/`. Unit column = `docs/plan.md`.
 
+Working against the old repo:
+- API keys: `~/src/metalcraft/.env` has `ANTHROPIC_API_KEY` (+ `OPENAI_API_KEY`, `E2B_API_KEY`) —
+  copy what a unit's proof needs into this repo's `.env` (gitignored).
+- The old repo's local stack holds `:5432`/`:8080` when up; `make -C ~/src/metalcraft
+  docker-down-all` before `compose up` here, or bind a different Postgres port.
+- Old-repo PR numbers cited in rows (`#62`, `#108`) are viewable via `gh pr view <n>` from
+  `~/src/metalcraft`.
+
 ## → core
 
 | Old file(s) | Lands in | Unit | Transformation |
@@ -22,7 +30,7 @@ written here. Old paths are relative to `~/src/metalcraft/src/`. Unit column = `
 | `metalcraft_agent/tools/sandbox.py` | `tools/builtins/` (`bash read write edit`) | U2 | drop `website`, 3× serve, `glob`, `grep` (bash + ripgrep subsume); keep read-before-write + image/PDF read |
 | `metalcraft_servers/sandbox_proxy/{proxy,server}.py` (minus kubectl mint), `metalcraft_servers/egress_proxy/server.py`, `metalcraft_store/egress.py` | `sandbox/proxy/` | U2 | MERGE into one proxy: sentinel swap, host/account scoping, wire metering; rules derived, no register API |
 | `metalcraft_agent/sandbox/workspace.py`, `executor/sandbox_fs_mount.py`, `metalcraft_store/sandbox_fs_creds.py` | `sandbox/` mount (S3 backend) | U2 | filesystem backend = plain bind mount (new); keep `mountpoint -q` health check |
-| `metalcraft_agent/sandbox/{sbx,sbxfs}` (in-sandbox toolchain), image recipe | `sandbox/image/` | U2 | rebuild Dockerfile fresh; heed memory `sandbox-build-env-traps` (build-scoped envs, per-step USER) |
+| `metalcraft_agent/sandbox/{sbx,sbxfs}` (in-sandbox toolchain), image recipe | `sandbox/image/` | U2 | rebuild Dockerfile fresh; two traps learned on e2b: build-time env vars don't reach runtime (set ENV in the Dockerfile), and per-step USER matters (apt fails non-root) |
 | `metalcraft_agent/sandbox/local.py`, `executor/executor_sandbox.py` | `sandbox/carrier.py` (Docker) | U2 | replace the sync `time.sleep` poll (old event-loop blocker) with async wait |
 | `metalcraft_store/secrets.py` | `credentials.py` | U3 | k8s Secrets → encrypted PG rows; slot-scoped access |
 | `metalcraft_brain/{chunk,embed,fusion,index}.py` | `memory/{embed,index}.py` | U4 | IndexBackend seam ports intact; pgvector impl stays |
