@@ -37,6 +37,11 @@ class ConnectStateInvalid(ValueError):
     """The sealed OAuth state is tampered, expired, or unreadable — the callback refuses it."""
 
 
+class ConnectUnavailable(RuntimeError):
+    """No connect flow is installed — the deploy set no credential key, so grants can be neither
+    sealed nor recorded. The `connect_account` tool and the OAuth callback fail loud with this."""
+
+
 @dataclass(frozen=True)
 class OAuthAccount:
     """What a completed handoff yields: the provider's stable account id and the access token the
@@ -199,14 +204,16 @@ class GrantStore:
 
 @dataclass(frozen=True)
 class ConnectFlow:
-    """The `/connect` workflow, twinned across a browser redirect: `authorize` opens a provider's
-    link carrying sealed state; `complete` verifies that state, exchanges the code, and records the
+    """The connect workflow, twinned across a browser redirect: `authorize` opens a provider's link
+    carrying sealed state; `complete` verifies that state, exchanges the code, and records the
     grant. Deps: the providers the deploy installs (empty until a connectors extension declares
-    any), the Fernet that seals the state, and the grant store."""
+    any), the Fernet that seals the state, the grant store, and the deploy's callback `redirect_uri`
+    — one value both legs use, so the token exchange presents the same redirect the link did."""
 
     providers: Mapping[str, OAuthProvider]
     fernet: Fernet
     store: GrantStore
+    redirect_uri: str
 
     def authorize(
         self,
@@ -216,7 +223,6 @@ class ConnectFlow:
         provider: str,
         grantor_member_id: UUID,
         conversation_id: UUID,
-        redirect_uri: str,
     ) -> str:
         descriptor = self._provider(provider)
         state = ConnectState(
@@ -227,12 +233,12 @@ class ConnectFlow:
             conversation_id=conversation_id,
         )
         sealed = self.fernet.encrypt(state.model_dump_json().encode()).decode()
-        return descriptor.authorize_url(sealed, redirect_uri)
+        return descriptor.authorize_url(sealed, self.redirect_uri)
 
-    async def complete(self, *, state: str, code: str, redirect_uri: str) -> GrantRecorded:
+    async def complete(self, *, state: str, code: str) -> GrantRecorded:
         claims = self._open(state)
         descriptor = self._provider(claims.provider)
-        account = await descriptor.exchange(code, redirect_uri)
+        account = await descriptor.exchange(code, self.redirect_uri)
         await self.store.record(
             workspace_id=claims.workspace_id,
             agent_id=claims.agent_id,
@@ -259,6 +265,25 @@ class ConnectFlow:
         except InvalidToken as error:
             raise ConnectStateInvalid("connect state is tampered or expired") from error
         return ConnectState.model_validate_json(raw)
+
+
+_installed_flow: ConnectFlow | None = None
+
+
+def install_connect_flow(flow: ConnectFlow | None) -> None:
+    """The process's single connect flow, installed once at serve boot before any turn runs. The
+    `connect_account` tool a turn dispatches and the OAuth callback both read it here rather than
+    threading a deploy-fixed singleton (one credential key, one provider map, one callback URL)
+    through every turn's tool context. None when no credential key is set — both readers then fail
+    loud with `ConnectUnavailable`. A test reinstalls to inject a stub provider."""
+    global _installed_flow
+    _installed_flow = flow
+
+
+def installed_connect_flow() -> ConnectFlow:
+    if _installed_flow is None:
+        raise ConnectUnavailable("grants unavailable: no credential key configured")
+    return _installed_flow
 
 
 async def grant_summaries(workspace_id: UUID) -> tuple[GrantSummary, ...]:
