@@ -114,6 +114,10 @@ def _sdk_import_failures(trees: dict[Path, ast.Module]) -> list[str]:
 
 
 def _manifest_point_fields(trees: dict[Path, ast.Module]) -> set[str]:
+    """The Manifest's declared points: fields whose default is a literal empty tuple (`= ()`) — the
+    `name`/`version` scalars and the `KW_ONLY` sentinel are excluded. Detection keys on the `= ()`
+    literal, so a point written `field(default_factory=tuple)` would escape this gate; keep points
+    declared as `name: tuple[...] = ()`."""
     tree = trees.get(MANIFEST_MODULE)
     fields: set[str] = set()
     for node in ast.walk(tree) if tree else ():
@@ -131,6 +135,9 @@ def _manifest_point_fields(trees: dict[Path, ast.Module]) -> set[str]:
 
 
 def _sample_declared_points(trees: dict[Path, ast.Module]) -> set[str] | None:
+    """The points the sample registers: Manifest keyword args whose value is not a literal empty
+    tuple. Detection is literal — `tools=_var` reads as registered even if `_var` is empty — so keep
+    the sample registering each point with an inline non-empty tuple."""
     tree = trees.get(SAMPLE_MODULE)
     if tree is None:
         return None
