@@ -5,6 +5,7 @@ import os
 import threading
 from uuid import UUID
 
+import httpx
 import sqlalchemy as sa
 import uvicorn
 from cryptography.fernet import Fernet
@@ -43,9 +44,13 @@ from selfhost.sandbox.proxy.server import EgressProxy, generate_ca
 from selfhost.sandbox.session import ProxyEndpoint
 from selfhost.schema import tables
 from selfhost.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION
+from selfhost.surfaces.admission import Admission
 from selfhost.surfaces.cli import router
+from selfhost.surfaces.slack import SlackSurface
+from selfhost.surfaces.slack import router as slack_router
 
 PROXY_STARTUP_TIMEOUT_SECONDS = 30
+SLACK_HTTP_TIMEOUT_SECONDS = 20
 
 
 def run() -> None:
@@ -104,6 +109,7 @@ def run() -> None:
     app.state.dbos = dbos_client
     app.include_router(router)
     _mount_ext_routes(app, manifests, workspace_id, credentials, memory)
+    _mount_slack_surface(app, config, workspace_id, credentials, dbos_client)
     log("serve.started", host=config.serve.host, port=config.serve.port)
     try:
         uvicorn.run(app, host=config.serve.host, port=config.serve.port, log_level="warning")
@@ -185,6 +191,31 @@ def _mount_ext_routes(
                 endpoint,
                 methods=[spec.method],
             )
+
+
+def _mount_slack_surface(
+    app: FastAPI,
+    config: Config,
+    workspace_id: UUID,
+    credentials: CredentialStore | None,
+    dbos_client: DBOSClient,
+) -> None:
+    """Mount the Slack ingress when the deploy enables it. The surface reads its signing secret and
+    bot token from the credential store, so an enabled Slack surface without a credential key set
+    fails loud at boot rather than on the first event."""
+    slack = config.surfaces.slack
+    if slack is None or not slack.enable:
+        return
+    if credentials is None:
+        raise RuntimeError("Slack surface is enabled but no credential key is set")
+    app.state.slack = SlackSurface(
+        admission=Admission(dbos=dbos_client),
+        credentials=credentials,
+        http=httpx.AsyncClient(timeout=SLACK_HTTP_TIMEOUT_SECONDS),
+        config=slack,
+        workspace_id=workspace_id,
+    )
+    app.include_router(slack_router)
 
 
 def _egress_proxy(rules: tuple[Rule, ...]) -> ProxyEndpoint:

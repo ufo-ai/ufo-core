@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
-from dbos import DBOSClient, EnqueueOptions
+from dbos import DBOSClient
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
@@ -16,14 +16,8 @@ from selfhost.governance import Governance
 from selfhost.hub import Hub, LiveFrame, Terminal
 from selfhost.o11y import log
 from selfhost.schema import tables
-from selfhost.schema.records import (
-    DBOS_APP_VERSION,
-    DEFAULT_AGENT_NAME,
-    TURN_QUEUE_NAME,
-    TURN_WORKFLOW_NAME,
-    TerminalFrame,
-    turn_id_for,
-)
+from selfhost.schema.records import DEFAULT_AGENT_NAME, TerminalFrame
+from selfhost.surfaces.admission import Admission
 
 MAX_INBOUND_CHARS = 200_000
 TERMINAL_POLL_SECONDS = 1.0
@@ -86,67 +80,11 @@ async def chat(
                 )
             )
         ).one_or_none()
-        if agent is None:
-            raise HTTPException(404, f"no agent named {x_selfhost_agent!r}")
-        await connection.execute(
-            sa.select(tables.conversation.c.id)
-            .where(tables.conversation.c.id == conversation.id)
-            .with_for_update()
-        )
-        seq = (
-            await connection.execute(
-                sa.select(sa.func.coalesce(sa.func.max(tables.turn.c.seq), 0) + 1).where(
-                    tables.turn.c.conversation_id == conversation.id
-                )
-            )
-        ).scalar_one()
-        turn_id = turn_id_for(identity.workspace_id, conversation.id, seq)
-        already_admitted = (
-            await connection.execute(
-                sa.select(tables.turn.c.id).where(tables.turn.c.id == turn_id)
-            )
-        ).one_or_none()
-        if already_admitted is None:
-            await connection.execute(
-                sa.insert(tables.turn).values(
-                    id=turn_id,
-                    workspace_id=identity.workspace_id,
-                    conversation_id=conversation.id,
-                    agent_id=agent.id,
-                    seq=seq,
-                    status="queued",
-                    inbound=inbound,
-                    terminal=None,
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
-    options: EnqueueOptions = {
-        "queue_name": TURN_QUEUE_NAME,
-        "workflow_name": TURN_WORKFLOW_NAME,
-        "workflow_id": str(turn_id),
-        "queue_partition_key": str(conversation.id),
-        "app_version": DBOS_APP_VERSION,
-    }
-    client: DBOSClient = request.app.state.dbos
-    try:
-        await client.enqueue_async(options, str(turn_id))
-    except Exception:
-        frame = TerminalFrame(status="failed", error_class="EnqueueFailed")
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.update(tables.turn)
-                .values(
-                    status="failed",
-                    terminal=frame.model_dump(mode="json"),
-                    updated_at=sa.func.now(),
-                )
-                .where(
-                    tables.turn.c.id == turn_id,
-                    tables.turn.c.status.in_(("queued", "running")),
-                )
-            )
-        raise
+    if agent is None:
+        raise HTTPException(404, f"no agent named {x_selfhost_agent!r}")
+    turn_id = await Admission(dbos=request.app.state.dbos).admit(
+        identity.workspace_id, conversation.id, agent.id, inbound
+    )
     return {"turn_id": str(turn_id)}
 
 
