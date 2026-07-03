@@ -7,6 +7,10 @@ provider the deploy already holds a key for. Manifests (U3) and connector grants
 inputs; the derivation stays the only path in."""
 
 from dataclasses import dataclass
+from uuid import UUID
+
+from selfhost.credentials import CredentialSlotUnset, CredentialStore
+from selfhost.ext.manifest import Manifest
 
 SENTINEL_MODEL_KEY = "SELFHOST_SENTINEL_MODEL_KEY"
 ANTHROPIC_HOST = "api.anthropic.com"
@@ -78,3 +82,30 @@ def derive_model_rules(model: str, real_key: str) -> tuple[Rule, ...]:
         ),
         MeterRule(host=host, dimension="tokens"),
     )
+
+
+async def derive_credential_rules(
+    manifests: tuple[Manifest, ...], workspace_id: UUID, store: CredentialStore
+) -> tuple[Rule, ...]:
+    """Each declared slot with an injection target becomes the egress rules that reach its host and
+    swap its stored secret in for the sentinel; a slot with no stored secret opens no egress, and a
+    slot with no injection target is code-only, never on the wire."""
+    rules: list[Rule] = []
+    for manifest in manifests:
+        for slot in manifest.credentials:
+            target = slot.injection
+            if target is None:
+                continue
+            try:
+                real = await store.get(workspace_id, slot.name)
+            except CredentialSlotUnset:
+                continue
+            rules.append(ScopeRule(allowed_hosts=frozenset({target.host})))
+            rules.append(
+                InjectionRule(
+                    host=target.host, header=target.header, sentinel=target.sentinel, real=real
+                )
+            )
+            if target.dimension is not None:
+                rules.append(MeterRule(host=target.host, dimension=target.dimension))
+    return tuple(rules)

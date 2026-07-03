@@ -48,6 +48,11 @@ class ModelsConfig(BaseModel):
     openai_api_key_env: str = "OPENAI_API_KEY"
 
 
+class CredentialsConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    key_env: str = "SELFHOST_CREDENTIAL_KEY"
+
+
 class ServeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     host: str = "127.0.0.1"
@@ -64,6 +69,7 @@ class Config(BaseModel):
     database: DatabaseConfig
     blob: BlobConfig
     models: ModelsConfig = ModelsConfig()
+    credentials: CredentialsConfig = CredentialsConfig()
     serve: ServeConfig = ServeConfig()
     o11y: O11yConfig = O11yConfig()
 

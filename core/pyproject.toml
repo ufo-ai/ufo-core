@@ -10,6 +10,7 @@ dependencies = [
     "anthropic>=0.40",
     "asyncpg>=0.31.0",
     "click>=8.1",
+    "cryptography>=49.0.0",
     "dbos>=2.24",
     "fastapi>=0.115",
     "httpx>=0.27",

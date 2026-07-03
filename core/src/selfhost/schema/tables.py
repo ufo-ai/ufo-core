@@ -102,3 +102,13 @@ ledger = sa.Table(
     sa.CheckConstraint("priced_micro_usd >= 0", name="ledger_priced"),
     sa.Index("ledger_turn", "turn_id"),
 )
+
+credential = sa.Table(
+    "credential",
+    metadata,
+    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), primary_key=True),
+    sa.Column("slot", sa.Text, primary_key=True),
+    sa.Column("ciphertext", sa.LargeBinary, nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+)

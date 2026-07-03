@@ -6,17 +6,25 @@ import threading
 
 import sqlalchemy as sa
 import uvicorn
+from cryptography.fernet import Fernet
 from dbos import DBOS, DBOSClient
 from fastapi import FastAPI
 
 from selfhost.blob import blob_store_for
 from selfhost.config import Config, load_config
+from selfhost.credentials import CredentialStore
 from selfhost.db import init_db, workspace_tx
+from selfhost.ext.loader import load_manifests
 from selfhost.hub import InProcessHub
 from selfhost.loop.queue import Runtime, init_runtime
 from selfhost.o11y import init_o11y, log
 from selfhost.sandbox.carrier import DockerCarrier
-from selfhost.sandbox.proxy.rules import Rule, ScopeRule, derive_model_rules
+from selfhost.sandbox.proxy.rules import (
+    Rule,
+    ScopeRule,
+    derive_credential_rules,
+    derive_model_rules,
+)
 from selfhost.sandbox.proxy.server import EgressProxy, generate_ca
 from selfhost.sandbox.session import ProxyEndpoint
 from selfhost.schema import tables
@@ -38,7 +46,7 @@ def run() -> None:
             blob=blob_store_for(config.blob),
             hub=hub,
             carrier=DockerCarrier(),
-            proxy=_egress_proxy(config),
+            proxy=_egress_proxy(asyncio.run(_assemble_rules(config))),
         )
     )
     DBOS(
@@ -71,10 +79,9 @@ async def _require_bootstrap() -> None:
         raise RuntimeError("workspace missing — run `selfhost init` first")
 
 
-def _egress_proxy(config: Config) -> ProxyEndpoint:
+def _egress_proxy(rules: tuple[Rule, ...]) -> ProxyEndpoint:
     """The sandbox's sole route out runs on its own event loop: a standalone network service, not
     part of the turn loop, that outlives every turn for the life of the process."""
-    rules = _proxy_rules(config)
     loop = asyncio.new_event_loop()
     threading.Thread(target=loop.run_forever, daemon=True).start()
 
@@ -85,10 +92,17 @@ def _egress_proxy(config: Config) -> ProxyEndpoint:
     return asyncio.run_coroutine_threadsafe(_boot(), loop).result(PROXY_STARTUP_TIMEOUT_SECONDS)
 
 
-def _proxy_rules(config: Config) -> tuple[Rule, ...]:
-    """The egress allowlist + credential injection, derived from the provider keys the deploy holds:
-    each configured provider host is reachable and its sentinel swaps to the real key on the wire;
-    every other host is refused at CONNECT."""
+async def _assemble_rules(config: Config) -> tuple[Rule, ...]:
+    """The proxy's full rule set: the model providers the deploy holds keys for, plus every
+    extension credential slot whose secret is stored — derived, never registered."""
+    model = _model_rules(config)
+    credential = await _credential_rules(config)
+    return (*model, *credential)
+
+
+def _model_rules(config: Config) -> tuple[Rule, ...]:
+    """The model-provider egress: each configured provider host is reachable and its sentinel swaps
+    to the real key on the wire; every other host is refused at CONNECT."""
     providers = (
         (config.models.anthropic_api_key_env, "claude-opus-4-8"),
         (config.models.openai_api_key_env, "gpt-5"),
@@ -107,3 +121,22 @@ def _proxy_rules(config: Config) -> tuple[Rule, ...]:
     if not hosts:
         raise RuntimeError("no model provider key set; the sandbox would have no egress route")
     return (ScopeRule(allowed_hosts=frozenset(hosts)), *rules)
+
+
+async def _credential_rules(config: Config) -> tuple[Rule, ...]:
+    """Every installed extension's injected credential slots become egress rules for this single
+    workspace; fail loud if a slot needs injection but the deploy set no credential key."""
+    manifests = load_manifests()
+    if not any(slot.injection for manifest in manifests for slot in manifest.credentials):
+        return ()
+    key = os.environ.get(config.credentials.key_env)
+    if not key:
+        raise RuntimeError(
+            f"credential key env {config.credentials.key_env!r} is unset but a slot needs injection"
+        )
+    store = CredentialStore(fernet=Fernet(key.encode()))
+    async with workspace_tx() as connection:
+        workspace_id = (
+            await connection.execute(sa.select(tables.workspace.c.id))
+        ).scalar_one()
+    return await derive_credential_rules(manifests, workspace_id, store)
