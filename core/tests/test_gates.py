@@ -54,6 +54,20 @@ def test_conformance_gate_flags_a_manifest_point_the_sample_drops() -> None:
     assert any("jobs" in failure for failure in failures)
 
 
+def test_skills_gate_passes_for_the_shipped_core_skills() -> None:
+    assert gates._skill_failures() == []
+
+
+def test_skills_gate_flags_a_skill_outside_the_fixed_set() -> None:
+    failures = gates._rogue_skill_failures(gates.CORE_SKILL_NAMES | {"rogue"})
+    assert any("rogue" in failure for failure in failures)
+
+
+def test_skills_gate_flags_a_missing_core_skill() -> None:
+    failures = gates._rogue_skill_failures(gates.CORE_SKILL_NAMES - {"memory"})
+    assert any("memory" in failure for failure in failures)
+
+
 def test_conformance_gate_passes_when_sample_covers_every_point() -> None:
     manifest_src = (
         "class Manifest:\n"
