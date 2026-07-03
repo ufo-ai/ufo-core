@@ -59,8 +59,14 @@ hard-to-vary decision; cut the words around it. Prefer a table to prose. One exa
   point → steps → types, one file, top to bottom. More than two file-hops to trace a flow means
   the seams are wrong — fix the seams.
 - **Fail loud** — raise on missing config or unexpected values; no silent fallbacks.
-- **Async-native** — async DB driver and HTTP; `asyncio.to_thread` only for libraries with no
-  async API; never block the event loop.
+- **Async-native, one event loop** — `selfhost serve` is one process: a blocking call stalls
+  every surface, stream, and turn at once. Async DB driver, async HTTP, `async def` DBOS
+  workflows/steps; never `time.sleep`, `subprocess.run`, sync `open()`, or a sync client inside
+  `async def` (ruff `ASYNC` rules gate this; `requests`/`psycopg2` are banned imports). A sync
+  impl behind `await asyncio.to_thread(sync_impl, …)` is two code paths and two error models for
+  one operation — `to_thread` is a last resort for a library with genuinely no async API, and
+  GIL-bound CPU work beyond ~10ms goes to a pool deliberately, never incidentally. Sync I/O is
+  fine only off the loop: CLI startup, migrations, build scripts.
 - **No comments** — code self-documents through naming; docstrings on public APIs OK.
 - **Constants over magic values** — top-level `SCREAMING_SNAKE_CASE`.
 - **Absolute imports, top-level imports, pathlib, guard clauses, built-ins over hand-rolled loops,

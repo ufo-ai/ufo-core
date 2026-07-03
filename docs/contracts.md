@@ -253,3 +253,5 @@ extension may touch; a CI gate fails any `extensions/` import outside `selfhost.
 - Extensions import `selfhost.sdk` only; credentials resolve only for declared slots.
 - Derived state (embeddings, summaries, index rows) is produced by jobs, never inline.
 - Every model/tool/proxy call meters into the ledger in the same commit as its step.
+- One event loop, never blocked: workflows/steps are `async def`; blocking calls in async code
+  fail lint; sync I/O exists only off the loop (CLI startup, migrations, build scripts).

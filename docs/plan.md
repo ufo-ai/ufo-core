@@ -127,4 +127,7 @@ call site fails CI (`sdk/` re-exports exempt); no module named `utils`/`helpers`
 **wiring gate (from U1)**: every schema column has ≥1 write site and ≥1 read site outside tests;
 every persisted enum/`Literal` member has a producer; every `LiveFrame` kind has an emitter —
 "both ends or neither" · **ext conformance (from U3)**: the sample extension exercises every
-Manifest point + the negative cases; a change that breaks it is a public-SDK break.
+Manifest point + the negative cases; a change that breaks it is a public-SDK break ·
+**async (from U1)**: ruff `ASYNC` rules on (blocking call inside `async def` fails lint);
+`requests`/`psycopg2` banned imports; `to_thread` call sites name the no-async-API library they
+wrap.
