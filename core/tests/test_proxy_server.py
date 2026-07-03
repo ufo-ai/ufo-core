@@ -6,7 +6,7 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from selfhost.db import workspace_tx
-from selfhost.sandbox.proxy.rules import InjectionRule, MeterRule
+from selfhost.sandbox.proxy.rules import InjectionRule, MeterRule, ScopeRule
 from selfhost.sandbox.proxy.server import EgressProxy, PerAgentRules, _inject, generate_ca
 from selfhost.sandbox.session import RunToken
 from selfhost.schema import tables
@@ -30,6 +30,31 @@ async def _proxy() -> EgressProxy:
 
 def _basic(run_token: str) -> str:
     return "Basic " + base64.b64encode(f"{run_token}:".encode()).decode()
+
+
+async def test_a_resolution_error_fails_closed_to_base_and_is_not_cached() -> None:
+    """A resolver that raises (a transient DB blip) yields the base for that one request and is NOT
+    cached, so the next request re-resolves — a blip degrades one request, never the turn."""
+    base = (ScopeRule(allowed_hosts=frozenset({MODEL_HOST})),)
+    granted = (
+        *base,
+        ScopeRule(allowed_hosts=frozenset({SEARCH_HOST})),
+        InjectionRule(host=SEARCH_HOST, header="authorization", sentinel="s", real="r"),
+    )
+    calls = {"n": 0}
+
+    async def flaky(run: RunToken | None) -> tuple[object, ...]:
+        if run is None:
+            return base
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient db blip")
+        return granted
+
+    proxy = EgressProxy(resolve=flaky, ca_cert="", ca_key="")
+    run = RunToken(uuid4(), uuid4())
+    assert await proxy._rules_for(run) == base
+    assert await proxy._rules_for(run) == granted
 
 
 async def _seed_turn(connection: AsyncConnection) -> tuple[UUID, UUID]:

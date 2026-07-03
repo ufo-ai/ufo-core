@@ -20,7 +20,6 @@ commits at terminal, so metering it here would double-count."""
 import asyncio
 import ssl
 import tempfile
-import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -48,7 +47,6 @@ MAX_HEADER_BYTES = 65536
 CONNECT_UPSTREAM_TIMEOUT_SECONDS = 30
 DEFAULT_HTTPS_PORT = 443
 CERT_VALID_DAYS = "1"
-RULE_CACHE_TTL_SECONDS = 60.0
 RULE_CACHE_MAX = 4096
 
 RuleResolver = Callable[["RunToken | None"], Awaitable[tuple[Rule, ...]]]
@@ -82,9 +80,10 @@ class PerAgentRules:
     workspace-wide model and credential base plus that agent's own OAuth grant rules. Per-agent
     scoping is the wire's isolation — agent A's turn resolves only A's grants, so A can neither
     reach (no ScopeRule) nor inject (no matching sentinel) another agent's granted account. A run
-    with no or unknown token, or a resolution that fails, yields the base alone — never a broad
-    allow, never another agent's grant. Deriving each call (not once at boot) is the liveness: a
-    grant recorded mid-serve is live for the next turn."""
+    with no or unknown token yields the base alone; a resolution error raises to the proxy, which
+    fails closed to the base without caching it — never a broad allow, never another agent's grant.
+    Deriving each call (not once at boot) is the liveness: a grant recorded mid-serve is live for
+    the next turn."""
 
     base: tuple[Rule, ...]
     grants: GrantStore | None
@@ -92,15 +91,11 @@ class PerAgentRules:
     async def resolve(self, run: RunToken | None) -> tuple[Rule, ...]:
         if run is None or self.grants is None:
             return self.base
-        try:
-            agent_id = await self._agent_of(run)
-            if agent_id is None:
-                return self.base
-            granted = await self.grants.active_grants(run.workspace_id, agent_id)
-            return (*self.base, *derive_grant_rules(granted))
-        except Exception as error:
-            log("egress.resolve_failed", turn=str(run.turn_id), error_class=type(error).__name__)
+        agent_id = await self._agent_of(run)
+        if agent_id is None:
             return self.base
+        granted = await self.grants.active_grants(run.workspace_id, agent_id)
+        return (*self.base, *derive_grant_rules(granted))
 
     async def _agent_of(self, run: RunToken) -> UUID | None:
         async with workspace_tx() as connection:
@@ -124,9 +119,7 @@ class EgressProxy:
     _contexts: dict[str, ssl.SSLContext] = field(default_factory=dict, init=False)
     _mint_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _meter_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False)
-    _rule_cache: dict[str, tuple[float, tuple[Rule, ...]]] = field(
-        default_factory=dict, init=False
-    )
+    _rule_cache: dict[str, tuple[Rule, ...]] = field(default_factory=dict, init=False)
 
     async def start(self, bind_host: str = PROXY_BIND_HOST) -> ProxyEndpoint:
         self._workdir = tempfile.TemporaryDirectory()
@@ -177,22 +170,24 @@ class EgressProxy:
 
     async def _rules_for(self, run: RunToken | None) -> tuple[Rule, ...]:
         """The resolved rule set for this turn's agent, cached per run token so the DB is hit once
-        per turn, not once per request. An entry lives RULE_CACHE_TTL_SECONDS, so a grant recorded
-        mid-serve becomes effective for the next turn without a proxy restart; the cache is bounded,
-        purging expired entries once full (correctness never rests on it — a stale entry only defers
-        a new grant to the next turn)."""
+        per turn, not once per request. The run token is unique per turn, so a grant recorded
+        mid-serve is live for the next turn (a fresh token) without a proxy restart. Bounded by
+        RULE_CACHE_MAX, evicting the oldest entry once full. A resolution that errors fails closed
+        to the base and is NOT cached — a transient DB blip degrades one request, never the turn."""
         if run is None:
             return await self.resolve(None)
         key = run.encode()
-        now = time.monotonic()
         hit = self._rule_cache.get(key)
-        if hit is not None and hit[0] > now:
-            return hit[1]
-        rules = await self.resolve(run)
+        if hit is not None:
+            return hit
+        try:
+            rules = await self.resolve(run)
+        except Exception as error:
+            log("egress.resolve_failed", turn=str(run.turn_id), error_class=type(error).__name__)
+            return await self.resolve(None)
         if len(self._rule_cache) >= RULE_CACHE_MAX:
-            for expired in [k for k, (expiry, _) in self._rule_cache.items() if expiry <= now]:
-                del self._rule_cache[expired]
-        self._rule_cache[key] = (now + RULE_CACHE_TTL_SECONDS, rules)
+            del self._rule_cache[next(iter(self._rule_cache))]
+        self._rule_cache[key] = rules
         return rules
 
     async def _tunnel(
