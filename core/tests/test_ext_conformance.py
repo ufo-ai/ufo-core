@@ -25,6 +25,7 @@ from selfhost.ext.context import ScopedStore, UndeclaredCredentialSlot, context_
 from selfhost.ext.loader import load_manifests, turn_tools
 from selfhost.ext.manifest import Manifest
 from selfhost.jobs import JobRunner, bindings_from
+from selfhost.onboarding import run_onboarding_steps
 from selfhost.sandbox.proxy.rules import InjectionRule, derive_credential_rules
 from selfhost.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from selfhost.schema import tables
@@ -93,6 +94,7 @@ async def test_sample_is_discovered_via_its_entry_point() -> None:
     assert {job.name for job in manifest.jobs} == {sample.JOB_NAME}
     assert {route.path for route in manifest.routes} == {sample.ROUTE_PATH}
     assert {slot.name for slot in manifest.credentials} == {sample.API_SLOT}
+    assert {step.name for step in manifest.onboarding_steps} == {sample.ONBOARDING_NAME}
 
 
 async def test_tool_dispatches_with_its_scoped_context(db: None, tmp_path: Path) -> None:
@@ -170,6 +172,14 @@ async def test_job_fires_through_its_scoped_context(db: None) -> None:
     await runner.fire(f"{manifest.name}:{sample.JOB_NAME}")
     scoped = ScopedStore(workspace_id=workspace_id, extension=sample.NAME)
     assert await scoped.get(sample.JOB_KEY) == {"ran": True}
+
+
+async def test_onboarding_step_runs_through_its_scoped_context(db: None) -> None:
+    workspace_id = await _workspace()
+    manifest = _sample_manifest()
+    await run_onboarding_steps((manifest,), workspace_id, _credential_store())
+    scoped = ScopedStore(workspace_id=workspace_id, extension=sample.NAME)
+    assert await scoped.get(sample.ONBOARDING_KEY) == {"onboarded": True}
 
 
 async def test_route_reaches_its_scoped_context(db: None) -> None:

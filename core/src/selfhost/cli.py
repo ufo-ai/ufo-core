@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import os
 import secrets
 from pathlib import Path
 from uuid import uuid4
@@ -11,15 +12,19 @@ import asyncpg
 import click
 import httpx
 import sqlalchemy as sa
+from cryptography.fernet import Fernet
 
 from selfhost.config import Config, load_config
+from selfhost.credentials import CredentialStore
 from selfhost.db import apply_migrations, dispose_db, init_db, workspace_tx
+from selfhost.ext.loader import load_manifests
+from selfhost.onboarding import AlreadyInitialized, Onboarded, Onboarding
 from selfhost.schema import tables
+from selfhost.schema.records import DEFAULT_AGENT_NAME
 from selfhost.serve import run as serve_run
 
 SELFHOST_DIR = Path.home() / ".selfhost"
 DEFAULT_AGENT_MODEL = "claude-opus-4-8"
-DEFAULT_AGENT_PROMPT = "You are a helpful assistant."
 RECONNECT_SECONDS = 1.0
 TURN_REQUEST_TIMEOUT_SECONDS = 90.0
 DEFAULT_CONFIG = """\
@@ -41,8 +46,8 @@ def main() -> None:
 @click.option("--email", required=True)
 @click.option("--model", default=DEFAULT_AGENT_MODEL, show_default=True)
 def init(email: str, model: str) -> None:
-    """Write selfhost.toml if absent, then create the schema, workspace, owner,
-    default agent, and CLI token."""
+    """Write selfhost.toml if absent, apply the schema, then onboard the workspace, owner, default
+    agent and model key (plus any extension onboarding steps) and bind this machine's CLI token."""
     config_path = Path("selfhost.toml")
     if not config_path.exists():
         config_path.write_text(DEFAULT_CONFIG)
@@ -52,60 +57,49 @@ def init(email: str, model: str) -> None:
         asyncio.run(_create_postgres_system_database(config))
     apply_migrations(config.database.url)
     token = secrets.token_hex(32)
-    asyncio.run(_bootstrap_workspace(config, email, model, token))
+    try:
+        asyncio.run(_onboard(config, email, model, token))
+    except AlreadyInitialized as already:
+        raise click.ClickException(str(already)) from already
     SELFHOST_DIR.mkdir(mode=0o700, exist_ok=True)
     token_path = SELFHOST_DIR / "token"
     token_path.write_text(token)
     token_path.chmod(0o600)
-    click.echo(f"workspace ready — owner {email}, agent 'assistant' ({model})")
+    click.echo(f"workspace ready — owner {email}, agent {DEFAULT_AGENT_NAME!r} ({model})")
     click.echo(f"cli token written to {token_path}")
 
 
-async def _bootstrap_workspace(config: Config, email: str, model: str, token: str) -> None:
+async def _onboard(config: Config, email: str, model: str, token: str) -> None:
+    """Open the db boundary once, run onboarding, then bind the CLI token to the new owner — the CLI
+    surface's own identity, issued here rather than in the surface-agnostic engine."""
     init_db(config.database.url)
     try:
-        async with workspace_tx() as connection:
-            owner = (await connection.execute(sa.select(tables.member.c.email))).first()
-            if owner is not None:
-                raise click.ClickException(f"already initialized (owner {owner.email})")
-            workspace_id, member_id, agent_id = uuid4(), uuid4(), uuid4()
-            await connection.execute(
-                sa.insert(tables.workspace).values(
-                    id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
-                )
-            )
-            await connection.execute(
-                sa.insert(tables.member).values(
-                    id=member_id,
-                    workspace_id=workspace_id,
-                    email=email,
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
-            await connection.execute(
-                sa.insert(tables.agent).values(
-                    id=agent_id,
-                    workspace_id=workspace_id,
-                    name="assistant",
-                    prompt=DEFAULT_AGENT_PROMPT,
-                    model=model,
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
-            await connection.execute(
-                sa.insert(tables.surface_identity).values(
-                    workspace_id=workspace_id,
-                    member_id=member_id,
-                    surface="cli",
-                    external_id=hashlib.sha256(token.encode()).hexdigest(),
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
+        key = os.environ.get(config.credentials.key_env)
+        credentials = CredentialStore(fernet=Fernet(key.encode())) if key else None
+        onboarded = await Onboarding(
+            config=config,
+            email=email,
+            model=model,
+            credentials=credentials,
+            manifests=load_manifests(),
+        ).run()
+        await _bind_cli_token(onboarded, token)
     finally:
         await dispose_db()
+
+
+async def _bind_cli_token(onboarded: Onboarded, token: str) -> None:
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.surface_identity).values(
+                workspace_id=onboarded.workspace_id,
+                member_id=onboarded.member_id,
+                surface="cli",
+                external_id=hashlib.sha256(token.encode()).hexdigest(),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
 
 
 async def _create_postgres_system_database(config: Config) -> None:

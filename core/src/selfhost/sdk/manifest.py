@@ -13,5 +13,8 @@ from selfhost.ext.manifest import (
     Manifest as Manifest,
 )
 from selfhost.ext.manifest import (
+    OnboardingStep as OnboardingStep,
+)
+from selfhost.ext.manifest import (
     RouteSpec as RouteSpec,
 )
