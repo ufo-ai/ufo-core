@@ -157,7 +157,7 @@ async def _execute_turn(turn_id: str) -> str:
             member_id=member_id,
             artifact_token_secret=runtime.artifact_token_secret,
             grants=(
-                GrantStore(fernet=runtime.credentials.fernet)
+                GrantStore()
                 if runtime.credentials is not None
                 else None
             ),

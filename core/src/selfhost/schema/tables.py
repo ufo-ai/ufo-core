@@ -152,7 +152,6 @@ grant = sa.Table(
     sa.Column("provider", sa.Text, nullable=False),
     sa.Column("account_id", sa.Text, nullable=False),
     sa.Column("host", sa.Text, nullable=False),
-    sa.Column("ciphertext", sa.LargeBinary, nullable=False),
     sa.Column("grantor_member_id", sa.Uuid, sa.ForeignKey("member.id"), nullable=False),
     sa.Column("conversation_id", sa.Uuid, sa.ForeignKey("conversation.id"), nullable=False),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),

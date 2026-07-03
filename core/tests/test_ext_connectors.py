@@ -1,14 +1,14 @@
-"""The connectors extension: Composio-brokered OAuth providers and their egress-proxied tools.
+"""The connectors extension: Composio-brokered OAuth providers and the dynamic Composio tools.
 
-The extension imports only `selfhost.sdk`; these tests source its manifest the way `serve` does
-(`_connect_flow` over the manifest, `turn_tools` for the tool set) and drive the resulting grant
-through the REAL egress proxy exactly as the grants/connectors seam tests do. Composio's HTTP is
-mocked with an `httpx.MockTransport` — no live Composio API or key — so the real client, provider,
-and route code run against canned Composio responses."""
+The extension imports only `selfhost.sdk`. These tests source its manifest the way `serve` does
+(`_connect_flow` over the manifest, `turn_tools` for the tool set) and drive the two seams it owns:
+the OAuth consent handoff (grant binding + confused-deputy close) and the dynamic tools
+(`list_external_tools`/`describe_external_tools`/`call_external_tool`). Composio's HTTP is mocked
+with an `httpx.MockTransport` — no live Composio API or key — so the real client, provider, route,
+and tool code run against canned Composio responses. Execution is server-side on Composio's execute
+API, so a dynamic tool never touches the sandbox egress proxy (the sample proves that path)."""
 
-import asyncio
-import base64
-import shlex
+import json
 from collections.abc import Callable, Iterator
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID, uuid4
@@ -20,6 +20,14 @@ import selfhost_ext_connectors.manifest as connectors
 import selfhost_ext_connectors.provider as provider
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
+from selfhost_ext_connectors.tools import (
+    CallExternalToolInput,
+    DescribeExternalToolsInput,
+    ListExternalToolsInput,
+    call_external_tool,
+    describe_external_tools,
+    list_external_tools,
+)
 from starlette.requests import Request
 
 from selfhost.config import Config
@@ -28,9 +36,6 @@ from selfhost.db import workspace_tx
 from selfhost.ext.context import context_for
 from selfhost.ext.loader import turn_tools
 from selfhost.grants import GrantStore, install_connect_flow
-from selfhost.sandbox.proxy.rules import GRANT_METER_DIMENSION, InjectionRule, MeterRule
-from selfhost.sandbox.proxy.server import EgressProxy, PerAgentRules, _inject, generate_ca
-from selfhost.sandbox.session import ExecResult, RunToken, SandboxHandle, SandboxSession
 from selfhost.schema import tables
 from selfhost.schema.records import Agent, Turn
 from selfhost.serve import _connect_flow
@@ -41,11 +46,13 @@ PUBLIC_BASE_URL = "https://selfhost.example.com"
 EXPECTED_REDIRECT_URI = "https://selfhost.example.com/v1/connect/callback"
 PROVIDER = "github"
 PROVIDER_HOST = "api.github.com"
-UNGRANTED_HOST = "api.ungranted.test"
 COMPOSIO_CONSENT_URL = "https://github.com/login/oauth/authorize?client_id=x&state=y"
 COMPOSIO_ACCOUNT = "ca_test123"
 GITHUB_TOKEN = "gho_realsecrettoken"
 COMPOSIO_USER = "selfhost_ws"
+GITHUB_SLUG = "GITHUB_LIST_PULL_REQUESTS"
+UNKNOWN_SLUG = "GITHUB_DEFINITELY_NOT_A_TOOL"
+TOOL_DESCRIPTION = "List pull requests on a repository."
 
 
 @pytest.fixture(autouse=True)
@@ -54,17 +61,22 @@ def _reset_connect_flow() -> Iterator[None]:
     install_connect_flow(None)
 
 
-def _composio_handler(owner: str) -> Callable[[httpx.Request], httpx.Response]:
-    """A Composio mock reporting `owner` as the connected account's owning user, so the ownership
-    assertion in `connected_account` passes for a matching user and refuses a foreign one."""
+def _composio_handler(
+    owner: str, executed: list[dict[str, object]] | None = None
+) -> Callable[[httpx.Request], httpx.Response]:
+    """A Composio mock: connect endpoints (reporting `owner` as the account's owning user, so the
+    ownership assertion passes for a match and refuses a foreign one), the tool catalog
+    (`GET /tools`, `GET /tools/{slug}`), and server-side execute (`POST /tools/execute/{slug}`,
+    recording the request body into `executed`). An unknown slug 404s on schema and execute."""
 
     def handle(request: httpx.Request) -> httpx.Response:
         path = request.url.path
-        if request.method == "POST" and path.endswith("/connected_accounts/link"):
+        method = request.method
+        if method == "POST" and path.endswith("/connected_accounts/link"):
             return httpx.Response(200, json={"redirect_url": COMPOSIO_CONSENT_URL})
-        if request.method == "GET" and path.endswith("/auth_configs"):
+        if method == "GET" and path.endswith("/auth_configs"):
             return httpx.Response(200, json={"items": [{"id": "ac_test"}]})
-        if request.method == "GET" and "/connected_accounts/" in path:
+        if method == "GET" and "/connected_accounts/" in path:
             return httpx.Response(
                 200,
                 json={
@@ -73,14 +85,36 @@ def _composio_handler(owner: str) -> Callable[[httpx.Request], httpx.Response]:
                     "state": {"val": {"access_token": GITHUB_TOKEN}},
                 },
             )
+        if method == "GET" and path.endswith("/tools"):
+            return httpx.Response(
+                200, json={"items": [{"slug": GITHUB_SLUG, "description": TOOL_DESCRIPTION}]}
+            )
+        if method == "GET" and path.endswith(f"/tools/{GITHUB_SLUG}"):
+            return httpx.Response(
+                200,
+                json={
+                    "slug": GITHUB_SLUG,
+                    "input_schema": {"type": "object", "properties": {"owner": {"type": "string"}}},
+                },
+            )
+        if method == "GET" and "/tools/" in path:
+            return httpx.Response(404, json={"error": "unknown tool"})
+        if method == "POST" and path.endswith(f"/tools/execute/{GITHUB_SLUG}"):
+            if executed is not None:
+                executed.append(json.loads(request.content))
+            return httpx.Response(200, json={"successful": True, "data": {"items": []}})
+        if method == "POST" and "/tools/execute/" in path:
+            return httpx.Response(404, json={"error": "unknown tool"})
         return httpx.Response(404, json={})
 
     return handle
 
 
-def _mock_client(owner: str = COMPOSIO_USER) -> composio.ComposioClient:
+def _mock_client(
+    owner: str = COMPOSIO_USER, executed: list[dict[str, object]] | None = None
+) -> composio.ComposioClient:
     return composio.ComposioClient(
-        api_key="test", transport=httpx.MockTransport(_composio_handler(owner))
+        api_key="test", transport=httpx.MockTransport(_composio_handler(owner, executed))
     )
 
 
@@ -98,10 +132,9 @@ def _credentials() -> CredentialStore:
     return CredentialStore(fernet=Fernet(Fernet.generate_key()))
 
 
-async def test_composio_client_reads_a_connected_accounts_real_token() -> None:
+async def test_composio_client_confirms_an_active_accounts_owner() -> None:
     account = await _mock_client().connected_account(COMPOSIO_ACCOUNT, COMPOSIO_USER)
     assert account.account_id == COMPOSIO_ACCOUNT
-    assert account.token == GITHUB_TOKEN
 
 
 async def test_composio_client_refuses_an_account_owned_by_a_foreign_user() -> None:
@@ -127,6 +160,29 @@ async def test_composio_client_mints_a_connect_link() -> None:
         toolkit="github", user_id="selfhost_ws", callback_url="https://selfhost.example.com/back"
     )
     assert redirect == COMPOSIO_CONSENT_URL
+
+
+async def test_composio_client_executes_a_tool_with_the_bound_account() -> None:
+    executed: list[dict[str, object]] = []
+    response = await _mock_client(executed=executed).execute_tool(
+        GITHUB_SLUG, {"owner": "acme"}, COMPOSIO_USER, COMPOSIO_ACCOUNT
+    )
+    assert response["successful"] is True
+    assert executed[0] == {
+        "user_id": COMPOSIO_USER,
+        "arguments": {"owner": "acme"},
+        "connected_account_id": COMPOSIO_ACCOUNT,
+    }
+
+
+async def test_composio_client_refuses_an_oversized_execute_payload() -> None:
+    with pytest.raises(ValueError, match="payload bound"):
+        await _mock_client().execute_tool(
+            GITHUB_SLUG,
+            {"blob": "x" * (composio.MAX_EXECUTE_ARGUMENTS_BYTES + 1)},
+            COMPOSIO_USER,
+            COMPOSIO_ACCOUNT,
+        )
 
 
 def test_authorize_url_points_the_browser_at_the_oauth_bridge() -> None:
@@ -170,24 +226,78 @@ async def test_oauth_route_return_leg_hands_the_account_id_to_core_as_code() -> 
     assert landing_query["code"] == [COMPOSIO_ACCOUNT]
 
 
-def test_serve_registers_every_provider_and_keeps_its_host() -> None:
+def test_serve_registers_every_provider_and_declares_the_dynamic_tools() -> None:
     flow = _connect_flow(_credentials(), _config(), (connectors.manifest(),))
     assert flow is not None
     assert set(flow.providers) == set(composio.CONNECTORS)
     assert flow.providers[PROVIDER].host == PROVIDER_HOST
     assert flow.redirect_uri == EXPECTED_REDIRECT_URI
+    tools, _ = turn_tools((connectors.manifest(),), uuid4(), _credentials())
+    names = {tool.name for tool in tools}
+    assert {"list_external_tools", "describe_external_tools", "call_external_tool"} <= names
 
 
-async def test_connect_then_a_grant_drives_egress_through_the_real_proxy(
+async def test_list_external_tools_filters_the_connector_catalog() -> None:
+    result = await list_external_tools(
+        _ctx(uuid4(), uuid4(), uuid4(), None),
+        ListExternalToolsInput(queries=("github",), user_description="find a code host"),
+    )
+    payload = json.loads(result.content[0].text)
+    rows = {row["source_id"] for row in payload["connectors"]}
+    assert PROVIDER in rows
+    assert "stripe" not in rows
+
+
+async def test_list_external_tools_select_prefix_fetches_one_by_exact_id() -> None:
+    result = await list_external_tools(
+        _ctx(uuid4(), uuid4(), uuid4(), None),
+        ListExternalToolsInput(queries=("select:github",), user_description="the code host"),
+    )
+    payload = json.loads(result.content[0].text)
+    assert [row["source_id"] for row in payload["connectors"]] == [PROVIDER]
+
+
+async def test_describe_external_tools_fetches_schemas_and_available_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(composio, "composio_client", _mock_client)
+    result = await describe_external_tools(
+        _ctx(uuid4(), uuid4(), uuid4(), None),
+        DescribeExternalToolsInput(source_id=PROVIDER, tool_names=(GITHUB_SLUG,)),
+    )
+    payload = json.loads(result.content[0].text)
+    assert payload["source_id"] == PROVIDER
+    assert GITHUB_SLUG in payload["schemas"]
+    assert payload["schemas"][GITHUB_SLUG]["input_schema"]["properties"] == {
+        "owner": {"type": "string"}
+    }
+
+
+async def test_describe_external_tools_marks_an_unknown_name_unresolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(composio, "composio_client", _mock_client)
+    result = await describe_external_tools(
+        _ctx(uuid4(), uuid4(), uuid4(), None),
+        DescribeExternalToolsInput(source_id=PROVIDER, tool_names=(UNKNOWN_SLUG,)),
+    )
+    payload = json.loads(result.content[0].text)
+    assert payload["unresolved"] == [UNKNOWN_SLUG]
+    assert [tool["slug"] for tool in payload["availableTools"]] == [GITHUB_SLUG]
+
+
+async def test_connect_binds_a_grant_and_call_external_tool_executes_via_composio(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """End to end: register the Composio provider, connect the account in chat (its OAuth token read
-    through mocked Composio HTTP), and drive the resulting grant through the REAL egress proxy — the
-    provider host is admitted and the sentinel swapped for the real token, an ungranted host is
-    refused, and the forwarded request is metered to the ledger."""
+    """End to end: connect the account in chat (its owner read through mocked Composio), binding a
+    grant that carries the Composio connected-account id, then `call_external_tool` resolves that
+    grant and POSTs to Composio's server-side execute API with the workspace's broker user id and
+    the bound account — no sandbox, no proxy."""
     workspace_id = await _workspace()
     owner = f"{composio.EXTERNAL_USER_PREFIX}{workspace_id}"
-    monkeypatch.setattr(composio, "composio_client", lambda: _mock_client(owner))
+    executed: list[dict[str, object]] = []
+    client = _mock_client(owner, executed)
+    monkeypatch.setattr(composio, "composio_client", lambda: client)
     member_id, agent_id = await _member_agent(workspace_id)
     conversation_id = await _conversation(workspace_id, member_id)
     turn_id = await _turn(workspace_id, agent_id, conversation_id)
@@ -214,52 +324,76 @@ async def test_connect_then_a_grant_drives_egress_through_the_real_proxy(
     assert (row.host, row.account_id) == (PROVIDER_HOST, COMPOSIO_ACCOUNT)
 
     tools, ext_by_tool = turn_tools((connectors.manifest(),), workspace_id, credentials)
-    tool = next(t for t in tools if t.name == f"{PROVIDER}_request")
-    carrier = _RecordingCarrier()
-    ctx = _connector_context(
-        workspace_id, agent_id, conversation_id, turn_id, member_id, carrier, flow.store,
-        ext_by_tool[tool.name],
+    tool = next(t for t in tools if t.name == "call_external_tool")
+    ctx = _ctx(workspace_id, agent_id, conversation_id, turn_id, flow.store, ext_by_tool[tool.name])
+    result = await tool.handler(
+        ctx,
+        tool.input_model.model_validate(
+            {"tool_name": GITHUB_SLUG, "source_id": PROVIDER, "arguments": {"owner": "acme"}}
+        ),
     )
-    result = await tool.handler(ctx, tool.input_model.model_validate({"path": "user"}))
     assert result.is_error is False
-    argv = shlex.split(carrier.commands[0])
-    emitted = argv[argv.index("-H") + 1].partition("Authorization: ")[2]
+    assert json.loads(result.content[0].text)["successful"] is True
+    assert executed == [
+        {
+            "user_id": owner,
+            "arguments": {"owner": "acme"},
+            "connected_account_id": COMPOSIO_ACCOUNT,
+        }
+    ]
 
-    resolver = PerAgentRules(base=(), grants=flow.store)
-    cert, key = await generate_ca()
-    proxy = EgressProxy(resolve=resolver.resolve, ca_cert=cert, ca_key=key)
-    endpoint = await proxy.start(bind_host="127.0.0.1")
-    try:
-        run = RunToken(workspace_id, turn_id).encode()
-        assert await _connect_status(endpoint.port, PROVIDER_HOST, run) == 200
-        assert await _connect_status(endpoint.port, UNGRANTED_HOST, run) == 403
-        rules = await proxy._rules_for(RunToken(workspace_id, turn_id))
-        assert MeterRule(host=PROVIDER_HOST, dimension=GRANT_METER_DIMENSION) in rules
-        candidates = [r for r in rules if isinstance(r, InjectionRule) and r.host == PROVIDER_HOST]
-        upstream = _inject([f"authorization: {emitted}\r\n".encode()], candidates)
-        proxy._meter_ledger(PROVIDER_HOST, _basic(run), rules)
-    finally:
-        await proxy.stop()
-    assert f"Bearer {GITHUB_TOKEN}".encode() in upstream
-    assert b"SELFHOST_SENTINEL_GRANT" not in upstream
 
-    async with workspace_tx() as connection:
-        ledger = (
-            await connection.execute(
-                sa.select(tables.ledger.c.dimension, tables.ledger.c.amount).where(
-                    tables.ledger.c.turn_id == turn_id
-                )
-            )
-        ).one()
-    assert (ledger.dimension, int(ledger.amount)) == ("egress", 1)
+async def test_call_external_tool_without_a_grant_fails_loud(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id, agent_id, conversation_id, turn_id = uuid4(), uuid4(), uuid4(), uuid4()
+    executed: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        composio, "composio_client", lambda: _mock_client(COMPOSIO_USER, executed)
+    )
+    ctx = _ctx(workspace_id, agent_id, conversation_id, turn_id, GrantStore())
+    with pytest.raises(ValueError, match="grant"):
+        await call_external_tool(
+            ctx,
+            CallExternalToolInput(tool_name=GITHUB_SLUG, source_id=PROVIDER, arguments={}),
+        )
+    assert executed == []
+
+
+async def test_call_external_tool_augments_a_404_with_the_real_slugs(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 404 from execute carries the source's real tool slugs, so the model's next attempt is
+    informed instead of another blind guess at the naming convention."""
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    turn_id = await _turn(workspace_id, agent_id, conversation_id)
+    store = GrantStore()
+    await store.record(
+        workspace_id=workspace_id,
+        agent_id=agent_id,
+        provider=PROVIDER,
+        account_id=COMPOSIO_ACCOUNT,
+        host=PROVIDER_HOST,
+        grantor_member_id=member_id,
+        conversation_id=conversation_id,
+    )
+    monkeypatch.setattr(composio, "composio_client", _mock_client)
+    ctx = _ctx(workspace_id, agent_id, conversation_id, turn_id, store)
+    with pytest.raises(composio.ComposioError, match=f"tools available on github: {GITHUB_SLUG}"):
+        await call_external_tool(
+            ctx,
+            CallExternalToolInput(tool_name=UNKNOWN_SLUG, source_id=PROVIDER, arguments={}),
+        )
 
 
 async def test_complete_rejects_an_account_owned_by_a_foreign_composio_user(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Confused-deputy close: driving `complete` with a connectedAccountId whose owning Composio
-    user is not this workspace's brokered user (an account id injected on the return leg) is refused
-    before any token is read, so no grant binds to an attacker-controlled account."""
+    user is not this workspace's brokered user is refused before any token is read, so no grant
+    binds to an attacker-controlled account."""
     workspace_id = uuid4()
     foreign_owner = f"{composio.EXTERNAL_USER_PREFIX}{uuid4()}"
     monkeypatch.setattr(composio, "composio_client", lambda: _mock_client(foreign_owner))
@@ -284,66 +418,6 @@ async def test_complete_rejects_an_account_owned_by_a_foreign_composio_user(
             )
         ).scalar_one()
     assert count == 0
-
-
-async def test_connector_tool_targets_a_named_account_among_several(db: None) -> None:
-    """Two accounts for one provider: the tool passing `account_id` puts that account's sentinel on
-    the wire, which the proxy swaps for that account's token alone."""
-    workspace_id = await _workspace()
-    member_id, agent_id = await _member_agent(workspace_id)
-    conversation_id = await _conversation(workspace_id, member_id)
-    turn_id = await _turn(workspace_id, agent_id, conversation_id)
-    credentials = _credentials()
-    store = GrantStore(fernet=credentials.fernet)
-    for account, token in (("ca_one", "tok-one"), ("ca_two", "tok-two")):
-        await store.record(
-            workspace_id=workspace_id,
-            agent_id=agent_id,
-            provider=PROVIDER,
-            account_id=account,
-            host=PROVIDER_HOST,
-            token=token,
-            grantor_member_id=member_id,
-            conversation_id=conversation_id,
-        )
-    tools, ext_by_tool = turn_tools((connectors.manifest(),), workspace_id, credentials)
-    tool = next(t for t in tools if t.name == f"{PROVIDER}_request")
-    carrier = _RecordingCarrier()
-    ctx = _connector_context(
-        workspace_id, agent_id, conversation_id, turn_id, member_id, carrier, store,
-        ext_by_tool[tool.name],
-    )
-    args = tool.input_model.model_validate({"path": "user", "account_id": "ca_two"})
-    await tool.handler(ctx, args)
-    argv = shlex.split(carrier.commands[0])
-    emitted = argv[argv.index("-H") + 1].partition("Authorization: ")[2]
-    assert "ca_two" in emitted and "ca_one" not in emitted
-
-    rules = await PerAgentRules(base=(), grants=store).resolve(RunToken(workspace_id, turn_id))
-    candidates = [r for r in rules if isinstance(r, InjectionRule) and r.host == PROVIDER_HOST]
-    upstream = _inject([f"authorization: {emitted}\r\n".encode()], candidates)
-    assert b"Bearer tok-two" in upstream and b"tok-one" not in upstream
-
-
-class _RecordingCarrier:
-    """Records the egress command the connector tool ran — so the test reads the exact
-    `Authorization` header the tool put on the wire — and answers with a canned 200. A stand-in for
-    the container, never the thing asserted; `create`/`destroy` stay unreachable."""
-
-    def __init__(self) -> None:
-        self.commands: list[str] = []
-
-    async def create(self, spec: object) -> object:
-        raise AssertionError("the connector tool reaches the sandbox only through exec")
-
-    async def exec(
-        self, handle: object, argv: tuple[str, ...], stdin: bytes, timeout_s: int
-    ) -> ExecResult:
-        self.commands.append(argv[-1])
-        return ExecResult(stdout="200", stderr="", exit_code=0)
-
-    async def destroy(self, handle: object) -> None:
-        raise AssertionError("the connector tool reaches the sandbox only through exec")
 
 
 def _request(query: str) -> Request:
@@ -379,35 +453,30 @@ def _turn_context(
     )
 
 
-def _connector_context(
+def _ctx(
     workspace_id: UUID,
     agent_id: UUID,
     conversation_id: UUID,
-    turn_id: UUID,
-    member_id: UUID | None,
-    carrier: _RecordingCarrier,
-    grants: GrantStore,
-    ext: object,
+    turn_id: UUID | None,
+    grants: GrantStore | None = None,
+    ext: object = None,
 ) -> ToolContext:
     return ToolContext(
-        sandbox=SandboxSession(
-            carrier=carrier,
-            handle=SandboxHandle(conversation_id=conversation_id, container_id="test"),
-        ),
+        sandbox=None,
         blob=None,
         turn=Turn(
-            id=turn_id,
+            id=turn_id or uuid4(),
             workspace_id=workspace_id,
             conversation_id=conversation_id,
             agent_id=agent_id,
             seq=1,
             status="running",
-            inbound="call the connector",
+            inbound="use a connector",
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=None,
         memory=None,
-        member_id=member_id,
+        member_id=None,
         artifact_token_secret="",
         grants=grants,
         ext=ext,
@@ -486,18 +555,3 @@ async def _turn(workspace_id: UUID, agent_id: UUID, conversation_id: UUID) -> UU
             )
         )
     return turn_id
-
-
-def _basic(run_token: str) -> str:
-    return "Basic " + base64.b64encode(f"{run_token}:".encode()).decode()
-
-
-async def _connect_status(port: int, host: str, run_token: str) -> int:
-    reader, writer = await asyncio.open_connection("127.0.0.1", port)
-    head = f"CONNECT {host}:443 HTTP/1.1\r\nHost: {host}\r\n"
-    head += f"Proxy-Authorization: {_basic(run_token)}\r\n"
-    writer.write((head + "\r\n").encode())
-    await writer.drain()
-    status_line = await reader.readline()
-    writer.close()
-    return int(status_line.split()[1])

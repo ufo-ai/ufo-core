@@ -3,18 +3,18 @@
 Rules are values the proxy reads, not an API extensions call: a credential slot implies its
 sentinel→real injection, a granted host implies its scope, a metered host implies its dimension.
 Three derivations produce them — the deploy's model provider from its key, each manifest credential
-slot from its stored secret, and each OAuth grant from its stored token — and derivation is the only
-path in."""
+slot from its stored secret, and each OAuth grant from its host — and derivation is the only path
+in. A grant injects nothing: the broker holds the account's token and executes server-side, so a
+grant only admits and meters its host."""
 
 from dataclasses import dataclass
 from uuid import UUID
 
 from selfhost.credentials import CredentialSlotUnset, CredentialStore
 from selfhost.ext.manifest import Manifest
-from selfhost.grants import GRANT_TOKEN_PREFIX, Grant
+from selfhost.grants import Grant
 from selfhost.sandbox.session import SENTINEL_MODEL_KEY
 
-GRANT_AUTH_HEADER = "authorization"
 GRANT_METER_DIMENSION = "requests"
 
 ANTHROPIC_HOST = "api.anthropic.com"
@@ -89,21 +89,13 @@ def derive_model_rules(model: str, real_key: str) -> tuple[Rule, ...]:
 
 
 def derive_grant_rules(grants: tuple[Grant, ...]) -> tuple[Rule, ...]:
-    """Each active grant admits its provider's own host, swaps its stored token onto the wire for
-    the per-account sentinel the sandbox sees — the OAuth-account analog of a credential slot's
-    injection — and meters every request to that host under `requests`, so connector egress shows in
-    `selfhost spend`. An ungranted host derives no ScopeRule, so the proxy refuses it at CONNECT."""
+    """Each active grant admits its provider's own host and meters every request to it under
+    `requests`, so any egress to a granted host shows in `selfhost spend`. A grant injects nothing —
+    the broker holds the account's token and runs connector tools server-side, so no secret is on
+    the wire. An ungranted host derives no ScopeRule, so the proxy refuses it at CONNECT."""
     rules: list[Rule] = []
     for grant in grants:
         rules.append(ScopeRule(allowed_hosts=frozenset({grant.host})))
-        rules.append(
-            InjectionRule(
-                host=grant.host,
-                header=GRANT_AUTH_HEADER,
-                sentinel=grant.sentinel_header,
-                real=f"{GRANT_TOKEN_PREFIX}{grant.token}",
-            )
-        )
         rules.append(MeterRule(host=grant.host, dimension=GRANT_METER_DIMENSION))
     return tuple(rules)
 

@@ -166,7 +166,7 @@ class ConnectStubProvider:
         return f"{STUB_AUTHORIZE_URL}?state={state}"
 
     async def exchange(self, code: str, redirect_uri: str, workspace_id: UUID) -> OAuthAccount:
-        return OAuthAccount(account_id="acct-42", token="tok")
+        return OAuthAccount(account_id="acct-42")
 
 
 @dataclass(frozen=True)
@@ -396,7 +396,7 @@ async def test_connect_account_tool_call_in_a_turn_yields_the_authorize_url(
         ConnectFlow(
             providers={"stub": ConnectStubProvider()},
             fernet=fernet,
-            store=GrantStore(fernet=fernet),
+            store=GrantStore(),
             redirect_uri="http://surface/v1/connect/callback",
         )
     )

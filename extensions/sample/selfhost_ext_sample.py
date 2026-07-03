@@ -8,7 +8,6 @@ mock log), so the tests read those rows back through the same public surfaces co
 `UNDECLARED_SLOT` names a slot the Manifest never declares — the probe that a handler asking for an
 undeclared slot is refused."""
 
-import shlex
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from uuid import UUID
@@ -53,16 +52,15 @@ INJECTION_DIMENSION = "requests"
 CONNECTOR_PROVIDER = "sample_connector"
 CONNECTOR_HOST = "api.connector.sample.test"
 CONNECTOR_ACCOUNT = "sample-account-1"
-CONNECTOR_TOKEN = "sample-connector-token"
 CONNECTOR_AUTHORIZE_URL = "https://connect.sample.test/oauth"
-CONNECTOR_TOOL_NAME = "sample_connector_call"
+CONNECTOR_EXECUTE_TOOL_NAME = "sample_connector_execute"
 TOOL_KEY = "tool:echo"
 JOB_KEY = "job:ran"
 TRAJECTORY_KEY = "job:trajectories"
 PROPOSAL_KEY = "job:proposal"
 ROUTE_KEY = "route:hit"
 ONBOARDING_KEY = "onboarding:done"
-CONNECTOR_KEY = "connector:called"
+CONNECTOR_EXECUTE_KEY = "connector:executed"
 HOOK_POST_KEY = "hook:post"
 PROPOSAL_SUFFIX = "\nBe concise."
 HOOK_DENY_REASON = "the sample pre_tool_use hook refuses its sentinel tool"
@@ -144,9 +142,10 @@ async def _record_post(ctx: HookContext) -> HookOutcome:
 
 @dataclass(frozen=True)
 class _SampleConnectorOAuth:
-    """The stub connector's OAuth descriptor: a canned authorize URL and a canned account/token
-    exchange stand in for a real provider's handoff, so the connect seam runs end to end without a
-    live provider. `host` is the one the derived grant admits and meters at the egress proxy."""
+    """The stub connector's OAuth descriptor: a canned authorize URL and a canned account exchange
+    stand in for a real provider's handoff, so the connect seam runs end to end without a live
+    provider. `host` is the one the derived grant admits and meters at the egress proxy. The broker
+    holds the account's token, so the exchange yields only the connected-account id — no secret."""
 
     provider: str = CONNECTOR_PROVIDER
     host: str = CONNECTOR_HOST
@@ -155,32 +154,26 @@ class _SampleConnectorOAuth:
         return f"{CONNECTOR_AUTHORIZE_URL}?state={state}&redirect_uri={redirect_uri}"
 
     async def exchange(self, code: str, redirect_uri: str, workspace_id: UUID) -> OAuthAccount:
-        return OAuthAccount(account_id=CONNECTOR_ACCOUNT, token=CONNECTOR_TOKEN)
+        return OAuthAccount(account_id=CONNECTOR_ACCOUNT)
 
 
-class ConnectorCallInput(BaseModel):
-    path: str = "me"
+class ConnectorExecuteInput(BaseModel):
+    tool_name: str = "sample_list"
 
 
-async def _connector_call(ctx: ToolContext, args: ConnectorCallInput) -> ToolResult:
-    """The stub connector action: authenticate to the provider by asking the turn's context for the
-    per-account sentinel `Authorization` value, send it as the request's `Authorization` header, and
-    reach the provider host through the sandbox's egress proxy. The proxy admits the granted host
-    (an ungranted host is refused at CONNECT) and swaps the sentinel for the turn-agent's real token
-    on the wire, so the raw secret never enters the sandbox. Records the call through the
-    extension's scoped store so the seam is read back through a public surface; an agent with no
-    grant for the provider fails loud here, before any egress."""
+async def _connector_execute(ctx: ToolContext, args: ConnectorExecuteInput) -> ToolResult:
+    """The stub connector's server-side execute path: it resolves the turn-agent's bound
+    connected-account id through `connector_account` — the broker's account id a server-side
+    execution API takes, holding the token itself — and records it through the extension's scoped
+    store so the seam is read back through a public surface. An agent with no grant for the provider
+    fails loud here, before any execution."""
     if ctx.ext is None:
         raise RuntimeError("sample connector tool dispatched without its ExtensionContext")
-    authorization = await ctx.connector_authorization(CONNECTOR_PROVIDER)
-    header = shlex.quote(f"Authorization: {authorization}")
-    result = await ctx.sandbox.bash(
-        f"curl -sS -o /dev/null -w '%{{http_code}}' -H {header} https://{CONNECTOR_HOST}/{args.path}"
+    account = await ctx.connector_account(CONNECTOR_PROVIDER)
+    await ctx.ext.store.put(
+        CONNECTOR_EXECUTE_KEY, {"account": account, "tool_name": args.tool_name}
     )
-    await ctx.ext.store.put(CONNECTOR_KEY, {"host": CONNECTOR_HOST, "path": args.path})
-    return ToolResult(
-        content=(TextContent(text=result.stdout),), is_error=result.exit_code != 0
-    )
+    return ToolResult(content=(TextContent(text=account),))
 
 
 class SurfaceIngestInput(BaseModel):
@@ -268,10 +261,10 @@ def manifest() -> Manifest:
                 oauth=_SampleConnectorOAuth(),
                 tools=(
                     ToolDef(
-                        name=CONNECTOR_TOOL_NAME,
-                        description="Call the sample connector's provider host through the proxy.",
-                        input_model=ConnectorCallInput,
-                        handler=_connector_call,
+                        name=CONNECTOR_EXECUTE_TOOL_NAME,
+                        description="Resolve the bound connected-account id for server-side exec.",
+                        input_model=ConnectorExecuteInput,
+                        handler=_connector_execute,
                     ),
                 ),
             ),

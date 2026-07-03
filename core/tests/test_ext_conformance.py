@@ -136,23 +136,6 @@ class _UntouchedCarrier:
         raise AssertionError(SANDBOX_UNTOUCHED)
 
 
-class _StubCarrier:
-    """A carrier that answers `exec` with a canned egress result — a stand-in dependency for the
-    connector tool's `ctx.sandbox.bash`, never the thing asserted. The tool records what it did
-    through its own store; the test reads that back. `create`/`destroy` stay unreachable here."""
-
-    async def create(self, spec: SandboxSpec) -> SandboxHandle:
-        raise AssertionError("the connector tool reaches the sandbox only through exec")
-
-    async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], stdin: bytes, timeout_s: int
-    ) -> ExecResult:
-        return ExecResult(stdout="200", stderr="", exit_code=0)
-
-    async def destroy(self, handle: SandboxHandle) -> None:
-        raise AssertionError("the connector tool reaches the sandbox only through exec")
-
-
 async def _unavailable_spawn(
     profile: str, payload: dict[str, object], background: bool = False
 ) -> SpawnResult:
@@ -171,7 +154,7 @@ async def test_sample_is_discovered_via_its_entry_point() -> None:
     }
     assert {
         tool.name for connector in manifest.connectors for tool in connector.tools
-    } == {sample.CONNECTOR_TOOL_NAME}
+    } == {sample.CONNECTOR_EXECUTE_TOOL_NAME}
     assert {section.name for section in manifest.prompt_sections} == {sample.SECTION_NAME}
     assert {profile.name for profile in manifest.subagents} == {sample.SUBAGENT_NAME}
     assert {surface.name for surface in manifest.surfaces} == {sample.SURFACE_NAME}
@@ -231,29 +214,30 @@ async def test_tool_dispatches_with_its_scoped_context(db: None, tmp_path: Path)
     assert await scoped.get(sample.TOOL_KEY) == {"message": "conformance-echo"}
 
 
-async def test_connector_tool_joins_the_turn_set_and_reaches_its_provider_host(
+async def test_connector_execute_tool_resolves_the_bound_account_without_the_sandbox(
     db: None, tmp_path: Path
 ) -> None:
+    """The server-side-execution seam: the sample's execute connector tool resolves the turn-agent's
+    bound connected-account id through `connector_account` and records it, never touching the
+    sandbox (its carrier raises on any reach). The test reads the account back through the store."""
     workspace_id = await _workspace()
     member_id, agent_id, conversation_id = await _grantable(workspace_id)
-    grants = GrantStore(fernet=Fernet(Fernet.generate_key()))
+    grants = GrantStore()
     await grants.record(
         workspace_id=workspace_id,
         agent_id=agent_id,
         provider=sample.CONNECTOR_PROVIDER,
         account_id=sample.CONNECTOR_ACCOUNT,
         host=sample.CONNECTOR_HOST,
-        token=sample.CONNECTOR_TOKEN,
         grantor_member_id=member_id,
         conversation_id=conversation_id,
     )
     manifest = _sample_manifest()
     tools, ext_by_tool = turn_tools((manifest,), workspace_id, _credential_store())
-    assert sample.CONNECTOR_TOOL_NAME in {tool.name for tool in tools}
-    tool = next(tool for tool in tools if tool.name == sample.CONNECTOR_TOOL_NAME)
+    tool = next(tool for tool in tools if tool.name == sample.CONNECTOR_EXECUTE_TOOL_NAME)
     context = ToolContext(
         sandbox=SandboxSession(
-            carrier=_StubCarrier(),
+            carrier=_UntouchedCarrier(),
             handle=SandboxHandle(conversation_id=conversation_id, container_id="test"),
         ),
         blob=FilesystemBlobStore(root=tmp_path),
@@ -274,13 +258,14 @@ async def test_connector_tool_joins_the_turn_set_and_reaches_its_provider_host(
         grants=grants,
         ext=ext_by_tool[tool.name],
     )
-    args = tool.input_model.model_validate({"path": "me"})
+    args = tool.input_model.model_validate({"tool_name": "sample_list"})
     result = await tool.handler(context, args)
     assert result.is_error is False
+    assert result.content[0].text == sample.CONNECTOR_ACCOUNT
     scoped = ScopedStore(workspace_id=workspace_id, extension=sample.NAME)
-    assert await scoped.get(sample.CONNECTOR_KEY) == {
-        "host": sample.CONNECTOR_HOST,
-        "path": "me",
+    assert await scoped.get(sample.CONNECTOR_EXECUTE_KEY) == {
+        "account": sample.CONNECTOR_ACCOUNT,
+        "tool_name": "sample_list",
     }
 
 

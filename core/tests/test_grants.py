@@ -30,7 +30,7 @@ from selfhost.sandbox.proxy.rules import (
     ScopeRule,
     derive_grant_rules,
 )
-from selfhost.sandbox.proxy.server import EgressProxy, PerAgentRules, _inject, generate_ca
+from selfhost.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
 from selfhost.sandbox.session import RunToken
 from selfhost.schema import tables
 from selfhost.schema.records import Agent, Turn
@@ -55,22 +55,17 @@ def _reset_connect_flow() -> Iterator[None]:
 class StubProvider:
     """The injected OAuth descriptor for the proof — stands in for a connector extension's provider,
     never the thing asserted. `authorize_url` echoes the sealed state so the test can drive the
-    callback; `exchange` yields a fixed account and token."""
+    callback; `exchange` yields a fixed connected-account id (the broker holds the token)."""
 
     provider: str = "stub"
     host: str = GRANTED_HOST
     account_id: str = "acct-42"
-    token: str = "tok-secret-abc"
 
     def authorize_url(self, state: str, redirect_uri: str) -> str:
         return f"https://stub.test/oauth?state={state}&redirect_uri={redirect_uri}"
 
     async def exchange(self, code: str, redirect_uri: str, workspace_id: UUID) -> OAuthAccount:
-        return OAuthAccount(account_id=self.account_id, token=self.token)
-
-
-def _store() -> GrantStore:
-    return GrantStore(fernet=Fernet(Fernet.generate_key()))
+        return OAuthAccount(account_id=self.account_id)
 
 
 async def _workspace() -> UUID:
@@ -110,68 +105,52 @@ async def _member_agent(workspace_id: UUID) -> tuple[UUID, UUID]:
     return member_id, agent_id
 
 
-def test_derive_admits_the_granted_host_and_injects_its_token() -> None:
-    grant = Grant(provider="stub", account_id="acct-42", host=GRANTED_HOST, token="tok-abc")
+def test_derive_admits_and_meters_the_granted_host_without_injecting() -> None:
+    """A grant admits and meters its host but injects nothing — the broker holds the account's token
+    and runs connector tools server-side, so no secret is on the wire."""
+    grant = Grant(provider="stub", account_id="acct-42", host=GRANTED_HOST)
     rules = derive_grant_rules((grant,))
     scope = next(r for r in rules if isinstance(r, ScopeRule))
-    injection = next(r for r in rules if isinstance(r, InjectionRule))
     assert scope.allowed_hosts == frozenset({GRANTED_HOST})
-    assert injection.host == GRANTED_HOST
-    assert injection.header == "authorization"
-    assert injection.sentinel == "Bearer SELFHOST_SENTINEL_GRANT_stub_acct-42"
-    assert injection.real == "Bearer tok-abc"
-    meter = next(r for r in rules if isinstance(r, MeterRule))
-    assert meter == MeterRule(host=GRANTED_HOST, dimension=GRANT_METER_DIMENSION)
+    assert MeterRule(host=GRANTED_HOST, dimension=GRANT_METER_DIMENSION) in rules
+    assert not any(isinstance(r, InjectionRule) for r in rules)
 
 
 def test_no_grants_derive_no_rules() -> None:
     assert derive_grant_rules(()) == ()
 
 
-async def test_grant_round_trips_and_encrypts_the_token(db: None) -> None:
+async def test_grant_round_trips_carrying_only_the_account_id(db: None) -> None:
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)
     conversation_id = await _conversation(workspace_id, member_id)
-    store = _store()
+    store = GrantStore()
     await store.record(
         workspace_id=workspace_id,
         agent_id=agent_id,
         provider="stub",
         account_id="acct-42",
         host=GRANTED_HOST,
-        token="tok-secret-abc",
         grantor_member_id=member_id,
         conversation_id=conversation_id,
     )
     grants = await store.active_grants(workspace_id, agent_id)
-    assert grants == (
-        Grant(provider="stub", account_id="acct-42", host=GRANTED_HOST, token="tok-secret-abc"),
-    )
-    async with workspace_tx() as connection:
-        ciphertext = (
-            await connection.execute(
-                sa.select(tables.grant.c.ciphertext).where(
-                    tables.grant.c.workspace_id == workspace_id
-                )
-            )
-        ).scalar_one()
-    assert b"tok-secret-abc" not in ciphertext
+    assert grants == (Grant(provider="stub", account_id="acct-42", host=GRANTED_HOST),)
 
 
 async def test_record_rejects_a_control_char_account_id(db: None) -> None:
-    """The account_id is external (the provider's OAuth exchange) and flows into the wire
-    Authorization sentinel, so a CR/LF that could split or forge a header is refused at record."""
+    """The account_id is external (the provider's OAuth exchange) and a connector tool sends it to
+    the broker, so a CR/LF that could forge a broker request is refused at record."""
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)
     conversation_id = await _conversation(workspace_id, member_id)
     with pytest.raises(ValueError, match="control character"):
-        await _store().record(
+        await GrantStore().record(
             workspace_id=workspace_id,
             agent_id=agent_id,
             provider="stub",
             account_id="acct-42\r\nX-Injected: 1",
             host=GRANTED_HOST,
-            token="tok",
             grantor_member_id=member_id,
             conversation_id=conversation_id,
         )
@@ -181,38 +160,34 @@ async def test_reconnecting_the_same_account_updates_not_duplicates(db: None) ->
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)
     conversation_id = await _conversation(workspace_id, member_id)
-    store = _store()
-    for token in ("tok-one", "tok-two"):
+    store = GrantStore()
+    for host in (HOST_A, HOST_B):
         await store.record(
             workspace_id=workspace_id,
             agent_id=agent_id,
             provider="stub",
             account_id="acct-42",
-            host=GRANTED_HOST,
-            token=token,
+            host=host,
             grantor_member_id=member_id,
             conversation_id=conversation_id,
         )
     async with workspace_tx() as connection:
         count = (
-            await connection.execute(
-                sa.select(sa.func.count()).select_from(tables.grant)
-            )
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.grant))
         ).scalar_one()
     assert count == 1
     grants = await store.active_grants(workspace_id, agent_id)
-    assert grants[0].token == "tok-two"
+    assert grants[0].host == HOST_B
 
 
 async def test_connect_flow_records_a_durable_grant_with_account_id(db: None) -> None:
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)
     conversation_id = await _conversation(workspace_id, member_id)
-    fernet = Fernet(Fernet.generate_key())
     flow = ConnectFlow(
         providers={"stub": StubProvider()},
-        fernet=fernet,
-        store=GrantStore(fernet=fernet),
+        fernet=Fernet(Fernet.generate_key()),
+        store=GrantStore(),
         redirect_uri=REDIRECT_URI,
     )
     url = flow.authorize(
@@ -247,11 +222,10 @@ async def test_connect_flow_records_a_durable_grant_with_account_id(db: None) ->
 
 
 async def test_tampered_connect_state_is_refused() -> None:
-    fernet = Fernet(Fernet.generate_key())
     flow = ConnectFlow(
         providers={"stub": StubProvider()},
-        fernet=fernet,
-        store=GrantStore(fernet=fernet),
+        fernet=Fernet(Fernet.generate_key()),
+        store=GrantStore(),
         redirect_uri=REDIRECT_URI,
     )
     with pytest.raises(ConnectStateInvalid):
@@ -259,9 +233,11 @@ async def test_tampered_connect_state_is_refused() -> None:
 
 
 def test_unknown_provider_is_rejected() -> None:
-    fernet = Fernet(Fernet.generate_key())
     flow = ConnectFlow(
-        providers={}, fernet=fernet, store=GrantStore(fernet=fernet), redirect_uri=REDIRECT_URI
+        providers={},
+        fernet=Fernet(Fernet.generate_key()),
+        store=GrantStore(),
+        redirect_uri=REDIRECT_URI,
     )
     with pytest.raises(UnknownProvider):
         flow.authorize(
@@ -277,13 +253,12 @@ async def test_grant_summaries_expose_the_audit_view(db: None) -> None:
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)
     conversation_id = await _conversation(workspace_id, member_id)
-    await _store().record(
+    await GrantStore().record(
         workspace_id=workspace_id,
         agent_id=agent_id,
         provider="stub",
         account_id="acct-42",
         host=GRANTED_HOST,
-        token="tok",
         grantor_member_id=member_id,
         conversation_id=conversation_id,
     )
@@ -295,33 +270,37 @@ async def test_grant_summaries_expose_the_audit_view(db: None) -> None:
 
 
 async def test_proxy_admits_the_granted_host_and_blocks_the_ungranted() -> None:
-    grant = Grant(provider="stub", account_id="acct-42", host=GRANTED_HOST, token="tok-abc")
+    """A grant admits its host — the resolved rule set carries a ScopeRule for it — while an
+    ungranted host is refused at CONNECT (403). No token is injected."""
+    grant = Grant(provider="stub", account_id="acct-42", host=GRANTED_HOST)
     resolver = PerAgentRules(base=derive_grant_rules((grant,)), grants=None)
     cert, key = await generate_ca()
     proxy = EgressProxy(resolve=resolver.resolve, ca_cert=cert, ca_key=key)
     endpoint = await proxy.start(bind_host="127.0.0.1")
     try:
         assert await _connect_status(endpoint.port, UNGRANTED_HOST) == 403
-        assert await _connect_status(endpoint.port, GRANTED_HOST) == 200
+        rules = await proxy._rules_for(None)
     finally:
         await proxy.stop()
+    assert any(isinstance(r, ScopeRule) and GRANTED_HOST in r.allowed_hosts for r in rules)
+    assert not any(isinstance(r, InjectionRule) for r in rules)
 
 
-async def test_agent_a_can_neither_reach_nor_inject_agent_bs_grant(db: None) -> None:
+async def test_agent_a_reaches_only_its_own_granted_host(db: None) -> None:
+    """Per-agent isolation on the wire: agent A's turn resolves a ScopeRule for A's granted host and
+    none for agent B's, so A is refused B's host and an ungranted host at CONNECT (403)."""
     workspace_id = await _workspace()
     member_id, agent_a = await _member_agent(workspace_id)
     agent_b = await _agent(workspace_id, "assistant-b")
     conversation_id = await _conversation(workspace_id, member_id)
     turn_a = await _turn(workspace_id, agent_a, conversation_id)
-    fernet = Fernet(Fernet.generate_key())
-    store = GrantStore(fernet=fernet)
+    store = GrantStore()
     await store.record(
         workspace_id=workspace_id,
         agent_id=agent_a,
         provider="stub",
         account_id="acct-a",
         host=HOST_A,
-        token="tok-a",
         grantor_member_id=member_id,
         conversation_id=conversation_id,
     )
@@ -331,7 +310,6 @@ async def test_agent_a_can_neither_reach_nor_inject_agent_bs_grant(db: None) -> 
         provider="stub",
         account_id="acct-b",
         host=HOST_B,
-        token="tok-b-secret",
         grantor_member_id=member_id,
         conversation_id=conversation_id,
     )
@@ -341,54 +319,13 @@ async def test_agent_a_can_neither_reach_nor_inject_agent_bs_grant(db: None) -> 
     endpoint = await proxy.start(bind_host="127.0.0.1")
     try:
         run_a = RunToken(workspace_id, turn_a).encode()
-        assert await _connect_status(endpoint.port, HOST_A, run_a) == 200
         assert await _connect_status(endpoint.port, HOST_B, run_a) == 403
         assert await _connect_status(endpoint.port, UNGRANTED_HOST, run_a) == 403
         rules_a = await proxy._rules_for(RunToken(workspace_id, turn_a))
-        candidates_a = [r for r in rules_a if isinstance(r, InjectionRule) and r.host == HOST_A]
-        swapped = _inject(
-            [b"authorization: Bearer SELFHOST_SENTINEL_GRANT_stub_acct-a\r\n"], candidates_a
-        )
-        assert b"Bearer tok-a" in swapped
-        b_sentinel = b"authorization: Bearer SELFHOST_SENTINEL_GRANT_stub_acct-b\r\n"
-        passed = _inject([b_sentinel], candidates_a)
-        assert b"tok-b-secret" not in passed
-        assert b"SELFHOST_SENTINEL_GRANT_stub_acct-b" in passed
-        assert all(
-            r.real != "Bearer tok-b-secret" for r in rules_a if isinstance(r, InjectionRule)
-        )
     finally:
         await proxy.stop()
-
-
-async def test_two_accounts_on_one_host_each_sentinel_selects_its_own_token(db: None) -> None:
-    workspace_id = await _workspace()
-    member_id, agent_id = await _member_agent(workspace_id)
-    conversation_id = await _conversation(workspace_id, member_id)
-    turn_id = await _turn(workspace_id, agent_id, conversation_id)
-    store = GrantStore(fernet=Fernet(Fernet.generate_key()))
-    for account, token in (("acct-1", "tok-one"), ("acct-2", "tok-two")):
-        await store.record(
-            workspace_id=workspace_id,
-            agent_id=agent_id,
-            provider="stub",
-            account_id=account,
-            host=GRANTED_HOST,
-            token=token,
-            grantor_member_id=member_id,
-            conversation_id=conversation_id,
-        )
-    rules = await PerAgentRules(base=(), grants=store).resolve(RunToken(workspace_id, turn_id))
-    candidates = [r for r in rules if isinstance(r, InjectionRule) and r.host == GRANTED_HOST]
-    assert len(candidates) == 2
-    one = _inject(
-        [b"authorization: Bearer SELFHOST_SENTINEL_GRANT_stub_acct-1\r\n"], candidates
-    )
-    two = _inject(
-        [b"authorization: Bearer SELFHOST_SENTINEL_GRANT_stub_acct-2\r\n"], candidates
-    )
-    assert b"Bearer tok-one" in one and b"tok-two" not in one
-    assert b"Bearer tok-two" in two and b"tok-one" not in two
+    assert any(isinstance(r, ScopeRule) and HOST_A in r.allowed_hosts for r in rules_a)
+    assert not any(isinstance(r, ScopeRule) and HOST_B in r.allowed_hosts for r in rules_a)
 
 
 async def test_a_grant_recorded_after_start_is_live_for_the_next_turn(db: None) -> None:
@@ -397,7 +334,7 @@ async def test_a_grant_recorded_after_start_is_live_for_the_next_turn(db: None) 
     conversation_id = await _conversation(workspace_id, member_id)
     turn_1 = await _turn(workspace_id, agent_id, conversation_id, seq=1)
     turn_2 = await _turn(workspace_id, agent_id, conversation_id, seq=2)
-    store = GrantStore(fernet=Fernet(Fernet.generate_key()))
+    store = GrantStore()
     resolver = PerAgentRules(base=(), grants=store)
     cert, key = await generate_ca()
     proxy = EgressProxy(resolve=resolver.resolve, ca_cert=cert, ca_key=key)
@@ -413,16 +350,13 @@ async def test_a_grant_recorded_after_start_is_live_for_the_next_turn(db: None) 
             provider="stub",
             account_id="acct-a",
             host=HOST_A,
-            token="tok-a",
             grantor_member_id=member_id,
             conversation_id=conversation_id,
         )
-        assert (
-            await _connect_status(endpoint.port, HOST_A, RunToken(workspace_id, turn_2).encode())
-            == 200
-        )
+        rules_2 = await proxy._rules_for(RunToken(workspace_id, turn_2))
     finally:
         await proxy.stop()
+    assert any(isinstance(r, ScopeRule) and HOST_A in r.allowed_hosts for r in rules_2)
 
 
 def _turn_context(
@@ -458,12 +392,11 @@ async def test_connect_account_tool_yields_authorize_url_and_callback_binds_the_
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)
     conversation_id = await _conversation(workspace_id, member_id)
-    fernet = Fernet(Fernet.generate_key())
     install_connect_flow(
         ConnectFlow(
             providers={"stub": StubProvider()},
-            fernet=fernet,
-            store=GrantStore(fernet=fernet),
+            fernet=Fernet(Fernet.generate_key()),
+            store=GrantStore(),
             redirect_uri=REDIRECT_URI,
         )
     )

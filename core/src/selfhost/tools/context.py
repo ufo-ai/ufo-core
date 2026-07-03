@@ -5,10 +5,11 @@ shell, the blob store for artifacts, the turn/agent it runs under, `spawn` to de
 subtask to a child turn, `memory` (with the conversation's `member_id`) for recall and commit
 scoped to the turn's subject, and `artifact_token_secret` with which `share_file` mints the signed
 download URLs the web surface verifies. `read_paths` is the working set that lets `edit` refuse to
-touch a file the turn has not read first. `connector_authorization` hands a connector tool the
-sentinel `Authorization` value the egress proxy swaps for the turn-agent's real OAuth token, scoped
-so a tool can only authenticate the turn-agent's own grants. An extension tool also gets `ext`, its
-owning extension's workspace-scoped ExtensionContext; a builtin tool gets `ext=None`."""
+touch a file the turn has not read first. `connector_account` hands a connector tool the broker's
+connected-account id it passes to the broker's server-side execute API, resolved strictly from the
+turn-agent's own grants so a tool reaches only the turn-agent's accounts. An extension tool also
+gets `ext`, its owning extension's workspace-scoped ExtensionContext; a builtin tool gets
+`ext=None`."""
 
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
@@ -69,15 +70,13 @@ class ToolContext:
     read_paths: set[str] = field(default_factory=set)
     ext: ExtensionContext | None = None
 
-    async def connector_authorization(self, provider: str, account_id: str | None = None) -> str:
-        """The `Authorization` header value a connector tool sends to reach `provider`: the exact
-        sentinel the egress proxy swaps for the turn-agent's real OAuth token, so the raw secret
-        never enters the sandbox. Resolves strictly the turn's own workspace and agent, so a tool
-        builds a sentinel for the turn-agent's grants alone, never another agent's. `account_id`
-        targets a specific account when the agent holds several for one provider (its sentinel draws
-        only its own token at the proxy); omitted, any of the agent's grants for the provider
-        answers. Fails loud when no grant subsystem is configured or the agent holds no matching
-        grant."""
+    async def connector_account(self, provider: str, account_id: str | None = None) -> str:
+        """The broker's connected-account id a connector tool passes to the broker's server-side
+        execute API (the broker holds the account's token and injects it itself, so no sentinel and
+        no egress proxy). Resolved strictly from the turn's own workspace and agent, so a tool
+        executes only against the turn-agent's accounts, never another agent's. `account_id` targets
+        a specific account when the agent holds several; omitted, any provider grant answers. Fails
+        loud when no grant subsystem is configured or the agent holds no matching grant."""
         if self.grants is None:
             raise ConnectUnavailable("grants unavailable: no credential key configured")
         granted = await self.grants.active_grants(self.turn.workspace_id, self.turn.agent_id)
@@ -92,4 +91,4 @@ class ToolContext:
         if grant is None:
             target = f"{provider!r} account {account_id!r}" if account_id else f"{provider!r}"
             raise ValueError(f"agent has no active {target} grant to authenticate")
-        return grant.sentinel_header
+        return grant.account_id
