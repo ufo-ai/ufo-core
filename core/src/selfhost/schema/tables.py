@@ -271,7 +271,6 @@ source = sa.Table(
     sa.Column("claim_expires_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-    sa.CheckConstraint("backend in ('folder')", name="source_backend"),
     sa.Index("source_due", "next_sync_at"),
 )
 

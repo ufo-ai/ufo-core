@@ -8,8 +8,10 @@ mock log), so the tests read those rows back through the same public surfaces co
 `UNDECLARED_SLOT` names a slot the Manifest never declares — the probe that a handler asking for an
 undeclared slot is refused."""
 
+import hashlib
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from typing import ClassVar
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -31,8 +33,10 @@ from selfhost.sdk.manifest import (
     PostToolUse,
     PromptSection,
     RouteSpec,
+    SourceProvider,
     SubagentProfile,
 )
+from selfhost.sdk.sources import SHARED_SUBJECT, Page, SourceAuth, SyncResult
 from selfhost.sdk.surfaces import SurfaceContext, SurfaceSpec, Writeback
 from selfhost.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 
@@ -74,6 +78,9 @@ SURFACE_NAME = "sample_surface"
 SURFACE_INBOX_REL = "sample-inbox/note.txt"
 SURFACE_DELIVERED_PREFIX = "sample-delivered"
 SURFACE_POST_REF = "sample-posted-ref"
+SOURCE_BACKEND = "sample_source"
+SOURCE_REF = "sample/handbook"
+SOURCE_TOPIC = "the sample source syncs a page about migrating the orbital widget fleet"
 
 
 class EchoInput(BaseModel):
@@ -120,8 +127,35 @@ async def _hook(ctx: ExtensionContext, request: Request) -> Response:
     return PlainTextResponse(body)
 
 
+class SampleSourceConfig(BaseModel):
+    """The sample source's typed per-source config — a distinct shape from the folder backend's, so
+    it proves a backend carries its own typed parameters, never a shared bag."""
+
+    topic: str
+
+
+@dataclass(frozen=True)
+class SampleSource:
+    """A canned content-source backend: `fetch` renders one deterministic page from its typed
+    config, exercising the seam core drives (register a source, poll it, land its page in memory,
+    index it for recall). `auth` is threaded but unused — a folder-like local source resolves no
+    provider token."""
+
+    config_model: ClassVar[type[SampleSourceConfig]] = SampleSourceConfig
+
+    async def fetch(
+        self, config: SampleSourceConfig, cursor: str | None, auth: SourceAuth
+    ) -> SyncResult:
+        digest = "sha256:" + hashlib.sha256(config.topic.encode()).hexdigest()
+        page = Page(
+            source_ref=SOURCE_REF, digest=digest, subject=SHARED_SUBJECT, body=config.topic
+        )
+        return SyncResult(pages=(page,), next_cursor=None)
+
+
 async def _setup(ctx: ExtensionContext) -> None:
     await ctx.store.put(ONBOARDING_KEY, {"onboarded": True})
+    await ctx.register_source(SOURCE_BACKEND, SampleSourceConfig(topic=SOURCE_TOPIC))
 
 
 async def _deny_echo(ctx: HookContext) -> HookOutcome:
@@ -281,4 +315,5 @@ def manifest() -> Manifest:
                 attach=_surface_attach,
             ),
         ),
+        sources=(SourceProvider(backend=SOURCE_BACKEND, source=SampleSource()),),
     )

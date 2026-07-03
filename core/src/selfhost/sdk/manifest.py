@@ -61,5 +61,8 @@ from selfhost.ext.manifest import (
     RouteSpec as RouteSpec,
 )
 from selfhost.ext.manifest import (
+    SourceProvider as SourceProvider,
+)
+from selfhost.ext.manifest import (
     SubagentProfile as SubagentProfile,
 )
