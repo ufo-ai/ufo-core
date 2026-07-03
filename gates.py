@@ -20,6 +20,9 @@ EXTENSIONS_ROOT = "extensions"
 SDK_PUBLIC_PREFIX = "selfhost.sdk"
 MANIFEST_MODULE = CORE_SRC / "ext" / "manifest.py"
 SAMPLE_MODULE = Path(EXTENSIONS_ROOT) / "sample" / "selfhost_ext_sample.py"
+CORE_SKILLS_DIR = CORE_SRC / "skills"
+CORE_SKILL_NAMES = frozenset({"sandbox", "memory", "delegation"})
+SKILL_MANIFEST = "SKILL.md"
 
 
 def _python_files() -> list[Path]:
@@ -295,6 +298,29 @@ def _to_thread_failures(trees: dict[Path, ast.Module]) -> list[str]:
     return failures
 
 
+def _rogue_skill_failures(present: frozenset[str]) -> list[str]:
+    failures = [
+        f"skills: core ships skill {name!r}, outside the fixed set {sorted(CORE_SKILL_NAMES)}"
+        for name in sorted(present - CORE_SKILL_NAMES)
+    ]
+    failures.extend(
+        f"skills: core is missing required skill {name!r}"
+        for name in sorted(CORE_SKILL_NAMES - present)
+    )
+    return failures
+
+
+def _skill_failures() -> list[str]:
+    """A skill ships with the thing it teaches, and core teaches only its own builtins, so core
+    ships exactly three skills — sandbox, memory, delegation. A fourth SKILL.md folder under
+    core/skills is an extension or a pack, never core; a missing one is a broken floor."""
+    root = ROOT / CORE_SKILLS_DIR
+    if not root.is_dir():
+        return [f"skills: core skills directory missing at {CORE_SKILLS_DIR}"]
+    present = frozenset(path.parent.name for path in root.rglob(SKILL_MANIFEST))
+    return _rogue_skill_failures(present)
+
+
 def main() -> int:
     failures = []
     trees: dict[Path, ast.Module] = {}
@@ -327,6 +353,7 @@ def main() -> int:
     failures.extend(_wiring_failures(trees))
     failures.extend(_live_frame_failures(trees))
     failures.extend(_to_thread_failures(trees))
+    failures.extend(_skill_failures())
 
     for failure in failures:
         print(f"GATE: {failure}")

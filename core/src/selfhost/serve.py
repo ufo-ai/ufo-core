@@ -27,6 +27,7 @@ from selfhost.ext.manifest import Manifest
 from selfhost.grants import ConnectFlow, GrantStore, OAuthProvider, install_connect_flow
 from selfhost.hub import Hub, InProcessHub
 from selfhost.jobs import JobRunner, SpendResume, bindings_from, core_jobs
+from selfhost.loop.profiles import CORE_SUBAGENT_PROFILES
 from selfhost.loop.queue import Runtime, init_runtime
 from selfhost.loop.subagents import SubagentRegistry
 from selfhost.memory.chunk import TextChunker
@@ -102,7 +103,7 @@ def run() -> None:
             carrier=DockerCarrier(),
             proxy=_egress_proxy(asyncio.run(_resolver(config, credentials))),
             dbos=dbos_client,
-            subagents=SubagentRegistry(()),
+            subagents=SubagentRegistry(CORE_SUBAGENT_PROFILES),
             manifests=manifests,
             credentials=credentials,
             memory=memory,

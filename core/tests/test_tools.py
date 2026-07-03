@@ -1,9 +1,11 @@
+import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
 
 from selfhost.artifact_token import verify_artifact_token
 from selfhost.blob import FilesystemBlobStore
@@ -117,6 +119,8 @@ def test_registry_schemas_cover_every_tool() -> None:
         "spawn_subagent",
         "memory_search",
         "memory_update",
+        "ask_user",
+        "load_skill",
         "connect_account",
     }
     bash = next(schema for schema in schemas if schema.name == "bash")
@@ -227,3 +231,72 @@ async def test_share_file_without_a_secret_fails_loud_and_writes_nothing(tmp_pat
     with pytest.raises(RuntimeError, match="not configured"):
         await run("share_file", ctx, path="report.txt")
     assert not (tmp_path / "artifacts").exists()
+
+
+async def test_ask_user_returns_the_structured_question_and_the_end_turn_directive(
+    tmp_path: Path,
+) -> None:
+    ctx = make_context(FakeSandbox(), tmp_path)
+    result = await run(
+        "ask_user",
+        ctx,
+        title="Scope",
+        questions=[{"question": "Which environment?", "header": "Deploy"}],
+    )
+    assert result.is_error is False
+    text = result.content[0].text
+    assert "arrives as the next message" in text
+    payload = json.loads(text.split("\n", 1)[1])
+    assert payload["awaiting"] == "question"
+    assert payload["title"] == "Scope"
+    assert payload["questions"] == [{"question": "Which environment?", "header": "Deploy"}]
+
+
+async def test_ask_user_folds_confirmation_as_a_question_with_options(tmp_path: Path) -> None:
+    ctx = make_context(FakeSandbox(), tmp_path)
+    result = await run(
+        "ask_user",
+        ctx,
+        title="Confirm send",
+        questions=[
+            {
+                "question": "Send the email to the whole team?",
+                "options": [{"label": "Send"}, {"label": "Cancel"}],
+            }
+        ],
+    )
+    payload = json.loads(result.content[0].text.split("\n", 1)[1])
+    assert [option["label"] for option in payload["questions"][0]["options"]] == [
+        "Send",
+        "Cancel",
+    ]
+
+
+async def test_ask_user_requires_at_least_one_question(tmp_path: Path) -> None:
+    ctx = make_context(FakeSandbox(), tmp_path)
+    with pytest.raises(ValidationError):
+        await run("ask_user", ctx, title="Empty", questions=[])
+
+
+async def _load_skill(ctx: ToolContext, name: str):
+    tool = REGISTRY.get("load_skill")
+    return await tool.handler(ctx, tool.input_model.model_validate({"name": name}))
+
+
+async def test_load_skill_mounts_files_under_the_workspace_and_returns_instructions(
+    tmp_path: Path,
+) -> None:
+    sandbox = FakeSandbox()
+    ctx = make_context(sandbox, tmp_path)
+    result = await _load_skill(ctx, "memory")
+    assert result.is_error is False
+    assert "Loaded skill(s): memory" in result.content[0].text
+    assert "Remembering and recalling" in result.content[0].text
+    mounted = sandbox.files["/workspace/.skills/memory/SKILL.md"]
+    assert b"name: memory" in mounted
+
+
+async def test_load_skill_unknown_name_fails_loud(tmp_path: Path) -> None:
+    ctx = make_context(FakeSandbox(), tmp_path)
+    with pytest.raises(ValueError, match="unknown skill 'nope'"):
+        await _load_skill(ctx, "nope")

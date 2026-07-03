@@ -1,5 +1,5 @@
 """The builtin tool set: bash, read, write, edit, share_file, spawn_subagent, memory_search,
-memory_update.
+memory_update, ask_user, load_skill.
 
 Each file/shell handler reaches the workspace only through `ctx.sandbox`, so the carrier's scoping
 and egress rules apply whether a byte arrives via a shell command or a file op. `read` records every
@@ -9,8 +9,12 @@ file's bytes into the blob store under `artifacts/<uuid>/` and returns a TTL-tok
 surface serves — the only path that hands a produced file back outside the sandbox. `spawn_subagent`
 delegates a typed subtask to a child turn through `ctx.spawn`. `memory_search` recalls facts and
 searches synced source pages through `ctx.memory`, and `memory_update` commits — both scoped to the
-conversation's subject (`{member, shared}`)."""
+conversation's subject (`{member, shared}`). `ask_user` is chat-native: it structures a question or
+confirmation the agent poses in its reply, whose answer rides the member's next message — no
+out-of-band prompt. `load_skill` mounts a skill's `SKILL.md` and assets into the workspace and
+returns its workflow instructions."""
 
+import json
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import Any
@@ -26,6 +30,7 @@ from selfhost.artifact_token import (
 from selfhost.grants import installed_connect_flow
 from selfhost.memory.service import SHARED_SUBJECT, member_subject, recall_subjects
 from selfhost.schema.records import FACT, ItemClass, MemoryWrite
+from selfhost.skills.runtime import mount_skill, skill_tree
 from selfhost.tools.context import TextContent, ToolContext, ToolResult
 from selfhost.tools.registry import ToolDef
 
@@ -77,6 +82,32 @@ class MemoryUpdateInput(BaseModel):
     item_class: ItemClass = FACT
     shared: bool = False
     source_ref: str | None = None
+
+
+MAX_USER_QUESTIONS = 4
+
+
+class QuestionOption(BaseModel):
+    label: str
+    description: str | None = None
+
+
+class AskQuestion(BaseModel):
+    question: str
+    options: tuple[QuestionOption, ...] | None = None
+    multi_select: bool | None = None
+    free_text_only: bool | None = None
+    header: str | None = None
+    allow_attachments: bool | None = None
+
+
+class AskUserInput(BaseModel):
+    title: str
+    questions: tuple[AskQuestion, ...] = Field(min_length=1, max_length=MAX_USER_QUESTIONS)
+
+
+class LoadSkillInput(BaseModel):
+    name: str
 
 
 class ConnectAccountInput(BaseModel):
@@ -172,6 +203,36 @@ async def memory_update_handler(ctx: ToolContext, args: MemoryUpdateInput) -> To
     return ToolResult(content=(TextContent(text=f"Remembered ({subject})."),))
 
 
+ASK_USER_DIRECTIVE = (
+    "Ask these in your reply, then end your turn — the user's answer arrives as the next message."
+)
+
+
+async def ask_user_handler(ctx: ToolContext, args: AskUserInput) -> ToolResult:
+    """Chat-native interaction: the question rides the agent's reply and the answer rides the
+    member's next message, never an out-of-band prompt. Returns the structured question so a rich
+    surface can render it and the model presents it faithfully, plus the directive to end the turn
+    and wait."""
+    payload = {
+        "awaiting": "question",
+        "title": args.title,
+        "questions": [question.model_dump(exclude_none=True) for question in args.questions],
+    }
+    return ToolResult(content=(TextContent(text=f"{ASK_USER_DIRECTIVE}\n{json.dumps(payload)}"),))
+
+
+async def load_skill_handler(ctx: ToolContext, args: LoadSkillInput) -> ToolResult:
+    """Resolve the named skill and its dependency closure, mount each into the workspace under
+    `.skills/<name>/`, and return their instructions so the workflow is in front of the model at
+    once. An unknown name fails loud as a recoverable tool error."""
+    loaded = skill_tree(args.name)
+    for skill in loaded:
+        await mount_skill(ctx.sandbox, skill)
+    header = "Loaded skill(s): " + ", ".join(skill.name for skill in loaded)
+    bodies = "\n\n---\n\n".join(skill.prompt_body() for skill in loaded)
+    return ToolResult(content=(TextContent(text=f"{header}\n\n{bodies}"),))
+
+
 async def connect_account_handler(ctx: ToolContext, args: ConnectAccountInput) -> ToolResult:
     """Begin the OAuth handoff for the speaking member: the grantor is this turn's member and the
     grant binds to this turn's agent and conversation, all read from the context — the speaker gates
@@ -256,6 +317,32 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=MemoryUpdateInput,
         handler=memory_update_handler,
+    ),
+    ToolDef(
+        name="ask_user",
+        description=(
+            "Ask the user one or more questions before non-trivial work when a missing detail "
+            "would change how you proceed, or to confirm an irreversible, expensive, or "
+            "high-impact action (sending a message, a purchase, a deletion) — a confirmation is a "
+            "question whose `options` are the choices. Each question may carry choice `options` "
+            "(with `multi_select`), a `header`, or `free_text_only`. Do not use it for small talk, "
+            "quick factual questions, or anything you can settle with a reasonable default. After "
+            "calling it, ask in your reply and end your turn; the answer arrives as the next "
+            "message."
+        ),
+        input_model=AskUserInput,
+        handler=ask_user_handler,
+    ),
+    ToolDef(
+        name="load_skill",
+        description=(
+            "Load a skill — a bundle of workflow instructions and files — so you can follow it. "
+            "The skill and anything it depends on are mounted under the workspace and its "
+            "instructions are returned at once. Load a skill proactively whenever its subject is "
+            "relevant to the task."
+        ),
+        input_model=LoadSkillInput,
+        handler=load_skill_handler,
     ),
     ToolDef(
         name="connect_account",
