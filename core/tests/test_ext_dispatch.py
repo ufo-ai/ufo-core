@@ -37,6 +37,18 @@ from selfhost.tools.registry import ToolDef, ToolRegistry
 EXTENSION = "sample"
 
 
+@dataclass(frozen=True)
+class StubMemory:
+    """Stand-in memory service: recall yields nothing, so these dispatch tests run the turn loop
+    without asserting recall behavior."""
+
+    async def recall(self, query: str, subjects: frozenset[str], limit: int) -> tuple:
+        return ()
+
+    async def commit(self, write: object) -> None:
+        return None
+
+
 class NoteInput(BaseModel):
     note: str
 
@@ -206,6 +218,8 @@ def _engine(
         tool_ext=tool_ext,
         blob=blob,
         spawn=_unavailable_spawn,
+        memory=StubMemory(),
+        member_id=None,
     )
 
 

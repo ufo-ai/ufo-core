@@ -18,3 +18,6 @@ from selfhost.ext.context import (
 from selfhost.ext.context import (
     UndeclaredCredentialSlot as UndeclaredCredentialSlot,
 )
+from selfhost.schema.records import (
+    MemoryWrite as MemoryWrite,
+)

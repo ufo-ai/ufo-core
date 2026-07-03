@@ -37,6 +37,18 @@ from selfhost.surfaces.cli import router
 STREAM_TIMEOUT_SECONDS = 30
 
 
+@dataclass(frozen=True)
+class StubMemory:
+    """Stand-in memory service for the lifecycle turns: recall yields nothing, so the turn loop runs
+    end to end without asserting memory behavior (recall/commit are proven in the memory tests)."""
+
+    async def recall(self, query: str, subjects: frozenset[str], limit: int) -> tuple:
+        return ()
+
+    async def commit(self, write: object) -> None:
+        return None
+
+
 class RoundTripInput(BaseModel):
     value: int
 
@@ -127,6 +139,7 @@ def dbos_runtime(
             subagents=SubagentRegistry((ROUNDTRIP_PROFILE,)),
             manifests=(),
             credentials=None,
+            memory=StubMemory(),
         )
     )
     yield config, hub, blob

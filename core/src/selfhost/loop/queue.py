@@ -19,6 +19,7 @@ from selfhost.loop.compaction import Compaction
 from selfhost.loop.engine import TurnEngine
 from selfhost.loop.subagents import SubagentRegistry, Subagents, subagent_system_prompt
 from selfhost.loop.transcript import Transcript
+from selfhost.memory.service import MemoryService
 from selfhost.models.anthropic import AnthropicClient, anthropic_sdk_client
 from selfhost.models.interface import ModelClient
 from selfhost.models.openai import OpenAIClient, openai_sdk_client
@@ -65,6 +66,7 @@ class Runtime:
     subagents: SubagentRegistry
     manifests: tuple[Manifest, ...]
     credentials: CredentialStore | None
+    memory: MemoryService
 
 
 _runtime: Runtime | None = None
@@ -83,10 +85,10 @@ async def _execute_turn(turn_id: str) -> str:
     if runtime is None:
         raise RuntimeError("runtime not initialized (init_runtime runs in serve)")
     try:
-        turn, agent = await _load_turn(UUID(turn_id))
+        turn, agent, member_id = await _load_turn(UUID(turn_id))
         subagents = Subagents(client=runtime.dbos, registry=runtime.subagents, parent=turn)
         all_tools, tool_ext = turn_tools(
-            runtime.manifests, turn.workspace_id, runtime.credentials
+            runtime.manifests, turn.workspace_id, runtime.credentials, runtime.memory
         )
         if turn.subagent_profile is None:
             resolved, tools = agent, ToolRegistry(all_tools)
@@ -122,6 +124,8 @@ async def _execute_turn(turn_id: str) -> str:
             tool_ext=tool_ext,
             blob=runtime.blob,
             spawn=subagents.spawn,
+            memory=runtime.memory,
+            member_id=member_id,
         )
         frame = await engine.run()
         return frame.status
@@ -168,7 +172,9 @@ async def turn_workflow(turn_id: str) -> str:
     return await _execute_turn(turn_id)
 
 
-async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent]:
+async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, UUID | None]:
+    """The turn, its agent, and the conversation's member (the memory subject the turn recalls
+    and commits under) — member lives on the conversation, not the turn."""
     async with workspace_tx() as connection:
         row = (
             await connection.execute(
@@ -185,8 +191,9 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent]:
                     tables.turn.c.subagent_profile,
                     tables.agent.c.prompt,
                     tables.agent.c.model,
+                    tables.conversation.c.member_id,
                 )
-                .select_from(tables.turn.join(tables.agent))
+                .select_from(tables.turn.join(tables.agent).join(tables.conversation))
                 .where(tables.turn.c.id == turn_id)
             )
         ).one()
@@ -202,7 +209,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent]:
         parent_turn_id=row.parent_turn_id,
         subagent_profile=row.subagent_profile,
     )
-    return turn, Agent(prompt=row.prompt, model=row.model)
+    return turn, Agent(prompt=row.prompt, model=row.model), row.member_id
 
 
 async def _workspace_mount(blob: BlobStore, conversation_id: UUID) -> MountSpec:

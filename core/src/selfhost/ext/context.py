@@ -14,7 +14,9 @@ import sqlalchemy as sa
 
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
+from selfhost.memory.service import MemoryService
 from selfhost.schema import tables
+from selfhost.schema.records import MemoryWrite
 
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 
@@ -100,6 +102,14 @@ class CredentialAccess:
 class ExtensionContext:
     store: ScopedStore
     credentials: CredentialAccess
+    memory: MemoryService | None = None
+
+    async def memory_write(self, write: MemoryWrite) -> None:
+        """Commit a memory item for this workspace. Fails loud when no memory service is wired,
+        rather than silently dropping the write."""
+        if self.memory is None:
+            raise RuntimeError("memory_write requires a memory service; none is wired")
+        await self.memory.commit(write)
 
 
 def context_for(
@@ -107,9 +117,10 @@ def context_for(
     extension: str,
     declared: frozenset[str],
     credential_store: CredentialStore,
+    memory: MemoryService | None = None,
 ) -> ExtensionContext:
     store = ScopedStore(workspace_id=workspace_id, extension=extension)
     credentials = CredentialAccess(
         workspace_id=workspace_id, declared=declared, store=credential_store
     )
-    return ExtensionContext(store=store, credentials=credentials)
+    return ExtensionContext(store=store, credentials=credentials, memory=memory)

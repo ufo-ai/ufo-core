@@ -9,8 +9,9 @@ from selfhost.blob import FilesystemBlobStore
 from selfhost.db import workspace_tx
 from selfhost.hub import InProcessHub
 from selfhost.loop.compaction import COMPACTED_CONTEXT_PREFIX, Compaction
-from selfhost.loop.engine import TurnEngine
+from selfhost.loop.engine import RECALL_CONTEXT_PREFIX, TurnEngine
 from selfhost.loop.transcript import Conversation, Transcript
+from selfhost.memory.service import Recalled
 from selfhost.models.interface import (
     Message,
     ModelEvent,
@@ -27,6 +28,65 @@ from selfhost.schema.records import Agent, TerminalFrame, Turn, Usage
 from selfhost.tools.builtins import BUILTIN_TOOLS
 from selfhost.tools.context import SpawnResult
 from selfhost.tools.registry import ToolRegistry
+
+
+@dataclass(frozen=True)
+class StubMemory:
+    """Stand-in for the memory service: recall yields nothing so these tests exercise the turn loop
+    without asserting memory behavior (recall/commit have their own tests)."""
+
+    async def recall(self, query: str, subjects: frozenset[str], limit: int) -> tuple:
+        return ()
+
+    async def commit(self, write: object) -> None:
+        return None
+
+
+@dataclass(frozen=True)
+class OneHitMemory:
+    """Recall that always returns one item — the dependency that lets these tests assert the
+    engine prepends recalled context to the round."""
+
+    body: str
+
+    async def recall(
+        self, query: str, subjects: frozenset[str], limit: int
+    ) -> tuple[Recalled, ...]:
+        return (
+            Recalled(
+                memory_id=uuid4(),
+                subject="shared",
+                item_class="fact",
+                body=self.body,
+                source_ref=None,
+                score=1.0,
+            ),
+        )
+
+    async def commit(self, write: object) -> None:
+        return None
+
+
+@dataclass(frozen=True)
+class RaisingMemory:
+    async def recall(self, query: str, subjects: frozenset[str], limit: int) -> tuple:
+        raise RuntimeError("index backend unreachable")
+
+    async def commit(self, write: object) -> None:
+        return None
+
+
+@dataclass
+class CapturingModel:
+    """Records the messages it is asked to complete, then answers — so a test can read back what
+    the engine put in front of the model."""
+
+    seen: list[tuple[Message, ...]] = field(default_factory=list)
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.seen.append(request.messages)
+        yield TextDelta(text="ok")
+        yield Usage(input_tokens=1, output_tokens=1)
 
 
 @dataclass(frozen=True)
@@ -183,6 +243,7 @@ def _engine(
     tmp_path: Path,
     carrier: RecordingCarrier | None = None,
     compaction: Compaction | None = None,
+    memory: object | None = None,
 ) -> TurnEngine:
     carrier = carrier or RecordingCarrier()
     blob = FilesystemBlobStore(root=tmp_path)
@@ -202,6 +263,8 @@ def _engine(
         tool_ext={},
         blob=blob,
         spawn=_unavailable_spawn,
+        memory=memory or StubMemory(),
+        member_id=None,
     )
 
 
@@ -329,3 +392,26 @@ async def test_cancel_winning_mid_round_keeps_cancelled_terminal_bills_and_prese
     stored = await engine.transcript.read()
     assert stored is not None
     assert stored.messages == (Message(role="user", content="hi"),)
+
+
+async def test_recall_prepends_relevant_memory_before_the_round(db: None, tmp_path: Path) -> None:
+    turn = await _seed_turn("queued", None)
+    model = CapturingModel()
+    engine = _engine(turn, model, tmp_path, memory=OneHitMemory("the launch is on tuesday"))
+    frame = await engine.run()
+    assert frame.status == "done"
+    first = model.seen[0][0]
+    assert isinstance(first.content, str)
+    assert first.content.startswith(RECALL_CONTEXT_PREFIX)
+    assert "the launch is on tuesday" in first.content
+
+
+async def test_recall_failure_degrades_to_no_context_and_never_fails_the_turn(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    model = CapturingModel()
+    engine = _engine(turn, model, tmp_path, memory=RaisingMemory())
+    frame = await engine.run()
+    assert frame.status == "done"
+    assert model.seen[0] == (Message(role="user", content="hi"),)

@@ -5,6 +5,13 @@ import pytest
 import sqlalchemy as sa
 
 from selfhost.db import workspace_tx
+from selfhost.jobs import (
+    CORE_EXTENSION,
+    MEMORY_INDEX_JOB,
+    MEMORY_INDEX_SCHEDULE,
+    bindings_from,
+    core_jobs,
+)
 from selfhost.memory.chunk import TextChunker
 from selfhost.memory.embed import EMBED_DIM
 from selfhost.memory.index import index_backend_for
@@ -109,3 +116,18 @@ async def test_member_memory_is_invisible_to_another_member(clean: None, databas
     assert await service.recall("window seat", recall_subjects(bob), 5) == ()
     mine = await service.recall("window seat", recall_subjects(alice), 5)
     assert len(mine) == 1 and "alice" in mine[0].body
+
+
+def test_memory_index_registers_as_a_core_job(database_url: str) -> None:
+    embed = StubEmbed(())
+    indexer = MemoryIndexer(
+        index=index_backend_for(database_url, embed), embed=embed, chunker=TextChunker()
+    )
+    specs = core_jobs(indexer)
+    assert [spec.name for spec in specs] == [MEMORY_INDEX_JOB]
+    assert specs[0].schedule == MEMORY_INDEX_SCHEDULE
+    bindings = bindings_from((), specs)
+    key = f"{CORE_EXTENSION}:{MEMORY_INDEX_JOB}"
+    assert [(b.key, b.extension, b.declared) for b in bindings] == [
+        (key, CORE_EXTENSION, frozenset())
+    ]
