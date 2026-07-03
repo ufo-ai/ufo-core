@@ -153,6 +153,12 @@ async def test_undeclared_credential_slot_is_refused(db: None) -> None:
         await context.credentials.get(sample.UNDECLARED_SLOT)
 
 
+def test_a_route_without_a_credential_key_fails_loud() -> None:
+    manifest = _sample_manifest()
+    with pytest.raises(RuntimeError, match="serves routes but no credential key"):
+        _mount_ext_routes(FastAPI(), (manifest,), uuid4(), None, StubMemory())
+
+
 async def test_job_fires_through_its_scoped_context(db: None) -> None:
     workspace_id = await _workspace()
     manifest = _sample_manifest()
