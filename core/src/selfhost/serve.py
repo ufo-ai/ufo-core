@@ -3,7 +3,9 @@
 import asyncio
 import os
 import threading
-from uuid import UUID
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from uuid import UUID, uuid4
 
 import httpx
 import sqlalchemy as sa
@@ -46,7 +48,7 @@ from selfhost.schema import tables
 from selfhost.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION
 from selfhost.surfaces.admission import Admission
 from selfhost.surfaces.cli import router
-from selfhost.surfaces.slack import SlackSurface
+from selfhost.surfaces.slack import SlackSurface, WritebackPoller
 from selfhost.surfaces.slack import router as slack_router
 
 PROXY_STARTUP_TIMEOUT_SECONDS = 30
@@ -104,9 +106,10 @@ def run() -> None:
     )
     DBOS.launch()
     _launch_jobs(config, indexer, page_indexer, sync_driver, memory)
-    app = FastAPI()
+    app = FastAPI(lifespan=_writeback_lifespan)
     app.state.hub = hub
     app.state.dbos = dbos_client
+    app.state.writeback_poller = None
     app.include_router(router)
     _mount_ext_routes(app, manifests, workspace_id, credentials, memory)
     _mount_slack_surface(app, config, workspace_id, credentials, dbos_client)
@@ -208,14 +211,31 @@ def _mount_slack_surface(
         return
     if credentials is None:
         raise RuntimeError("Slack surface is enabled but no credential key is set")
+    http = httpx.AsyncClient(timeout=SLACK_HTTP_TIMEOUT_SECONDS)
     app.state.slack = SlackSurface(
         admission=Admission(dbos=dbos_client),
         credentials=credentials,
-        http=httpx.AsyncClient(timeout=SLACK_HTTP_TIMEOUT_SECONDS),
+        http=http,
         config=slack,
         workspace_id=workspace_id,
     )
+    app.state.writeback_poller = WritebackPoller(
+        credentials=credentials, http=http, workspace_id=workspace_id, worker_id=uuid4().hex
+    )
     app.include_router(slack_router)
+
+
+@asynccontextmanager
+async def _writeback_lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Run the Slack writeback poller for the life of the process when the surface is enabled — the
+    durable half of Slack delivery, off the hub and off the turn loop."""
+    poller = app.state.writeback_poller
+    task = None if poller is None else asyncio.create_task(poller.run())
+    try:
+        yield
+    finally:
+        if task is not None:
+            task.cancel()
 
 
 def _egress_proxy(rules: tuple[Rule, ...]) -> ProxyEndpoint:
