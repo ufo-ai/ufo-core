@@ -9,3 +9,4 @@ dist/
 implementation-details.md
 selfhost.toml
 blobs/
+*.db
