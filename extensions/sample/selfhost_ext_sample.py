@@ -8,10 +8,9 @@ those rows back through the same public surfaces core writes them by. `UNDECLARE
 the Manifest never declares — the probe that a handler asking for an undeclared slot is refused."""
 
 from pydantic import BaseModel
-from starlette.requests import Request
-from starlette.responses import PlainTextResponse, Response
 
 from selfhost.sdk.context import ExtensionContext
+from selfhost.sdk.http import PlainTextResponse, Request, Response
 from selfhost.sdk.jobs import JobSpec
 from selfhost.sdk.manifest import CredentialSlot, InjectionTarget, Manifest, RouteSpec
 from selfhost.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
