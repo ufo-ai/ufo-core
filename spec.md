@@ -25,13 +25,16 @@ test for the extension API — every entry must be expressible without touching 
 
 | Decision | Value |
 |---|---|
-| Language | Python 3.12+, uv. Monorepo: `core/` + `extensions/*` + `packs/*` (uv workspace). |
-| Persistence | Postgres only. One schema; every row carries `workspace_id`; a deploy serves ONE workspace (hosted multi-workspace is the enterprise layer). Blobs (transcripts, compaction records, skill content, artifacts) live in Postgres — no object store in core. |
-| Queue/stream | Postgres queue tables + worker poll; live deltas over LISTEN/NOTIFY with poll fallback. No Redis, no DBOS. |
-| Sandbox | Docker is the default carrier, built into core. E2B (and any other carrier) is an extension. No unsandboxed mode. |
-| Models | Anthropic + OpenAI direct clients behind one `ModelClient` interface. No router service, no OpenRouter. |
+| Language | Python 3.12+, uv. Monorepo: `core/` + `extensions/*` + `packs/*` (uv workspace). Rust was considered and rejected for core: the salvage is Python, DBOS has no Rust SDK, the loop is I/O-bound, and extensions must be writable by users and agents in the AI ecosystem's default language. A hot data plane (egress proxy) may become a Rust component later without changing this. |
+| Persistence | Postgres (relational state, queues, memory index) + a pluggable blob store (transcripts, compaction records, sandbox workspaces, shared artifacts): **local filesystem by default**, S3-compatible for deploys. One schema; every row carries `workspace_id`; a deploy serves ONE workspace (hosted multi-workspace is the enterprise layer). The S3 API is the cloud-portability seam — any S3-compatible store works, no per-cloud code. |
+| Durable execution | DBOS on Postgres: a turn is a durable workflow, a subagent a child workflow; queues, async cancel, crash recovery. Dequeue poll interval and system-DB retention are configured from day one. |
+| Streaming | Durable terminal frames in Postgres; live token deltas through a hub interface — in-process in the single-process default, a Redis hub extension for multi-instance deploys. A lost delta costs a redrawn token, never correctness. |
+| Topology | `metalcraft serve` is one process: surfaces + DBOS workers + jobs. Scale-out = more instances plus a shared hub. |
+| Sandbox | Docker is the default carrier, built into core; carriers are an extension point (E2B is an extension). No unsandboxed mode. |
+| Models | Model providers are an extension point; core ships Anthropic + OpenAI direct clients behind one `ModelClient` interface. OpenRouter (or any router) is an extension, never core. |
+| Observability | OpenTelemetry APIs only in product code; the OTLP export target (Datadog, …) is deploy config. No vendor SDK in core. |
 | Kubernetes | Absent from core by construction. The enterprise offering later wraps core with k8s (principle 3); nothing in core may assume or import it. |
-| CLI | One CLI: `metalcraft` (`chat`, `serve`, `bundle`, admin verbs). |
+| CLI | One CLI: `metalcraft` (`chat`, `serve`, `bundle`, `ext`, admin verbs). |
 
 ## Workspace model
 
@@ -62,22 +65,30 @@ terminal frame. A client's wait always ends — the terminal state commits on th
 - **Typed subagents** — a registry of profiles (name, prompt, tool subset, input/output schema);
   spawn = child turn with parent linkage; foreground awaits, background returns an id. Extensions
   register profiles.
-- **Compaction** — full-conversation transcript with monotonic seq + before/after compaction
-  records (port of the shipped design, Postgres-stored); history compacts as it approaches the
-  model window so a long turn never exceeds it.
-- **Memory** — recall (lexical + vector over pgvector, subject ∈ {member, shared}) auto-injected at
-  turn load; `memory_update` writes; triggers feed it from data sources.
+- **Compaction** — full-conversation `messages.json.lz4` transcript with monotonic seq +
+  `compactions/<cid>/{before,after}` records in the blob store (port of the shipped design);
+  history compacts as it approaches the model window so a long turn never exceeds it.
+- **Memory** — the store and recall (lexical + vector fusion, subject ∈ {member, shared},
+  auto-injected at turn load; `memory_update` writes) are core. Two pluggable seams: the **index
+  backend** (pgvector default; turbopuffer as an extension) behind one lexical/vector/reindex
+  interface, and the **derivation mechanics** — extensions register pipeline stages (source
+  pages/events → condense — e.g. to markdown — → memory items + graph updates). Core ships a
+  default condenser; a gbrain-style pipeline replaces or extends it.
 - **Minimal built-in tools** — `bash`, `read`, `write`, `edit`, `memory_search`, `memory_update`,
   `ask_user`, `spawn_subagent`, `load_skill`, `share_file`. Everything else arrives via extensions.
-  Two tools where one would do is a defect.
+  Two tools where one would do is a defect. `share_file` ports the shipped design: byte custody in
+  the blob store, a TTL-bound token URL served by the web surface — no token, no bytes.
 
 ## Sandboxing
 
 Every turn executes tools in a per-conversation sandbox: Docker container from a pinned image
-(baked toolchain), workspace-mounted working dir, default-deny network egress through the core's
-egress proxy (credential injection happens at the proxy; raw secrets never enter the sandbox).
-Carrier interface: `create / exec / mount / route / destroy` — Docker implements it in core; E2B
-implements it as an extension.
+(baked toolchain), default-deny network egress through the core's egress proxy (credential
+injection happens at the proxy; raw secrets never enter the sandbox). The working directory mounts
+from the blob store — a bind mount on the filesystem backend, the sandbox-fs design on S3 — and the
+invariant holds on every backend: the sandbox reaches only the conversation's `workspace/` subtree;
+transcripts and compaction records live above it, framework-only. Carrier interface:
+`create / exec / mount / route / destroy` — Docker implements it in core; E2B implements it as an
+extension.
 
 ## Extension system
 
@@ -92,17 +103,34 @@ Manifest registers (each optional):
 | `tools` | Typed tool defs + handlers; appear in agents' granted tool sets. |
 | `subagents` | Typed subagent profiles. |
 | `connectors` | Provider actions behind the connector framework; OAuth via the grant flow. |
-| `sources` | Data feeds: `sync(cursor) -> pages` run as jobs; pages land in memory/knowledge. |
+| `sources` | Data-feed backends: `sync(cursor) -> pages` run as jobs; pages land in memory/knowledge via the derivation pipeline. Each backend is pluggable — S3, GitHub, provider APIs (via connectors), webhooks; core ships only `folder` (local files). |
 | `triggers` | Data → memory (and → invocation): hooks on source pages and platform events. |
 | `jobs` | Recurring/one-time background work. |
 | `routes` | HTTP endpoints under `/ext/<name>/` (webhooks, OAuth callbacks, plugin UIs). |
 | `credentials` | Named BYOK slots the workspace must fill (drives onboarding). |
 | `onboarding` | Steps contributed to the workspace/pack onboarding flow. |
 | `packs` | Bundled skill packs. |
+| `models` | Model providers behind `ModelClient` (OpenRouter, local runtimes). |
+| `carriers` | Sandbox carriers (E2B, remote runners). |
+| `memory` | Derivation pipeline stages (condensers, graph updaters) — see Agent loop / Memory. |
+| `indexes` | Index backends for memory/source retrieval (turbopuffer); pgvector is the core default. |
+| `hubs` | Stream hubs for multi-instance deploys (Redis). |
 
 `ExtensionContext` (capability-scoped, handed to every handler): workspace-scoped store access,
 `credentials.get(slot)`, `memory.write(...)`, `invoke(agent, input, conversation=...)`,
-`schedule(job)`. Extensions never see raw DB handles or other workspaces.
+`schedule(job)`, `trajectories.read(...)` (transcript/turn evidence), and
+`agents.propose_change(...)` — the governed promotion path: an extension never edits agent config
+directly; it opens a proposal (prompt, skills, tool grants) that applies through the same
+grant/approval flow chat uses. This is what makes a full self-improvement extension expressible —
+mine trajectories, evaluate candidates via `invoke`, promote through `propose_change` — not just
+prompt files on disk. Extensions never see raw DB handles or other workspaces.
+
+### Extension store
+
+Extensions are Python packages. A deploy may enable the extension store — a registry index that
+the CLI (and, when granted, an agent in chat) searches and installs from: `metalcraft ext search /
+install / remove`. Installs pin version + digest and are recorded in the bundle lockfile; with the
+store disabled, a deploy runs only what its bundle ships.
 
 ## Surfaces (core)
 
@@ -130,8 +158,9 @@ keys come from `credential` slots or deploy config.
 
 ## Deploy config bundling
 
-One declarative file, `metalcraft.toml`: Postgres URL, model keys (env refs), enabled extensions +
-versions, installed packs, surface config (Slack app, web host), sandbox carrier, spend defaults.
+One declarative file, `metalcraft.toml`: Postgres URL, blob store (filesystem root or S3 endpoint),
+model keys (env refs), enabled extensions + versions, installed packs, surface config (Slack app,
+web host), sandbox carrier, stream hub, OTLP export target, extension-store toggle, spend defaults.
 `metalcraft bundle` produces a runnable artifact (OCI image + pinned config + lockfile) — the same
 bundle installs OSS, on-prem, or hosted.
 
@@ -139,12 +168,19 @@ bundle installs OSS, on-prem, or hosted.
 
 | Extension | Points it exercises |
 |---|---|
+| OpenRouter (any model router) | models |
+| Composio connectors | connectors, credentials, routes (OAuth) |
+| E2B | carriers |
+| Redis stream hub | hubs |
+| turbopuffer index | indexes |
+| GitHub / S3 source backends | sources |
 | Agent-guided education / onboarding | onboarding, tools, packs |
 | Scheduled tasks (cron / one-time) | jobs, invoke, tools |
 | GH code review on PR + auto-merge | routes (webhook), credentials, invoke, tools |
-| Service self-improvement / bug-fixing from o11y | sources (o11y), jobs, invoke |
+| Service self-improvement / bug-fixing from o11y | sources (o11y), jobs, trajectories.read, invoke (evals), agents.propose_change |
 | Security review | tools, subagents, packs |
-| gbrain / CRM / ATS | connectors, sources, triggers, tools, packs |
+| gbrain-style memory (source → condense to markdown + graph) | memory, sources, triggers |
+| CRM / ATS | connectors, sources, triggers, tools, packs |
 | Websites | tools (sandbox serving), routes |
 
 Skill packs (content, not code): **assistant** (deep research, wide research/browse, browser
@@ -156,7 +192,8 @@ intercom-style website plugin via the websites extension).
 
 - No Kubernetes, CRDs, operators, or RLS multi-tenancy (the `workspace_id` column is the only
   concession to the future).
-- No object store, Redis, DBOS, or router services.
-- No self-improvement machinery in core.
+- No Redis in the single-process default; no router service in core (both are extensions).
+- No self-improvement machinery in core (the extension API carries it — see `trajectories.read` /
+  `agents.propose_change`).
 - No second representation of any fact: one transcript store, one schema source, one config file.
 - No tool that another tool or `bash` subsumes.
