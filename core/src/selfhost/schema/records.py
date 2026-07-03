@@ -61,6 +61,8 @@ class Turn(BaseModel):
     status: TurnStatus
     inbound: str
     terminal: TerminalFrame | None = None
+    parent_turn_id: UUID | None = None
+    subagent_profile: str | None = None
 
     @model_validator(mode="after")
     def _terminal_matches_status(self) -> "Turn":

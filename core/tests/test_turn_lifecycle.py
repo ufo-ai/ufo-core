@@ -12,6 +12,7 @@ from conftest import reset_postgres_database
 from dbos import DBOS, DBOSClient
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from pydantic import BaseModel
 from sqlalchemy.engine import make_url
 
 from selfhost.blob import FilesystemBlobStore
@@ -20,22 +21,59 @@ from selfhost.db import workspace_tx
 from selfhost.hub import InProcessHub
 from selfhost.loop import queue as loop_queue
 from selfhost.loop.engine import EMPTY_RESPONSE_NUDGE
+from selfhost.loop.subagents import SubagentProfile, SubagentRegistry
 from selfhost.loop.transcript import Conversation, Transcript
-from selfhost.models.interface import ModelEvent, ModelRequest, TextDelta
+from selfhost.models.interface import (
+    ModelEvent,
+    ModelRequest,
+    TextDelta,
+    ToolCallDelta,
+    ToolCallStart,
+    ToolResultBlock,
+)
 from selfhost.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
 from selfhost.schema import tables
-from selfhost.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION, Usage
+from selfhost.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION, TerminalFrame, Usage
 from selfhost.surfaces.cli import router
 
 STREAM_TIMEOUT_SECONDS = 30
 
 
+class RoundTripInput(BaseModel):
+    value: int
+
+
+class RoundTripOutput(BaseModel):
+    echoed: int
+
+
+ROUNDTRIP_PROFILE = SubagentProfile(
+    name="roundtrip",
+    prompt="ROUNDTRIP: echo the value back.",
+    tool_names=(),
+    input_model=RoundTripInput,
+    output_model=RoundTripOutput,
+)
+
+
 @dataclass(frozen=True)
 class StandInModel:
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        if "ROUNDTRIP" in request.system:
+            payload = json.loads(request.messages[-1].content)
+            yield TextDelta(text=json.dumps({"echoed": payload["value"]}))
+            yield Usage(input_tokens=5, output_tokens=5)
+            return
         contents = [m.content for m in request.messages]
         nudged = contents[-1] == EMPTY_RESPONSE_NUDGE
         inbound = contents[-2] if nudged else contents[-1]
+        if isinstance(inbound, str) and "spawn-subagent" in inbound:
+            yield ToolCallStart(id="s1", name="spawn_subagent")
+            yield ToolCallDelta(
+                id="s1", partial_json='{"profile": "roundtrip", "payload": {"value": 21}}'
+            )
+            yield Usage(input_tokens=4, output_tokens=4)
+            return
         if "explode-after-usage" in inbound:
             yield TextDelta(text="partial")
             yield Usage(input_tokens=7, output_tokens=3)
@@ -86,9 +124,16 @@ def dbos_runtime(
     hub = InProcessHub()
     blob = FilesystemBlobStore(root=blob_root)
     proxy = ProxyEndpoint(port=0, ca_cert="test-ca")
+    dbos_client = DBOSClient(system_database_url=system_url)
     loop_queue.init_runtime(
         loop_queue.Runtime(
-            config=config, blob=blob, hub=hub, carrier=StandInCarrier(), proxy=proxy
+            config=config,
+            blob=blob,
+            hub=hub,
+            carrier=StandInCarrier(),
+            proxy=proxy,
+            dbos=dbos_client,
+            subagents=SubagentRegistry((ROUNDTRIP_PROFILE,)),
         )
     )
     DBOS(
@@ -102,6 +147,7 @@ def dbos_runtime(
     DBOS.launch()
     yield config, hub, blob
     DBOS.destroy()
+    dbos_client.destroy()
     loop_queue._runtime = None
 
 
@@ -405,3 +451,38 @@ async def test_concurrent_admissions_allocate_unique_seqs(surface: AsyncClient) 
         ).scalars()
         assert sorted(seqs) == list(range(1, 11))
     await asyncio.gather(*(_consume(surface, headers, turn_id) for turn_id in turn_ids))
+
+
+async def test_typed_subagent_round_trips_schema(surface: AsyncClient) -> None:
+    headers = await _bootstrap()
+    parent = (
+        await surface.post("/v1/chat", content=b"spawn-subagent", headers=headers)
+    ).json()["turn_id"]
+    _, terminal = await _consume(surface, headers, parent)
+    assert terminal["status"] == "done"
+    async with workspace_tx() as connection:
+        child = (
+            await connection.execute(
+                sa.select(
+                    tables.turn.c.subagent_profile,
+                    tables.turn.c.status,
+                    tables.turn.c.terminal,
+                ).where(tables.turn.c.parent_turn_id == UUID(parent))
+            )
+        ).one()
+    assert child.subagent_profile == "roundtrip"
+    assert child.status == "done"
+    child_output = TerminalFrame.model_validate(child.terminal).text
+    assert RoundTripOutput.model_validate_json(child_output).echoed == 21
+    _, conversation_id = await _turn_row(parent)
+    _, _, blob = _runtime_parts(surface)
+    stored = await _read_transcript(blob, conversation_id, 1)
+    tool_result = next(
+        block
+        for message in stored.messages
+        if isinstance(message.content, tuple)
+        for block in message.content
+        if isinstance(block, ToolResultBlock)
+    )
+    assert RoundTripOutput.model_validate_json(tool_result.content).echoed == 21
+    assert tool_result.is_error is False

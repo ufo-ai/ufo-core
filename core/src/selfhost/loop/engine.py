@@ -11,6 +11,7 @@ from selfhost.accounting import read_turn_cost, record_turn_usage
 from selfhost.blob import BlobStore
 from selfhost.db import workspace_tx
 from selfhost.hub import Hub, Terminal
+from selfhost.loop.compaction import Compaction
 from selfhost.loop.transcript import Conversation, Transcript
 from selfhost.models.interface import (
     Message,
@@ -27,7 +28,7 @@ from selfhost.o11y import emit_metric, log, turn_span
 from selfhost.sandbox.session import SandboxSession
 from selfhost.schema import tables
 from selfhost.schema.records import Agent, TerminalFrame, TerminalStatus, Turn, Usage
-from selfhost.tools.context import ToolContext
+from selfhost.tools.context import Spawn, ToolContext
 from selfhost.tools.registry import ToolRegistry
 
 MAX_OUTPUT_TOKENS = 16_000
@@ -61,10 +62,12 @@ class TurnEngine:
     agent: Agent
     model: ModelClient
     transcript: Transcript
+    compaction: Compaction
     hub: Hub
     sandbox: SandboxSession
     tools: ToolRegistry
     blob: BlobStore
+    spawn: Spawn
 
     async def run(self) -> TerminalFrame:
         with turn_span(self.turn.id, self.turn.conversation_id):
@@ -72,14 +75,22 @@ class TurnEngine:
             log("turn.started", turn_id=str(self.turn.id), seq=self.turn.seq)
             usage_events: list[Usage] = []
             context = ToolContext(
-                sandbox=self.sandbox, blob=self.blob, turn=self.turn, agent=self.agent
+                sandbox=self.sandbox,
+                blob=self.blob,
+                turn=self.turn,
+                agent=self.agent,
+                spawn=self.spawn,
             )
             try:
                 if not await self._mark_running():
                     await self._persist_inbound()
                     return await self._publish_existing_terminal()
+                messages, compaction_usage = await self.compaction.maybe_compact(
+                    await self._load_messages()
+                )
+                usage_events.extend(compaction_usage)
                 final_messages, answer = await self._model_round(
-                    context, await self._load_messages(), usage_events
+                    context, messages, usage_events
                 )
                 frame = await self._commit("done", usage_events, answer=answer)
                 if frame.status == "done":

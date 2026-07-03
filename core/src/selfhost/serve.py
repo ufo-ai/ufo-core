@@ -17,6 +17,7 @@ from selfhost.db import init_db, workspace_tx
 from selfhost.ext.loader import load_manifests
 from selfhost.hub import InProcessHub
 from selfhost.loop.queue import Runtime, init_runtime
+from selfhost.loop.subagents import SubagentRegistry
 from selfhost.o11y import init_o11y, log
 from selfhost.sandbox.carrier import DockerCarrier
 from selfhost.sandbox.proxy.rules import (
@@ -40,6 +41,7 @@ def run() -> None:
     init_db(config.database.url)
     asyncio.run(_require_bootstrap())
     hub = InProcessHub()
+    dbos_client = DBOSClient(system_database_url=config.database.system_url)
     init_runtime(
         Runtime(
             config=config,
@@ -47,6 +49,8 @@ def run() -> None:
             hub=hub,
             carrier=DockerCarrier(),
             proxy=_egress_proxy(asyncio.run(_assemble_rules(config))),
+            dbos=dbos_client,
+            subagents=SubagentRegistry(()),
         )
     )
     DBOS(
@@ -60,7 +64,7 @@ def run() -> None:
     DBOS.launch()
     app = FastAPI()
     app.state.hub = hub
-    app.state.dbos = DBOSClient(system_database_url=config.database.system_url)
+    app.state.dbos = dbos_client
     app.include_router(router)
     log("serve.started", host=config.serve.host, port=config.serve.port)
     try:

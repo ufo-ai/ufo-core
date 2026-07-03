@@ -44,8 +44,9 @@ class SpendCap(BaseModel):         scope: Literal["workspace", "member", "agent"
 Dimension = Literal["usd", "tokens", "tool_calls", "connector_calls", "sandbox_minutes"]
 ```
 Each unit's migration adds only what it wires: U2 grows turn status/queue state for tools, U5
-adds `parent_turn_id`, U6 relaxes `conversation.member_id` for shared surfaces, U7 adds ledger
-attribution + price-digest audit columns.
+adds `turn.parent_turn_id` + `turn.subagent_profile` and the `subagent` conversation surface, U6
+relaxes `conversation.member_id` for shared surfaces, U7 adds ledger attribution + price-digest
+audit columns.
 
 ## blob.py (U2 remainder)
 
@@ -53,9 +54,9 @@ attribution + price-digest audit columns.
 class BlobStore(Protocol):        # put/get/exists landed U1
     def workspace_mount(self, conversation_id: UUID) -> MountSpec: ...   # reaches ONLY .../workspace/
 ```
-Key layout still to land: `conversations/<cid>/compactions/<n>/{before,after}.json.lz4` (U5),
-`conversations/<cid>/workspace/**` (U2), `artifacts/<digest>` (U5). `MountSpec`: bind mount on
-filesystem, sandbox-fs cred scoped to the `workspace/` prefix on S3.
+Key layout still to land: `conversations/<cid>/workspace/**` (U2), `artifacts/<digest>` (U5).
+`conversations/<cid>/compactions/<n>/{before,after}.json.lz4` (U5) has landed. `MountSpec`: bind
+mount on filesystem, sandbox-fs cred scoped to the `workspace/` prefix on S3.
 
 ## hub.py (later-unit remainder)
 
@@ -73,18 +74,10 @@ Provider image/content limits (Anthropic image-count trim) live in the provider 
 
 ## loop/ (later-unit remainder)
 
-`TurnEngine` grows fields as its deps land: `tools: ToolRegistry` + `sandbox: SandboxSession`
-(U2), `memory: MemoryService` with a `_recall` step (U4), `_maybe_compact` + multi-round tool
-dispatch (U2/U5), `spend: SpendEvaluator` per step (U7). Subagent = DBOS child workflow (U5):
-
-```python
-@dataclass(frozen=True)
-class SubagentProfile:
-    name: str; prompt: str; tool_names: tuple[str, ...]
-    input_model: type[BaseModel]; output_model: type[BaseModel]
-```
-
-`Transcript.compact()` (U5) writes `before/after` records and swaps the live window.
+`TurnEngine` grows fields as its deps land: `memory: MemoryService` with a `_recall` step (U4),
+`spend: SpendEvaluator` per step (U7). Compaction (`loop/compaction.py`: window trigger, before/after
+records, live-window swap) and typed subagents (`loop/subagents.py`: profile registry, DBOS child
+spawn foreground/background, the `spawn_subagent` builtin) are code-authoritative.
 
 ## tools/
 

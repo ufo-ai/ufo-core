@@ -8,7 +8,7 @@ from selfhost.blob import FilesystemBlobStore
 from selfhost.sandbox.session import ExecResult
 from selfhost.schema.records import Agent, Turn
 from selfhost.tools.builtins import BUILTIN_TOOLS
-from selfhost.tools.context import ToolContext
+from selfhost.tools.context import SpawnResult, ToolContext
 from selfhost.tools.registry import ToolRegistry
 
 REGISTRY = ToolRegistry(BUILTIN_TOOLS)
@@ -40,6 +40,12 @@ class FakeSandbox:
         self.files[path] = content
 
 
+async def _unavailable_spawn(
+    profile: str, payload: dict[str, object], background: bool = False
+) -> SpawnResult:
+    raise RuntimeError("spawn is not wired in this context")
+
+
 def make_context(sandbox: FakeSandbox, tmp_path: Path) -> ToolContext:
     workspace_id, conversation_id, agent_id = uuid4(), uuid4(), uuid4()
     turn = Turn(
@@ -56,6 +62,7 @@ def make_context(sandbox: FakeSandbox, tmp_path: Path) -> ToolContext:
         blob=FilesystemBlobStore(root=tmp_path),
         turn=turn,
         agent=Agent(prompt="be terse", model="claude-opus-4-8"),
+        spawn=_unavailable_spawn,
     )
 
 
@@ -81,7 +88,13 @@ def test_registry_get_returns_named_tool() -> None:
 
 def test_registry_schemas_cover_every_tool() -> None:
     schemas = REGISTRY.schemas()
-    assert {schema.name for schema in schemas} == {"bash", "read", "write", "edit"}
+    assert {schema.name for schema in schemas} == {
+        "bash",
+        "read",
+        "write",
+        "edit",
+        "spawn_subagent",
+    }
     bash = next(schema for schema in schemas if schema.name == "bash")
     assert "command" in bash.input_schema["properties"]
 
