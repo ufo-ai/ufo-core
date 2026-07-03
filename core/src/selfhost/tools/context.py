@@ -5,8 +5,10 @@ shell, the blob store for artifacts, the turn/agent it runs under, `spawn` to de
 subtask to a child turn, `memory` (with the conversation's `member_id`) for recall and commit
 scoped to the turn's subject, and `artifact_token_secret` with which `share_file` mints the signed
 download URLs the web surface verifies. `read_paths` is the working set that lets `edit` refuse to
-touch a file the turn has not read first. An extension tool also gets `ext`, its owning extension's
-workspace-scoped ExtensionContext; a builtin tool gets `ext=None`."""
+touch a file the turn has not read first. `connector_authorization` hands a connector tool the
+sentinel `Authorization` value the egress proxy swaps for the turn-agent's real OAuth token, scoped
+so a tool can only authenticate the turn-agent's own grants. An extension tool also gets `ext`, its
+owning extension's workspace-scoped ExtensionContext; a builtin tool gets `ext=None`."""
 
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
@@ -16,6 +18,7 @@ from pydantic import BaseModel
 
 from selfhost.blob import BlobStore
 from selfhost.ext.context import ExtensionContext
+from selfhost.grants import ConnectUnavailable, GrantStore
 from selfhost.memory.service import MemoryService
 from selfhost.sandbox.session import SandboxSession
 from selfhost.schema.records import Agent, Turn
@@ -62,5 +65,20 @@ class ToolContext:
     memory: MemoryService
     member_id: UUID | None
     artifact_token_secret: str
+    grants: GrantStore | None = None
     read_paths: set[str] = field(default_factory=set)
     ext: ExtensionContext | None = None
+
+    async def connector_authorization(self, provider: str) -> str:
+        """The `Authorization` header value a connector tool sends to reach `provider`: the exact
+        sentinel the egress proxy swaps for the turn-agent's real OAuth token, so the raw secret
+        never enters the sandbox. Resolves strictly the turn's own workspace and agent, so a tool
+        builds a sentinel for the turn-agent's grants alone, never another agent's. Fails loud when
+        no grant subsystem is configured or the agent holds no grant for the provider."""
+        if self.grants is None:
+            raise ConnectUnavailable("grants unavailable: no credential key configured")
+        granted = await self.grants.active_grants(self.turn.workspace_id, self.turn.agent_id)
+        grant = next((g for g in granted if g.provider == provider), None)
+        if grant is None:
+            raise ValueError(f"agent has no active {provider!r} grant to authenticate")
+        return grant.sentinel_header

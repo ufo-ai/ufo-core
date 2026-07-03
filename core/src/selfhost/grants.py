@@ -27,6 +27,8 @@ from selfhost.o11y import log
 from selfhost.schema import tables
 
 CONNECT_STATE_TTL_SECONDS = 600
+GRANT_TOKEN_PREFIX = "Bearer "
+SENTINEL_GRANT_PREFIX = "SELFHOST_SENTINEL_GRANT_"
 
 
 class UnknownProvider(KeyError):
@@ -73,6 +75,15 @@ class Grant:
     account_id: str
     host: str
     token: str
+
+    @property
+    def sentinel_header(self) -> str:
+        """The `Authorization` value that stands in for this grant's token: a connector tool sends
+        it on the wire and the egress proxy's InjectionRule swaps it for the real token, so the raw
+        secret never enters the sandbox. Both ends — the tool that emits it and the rule that swaps
+        it — read this one formula, so the emitted sentinel and the swapped sentinel are identical
+        by construction."""
+        return f"{GRANT_TOKEN_PREFIX}{SENTINEL_GRANT_PREFIX}{self.provider}_{self.account_id}"
 
 
 @dataclass(frozen=True)

@@ -8,6 +8,7 @@ and drive the resulting grant through the proxy exactly as U8b/U8c do."""
 
 import asyncio
 import base64
+import shlex
 from collections.abc import Iterator
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID, uuid4
@@ -20,14 +21,15 @@ from cryptography.fernet import Fernet
 from selfhost.config import Config
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
-from selfhost.grants import install_connect_flow
+from selfhost.ext.loader import turn_tools
+from selfhost.grants import GrantStore, install_connect_flow
 from selfhost.sandbox.proxy.rules import (
     GRANT_METER_DIMENSION,
     InjectionRule,
     MeterRule,
 )
 from selfhost.sandbox.proxy.server import EgressProxy, PerAgentRules, _inject, generate_ca
-from selfhost.sandbox.session import RunToken
+from selfhost.sandbox.session import ExecResult, RunToken, SandboxHandle, SandboxSession
 from selfhost.schema import tables
 from selfhost.schema.records import Agent, Turn
 from selfhost.serve import _connect_flow, _connect_redirect_uri
@@ -172,8 +174,174 @@ async def test_connect_via_a_manifest_connector_binds_a_grant_and_egress_is_mete
     assert (ledger.dimension, int(ledger.amount)) == ("egress", 1)
 
 
+class _RecordingCarrier:
+    """A carrier whose `exec` records the egress command the connector tool ran — so the test reads
+    the exact `Authorization` header the tool put on the wire — and answers with a canned 200. A
+    stand-in for the container, never the thing asserted; `create`/`destroy` stay unreachable."""
+
+    def __init__(self) -> None:
+        self.commands: list[str] = []
+
+    async def create(self, spec: object) -> object:
+        raise AssertionError("the connector tool reaches the sandbox only through exec")
+
+    async def exec(
+        self, handle: object, argv: tuple[str, ...], stdin: bytes, timeout_s: int
+    ) -> ExecResult:
+        self.commands.append(argv[-1])
+        return ExecResult(stdout="200", stderr="", exit_code=0)
+
+    async def destroy(self, handle: object) -> None:
+        raise AssertionError("the connector tool reaches the sandbox only through exec")
+
+
+def _connector_context(
+    workspace_id: UUID,
+    agent_id: UUID,
+    conversation_id: UUID,
+    turn_id: UUID,
+    member_id: UUID | None,
+    carrier: _RecordingCarrier,
+    grants: GrantStore,
+    ext: object,
+) -> ToolContext:
+    return ToolContext(
+        sandbox=SandboxSession(
+            carrier=carrier,
+            handle=SandboxHandle(conversation_id=conversation_id, container_id="test"),
+        ),
+        blob=None,
+        turn=Turn(
+            id=turn_id,
+            workspace_id=workspace_id,
+            conversation_id=conversation_id,
+            agent_id=agent_id,
+            seq=1,
+            status="running",
+            inbound="call the connector",
+        ),
+        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        spawn=None,
+        memory=None,
+        member_id=member_id,
+        artifact_token_secret="",
+        grants=grants,
+        ext=ext,
+    )
+
+
+async def test_connector_tool_emits_the_sentinel_the_proxy_swaps_for_the_real_token(
+    db: None,
+) -> None:
+    """The load-bearing injection proof, end-to-end through the real sample connector tool: the tool
+    resolves the turn-agent's grant and puts its per-account sentinel on the wire; fed through the
+    real proxy's turn-resolved rules, `_inject` (the exact bytes `_mitm` writes upstream) swaps the
+    emitted sentinel for the account's real token, and the sentinel never survives. The granted host
+    is admitted at CONNECT and an ungranted host is refused — the U8b/U8d isolation, inherited."""
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    turn_id = await _turn(workspace_id, agent_id, conversation_id)
+    credentials = _credentials()
+    flow = _connect_flow(credentials, _config(PUBLIC_BASE_URL), (sample.manifest(),))
+    assert flow is not None
+    install_connect_flow(flow)
+    begin = await connect_account_handler(
+        _turn_context(workspace_id, agent_id, conversation_id, member_id),
+        ConnectAccountInput(provider=sample.CONNECTOR_PROVIDER),
+    )
+    state = parse_qs(urlparse(begin.content[0].text).query)["state"][0]
+    await flow.complete(state=state, code="the-code")
+
+    tools, ext_by_tool = turn_tools((sample.manifest(),), workspace_id, credentials)
+    tool = next(t for t in tools if t.name == sample.CONNECTOR_TOOL_NAME)
+    carrier = _RecordingCarrier()
+    ctx = _connector_context(
+        workspace_id,
+        agent_id,
+        conversation_id,
+        turn_id,
+        member_id,
+        carrier,
+        flow.store,
+        ext_by_tool[tool.name],
+    )
+    result = await tool.handler(ctx, tool.input_model.model_validate({"path": "me"}))
+    assert result.is_error is False
+    argv = shlex.split(carrier.commands[0])
+    emitted = argv[argv.index("-H") + 1].partition("Authorization: ")[2]
+
+    resolver = PerAgentRules(base=(), grants=flow.store)
+    cert, key = await generate_ca()
+    proxy = EgressProxy(resolve=resolver.resolve, ca_cert=cert, ca_key=key)
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    try:
+        run = RunToken(workspace_id, turn_id).encode()
+        assert await _connect_status(endpoint.port, sample.CONNECTOR_HOST, run) == 200
+        assert await _connect_status(endpoint.port, UNGRANTED_HOST, run) == 403
+        rules = await proxy._rules_for(RunToken(workspace_id, turn_id))
+        candidates = [
+            r for r in rules if isinstance(r, InjectionRule) and r.host == sample.CONNECTOR_HOST
+        ]
+        upstream = _inject([f"authorization: {emitted}\r\n".encode()], candidates)
+    finally:
+        await proxy.stop()
+    assert f"Bearer {sample.CONNECTOR_TOKEN}".encode() in upstream
+    assert b"SELFHOST_SENTINEL_GRANT" not in upstream
+
+
+async def test_connector_tool_without_a_grant_fails_loud_before_egress(db: None) -> None:
+    workspace_id, agent_id, conversation_id = uuid4(), uuid4(), uuid4()
+    credentials = _credentials()
+    tools, ext_by_tool = turn_tools((sample.manifest(),), workspace_id, credentials)
+    tool = next(t for t in tools if t.name == sample.CONNECTOR_TOOL_NAME)
+    carrier = _RecordingCarrier()
+    ctx = _connector_context(
+        workspace_id,
+        agent_id,
+        conversation_id,
+        uuid4(),
+        None,
+        carrier,
+        GrantStore(fernet=credentials.fernet),
+        ext_by_tool[tool.name],
+    )
+    with pytest.raises(ValueError, match="grant"):
+        await tool.handler(ctx, tool.input_model.model_validate({"path": "me"}))
+    assert carrier.commands == []
+
+
+async def test_connector_authorization_is_scoped_to_the_turn_agents_own_grants(db: None) -> None:
+    """Agent A's context builds a sentinel for A's account only — B's grant on the same provider is
+    not in A's resolved grants, so A can neither name nor authenticate B's account."""
+    workspace_id = await _workspace()
+    member_id, agent_a = await _member_agent(workspace_id)
+    agent_b = await _agent(workspace_id, "assistant-b")
+    conversation_id = await _conversation(workspace_id, member_id)
+    store = GrantStore(fernet=Fernet(Fernet.generate_key()))
+    for agent_id, account in ((agent_a, "acct-a"), (agent_b, "acct-b")):
+        await store.record(
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            provider=sample.CONNECTOR_PROVIDER,
+            account_id=account,
+            host=sample.CONNECTOR_HOST,
+            token=f"tok-{account}",
+            grantor_member_id=member_id,
+            conversation_id=conversation_id,
+        )
+    ctx_a = _turn_context(workspace_id, agent_a, conversation_id, member_id, grants=store)
+    sentinel_a = await ctx_a.connector_authorization(sample.CONNECTOR_PROVIDER)
+    assert "acct-a" in sentinel_a
+    assert "acct-b" not in sentinel_a
+
+
 def _turn_context(
-    workspace_id: UUID, agent_id: UUID, conversation_id: UUID, member_id: UUID
+    workspace_id: UUID,
+    agent_id: UUID,
+    conversation_id: UUID,
+    member_id: UUID,
+    grants: GrantStore | None = None,
 ) -> ToolContext:
     turn = Turn(
         id=uuid4(),
@@ -193,6 +361,7 @@ def _turn_context(
         memory=None,
         member_id=member_id,
         artifact_token_secret="",
+        grants=grants,
     )
 
 
@@ -231,6 +400,23 @@ async def _member_agent(workspace_id: UUID) -> tuple[UUID, UUID]:
             )
         )
     return member_id, agent_id
+
+
+async def _agent(workspace_id: UUID, name: str) -> UUID:
+    agent_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name=name,
+                prompt="p",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return agent_id
 
 
 async def _conversation(workspace_id: UUID, member_id: UUID) -> UUID:

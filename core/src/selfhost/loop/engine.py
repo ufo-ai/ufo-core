@@ -19,6 +19,7 @@ from selfhost.accounting import (
 from selfhost.blob import BlobStore
 from selfhost.db import workspace_tx
 from selfhost.ext.context import ExtensionContext
+from selfhost.grants import GrantStore
 from selfhost.hub import CostTick, Hub, LiveFrame, Parked, Terminal
 from selfhost.loop.compaction import Compaction
 from selfhost.loop.transcript import Conversation, Transcript
@@ -101,6 +102,7 @@ class TurnEngine:
     memory: MemoryService
     member_id: UUID | None
     artifact_token_secret: str
+    grants: GrantStore | None
     attempt: str = ""
 
     async def run(self) -> TerminalFrame | None:
@@ -117,6 +119,7 @@ class TurnEngine:
                 memory=self.memory,
                 member_id=self.member_id,
                 artifact_token_secret=self.artifact_token_secret,
+                grants=self.grants,
             )
             try:
                 if not await self._mark_running():

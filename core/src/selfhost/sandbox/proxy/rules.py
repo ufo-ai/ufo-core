@@ -11,12 +11,10 @@ from uuid import UUID
 
 from selfhost.credentials import CredentialSlotUnset, CredentialStore
 from selfhost.ext.manifest import Manifest
-from selfhost.grants import Grant
+from selfhost.grants import GRANT_TOKEN_PREFIX, Grant
 from selfhost.sandbox.session import SENTINEL_MODEL_KEY
 
 GRANT_AUTH_HEADER = "authorization"
-GRANT_TOKEN_PREFIX = "Bearer "
-SENTINEL_GRANT_PREFIX = "SELFHOST_SENTINEL_GRANT_"
 GRANT_METER_DIMENSION = "requests"
 
 ANTHROPIC_HOST = "api.anthropic.com"
@@ -97,13 +95,12 @@ def derive_grant_rules(grants: tuple[Grant, ...]) -> tuple[Rule, ...]:
     `selfhost spend`. An ungranted host derives no ScopeRule, so the proxy refuses it at CONNECT."""
     rules: list[Rule] = []
     for grant in grants:
-        sentinel = f"{SENTINEL_GRANT_PREFIX}{grant.provider}_{grant.account_id}"
         rules.append(ScopeRule(allowed_hosts=frozenset({grant.host})))
         rules.append(
             InjectionRule(
                 host=grant.host,
                 header=GRANT_AUTH_HEADER,
-                sentinel=f"{GRANT_TOKEN_PREFIX}{sentinel}",
+                sentinel=grant.sentinel_header,
                 real=f"{GRANT_TOKEN_PREFIX}{grant.token}",
             )
         )
