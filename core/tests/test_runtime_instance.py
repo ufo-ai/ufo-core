@@ -160,6 +160,38 @@ async def test_a_peer_in_another_workspace_never_blocks(db: None) -> None:
     assert await _row_present(guard.instance_id)
 
 
+async def test_a_transient_error_does_not_kill_the_heartbeat_loop(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id = await _workspace()
+    instance_id = await _insert_instance(
+        workspace_id, heartbeat_age_seconds=STALE_AFTER_SECONDS + 20
+    )
+    real_tx = runtime_instance.workspace_tx
+    ticks = {"n": 0}
+
+    def flaky_tx() -> object:
+        ticks["n"] += 1
+        if ticks["n"] == 1:
+            raise sa.exc.SQLAlchemyError("transient connection reset")
+        return real_tx()
+
+    monkeypatch.setattr(runtime_instance, "workspace_tx", flaky_tx)
+    monkeypatch.setattr(runtime_instance, "HEARTBEAT_INTERVAL_SECONDS", 0.02)
+    heartbeat = Heartbeat(instance_id=instance_id, workspace_id=workspace_id)
+    task = asyncio.create_task(heartbeat.run())
+    try:
+        async with asyncio.timeout(5):
+            while True:
+                if await _row_live(instance_id):
+                    break
+                await asyncio.sleep(0.05)
+    finally:
+        task.cancel()
+    assert ticks["n"] >= 2
+    assert await _row_live(instance_id)
+
+
 async def test_heartbeat_refreshes_a_stale_row_and_retire_removes_it(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

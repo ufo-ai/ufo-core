@@ -99,7 +99,10 @@ class BootGuard:
 @dataclass(frozen=True)
 class Heartbeat:
     """Keep this instance's row fresh on an interval, and drop it on graceful shutdown so peers see
-    the seat free at once rather than waiting out the stale window."""
+    the seat free at once rather than waiting out the stale window. A transient database error on
+    one tick is logged and the loop continues — a single failed update must not kill the heartbeat
+    and let a healthy instance's row go stale, which would wrongly free the seat to a peer; only a
+    sustained outage lets the row age out, which is the correct signal that the instance is gone."""
 
     instance_id: UUID
     workspace_id: UUID
@@ -107,11 +110,18 @@ class Heartbeat:
     async def run(self) -> None:
         while True:
             await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
-            async with workspace_tx() as connection:
-                await connection.execute(
-                    sa.update(tables.runtime_instance)
-                    .values(heartbeat_at=sa.func.now(), updated_at=sa.func.now())
-                    .where(tables.runtime_instance.c.id == self.instance_id)
+            try:
+                async with workspace_tx() as connection:
+                    await connection.execute(
+                        sa.update(tables.runtime_instance)
+                        .values(heartbeat_at=sa.func.now(), updated_at=sa.func.now())
+                        .where(tables.runtime_instance.c.id == self.instance_id)
+                    )
+            except sa.exc.SQLAlchemyError as error:
+                log(
+                    "instance.heartbeat_failed",
+                    instance=str(self.instance_id),
+                    error_class=type(error).__name__,
                 )
 
     async def retire(self) -> None:
