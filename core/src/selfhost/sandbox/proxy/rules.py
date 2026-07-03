@@ -2,15 +2,21 @@
 
 Rules are values the proxy reads, not an API extensions call: a credential slot implies its
 sentinel→real injection, a granted host implies its scope, a metered host implies its dimension.
-Two derivations produce them — the deploy's model provider from its key, and each manifest
-credential slot from its stored secret — and derivation is the only path in."""
+Three derivations produce them — the deploy's model provider from its key, each manifest credential
+slot from its stored secret, and each OAuth grant from its stored token — and derivation is the only
+path in."""
 
 from dataclasses import dataclass
 from uuid import UUID
 
 from selfhost.credentials import CredentialSlotUnset, CredentialStore
 from selfhost.ext.manifest import Manifest
+from selfhost.grants import Grant
 from selfhost.sandbox.session import SENTINEL_MODEL_KEY
+
+GRANT_AUTH_HEADER = "authorization"
+GRANT_TOKEN_PREFIX = "Bearer "
+SENTINEL_GRANT_PREFIX = "SELFHOST_SENTINEL_GRANT_"
 
 ANTHROPIC_HOST = "api.anthropic.com"
 OPENAI_HOST = "api.openai.com"
@@ -81,6 +87,25 @@ def derive_model_rules(model: str, real_key: str) -> tuple[Rule, ...]:
         ),
         MeterRule(host=host, dimension="tokens"),
     )
+
+
+def derive_grant_rules(grants: tuple[Grant, ...]) -> tuple[Rule, ...]:
+    """Each active grant admits its provider's own host and swaps its stored token onto the wire for
+    the per-account sentinel the sandbox sees — the OAuth-account analog of a credential slot's
+    injection. An ungranted host derives no ScopeRule, so the proxy refuses it at CONNECT."""
+    rules: list[Rule] = []
+    for grant in grants:
+        sentinel = f"{SENTINEL_GRANT_PREFIX}{grant.provider}_{grant.account_id}"
+        rules.append(ScopeRule(allowed_hosts=frozenset({grant.host})))
+        rules.append(
+            InjectionRule(
+                host=grant.host,
+                header=GRANT_AUTH_HEADER,
+                sentinel=f"{GRANT_TOKEN_PREFIX}{sentinel}",
+                real=f"{GRANT_TOKEN_PREFIX}{grant.token}",
+            )
+        )
+    return tuple(rules)
 
 
 async def derive_credential_rules(
