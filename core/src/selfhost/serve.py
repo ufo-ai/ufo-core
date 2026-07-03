@@ -22,7 +22,7 @@ from selfhost.config import Config, load_config
 from selfhost.credentials import CredentialStore
 from selfhost.db import init_db, workspace_tx
 from selfhost.ext.context import context_for
-from selfhost.ext.loader import load_manifests, validate_ext_tools
+from selfhost.ext.loader import load_manifests, turn_subagents, validate_ext_tools
 from selfhost.ext.manifest import Manifest
 from selfhost.grants import ConnectFlow, GrantStore, OAuthProvider, install_connect_flow
 from selfhost.hub import Hub, InProcessHub
@@ -102,7 +102,7 @@ def run() -> None:
             carrier=DockerCarrier(),
             proxy=_egress_proxy(asyncio.run(_resolver(config, credentials))),
             dbos=dbos_client,
-            subagents=SubagentRegistry(()),
+            subagents=SubagentRegistry(turn_subagents(manifests)),
             manifests=manifests,
             credentials=credentials,
             memory=memory,

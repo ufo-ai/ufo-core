@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict
 
 from selfhost.credentials import CredentialStore
 from selfhost.ext.context import ExtensionContext, context_for
-from selfhost.ext.manifest import Manifest
+from selfhost.ext.manifest import Manifest, SubagentProfile
 from selfhost.memory.service import MemoryService
 from selfhost.tools.builtins import BUILTIN_TOOLS
 from selfhost.tools.registry import ToolDef, ToolRegistry
@@ -160,6 +160,13 @@ def turn_tools(
             tools.append(tool)
             ext_by_tool[tool.name] = context
     return tuple(tools), ext_by_tool
+
+
+def turn_subagents(manifests: tuple[Manifest, ...]) -> tuple[SubagentProfile, ...]:
+    """Every subagent profile the active extensions declare, in load order — the set `serve` builds
+    the SubagentRegistry from. A duplicate name across extensions is rejected by the registry at
+    construction, so boot fails loud rather than shadowing one profile with another."""
+    return tuple(profile for manifest in manifests for profile in manifest.subagents)
 
 
 def validate_ext_tools(

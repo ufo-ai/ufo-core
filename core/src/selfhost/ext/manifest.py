@@ -9,6 +9,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import KW_ONLY, dataclass
 from typing import Literal
 
+from pydantic import BaseModel
 from starlette.requests import Request
 from starlette.responses import Response
 
@@ -83,6 +84,20 @@ class OnboardingStep:
 
 
 @dataclass(frozen=True)
+class SubagentProfile:
+    """A typed subagent an extension registers. `prompt` is the child's own instructions and
+    `tool_names` the subset of the turn's tool set the child may call; a spawn validates its payload
+    against `input_model` and its final answer against `output_model`. The loader collects every
+    manifest's profiles into the SubagentRegistry `spawn_subagent` dispatches against."""
+
+    name: str
+    prompt: str
+    tool_names: tuple[str, ...]
+    input_model: type[BaseModel]
+    output_model: type[BaseModel]
+
+
+@dataclass(frozen=True)
 class Manifest:
     """What one extension declares, returned by its `selfhost.extension` entry point."""
 
@@ -95,3 +110,4 @@ class Manifest:
     credentials: tuple[CredentialSlot, ...] = ()
     connectors: tuple[ConnectorProvider, ...] = ()
     onboarding_steps: tuple[OnboardingStep, ...] = ()
+    subagents: tuple[SubagentProfile, ...] = ()

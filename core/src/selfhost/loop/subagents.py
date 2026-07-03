@@ -14,9 +14,9 @@ from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from dbos import DBOSClient, EnqueueOptions
-from pydantic import BaseModel
 
 from selfhost.db import workspace_tx
+from selfhost.ext.manifest import SubagentProfile
 from selfhost.schema import tables
 from selfhost.schema.records import (
     DBOS_APP_VERSION,
@@ -30,15 +30,6 @@ from selfhost.tools.context import SpawnResult
 
 SUBAGENT_SURFACE = "subagent"
 SUBAGENT_POLL_SECONDS = 0.1
-
-
-@dataclass(frozen=True)
-class SubagentProfile:
-    name: str
-    prompt: str
-    tool_names: tuple[str, ...]
-    input_model: type[BaseModel]
-    output_model: type[BaseModel]
 
 
 @dataclass(frozen=True)
