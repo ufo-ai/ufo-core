@@ -1,5 +1,7 @@
 """The tenancy boundary: module-private engine, workspace_tx as the only session source."""
 
+import asyncio
+import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -19,7 +21,10 @@ _engine: AsyncEngine | None = None
 
 def init_db(url: str) -> None:
     """NullPool: a pooled connection binds to one event loop, and surfaces and DBOS
-    workflows run on different loops in the same process."""
+    workflows run on different loops in the same process. The engine's one-time first-connect
+    (dialect init, guarded by the pool's first-connect mutex held across async I/O) is completed
+    here, single-threaded, before the engine is published — a first-connect driven concurrently
+    from two loops deadlocks that mutex, so an engine is never shared until it is past it."""
     global _engine
     if _engine is not None:
         raise RuntimeError("db already initialized")
@@ -27,7 +32,36 @@ def init_db(url: str) -> None:
     if engine.dialect.name == "sqlite":
         sa.event.listen(engine.sync_engine, "connect", _sqlite_on_connect)
         sa.event.listen(engine.sync_engine, "begin", _sqlite_begin_immediate)
+    _first_connect(engine)
     _engine = engine
+
+
+def _first_connect(engine: AsyncEngine) -> None:
+    """Force the engine's one-time dialect initialization on a private loop off any caller loop, so
+    it is complete before the engine is driven concurrently from multiple event loops. Runs on its
+    own thread — a fresh thread never has a running loop, so this is uniform whether init_db is
+    called from a composition root or from within a running loop — and re-raises on the caller."""
+    error: list[BaseException] = []
+
+    def run() -> None:
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(_open_and_close(engine))
+        except BaseException as caught:
+            error.append(caught)
+        finally:
+            loop.close()
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    thread.join()
+    if error:
+        raise error[0]
+
+
+async def _open_and_close(engine: AsyncEngine) -> None:
+    async with engine.connect():
+        pass
 
 
 async def dispose_db() -> None:
