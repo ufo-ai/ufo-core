@@ -158,7 +158,11 @@ async def connect(
 ) -> dict[str, str]:
     """Begin an OAuth grant: the authenticated member is the grantor, binding a provider account to
     the named agent within this session's conversation. Returns the authorize link the member opens;
-    the provider redirects to the callback, which lands the grant."""
+    the provider redirects to the callback, which lands the grant.
+
+    Deploy note: the callback `redirect_uri` is derived from the request URL, so behind a reverse
+    proxy that rewrites host/scheme the provider must be registered against the externally visible
+    callback URL (set the proxy to forward the original host/scheme)."""
     identity = await _authenticate(authorization)
     flow: ConnectFlow | None = request.app.state.connect_flow
     if flow is None:

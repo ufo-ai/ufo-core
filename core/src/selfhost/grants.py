@@ -19,8 +19,11 @@ from uuid import UUID, uuid4
 import sqlalchemy as sa
 from cryptography.fernet import Fernet, InvalidToken
 from pydantic import BaseModel
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from selfhost.db import workspace_tx
+from selfhost.o11y import log
 from selfhost.schema import tables
 
 CONNECT_STATE_TTL_SECONDS = 600
@@ -121,46 +124,50 @@ class GrantStore:
         conversation_id: UUID,
     ) -> None:
         """Upsert on (workspace, agent, provider, account): re-connecting the same account refreshes
-        its token and audit fields rather than duplicating the grant."""
+        its token and audit fields rather than duplicating the grant. One atomic insert-on-conflict,
+        so two near-simultaneous first connects of the same account settle on one row instead of
+        colliding on the unique identity — the loser updates, never raises."""
         ciphertext = self.fernet.encrypt(token.encode())
         async with workspace_tx() as connection:
-            updated = await connection.execute(
-                sa.update(tables.grant)
+            insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
+            await connection.execute(
+                insert(tables.grant)
                 .values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    agent_id=agent_id,
+                    provider=provider,
+                    account_id=account_id,
                     host=host,
                     ciphertext=ciphertext,
                     grantor_member_id=grantor_member_id,
                     conversation_id=conversation_id,
+                    created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
-                .where(
-                    tables.grant.c.workspace_id == workspace_id,
-                    tables.grant.c.agent_id == agent_id,
-                    tables.grant.c.provider == provider,
-                    tables.grant.c.account_id == account_id,
+                .on_conflict_do_update(
+                    index_elements=[
+                        tables.grant.c.workspace_id,
+                        tables.grant.c.agent_id,
+                        tables.grant.c.provider,
+                        tables.grant.c.account_id,
+                    ],
+                    set_={
+                        "host": host,
+                        "ciphertext": ciphertext,
+                        "grantor_member_id": grantor_member_id,
+                        "conversation_id": conversation_id,
+                        "updated_at": sa.func.now(),
+                    },
                 )
             )
-            if updated.rowcount == 0:
-                await connection.execute(
-                    sa.insert(tables.grant).values(
-                        id=uuid4(),
-                        workspace_id=workspace_id,
-                        agent_id=agent_id,
-                        provider=provider,
-                        account_id=account_id,
-                        host=host,
-                        ciphertext=ciphertext,
-                        grantor_member_id=grantor_member_id,
-                        conversation_id=conversation_id,
-                        created_at=sa.func.now(),
-                        updated_at=sa.func.now(),
-                    )
-                )
 
-    async def active_grants(self, workspace_id: UUID) -> tuple[Grant, ...]:
-        """Every grant this workspace holds, decrypted into the shape the proxy-rule derivation
-        reads. Workspace-scoped: the wire admits a host when any agent holds a grant for it; which
-        agent may invoke which connector is enforced above the wire, at tool dispatch."""
+    async def active_grants(self, workspace_id: UUID, agent_id: UUID) -> tuple[Grant, ...]:
+        """One agent's grants in this workspace, decrypted into the shape the proxy-rule derivation
+        reads. Agent-scoped: the per-turn resolver admits and injects only the turn's agent's own
+        grants, so agent A's rule set never carries agent B's host or token. A grant whose
+        ciphertext will not decrypt is logged and skipped — its host stays ungranted, so one corrupt
+        row denies only itself, never the agent's other grants or the proxy loop."""
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
@@ -169,18 +176,25 @@ class GrantStore:
                         tables.grant.c.account_id,
                         tables.grant.c.host,
                         tables.grant.c.ciphertext,
-                    ).where(tables.grant.c.workspace_id == workspace_id)
+                    ).where(
+                        tables.grant.c.workspace_id == workspace_id,
+                        tables.grant.c.agent_id == agent_id,
+                    )
                 )
             ).all()
-        return tuple(
-            Grant(
-                provider=row.provider,
-                account_id=row.account_id,
-                host=row.host,
-                token=self.fernet.decrypt(row.ciphertext).decode(),
+        grants: list[Grant] = []
+        for row in rows:
+            try:
+                token = self.fernet.decrypt(row.ciphertext).decode()
+            except InvalidToken:
+                log("grant.undecryptable", provider=row.provider, account_id=row.account_id)
+                continue
+            grants.append(
+                Grant(
+                    provider=row.provider, account_id=row.account_id, host=row.host, token=token
+                )
             )
-            for row in rows
-        )
+        return tuple(grants)
 
 
 @dataclass(frozen=True)
