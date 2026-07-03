@@ -50,7 +50,7 @@ from selfhost.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_c
 from selfhost.sandbox.session import ProxyEndpoint
 from selfhost.schema import tables
 from selfhost.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION
-from selfhost.surfaces.admission import Admission
+from selfhost.surfaces.admission import Admission, AdmissionInvoker
 from selfhost.surfaces.cli import CONNECT_CALLBACK_PATH, router
 from selfhost.surfaces.slack import SlackSurface, WritebackPoller
 from selfhost.surfaces.slack import router as slack_router
@@ -173,12 +173,14 @@ def _launch_jobs(
         raise RuntimeError(
             f"credential key env {config.credentials.key_env!r} is unset but jobs are registered"
         )
+    workspace_id = asyncio.run(_sole_workspace_id())
     JobRunner(
-        workspace_id=asyncio.run(_sole_workspace_id()),
+        workspace_id=workspace_id,
         credential_store=CredentialStore(fernet=Fernet(key.encode())),
         bindings=bindings,
         memory=memory,
         blob=blob,
+        invoker=AdmissionInvoker(admission=Admission(dbos=dbos_client), workspace_id=workspace_id),
     ).launch()
 
 
