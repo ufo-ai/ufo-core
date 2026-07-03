@@ -56,6 +56,7 @@ class EgressProxy:
     _server: asyncio.Server | None = field(default=None, init=False)
     _workdir: tempfile.TemporaryDirectory | None = field(default=None, init=False)
     _contexts: dict[str, ssl.SSLContext] = field(default_factory=dict, init=False)
+    _mint_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
 
     async def start(self, bind_host: str = PROXY_BIND_HOST) -> ProxyEndpoint:
         self._workdir = tempfile.TemporaryDirectory()
@@ -149,24 +150,28 @@ class EgressProxy:
         cached = self._contexts.get(host)
         if cached is not None:
             return cached
-        root = Path(self._workdir.name)
-        cert_path = root / f"leaf-{host}.crt"
-        ext_path = root / f"leaf-{host}.ext"
-        ext_path.write_text(f"subjectAltName=DNS:{host}\nextendedKeyUsage=serverAuth\n")
-        await _openssl(
-            "req", "-new", "-key", str(root / "leaf.key"),
-            "-subj", f"/CN={host}", "-out", str(root / f"leaf-{host}.csr"),
-        )
-        await _openssl(
-            "x509", "-req", "-in", str(root / f"leaf-{host}.csr"),
-            "-CA", str(root / "ca.crt"), "-CAkey", str(root / "ca.key"), "-CAcreateserial",
-            "-days", CERT_VALID_DAYS, "-extfile", str(ext_path), "-out", str(cert_path),
-        )
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.load_cert_chain(certfile=str(cert_path), keyfile=str(root / "leaf.key"))
-        context.set_alpn_protocols(["http/1.1"])
-        self._contexts[host] = context
-        return context
+        async with self._mint_lock:
+            cached = self._contexts.get(host)
+            if cached is not None:
+                return cached
+            root = Path(self._workdir.name)
+            cert_path = root / f"leaf-{host}.crt"
+            ext_path = root / f"leaf-{host}.ext"
+            ext_path.write_text(f"subjectAltName=DNS:{host}\nextendedKeyUsage=serverAuth\n")
+            await _openssl(
+                "req", "-new", "-key", str(root / "leaf.key"),
+                "-subj", f"/CN={host}", "-out", str(root / f"leaf-{host}.csr"),
+            )
+            await _openssl(
+                "x509", "-req", "-in", str(root / f"leaf-{host}.csr"),
+                "-CA", str(root / "ca.crt"), "-CAkey", str(root / "ca.key"), "-CAcreateserial",
+                "-days", CERT_VALID_DAYS, "-extfile", str(ext_path), "-out", str(cert_path),
+            )
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(certfile=str(cert_path), keyfile=str(root / "leaf.key"))
+            context.set_alpn_protocols(["http/1.1"])
+            self._contexts[host] = context
+            return context
 
     def _meter(self, host: str) -> None:
         for rule in self.rules:
