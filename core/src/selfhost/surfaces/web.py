@@ -14,6 +14,7 @@ import html
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from urllib.parse import quote
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -92,12 +93,15 @@ class WebSurface:
             data = await self.blob.get(claims.blob_key)
         except BlobNotFound as error:
             raise HTTPException(404, "artifact not found") from error
-        disposition = (
-            {"content-disposition": f'attachment; filename="{claims.filename}"'}
-            if claims.filename
-            else {}
-        )
-        return Response(data, media_type="application/octet-stream", headers=disposition)
+        headers: dict[str, str] = {}
+        if claims.filename:
+            encoded = quote(claims.filename, safe="")
+            headers["content-disposition"] = (
+                f'attachment; filename="{claims.filename}"'
+                if encoded == claims.filename
+                else f"attachment; filename*=UTF-8''{encoded}"
+            )
+        return Response(data, media_type="application/octet-stream", headers=headers)
 
     async def _authenticate(self, request: Request) -> WebIdentity:
         token = request.cookies.get(SESSION_COOKIE, "")

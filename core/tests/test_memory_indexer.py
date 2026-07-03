@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -43,6 +44,19 @@ class StubEmbed:
         return tuple(self._vector for _ in texts)
 
 
+class CountingEmbed:
+    """Counts embed calls: a double-embed is wasted model spend that the idempotent chunk upsert
+    hides, so the call count is the only witness that overlapping runs embed each row once."""
+
+    def __init__(self, vector: tuple[float, ...]) -> None:
+        self._vector = vector
+        self.calls = 0
+
+    async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+        self.calls += 1
+        return tuple(self._vector for _ in texts)
+
+
 @pytest.fixture
 async def clean(db: None, database_url: str) -> AsyncIterator[None]:
     async with workspace_tx() as connection:
@@ -67,7 +81,12 @@ def _wire(database_url: str, vector: tuple[float, ...]) -> tuple[MemoryService, 
     embed = StubEmbed(vector)
     index = index_backend_for(database_url, embed)
     service = MemoryService(index=index, embed=embed)
-    indexer = MemoryIndexer(index=index, embed=embed, chunker=TextChunker())
+    indexer = MemoryIndexer(
+        index=index,
+        embed=embed,
+        chunker=TextChunker(),
+        postgres=database_url.startswith("postgresql"),
+    )
     return service, indexer
 
 
@@ -93,6 +112,34 @@ async def test_index_job_derives_chunks_and_stamps_digest(clean: None, database_
 
     await indexer.run()
     assert await _chunk_count() == derived
+
+
+async def test_overlapping_index_runs_embed_each_row_once(clean: None, database_url: str) -> None:
+    await _workspace()
+    embed = CountingEmbed(vec((0, 1.0)))
+    index = index_backend_for(database_url, embed)
+    service = MemoryService(index=index, embed=embed)
+    postgres = database_url.startswith("postgresql")
+    bodies = tuple(f"fact number {n} worth remembering" for n in range(6))
+    for body in bodies:
+        await service.commit(MemoryWrite(subject="shared", body=body))
+
+    runs = tuple(
+        MemoryIndexer(index=index, embed=embed, chunker=TextChunker(), postgres=postgres)
+        for _ in range(2)
+    )
+    await asyncio.gather(*(indexer.run() for indexer in runs))
+
+    assert embed.calls == len(bodies)
+    async with workspace_tx() as connection:
+        pending = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.memory_item)
+                .where(tables.memory_item.c.embedding_digest.is_(None))
+            )
+        ).scalar_one()
+    assert pending == 0
 
 
 async def test_committed_fact_recalls_after_indexing(clean: None, database_url: str) -> None:
@@ -126,13 +173,14 @@ def test_memory_index_registers_as_a_core_job(database_url: str, tmp_path: Path)
     embed = StubEmbed(())
     index = index_backend_for(database_url, embed)
     blob = FilesystemBlobStore(root=tmp_path)
+    postgres = database_url.startswith("postgresql")
     specs = core_jobs(
-        MemoryIndexer(index=index, embed=embed, chunker=TextChunker()),
-        PageIndexer(index=index, embed=embed, chunker=TextChunker(), blob=blob),
+        MemoryIndexer(index=index, embed=embed, chunker=TextChunker(), postgres=postgres),
+        PageIndexer(index=index, embed=embed, chunker=TextChunker(), blob=blob, postgres=postgres),
         SyncDriver(
             backends={FOLDER_BACKEND: FolderSource()},
             blob=blob,
-            postgres=database_url.startswith("postgresql"),
+            postgres=postgres,
         ),
         SpendResume(client=None),
     )

@@ -80,12 +80,15 @@ def run() -> None:
     blob = blob_store_for(config.blob)
     artifact_secret = os.environ.get(config.artifacts.token_secret_env, "")
     memory = MemoryService(index=index, embed=embed)
-    indexer = MemoryIndexer(index=index, embed=embed, chunker=chunker)
-    page_indexer = PageIndexer(index=index, embed=embed, chunker=chunker, blob=blob)
+    postgres = config.database.url.startswith("postgresql")
+    indexer = MemoryIndexer(index=index, embed=embed, chunker=chunker, postgres=postgres)
+    page_indexer = PageIndexer(
+        index=index, embed=embed, chunker=chunker, blob=blob, postgres=postgres
+    )
     sync_driver = SyncDriver(
         backends={FOLDER_BACKEND: FolderSource()},
         blob=blob,
-        postgres=config.database.url.startswith("postgresql"),
+        postgres=postgres,
     )
     asyncio.run(register_sources(config.sources))
     hub = InProcessHub()

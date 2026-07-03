@@ -5,6 +5,7 @@ import secrets
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from email.message import Message
 from uuid import UUID, uuid4
 
 import pytest
@@ -273,6 +274,25 @@ async def test_artifact_download_serves_bytes_for_a_valid_token(
     assert response.status_code == 200
     assert response.content == b"the shared bytes"
     assert "report.txt" in response.headers["content-disposition"]
+
+
+async def test_artifact_download_escapes_special_filenames(
+    artifact_client: tuple[AsyncClient, FilesystemBlobStore],
+) -> None:
+    """A `"` would break the quoted `filename=` and a unicode name is not header-safe; both must
+    ride out as a well-formed Content-Disposition the download still serves."""
+    client, blob = artifact_client
+    for filename in ('a"quote.txt', "résumé pièce.txt"):
+        key = f"artifacts/{uuid4()}"
+        await blob.put(key, b"the bytes")
+        token = mint_artifact_token(SECRET, key, filename, _future())
+        response = await client.get("/web/artifacts/download", params={"token": token})
+        assert response.status_code == 200
+        assert response.content == b"the bytes"
+        parsed = Message()
+        parsed["content-disposition"] = response.headers["content-disposition"]
+        assert parsed.get_content_disposition() == "attachment"
+        assert parsed.get_filename() == filename
 
 
 async def test_artifact_download_rejects_missing_tampered_expired_and_out_of_namespace(
