@@ -3,17 +3,21 @@
 An extension's entry point returns a Manifest — a frozen bundle of declared points the loader reads
 and derives from, never a registration API it calls. Each point is a value object a core subsystem
 consumes: tools enter the turn's registry, routes mount under the app, jobs register on the
-scheduler, credential slots drive proxy injection."""
+scheduler, credential slots drive proxy injection, hooks fire on turn-lifecycle events as a runtime
+policy filter over the tools grants already admit."""
 
 from collections.abc import Awaitable, Callable
 from dataclasses import KW_ONLY, dataclass
 from typing import Literal
+from uuid import UUID
 
+from pydantic import BaseModel
 from starlette.requests import Request
 from starlette.responses import Response
 
 from selfhost.ext.context import ExtensionContext
 from selfhost.grants import OAuthProvider
+from selfhost.schema.records import Agent, Turn
 from selfhost.tools.registry import ToolDef
 
 
@@ -82,6 +86,100 @@ class OnboardingStep:
     handler: Callable[[ExtensionContext], Awaitable[None]]
 
 
+HookEvent = Literal["pre_tool_use", "post_tool_use", "on_inbound"]
+
+
+@dataclass(frozen=True)
+class PreToolUse:
+    """A tool call about to dispatch. `tool_input` is the validated argument model; a hook may Deny
+    the call (it never dispatches) or ModifyInput (fold the args the handler receives)."""
+
+    tool_name: str
+    tool_input: BaseModel
+
+
+@dataclass(frozen=True)
+class PostToolUse:
+    """A tool call that dispatched, including the error path (`is_error`). A hook may ModifyOutput
+    (replace the result the model sees) or InjectContext (append guidance to it)."""
+
+    tool_name: str
+    tool_input: BaseModel
+    output: str
+    is_error: bool
+
+
+@dataclass(frozen=True)
+class OnInbound:
+    """A member message opening a turn. A hook may Deny it (the turn refuses) or InjectContext
+    (append to the turn's system context — the generalized recall-injection point)."""
+
+    text: str
+
+
+HookPayload = PreToolUse | PostToolUse | OnInbound
+
+
+@dataclass(frozen=True)
+class Deny:
+    """Refuse the pending act — a pre_tool_use call or an on_inbound turn. The reason surfaces to
+    the member as the terminal frame; a tool Deny is the is_error result the model recovers from.
+    Narrow-only: Deny cannot admit a tool grants withheld, it only refuses one already admitted."""
+
+    reason: str
+
+
+@dataclass(frozen=True)
+class ModifyInput:
+    """Replace the argument model a pre_tool_use call dispatches with (pre_tool_use only)."""
+
+    tool_input: BaseModel
+
+
+@dataclass(frozen=True)
+class ModifyOutput:
+    """Replace the result a post_tool_use call returns to the model (post_tool_use only)."""
+
+    output: str
+
+
+@dataclass(frozen=True)
+class InjectContext:
+    """Append text to the turn's context — the system prompt on on_inbound, the tool result on
+    post_tool_use (on_inbound and post_tool_use only)."""
+
+    text: str
+
+
+HookOutcome = Deny | ModifyInput | ModifyOutput | InjectContext | None
+
+
+@dataclass(frozen=True)
+class HookContext:
+    """What a hook handler receives: the same workspace-scoped `ExtensionContext` a job or route
+    gets (its store, declared credential slots, memory), the frozen turn and agent it fires under,
+    the conversation's member, and the per-event payload. Deliberately no raw SandboxSession,
+    ToolContext, DB handle, spawn, admit, or invoke — a hook observes and filters, it cannot act
+    outside its scope or fire work that would re-enter the loop it runs inside."""
+
+    ext: ExtensionContext
+    turn: Turn
+    agent: Agent
+    member_id: UUID | None
+    payload: HookPayload
+
+
+@dataclass(frozen=True)
+class HookSpec:
+    """One reactive lifecycle hook. `handler` runs with the extension's scoped context on `event`;
+    for the `*_tool_use` events `tools` matches by tool name (empty = every tool). A hook is a
+    runtime policy filter over the turn's granted tools, never a second grant path."""
+
+    event: HookEvent
+    handler: Callable[[HookContext], Awaitable[HookOutcome]]
+    tools: tuple[str, ...] = ()
+
+
 @dataclass(frozen=True)
 class Manifest:
     """What one extension declares, returned by its `selfhost.extension` entry point."""
@@ -95,3 +193,4 @@ class Manifest:
     credentials: tuple[CredentialSlot, ...] = ()
     connectors: tuple[ConnectorProvider, ...] = ()
     onboarding_steps: tuple[OnboardingStep, ...] = ()
+    hooks: tuple[HookSpec, ...] = ()

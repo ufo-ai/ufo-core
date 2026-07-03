@@ -19,9 +19,14 @@ from selfhost.sdk.jobs import JobSpec
 from selfhost.sdk.manifest import (
     ConnectorProvider,
     CredentialSlot,
+    Deny,
+    HookContext,
+    HookOutcome,
+    HookSpec,
     InjectionTarget,
     Manifest,
     OnboardingStep,
+    PostToolUse,
     RouteSpec,
 )
 from selfhost.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
@@ -51,7 +56,9 @@ PROPOSAL_KEY = "job:proposal"
 ROUTE_KEY = "route:hit"
 ONBOARDING_KEY = "onboarding:done"
 CONNECTOR_KEY = "connector:called"
+HOOK_POST_KEY = "hook:post"
 PROPOSAL_SUFFIX = "\nBe concise."
+HOOK_DENY_REASON = "the sample pre_tool_use hook refuses its sentinel tool"
 
 
 class EchoInput(BaseModel):
@@ -92,6 +99,22 @@ async def _hook(ctx: ExtensionContext, request: Request) -> Response:
 
 async def _setup(ctx: ExtensionContext) -> None:
     await ctx.store.put(ONBOARDING_KEY, {"onboarded": True})
+
+
+async def _deny_echo(ctx: HookContext) -> HookOutcome:
+    """A pre_tool_use gate matched to TOOL_NAME: it refuses that call, so the tool's handler never
+    runs and never records TOOL_KEY. The probe that a Deny short-circuits before dispatch."""
+    return Deny(reason=HOOK_DENY_REASON)
+
+
+async def _record_post(ctx: HookContext) -> HookOutcome:
+    """A post_tool_use observer over every dispatched call: it records the payload through the
+    extension's own scoped store, so the test reads back through a public surface that the
+    post payload arrived. The probe that a call which was not denied reaches the post point."""
+    match ctx.payload:
+        case PostToolUse(tool_name=tool_name, is_error=is_error):
+            await ctx.ext.store.put(HOOK_POST_KEY, {"tool": tool_name, "is_error": is_error})
+    return None
 
 
 @dataclass(frozen=True)
@@ -174,5 +197,9 @@ def manifest() -> Manifest:
                     ),
                 ),
             ),
+        ),
+        hooks=(
+            HookSpec(event="pre_tool_use", handler=_deny_echo, tools=(TOOL_NAME,)),
+            HookSpec(event="post_tool_use", handler=_record_post),
         ),
     )

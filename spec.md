@@ -123,6 +123,7 @@ Manifest registers (each optional):
 | `connectors` | Provider actions behind the connector framework; OAuth via the grant flow. |
 | `sources` | Data-feed backends: `sync(cursor) -> pages` run as jobs; pages land in memory/knowledge via the derivation pipeline. Each backend is pluggable — S3, GitHub, provider APIs (via connectors), webhooks; core ships only `folder` (local files). |
 | `triggers` | Data → memory (and → invocation): hooks on source pages and platform events. |
+| `hooks` | Turn-lifecycle policy filters — `pre_tool_use`/`post_tool_use`/`on_inbound` handlers, scoped like a job, that observe, deny, modify, or inject over the tools grants already admit; a runtime filter on top of grants, never a second grant path. Distinct axis from `triggers` (data-plane). |
 | `jobs` | Recurring/one-time background work. |
 | `routes` | HTTP endpoints under `/ext/<name>/` (webhooks, OAuth callbacks, plugin UIs). |
 | `credentials` | Named BYOK slots the workspace must fill (drives onboarding). |

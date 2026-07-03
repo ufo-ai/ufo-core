@@ -11,6 +11,7 @@ from cryptography.fernet import Fernet
 
 from selfhost.blob import FilesystemBlobStore
 from selfhost.db import workspace_tx
+from selfhost.ext.loader import HookChain
 from selfhost.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
 from selfhost.hub import InProcessHub
 from selfhost.loop.compaction import COMPACTED_CONTEXT_PREFIX, Compaction
@@ -304,6 +305,7 @@ def _engine(
         sandbox=SandboxSession(carrier=carrier, handle=handle),
         tools=ToolRegistry(BUILTIN_TOOLS),
         tool_ext={},
+        hooks=HookChain(),
         blob=blob,
         spawn=_unavailable_spawn,
         memory=memory or StubMemory(),

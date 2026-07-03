@@ -12,7 +12,7 @@ from selfhost.blob import FilesystemBlobStore
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.ext.context import ExtensionContext, ScopedStore, context_for
-from selfhost.ext.loader import turn_tools, validate_ext_tools
+from selfhost.ext.loader import HookChain, turn_tools, validate_ext_tools
 from selfhost.ext.manifest import CredentialSlot, Manifest
 from selfhost.hub import InProcessHub
 from selfhost.loop.compaction import Compaction
@@ -213,6 +213,7 @@ def _engine(
         sandbox=SandboxSession(carrier=StubCarrier(), handle=handle),
         tools=ToolRegistry(tools),
         tool_ext=tool_ext,
+        hooks=HookChain(),
         blob=blob,
         spawn=_unavailable_spawn,
         memory=StubMemory(),
