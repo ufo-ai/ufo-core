@@ -99,7 +99,13 @@ def _wire(
         blob=blob,
         postgres=database_url.startswith("postgresql"),
     )
-    page_indexer = PageIndexer(index=index, embed=embed, chunker=TextChunker(), blob=blob)
+    page_indexer = PageIndexer(
+        index=index,
+        embed=embed,
+        chunker=TextChunker(),
+        blob=blob,
+        postgres=database_url.startswith("postgresql"),
+    )
     service = MemoryService(index=index, embed=embed)
     return driver, page_indexer, service
 
@@ -413,7 +419,10 @@ async def test_a_failing_source_is_isolated_and_released(
 def test_sync_and_page_index_register_as_core_jobs(database_url: str, tmp_path: Path) -> None:
     driver, page_indexer, service = _wire(database_url, (), tmp_path / "blobs")
     memory_indexer = MemoryIndexer(
-        index=service.index, embed=service.embed, chunker=TextChunker()
+        index=service.index,
+        embed=service.embed,
+        chunker=TextChunker(),
+        postgres=database_url.startswith("postgresql"),
     )
     specs = core_jobs(memory_indexer, page_indexer, driver, SpendResume(client=None))
     assert [spec.name for spec in specs] == [

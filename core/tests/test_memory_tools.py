@@ -66,7 +66,12 @@ def _wire(database_url: str, vector: tuple[float, ...]) -> tuple[MemoryService, 
     embed = StubEmbed(vector)
     index = index_backend_for(database_url, embed)
     service = MemoryService(index=index, embed=embed)
-    indexer = MemoryIndexer(index=index, embed=embed, chunker=TextChunker())
+    indexer = MemoryIndexer(
+        index=index,
+        embed=embed,
+        chunker=TextChunker(),
+        postgres=database_url.startswith("postgresql"),
+    )
     return service, indexer
 
 
