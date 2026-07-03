@@ -4,6 +4,7 @@ import json
 import secrets
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -249,6 +250,19 @@ async def _turn_row(turn_id: str) -> tuple[str, UUID]:
             )
         ).one()
     return row.status, row.conversation_id
+
+
+async def test_workspace_mount_source_is_absolute_for_a_relative_blob_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A relative blob root — the default config's `./blobs` — must still yield an absolute bind
+    mount source: Docker reads a relative `-v` source as a named volume, not a host directory, so a
+    turn would otherwise fail at container create under the shipped default config."""
+    monkeypatch.chdir(tmp_path)
+    blob = FilesystemBlobStore(root=Path("blobs"))
+    mount = await loop_queue._workspace_mount(blob, uuid4())
+    assert Path(mount.host_path).is_absolute()
+    assert await asyncio.to_thread(Path(mount.host_path).is_dir)
 
 
 async def test_turn_round_trip_bills_and_persists(surface: AsyncClient) -> None:

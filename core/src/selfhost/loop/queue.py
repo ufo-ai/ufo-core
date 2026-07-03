@@ -230,10 +230,12 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, UUID | None]:
 async def _workspace_mount(blob: BlobStore, conversation_id: UUID) -> MountSpec:
     """The container bind-mounts only the conversation's `workspace/` subtree — a sibling of the
     transcript under `conversations/<id>/`, never the transcript itself. The Docker carrier reaches
-    the workspace as a host path, so it requires the filesystem blob backend."""
+    the workspace as a host path, so it requires the filesystem blob backend, and the source is
+    absolute: Docker reads a relative `-v` source as a named volume, not a host directory, and a
+    relative blob root (the default config's `./blobs`) would otherwise fail at container create."""
     if not isinstance(blob, FilesystemBlobStore):
         raise RuntimeError("the docker sandbox requires a filesystem blob store for its workspace")
-    host_path = blob.root / "conversations" / str(conversation_id) / "workspace"
+    host_path = (blob.root / "conversations" / str(conversation_id) / "workspace").resolve()
     await asyncio.to_thread(host_path.mkdir, parents=True, exist_ok=True)
     return MountSpec(kind="filesystem", host_path=str(host_path))
 
