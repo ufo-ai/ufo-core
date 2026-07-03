@@ -6,6 +6,7 @@ here asserts a fake."""
 import base64
 import hashlib
 import json
+import os
 import shutil
 import struct
 import subprocess
@@ -107,12 +108,18 @@ def sandbox_image() -> str:
 @pytest.fixture
 def file_ctx(sandbox_image: str, tmp_path: Path) -> Iterator[tuple[ToolContext, Path]]:
     """A tool context over a live container whose /workspace is a host bind mount, so the streamed
-    `share_file` export reads the same files the tools write — the real carrier, not a stand-in."""
+    `share_file` export reads the same files the tools write — the real carrier, not a stand-in.
+
+    The container runs as the mount-owner uid, not the image's non-root `sandbox` user (uid 1000):
+    on Linux a bind mount is owned by whoever created the host dir (this test process), and uid 1000
+    cannot write it. Matching the uid keeps the mount writable without touching the confinement (the
+    `-v` mount and the workspace_path guard). The real DockerCarrier omits this, so the sandbox user
+    cannot write a serve-created workspace on Linux — a prod gap, reported in the summary."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     started = subprocess.run(
-        ["docker", "run", "-d", "--rm", "-v", f"{workspace}:/workspace", sandbox_image,
-         "sleep", "infinity"],
+        ["docker", "run", "-d", "--rm", "--user", f"{os.getuid()}:{os.getgid()}",
+         "-v", f"{workspace}:/workspace", sandbox_image, "sleep", "infinity"],
         capture_output=True,
         text=True,
         check=False,
