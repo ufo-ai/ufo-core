@@ -88,9 +88,19 @@ class SlackSurfaceConfig(BaseModel):
     bot_user_id: str
 
 
+class WebSurfaceConfig(BaseModel):
+    """The web chat surface. `artifact_token_secret_env` names the env var holding the HMAC secret
+    the surface verifies artifact delivery tokens with — the same secret `share_file` mints with."""
+
+    model_config = ConfigDict(extra="forbid")
+    enable: bool = False
+    artifact_token_secret_env: str = "SELFHOST_ARTIFACT_TOKEN_SECRET"
+
+
 class SurfacesConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     slack: SlackSurfaceConfig | None = None
+    web: WebSurfaceConfig | None = None
 
 
 class Config(BaseModel):

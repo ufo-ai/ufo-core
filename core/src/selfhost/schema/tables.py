@@ -32,7 +32,7 @@ surface_identity = sa.Table(
     sa.Column("external_id", sa.Text, primary_key=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-    sa.CheckConstraint("surface in ('cli', 'slack')", name="surface_identity_surface"),
+    sa.CheckConstraint("surface in ('cli', 'slack', 'web')", name="surface_identity_surface"),
 )
 
 agent = sa.Table(
@@ -59,7 +59,9 @@ conversation = sa.Table(
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint("surface", "queue_key"),
-    sa.CheckConstraint("surface in ('cli', 'subagent', 'slack')", name="conversation_surface"),
+    sa.CheckConstraint(
+        "surface in ('cli', 'subagent', 'slack', 'web')", name="conversation_surface"
+    ),
 )
 
 turn = sa.Table(

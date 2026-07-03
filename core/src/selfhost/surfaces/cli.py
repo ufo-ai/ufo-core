@@ -1,6 +1,5 @@
 """The CLI surface: bearer-token identity, turn admission, live stream, cancel."""
 
-import asyncio
 import hashlib
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -13,14 +12,14 @@ from fastapi.responses import StreamingResponse
 
 from selfhost.db import workspace_tx
 from selfhost.governance import Governance
-from selfhost.hub import Hub, LiveFrame, Terminal
+from selfhost.hub import Hub, Terminal
 from selfhost.o11y import log
 from selfhost.schema import tables
 from selfhost.schema.records import DEFAULT_AGENT_NAME, TerminalFrame
 from selfhost.surfaces.admission import Admission
+from selfhost.surfaces.hub_tail import tail_frames, terminal_frame
 
 MAX_INBOUND_CHARS = 200_000
-TERMINAL_POLL_SECONDS = 1.0
 CORE_PROPOSER = "core"
 
 router = APIRouter(prefix="/v1")
@@ -121,7 +120,7 @@ async def cancel_turn(
         client: DBOSClient = request.app.state.dbos
         await client.cancel_workflow_async(str(turn_id))
         return {"status": "cancelled"}
-    stored = await _terminal_frame(turn_id)
+    stored = await terminal_frame(turn_id)
     if stored is None:
         raise HTTPException(409, "turn could not be cancelled")
     return {"status": stored.status}
@@ -196,49 +195,5 @@ async def _require_turn(turn_id: UUID, identity: CliIdentity) -> None:
 
 
 async def _frame_lines(hub: Hub, turn_id: UUID) -> AsyncIterator[bytes]:
-    frames: asyncio.Queue[LiveFrame] = asyncio.Queue()
-    pump = asyncio.ensure_future(_pump(hub, turn_id, frames))
-    poll = asyncio.ensure_future(_poll_terminal(turn_id, frames))
-    try:
-        stored = await _terminal_frame(turn_id)
-        if stored is not None:
-            yield _line(Terminal(frame=stored))
-            return
-        while True:
-            frame = await frames.get()
-            yield _line(frame)
-            if isinstance(frame, Terminal):
-                return
-    finally:
-        pump.cancel()
-        poll.cancel()
-
-
-async def _pump(hub: Hub, turn_id: UUID, frames: asyncio.Queue[LiveFrame]) -> None:
-    async for frame in hub.subscribe(turn_id):
-        await frames.put(frame)
-
-
-async def _poll_terminal(turn_id: UUID, frames: asyncio.Queue[LiveFrame]) -> None:
-    while True:
-        await asyncio.sleep(TERMINAL_POLL_SECONDS)
-        frame = await _terminal_frame(turn_id)
-        if frame is not None:
-            await frames.put(Terminal(frame=frame))
-            return
-
-
-async def _terminal_frame(turn_id: UUID) -> TerminalFrame | None:
-    async with workspace_tx() as connection:
-        row = (
-            await connection.execute(
-                sa.select(tables.turn.c.terminal).where(tables.turn.c.id == turn_id)
-            )
-        ).one_or_none()
-    if row is None or row.terminal is None:
-        return None
-    return TerminalFrame.model_validate(row.terminal)
-
-
-def _line(frame: LiveFrame) -> bytes:
-    return frame.model_dump_json().encode() + b"\n"
+    async for frame in tail_frames(hub, turn_id):
+        yield frame.model_dump_json().encode() + b"\n"
