@@ -16,6 +16,7 @@ from httpx import ASGITransport, AsyncClient
 
 from selfhost.accounting import record_egress_request, record_turn_usage
 from selfhost.artifact_token import (
+    ARTIFACT_KEY_PREFIX,
     ArtifactTokenError,
     mint_artifact_token,
     verify_artifact_token,
@@ -30,12 +31,10 @@ from selfhost.memory.service import SHARED_SUBJECT, member_subject, recall_subje
 from selfhost.models.interface import ModelEvent, ModelRequest, TextDelta
 from selfhost.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
 from selfhost.schema import tables
-from selfhost.schema.records import Agent, TerminalFrame, Turn, Usage
+from selfhost.schema.records import TerminalFrame, Usage
 from selfhost.surfaces.admission import Admission
 from selfhost.surfaces.web import SESSION_COOKIE, WebSurface
 from selfhost.surfaces.web import router as web_router
-from selfhost.tools.builtins import ShareFileInput, share_file_handler
-from selfhost.tools.context import ToolContext
 
 SECRET = "artifact-signing-secret"
 STREAM_TIMEOUT_SECONDS = 30
@@ -322,50 +321,17 @@ async def test_artifact_download_rejects_missing_tampered_expired_and_out_of_nam
     assert outside.status_code == 403
 
 
-@dataclass(frozen=True)
-class _ProducedFile:
-    """A byte source standing in for the carrier-backed sandbox (which needs Docker): share_file
-    reads through it, and the test asserts on the bytes the real download endpoint returns."""
-
-    content: bytes
-
-    async def read_file(self, path: str) -> bytes:
-        return self.content
-
-
-async def _unused_spawn(profile: str, payload: dict[str, object], background: bool = False) -> None:
-    raise RuntimeError("spawn is not wired in this test")
-
-
-async def test_share_file_mints_a_token_the_download_endpoint_serves(
+async def test_download_endpoint_serves_a_minted_artifact(
     artifact_client: tuple[AsyncClient, FilesystemBlobStore],
 ) -> None:
+    """The download endpoint is the consumer of a share_file token: bytes under an artifacts key
+    plus a valid token serve. `share_file` producing that token+blob is proven end-to-end against a
+    real container in test_file_tools; here the token is minted directly to keep this non-Docker."""
     client, blob = artifact_client
-    context = ToolContext(
-        sandbox=_ProducedFile(b"produced report bytes"),
-        blob=blob,
-        turn=Turn(
-            id=uuid4(),
-            workspace_id=uuid4(),
-            conversation_id=uuid4(),
-            agent_id=uuid4(),
-            seq=1,
-            status="running",
-            inbound="make a report",
-        ),
-        agent=Agent(prompt="p", model="claude-opus-4-8"),
-        spawn=_unused_spawn,
-        memory=StubMemory(),
-        member_id=None,
-        artifact_token_secret=SECRET,
-    )
-    result = await share_file_handler(context, ShareFileInput(path="report.txt"))
-    url = result.content[0].text
-    assert url.startswith("/web/artifacts/download?token=")
-    token = url.split("token=", 1)[1]
-    claims = verify_artifact_token(token, SECRET, datetime.now(UTC))
-    assert claims.blob_key.startswith("artifacts/")
-    assert claims.blob_key.endswith("/report.txt")
+    key = f"{ARTIFACT_KEY_PREFIX}{uuid4()}/report.txt"
+    await blob.put(key, b"produced report bytes")
+    now = datetime.now(UTC)
+    token = mint_artifact_token(SECRET, key, "report.txt", int(now.timestamp()) + 100)
     response = await client.get("/web/artifacts/download", params={"token": token})
     assert response.status_code == 200
     assert response.content == b"produced report bytes"

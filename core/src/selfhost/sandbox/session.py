@@ -6,11 +6,14 @@ tool. The invariant the session exists to hold: a tool reaches only the conversa
 `workspace/` subtree, never the transcript or compaction records above it."""
 
 import base64
+import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Protocol
 from uuid import UUID
+
+from selfhost.blob import BlobStore
 
 WORKSPACE_DIR = "/workspace"
 DEFAULT_EXEC_TIMEOUT_SECONDS = 120
@@ -82,10 +85,13 @@ class SandboxSpec:
 
 @dataclass(frozen=True)
 class SandboxHandle:
-    """An opaque reference to a created-or-attached container; the carrier reads it, not tools."""
+    """An opaque reference to a created-or-attached container; the carrier reads it, not tools. It
+    carries the workspace `mount` so the carrier can stream a produced file straight out of the
+    mount on `export` without a whole-file read across the boundary."""
 
     conversation_id: UUID
     container_id: str
+    mount: MountSpec | None = None
 
 
 @dataclass(frozen=True)
@@ -105,6 +111,13 @@ class Carrier(Protocol):
     async def exec(
         self, handle: SandboxHandle, argv: tuple[str, ...], stdin: bytes, timeout_s: int
     ) -> ExecResult: ...
+
+    async def export(self, handle: SandboxHandle, path: str, blob: BlobStore, key: str) -> None:
+        """Stream a workspace file straight into `blob` under `key`, never buffering it whole in the
+        host process — the large-attachment path that must not hit the bounded in-memory read. Each
+        carrier supplies its own copy-out (the Docker carrier reads its bind mount; a remote carrier
+        streams from its own API)."""
+        ...
 
     async def destroy(self, handle: SandboxHandle) -> None: ...
 
@@ -174,6 +187,46 @@ class SandboxSession:
         )
         if result.exit_code != 0:
             raise OSError(result.stderr.strip() or f"write failed: {path}")
+
+    async def file_exists(self, path: str) -> bool:
+        target = workspace_path(path)
+        result = await self.carrier.exec(
+            self.handle, ("sh", "-c", 'test -f "$1"', "sh", target), stdin=b"", timeout_s=30
+        )
+        return result.exit_code == 0
+
+    async def run_sbxfs(self, op: str, args: dict[str, object]) -> dict[str, object]:
+        """Run one in-sandbox file op through the `sbxfs` CLI and return its parsed JSON. The work
+        (windowing, ripgrep, poppler render) runs inside the container and comes back as one bounded
+        JSON object, so the host never pulls a whole file across the boundary to loop over it. A
+        `path` arg is workspace-scoped here so every op inherits the same subtree guard. A handled
+        `{"error": …}` surfaces as a ValueError — a recoverable tool error to the model."""
+        params = dict(args)
+        raw_path = params.get("path")
+        if isinstance(raw_path, str):
+            params["path"] = workspace_path(raw_path)
+        result = await self.carrier.exec(
+            self.handle,
+            ("sbxfs", op, json.dumps(params, separators=(",", ":"))),
+            stdin=b"",
+            timeout_s=DEFAULT_EXEC_TIMEOUT_SECONDS,
+        )
+        stdout = result.stdout.strip()
+        if not stdout:
+            raise RuntimeError(result.stderr.strip() or f"sbxfs {op} produced no output")
+        try:
+            parsed = json.loads(stdout)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(result.stderr.strip() or stdout) from error
+        if not isinstance(parsed, dict):
+            raise RuntimeError(f"sbxfs {op} did not return a JSON object")
+        failure = parsed.get("error")
+        if isinstance(failure, str):
+            raise ValueError(failure)
+        return parsed
+
+    async def export_file(self, path: str, blob: BlobStore, key: str) -> None:
+        await self.carrier.export(self.handle, workspace_path(path), blob, key)
 
 
 SandboxFactory = Callable[[UUID], Awaitable[SandboxSession]]

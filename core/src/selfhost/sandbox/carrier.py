@@ -10,9 +10,12 @@ on the wire, so the raw credential never enters the sandbox."""
 
 import asyncio
 from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 
+from selfhost.blob import BlobStore
 from selfhost.sandbox.session import (
     SENTINEL_MODEL_KEY,
+    WORKSPACE_DIR,
     ExecResult,
     SandboxHandle,
     SandboxSpec,
@@ -50,7 +53,9 @@ class DockerCarrier:
         name = f"{CONTAINER_NAME_PREFIX}{spec.conversation_id}"
         running = await self._running_id(name)
         if running is not None:
-            return SandboxHandle(conversation_id=spec.conversation_id, container_id=running)
+            return SandboxHandle(
+                conversation_id=spec.conversation_id, container_id=running, mount=spec.mount
+            )
         await self._ensure_network()
         proxy_url = f"http://{spec.run_token}:@{HOST_GATEWAY_NAME}:{spec.proxy.port}"
         argv = [
@@ -84,7 +89,9 @@ class DockerCarrier:
             raise RuntimeError(f"docker run failed: {stderr.decode().strip()}")
         container_id = stdout.decode().strip()
         await self._install_ca(container_id, spec.proxy.ca_cert)
-        return SandboxHandle(conversation_id=spec.conversation_id, container_id=container_id)
+        return SandboxHandle(
+            conversation_id=spec.conversation_id, container_id=container_id, mount=spec.mount
+        )
 
     async def exec(
         self, handle: SandboxHandle, argv: tuple[str, ...], stdin: bytes, timeout_s: int
@@ -97,6 +104,17 @@ class DockerCarrier:
             stderr=stderr.decode(errors="replace"),
             exit_code=code,
         )
+
+    async def export(self, handle: SandboxHandle, path: str, blob: BlobStore, key: str) -> None:
+        """The workspace is a host bind mount, so the produced file already lives at
+        `host_path/<rel>` — hand that path to the blob store, which streams it in (a filesystem
+        copy, an S3 multipart upload) without the host process ever holding the bytes whole. No
+        read cap applies: this is the large-attachment path, distinct from the bounded read."""
+        mount = handle.mount
+        if mount is None or mount.kind != "filesystem" or mount.host_path is None:
+            raise RuntimeError("docker export requires a filesystem workspace mount")
+        rel = PurePosixPath(path).relative_to(WORKSPACE_DIR)
+        await blob.put_file(key, Path(mount.host_path) / rel)
 
     async def destroy(self, handle: SandboxHandle) -> None:
         await _docker("rm", "-f", handle.container_id)

@@ -20,5 +20,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && mkdir -p /workspace \
     && chown sandbox:sandbox /workspace
 
+COPY sbxfs /usr/local/bin/sbxfs
+RUN chmod 0755 /usr/local/bin/sbxfs
+
 USER sandbox
 WORKDIR /workspace

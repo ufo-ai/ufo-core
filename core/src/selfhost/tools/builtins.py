@@ -2,15 +2,20 @@
 memory_update.
 
 Each file/shell handler reaches the workspace only through `ctx.sandbox`, so the carrier's scoping
-and egress rules apply whether a byte arrives via a shell command or a file op. `read` records every
-path it returns so `edit` can refuse to touch a file the turn has not read — the guard that keeps a
-blind string-replace from clobbering content the model never saw. `share_file` takes a workspace
-file's bytes into the blob store under `artifacts/<uuid>/` and returns a TTL-token URL the web
-surface serves — the only path that hands a produced file back outside the sandbox. `spawn_subagent`
-delegates a typed subtask to a child turn through `ctx.spawn`. `memory_search` recalls facts and
-searches synced source pages through `ctx.memory`, and `memory_update` commits — both scoped to the
-conversation's subject (`{member, shared}`)."""
+and egress rules apply whether a byte arrives via a shell command or a file op. `read`, `edit`, and
+`write` run the in-sandbox `sbxfs` CLI, so windowing, ripgrep, and PDF/image render happen in the
+container and only a bounded JSON result crosses back — the host never pulls a whole file over to
+loop on it. `read` records every path it returns so `edit`/`write` can refuse to touch a file the
+turn has not read — the guard that keeps a blind string-replace from clobbering content the model
+never saw. `share_file` streams a produced workspace file straight out of the mount into the blob
+store under `artifacts/<uuid>/` and returns a TTL-token URL the web surface serves — the only path
+that hands a file back outside the sandbox, with no read cap and no whole-file buffer.
+`spawn_subagent` delegates a typed subtask to a child turn through `ctx.spawn`. `memory_search`
+recalls facts and searches synced source pages through `ctx.memory`, and `memory_update` commits —
+both scoped to the conversation's subject (`{member, shared}`)."""
 
+import json
+import shlex
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import Any
@@ -25,14 +30,34 @@ from selfhost.artifact_token import (
 )
 from selfhost.grants import installed_connect_flow
 from selfhost.memory.service import SHARED_SUBJECT, member_subject, recall_subjects
+from selfhost.sandbox.session import workspace_path
 from selfhost.schema.records import FACT, ItemClass, MemoryWrite
 from selfhost.tools.context import TextContent, ToolContext, ToolResult
 from selfhost.tools.registry import ToolDef
 
-DEFAULT_READ_LIMIT = 2000
 MEMORY_SEARCH_LIMIT = 8
 ARTIFACT_DOWNLOAD_PATH = "/web/artifacts/download"
 ARTIFACT_FALLBACK_NAME = "download"
+SHARE_PREFLIGHT_TIMEOUT_SECONDS = 300
+
+SHARE_PREFLIGHT_PROG = """
+import hashlib, json, sys
+path = sys.argv[1]
+h = hashlib.sha256()
+size = 0
+head = b""
+with open(path, "rb") as f:
+    while True:
+        chunk = f.read(1048576)
+        if not chunk:
+            break
+        if len(head) < 4096:
+            head += chunk[: 4096 - len(head)]
+        size += len(chunk)
+        h.update(chunk)
+stat = {"size": size, "digest": "sha256:" + h.hexdigest(), "is_text": b"\\x00" not in head}
+print(json.dumps(stat))
+"""
 
 
 class BashInput(BaseModel):
@@ -40,25 +65,30 @@ class BashInput(BaseModel):
 
 
 class ReadInput(BaseModel):
-    path: str
-    offset: int = 0
-    limit: int = DEFAULT_READ_LIMIT
+    file_path: str
+    offset: int | None = None
+    limit: int | None = None
 
 
 class WriteInput(BaseModel):
-    path: str
+    file_path: str
     content: str
 
 
-class EditInput(BaseModel):
-    path: str
+class FileEdit(BaseModel):
     old_string: str
     new_string: str
+    replace_all: bool = False
+
+
+class EditInput(BaseModel):
+    file_path: str
+    edits: tuple[FileEdit, ...] = Field(min_length=1)
 
 
 class ShareFileInput(BaseModel):
-    path: str
-    filename: str | None = None
+    file_path: str
+    name: str | None = None
 
 
 class SpawnSubagentInput(BaseModel):
@@ -92,50 +122,108 @@ async def bash_handler(ctx: ToolContext, args: BashInput) -> ToolResult:
 
 
 async def read_handler(ctx: ToolContext, args: ReadInput) -> ToolResult:
-    lines = (await ctx.sandbox.read_file(args.path)).decode().splitlines()
-    ctx.read_paths.add(args.path)
-    window = lines[args.offset : args.offset + args.limit]
-    if not window:
-        text = f"(no lines at offset {args.offset}; file has {len(lines)} lines)"
-    else:
-        text = "\n".join(window)
-    return ToolResult(content=(TextContent(text=text),))
+    params: dict[str, object] = {"path": args.file_path}
+    if args.offset is not None:
+        params["offset"] = args.offset
+    if args.limit is not None:
+        params["limit"] = args.limit
+    result = await ctx.sandbox.run_sbxfs("read", params)
+    ctx.read_paths.add(args.file_path)
+    if result.get("type") in ("image", "pdf"):
+        return ToolResult(content=(TextContent(text=json.dumps(result)),))
+    if result.get("is_empty"):
+        return ToolResult(content=(TextContent(text="(file is empty)"),))
+    start = result.get("start_line")
+    total = result.get("total_lines")
+    returned = result.get("lines_returned")
+    if not (isinstance(start, int) and isinstance(total, int) and isinstance(returned, int)):
+        raise RuntimeError("sbxfs read returned a malformed text result")
+    if returned == 0:
+        return ToolResult(
+            content=(TextContent(text=f"(no lines at offset {start}; file has {total} lines)"),)
+        )
+    content = result.get("content")
+    if not isinstance(content, str):
+        raise RuntimeError("sbxfs read returned no content")
+    footer = f"\n\n[lines {start}-{start + returned - 1} of {total}]"
+    remaining = result.get("remaining_lines")
+    if isinstance(remaining, int) and not isinstance(remaining, bool) and remaining > 0:
+        footer += f"; {remaining} more - read with offset={result.get('next_offset')}"
+    return ToolResult(content=(TextContent(text=content + footer),))
 
 
 async def write_handler(ctx: ToolContext, args: WriteInput) -> ToolResult:
-    await ctx.sandbox.write_file(args.path, args.content.encode())
-    return ToolResult(content=(TextContent(text=f"wrote {args.path}"),))
+    existed = await ctx.sandbox.file_exists(args.file_path)
+    if existed and args.file_path not in ctx.read_paths:
+        raise ValueError(f"file {args.file_path} must be read before it is written")
+    data = args.content.encode()
+    await ctx.sandbox.write_file(args.file_path, data)
+    ctx.read_paths.add(args.file_path)
+    trailing = 1 if data and not data.endswith(b"\n") else 0
+    return ToolResult(
+        content=(
+            TextContent(
+                text=json.dumps(
+                    {
+                        "path": args.file_path,
+                        "created": not existed,
+                        "size_bytes": len(data),
+                        "lines": args.content.count("\n") + trailing,
+                    }
+                )
+            ),
+        )
+    )
 
 
 async def edit_handler(ctx: ToolContext, args: EditInput) -> ToolResult:
-    if args.path not in ctx.read_paths:
-        raise ValueError(f"file {args.path} must be read before it is edited")
-    current = (await ctx.sandbox.read_file(args.path)).decode()
-    occurrences = current.count(args.old_string)
-    if occurrences == 0:
-        raise ValueError(f"old_string not found in {args.path}")
-    if occurrences > 1:
-        raise ValueError(f"old_string is not unique in {args.path}: {occurrences} occurrences")
-    updated = current.replace(args.old_string, args.new_string)
-    await ctx.sandbox.write_file(args.path, updated.encode())
-    return ToolResult(content=(TextContent(text=f"edited {args.path}"),))
+    if args.file_path not in ctx.read_paths:
+        raise ValueError(f"file {args.file_path} must be read before it is edited")
+    edits = [
+        {"old_string": e.old_string, "new_string": e.new_string, "replace_all": e.replace_all}
+        for e in args.edits
+    ]
+    result = await ctx.sandbox.run_sbxfs("edit", {"path": args.file_path, "edits": edits})
+    return ToolResult(content=(TextContent(text=json.dumps(result)),))
 
 
 async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResult:
-    """Store a workspace file as an artifact under `artifacts/<uuid>/<sanitized-name>` and mint a
-    TTL download token. The returned URL is served only where a delivery surface (the web surface)
-    is mounted. The sandbox read is raw bytes, so any file — text or binary — round-trips exactly;
-    a file over the read cap is refused rather than streamed into memory."""
+    """Stream a produced workspace file into the artifact store under `artifacts/<uuid>/<name>` and
+    mint a TTL download token the web surface serves — the only path a produced file leaves the
+    sandbox. A preflight in the container streams the file to derive its size and sha256 without
+    loading it whole; the carrier then copies it out of the workspace mount into the blob store the
+    same way, so any file type and size shares without a read cap or a whole-file host buffer."""
     if not ctx.artifact_token_secret:
         raise RuntimeError("artifact sharing is not configured (no artifact token secret set)")
-    data = await ctx.sandbox.read_file(args.path)
-    basename = PurePosixPath((args.filename or args.path).replace("\\", "/")).name
+    scoped = workspace_path(args.file_path)
+    preflight = await ctx.sandbox.bash(
+        f"python3 -c {shlex.quote(SHARE_PREFLIGHT_PROG)} {shlex.quote(scoped)}",
+        timeout_s=SHARE_PREFLIGHT_TIMEOUT_SECONDS,
+    )
+    if preflight.exit_code != 0:
+        raise RuntimeError(preflight.stderr.strip() or "artifact preflight failed")
+    stat = json.loads(preflight.stdout)
+    basename = PurePosixPath((args.name or args.file_path).replace("\\", "/")).name
     safe_name = basename if basename not in ("", ".", "..") else ARTIFACT_FALLBACK_NAME
     key = f"{ARTIFACT_KEY_PREFIX}{uuid4()}/{safe_name}"
-    await ctx.blob.put(key, data)
+    await ctx.sandbox.export_file(args.file_path, ctx.blob, key)
     expires_at = int(datetime.now(UTC).timestamp()) + ARTIFACT_TOKEN_TTL_SECONDS
     token = mint_artifact_token(ctx.artifact_token_secret, key, safe_name, expires_at)
-    return ToolResult(content=(TextContent(text=f"{ARTIFACT_DOWNLOAD_PATH}?token={token}"),))
+    return ToolResult(
+        content=(
+            TextContent(
+                text=json.dumps(
+                    {
+                        "url": f"{ARTIFACT_DOWNLOAD_PATH}?token={token}",
+                        "name": safe_name,
+                        "size_bytes": int(stat["size"]),
+                        "digest": str(stat["digest"]),
+                        "is_text": bool(stat["is_text"]),
+                    }
+                )
+            ),
+        )
+    )
 
 
 async def spawn_subagent_handler(ctx: ToolContext, args: SpawnSubagentInput) -> ToolResult:
@@ -199,31 +287,44 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
     ),
     ToolDef(
         name="read",
-        description="Read a workspace file, returning a line window from offset up to limit lines.",
+        description=(
+            "Reads a file from the workspace. Returns up to 2000 lines by default; use "
+            "offset/limit for large files. Lines longer than 2000 chars are truncated. For "
+            "images: returns visual content for analysis. For PDFs: extracts text and renders "
+            "page images (default 20 pages). Cannot read binary files."
+        ),
         input_model=ReadInput,
         handler=read_handler,
     ),
     ToolDef(
         name="write",
-        description="Write content to a workspace file, creating or overwriting it.",
+        description=(
+            "Create a file in workspace storage at a given path. Does NOT send to user — call "
+            "share_file afterward to share it. Use for creating new files; use edit for modifying "
+            "existing ones."
+        ),
         input_model=WriteInput,
         handler=write_handler,
     ),
     ToolDef(
         name="edit",
-        description="Replace a unique string in a workspace file that has already been read.",
+        description=(
+            "Performs exact string replacements in files. An edit FAILS if old_string is not "
+            "unique in the file (unless replace_all=true). Multiple edits are applied "
+            "sequentially; all must succeed or none are applied."
+        ),
         input_model=EditInput,
         handler=edit_handler,
     ),
     ToolDef(
         name="share_file",
         description=(
-            "Share a workspace file the agent produced as a downloadable link: read its bytes, "
-            "store them as an artifact, and return a time-limited URL to hand back to the user — "
-            "the only way to deliver a produced file outside the sandbox. Any file type works "
-            "(reports, code, csv, json, images, PDFs); a file larger than the sandbox read cap is "
-            "refused. `filename` sets the download name; any directory components in it are "
-            "stripped."
+            "Send a file to the user as a downloadable link. The ONLY way to make a produced file "
+            "visible outside the sandbox — the user CANNOT see a workspace file until this is "
+            "called. The file must be under the /workspace directory. Any file type and size works "
+            "(reports, code, csv, json, images, PDFs, large archives); it is streamed out, never "
+            "read whole into memory. `name` sets the download name; any directory components in it "
+            "are stripped."
         ),
         input_model=ShareFileInput,
         handler=share_file_handler,

@@ -1,11 +1,9 @@
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
-from selfhost.artifact_token import verify_artifact_token
 from selfhost.blob import FilesystemBlobStore
 from selfhost.sandbox.session import ExecResult
 from selfhost.schema.records import Agent, Turn
@@ -19,13 +17,12 @@ ARTIFACT_SECRET = "tools-test-secret"
 
 @dataclass
 class FakeSandbox:
-    """A stand-in for the carrier-backed session: shell output is scripted, files live in a dict.
+    """A stand-in for the carrier-backed session for the handler logic that never reaches the
+    sandbox: `bash` output is scripted, and `run_sbxfs` raises so a guard test proves the read
+    guard short-circuits before any file op runs. The sbxfs-backed behavior (windowing, edits,
+    streamed share) is proven against a real container in test_file_tools, never against this
+    stand-in."""
 
-    It exists so the builtin handlers can be driven without Docker; tests assert the handlers'
-    behavior (combined output, the EOF marker, the read-before-edit guard, unique replace), never
-    the stand-in itself."""
-
-    files: dict[str, bytes] = field(default_factory=dict)
     bash_result: ExecResult = field(
         default_factory=lambda: ExecResult(stdout="", stderr="", exit_code=0)
     )
@@ -33,14 +30,8 @@ class FakeSandbox:
     async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
         return self.bash_result
 
-    async def read_file(self, path: str) -> bytes:
-        try:
-            return self.files[path]
-        except KeyError as error:
-            raise FileNotFoundError(path) from error
-
-    async def write_file(self, path: str, content: bytes) -> None:
-        self.files[path] = content
+    async def run_sbxfs(self, op: str, args: dict[str, object]) -> dict[str, object]:
+        raise AssertionError(f"run_sbxfs({op}) must not run once a guard has rejected the call")
 
 
 async def _unavailable_spawn(
@@ -139,91 +130,19 @@ async def test_bash_zero_exit_is_not_error(tmp_path: Path) -> None:
     assert result.content[0].text == "ok"
 
 
-async def test_read_windows_and_records_path(tmp_path: Path) -> None:
-    sandbox = FakeSandbox(files={"notes.txt": b"a\nb\nc\nd"})
-    ctx = make_context(sandbox, tmp_path)
-    result = await run("read", ctx, path="notes.txt", offset=1, limit=2)
-    assert result.content[0].text == "b\nc"
-    assert "notes.txt" in ctx.read_paths
-
-
-async def test_read_offset_past_eof_returns_marker(tmp_path: Path) -> None:
-    sandbox = FakeSandbox(files={"notes.txt": b"a\nb\nc"})
-    ctx = make_context(sandbox, tmp_path)
-    result = await run("read", ctx, path="notes.txt", offset=5)
-    assert result.content[0].text == "(no lines at offset 5; file has 3 lines)"
-
-
-async def test_write_persists_encoded_content(tmp_path: Path) -> None:
-    sandbox = FakeSandbox()
-    ctx = make_context(sandbox, tmp_path)
-    await run("write", ctx, path="out.txt", content="hello")
-    assert sandbox.files["out.txt"] == b"hello"
-
-
 async def test_edit_requires_read_before_write(tmp_path: Path) -> None:
-    sandbox = FakeSandbox(files={"code.py": b"x = 1"})
-    ctx = make_context(sandbox, tmp_path)
+    ctx = make_context(FakeSandbox(), tmp_path)
     with pytest.raises(ValueError, match="must be read before it is edited"):
-        await run("edit", ctx, path="code.py", old_string="x = 1", new_string="x = 2")
-
-
-async def test_edit_replaces_unique_string(tmp_path: Path) -> None:
-    sandbox = FakeSandbox(files={"code.py": b"x = 1\ny = 2"})
-    ctx = make_context(sandbox, tmp_path)
-    await run("read", ctx, path="code.py")
-    await run("edit", ctx, path="code.py", old_string="x = 1", new_string="x = 9")
-    assert sandbox.files["code.py"] == b"x = 9\ny = 2"
-
-
-async def test_edit_rejects_non_unique_string(tmp_path: Path) -> None:
-    sandbox = FakeSandbox(files={"code.py": b"n = n"})
-    ctx = make_context(sandbox, tmp_path)
-    await run("read", ctx, path="code.py")
-    with pytest.raises(ValueError, match="not unique"):
-        await run("edit", ctx, path="code.py", old_string="n", new_string="m")
-
-
-async def test_edit_rejects_missing_string(tmp_path: Path) -> None:
-    sandbox = FakeSandbox(files={"code.py": b"x = 1"})
-    ctx = make_context(sandbox, tmp_path)
-    await run("read", ctx, path="code.py")
-    with pytest.raises(ValueError, match="not found"):
-        await run("edit", ctx, path="code.py", old_string="zzz", new_string="q")
-
-
-async def test_share_file_stores_bytes_and_returns_a_verifiable_url(tmp_path: Path) -> None:
-    sandbox = FakeSandbox(files={"report.txt": b"the produced report"})
-    ctx = make_context(sandbox, tmp_path)
-    result = await run("share_file", ctx, path="report.txt")
-    url = result.content[0].text
-    assert url.startswith("/web/artifacts/download?token=")
-    token = url.split("token=", 1)[1]
-    claims = verify_artifact_token(token, ARTIFACT_SECRET, datetime.now(UTC))
-    parts = claims.blob_key.split("/")
-    assert parts[0] == "artifacts" and len(parts) == 3 and parts[-1] == "report.txt"
-    assert await ctx.blob.get(claims.blob_key) == b"the produced report"
-
-
-async def test_share_file_confines_a_traversal_filename_to_the_artifact_namespace(
-    tmp_path: Path,
-) -> None:
-    sandbox = FakeSandbox(files={"report.txt": b"data"})
-    ctx = make_context(sandbox, tmp_path)
-    for hostile, expected in (("../../conversations/x", "x"), ("/etc/passwd", "passwd")):
-        result = await run("share_file", ctx, path="report.txt", filename=hostile)
-        token = result.content[0].text.split("token=", 1)[1]
-        claims = verify_artifact_token(token, ARTIFACT_SECRET, datetime.now(UTC))
-        parts = claims.blob_key.split("/")
-        assert parts[0] == "artifacts"
-        assert ".." not in parts
-        assert parts[-1] == expected
-        assert claims.filename == expected
+        await run(
+            "edit",
+            ctx,
+            file_path="code.py",
+            edits=[{"old_string": "x = 1", "new_string": "x = 2"}],
+        )
 
 
 async def test_share_file_without_a_secret_fails_loud_and_writes_nothing(tmp_path: Path) -> None:
-    sandbox = FakeSandbox(files={"report.txt": b"data"})
-    ctx = make_context(sandbox, tmp_path, artifact_secret="")
+    ctx = make_context(FakeSandbox(), tmp_path, artifact_secret="")
     with pytest.raises(RuntimeError, match="not configured"):
-        await run("share_file", ctx, path="report.txt")
+        await run("share_file", ctx, file_path="report.txt")
     assert not (tmp_path / "artifacts").exists()
