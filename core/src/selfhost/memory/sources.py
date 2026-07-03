@@ -1,12 +1,16 @@
 """Content sources: a backend fetches documents into pages, a core job syncs them on an interval.
 
-`SourceBackend` is the seam — `fetch(config, cursor) -> SyncResult` returns the documents a source
-currently holds plus a resume cursor. Core ships `FolderSource` (a local directory); S3/GitHub/
-connector backends are extensions. `SyncDriver` is the core sync job: it claims due sources (one
-worker per source, dialect-native — Postgres `FOR UPDATE SKIP LOCKED`, SQLite the single writer),
-fetches, writes each page's body to the blob store, and upserts page rows — skipping ones unchanged
-by digest and tombstoning ones whose document is gone. It writes NO chunks: a synced page carries a
-NULL `embedding_digest`, marking it due for the page index job (the sole chunk producer). The driver
+`SourceBackend` is the seam — `fetch(config, cursor, auth) -> SyncResult` returns the documents a
+source currently holds plus a resume cursor. `config` is the backend's own typed model (each backend
+owns `config_model`, so a source carries typed parameters, never an untyped bag); `auth` is the
+workspace the sync runs for, so a connector backend can resolve its provider token itself — core
+never mints or holds one. Core ships `FolderSource` (a local directory); connector/S3/GitHub
+backends are extensions registered through the `sources` Manifest point and sourced into
+`SyncDriver.backends` at boot. `SyncDriver` is the core sync job: it claims due sources (one worker
+per source, dialect-native — Postgres `FOR UPDATE SKIP LOCKED`, SQLite the single writer), fetches,
+writes each page's body to the blob store, and upserts page rows — skipping ones unchanged by digest
+and tombstoning ones whose document is gone. It writes NO chunks: a synced page carries a NULL
+`embedding_digest`, marking it due for the page index job (the sole chunk producer). The driver
 polls; it never fires on the writes it makes."""
 
 import asyncio
@@ -16,7 +20,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Protocol
+from typing import ClassVar, Protocol, TypeVar
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import sqlalchemy as sa
@@ -53,8 +57,32 @@ class SyncResult(BaseModel):
     next_cursor: str | None = None
 
 
-class SourceBackend(Protocol):
-    async def fetch(self, config: SourceConfig, cursor: str | None) -> SyncResult: ...
+@dataclass(frozen=True)
+class SourceAuth:
+    """What the sync runner threads into a backend's `fetch` so it can reach its provider without
+    core minting or holding a token: the workspace the sync runs for. A connector backend derives
+    its broker user from `workspace_id` and reads the account's real access token itself (the
+    broker is the extension's concern); the folder backend ignores it. A value object, never
+    persisted."""
+
+    workspace_id: UUID
+
+
+ConfigT = TypeVar("ConfigT", bound=BaseModel)
+
+
+class SourceBackend(Protocol[ConfigT]):
+    """A content-source backend, keyed by its `backend` name onto `source` rows. `config_model` is
+    the typed per-source config the driver validates a row's JSON `config` against — each backend
+    owns its own model, so a source carries typed parameters, never an untyped bag. `fetch` returns
+    the documents the source holds now plus a resume cursor, given that config, the prior `cursor`,
+    and the workspace `auth` the runner threads."""
+
+    config_model: type[ConfigT]
+
+    async def fetch(
+        self, config: ConfigT, cursor: str | None, auth: SourceAuth
+    ) -> SyncResult: ...
 
 
 @dataclass(frozen=True)
@@ -66,7 +94,9 @@ class FolderSource:
     fails closed (a transient mount blip can't sweep the index) — purge a folder's docs by emptying
     it or removing the source, never by deleting the folder."""
 
-    async def fetch(self, config: SourceConfig, cursor: str | None) -> SyncResult:
+    config_model: ClassVar[type[SourceConfig]] = SourceConfig
+
+    async def fetch(self, config: SourceConfig, cursor: str | None, auth: SourceAuth) -> SyncResult:
         entries = await asyncio.to_thread(self._read, Path(config.root))
         pages = tuple(
             Page(
@@ -90,6 +120,16 @@ class FolderSource:
         )
 
 
+def source_row_id(workspace_id: UUID, backend: str, config: Mapping[str, object]) -> UUID:
+    """The deterministic id of a source row for this workspace + backend + config, so a restart
+    (folder `[[sources]]`) or a re-registration (an extension's `register_source`) settles on the
+    same row rather than duplicating the sync."""
+    return uuid5(
+        NAMESPACE_URL,
+        f"{workspace_id}/source/{backend}/{json.dumps(dict(config), sort_keys=True)}",
+    )
+
+
 async def register_sources(configured: tuple[SourceEntry, ...]) -> None:
     """Ensure a source row exists for each configured `[[sources]]` entry. The row id is derived
     from the workspace, backend, and config, so a restart re-registers the same rows without
@@ -101,10 +141,7 @@ async def register_sources(configured: tuple[SourceEntry, ...]) -> None:
         workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
         for entry in configured:
             config = entry.config.model_dump()
-            source_id = uuid5(
-                NAMESPACE_URL,
-                f"{workspace_id}/source/{entry.backend}/{json.dumps(config, sort_keys=True)}",
-            )
+            source_id = source_row_id(workspace_id, entry.backend, config)
             present = (
                 await connection.execute(
                     sa.select(tables.source.c.id).where(tables.source.c.id == source_id)
@@ -131,8 +168,9 @@ async def register_sources(configured: tuple[SourceEntry, ...]) -> None:
 @dataclass(frozen=True)
 class ClaimedSource:
     source_id: UUID
+    workspace_id: UUID
     backend: str
-    config: SourceConfig
+    config: Mapping[str, object]
     cursor: str | None
 
 
@@ -165,6 +203,7 @@ class SyncDriver:
         due = (
             sa.select(
                 tables.source.c.id,
+                tables.source.c.workspace_id,
                 tables.source.c.backend,
                 tables.source.c.config,
                 tables.source.c.cursor,
@@ -192,8 +231,9 @@ class SyncDriver:
         return tuple(
             ClaimedSource(
                 source_id=row["id"],
+                workspace_id=row["workspace_id"],
                 backend=row["backend"],
-                config=SourceConfig.model_validate(row["config"]),
+                config=row["config"],
                 cursor=row["cursor"],
             )
             for row in rows
@@ -203,7 +243,9 @@ class SyncDriver:
         backend = self.backends.get(source.backend)
         if backend is None:
             raise RuntimeError(f"no source backend for {source.backend!r}")
-        return await backend.fetch(source.config, source.cursor)
+        config = backend.config_model.model_validate(source.config)
+        auth = SourceAuth(workspace_id=source.workspace_id)
+        return await backend.fetch(config, source.cursor, auth)
 
     async def _commit(self, source: ClaimedSource, result: SyncResult) -> None:
         prior = await self._prior_pages(source.source_id)

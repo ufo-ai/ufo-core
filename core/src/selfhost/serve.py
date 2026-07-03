@@ -34,7 +34,13 @@ from selfhost.memory.embed import OpenAIEmbedClient
 from selfhost.memory.index import index_backend_for
 from selfhost.memory.indexer import MemoryIndexer, PageIndexer
 from selfhost.memory.service import MemoryService
-from selfhost.memory.sources import FOLDER_BACKEND, FolderSource, SyncDriver, register_sources
+from selfhost.memory.sources import (
+    FOLDER_BACKEND,
+    FolderSource,
+    SourceBackend,
+    SyncDriver,
+    register_sources,
+)
 from selfhost.models.openai import openai_sdk_client
 from selfhost.o11y import init_o11y, log
 from selfhost.runtime_instance import BootGuard, Heartbeat
@@ -87,7 +93,7 @@ def run() -> None:
         index=index, embed=embed, chunker=chunker, blob=blob, postgres=postgres
     )
     sync_driver = SyncDriver(
-        backends={FOLDER_BACKEND: FolderSource()},
+        backends=_source_backends(manifests),
         blob=blob,
         postgres=postgres,
     )
@@ -184,6 +190,21 @@ def _launch_jobs(
 async def _sole_workspace_id() -> UUID:
     async with workspace_tx() as connection:
         return (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
+
+
+def _source_backends(manifests: tuple[Manifest, ...]) -> dict[str, SourceBackend]:
+    """The sync driver's backend map: core's folder backend plus every backend an extension
+    registers through its Manifest `sources` point. Two extensions claiming one backend name fail
+    loud at boot, so a source row's backend resolves to exactly one implementation."""
+    backends: dict[str, SourceBackend] = {FOLDER_BACKEND: FolderSource()}
+    for manifest in manifests:
+        for provider in manifest.sources:
+            if provider.backend in backends:
+                raise RuntimeError(
+                    f"two extensions register source backend {provider.backend!r}"
+                )
+            backends[provider.backend] = provider.source
+    return backends
 
 
 def _mount_ext_routes(

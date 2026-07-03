@@ -34,6 +34,12 @@ from selfhost.governance import prompt_digest
 from selfhost.grants import GrantStore
 from selfhost.jobs import JobRunner, bindings_from
 from selfhost.loop.transcript import Transcript
+from selfhost.memory.chunk import TextChunker
+from selfhost.memory.embed import EMBED_DIM
+from selfhost.memory.index import index_backend_for
+from selfhost.memory.indexer import PageIndexer
+from selfhost.memory.service import SHARED_SUBJECT, MemoryService
+from selfhost.memory.sources import SyncDriver
 from selfhost.models.interface import Message
 from selfhost.onboarding import run_onboarding_steps
 from selfhost.sandbox.proxy.rules import InjectionRule, MeterRule, derive_credential_rules
@@ -168,6 +174,7 @@ async def test_sample_is_discovered_via_its_entry_point() -> None:
     assert {
         tool.name for connector in manifest.connectors for tool in connector.tools
     } == {sample.CONNECTOR_TOOL_NAME}
+    assert {source.backend for source in manifest.sources} == {sample.SOURCE_BACKEND}
 
 
 async def test_tool_dispatches_with_its_scoped_context(db: None, tmp_path: Path) -> None:
@@ -516,3 +523,70 @@ async def test_a_corrupt_transcript_is_skipped_not_aborting_the_corpus(
     trajectories = await context.trajectories()
     assert len(trajectories) == 1
     assert trajectories[0].agent_id == good_agent
+
+
+def _vec(*axes: tuple[int, float]) -> tuple[float, ...]:
+    values = [0.0] * EMBED_DIM
+    for index, value in axes:
+        values[index] = value
+    return tuple(values)
+
+
+class _StubEmbed:
+    """Deterministic stand-in EmbedClient the page indexer embeds through and search queries
+    through; the test asserts the recalled SourceMatch, never this stand-in."""
+
+    def __init__(self, vector: tuple[float, ...]) -> None:
+        self._vector = vector
+
+    async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+        return tuple(self._vector for _ in texts)
+
+
+async def test_sample_source_syncs_a_page_recallable_through_memory(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    """The source seam end to end through the sample: onboarding registers a source row via the SDK,
+    the core sync driver drives the sample's registered SourceBackend and lands one page (embedding
+    deferred), the page index job derives its chunk, and the page is recalled through
+    `search_sources` — proving register_source + the `sources` Manifest point + the runner + memory,
+    all through public surfaces."""
+    workspace_id = await _workspace()
+    manifest = _sample_manifest()
+    async with workspace_tx() as connection:
+        await connection.execute(sa.text("delete from chunk"))
+        if database_url.startswith("sqlite"):
+            await connection.execute(sa.text("delete from chunk_fts"))
+    await run_onboarding_steps((manifest,), workspace_id, _credential_store())
+
+    embed = _StubEmbed(_vec((3, 1.0)))
+    index = index_backend_for(database_url, embed)
+    blob = FilesystemBlobStore(root=tmp_path)
+    postgres = database_url.startswith("postgresql")
+    driver = SyncDriver(
+        backends={source.backend: source.source for source in manifest.sources},
+        blob=blob,
+        postgres=postgres,
+    )
+    page_indexer = PageIndexer(
+        index=index, embed=embed, chunker=TextChunker(), blob=blob, postgres=postgres
+    )
+    service = MemoryService(index=index, embed=embed)
+
+    await driver.run()
+    async with workspace_tx() as connection:
+        page = (
+            await connection.execute(
+                sa.select(tables.page.c.embedding_digest, tables.page.c.subject).where(
+                    tables.page.c.workspace_id == workspace_id
+                )
+            )
+        ).one()
+    assert page.subject == SHARED_SUBJECT
+    assert page.embedding_digest is None
+
+    await page_indexer.run()
+    matches = await service.search_sources(
+        "migrating orbital widget fleet", frozenset({SHARED_SUBJECT}), 5
+    )
+    assert matches and "orbital widget" in matches[0].text

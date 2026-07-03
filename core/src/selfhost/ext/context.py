@@ -9,15 +9,18 @@ path an extension does. The `ExtensionContext` shape is open: later units add me
 writes, governed proposals, invoke) without reshaping what handlers already hold."""
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from uuid import UUID
 
 import sqlalchemy as sa
+from pydantic import BaseModel
 
 from selfhost.blob import BlobNotFound, BlobStore
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.governance import Governance, prompt_digest
 from selfhost.memory.service import SHARED_SUBJECT, MemoryService, Recalled
+from selfhost.memory.sources import source_row_id
 from selfhost.models.interface import Message
 from selfhost.o11y import log
 from selfhost.schema import tables
@@ -215,6 +218,38 @@ class ExtensionContext:
         if self.memory is None:
             raise RuntimeError("memory_write requires a memory service; none is wired")
         await self.memory.commit(write)
+
+    async def register_source(self, backend: str, config: BaseModel) -> None:
+        """Register a content-sync source for this workspace under `backend` — a `SourceBackend` an
+        extension declared through its Manifest `sources` point — with `config` the backend's typed
+        per-source parameters (the connected account, a folder root). Idempotent on (workspace,
+        backend, config): re-running onboarding or re-connecting the same account settles on the one
+        row, never a duplicate sync. The core sync driver polls the row and lands its pages in
+        memory; embedding stays a job."""
+        payload = config.model_dump(mode="json")
+        source_id = source_row_id(self.store.workspace_id, backend, payload)
+        async with workspace_tx() as connection:
+            present = (
+                await connection.execute(
+                    sa.select(tables.source.c.id).where(tables.source.c.id == source_id)
+                )
+            ).one_or_none()
+            if present is not None:
+                return
+            await connection.execute(
+                sa.insert(tables.source).values(
+                    id=source_id,
+                    workspace_id=self.store.workspace_id,
+                    backend=backend,
+                    config=payload,
+                    cursor=None,
+                    next_sync_at=datetime.now(UTC),
+                    claimed_by=None,
+                    claim_expires_at=None,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
 
     async def propose_change(self, change: AgentChange) -> ProposalRef:
         """Open a governed proposal against an agent's prompt, stamped with this extension as the
