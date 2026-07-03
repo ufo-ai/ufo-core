@@ -18,6 +18,8 @@ from selfhost.blob import BlobStore
 WORKSPACE_DIR = "/workspace"
 DEFAULT_EXEC_TIMEOUT_SECONDS = 120
 SENTINEL_MODEL_KEY = "SELFHOST_SENTINEL_MODEL_KEY"
+SANDBOX_UID = 1000
+SANDBOX_GID = 1000
 
 
 @dataclass(frozen=True, slots=True)
