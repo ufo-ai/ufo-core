@@ -31,21 +31,14 @@ def fingerprint_of(config: Config) -> str:
     return f"db={dialect};blob={config.blob.backend};hub=in_process"
 
 
-def uses_dev_default(config: Config) -> bool:
-    """Core ships only the in-process hub — no cross-process fan-out — so every core instance
-    carries a dev default a second process cannot share, and the guard refuses any second live
-    instance. SQLite (single-writer file) and filesystem blobs (local disk) are the other two dev
-    defaults, named in the fingerprint the refusal prints; a shared-hub extension is what would make
-    this conditional."""
-    return True
-
-
 @dataclass(frozen=True)
 class BootGuard:
-    """Admit this instance or refuse it. `admit` is the whole flow: read live peers, refuse when a
-    dev default cannot be shared alongside them, else record this instance's row. Two instances
-    booting at once are serialized so the read-then-insert is atomic — a workspace-scoped advisory
-    lock on Postgres, `begin immediate` on SQLite — so a race cannot admit both."""
+    """Admit this instance or refuse it. `admit` is the whole flow: read live peers, refuse when any
+    live peer exists — core ships only the in-process hub (no cross-process fan-out), so a workspace
+    runs a single instance; the dev-default backends that can't be shared are named in the refusal's
+    fingerprint — else record this instance's row. Two instances booting at once are serialized so
+    the read-then-insert is atomic — a workspace-scoped advisory lock on Postgres, `begin immediate`
+    on SQLite — so a race cannot admit both."""
 
     config: Config
     workspace_id: UUID
@@ -72,7 +65,7 @@ class BootGuard:
                     )
                 )
             ).all()
-            if peers and uses_dev_default(self.config):
+            if peers:
                 listed = ", ".join(
                     f"{p.id} started {p.started_at} ({p.fingerprint})" for p in peers
                 )

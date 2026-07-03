@@ -101,10 +101,8 @@ def extension_digest(entry: EntryPoint) -> str:
         files = {origin.name: origin}
     digest = hashlib.sha256()
     for name in sorted(files):
-        digest.update(name.encode())
-        digest.update(b"\0")
-        digest.update(files[name].read_bytes())
-        digest.update(b"\0")
+        digest.update(hashlib.sha256(name.encode()).digest())
+        digest.update(hashlib.sha256(files[name].read_bytes()).digest())
     return DIGEST_PREFIX + digest.hexdigest()
 
 

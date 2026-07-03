@@ -416,7 +416,7 @@ async def _read_spend(config: Config, window_seconds: int) -> SpendReport:
 
 @main.command()
 def grants() -> None:
-    """List the OAuth accounts granted to each agent through `/connect`."""
+    """List the OAuth accounts granted to each agent (granted in chat via connect_account)."""
     config = load_config()
     summaries = asyncio.run(_read_grants(config))
     if not summaries:

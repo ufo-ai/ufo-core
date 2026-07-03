@@ -14,7 +14,6 @@ from selfhost.runtime_instance import (
     BootGuard,
     Heartbeat,
     fingerprint_of,
-    uses_dev_default,
 )
 from selfhost.schema import tables
 
@@ -88,11 +87,6 @@ async def _row_live(instance_id: UUID) -> bool:
             )
         ).one_or_none()
     return row is not None
-
-
-def test_every_core_config_is_a_dev_default_via_the_in_process_hub() -> None:
-    assert uses_dev_default(_dev_config()) is True
-    assert uses_dev_default(_production_config()) is True
 
 
 def test_fingerprint_names_the_backend_selection() -> None:
