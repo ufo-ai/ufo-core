@@ -23,9 +23,9 @@ subsystem liveness).
 | Skills runtime (folders, load/list, digests) | `src/metalcraft_agent/skills/` | core skill loading; skill content → `packs/` |
 | Connector framework + 48 providers + Composio client | `src/metalcraft_connectors/` (closed leaf — port framework + registry wholesale) | connectors extension(s) |
 | Grant-through-chat flow (`/connect`, link/complete OAuth) | `gateway/tool_connections.py`, `ufo_commands.py` | core grant flow (the P4 exemplar — this shape is the house style) |
-| Egress credential injection (secrets never in sandbox) | `src/metalcraft_servers/egress_proxy/` | core sandbox egress proxy (Docker network) |
+| Sandbox proxy — MITM egress, sentinel swap, grant-scoped Composio, wire metering — plus connector credential injection | `src/metalcraft_servers/sandbox_proxy/` (all but kubectl minting), `src/metalcraft_servers/egress_proxy/` | ONE core sandbox proxy (the two old proxies merge); rewrite rules derive from extension manifests |
 | Slack surface (signature verify, thread keys, Block Kit writeback, speaker→member linking) | `contracts/slack.py`, gateway slack ingress, `slack_members.py` | core slackbot surface (de-k8s: link map → `member` rows) |
-| ufo CLI client (streaming, sessions) | `scripts/ufo`, `src/metalcraft_cli/` | `metalcraft chat` |
+| ufo CLI client (streaming, sessions) | `scripts/ufo`, `src/metalcraft_cli/` | `selfhost chat` |
 | Spend evaluation (decide at inbound + per-step, scoped caps, price pins) | `contracts/spend_context.py`, `spend_status.py`, `store/price.py` | core accounting (SpendPolicy CRD → `spend_cap` rows) |
 | Memory/knowledge (chunk/embed/fusion, pgvector, curated recall, `{subject, shared}`) | `src/metalcraft_brain/` | core memory + knowledge; the IndexBackend seam ports with it |
 | turbopuffer backend (per-env, live-proven PR #108) | `src/metalcraft_brain/index.py` turbopuffer path | indexes extension |
@@ -41,7 +41,7 @@ subsystem liveness).
 |---|---|
 | `metalcraft_k8s/`, CRDs/kinds, operator, admission, reconcile | k8s is the enterprise layer, not core |
 | Gateway SAR/virtual-action machinery, dual-principal + speaker gates | caller-identity authority contradicts principle 4; the grant flow replaces it |
-| `sandbox_proxy` kubectl minting, `metalcraft-agent-writer` RBAC | returns with the enterprise k8s layer |
+| `sandbox_proxy` kubectl minting (apiserver rewrite, token mint), `metalcraft-agent-writer` RBAC | returns as the enterprise k8s layer's rewriter module in the core sandbox proxy |
 | Self-improvement (`metalcraft_improve/`, Refinement CRD, miner, promotions) | rebuilt as a fully supported extension on `trajectories.read` + `agents.propose_change` (PR #62's offline-replay design is the reference); the CRD machinery dies |
 | `metalcraft_cloud/` onboarding | signup is a hosted concern; core owns the onboarding *engine*; identity is core |
 | Helm chart, tenant kustomize, Terraform | replaced by `metalcraft bundle` |

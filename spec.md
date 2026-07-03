@@ -82,8 +82,19 @@ terminal frame. A client's wait always ends — the terminal state commits on th
 ## Sandboxing
 
 Every turn executes tools in a per-conversation sandbox: Docker container from a pinned image
-(baked toolchain), default-deny network egress through the core's egress proxy (credential
-injection happens at the proxy; raw secrets never enter the sandbox). The working directory mounts
+(baked toolchain), default-deny network egress with exactly one route out — the sandbox proxy.
+
+**The sandbox proxy is core, not an extension** — it is the enforcement point for three core
+invariants: **sentinel swap** (processes inside see placeholder credentials; the proxy swaps real
+values onto the wire, so raw secrets never enter the sandbox), **grant scoping** (an outbound call
+is allowed only for hosts/accounts the agent's grants cover — principle 4 enforced at the wire),
+and **wire metering** (every model/API call made from inside the sandbox lands in the ledger).
+Extensions never register raw network rules; the proxy's rewrite rules are *derived* from their
+manifests — a credential slot, a connector, a model provider each imply their injection and scoping
+rules. Declare, don't open. The enterprise k8s layer later ships its apiserver-rewrite / token-mint
+module through this same rewriter seam.
+
+The working directory mounts
 from the blob store — a bind mount on the filesystem backend, the sandbox-fs design on S3 — and the
 invariant holds on every backend: the sandbox reaches only the conversation's `workspace/` subtree;
 transcripts and compaction records live above it, framework-only. The workspace is the truth and
