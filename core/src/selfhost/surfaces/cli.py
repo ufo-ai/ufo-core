@@ -13,9 +13,11 @@ from fastapi.responses import StreamingResponse
 
 from selfhost.db import workspace_tx
 from selfhost.hub import Hub, LiveFrame, Terminal
+from selfhost.o11y import log
 from selfhost.schema import tables
 from selfhost.schema.records import (
     DBOS_APP_VERSION,
+    DEFAULT_AGENT_NAME,
     TURN_QUEUE_NAME,
     TURN_WORKFLOW_NAME,
     TerminalFrame,
@@ -24,7 +26,6 @@ from selfhost.schema.records import (
 
 MAX_INBOUND_CHARS = 200_000
 TERMINAL_POLL_SECONDS = 1.0
-DEFAULT_AGENT_NAME = "assistant"
 
 router = APIRouter(prefix="/v1")
 
@@ -71,6 +72,9 @@ async def chat(
         raise HTTPException(400, "empty message")
     if len(inbound) > MAX_INBOUND_CHARS:
         raise HTTPException(413, f"message exceeds {MAX_INBOUND_CHARS} characters")
+    conversation = await _conversation_for(identity, x_selfhost_session)
+    if conversation.member_id != identity.member_id:
+        raise HTTPException(403, "conversation belongs to another member")
     async with workspace_tx() as connection:
         agent = (
             await connection.execute(
@@ -82,38 +86,11 @@ async def chat(
         ).one_or_none()
         if agent is None:
             raise HTTPException(404, f"no agent named {x_selfhost_agent!r}")
-        conversation_filter = (
-            (tables.conversation.c.surface == "cli")
-            & (tables.conversation.c.queue_key == x_selfhost_session)
+        await connection.execute(
+            sa.select(tables.conversation.c.id)
+            .where(tables.conversation.c.id == conversation.id)
+            .with_for_update()
         )
-        conversation = (
-            await connection.execute(
-                sa.select(tables.conversation.c.id, tables.conversation.c.member_id)
-                .where(conversation_filter)
-                .with_for_update()
-            )
-        ).one_or_none()
-        if conversation is None:
-            await connection.execute(
-                sa.insert(tables.conversation).values(
-                    id=uuid4(),
-                    workspace_id=identity.workspace_id,
-                    surface="cli",
-                    queue_key=x_selfhost_session,
-                    member_id=identity.member_id,
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
-            conversation = (
-                await connection.execute(
-                    sa.select(tables.conversation.c.id, tables.conversation.c.member_id)
-                    .where(conversation_filter)
-                    .with_for_update()
-                )
-            ).one()
-        if conversation.member_id != identity.member_id:
-            raise HTTPException(403, "conversation belongs to another member")
         seq = (
             await connection.execute(
                 sa.select(sa.func.coalesce(sa.func.max(tables.turn.c.seq), 0) + 1).where(
@@ -150,7 +127,24 @@ async def chat(
         "app_version": DBOS_APP_VERSION,
     }
     client: DBOSClient = request.app.state.dbos
-    await client.enqueue_async(options, str(turn_id))
+    try:
+        await client.enqueue_async(options, str(turn_id))
+    except Exception:
+        frame = TerminalFrame(status="failed", error_class="EnqueueFailed")
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.turn)
+                .values(
+                    status="failed",
+                    terminal=frame.model_dump(mode="json"),
+                    updated_at=sa.func.now(),
+                )
+                .where(
+                    tables.turn.c.id == turn_id,
+                    tables.turn.c.status.in_(("queued", "running")),
+                )
+            )
+        raise
     return {"turn_id": str(turn_id)}
 
 
@@ -191,6 +185,38 @@ async def cancel_turn(
     if stored is None:
         raise HTTPException(409, "turn could not be cancelled")
     return {"status": stored.status}
+
+
+async def _conversation_for(identity: CliIdentity, queue_key: str) -> sa.Row:
+    """Get-or-create outside the admission transaction: a concurrent creator's unique
+    violation is swallowed and the surviving row re-read."""
+    conversation_filter = (tables.conversation.c.surface == "cli") & (
+        tables.conversation.c.queue_key == queue_key
+    )
+    lookup = sa.select(tables.conversation.c.id, tables.conversation.c.member_id).where(
+        conversation_filter
+    )
+    async with workspace_tx() as connection:
+        found = (await connection.execute(lookup)).one_or_none()
+    if found is not None:
+        return found
+    try:
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.conversation).values(
+                    id=uuid4(),
+                    workspace_id=identity.workspace_id,
+                    surface="cli",
+                    queue_key=queue_key,
+                    member_id=identity.member_id,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+    except sa.exc.IntegrityError:
+        log("conversation.create_lost_race", queue_key=queue_key)
+    async with workspace_tx() as connection:
+        return (await connection.execute(lookup)).one()
 
 
 async def _require_turn(turn_id: UUID, identity: CliIdentity) -> None:

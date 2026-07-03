@@ -21,6 +21,17 @@ DELTA_FLUSH_SECONDS = 0.2
 EMPTY_RESPONSE_NUDGE = "Previous model response was empty. Answer now."
 TRANSCRIPT_WRITE_ATTEMPTS = 3
 TRANSCRIPT_WRITE_RETRY_SECONDS = 0.5
+COMMIT_RETRY_INITIAL_SECONDS = 1.0
+COMMIT_RETRY_MAX_SECONDS = 30.0
+
+
+def _total_usage(usage_events: list[Usage]) -> Usage:
+    return Usage(
+        input_tokens=sum(u.input_tokens for u in usage_events),
+        output_tokens=sum(u.output_tokens for u in usage_events),
+        cache_read_tokens=sum(u.cache_read_tokens for u in usage_events),
+        cache_write_tokens=sum(u.cache_write_tokens for u in usage_events),
+    )
 
 
 @dataclass(frozen=True)
@@ -32,7 +43,7 @@ class TurnEngine:
     hub: Hub
 
     async def run(self) -> TerminalFrame:
-        with turn_span(str(self.turn.id), str(self.turn.conversation_id)):
+        with turn_span(self.turn.id, self.turn.conversation_id):
             emit_metric("turn_started_total")
             log("turn.started", turn_id=str(self.turn.id), seq=self.turn.seq)
             usage_events: list[Usage] = []
@@ -42,8 +53,12 @@ class TurnEngine:
                 messages = await self._load_messages()
                 final_messages, answer = await self._model_round(messages, usage_events)
                 frame = await self._commit("done", usage_events, answer=answer)
-                await self._persist_transcript(final_messages, answer)
+                if frame.status == "done":
+                    await self._persist_transcript(final_messages, answer)
                 return frame
+            except asyncio.CancelledError:
+                await self._bill_cancelled(usage_events)
+                raise
             except Exception as error:
                 await self._commit("failed", usage_events, error_class=type(error).__name__)
                 raise
@@ -124,12 +139,34 @@ class TurnEngine:
         answer: str = "",
         error_class: str | None = None,
     ) -> TerminalFrame:
-        usage = Usage(
-            input_tokens=sum(u.input_tokens for u in usage_events),
-            output_tokens=sum(u.output_tokens for u in usage_events),
-            cache_read_tokens=sum(u.cache_read_tokens for u in usage_events),
-            cache_write_tokens=sum(u.cache_write_tokens for u in usage_events),
-        )
+        """Retries until the terminal state is durable: a client's wait always ends,
+        so a database outage delays the commit rather than losing it."""
+        delay = COMMIT_RETRY_INITIAL_SECONDS
+        while True:
+            try:
+                frame = await self._commit_once(status, usage_events, answer, error_class)
+                break
+            except Exception as error:
+                log(
+                    "turn.commit_retry",
+                    turn_id=str(self.turn.id),
+                    error_class=type(error).__name__,
+                )
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, COMMIT_RETRY_MAX_SECONDS)
+        await self._publish(Terminal(frame=frame))
+        emit_metric("turn_terminal_total", status=frame.status)
+        log("turn.terminal", turn_id=str(self.turn.id), status=frame.status)
+        return frame
+
+    async def _commit_once(
+        self,
+        status: TerminalStatus,
+        usage_events: list[Usage],
+        answer: str,
+        error_class: str | None,
+    ) -> TerminalFrame:
+        usage = _total_usage(usage_events)
         async with workspace_tx() as connection:
             await record_turn_usage(
                 connection, self.turn.workspace_id, self.turn.id, self.agent.model, usage
@@ -163,10 +200,33 @@ class TurnEngine:
                     )
                 ).one()
                 frame = TerminalFrame.model_validate(row.terminal)
-        await self.hub.publish(self.turn.id, Terminal(frame=frame))
-        emit_metric("turn_terminal_total", status=frame.status)
-        log("turn.terminal", turn_id=str(self.turn.id), status=frame.status)
         return frame
+
+    async def _publish(self, frame: Terminal) -> None:
+        """The live leg never fails the turn; the durable terminal is authoritative."""
+        try:
+            await self.hub.publish(self.turn.id, frame)
+        except Exception as error:
+            log(
+                "hub.publish_failed",
+                turn_id=str(self.turn.id),
+                error_class=type(error).__name__,
+            )
+
+    async def _bill_cancelled(self, usage_events: list[Usage]) -> None:
+        """Best-effort: cancellation must not stall on billing, but consumed tokens count."""
+        usage = _total_usage(usage_events)
+        try:
+            async with workspace_tx() as connection:
+                await record_turn_usage(
+                    connection, self.turn.workspace_id, self.turn.id, self.agent.model, usage
+                )
+        except Exception as error:
+            log(
+                "turn.cancel_billing_failed",
+                turn_id=str(self.turn.id),
+                error_class=type(error).__name__,
+            )
 
     async def _publish_existing_terminal(self) -> TerminalFrame:
         async with workspace_tx() as connection:
@@ -176,7 +236,7 @@ class TurnEngine:
                 )
             ).one()
         frame = TerminalFrame.model_validate(row.terminal)
-        await self.hub.publish(self.turn.id, Terminal(frame=frame))
+        await self._publish(Terminal(frame=frame))
         return frame
 
     async def _persist_transcript(self, messages: tuple[Message, ...], answer: str) -> None:

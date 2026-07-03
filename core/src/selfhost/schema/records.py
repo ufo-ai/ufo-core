@@ -5,10 +5,10 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from pydantic import BaseModel, model_validator
 
-Surface = Literal["cli"]
 TurnStatus = Literal["queued", "running", "done", "failed", "cancelled"]
 TerminalStatus = Literal["done", "failed", "cancelled"]
 
+DEFAULT_AGENT_NAME = "assistant"
 TURN_QUEUE_NAME = "turns"
 TURN_WORKFLOW_NAME = "turn"
 DBOS_APP_NAME = "selfhost"

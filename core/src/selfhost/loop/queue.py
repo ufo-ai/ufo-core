@@ -1,5 +1,6 @@
 """Durable turn execution: partitioned queue, the turn workflow, per-process runtime."""
 
+import asyncio
 import os
 from dataclasses import dataclass
 from uuid import UUID
@@ -10,12 +11,13 @@ from dbos import DBOS, Queue
 from selfhost.blob import BlobStore
 from selfhost.config import Config
 from selfhost.db import workspace_tx
-from selfhost.hub import Hub
+from selfhost.hub import Hub, Terminal
 from selfhost.loop.engine import TurnEngine
 from selfhost.loop.transcript import Transcript
 from selfhost.models import ModelClient
 from selfhost.models.anthropic import AnthropicClient, anthropic_sdk_client
 from selfhost.models.openai import OpenAIClient, openai_sdk_client
+from selfhost.o11y import log
 from selfhost.schema import tables
 from selfhost.schema.records import (
     TURN_QUEUE_NAME,
@@ -26,6 +28,8 @@ from selfhost.schema.records import (
 )
 
 TURN_QUEUE_POLL_SECONDS = 0.1
+FAILED_TERMINAL_RETRY_SECONDS = 1.0
+FAILED_TERMINAL_RETRY_MAX_SECONDS = 30.0
 TURN_QUEUE = Queue(
     TURN_QUEUE_NAME,
     concurrency=1,
@@ -58,16 +62,53 @@ async def _execute_turn(turn_id: str) -> str:
     runtime = _runtime
     if runtime is None:
         raise RuntimeError("runtime not initialized (init_runtime runs in serve)")
-    turn, agent = await _load_turn(UUID(turn_id))
-    engine = TurnEngine(
-        turn=turn,
-        agent=agent,
-        model=_model_client(agent.model, runtime.config),
-        transcript=Transcript(blob=runtime.blob, conversation_id=turn.conversation_id),
-        hub=runtime.hub,
-    )
-    frame = await engine.run()
-    return frame.status
+    try:
+        turn, agent = await _load_turn(UUID(turn_id))
+        engine = TurnEngine(
+            turn=turn,
+            agent=agent,
+            model=_model_client(agent.model, runtime.config),
+            transcript=Transcript(blob=runtime.blob, conversation_id=turn.conversation_id),
+            hub=runtime.hub,
+        )
+        frame = await engine.run()
+        return frame.status
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        await _commit_failed_terminal(runtime.hub, UUID(turn_id), type(error).__name__)
+        raise
+
+
+async def _commit_failed_terminal(hub: Hub, turn_id: UUID, error_class: str) -> None:
+    """The backstop for failures outside the engine: retries until the wait can end."""
+    frame = TerminalFrame(status="failed", error_class=error_class)
+    delay = FAILED_TERMINAL_RETRY_SECONDS
+    while True:
+        try:
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.update(tables.turn)
+                    .values(
+                        status="failed",
+                        terminal=frame.model_dump(mode="json"),
+                        updated_at=sa.func.now(),
+                    )
+                    .where(
+                        tables.turn.c.id == turn_id,
+                        tables.turn.c.status.in_(("queued", "running")),
+                    )
+                )
+            await hub.publish(turn_id, Terminal(frame=frame))
+            return
+        except Exception as retried:
+            log(
+                "turn.terminal_backstop_retry",
+                turn_id=str(turn_id),
+                error_class=type(retried).__name__,
+            )
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, FAILED_TERMINAL_RETRY_MAX_SECONDS)
 
 
 @DBOS.workflow(name=TURN_WORKFLOW_NAME)
