@@ -39,6 +39,7 @@ class TerminalFrame(BaseModel):
     error_class: str | None = None
     tokens: int = 0
     cost_usd: Decimal = Decimal("0")
+    model: str = ""
 
 
 class Agent(BaseModel):
