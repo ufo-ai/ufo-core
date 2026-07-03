@@ -183,7 +183,9 @@ def _run_turn(config: Config, headers: dict[str, str], message: str) -> None:
 async def _stream_turn(
     base: str, headers: dict[str, str], message: str, current: dict[str, str]
 ) -> None:
-    display = _TurnDisplay(out=sys.stdout, err=sys.stderr, tty=sys.stderr.isatty())
+    display = _TurnDisplay(
+        out=sys.stdout, err=sys.stderr, tty=sys.stdout.isatty() and sys.stderr.isatty()
+    )
     async with httpx.AsyncClient(base_url=base, timeout=TURN_REQUEST_TIMEOUT_SECONDS) as client:
         response = await client.post("/v1/chat", content=message.encode(), headers=headers)
         response.raise_for_status()
@@ -223,8 +225,9 @@ async def _cancel_turn(base: str, headers: dict[str, str], turn_id: str) -> None
 class _TurnDisplay:
     """One turn's terminal rendering: text deltas stream to stdout; the live cost meter is a
     transient stderr line that only ever occupies a line of its own and is erased before anything
-    else prints, so it can never overwrite streamed text. The meter is tty-only chrome — the
-    terminal frame prints the authoritative cost either way."""
+    else prints, so it can never overwrite streamed text. Its line bookkeeping assumes both
+    streams land on one terminal, so tty is true only when stdout and stderr are both ttys —
+    the terminal frame prints the authoritative cost either way."""
 
     out: TextIO
     err: TextIO

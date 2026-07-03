@@ -91,15 +91,16 @@ def test_multi_round_text_survives_interleaved_ticks() -> None:
     ]
 
 
-def test_meter_is_suppressed_off_tty() -> None:
-    buffer = io.StringIO()
-    display = _TurnDisplay(out=buffer, err=buffer, tty=False)
-    display.text("Hi!")
-    display.tick(1834, 9430)
+def test_meter_is_suppressed_when_streams_diverge() -> None:
+    out, err = io.StringIO(), io.StringIO()
+    display = _TurnDisplay(out=out, err=err, tty=False)
+    for round_tokens in (100, 200, 300):
+        display.text(f"Round of {round_tokens}. ")
+        display.tick(round_tokens, round_tokens * 5)
     display.terminal(DONE_FRAME)
-    assert "\r" not in buffer.getvalue()
-    assert screen(buffer.getvalue()) == [
-        "Hi!",
+    assert err.getvalue() == ""
+    assert screen(out.getvalue()) == [
+        "Round of 100. Round of 200. Round of 300. ",
         "claude-opus-4-8 · 1834 tok · $0.009430",
         "",
     ]
