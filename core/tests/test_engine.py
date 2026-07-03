@@ -1,5 +1,5 @@
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import pairwise
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -293,6 +293,30 @@ async def test_already_terminal_turn_republishes_without_clobbering_transcript(
         ).scalar_one()
     assert billed == 0
     assert await engine.transcript.read() == done_transcript
+
+
+async def test_running_turn_is_claimed_only_by_its_own_workflow_id(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("running", None)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(running_attempt="attempt-A", resume_enqueued_at=sa.func.now())
+            .where(tables.turn.c.id == turn.id)
+        )
+    intruder = replace(_engine(turn, EchoModel(), tmp_path), attempt="attempt-B")
+    assert await intruder._mark_running() is False
+    assert await intruder._resolve_unclaimed() is None
+    owner = replace(_engine(turn, EchoModel(), tmp_path), attempt="attempt-A")
+    assert await owner._mark_running() is True
+    async with workspace_tx() as connection:
+        stamp = (
+            await connection.execute(
+                sa.select(tables.turn.c.resume_enqueued_at).where(tables.turn.c.id == turn.id)
+            )
+        ).scalar_one()
+    assert stamp is None
 
 
 async def test_tool_call_round_dispatches_in_sandbox_then_answers(

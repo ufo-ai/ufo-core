@@ -1,9 +1,11 @@
+import time
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from selfhost import accounting
 from selfhost.accounting import (
     SpendRollup,
     read_turn_cost,
@@ -50,6 +52,18 @@ async def test_unknown_model_records_tokens_at_zero_price(db: None) -> None:
     async with workspace_tx() as connection:
         cost = await read_turn_cost(connection, turn_id)
     assert cost == (10_000, 0, "gpt-4o")
+
+
+def test_absent_caps_cache_evicts_expired_entries_when_full() -> None:
+    accounting._no_applicable_caps.clear()
+    try:
+        expired = time.monotonic() - 1.0
+        for _ in range(accounting.CAP_PRESENCE_CACHE_MAX):
+            accounting._no_applicable_caps[(uuid4(), uuid4(), uuid4())] = expired
+        accounting._note_absent_caps((uuid4(), None, uuid4()))
+        assert len(accounting._no_applicable_caps) == 1
+    finally:
+        accounting._no_applicable_caps.clear()
 
 
 async def _seed_turn(connection: AsyncConnection) -> tuple[UUID, UUID]:

@@ -34,6 +34,7 @@ SpendOutcome = Literal["allow", "park", "reject"]
 ALLOW: SpendOutcome = "allow"
 
 CAP_PRESENCE_TTL_SECONDS = 5.0
+CAP_PRESENCE_CACHE_MAX = 4096
 _no_applicable_caps: dict[tuple[UUID, UUID | None, UUID], float] = {}
 
 
@@ -44,6 +45,18 @@ def applicable_caps_absent(workspace_id: UUID, member_id: UUID | None, agent_id:
     cap on another member never suppresses this one; a newly-set cap takes effect within the TTL."""
     expiry = _no_applicable_caps.get((workspace_id, member_id, agent_id))
     return expiry is not None and expiry > time.monotonic()
+
+
+def _note_absent_caps(key: tuple[UUID, UUID | None, UUID]) -> None:
+    """Remember for the TTL that no cap applies to this triple. Evict expired entries once the map
+    is full so a long-lived serve seeing many distinct triples never grows it without bound —
+    correctness never rests on the cache, so a purge that frees nothing simply lets it drift over
+    the soft bound until entries age out."""
+    now = time.monotonic()
+    if len(_no_applicable_caps) >= CAP_PRESENCE_CACHE_MAX:
+        for expired in [k for k, expiry in _no_applicable_caps.items() if expiry <= now]:
+            del _no_applicable_caps[expired]
+    _no_applicable_caps[key] = now + CAP_PRESENCE_TTL_SECONDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,7 +235,7 @@ class SpendEvaluator:
         caps = await self._applicable_caps(connection)
         key = (self.workspace_id, self.member_id, self.agent_id)
         if not caps:
-            _no_applicable_caps[key] = time.monotonic() + CAP_PRESENCE_TTL_SECONDS
+            _note_absent_caps(key)
             return SpendDecision(outcome=ALLOW, message="")
         _no_applicable_caps.pop(key, None)
         breaches = [

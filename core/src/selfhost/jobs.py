@@ -9,7 +9,7 @@ shut that pool down. One durable workflow fires each handler with the extension'
 ExtensionContext, so a core job and an extension job run the identical path."""
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -41,6 +41,7 @@ PAGE_INDEX_JOB = "page_index"
 PAGE_INDEX_SCHEDULE = "0 * * * * *"
 SPEND_RESUME_JOB = "spend_resume"
 SPEND_RESUME_SCHEDULE = "0 * * * * *"
+RESUME_ENQUEUE_GRACE_SECONDS = 300
 JOB_QUEUE = Queue(JOB_QUEUE_NAME)
 
 
@@ -59,10 +60,17 @@ class SpendResume:
     batch-at-interval job, never fired by the spend_cap write it reacts to, so raising a cap frees
     its parked turns on the next sweep. It only ENQUEUES; the turn stays PARKED until its own
     execution atomically claims it (parked → running), so a crash between decide and enqueue leaves
-    it re-enqueueable rather than orphaned, and a duplicate enqueue loses the claim and no-ops. Each
-    run is a fresh DBOS workflow id (the original was consumed by the run that parked it); the
-    transcript and per-attempt ledger stay keyed by the turn id, so the re-run is idempotent at the
-    durable layer and each attempt's real spend is billed."""
+    it re-enqueueable rather than orphaned. Each run is a fresh DBOS workflow id (the original was
+    consumed by the run that parked it); the transcript and per-attempt ledger stay keyed by the
+    turn id, so the re-run is idempotent at the durable layer and each attempt's real spend is
+    billed.
+
+    A parked turn's resume can linger unclaimed while its conversation partition is busy, so the
+    enqueue stamps an advisory `resume_enqueued_at`: a sweep skips a turn stamped within the grace
+    window, bounding a lingering turn to one in-flight resume instead of one per sweep. The stamp is
+    advisory, not a status flip — set before the enqueue and cleared by the claim, so a crash
+    between stamp and enqueue merely delays re-admission to the end of the grace window rather than
+    orphaning the turn."""
 
     client: DBOSClient
 
@@ -76,6 +84,7 @@ class SpendResume:
                 await self._enqueue(turn)
 
     async def _parked_turns(self) -> tuple[_ParkedTurn, ...]:
+        cutoff = datetime.now(UTC) - timedelta(seconds=RESUME_ENQUEUE_GRACE_SECONDS)
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
@@ -87,7 +96,13 @@ class SpendResume:
                         tables.conversation.c.member_id,
                     )
                     .select_from(tables.turn.join(tables.conversation))
-                    .where(tables.turn.c.status == PARKED)
+                    .where(
+                        tables.turn.c.status == PARKED,
+                        sa.or_(
+                            tables.turn.c.resume_enqueued_at.is_(None),
+                            tables.turn.c.resume_enqueued_at < cutoff,
+                        ),
+                    )
                 )
             ).all()
         return tuple(
@@ -96,6 +111,12 @@ class SpendResume:
         )
 
     async def _enqueue(self, turn: _ParkedTurn) -> None:
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.turn)
+                .values(resume_enqueued_at=sa.func.now())
+                .where(tables.turn.c.id == turn.id, tables.turn.c.status == PARKED)
+            )
         options: EnqueueOptions = {
             "queue_name": TURN_QUEUE_NAME,
             "workflow_name": TURN_WORKFLOW_NAME,
