@@ -5,7 +5,10 @@ import hashlib
 import json
 import os
 import secrets
+import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TextIO
 from uuid import UUID, uuid4
 
 import asyncpg
@@ -31,6 +34,8 @@ SELFHOST_DIR = Path.home() / ".selfhost"
 DEFAULT_AGENT_MODEL = "claude-opus-4-8"
 RECONNECT_SECONDS = 1.0
 TURN_REQUEST_TIMEOUT_SECONDS = 90.0
+ERASE_LINE = "\r\x1b[K"
+MICRO_USD_PER_USD = 1_000_000
 DEFAULT_CONFIG = """\
 [database]
 url = "sqlite+aiosqlite:///selfhost.db"
@@ -178,12 +183,12 @@ def _run_turn(config: Config, headers: dict[str, str], message: str) -> None:
 async def _stream_turn(
     base: str, headers: dict[str, str], message: str, current: dict[str, str]
 ) -> None:
+    display = _TurnDisplay(out=sys.stdout, err=sys.stderr, tty=sys.stderr.isatty())
     async with httpx.AsyncClient(base_url=base, timeout=TURN_REQUEST_TIMEOUT_SECONDS) as client:
         response = await client.post("/v1/chat", content=message.encode(), headers=headers)
         response.raise_for_status()
         turn_id = response.json()["turn_id"]
         current["turn_id"] = turn_id
-        streamed = False
         while True:
             try:
                 async with client.stream(
@@ -196,19 +201,15 @@ async def _stream_turn(
                             continue
                         frame = json.loads(line)
                         if "frame" in frame:
-                            _render_terminal(frame["frame"], streamed)
+                            display.terminal(frame["frame"])
                             return
                         if "message" in frame:
-                            click.echo()
-                            click.echo(click.style(frame["message"], dim=True))
+                            display.message(frame["message"])
                             return
                         if "cost_micro_usd" in frame:
-                            dollars = frame["cost_micro_usd"] / MICRO_USD_PER_USD
-                            meter = f"\r{frame['tokens']} tok · ${dollars:.6f}"
-                            click.echo(click.style(meter, dim=True), nl=False, err=True)
+                            display.tick(frame["tokens"], frame["cost_micro_usd"])
                             continue
-                        click.echo(frame["text"], nl=False)
-                        streamed = True
+                        display.text(frame["text"])
             except httpx.TransportError:
                 await asyncio.sleep(RECONNECT_SECONDS)
 
@@ -218,23 +219,67 @@ async def _cancel_turn(base: str, headers: dict[str, str], turn_id: str) -> None
         await client.post(f"/v1/turns/{turn_id}/cancel", headers=headers)
 
 
-def _render_terminal(terminal: dict[str, object], streamed: bool) -> None:
-    match terminal["status"]:
-        case "done":
-            if not streamed:
-                click.echo(terminal["text"], nl=False)
-            click.echo()
-            dollars = int(terminal["cost_micro_usd"]) / 1_000_000
-            cost = f"{terminal['model']} · {terminal['tokens']} tok · ${dollars:.6f}"
-            click.echo(click.style(cost, dim=True))
-        case "cancelled":
-            reason = terminal.get("text")
-            click.echo(f"\n{reason}" if reason else "\n(cancelled)")
-        case _:
-            raise click.ClickException(f"turn failed: {terminal['error_class']}")
+@dataclass
+class _TurnDisplay:
+    """One turn's terminal rendering: text deltas stream to stdout; the live cost meter is a
+    transient stderr line that only ever occupies a line of its own and is erased before anything
+    else prints, so it can never overwrite streamed text. The meter is tty-only chrome — the
+    terminal frame prints the authoritative cost either way."""
 
+    out: TextIO
+    err: TextIO
+    tty: bool
+    streamed: bool = False
+    line_open: bool = False
+    meter: bool = False
 
-MICRO_USD_PER_USD = 1_000_000
+    def text(self, delta: str) -> None:
+        self._erase_meter()
+        click.echo(delta, nl=False, file=self.out)
+        self.streamed = True
+        if delta:
+            self.line_open = not delta.endswith("\n")
+
+    def tick(self, tokens: int, cost_micro_usd: int) -> None:
+        if not self.tty:
+            return
+        if self.line_open:
+            click.echo(file=self.err)
+            self.line_open = False
+        dollars = cost_micro_usd / MICRO_USD_PER_USD
+        meter = click.style(f"{tokens} tok · ${dollars:.6f}", dim=True)
+        click.echo(f"{ERASE_LINE}{meter}", nl=False, file=self.err, color=True)
+        self.meter = True
+
+    def message(self, note: str) -> None:
+        self._close_line()
+        click.echo(click.style(note, dim=True), file=self.out)
+
+    def terminal(self, frame: dict[str, object]) -> None:
+        self._close_line()
+        match frame["status"]:
+            case "done":
+                if not self.streamed:
+                    click.echo(frame["text"], file=self.out)
+                dollars = int(frame["cost_micro_usd"]) / MICRO_USD_PER_USD
+                cost = f"{frame['model']} · {frame['tokens']} tok · ${dollars:.6f}"
+                click.echo(click.style(cost, dim=True), file=self.out)
+            case "cancelled":
+                click.echo(frame.get("text") or "(cancelled)", file=self.out)
+            case _:
+                raise click.ClickException(f"turn failed: {frame['error_class']}")
+
+    def _erase_meter(self) -> None:
+        if not self.meter:
+            return
+        click.echo(ERASE_LINE, nl=False, file=self.err, color=True)
+        self.meter = False
+
+    def _close_line(self) -> None:
+        self._erase_meter()
+        if self.line_open:
+            click.echo(file=self.out)
+            self.line_open = False
 
 
 @main.group(name="spend-cap")
@@ -282,9 +327,7 @@ def spend_cap_list() -> None:
     for cap_id, scope, subject, window_seconds, limit_micro_usd, on_breach in caps:
         dollars = limit_micro_usd / MICRO_USD_PER_USD
         target = f" {subject}" if subject is not None else ""
-        click.echo(
-            f"{cap_id}  {scope}{target}  ${dollars:,.2f} / {window_seconds}s  {on_breach}"
-        )
+        click.echo(f"{cap_id}  {scope}{target}  ${dollars:,.2f} / {window_seconds}s  {on_breach}")
 
 
 async def _write_spend_cap(
@@ -298,9 +341,7 @@ async def _write_spend_cap(
     init_db(config.database.url)
     try:
         async with workspace_tx() as connection:
-            workspace_id = (
-                await connection.execute(sa.select(tables.workspace.c.id))
-            ).scalar_one()
+            workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
             subject_match = (
                 tables.spend_cap.c.subject_id.is_(None)
                 if subject is None
@@ -352,9 +393,7 @@ async def _read_spend_caps(
     init_db(config.database.url)
     try:
         async with workspace_tx() as connection:
-            workspace_id = (
-                await connection.execute(sa.select(tables.workspace.c.id))
-            ).scalar_one()
+            workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
             rows = (
                 await connection.execute(
                     sa.select(
@@ -381,9 +420,7 @@ SPEND_WINDOW_DEFAULT_SECONDS = 86_400
 
 
 @main.command()
-@click.option(
-    "--window-seconds", type=int, default=SPEND_WINDOW_DEFAULT_SECONDS, show_default=True
-)
+@click.option("--window-seconds", type=int, default=SPEND_WINDOW_DEFAULT_SECONDS, show_default=True)
 def spend(window_seconds: int) -> None:
     """Sum the ledger over a window: the workspace total, then a per-dimension, per-member, and
     per-agent breakdown — the rollups that match the ledger."""
@@ -406,9 +443,7 @@ async def _read_spend(config: Config, window_seconds: int) -> SpendReport:
     init_db(config.database.url)
     try:
         async with workspace_tx() as connection:
-            workspace_id = (
-                await connection.execute(sa.select(tables.workspace.c.id))
-            ).scalar_one()
+            workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
             return await SpendRollup(workspace_id).read(connection, window_seconds)
     finally:
         await dispose_db()
@@ -424,18 +459,14 @@ def grants() -> None:
         return
     for summary in summaries:
         granted = summary.granted_at.strftime("%Y-%m-%d")
-        click.echo(
-            f"{summary.agent:<20}{summary.provider:<16}{summary.account_id:<28}{granted}"
-        )
+        click.echo(f"{summary.agent:<20}{summary.provider:<16}{summary.account_id:<28}{granted}")
 
 
 async def _read_grants(config: Config) -> tuple[GrantSummary, ...]:
     init_db(config.database.url)
     try:
         async with workspace_tx() as connection:
-            workspace_id = (
-                await connection.execute(sa.select(tables.workspace.c.id))
-            ).scalar_one()
+            workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
         return await grant_summaries(workspace_id)
     finally:
         await dispose_db()
