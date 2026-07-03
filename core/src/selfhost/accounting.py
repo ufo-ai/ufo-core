@@ -6,6 +6,7 @@ from uuid import UUID
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from selfhost.o11y import log
 from selfhost.schema import tables
 from selfhost.schema.records import Usage, ledger_id_for
 
@@ -37,18 +38,16 @@ MODEL_TOKEN_PRICE: dict[str, ModelPrice] = {
 }
 
 
-def model_price(model: str) -> ModelPrice:
-    """The price row for a model; unknown models fail loud."""
+def usage_priced_micro_usd(model: str, usage: Usage) -> int:
+    """Micro-USD for a usage split: integer dot product, floored at micro-dollar precision.
+
+    An unknown model warns loudly and prices at zero — never a silent fallback to another
+    model's price, and never a raise: pricing runs inside the turn's terminal commit, so raising
+    would wedge the commit-retry loop instead of ending the client's wait."""
     price = MODEL_TOKEN_PRICE.get(model)
     if price is None:
-        known = ", ".join(sorted(MODEL_TOKEN_PRICE))
-        raise KeyError(f"no price for model {model!r}; priced models: {known}")
-    return price
-
-
-def usage_priced_micro_usd(model: str, usage: Usage) -> int:
-    """Micro-USD for a usage split: integer dot product, floored at micro-dollar precision."""
-    price = model_price(model)
+        log("pricing.unknown_model", model=model)
+        return 0
     micro_usd_mtok = (
         usage.input_tokens * price.input
         + usage.output_tokens * price.output

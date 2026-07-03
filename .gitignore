@@ -11,3 +11,4 @@ selfhost.toml
 blobs/
 *.db
 .coverage
+.claude/

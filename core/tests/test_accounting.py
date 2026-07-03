@@ -1,11 +1,9 @@
 from uuid import UUID, uuid4
 
-import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from selfhost.accounting import (
-    model_price,
     read_turn_cost,
     record_turn_usage,
     usage_priced_micro_usd,
@@ -38,9 +36,17 @@ def test_openai_row_converted_from_usd_per_mtok() -> None:
     assert usage_priced_micro_usd("gpt-5.4", usage) == 17_500_000
 
 
-def test_unknown_model_raises() -> None:
-    with pytest.raises(KeyError, match="grok-9"):
-        model_price("grok-9")
+def test_unknown_model_prices_zero_never_raises() -> None:
+    assert usage_priced_micro_usd("gpt-4o", FULL_USAGE) == 0
+
+
+async def test_unknown_model_records_tokens_at_zero_price(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await record_turn_usage(connection, workspace_id, turn_id, "gpt-4o", FULL_USAGE)
+    async with workspace_tx() as connection:
+        cost = await read_turn_cost(connection, turn_id)
+    assert cost == (10_000, 0, "gpt-4o")
 
 
 async def _seed_turn(connection: AsyncConnection) -> tuple[UUID, UUID]:

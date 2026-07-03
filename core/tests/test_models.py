@@ -10,9 +10,11 @@ from anthropic.types.raw_message_delta_event import Delta
 from openai.types.chat import chat_completion_chunk
 from openai.types.completion_usage import CompletionUsage, PromptTokensDetails
 
-from selfhost.models import Message, ModelEvent, ModelRequest, TextDelta
+from selfhost.models import Message, ModelEvent, ModelRequest, ModelResponseTruncated, TextDelta
+from selfhost.models.anthropic import MAX_EMPTY_PROVIDER_RETRIES as ANTHROPIC_MAX_EMPTY_RETRIES
 from selfhost.models.anthropic import MAX_PROVIDER_RETRIES as ANTHROPIC_MAX_RETRIES
 from selfhost.models.anthropic import AnthropicClient, anthropic_sdk_client
+from selfhost.models.openai import MAX_EMPTY_PROVIDER_RETRIES as OPENAI_MAX_EMPTY_RETRIES
 from selfhost.models.openai import MAX_PROVIDER_RETRIES as OPENAI_MAX_RETRIES
 from selfhost.models.openai import OpenAIClient, openai_sdk_client
 from selfhost.schema.records import Usage
@@ -91,10 +93,12 @@ def anthropic_text(text: str) -> anthropic.types.RawContentBlockDeltaEvent:
     )
 
 
-def anthropic_output(output_tokens: int) -> anthropic.types.RawMessageDeltaEvent:
+def anthropic_output(
+    output_tokens: int, stop_reason: str | None = None
+) -> anthropic.types.RawMessageDeltaEvent:
     return anthropic.types.RawMessageDeltaEvent(
         type="message_delta",
-        delta=Delta(),
+        delta=Delta(stop_reason=stop_reason),
         usage=anthropic.types.MessageDeltaUsage(output_tokens=output_tokens),
     )
 
@@ -110,6 +114,22 @@ def openai_text(text: str | None) -> chat_completion_chunk.ChatCompletionChunk:
                 index=0,
                 finish_reason=None,
                 delta=chat_completion_chunk.ChoiceDelta(content=text),
+            )
+        ],
+    )
+
+
+def openai_finish(reason: str) -> chat_completion_chunk.ChatCompletionChunk:
+    return chat_completion_chunk.ChatCompletionChunk(
+        id="chunk_test",
+        object="chat.completion.chunk",
+        created=0,
+        model="gpt-5",
+        choices=[
+            chat_completion_chunk.Choice(
+                index=0,
+                finish_reason=reason,
+                delta=chat_completion_chunk.ChoiceDelta(content=None),
             )
         ],
     )
@@ -294,6 +314,90 @@ async def test_no_retry_after_first_yield(harness: ProviderHarness) -> None:
             received.append(event)
     assert received == [TextDelta(text="partial")]
     assert create.calls == 1
+
+
+async def test_anthropic_truncation_raises() -> None:
+    create = ScriptedCreate(
+        (
+            [
+                anthropic_message_start(input_tokens=1),
+                anthropic_text("cut of"),
+                anthropic_output(9, stop_reason="max_tokens"),
+            ],
+            None,
+        )
+    )
+    with pytest.raises(ModelResponseTruncated):
+        await collect(AnthropicClient(client=anthropic_sdk(create)))
+
+
+async def test_openai_truncation_raises() -> None:
+    create = ScriptedCreate(
+        (
+            [openai_text("cut of"), openai_finish("length"), openai_usage(prompt=1, completion=9)],
+            None,
+        )
+    )
+    with pytest.raises(ModelResponseTruncated):
+        await collect(OpenAIClient(client=openai_sdk(create)))
+
+
+async def test_anthropic_empty_completion_retries_then_succeeds() -> None:
+    create = ScriptedCreate(
+        (
+            [anthropic_message_start(input_tokens=1), anthropic_output(0, stop_reason="end_turn")],
+            None,
+        ),
+        (
+            [
+                anthropic_message_start(input_tokens=2),
+                anthropic_text("recovered"),
+                anthropic_output(3, stop_reason="end_turn"),
+            ],
+            None,
+        ),
+    )
+    events = await collect(AnthropicClient(client=anthropic_sdk(create)))
+    assert create.calls == 2
+    assert events == [
+        TextDelta(text="recovered"),
+        Usage(input_tokens=2, output_tokens=3),
+    ]
+
+
+async def test_openai_empty_completion_retries_then_succeeds() -> None:
+    create = ScriptedCreate(
+        ([openai_finish("stop"), openai_usage(prompt=1, completion=0)], None),
+        (
+            [openai_text("recovered"), openai_finish("stop"), openai_usage(prompt=2, completion=3)],
+            None,
+        ),
+    )
+    events = await collect(OpenAIClient(client=openai_sdk(create)))
+    assert create.calls == 2
+    assert events == [
+        TextDelta(text="recovered"),
+        Usage(input_tokens=2, output_tokens=3),
+    ]
+
+
+async def test_anthropic_persistent_empty_degrades_to_empty() -> None:
+    empty = (
+        [anthropic_message_start(input_tokens=1), anthropic_output(0, stop_reason="end_turn")],
+        None,
+    )
+    create = ScriptedCreate(*([empty] * (ANTHROPIC_MAX_EMPTY_RETRIES + 1)))
+    events = await collect(AnthropicClient(client=anthropic_sdk(create)))
+    assert create.calls == ANTHROPIC_MAX_EMPTY_RETRIES + 1
+    assert events == [Usage(input_tokens=1, output_tokens=0)]
+
+
+async def test_openai_persistent_empty_degrades_to_empty() -> None:
+    empty = ([openai_finish("stop"), openai_usage(prompt=1, completion=0)], None)
+    create = ScriptedCreate(*([empty] * (OPENAI_MAX_EMPTY_RETRIES + 1)))
+    events = await collect(OpenAIClient(client=openai_sdk(create)))
+    assert create.calls == OPENAI_MAX_EMPTY_RETRIES + 1
+    assert events == [Usage(input_tokens=1, output_tokens=0)]
 
 
 def test_sdk_client_factories_disable_sdk_retries() -> None:
