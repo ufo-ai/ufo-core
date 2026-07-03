@@ -12,3 +12,6 @@ from selfhost.ext.manifest import (
 from selfhost.ext.manifest import (
     Manifest as Manifest,
 )
+from selfhost.ext.manifest import (
+    RouteSpec as RouteSpec,
+)

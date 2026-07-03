@@ -199,6 +199,7 @@ def _engine(
         hub=InProcessHub(),
         sandbox=SandboxSession(carrier=carrier, handle=handle),
         tools=ToolRegistry(BUILTIN_TOOLS),
+        tool_ext={},
         blob=blob,
         spawn=_unavailable_spawn,
     )

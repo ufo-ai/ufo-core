@@ -10,12 +10,16 @@ import uvicorn
 from cryptography.fernet import Fernet
 from dbos import DBOS, DBOSClient
 from fastapi import FastAPI
+from starlette.requests import Request
+from starlette.responses import Response
 
 from selfhost.blob import blob_store_for
 from selfhost.config import Config, load_config
 from selfhost.credentials import CredentialStore
 from selfhost.db import init_db, workspace_tx
+from selfhost.ext.context import context_for
 from selfhost.ext.loader import load_manifests
+from selfhost.ext.manifest import Manifest
 from selfhost.hub import InProcessHub
 from selfhost.jobs import CORE_JOBS, JobRunner, bindings_from
 from selfhost.loop.queue import Runtime, init_runtime
@@ -42,6 +46,10 @@ def run() -> None:
     init_o11y(config.o11y.otlp_endpoint)
     init_db(config.database.url)
     asyncio.run(_require_bootstrap())
+    manifests = load_manifests()
+    workspace_id = asyncio.run(_sole_workspace_id())
+    key = os.environ.get(config.credentials.key_env)
+    credentials = CredentialStore(fernet=Fernet(key.encode())) if key else None
     hub = InProcessHub()
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
     init_runtime(
@@ -53,6 +61,8 @@ def run() -> None:
             proxy=_egress_proxy(asyncio.run(_assemble_rules(config))),
             dbos=dbos_client,
             subagents=SubagentRegistry(()),
+            manifests=manifests,
+            credentials=credentials,
         )
     )
     DBOS(
@@ -69,6 +79,7 @@ def run() -> None:
     app.state.hub = hub
     app.state.dbos = dbos_client
     app.include_router(router)
+    _mount_ext_routes(app, manifests, workspace_id, credentials)
     log("serve.started", host=config.serve.host, port=config.serve.port)
     try:
         uvicorn.run(app, host=config.serve.host, port=config.serve.port, log_level="warning")
@@ -109,6 +120,38 @@ def _launch_jobs(config: Config) -> None:
 async def _sole_workspace_id() -> UUID:
     async with workspace_tx() as connection:
         return (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
+
+
+def _mount_ext_routes(
+    app: FastAPI,
+    manifests: tuple[Manifest, ...],
+    workspace_id: UUID,
+    credentials: CredentialStore | None,
+) -> None:
+    """Mount each extension's declared routes at `/ext/<name>/<path>`, every request bound to that
+    extension's workspace-scoped ExtensionContext. An extension serving routes without a credential
+    key set fails loud, since its context needs the credential store."""
+    for manifest in manifests:
+        if not manifest.routes:
+            continue
+        if credentials is None:
+            raise RuntimeError(
+                f"extension {manifest.name!r} serves routes but no credential key is set"
+            )
+        declared = frozenset(slot.name for slot in manifest.credentials)
+        context = context_for(workspace_id, manifest.name, declared, credentials)
+        for spec in manifest.routes:
+
+            async def endpoint(
+                request: Request, handler=spec.handler, extension_context=context
+            ) -> Response:
+                return await handler(extension_context, request)
+
+            app.add_route(
+                f"/ext/{manifest.name}/{spec.path.lstrip('/')}",
+                endpoint,
+                methods=[spec.method],
+            )
 
 
 def _egress_proxy(rules: tuple[Rule, ...]) -> ProxyEndpoint:
