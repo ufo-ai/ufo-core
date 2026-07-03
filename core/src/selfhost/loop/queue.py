@@ -42,12 +42,14 @@ from selfhost.schema.records import (
     TerminalFrame,
     Turn,
 )
+from selfhost.skills.runtime import CORE_SKILLS
 from selfhost.tools.registry import ToolRegistry
 
 SANDBOX_IMAGE_REF = "selfhost-sandbox:latest"
 TURN_QUEUE_POLL_SECONDS = 0.1
 FAILED_TERMINAL_RETRY_SECONDS = 1.0
 FAILED_TERMINAL_RETRY_MAX_SECONDS = 30.0
+CORE_SKILL_INDEX = tuple((skill.name, skill.description) for skill in CORE_SKILLS)
 TURN_QUEUE = Queue(
     TURN_QUEUE_NAME,
     concurrency=1,
@@ -110,7 +112,7 @@ async def _execute_turn(turn_id: str) -> str:
         )
         if turn.subagent_profile is None:
             resolved, tools = agent, ToolRegistry(all_tools)
-            system_prompt = render_system_prompt(agent.prompt, sections)
+            system_prompt = render_system_prompt(agent.prompt, sections, skills=CORE_SKILL_INDEX)
         else:
             profile = runtime.subagents.get(turn.subagent_profile)
             resolved = Agent(prompt=subagent_system_prompt(profile), model=agent.model)

@@ -32,4 +32,9 @@ Relevant memory is recalled into your context each turn. Call memory_search when
 Delegate to a subagent with spawn_subagent to parallelize independent work or to keep a large result set out of your own context. Give each subagent a self-contained objective; have it write findings to a workspace file and reference that path rather than returning bulk data inline.
 </delegation>
 
+<skills>
+When a task matches one of your skills, call load_skill first — it mounts that skill's step-by-step instructions and assets into your workspace before you begin.
+{{skill_index}}
+</skills>
+
 {{sections}}
