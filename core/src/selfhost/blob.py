@@ -1,6 +1,7 @@
 """Blob storage behind one async protocol: filesystem for dev, S3 for deploys."""
 
 import asyncio
+import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -78,12 +79,6 @@ def _is_missing_key(error: ClientError) -> bool:
     return error.response.get("Error", {}).get("Code") in MISSING_KEY_CODES
 
 
-def _read_range(source: Path, offset: int, size: int) -> bytes:
-    with source.open("rb") as handle:
-        handle.seek(offset)
-        return handle.read(size)
-
-
 @dataclass(frozen=True)
 class S3BlobStore:
     """Single-shot object storage over aiobotocore; a fresh client per call."""
@@ -97,18 +92,20 @@ class S3BlobStore:
             await client.put_object(Bucket=self.bucket, Key=key, Body=data)
 
     async def put_file(self, key: str, source: Path) -> None:
-        size = await asyncio.to_thread(lambda: source.stat().st_size)
+        stat = await asyncio.to_thread(source.stat)
+        size = stat.st_size
         async with self._client() as client:
             if size == 0:
                 await client.put_object(Bucket=self.bucket, Key=key, Body=b"")
                 return
             created = await client.create_multipart_upload(Bucket=self.bucket, Key=key)
             upload_id = created["UploadId"]
+            fd = await asyncio.to_thread(os.open, source, os.O_RDONLY)
             try:
                 parts: list[dict[str, object]] = []
                 for number, offset in enumerate(range(0, size, S3_MULTIPART_PART_BYTES), start=1):
                     chunk = await asyncio.to_thread(
-                        _read_range, source, offset, S3_MULTIPART_PART_BYTES
+                        os.pread, fd, S3_MULTIPART_PART_BYTES, offset
                     )
                     part = await client.upload_part(
                         Bucket=self.bucket,
@@ -129,6 +126,8 @@ class S3BlobStore:
                     Bucket=self.bucket, Key=key, UploadId=upload_id
                 )
                 raise
+            finally:
+                await asyncio.to_thread(os.close, fd)
 
     async def get(self, key: str) -> bytes:
         async with self._client() as client:

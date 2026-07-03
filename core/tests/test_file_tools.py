@@ -22,7 +22,6 @@ from selfhost.blob import FilesystemBlobStore
 from selfhost.sandbox import session as session_module
 from selfhost.sandbox.carrier import DockerCarrier
 from selfhost.sandbox.session import (
-    MAX_READ_BYTES,
     MountSpec,
     SandboxHandle,
     SandboxSession,
@@ -33,6 +32,7 @@ from selfhost.tools.context import SpawnResult, ToolContext
 from selfhost.tools.registry import ToolRegistry
 
 SANDBOX_TEST_IMAGE = "selfhost-sandbox:test"
+OVER_INMEMORY_BYTES = 25 * 1024 * 1024
 ARTIFACT_SECRET = "file-tools-secret"
 REGISTRY = ToolRegistry(BUILTIN_TOOLS)
 
@@ -288,8 +288,8 @@ async def test_share_file_streams_a_file_over_the_read_cap_byte_exact(
     file_ctx: tuple[ToolContext, Path],
 ) -> None:
     ctx, workspace = file_ctx
-    payload = b"\x00\x01\x02\x03\x04\x05\x06\x07" * (MAX_READ_BYTES // 8 + 200000)
-    assert len(payload) > MAX_READ_BYTES
+    payload = b"\x00\x01\x02\x03\x04\x05\x06\x07" * (OVER_INMEMORY_BYTES // 8 + 200000)
+    assert len(payload) > OVER_INMEMORY_BYTES
     (workspace / "big.bin").write_bytes(payload)
     result = await _run("share_file", ctx, file_path="big.bin")
     shared = json.loads(result.content[0].text)

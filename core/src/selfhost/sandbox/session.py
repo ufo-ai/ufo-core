@@ -18,8 +18,6 @@ from selfhost.blob import BlobStore
 WORKSPACE_DIR = "/workspace"
 DEFAULT_EXEC_TIMEOUT_SECONDS = 120
 SENTINEL_MODEL_KEY = "SELFHOST_SENTINEL_MODEL_KEY"
-MAX_READ_BYTES = 25 * 1024 * 1024
-READ_TOO_LARGE_EXIT = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,22 +158,6 @@ class SandboxSession:
         return await self.carrier.exec(
             self.handle, ("bash", "-lc", command), stdin=b"", timeout_s=timeout_s
         )
-
-    async def read_file(self, path: str) -> bytes:
-        target = workspace_path(path)
-        script = (
-            f'test -f "$1" || exit 2\n'
-            f'if [ "$(wc -c < "$1")" -gt {MAX_READ_BYTES} ]; then exit {READ_TOO_LARGE_EXIT}; fi\n'
-            f'base64 -- "$1"'
-        )
-        result = await self.carrier.exec(
-            self.handle, ("sh", "-c", script, "sh", target), stdin=b"", timeout_s=30
-        )
-        if result.exit_code == READ_TOO_LARGE_EXIT:
-            raise ValueError(f"file {path!r} exceeds max read size of {MAX_READ_BYTES} bytes")
-        if result.exit_code != 0:
-            raise FileNotFoundError(result.stderr.strip() or path)
-        return base64.b64decode(result.stdout)
 
     async def write_file(self, path: str, content: bytes) -> None:
         target = workspace_path(path)
