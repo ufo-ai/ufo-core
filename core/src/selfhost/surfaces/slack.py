@@ -43,12 +43,20 @@ WRITEBACK_CLAIMED = "claimed"
 WRITEBACK_DELIVERED = "delivered"
 WRITEBACK_FAILED = "failed"
 TURN_DONE = "done"
+TURN_FAILED = "failed"
+TURN_CANCELLED = "cancelled"
+TERMINAL_TURN_STATUSES = (TURN_DONE, TURN_FAILED, TURN_CANCELLED)
 SLACK_MARKDOWN_TEXT_LIMIT = 12_000
 MAX_SLACK_MESSAGE_BYTES = 40_000
 MAX_WRITEBACK_ERROR_CHARS = 2_048
 WRITEBACK_POLL_SECONDS = 1.0
 WRITEBACK_CLAIM_SECONDS = 300
+WRITEBACK_RETRY_BACKOFF_SECONDS = 60
+WRITEBACK_MAX_AGE_SECONDS = 3600
 WRITEBACK_CLAIM_BATCH = 16
+SLACK_TURN_FAILED_TEXT = "⚠️ Something went wrong handling your message."
+SLACK_TURN_CANCELLED_TEXT = "🛑 That request was cancelled."
+SLACK_EMPTY_REPLY_TEXT = "(no reply)"
 
 router = APIRouter()
 
@@ -340,14 +348,32 @@ class SlackSurface:
         return agent.id
 
 
+def _reply_text(terminal: TerminalFrame) -> str:
+    """What to post for a terminal turn: the agent's reply for a done turn (a placeholder when it
+    produced none), or a short outcome line so a failed or cancelled turn still answers in-thread
+    rather than leaving the Slack user in silence."""
+    if terminal.status == TURN_FAILED:
+        return SLACK_TURN_FAILED_TEXT
+    if terminal.status == TURN_CANCELLED:
+        return SLACK_TURN_CANCELLED_TEXT
+    return terminal.text or SLACK_EMPTY_REPLY_TEXT
+
+
 @dataclass(frozen=True)
 class WritebackPoller:
-    """Durable delivery of Slack replies. The hub is lossy, so the reply is never posted from a live
-    Terminal frame: this poller claims writebacks whose turn is done, posts the Block Kit reply to
-    the thread with the bot token (in-process, not through the sandbox proxy), records the message
-    ts, then marks delivered. A claim (worker id + expiry) makes it safe under `serve`'s concurrent
-    instances — Postgres skips a peer's locked rows, SQLite's single writer serializes them — and a
-    compare-and-swap on the claim owner means only the worker still holding a claim finalizes it."""
+    """Durable, at-least-once delivery of Slack replies. The hub is lossy, so the reply is never
+    posted from a live Terminal frame: this poller claims writebacks whose turn reached a terminal
+    state, posts the Block Kit reply to the thread with the bot token (in-process, not through the
+    sandbox proxy), records the message ts, then marks delivered. The claim (worker id + expiry) is
+    safe under `serve`'s concurrent instances — Postgres skips a peer's locked rows, SQLite's single
+    writer serializes them — and a compare-and-swap on the owner means only the worker still holding
+    the claim advances it. A poller that crashes after claiming is recovered once its lease expires:
+    the row is re-claimed, and because the message ts is recorded in its own commit before the
+    delivered mark, a recovered row whose ts is already set is finalized without re-posting. Slack
+    has no postMessage idempotency key, so only a crash in the window between a successful post and
+    its ts commit can double a reply — the trade is guaranteed delivery over a never-dropped one.
+    A post that errors is retried with backoff and terminally failed once the writeback ages out, so
+    a permanently undeliverable reply can neither be lost silently nor hot-loop."""
 
     credentials: CredentialStore
     http: httpx.AsyncClient
@@ -369,6 +395,9 @@ class WritebackPoller:
             await self._deliver(row.turn_id, row.reply_ref)
 
     async def _claim(self) -> Sequence[sa.Row]:
+        """Claim deliverable writebacks: a fresh or retry-eligible `pending` row (its backoff gate,
+        if any, elapsed), or a `claimed` row whose lease expired — the crash-recovery path. A
+        terminally `failed` row is never re-claimed. The turn must have reached a terminal state."""
         now = datetime.now(UTC)
         claimable = (
             sa.select(tables.writeback.c.turn_id)
@@ -377,11 +406,19 @@ class WritebackPoller:
             )
             .where(
                 tables.writeback.c.workspace_id == self.workspace_id,
-                tables.writeback.c.status.in_((WRITEBACK_PENDING, WRITEBACK_FAILED)),
-                tables.turn.c.status == TURN_DONE,
+                tables.turn.c.status.in_(TERMINAL_TURN_STATUSES),
                 sa.or_(
-                    tables.writeback.c.claim_expires_at.is_(None),
-                    tables.writeback.c.claim_expires_at <= now,
+                    sa.and_(
+                        tables.writeback.c.status == WRITEBACK_PENDING,
+                        sa.or_(
+                            tables.writeback.c.claim_expires_at.is_(None),
+                            tables.writeback.c.claim_expires_at <= now,
+                        ),
+                    ),
+                    sa.and_(
+                        tables.writeback.c.status == WRITEBACK_CLAIMED,
+                        tables.writeback.c.claim_expires_at <= now,
+                    ),
                 ),
             )
             .order_by(tables.writeback.c.created_at)
@@ -409,33 +446,35 @@ class WritebackPoller:
             ).all()
 
     async def _deliver(self, turn_id: UUID, reply_ref: str | None) -> None:
-        async with workspace_tx() as connection:
-            row = (
-                await connection.execute(
-                    sa.select(tables.turn.c.terminal, tables.conversation.c.queue_key)
-                    .select_from(
-                        tables.turn.join(
-                            tables.conversation,
-                            tables.conversation.c.id == tables.turn.c.conversation_id,
-                        )
-                    )
-                    .where(tables.turn.c.id == turn_id)
-                )
-            ).one()
-        channel, separator, thread_ts = row.queue_key.partition(":")
-        text = TerminalFrame.model_validate(row.terminal).text
         try:
+            async with workspace_tx() as connection:
+                row = (
+                    await connection.execute(
+                        sa.select(tables.turn.c.terminal, tables.conversation.c.queue_key)
+                        .select_from(
+                            tables.turn.join(
+                                tables.conversation,
+                                tables.conversation.c.id == tables.turn.c.conversation_id,
+                            )
+                        )
+                        .where(tables.turn.c.id == turn_id)
+                    )
+                ).one()
             if reply_ref is None:
-                reply_ref = await self._post(channel, thread_ts if separator else None, text)
+                channel, separator, thread_ts = row.queue_key.partition(":")
+                terminal = TerminalFrame.model_validate(row.terminal)
+                reply_ref = await self._post(
+                    channel, thread_ts if separator else None, _reply_text(terminal)
+                )
                 await self._record_ref(turn_id, reply_ref)
-            await self._finalize(turn_id, WRITEBACK_DELIVERED, None)
+            await self._mark_delivered(turn_id)
         except Exception as error:
             log(
                 "slack.writeback_post_failed",
                 turn_id=str(turn_id),
                 error_class=type(error).__name__,
             )
-            await self._finalize(turn_id, WRITEBACK_FAILED, str(error)[:MAX_WRITEBACK_ERROR_CHARS])
+            await self._fail_or_retry(turn_id, str(error)[:MAX_WRITEBACK_ERROR_CHARS])
 
     async def _post(self, channel: str, thread_ts: str | None, text: str) -> str:
         token = await self.credentials.get(self.workspace_id, SLACK_BOT_TOKEN_SLOT)
@@ -457,6 +496,10 @@ class WritebackPoller:
         return ts
 
     async def _record_ref(self, turn_id: UUID, reply_ref: str) -> None:
+        """Persist the posted message ts in its own commit, while the row is still claimed, so a
+        crash before the delivered mark leaves a re-claimable row whose set ts tells the recovering
+        poller the reply already went out — skip the re-post. The compare-and-swap on `claimed_by`
+        keeps a resurrected old worker inert against the current claimant."""
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.update(tables.writeback)
@@ -467,7 +510,7 @@ class WritebackPoller:
                 .values(reply_ref=reply_ref, updated_at=sa.func.now())
             )
 
-    async def _finalize(self, turn_id: UUID, status: str, last_error: str | None) -> None:
+    async def _mark_delivered(self, turn_id: UUID) -> None:
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.update(tables.writeback)
@@ -476,10 +519,36 @@ class WritebackPoller:
                     tables.writeback.c.claimed_by == self.worker_id,
                 )
                 .values(
-                    status=status,
-                    last_error=last_error,
+                    status=WRITEBACK_DELIVERED,
+                    last_error=None,
                     claimed_by=None,
                     claim_expires_at=None,
+                    updated_at=sa.func.now(),
+                )
+            )
+
+    async def _fail_or_retry(self, turn_id: UUID, last_error: str) -> None:
+        """A failed post releases the claim for a backed-off retry, unless the writeback has aged
+        past its retry budget — then it is terminally failed so a permanently undeliverable reply
+        neither hot-loops nor lingers. The compare-and-swap keeps a resurrected old worker inert."""
+        now = datetime.now(UTC)
+        give_up_before = now - timedelta(seconds=WRITEBACK_MAX_AGE_SECONDS)
+        aged_out = tables.writeback.c.created_at <= give_up_before
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.writeback)
+                .where(
+                    tables.writeback.c.turn_id == turn_id,
+                    tables.writeback.c.claimed_by == self.worker_id,
+                )
+                .values(
+                    status=sa.case((aged_out, WRITEBACK_FAILED), else_=WRITEBACK_PENDING),
+                    claim_expires_at=sa.case(
+                        (aged_out, None),
+                        else_=now + timedelta(seconds=WRITEBACK_RETRY_BACKOFF_SECONDS),
+                    ),
+                    claimed_by=None,
+                    last_error=last_error,
                     updated_at=sa.func.now(),
                 )
             )

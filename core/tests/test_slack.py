@@ -3,6 +3,7 @@ import hmac
 import json
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import httpx
@@ -23,8 +24,13 @@ from selfhost.surfaces.slack import (
     SLACK_BOT_TOKEN_SLOT,
     SLACK_CHAT_POST_MESSAGE_URL,
     SLACK_SIGNING_SECRET_SLOT,
+    SLACK_TURN_FAILED_TEXT,
     SURFACE_SLACK,
+    TERMINAL_TURN_STATUSES,
+    WRITEBACK_CLAIMED,
     WRITEBACK_DELIVERED,
+    WRITEBACK_FAILED,
+    WRITEBACK_MAX_AGE_SECONDS,
     WRITEBACK_PENDING,
     SlackSignatureError,
     SlackSurface,
@@ -224,7 +230,11 @@ def _recording_post_transport(posted: list[httpx.Request]) -> httpx.MockTranspor
 
 async def _seed_slack_turn(workspace_id: UUID, queue_key: str, status: str, text: str) -> UUID:
     conversation_id, turn_id = uuid4(), uuid4()
-    terminal = TerminalFrame(status=status, text=text).model_dump(mode="json") if text else None
+    terminal = (
+        TerminalFrame(status=status, text=text).model_dump(mode="json")
+        if status in TERMINAL_TURN_STATUSES
+        else None
+    )
     async with workspace_tx() as connection:
         agent_id = (
             await connection.execute(
@@ -268,15 +278,53 @@ async def _seed_slack_turn(workspace_id: UUID, queue_key: str, status: str, text
     return turn_id
 
 
+def _failing_post_transport(posted: list[httpx.Request]) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        posted.append(request)
+        return httpx.Response(200, json={"ok": False, "error": "channel_not_found"})
+
+    return httpx.MockTransport(handler)
+
+
 async def _writeback(turn_id: UUID) -> sa.Row:
     async with workspace_tx() as connection:
         return (
             await connection.execute(
-                sa.select(tables.writeback.c.status, tables.writeback.c.reply_ref).where(
-                    tables.writeback.c.turn_id == turn_id
-                )
+                sa.select(
+                    tables.writeback.c.status,
+                    tables.writeback.c.reply_ref,
+                    tables.writeback.c.claimed_by,
+                    tables.writeback.c.claim_expires_at,
+                    tables.writeback.c.last_error,
+                ).where(tables.writeback.c.turn_id == turn_id)
             )
         ).one()
+
+
+async def _set_writeback(turn_id: UUID, **values: object) -> None:
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.writeback)
+            .where(tables.writeback.c.turn_id == turn_id)
+            .values(**values)
+        )
+
+
+def _poller(
+    workspace_id: UUID, store: CredentialStore, transport: httpx.MockTransport, worker: str
+) -> WritebackPoller:
+    return WritebackPoller(
+        credentials=store,
+        http=AsyncClient(transport=transport),
+        workspace_id=workspace_id,
+        worker_id=worker,
+    )
+
+
+async def _token_store(workspace_id: UUID) -> CredentialStore:
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    await store.put(workspace_id, SLACK_BOT_TOKEN_SLOT, BOT_TOKEN)
+    return store
 
 
 async def test_writeback_poller_posts_block_kit_reply_to_thread(db: None) -> None:
@@ -321,6 +369,143 @@ async def test_writeback_poller_leaves_a_pending_turn_undelivered(db: None) -> N
         await poller.drain()
     assert posted == []
     assert (await _writeback(turn_id)).status == WRITEBACK_PENDING
+
+
+async def test_writeback_poller_recovers_an_expired_claim(db: None) -> None:
+    """D1: a poller that claimed then crashed leaves the row 'claimed' with an expired lease; a
+    fresh poller must re-claim and deliver it, not lose the reply and strand the row forever."""
+    workspace_id, _ = await _seed()
+    turn_id = await _seed_slack_turn(workspace_id, "C7:1.0", "done", "recovered")
+    await _set_writeback(
+        turn_id,
+        status=WRITEBACK_CLAIMED,
+        claimed_by="dead-worker",
+        claim_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    posted: list[httpx.Request] = []
+    poller = _poller(
+        workspace_id,
+        await _token_store(workspace_id),
+        _recording_post_transport(posted),
+        "worker-2",
+    )
+    async with poller.http:
+        await poller.drain()
+    assert len(posted) == 1
+    row = await _writeback(turn_id)
+    assert row.status == WRITEBACK_DELIVERED
+    assert row.reply_ref == "999.100"
+    assert row.claimed_by is None
+
+
+async def test_writeback_poller_finalizes_a_recorded_ref_without_reposting(db: None) -> None:
+    """D2: a crash after the ts is recorded but before the delivered mark leaves a claimed row with
+    reply_ref set; recovery must finalize it WITHOUT posting again — no duplicate thread reply."""
+    workspace_id, _ = await _seed()
+    turn_id = await _seed_slack_turn(workspace_id, "C12:1.0", "done", "already sent")
+    await _set_writeback(
+        turn_id,
+        status=WRITEBACK_CLAIMED,
+        claimed_by="dead-worker",
+        reply_ref="555.001",
+        claim_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    posted: list[httpx.Request] = []
+    poller = _poller(
+        workspace_id,
+        await _token_store(workspace_id),
+        _recording_post_transport(posted),
+        "worker-2",
+    )
+    async with poller.http:
+        await poller.drain()
+    assert posted == []
+    row = await _writeback(turn_id)
+    assert row.status == WRITEBACK_DELIVERED
+    assert row.reply_ref == "555.001"
+
+
+async def test_writeback_poller_leaves_an_unexpired_claim_to_its_owner(db: None) -> None:
+    """D1 corollary: a live peer's unexpired claim is never stolen, so no two pollers deliver it."""
+    workspace_id, _ = await _seed()
+    turn_id = await _seed_slack_turn(workspace_id, "C8:1.0", "done", "held")
+    await _set_writeback(
+        turn_id,
+        status=WRITEBACK_CLAIMED,
+        claimed_by="worker-1",
+        claim_expires_at=datetime.now(UTC) + timedelta(seconds=WRITEBACK_MAX_AGE_SECONDS),
+    )
+    posted: list[httpx.Request] = []
+    poller = _poller(
+        workspace_id,
+        await _token_store(workspace_id),
+        _recording_post_transport(posted),
+        "worker-2",
+    )
+    async with poller.http:
+        await poller.drain()
+    assert posted == []
+    row = await _writeback(turn_id)
+    assert row.status == WRITEBACK_CLAIMED
+    assert row.claimed_by == "worker-1"
+
+
+async def test_writeback_poller_backs_off_a_young_failure_then_holds(db: None) -> None:
+    """D3: a failed post on a young writeback releases it to pending behind a future backoff gate,
+    so an immediate re-drain does not re-claim it — no per-second hot loop against Slack."""
+    workspace_id, _ = await _seed()
+    turn_id = await _seed_slack_turn(workspace_id, "C9:1.0", "done", "hi")
+    posted: list[httpx.Request] = []
+    poller = _poller(
+        workspace_id, await _token_store(workspace_id), _failing_post_transport(posted), "worker-1"
+    )
+    async with poller.http:
+        await poller.drain()
+        assert len(posted) == 1
+        row = await _writeback(turn_id)
+        assert row.status == WRITEBACK_PENDING
+        assert row.claim_expires_at is not None
+        assert row.last_error is not None
+        await poller.drain()
+    assert len(posted) == 1
+
+
+async def test_writeback_poller_terminally_fails_an_aged_out_reply(db: None) -> None:
+    """D3: a writeback older than the retry budget that still fails is terminally failed and never
+    re-claimed, so a permanently undeliverable reply neither hot-loops nor lingers pending."""
+    workspace_id, _ = await _seed()
+    turn_id = await _seed_slack_turn(workspace_id, "C10:1.0", "done", "hi")
+    await _set_writeback(
+        turn_id, created_at=datetime.now(UTC) - timedelta(seconds=WRITEBACK_MAX_AGE_SECONDS + 60)
+    )
+    posted: list[httpx.Request] = []
+    poller = _poller(
+        workspace_id, await _token_store(workspace_id), _failing_post_transport(posted), "worker-1"
+    )
+    async with poller.http:
+        await poller.drain()
+        assert (await _writeback(turn_id)).status == WRITEBACK_FAILED
+        await poller.drain()
+    assert len(posted) == 1
+
+
+async def test_writeback_poller_posts_an_outcome_for_a_failed_turn(db: None) -> None:
+    """D5: a failed turn still delivers a short outcome line instead of ghosting the Slack user and
+    leaking a pending writeback forever."""
+    workspace_id, _ = await _seed()
+    turn_id = await _seed_slack_turn(workspace_id, "C11:2.0", "failed", "")
+    posted: list[httpx.Request] = []
+    poller = _poller(
+        workspace_id,
+        await _token_store(workspace_id),
+        _recording_post_transport(posted),
+        "worker-1",
+    )
+    async with poller.http:
+        await poller.drain()
+    assert len(posted) == 1
+    assert json.loads(posted[0].content)["text"] == SLACK_TURN_FAILED_TEXT
+    assert (await _writeback(turn_id)).status == WRITEBACK_DELIVERED
 
 
 async def test_dm_links_member_while_channel_thread_is_shared(db: None) -> None:
