@@ -134,9 +134,10 @@ async def _execute_turn(turn_id: str) -> str:
             memory=runtime.memory,
             member_id=member_id,
             artifact_token_secret=runtime.artifact_token_secret,
+            attempt=DBOS.workflow_id or turn_id,
         )
         frame = await engine.run()
-        return frame.status
+        return "superseded" if frame is None else frame.status
     except TurnParked:
         return "parked"
     except asyncio.CancelledError:

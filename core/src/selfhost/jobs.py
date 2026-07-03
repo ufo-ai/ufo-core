@@ -30,7 +30,6 @@ from selfhost.schema.records import (
     PARKED,
     TURN_QUEUE_NAME,
     TURN_WORKFLOW_NAME,
-    TurnStatus,
 )
 
 JOB_QUEUE_NAME = "jobs"
@@ -42,7 +41,6 @@ PAGE_INDEX_JOB = "page_index"
 PAGE_INDEX_SCHEDULE = "0 * * * * *"
 SPEND_RESUME_JOB = "spend_resume"
 SPEND_RESUME_SCHEDULE = "0 * * * * *"
-RESUME_QUEUED: TurnStatus = "queued"
 JOB_QUEUE = Queue(JOB_QUEUE_NAME)
 
 
@@ -59,9 +57,12 @@ class _ParkedTurn:
 class SpendResume:
     """Re-admit parked turns whose caps now have headroom — the resume half of parking. A
     batch-at-interval job, never fired by the spend_cap write it reacts to, so raising a cap frees
-    its parked turns on the next sweep. A freed turn re-runs under a fresh DBOS workflow id (its
-    original id was consumed by the run that parked it), while its transcript and ledger stay keyed
-    by the turn id, so the re-run is idempotent at the durable layer."""
+    its parked turns on the next sweep. It only ENQUEUES; the turn stays PARKED until its own
+    execution atomically claims it (parked → running), so a crash between decide and enqueue leaves
+    it re-enqueueable rather than orphaned, and a duplicate enqueue loses the claim and no-ops. Each
+    run is a fresh DBOS workflow id (the original was consumed by the run that parked it); the
+    transcript and per-attempt ledger stay keyed by the turn id, so the re-run is idempotent at the
+    durable layer and each attempt's real spend is billed."""
 
     client: DBOSClient
 
@@ -71,14 +72,7 @@ class SpendResume:
                 decision = await SpendEvaluator(
                     turn.workspace_id, turn.member_id, turn.agent_id
                 ).decide(connection, 0)
-                if decision.outcome != ALLOW:
-                    continue
-                updated = await connection.execute(
-                    sa.update(tables.turn)
-                    .values(status=RESUME_QUEUED, updated_at=sa.func.now())
-                    .where(tables.turn.c.id == turn.id, tables.turn.c.status == PARKED)
-                )
-            if updated.rowcount == 1:
+            if decision.outcome == ALLOW:
                 await self._enqueue(turn)
 
     async def _parked_turns(self) -> tuple[_ParkedTurn, ...]:
@@ -109,16 +103,7 @@ class SpendResume:
             "queue_partition_key": str(turn.conversation_id),
             "app_version": DBOS_APP_VERSION,
         }
-        try:
-            await self.client.enqueue_async(options, str(turn.id))
-        except Exception:
-            async with workspace_tx() as connection:
-                await connection.execute(
-                    sa.update(tables.turn)
-                    .values(status=PARKED, updated_at=sa.func.now())
-                    .where(tables.turn.c.id == turn.id, tables.turn.c.status == RESUME_QUEUED)
-                )
-            raise
+        await self.client.enqueue_async(options, str(turn.id))
 
 
 def core_jobs(
