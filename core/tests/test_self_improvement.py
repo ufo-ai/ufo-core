@@ -31,9 +31,10 @@ from selfhost.db import workspace_tx
 from selfhost.ext.context import Trajectory, context_for
 from selfhost.ext.loader import load_manifests
 from selfhost.governance import prompt_digest
-from selfhost.loop.transcript import Conversation, Transcript
+from selfhost.loop.transcript import Transcript
 from selfhost.models.interface import Message, ToolResultBlock, ToolUseBlock
 from selfhost.schema import tables
+from selfhost.transcript import Conversation
 
 SEED_PROMPT = "You are a helpful assistant."
 IMPROVED_MARKER = "IMPROVED"

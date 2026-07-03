@@ -6,8 +6,9 @@ import pytest
 from pydantic import ValidationError
 
 from selfhost.blob import FilesystemBlobStore
-from selfhost.loop.transcript import Conversation, Transcript
+from selfhost.loop.transcript import Transcript
 from selfhost.models.interface import Message
+from selfhost.transcript import Conversation, decode, transcript_key
 
 
 def _transcript(tmp_path: Path) -> Transcript:
@@ -70,6 +71,14 @@ async def test_stored_bytes_are_lz4_compact_json(tmp_path: Path) -> None:
     await transcript.write(
         Conversation(seq=1, messages=(Message(role="user", content="hi"),))
     )
-    raw = await blob.get(f"conversations/{conversation_id}/messages.json.lz4")
+    raw = await blob.get(transcript_key(conversation_id))
     decoded = lz4.frame.decompress(raw).decode()
     assert decoded == '{"messages":[{"content":"hi","role":"user"}],"seq":1}'
+
+
+async def test_writer_bytes_decode_through_the_shared_contract(tmp_path: Path) -> None:
+    blob = FilesystemBlobStore(root=tmp_path)
+    conversation_id = uuid4()
+    conversation = Conversation(seq=1, messages=(Message(role="user", content="hi"),))
+    await Transcript(blob=blob, conversation_id=conversation_id).write(conversation)
+    assert decode(await blob.get(transcript_key(conversation_id))) == conversation

@@ -1,17 +1,16 @@
 """The capability-scoped view a job or extension handler receives.
 
-A handler never sees a raw DB handle or another workspace: it gets a `ScopedStore` (its own
-key space under one workspace) and `CredentialAccess` (only the slots its manifest declared).
-`context_for` builds the same shape for an extension (its manifest name + declared slots) and for
-a core job (the `core` namespace, no slots) — so a core job rides the exact path an extension does.
-The `ExtensionContext` shape is open: later units add methods (memory writes, governed proposals,
-invoke) without reshaping what handlers already hold."""
+A handler never sees a raw DB handle, a raw blob store, or another workspace: it gets a
+`ScopedStore` (its own key space under one workspace), `CredentialAccess` (only the slots its
+manifest declared), and — when trajectory reads are wired — a `TrajectoryCorpus` (this workspace's
+transcripts, read only). `context_for` builds the same shape for an extension (its manifest name +
+declared slots) and for a core job (the `core` namespace, no slots) — so a core job rides the exact
+path an extension does. The `ExtensionContext` shape is open: later units add methods (memory
+writes, governed proposals, invoke) without reshaping what handlers already hold."""
 
-import json
 from dataclasses import dataclass
 from uuid import UUID
 
-import lz4.frame
 import sqlalchemy as sa
 
 from selfhost.blob import BlobNotFound, BlobStore
@@ -20,12 +19,12 @@ from selfhost.db import workspace_tx
 from selfhost.governance import Governance, prompt_digest
 from selfhost.memory.service import MemoryService
 from selfhost.models.interface import Message
+from selfhost.o11y import log
 from selfhost.schema import tables
 from selfhost.schema.records import AgentChange, MemoryWrite, ProposalRef
+from selfhost.transcript import TranscriptDecodeError, decode, transcript_key
 
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
-
-TRANSCRIPT_KEY = "conversations/{conversation_id}/messages.json.lz4"
 
 
 class UndeclaredCredentialSlot(KeyError):
@@ -119,11 +118,69 @@ class Trajectory:
 
 
 @dataclass(frozen=True)
+class TrajectoryCorpus:
+    """The one blob reach a handler gets: this workspace's conversation transcripts, read only. The
+    store stays module-private (`_blob`), so the only operation exposed is enumerating this
+    workspace's trajectories — never an arbitrary blob get or put over another conversation or an
+    artifact. A conversation whose transcript is missing or corrupt is skipped-with-log, never
+    aborting the whole corpus."""
+
+    workspace_id: UUID
+    _blob: BlobStore
+
+    async def trajectories(self) -> tuple[Trajectory, ...]:
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(
+                        tables.conversation.c.id,
+                        tables.turn.c.agent_id,
+                        tables.agent.c.prompt,
+                    )
+                    .select_from(
+                        tables.conversation.join(
+                            tables.turn,
+                            tables.turn.c.conversation_id == tables.conversation.c.id,
+                        ).join(tables.agent, tables.agent.c.id == tables.turn.c.agent_id)
+                    )
+                    .where(tables.conversation.c.workspace_id == self.workspace_id)
+                    .distinct()
+                    .order_by(tables.conversation.c.id)
+                )
+            ).all()
+        seen: set[UUID] = set()
+        trajectories: list[Trajectory] = []
+        for row in rows:
+            if row.id in seen:
+                continue
+            seen.add(row.id)
+            try:
+                body = await self._blob.get(transcript_key(row.id))
+            except BlobNotFound:
+                continue
+            try:
+                conversation = decode(body)
+            except TranscriptDecodeError as error:
+                log("trajectory.skip_corrupt", conversation_id=str(row.id), error=str(error))
+                continue
+            trajectories.append(
+                Trajectory(
+                    conversation_id=row.id,
+                    agent_id=row.agent_id,
+                    agent_prompt=row.prompt,
+                    agent_prompt_digest=prompt_digest(row.prompt),
+                    messages=conversation.messages,
+                )
+            )
+        return tuple(trajectories)
+
+
+@dataclass(frozen=True)
 class ExtensionContext:
     store: ScopedStore
     credentials: CredentialAccess
     memory: MemoryService | None = None
-    blob: BlobStore | None = None
+    corpus: TrajectoryCorpus | None = None
 
     async def memory_write(self, write: MemoryWrite) -> None:
         """Commit a memory item for this workspace. Fails loud when no memory service is wired,
@@ -141,51 +198,11 @@ class ExtensionContext:
         ).propose_change(change)
 
     async def trajectories(self) -> tuple[Trajectory, ...]:
-        """The workspace's conversation transcripts as the eval corpus: each conversation's stored
-        messages with the agent and current prompt that produced them. Fails loud when no blob
-        store is wired, rather than reporting an empty corpus."""
-        if self.blob is None:
-            raise RuntimeError("trajectories requires a blob store; none is wired")
-        async with workspace_tx() as connection:
-            rows = (
-                await connection.execute(
-                    sa.select(
-                        tables.conversation.c.id,
-                        tables.turn.c.agent_id,
-                        tables.agent.c.prompt,
-                    )
-                    .select_from(
-                        tables.conversation.join(
-                            tables.turn,
-                            tables.turn.c.conversation_id == tables.conversation.c.id,
-                        ).join(tables.agent, tables.agent.c.id == tables.turn.c.agent_id)
-                    )
-                    .where(tables.conversation.c.workspace_id == self.store.workspace_id)
-                    .distinct()
-                    .order_by(tables.conversation.c.id)
-                )
-            ).all()
-        seen: set[UUID] = set()
-        trajectories: list[Trajectory] = []
-        for row in rows:
-            if row.id in seen:
-                continue
-            seen.add(row.id)
-            try:
-                body = await self.blob.get(TRANSCRIPT_KEY.format(conversation_id=row.id))
-            except BlobNotFound:
-                continue
-            messages = json.loads(lz4.frame.decompress(body))["messages"]
-            trajectories.append(
-                Trajectory(
-                    conversation_id=row.id,
-                    agent_id=row.agent_id,
-                    agent_prompt=row.prompt,
-                    agent_prompt_digest=prompt_digest(row.prompt),
-                    messages=tuple(Message.model_validate(message) for message in messages),
-                )
-            )
-        return tuple(trajectories)
+        """This workspace's conversation transcripts as the eval corpus. Fails loud when no corpus
+        is wired, rather than reporting an empty corpus."""
+        if self.corpus is None:
+            raise RuntimeError("trajectories requires a trajectory corpus; none is wired")
+        return await self.corpus.trajectories()
 
 
 def context_for(
@@ -200,4 +217,5 @@ def context_for(
     credentials = CredentialAccess(
         workspace_id=workspace_id, declared=declared, store=credential_store
     )
-    return ExtensionContext(store=store, credentials=credentials, memory=memory, blob=blob)
+    corpus = None if blob is None else TrajectoryCorpus(workspace_id, blob)
+    return ExtensionContext(store=store, credentials=credentials, memory=memory, corpus=corpus)

@@ -55,7 +55,7 @@ async def _echo(ctx: ToolContext, args: EchoInput) -> ToolResult:
 
 async def _tick(ctx: ExtensionContext) -> None:
     await ctx.store.put(JOB_KEY, {"ran": True})
-    if ctx.blob is None:
+    if ctx.corpus is None:
         return
     trajectories = await ctx.trajectories()
     await ctx.store.put(TRAJECTORY_KEY, {"count": len(trajectories)})

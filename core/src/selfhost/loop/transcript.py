@@ -1,20 +1,11 @@
-"""The conversation's one durable transcript: whole-object codec, monotonic seq guard."""
+"""The conversation's one durable transcript writer: monotonic seq guard over the shared blob
+contract in `selfhost.transcript`."""
 
-import json
 from dataclasses import dataclass
 from uuid import UUID
 
-import lz4.frame
-from pydantic import BaseModel, ConfigDict, Field
-
 from selfhost.blob import BlobNotFound, BlobStore
-from selfhost.models.interface import Message
-
-
-class Conversation(BaseModel):
-    model_config = ConfigDict(strict=True)
-    seq: int = Field(ge=1)
-    messages: tuple[Message, ...]
+from selfhost.transcript import Conversation, decode, encode, transcript_key
 
 
 @dataclass(frozen=True)
@@ -24,20 +15,13 @@ class Transcript:
 
     async def read(self) -> Conversation | None:
         try:
-            body = await self.blob.get(self._key)
+            body = await self.blob.get(transcript_key(self.conversation_id))
         except BlobNotFound:
             return None
-        return Conversation.model_validate_json(lz4.frame.decompress(body))
+        return decode(body)
 
     async def write(self, conversation: Conversation) -> None:
         current = await self.read()
         if current is not None and current.seq >= conversation.seq:
             return
-        encoded = json.dumps(
-            conversation.model_dump(), separators=(",", ":"), sort_keys=True
-        ).encode()
-        await self.blob.put(self._key, lz4.frame.compress(encoded))
-
-    @property
-    def _key(self) -> str:
-        return f"conversations/{self.conversation_id}/messages.json.lz4"
+        await self.blob.put(transcript_key(self.conversation_id), encode(conversation))
