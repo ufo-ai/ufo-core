@@ -30,4 +30,11 @@ jobs:
       - run: uv sync
       - run: uv run ruff check
       - run: uv run python gates.py
-      - run: uv run pytest
+      # Split the run by dialect: DBOS is a process singleton, and relaunching it across the
+      # sqlite→postgres param in one process hangs the DBOS-driving tests. One process per dialect
+      # launches DBOS exactly once. timeout-minutes bounds the known intermittent DBOS-postgres hang
+      # to a fail-fast red instead of stalling the job.
+      - run: uv run pytest -k "not postgres"
+        timeout-minutes: 10
+      - run: uv run pytest -k postgres
+        timeout-minutes: 10
