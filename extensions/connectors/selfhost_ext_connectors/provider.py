@@ -10,6 +10,7 @@ exchange."""
 
 from dataclasses import dataclass
 from urllib.parse import urlencode, urlparse
+from uuid import UUID
 
 from selfhost.sdk.connectors import OAuthAccount
 from selfhost.sdk.context import ExtensionContext
@@ -28,7 +29,10 @@ class ComposioOAuthProvider:
     """One provider's OAuth descriptor keyed into `serve`'s connect registry. `host` is the
     provider's own API host the derived grant admits; `toolkit` is the Composio managed-auth slug
     the consent leg opens. `authorize_url` is pure — it points the browser at the async `oauth`
-    route — and `exchange` reads the consented account's real token from Composio."""
+    route — and `exchange` reads the consented account's real token from Composio, but only once
+    Composio confirms the account is owned by this workspace's brokered user — the same
+    `EXTERNAL_USER_PREFIX`-scoped id `oauth_route` minted the consent link against — so a foreign
+    account id injected on the return leg binds no grant."""
 
     provider: str
     host: str
@@ -38,8 +42,9 @@ class ComposioOAuthProvider:
         query = urlencode({"provider": self.provider, "state": state, "callback": redirect_uri})
         return f"{_origin(redirect_uri)}{OAUTH_ROUTE_MOUNT}?{query}"
 
-    async def exchange(self, code: str, redirect_uri: str) -> OAuthAccount:
-        return await composio.composio_client().connected_account(code)
+    async def exchange(self, code: str, redirect_uri: str, workspace_id: UUID) -> OAuthAccount:
+        expected_user = f"{composio.EXTERNAL_USER_PREFIX}{workspace_id}"
+        return await composio.composio_client().connected_account(code, expected_user)
 
 
 async def oauth_route(ctx: ExtensionContext, request: Request) -> Response:

@@ -72,9 +72,11 @@ class ComposioError(RuntimeError):
 class ComposioClient:
     """Composio v3 over httpx, twinned across the consent handoff: `connect_link` mints the hosted
     OAuth link the member opens (ensuring the toolkit's managed auth config first), and
-    `connected_account` reads back the account's real access token once the member has consented.
-    Each call opens and closes its own client so a transport override (a test's MockTransport) is
-    honoured and no connection leaks."""
+    `connected_account` reads back the account's real access token once the member has consented —
+    but only after asserting the account is owned by `expected_user_id`, the workspace's brokered
+    Composio user `connect_link` minted against, so a foreign account id (injected on the return
+    leg) is refused before any token is read. Each call opens and closes its own client so a
+    transport override (a test's MockTransport) is honoured and no connection leaks."""
 
     api_key: str
     transport: httpx.AsyncBaseTransport | None = None
@@ -90,8 +92,14 @@ class ComposioClient:
             raise ComposioError(502, f"connect link carried no redirect_url: {payload!r}")
         return redirect
 
-    async def connected_account(self, account_id: str) -> OAuthAccount:
+    async def connected_account(self, account_id: str, expected_user_id: str) -> OAuthAccount:
         payload = await self._get(f"/connected_accounts/{account_id}")
+        owner = payload.get("user_id")
+        if not isinstance(owner, str) or owner != expected_user_id:
+            raise ComposioError(
+                403,
+                f"connected account {account_id!r} is owned by {owner!r}, not {expected_user_id!r}",
+            )
         status = str(payload.get("status") or "").upper()
         if status != ACTIVE_STATUS:
             raise ComposioError(409, f"connected account {account_id!r} is {status or 'unknown'}")

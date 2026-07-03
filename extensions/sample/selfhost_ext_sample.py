@@ -9,6 +9,7 @@ the Manifest never declares — the probe that a handler asking for an undeclare
 
 import shlex
 from dataclasses import dataclass
+from uuid import UUID
 
 from pydantic import BaseModel
 
@@ -106,7 +107,7 @@ class _SampleConnectorOAuth:
     def authorize_url(self, state: str, redirect_uri: str) -> str:
         return f"{CONNECTOR_AUTHORIZE_URL}?state={state}&redirect_uri={redirect_uri}"
 
-    async def exchange(self, code: str, redirect_uri: str) -> OAuthAccount:
+    async def exchange(self, code: str, redirect_uri: str, workspace_id: UUID) -> OAuthAccount:
         return OAuthAccount(account_id=CONNECTOR_ACCOUNT, token=CONNECTOR_TOKEN)
 
 

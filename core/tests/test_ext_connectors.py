@@ -9,7 +9,7 @@ and route code run against canned Composio responses."""
 import asyncio
 import base64
 import shlex
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID, uuid4
 
@@ -45,6 +45,7 @@ UNGRANTED_HOST = "api.ungranted.test"
 COMPOSIO_CONSENT_URL = "https://github.com/login/oauth/authorize?client_id=x&state=y"
 COMPOSIO_ACCOUNT = "ca_test123"
 GITHUB_TOKEN = "gho_realsecrettoken"
+COMPOSIO_USER = "selfhost_ws"
 
 
 @pytest.fixture(autouse=True)
@@ -53,21 +54,34 @@ def _reset_connect_flow() -> Iterator[None]:
     install_connect_flow(None)
 
 
-def _composio_handler(request: httpx.Request) -> httpx.Response:
-    path = request.url.path
-    if request.method == "POST" and path.endswith("/connected_accounts/link"):
-        return httpx.Response(200, json={"redirect_url": COMPOSIO_CONSENT_URL})
-    if request.method == "GET" and path.endswith("/auth_configs"):
-        return httpx.Response(200, json={"items": [{"id": "ac_test"}]})
-    if request.method == "GET" and "/connected_accounts/" in path:
-        return httpx.Response(
-            200, json={"status": "ACTIVE", "state": {"val": {"access_token": GITHUB_TOKEN}}}
-        )
-    return httpx.Response(404, json={})
+def _composio_handler(owner: str) -> Callable[[httpx.Request], httpx.Response]:
+    """A Composio mock reporting `owner` as the connected account's owning user, so the ownership
+    assertion in `connected_account` passes for a matching user and refuses a foreign one."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "POST" and path.endswith("/connected_accounts/link"):
+            return httpx.Response(200, json={"redirect_url": COMPOSIO_CONSENT_URL})
+        if request.method == "GET" and path.endswith("/auth_configs"):
+            return httpx.Response(200, json={"items": [{"id": "ac_test"}]})
+        if request.method == "GET" and "/connected_accounts/" in path:
+            return httpx.Response(
+                200,
+                json={
+                    "status": "ACTIVE",
+                    "user_id": owner,
+                    "state": {"val": {"access_token": GITHUB_TOKEN}},
+                },
+            )
+        return httpx.Response(404, json={})
+
+    return handle
 
 
-def _mock_client() -> composio.ComposioClient:
-    return composio.ComposioClient(api_key="test", transport=httpx.MockTransport(_composio_handler))
+def _mock_client(owner: str = COMPOSIO_USER) -> composio.ComposioClient:
+    return composio.ComposioClient(
+        api_key="test", transport=httpx.MockTransport(_composio_handler(owner))
+    )
 
 
 def _config() -> Config:
@@ -85,18 +99,27 @@ def _credentials() -> CredentialStore:
 
 
 async def test_composio_client_reads_a_connected_accounts_real_token() -> None:
-    account = await _mock_client().connected_account(COMPOSIO_ACCOUNT)
+    account = await _mock_client().connected_account(COMPOSIO_ACCOUNT, COMPOSIO_USER)
     assert account.account_id == COMPOSIO_ACCOUNT
     assert account.token == GITHUB_TOKEN
 
 
+async def test_composio_client_refuses_an_account_owned_by_a_foreign_user() -> None:
+    with pytest.raises(composio.ComposioError, match="owned by"):
+        await _mock_client("selfhost_someone_else").connected_account(
+            COMPOSIO_ACCOUNT, COMPOSIO_USER
+        )
+
+
 async def test_composio_client_refuses_an_inactive_account() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"status": "INITIATED", "state": {"val": {}}})
+        return httpx.Response(
+            200, json={"status": "INITIATED", "user_id": COMPOSIO_USER, "state": {"val": {}}}
+        )
 
     client = composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handler))
     with pytest.raises(composio.ComposioError, match="INITIATED"):
-        await client.connected_account(COMPOSIO_ACCOUNT)
+        await client.connected_account(COMPOSIO_ACCOUNT, COMPOSIO_USER)
 
 
 async def test_composio_client_mints_a_connect_link() -> None:
@@ -162,8 +185,9 @@ async def test_connect_then_a_grant_drives_egress_through_the_real_proxy(
     through mocked Composio HTTP), and drive the resulting grant through the REAL egress proxy — the
     provider host is admitted and the sentinel swapped for the real token, an ungranted host is
     refused, and the forwarded request is metered to the ledger."""
-    monkeypatch.setattr(composio, "composio_client", _mock_client)
     workspace_id = await _workspace()
+    owner = f"{composio.EXTERNAL_USER_PREFIX}{workspace_id}"
+    monkeypatch.setattr(composio, "composio_client", lambda: _mock_client(owner))
     member_id, agent_id = await _member_agent(workspace_id)
     conversation_id = await _conversation(workspace_id, member_id)
     turn_id = await _turn(workspace_id, agent_id, conversation_id)
@@ -228,6 +252,38 @@ async def test_connect_then_a_grant_drives_egress_through_the_real_proxy(
             )
         ).one()
     assert (ledger.dimension, int(ledger.amount)) == ("egress", 1)
+
+
+async def test_complete_rejects_an_account_owned_by_a_foreign_composio_user(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Confused-deputy close: driving `complete` with a connectedAccountId whose owning Composio
+    user is not this workspace's brokered user (an account id injected on the return leg) is refused
+    before any token is read, so no grant binds to an attacker-controlled account."""
+    workspace_id = uuid4()
+    foreign_owner = f"{composio.EXTERNAL_USER_PREFIX}{uuid4()}"
+    monkeypatch.setattr(composio, "composio_client", lambda: _mock_client(foreign_owner))
+    flow = _connect_flow(_credentials(), _config(), (connectors.manifest(),))
+    assert flow is not None
+    url = flow.authorize(
+        workspace_id=workspace_id,
+        agent_id=uuid4(),
+        provider=PROVIDER,
+        grantor_member_id=uuid4(),
+        conversation_id=uuid4(),
+    )
+    state = parse_qs(urlparse(url).query)["state"][0]
+    with pytest.raises(composio.ComposioError, match="owned by"):
+        await flow.complete(state=state, code=COMPOSIO_ACCOUNT)
+    async with workspace_tx() as connection:
+        count = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.grant)
+                .where(tables.grant.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    assert count == 0
 
 
 async def test_connector_tool_targets_a_named_account_among_several(db: None) -> None:

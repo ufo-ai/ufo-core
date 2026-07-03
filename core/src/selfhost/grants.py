@@ -56,14 +56,17 @@ class OAuthAccount:
 class OAuthProvider(Protocol):
     """A connector's OAuth descriptor, injected by the extension that declares it. `authorize_url`
     builds the link the member opens; `exchange` turns the returned code into the account and token.
-    `host` is the provider's own host the grant admits — direct-provider-host, provider-agnostic."""
+    `workspace_id` is the sealed workspace the code was scoped to — passed so the provider can prove
+    the returned account belongs to this workspace's brokered user and refuse a foreign account
+    (the confused-deputy guard). `host` is the provider's own host the grant admits —
+    direct-provider-host, provider-agnostic."""
 
     provider: str
     host: str
 
     def authorize_url(self, state: str, redirect_uri: str) -> str: ...
 
-    async def exchange(self, code: str, redirect_uri: str) -> OAuthAccount: ...
+    async def exchange(self, code: str, redirect_uri: str, workspace_id: UUID) -> OAuthAccount: ...
 
 
 @dataclass(frozen=True)
@@ -254,7 +257,7 @@ class ConnectFlow:
     async def complete(self, *, state: str, code: str) -> GrantRecorded:
         claims = self._open(state)
         descriptor = self._provider(claims.provider)
-        account = await descriptor.exchange(code, self.redirect_uri)
+        account = await descriptor.exchange(code, self.redirect_uri, claims.workspace_id)
         await self.store.record(
             workspace_id=claims.workspace_id,
             agent_id=claims.agent_id,
