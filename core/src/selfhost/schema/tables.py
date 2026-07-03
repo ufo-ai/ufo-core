@@ -75,6 +75,7 @@ turn = sa.Table(
     sa.Column("terminal", sa.JSON(none_as_null=True), nullable=True),
     sa.Column("parent_turn_id", sa.Uuid, nullable=True),
     sa.Column("subagent_profile", sa.Text, nullable=True),
+    sa.Column("idempotency_key", sa.Text, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint("conversation_id", "seq"),
@@ -85,6 +86,7 @@ turn = sa.Table(
     sa.CheckConstraint(
         "(status in ('queued', 'running')) = (terminal is null)", name="turn_terminal"
     ),
+    sa.Index("turn_idempotency_key", "workspace_id", "idempotency_key", unique=True),
 )
 
 ledger = sa.Table(
