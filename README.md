@@ -1,4 +1,4 @@
-# metalcraft
+# selfhost
 
 An agent runtime you can run, read, and extend: a hard-to-vary core — sandboxed agent loop, memory,
 Slack/CLI/web surfaces, accounting, Anthropic/OpenAI model abstraction — plus an extension system

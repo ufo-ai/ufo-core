@@ -1,4 +1,4 @@
-# metalcraft — agent guidelines
+# selfhost — agent guidelines
 
 ## Where to look first
 
@@ -25,7 +25,7 @@ past; salvaged code arrives as if written here.
 If a constraint can be made true by code — a required argument, a type, a test, a CI gate — encode
 it there and delete the prose. A cross-cutting precondition (workspace scoping, credential access,
 sandbox egress) is established once at the boundary and threaded down; the unsafe primitive stays
-module-private behind a factory, backed by a gate. Extensions import only `metalcraft.sdk` — a CI
+module-private behind a factory, backed by a gate. Extensions import only `selfhost.sdk` — a CI
 gate forbids `core` internals in `extensions/`.
 
 ## Succinctness

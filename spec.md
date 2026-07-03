@@ -1,6 +1,6 @@
-# Metalcraft Spec
+# Selfhost Spec
 
-Metalcraft is an agent runtime a developer can run, read, and extend: a hard-to-vary **core**
+Selfhost is an agent runtime a developer can run, read, and extend: a hard-to-vary **core**
 (sandboxed agent loop, memory, surfaces, accounting, model abstraction, the extension system) plus
 **extensions** through which nearly every easy-to-vary capability is built — connectors, data
 sources, triggers, tools, subagents, onboarding. A **workspace** hosts one team and its agents.
@@ -29,12 +29,12 @@ test for the extension API — every entry must be expressible without touching 
 | Persistence | Postgres (relational state, queues, memory index) + a pluggable blob store (transcripts, compaction records, sandbox workspaces, shared artifacts): **local filesystem by default**, S3-compatible for deploys. One schema; every row carries `workspace_id`; a deploy serves ONE workspace (hosted multi-workspace is the enterprise layer). The S3 API is the cloud-portability seam — any S3-compatible store works, no per-cloud code. |
 | Durable execution | DBOS on Postgres: a turn is a durable workflow, a subagent a child workflow; queues, async cancel, crash recovery. Dequeue poll interval and system-DB retention are configured from day one. |
 | Streaming | Durable terminal frames in Postgres; live token deltas through a hub interface — in-process in the single-process default, a Redis hub extension for multi-instance deploys. A lost delta costs a redrawn token, never correctness. |
-| Topology | `metalcraft serve` is one process: surfaces + DBOS workers + jobs. Scale-out = more instances plus a shared hub. |
+| Topology | `selfhost serve` is one process: surfaces + DBOS workers + jobs. Scale-out = more instances plus a shared hub. |
 | Sandbox | Docker is the default carrier, built into core; carriers are an extension point (E2B is an extension). No unsandboxed mode. |
 | Models | Model providers are an extension point; core ships Anthropic + OpenAI direct clients behind one `ModelClient` interface. OpenRouter (or any router) is an extension, never core. |
 | Observability | OpenTelemetry APIs only in product code; the OTLP export target (Datadog, …) is deploy config. No vendor SDK in core. |
 | Kubernetes | Absent from core by construction. The enterprise offering later wraps core with k8s (principle 3); nothing in core may assume or import it. |
-| CLI | One CLI: `metalcraft` (`chat`, `serve`, `bundle`, `ext`, admin verbs). |
+| CLI | One CLI: `selfhost` (`chat`, `serve`, `bundle`, `ext`, admin verbs). |
 
 ## Workspace model
 
@@ -94,8 +94,8 @@ extension.
 
 ## Extension system
 
-An extension is a Python package exposing one entry point (`metalcraft.extension`) that returns a
-`Manifest`. Extensions import only the public SDK (`metalcraft.sdk`); a CI gate forbids reaching
+An extension is a Python package exposing one entry point (`selfhost.extension`) that returns a
+`Manifest`. Extensions import only the public SDK (`selfhost.sdk`); a CI gate forbids reaching
 into core internals.
 
 Manifest registers (each optional):
@@ -130,7 +130,7 @@ prompt files on disk. Extensions never see raw DB handles or other workspaces.
 ### Extension store
 
 Extensions are Python packages. A deploy may enable the extension store — a registry index that
-the CLI (and, when granted, an agent in chat) searches and installs from: `metalcraft ext search /
+the CLI (and, when granted, an agent in chat) searches and installs from: `selfhost ext search /
 install / remove`. Installs pin version + digest and are recorded in the bundle lockfile; with the
 store disabled, a deploy runs only what its bundle ships.
 
@@ -160,7 +160,7 @@ keys come from `credential` slots or deploy config.
 
 ## Deploy config bundling
 
-One declarative file, `metalcraft.toml`: Postgres URL, blob store (filesystem root or S3 endpoint),
+One declarative file, `selfhost.toml`: Postgres URL, blob store (filesystem root or S3 endpoint),
 model keys (env refs), enabled extensions + versions, installed packs, surface config (Slack app,
 web host), sandbox carrier, stream hub, OTLP export target, extension-store toggle, spend defaults.
 
@@ -187,7 +187,7 @@ Two invariants make this safe, and they hold even single-instance:
 Misconfiguration fails loud at boot: instances heartbeat a `runtime_instance` row; an instance that
 sees a live peer while configured with an in-process hub or a filesystem blob store refuses to
 start.
-`metalcraft bundle` produces a runnable artifact (OCI image + pinned config + lockfile) — the same
+`selfhost bundle` produces a runnable artifact (OCI image + pinned config + lockfile) — the same
 bundle installs OSS, on-prem, or hosted.
 
 ## Example extensions (the API's acceptance tests)
