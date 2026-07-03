@@ -21,7 +21,7 @@ from selfhost.loop.subagents import SubagentRegistry, Subagents, subagent_system
 from selfhost.loop.transcript import Transcript
 from selfhost.memory.service import MemoryService
 from selfhost.models.anthropic import AnthropicClient, anthropic_sdk_client
-from selfhost.models.interface import ModelClient
+from selfhost.models.interface import PROVIDER_ANTHROPIC, ModelClient, provider_for
 from selfhost.models.openai import OpenAIClient, openai_sdk_client
 from selfhost.o11y import log
 from selfhost.sandbox.session import (
@@ -51,8 +51,6 @@ TURN_QUEUE = Queue(
     partition_queue=True,
     polling_interval_sec=TURN_QUEUE_POLL_SECONDS,
 )
-ANTHROPIC_MODEL_PREFIXES = ("claude-",)
-OPENAI_MODEL_PREFIXES = ("gpt-", "o1", "o3", "o4", "chatgpt-")
 
 
 @dataclass(frozen=True)
@@ -232,13 +230,11 @@ async def _workspace_mount(blob: BlobStore, conversation_id: UUID) -> MountSpec:
 
 
 def _model_client(model: str, config: Config) -> ModelClient:
-    if model.startswith(ANTHROPIC_MODEL_PREFIXES):
+    if provider_for(model) == PROVIDER_ANTHROPIC:
         key = _api_key(config.models.anthropic_api_key_env)
         return AnthropicClient(client=anthropic_sdk_client(key))
-    if model.startswith(OPENAI_MODEL_PREFIXES):
-        key = _api_key(config.models.openai_api_key_env)
-        return OpenAIClient(client=openai_sdk_client(key))
-    raise ValueError(f"no provider serves model {model!r}")
+    key = _api_key(config.models.openai_api_key_env)
+    return OpenAIClient(client=openai_sdk_client(key))
 
 
 def _api_key(env_name: str) -> str:

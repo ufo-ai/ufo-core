@@ -76,3 +76,20 @@ class ModelResponseTruncated(RuntimeError):
 
 class ModelClient(Protocol):
     def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]: ...
+
+
+PROVIDER_ANTHROPIC = "anthropic"
+PROVIDER_OPENAI = "openai"
+ANTHROPIC_MODEL_PREFIXES = ("claude-",)
+OPENAI_MODEL_PREFIXES = ("gpt-", "o1", "o3", "o4", "chatgpt-")
+
+
+def provider_for(model: str) -> str:
+    """The provider that serves a model, decided by name prefix — the single home for the
+    model→provider mapping, shared by the turn loop's client selection and onboarding's key check.
+    Fail loud on an unrecognized model rather than guess a provider."""
+    if model.startswith(ANTHROPIC_MODEL_PREFIXES):
+        return PROVIDER_ANTHROPIC
+    if model.startswith(OPENAI_MODEL_PREFIXES):
+        return PROVIDER_OPENAI
+    raise ValueError(f"no provider serves model {model!r}")

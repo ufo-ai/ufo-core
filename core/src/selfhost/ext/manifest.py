@@ -60,6 +60,16 @@ class RouteSpec:
 
 
 @dataclass(frozen=True)
+class OnboardingStep:
+    """A first-run step an extension contributes to workspace onboarding. `handler` runs once, after
+    the core steps, with the extension's scoped ExtensionContext — the same handle its jobs receive,
+    so a step can seed the extension's store or read a credential slot it declared."""
+
+    name: str
+    handler: Callable[[ExtensionContext], Awaitable[None]]
+
+
+@dataclass(frozen=True)
 class Manifest:
     """What one extension declares, returned by its `selfhost.extension` entry point."""
 
@@ -70,3 +80,4 @@ class Manifest:
     jobs: tuple[JobSpec, ...] = ()
     routes: tuple[RouteSpec, ...] = ()
     credentials: tuple[CredentialSlot, ...] = ()
+    onboarding_steps: tuple[OnboardingStep, ...] = ()
