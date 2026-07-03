@@ -1,24 +1,31 @@
-"""Composio as the connector OAuth broker: the async client, the provider registry, the errors.
+"""Composio the connector broker: the async client, the provider registry, the errors.
 
-selfhost holds a direct-provider-host grant — the egress proxy reaches the provider's own API host
-and swaps a per-account sentinel for the real `Authorization: Bearer` token. Composio's job is only
-the consent handoff: it runs a provider's managed OAuth and, once the member consents, exposes that
-account's real access token, which selfhost then holds and injects itself. The client speaks
-Composio's v3 REST API over httpx; the deploy's single broker key is read loud from the environment
-(one Composio account per deploy, the analog of the model-provider key)."""
+Composio brokers hundreds of services and thousands of tools, so the agent never holds a fixed
+per-provider tool — it discovers and executes them dynamically. `connect_link`/`connected_account`
+run the consent handoff (managed OAuth, then the account bound to this workspace's broker user, its
+ownership confirmed from account metadata); `list_tools`/`tool_schema` are the catalog the dynamic
+tools search and describe; `execute_tool` runs a tool on Composio's server-side execute API, which
+holds the account's token and injects it itself — no sentinel, no egress proxy. The token never
+leaves Composio, so the grant stores only the connected-account id, never a secret. The client
+speaks Composio's v3 REST API over httpx; the deploy's single broker key is read loud from the
+environment (one Composio account per deploy, the analog of the model key)."""
 
+import json
 import os
 from dataclasses import dataclass
 
 import httpx
 
 from selfhost.sdk.connectors import OAuthAccount
+from selfhost.sdk.context import JsonValue
 
-COMPOSIO_API_BASE = "https://backend.composio.dev/api/v3"
+COMPOSIO_API_BASE = "https://backend.composio.dev/api/v3.1"
 COMPOSIO_API_KEY_ENV = "COMPOSIO_API_KEY"
 EXTERNAL_USER_PREFIX = "selfhost_"
 COMPOSIO_TIMEOUT_SECONDS = 30.0
 ACTIVE_STATUS = "ACTIVE"
+TOOL_SEARCH_LIMIT = 10
+MAX_EXECUTE_ARGUMENTS_BYTES = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -70,13 +77,15 @@ class ComposioError(RuntimeError):
 
 @dataclass(frozen=True)
 class ComposioClient:
-    """Composio v3 over httpx, twinned across the consent handoff: `connect_link` mints the hosted
-    OAuth link the member opens (ensuring the toolkit's managed auth config first), and
-    `connected_account` reads back the account's real access token once the member has consented —
-    but only after asserting the account is owned by `expected_user_id`, the workspace's brokered
-    Composio user `connect_link` minted against, so a foreign account id (injected on the return
-    leg) is refused before any token is read. Each call opens and closes its own client so a
-    transport override (a test's MockTransport) is honoured and no connection leaks."""
+    """Composio v3 over httpx. `connect_link` mints the hosted OAuth link the member opens (ensuring
+    the toolkit's managed auth config first), and `connected_account` confirms an account is active
+    and owned by `expected_user_id`, the workspace's brokered Composio user `connect_link` minted
+    against, so a foreign account id (injected on the return leg) is refused — the account's token
+    never leaves Composio, so ownership is asserted from the account's metadata, not by reading a
+    secret. `list_tools` and `tool_schema` are the catalog the dynamic tools search and describe;
+    `execute_tool` runs one on Composio's server-side execute API for a bound account, bounding the
+    arguments payload before the call. Each call opens and closes its own client so a transport
+    override (a test's MockTransport) is honoured and no connection leaks."""
 
     api_key: str
     transport: httpx.AsyncBaseTransport | None = None
@@ -103,12 +112,32 @@ class ComposioClient:
         status = str(payload.get("status") or "").upper()
         if status != ACTIVE_STATUS:
             raise ComposioError(409, f"connected account {account_id!r} is {status or 'unknown'}")
-        state = payload.get("state")
-        val = state.get("val") if isinstance(state, dict) else None
-        token = val.get("access_token") if isinstance(val, dict) else None
-        if not isinstance(token, str) or not token:
-            raise ComposioError(502, f"connected account {account_id!r} exposes no access token")
-        return OAuthAccount(account_id=account_id, token=token)
+        return OAuthAccount(account_id=account_id)
+
+    async def list_tools(
+        self, toolkit: str, query: str = "", limit: int = TOOL_SEARCH_LIMIT
+    ) -> dict[str, object]:
+        params = {"toolkit_slug": toolkit, "limit": str(limit)}
+        if query:
+            params["query"] = query
+        return await self._get("/tools", params=params)
+
+    async def tool_schema(self, slug: str) -> dict[str, object]:
+        return await self._get(f"/tools/{slug}")
+
+    async def execute_tool(
+        self,
+        slug: str,
+        arguments: dict[str, JsonValue],
+        user_id: str,
+        connected_account_id: str | None = None,
+    ) -> dict[str, object]:
+        body: dict[str, object] = {"user_id": user_id, "arguments": dict(arguments)}
+        if connected_account_id:
+            body["connected_account_id"] = connected_account_id
+        if len(json.dumps(body).encode()) > MAX_EXECUTE_ARGUMENTS_BYTES:
+            raise ValueError("connector tool arguments exceed the Composio execute payload bound")
+        return await self._post(f"/tools/execute/{slug}", body)
 
     async def _auth_config(self, toolkit: str) -> str:
         existing = await self._get(

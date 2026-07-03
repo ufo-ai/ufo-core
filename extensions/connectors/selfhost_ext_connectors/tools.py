@@ -1,43 +1,199 @@
-"""The connector action tool: one HTTP-through-proxy request tool per registered provider.
+"""The dynamic Composio tool surface: discover connectors, describe a connector's real tools, and
+execute one server-side.
 
-A tool never holds the provider's token. It asks the turn for the per-account sentinel
-`Authorization` value and sends it to the provider's own host through the sandbox's egress proxy —
-which admits only a granted host (an ungranted one is refused at CONNECT) and swaps the sentinel for
-the turn-agent's real token on the wire. `account_id` targets a specific account when the agent
-holds several for one provider; omitted, the turn resolves any of its grants for the provider."""
+Composio brokers hundreds of services and thousands of tools, so the agent never holds a fixed
+per-provider tool — it searches. `list_external_tools` filters the connector catalog locally;
+`describe_external_tools` fetches a connector's real tool slugs and input schemas from Composio;
+`call_external_tool` executes a tool on Composio's server-side execute API, authenticated by the
+deploy's Composio key and the turn-agent's connected account (bound through `/connect`). Composio
+holds the account's OAuth token and injects it itself, so a dynamic tool never touches the sandbox
+egress proxy — it reaches only Composio's own API."""
 
-import shlex
-from typing import Literal
+import json
+import re
 
 from pydantic import BaseModel
 
+from selfhost.sdk.context import JsonValue
 from selfhost.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
-from selfhost_ext_connectors.composio import ConnectorSpec
+from selfhost_ext_connectors import composio
+from selfhost_ext_connectors.composio import CONNECTORS, EXTERNAL_USER_PREFIX, ComposioError
+
+DISCOVERY_DESCRIPTION_CAP = 240
+NOT_FOUND = 404
 
 
-class ConnectorRequestInput(BaseModel):
-    path: str = ""
-    method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"] = "GET"
-    account_id: str | None = None
-    body: str | None = None
+class ListExternalToolsInput(BaseModel):
+    queries: tuple[str, ...]
+    user_description: str
 
 
-def connector_request_tool(provider: str, spec: ConnectorSpec) -> ToolDef:
-    async def handler(ctx: ToolContext, args: ConnectorRequestInput) -> ToolResult:
-        authorization = await ctx.connector_authorization(provider, args.account_id)
-        header = shlex.quote(f"Authorization: {authorization}")
-        url = shlex.quote(f"https://{spec.host}/{args.path.lstrip('/')}")
-        command = f"curl -sS -X {args.method} -o /dev/null -w '%{{http_code}}' -H {header} {url}"
-        if args.body is not None:
-            command += f" --data {shlex.quote(args.body)}"
-        result = await ctx.sandbox.bash(command)
-        return ToolResult(
-            content=(TextContent(text=result.stdout),), is_error=result.exit_code != 0
+class DescribeExternalToolsInput(BaseModel):
+    source_id: str
+    tool_names: tuple[str, ...] = ()
+    query: str = ""
+
+
+class CallExternalToolInput(BaseModel):
+    tool_name: str
+    source_id: str
+    arguments: dict[str, JsonValue]
+
+
+async def list_external_tools(ctx: ToolContext, args: ListExternalToolsInput) -> ToolResult:
+    matches: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for query in args.queries:
+        target = query.removeprefix("select:").strip().lower()
+        for connector, spec in sorted(CONNECTORS.items()):
+            if connector in seen:
+                continue
+            haystack = f"{connector} {spec.toolkit} {spec.label}".lower()
+            if target and target not in haystack:
+                continue
+            seen.add(connector)
+            matches.append({"source_id": connector, "toolkit": spec.toolkit, "label": spec.label})
+    return _json_result({"connectors": matches})
+
+
+async def describe_external_tools(
+    ctx: ToolContext, args: DescribeExternalToolsInput
+) -> ToolResult:
+    client = composio.composio_client()
+    schemas: dict[str, object] = {}
+    unresolved: list[str] = []
+    for name in args.tool_names:
+        try:
+            schemas[name] = await client.tool_schema(name)
+        except ComposioError as error:
+            if error.status != NOT_FOUND:
+                raise
+            unresolved.append(name)
+    result: dict[str, object] = {"source_id": args.source_id, "schemas": schemas}
+    if args.query or unresolved or not args.tool_names:
+        toolkit = _toolkit(args.source_id)
+        listed = await client.list_tools(toolkit, _discovery_query(args.query, unresolved))
+        result["availableTools"] = _discovered_tools(listed)
+    if unresolved:
+        result["unresolved"] = unresolved
+    return _json_result(result)
+
+
+async def call_external_tool(ctx: ToolContext, args: CallExternalToolInput) -> ToolResult:
+    client = composio.composio_client()
+    connected_account_id = await ctx.connector_account(args.source_id)
+    user_id = f"{EXTERNAL_USER_PREFIX}{ctx.turn.workspace_id}"
+    try:
+        response = await client.execute_tool(
+            args.tool_name, args.arguments, user_id, connected_account_id
         )
+    except ComposioError as error:
+        if error.status != NOT_FOUND:
+            raise
+        raise await _tool_not_found(client, args, error) from error
+    return _json_result(response)
 
-    return ToolDef(
-        name=f"{provider}_request",
-        description=f"Call the {spec.label} API for a granted account through the egress proxy.",
-        input_model=ConnectorRequestInput,
-        handler=handler,
-    )
+
+async def _tool_not_found(
+    client: composio.ComposioClient, args: CallExternalToolInput, error: ComposioError
+) -> ComposioError:
+    """A 404 from execute, augmented with the source's real tool slugs so the model's next attempt
+    is informed instead of another blind guess at the naming convention. Augmentation is
+    best-effort: if the discovery lookup fails, the original 404 stands."""
+    try:
+        toolkit = _toolkit(args.source_id)
+        query = _discovery_query("", [args.tool_name])
+        tools = _discovered_tools(await client.list_tools(toolkit, query))
+        if not tools and query:
+            tools = _discovered_tools(await client.list_tools(toolkit, ""))
+    except (ComposioError, ValueError, KeyError):
+        return error
+    if not tools:
+        return error
+    names = ", ".join(tool["slug"] for tool in tools)
+    return ComposioError(error.status, f"{error.body} — tools available on {toolkit}: {names}")
+
+
+def _toolkit(source_id: str) -> str:
+    spec = CONNECTORS.get(source_id)
+    return spec.toolkit if spec is not None else source_id
+
+
+def _discovery_query(explicit: str, unresolved: list[str]) -> str:
+    """The catalog search query: the caller's explicit keywords, else the deduped words of the slugs
+    that missed (so a guessed `GITHUB_LIST_PULL_REQUEST_REVIEWS` searches 'github list pull request
+    reviews' and surfaces the real slug)."""
+    if explicit:
+        return explicit
+    words = re.sub(r"[^a-z0-9]+", " ", " ".join(unresolved).lower()).split()
+    return " ".join(dict.fromkeys(words))
+
+
+def _discovered_tools(listed: dict[str, object]) -> list[dict[str, str]]:
+    """Project a Composio `list_tools` response to the connector's real slugs and short
+    descriptions."""
+    items = listed.get("items")
+    tools: list[dict[str, str]] = []
+    if not isinstance(items, list):
+        return tools
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        slug = item.get("slug") or item.get("name")
+        if not isinstance(slug, str) or not slug:
+            continue
+        description = item.get("description")
+        tools.append(
+            {
+                "slug": slug,
+                "description": description[:DISCOVERY_DESCRIPTION_CAP]
+                if isinstance(description, str)
+                else "",
+            }
+        )
+    return tools
+
+
+def _json_result(payload: dict[str, object]) -> ToolResult:
+    return ToolResult(content=(TextContent(text=json.dumps(payload)),))
+
+
+CONNECTOR_TOOLS: tuple[ToolDef, ...] = (
+    ToolDef(
+        name="list_external_tools",
+        description=(
+            "List available external connectors (github, slack, ...), not their tools. Filter by "
+            "queries to search connector name/toolkit/label. Returns connector catalog rows: "
+            "source_id, toolkit, label. Call this before claiming you can't access something — "
+            "there may be a connector available. Use 'select:<source_id>' syntax to fetch a "
+            "specific connector by exact source ID. To find a connector's real tools, call "
+            "describe_external_tools(source_id, query=...)."
+        ),
+        input_model=ListExternalToolsInput,
+        handler=list_external_tools,
+    ),
+    ToolDef(
+        name="describe_external_tools",
+        description=(
+            "Discover and describe a connector's real tools. Never guess slugs. Pass source_id "
+            "plus a natural-language query (e.g. 'list pull request reviews') to get the "
+            "connector's matching real slugs in 'availableTools'; pass source_id with no query to "
+            "list its top tools. Pass exact tool_names to fetch their full input schemas — MUST be "
+            "done before call_external_tool. Any name that is not a real slug is returned under "
+            "'unresolved', with the connector's real slugs in 'availableTools' to use instead."
+        ),
+        input_model=DescribeExternalToolsInput,
+        handler=describe_external_tools,
+    ),
+    ToolDef(
+        name="call_external_tool",
+        description=(
+            "Execute an external connector tool. PREREQUISITE: Must call describe_external_tools "
+            "first to get the input schema. The tool's own parameters go nested under 'arguments', "
+            "never at the top level — e.g. {tool_name: 'GITHUB_LIST_PULL_REQUESTS', source_id: "
+            "'github', arguments: {owner: 'acme', repo: 'widgets', state: 'open'}}."
+        ),
+        input_model=CallExternalToolInput,
+        handler=call_external_tool,
+    ),
+)

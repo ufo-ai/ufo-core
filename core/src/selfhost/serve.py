@@ -332,7 +332,7 @@ def _connect_flow(
     return ConnectFlow(
         providers=providers,
         fernet=credentials.fernet,
-        store=GrantStore(fernet=credentials.fernet),
+        store=GrantStore(),
         redirect_uri=_connect_redirect_uri(config, providers),
     )
 
@@ -367,9 +367,9 @@ def _connect_redirect_uri(config: Config, providers: Mapping[str, OAuthProvider]
 async def _resolver(config: Config, credentials: CredentialStore | None) -> PerAgentRules:
     """The per-turn rule resolver the proxy consumes: a static workspace base (the model providers
     the deploy holds keys for and every stored credential slot, fixed for the serve's life) plus the
-    grant store it derives each turn's agent's grants from. No credential key means no token can be
-    decrypted, so no grant store — the base alone. Grants layer on per turn, not assembled here."""
-    grants = GrantStore(fernet=credentials.fernet) if credentials is not None else None
+    grant store it derives each turn's agent's granted hosts from. No credential key means no
+    connect flow to record grants, so no grant store — the base alone. Grants layer on per turn."""
+    grants = GrantStore() if credentials is not None else None
     base = (*_model_rules(config), *await _credential_rules(config))
     return PerAgentRules(base=base, grants=grants)
 

@@ -4,8 +4,8 @@ selfhost's connect flow wants a synchronous `authorize_url` and a two-legged han
 Composio connect link is an async API call — so `authorize_url` points the member's browser at this
 extension's `oauth` route instead. The route (async) mints the link and redirects on to Composio's
 hosted consent; Composio redirects back to the same route with the connected-account id, which the
-route hands to core's callback as the `code`. `exchange` then reads that account's real access
-token. The flow reads top to bottom: authorize_url → oauth_route (start leg, then return leg) →
+route hands to core's callback as the `code`. `exchange` then confirms that account's ownership and
+binds it. The flow reads top to bottom: authorize_url → oauth_route (start leg, then return leg) →
 exchange."""
 
 from dataclasses import dataclass
@@ -27,12 +27,13 @@ REDIRECT_STATUS = 302
 @dataclass(frozen=True)
 class ComposioOAuthProvider:
     """One provider's OAuth descriptor keyed into `serve`'s connect registry. `host` is the
-    provider's own API host the derived grant admits; `toolkit` is the Composio managed-auth slug
-    the consent leg opens. `authorize_url` is pure — it points the browser at the async `oauth`
-    route — and `exchange` reads the consented account's real token from Composio, but only once
-    Composio confirms the account is owned by this workspace's brokered user — the same
-    `EXTERNAL_USER_PREFIX`-scoped id `oauth_route` minted the consent link against — so a foreign
-    account id injected on the return leg binds no grant."""
+    provider's own API host the derived grant admits and meters; `toolkit` is the Composio
+    managed-auth slug the consent leg opens. `authorize_url` is pure — it points the browser at the
+    async `oauth` route — and `exchange` binds the consented account (by its id) once Composio
+    confirms it is owned by this workspace's brokered user — the same `EXTERNAL_USER_PREFIX`-scoped
+    id `oauth_route` minted the consent link against — so a foreign account id injected on the
+    return leg binds no grant. The account's token stays with Composio; connector tools execute
+    through it server-side, so no secret is read or stored."""
 
     provider: str
     host: str
