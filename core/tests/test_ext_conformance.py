@@ -77,9 +77,6 @@ class _UntouchedCarrier:
     ) -> ExecResult:
         raise AssertionError(SANDBOX_UNTOUCHED)
 
-    async def route(self, handle: SandboxHandle, port: int) -> str:
-        raise AssertionError(SANDBOX_UNTOUCHED)
-
     async def destroy(self, handle: SandboxHandle) -> None:
         raise AssertionError(SANDBOX_UNTOUCHED)
 

@@ -163,9 +163,6 @@ class RecordingCarrier:
         self.calls.append(argv)
         return self.result
 
-    async def route(self, handle: SandboxHandle, port: int) -> str:
-        return "http://test"
-
     async def destroy(self, handle: SandboxHandle) -> None: ...
 
 

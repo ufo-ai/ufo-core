@@ -118,9 +118,6 @@ class StubCarrier:
     ) -> ExecResult:
         return ExecResult(stdout="", stderr="", exit_code=0)
 
-    async def route(self, handle: SandboxHandle, port: int) -> str:
-        return "http://test"
-
     async def destroy(self, handle: SandboxHandle) -> None: ...
 
 

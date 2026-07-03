@@ -97,17 +97,6 @@ class DockerCarrier:
             exit_code=code,
         )
 
-    async def route(self, handle: SandboxHandle, port: int) -> str:
-        code, stdout, _ = await _docker(
-            "inspect",
-            "-f",
-            "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
-            handle.container_id,
-        )
-        if code != 0:
-            raise RuntimeError(f"no route for {handle.container_id}")
-        return f"http://{stdout.decode().strip()}:{port}"
-
     async def destroy(self, handle: SandboxHandle) -> None:
         await _docker("rm", "-f", handle.container_id)
 

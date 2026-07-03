@@ -61,17 +61,15 @@ class ExecResult:
 
 
 class Carrier(Protocol):
-    """Create-or-attach a per-conversation container, run commands in it, expose a served port,
-    reclaim it. The container is disposable cache over the durable workspace — destroy and
-    recreate between turns costs latency, never state."""
+    """Create-or-attach a per-conversation container, run commands in it, reclaim it. The container
+    is disposable cache over the durable workspace — destroy and recreate between turns costs
+    latency, never state."""
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle: ...
 
     async def exec(
         self, handle: SandboxHandle, argv: tuple[str, ...], stdin: bytes, timeout_s: int
     ) -> ExecResult: ...
-
-    async def route(self, handle: SandboxHandle, port: int) -> str: ...
 
     async def destroy(self, handle: SandboxHandle) -> None: ...
 
