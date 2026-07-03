@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: selfhost
+          POSTGRES_PASSWORD: selfhost
+          POSTGRES_DB: selfhost
+        ports:
+          - 5541:5432
+        options: >-
+          --health-cmd "pg_isready -U selfhost"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync
+      - run: uv run ruff check
+      - run: uv run python gates.py
+      - run: uv run pytest
