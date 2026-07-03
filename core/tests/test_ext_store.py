@@ -1,3 +1,5 @@
+import importlib
+from importlib.metadata import EntryPoint
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -14,6 +16,7 @@ from selfhost.ext.loader import (
     LOCKFILE_PATH_ENV,
     ExtensionPin,
     Lockfile,
+    extension_digest,
     load_manifests,
     write_lockfile,
 )
@@ -154,6 +157,23 @@ def test_a_pinned_but_missing_extension_fails_boot(
     )
     with pytest.raises(RuntimeError, match="not installed"):
         load_manifests()
+
+
+def test_digest_covers_a_tampered_non_entry_file_in_a_multi_file_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = tmp_path / "tamperpkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("def manifest():\n    return None\n")
+    other = package / "other.py"
+    other.write_text("VALUE = 1\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    importlib.invalidate_caches()
+    entry = EntryPoint(name="tamper", value="tamperpkg:manifest", group="selfhost.extension")
+    before = extension_digest(entry)
+    other.write_text("VALUE = 2\n")
+    after = extension_digest(entry)
+    assert before != after
 
 
 async def test_an_installed_extension_fires_through_the_loader(

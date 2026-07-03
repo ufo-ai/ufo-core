@@ -81,13 +81,31 @@ def discovered() -> dict[str, tuple[Manifest, EntryPoint]]:
 
 
 def extension_digest(entry: EntryPoint) -> str:
-    """The digest that pins an extension: sha256 over its entry-point module source, so an edit to
-    the installed code changes the digest and a pinned deploy refuses to run it."""
-    spec = importlib.util.find_spec(entry.module)
+    """The digest that pins an extension: sha256 over every source file of the installed package the
+    entry point belongs to — not only its entry module — so editing any file in a multi-file
+    extension changes the digest and a pinned deploy refuses to run it. Bytecode caches, which are
+    machine-specific and rebuilt on import, are excluded so the digest is stable across machines."""
+    top = entry.module.split(".", 1)[0]
+    spec = importlib.util.find_spec(top)
     if spec is None or spec.origin is None:
-        raise RuntimeError(f"extension module {entry.module!r} has no importable source")
-    body = Path(spec.origin).read_bytes()
-    return DIGEST_PREFIX + hashlib.sha256(body).hexdigest()
+        raise RuntimeError(f"extension package {top!r} has no importable source")
+    if spec.submodule_search_locations:
+        root = Path(next(iter(spec.submodule_search_locations)))
+        files = {
+            path.relative_to(root).as_posix(): path
+            for path in root.rglob("*")
+            if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc"
+        }
+    else:
+        origin = Path(spec.origin)
+        files = {origin.name: origin}
+    digest = hashlib.sha256()
+    for name in sorted(files):
+        digest.update(name.encode())
+        digest.update(b"\0")
+        digest.update(files[name].read_bytes())
+        digest.update(b"\0")
+    return DIGEST_PREFIX + digest.hexdigest()
 
 
 def load_manifests() -> tuple[Manifest, ...]:
