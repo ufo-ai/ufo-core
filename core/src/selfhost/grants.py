@@ -56,14 +56,17 @@ class OAuthAccount:
 class OAuthProvider(Protocol):
     """A connector's OAuth descriptor, injected by the extension that declares it. `authorize_url`
     builds the link the member opens; `exchange` turns the returned code into the account and token.
-    `host` is the provider's own host the grant admits — direct-provider-host, provider-agnostic."""
+    `workspace_id` is the sealed workspace the code was scoped to — passed so the provider can prove
+    the returned account belongs to this workspace's brokered user and refuse a foreign account
+    (the confused-deputy guard). `host` is the provider's own host the grant admits —
+    direct-provider-host, provider-agnostic."""
 
     provider: str
     host: str
 
     def authorize_url(self, state: str, redirect_uri: str) -> str: ...
 
-    async def exchange(self, code: str, redirect_uri: str) -> OAuthAccount: ...
+    async def exchange(self, code: str, redirect_uri: str, workspace_id: UUID) -> OAuthAccount: ...
 
 
 @dataclass(frozen=True)
@@ -142,7 +145,12 @@ class GrantStore:
         """Upsert on (workspace, agent, provider, account): re-connecting the same account refreshes
         its token and audit fields rather than duplicating the grant. One atomic insert-on-conflict,
         so two near-simultaneous first connects of the same account settle on one row instead of
-        colliding on the unique identity — the loser updates, never raises."""
+        colliding on the unique identity — the loser updates, never raises. `account_id` comes from
+        the provider's OAuth exchange and flows into the wire `Authorization` sentinel, so a control
+        character (CR/LF and friends) that could split or forge a header is refused here, before any
+        grant it would malform is recorded."""
+        if any(ord(char) < 0x20 or ord(char) == 0x7F for char in account_id):
+            raise ValueError("account_id has a control character; refusing to record the grant")
         ciphertext = self.fernet.encrypt(token.encode())
         async with workspace_tx() as connection:
             insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
@@ -249,7 +257,7 @@ class ConnectFlow:
     async def complete(self, *, state: str, code: str) -> GrantRecorded:
         claims = self._open(state)
         descriptor = self._provider(claims.provider)
-        account = await descriptor.exchange(code, self.redirect_uri)
+        account = await descriptor.exchange(code, self.redirect_uri, claims.workspace_id)
         await self.store.record(
             workspace_id=claims.workspace_id,
             agent_id=claims.agent_id,

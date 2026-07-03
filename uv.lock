@@ -5,6 +5,7 @@ requires-python = ">=3.12"
 [manifest]
 members = [
     "selfhost",
+    "selfhost-ext-connectors",
     "selfhost-ext-sample",
     "selfhost-ext-self-improvement",
 ]
@@ -1682,6 +1683,21 @@ dev = [
     { name = "pytest", specifier = ">=8.3" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
     { name = "ruff", specifier = ">=0.7" },
+]
+
+[[package]]
+name = "selfhost-ext-connectors"
+version = "0.1.0"
+source = { editable = "extensions/connectors" }
+dependencies = [
+    { name = "httpx" },
+    { name = "selfhost" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "selfhost", editable = "core" },
 ]
 
 [[package]]
