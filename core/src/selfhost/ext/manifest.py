@@ -1,13 +1,19 @@
 """What an extension declares: the Manifest and its value objects.
 
 An extension's entry point returns a Manifest — a frozen bundle of declared points the loader reads
-and derives from, never a registration API it calls. The Manifest grows unit by unit: each declared
-point lands beside the consumer that gives it meaning, never before it."""
+and derives from, never a registration API it calls. Each point is a value object a core subsystem
+consumes: tools enter the turn's registry, routes mount under the app, jobs register on the
+scheduler, credential slots drive proxy injection."""
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Literal
+
+from starlette.requests import Request
+from starlette.responses import Response
 
 from selfhost.ext.context import ExtensionContext
+from selfhost.tools.registry import ToolDef
 
 
 @dataclass(frozen=True)
@@ -43,10 +49,23 @@ class JobSpec:
 
 
 @dataclass(frozen=True)
+class RouteSpec:
+    """An HTTP endpoint an extension serves. The app mounts `handler` for `method` at
+    `/ext/<name>/<path>`; each request is handed the extension's scoped ExtensionContext and the
+    incoming Request, and the handler returns the Response."""
+
+    method: Literal["GET", "POST"]
+    path: str
+    handler: Callable[[ExtensionContext, Request], Awaitable[Response]]
+
+
+@dataclass(frozen=True)
 class Manifest:
     """What one extension declares, returned by its `selfhost.extension` entry point."""
 
     name: str
     version: str
-    credentials: tuple[CredentialSlot, ...] = ()
+    tools: tuple[ToolDef, ...] = ()
     jobs: tuple[JobSpec, ...] = ()
+    routes: tuple[RouteSpec, ...] = ()
+    credentials: tuple[CredentialSlot, ...] = ()
