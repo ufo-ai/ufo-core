@@ -174,6 +174,30 @@ def _live_frame_failures(trees: dict[Path, ast.Module]) -> list[str]:
     return [f"hub: LiveFrame kind {m!r} has no emitter" for m in members if m not in calls]
 
 
+def _init_code_failures(trees: dict[Path, ast.Module]) -> list[str]:
+    """__init__.py is a package marker, never a place code lives: no imports, no re-exports, no
+    definitions. Code goes in a named module the reader can find by its name; a leading docstring
+    is the only statement an __init__ may carry."""
+    failures = []
+    for rel, tree in trees.items():
+        if rel.name != "__init__.py":
+            continue
+        for index, node in enumerate(tree.body):
+            is_docstring = (
+                index == 0
+                and isinstance(node, ast.Expr)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)
+            )
+            if is_docstring:
+                continue
+            failures.append(
+                f"{rel}: __init__.py holds code — a package is a marker; code lives in a module"
+            )
+            break
+    return failures
+
+
 def _to_thread_failures(trees: dict[Path, ast.Module]) -> list[str]:
     failures = []
     for rel, tree in trees.items():
@@ -214,6 +238,7 @@ def main() -> int:
         for name, rel in aliases.items()
         if calls.count(name) == 1
     )
+    failures.extend(_init_code_failures(trees))
     failures.extend(_boundary_failures(trees))
     failures.extend(_wiring_failures(trees))
     failures.extend(_live_frame_failures(trees))

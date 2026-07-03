@@ -8,7 +8,7 @@ import lz4.frame
 from pydantic import BaseModel, ConfigDict, Field
 
 from selfhost.blob import BlobNotFound, BlobStore
-from selfhost.models import Message
+from selfhost.models.interface import Message
 
 
 class Conversation(BaseModel):

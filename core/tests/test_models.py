@@ -10,10 +10,16 @@ from anthropic.types.raw_message_delta_event import Delta
 from openai.types.chat import chat_completion_chunk
 from openai.types.completion_usage import CompletionUsage, PromptTokensDetails
 
-from selfhost.models import Message, ModelEvent, ModelRequest, ModelResponseTruncated, TextDelta
 from selfhost.models.anthropic import MAX_EMPTY_PROVIDER_RETRIES as ANTHROPIC_MAX_EMPTY_RETRIES
 from selfhost.models.anthropic import MAX_PROVIDER_RETRIES as ANTHROPIC_MAX_RETRIES
 from selfhost.models.anthropic import AnthropicClient, anthropic_sdk_client
+from selfhost.models.interface import (
+    Message,
+    ModelEvent,
+    ModelRequest,
+    ModelResponseTruncated,
+    TextDelta,
+)
 from selfhost.models.openai import MAX_EMPTY_PROVIDER_RETRIES as OPENAI_MAX_EMPTY_RETRIES
 from selfhost.models.openai import MAX_PROVIDER_RETRIES as OPENAI_MAX_RETRIES
 from selfhost.models.openai import OpenAIClient, openai_sdk_client

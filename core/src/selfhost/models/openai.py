@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import openai
 
-from selfhost.models import (
+from selfhost.models.interface import (
     Message,
     ModelEvent,
     ModelRequest,

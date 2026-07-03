@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import anthropic
 
-from selfhost.models import (
+from selfhost.models.interface import (
     ContentBlock,
     ModelEvent,
     ModelRequest,

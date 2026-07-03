@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel
 
-from selfhost.models import ToolSchema
+from selfhost.models.interface import ToolSchema
 from selfhost.tools.context import ToolContext, ToolResult
 
 

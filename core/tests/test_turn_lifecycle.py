@@ -21,7 +21,7 @@ from selfhost.hub import InProcessHub
 from selfhost.loop import queue as loop_queue
 from selfhost.loop.engine import EMPTY_RESPONSE_NUDGE
 from selfhost.loop.transcript import Conversation, Transcript
-from selfhost.models import ModelEvent, ModelRequest, TextDelta
+from selfhost.models.interface import ModelEvent, ModelRequest, TextDelta
 from selfhost.schema import tables
 from selfhost.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION, Usage
 from selfhost.surfaces.cli import router

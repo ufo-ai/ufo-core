@@ -7,7 +7,7 @@ from pydantic import ValidationError
 
 from selfhost.blob import FilesystemBlobStore
 from selfhost.loop.transcript import Conversation, Transcript
-from selfhost.models import Message
+from selfhost.models.interface import Message
 
 
 def _transcript(tmp_path: Path) -> Transcript:

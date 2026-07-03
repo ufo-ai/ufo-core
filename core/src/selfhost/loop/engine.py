@@ -10,7 +10,7 @@ from selfhost.accounting import read_turn_cost, record_turn_usage
 from selfhost.db import workspace_tx
 from selfhost.hub import Hub, Terminal
 from selfhost.loop.transcript import Conversation, Transcript
-from selfhost.models import Message, ModelClient, ModelRequest, TextDelta
+from selfhost.models.interface import Message, ModelClient, ModelRequest, TextDelta
 from selfhost.o11y import emit_metric, log, turn_span
 from selfhost.schema import tables
 from selfhost.schema.records import Agent, TerminalFrame, TerminalStatus, Turn, Usage

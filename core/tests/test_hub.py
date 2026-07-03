@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator
 from uuid import uuid4
 
 from selfhost.hub import SUBSCRIBER_QUEUE_FRAMES, InProcessHub, LiveFrame, Terminal
-from selfhost.models import TextDelta
+from selfhost.models.interface import TextDelta
 from selfhost.schema.records import TerminalFrame
 
 

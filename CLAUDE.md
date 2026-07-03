@@ -55,6 +55,10 @@ hard-to-vary decision; cut the words around it. Prefer a table to prose. One exa
 - **Localize next to the user** — a type, constant, or helper lives beside its only user; nothing
   moves to a shared module before the second user exists. No `utils.py`, `helpers.py`, or grab-bag
   modules, ever.
+- **`__init__.py` is an empty marker** — never code, never re-exports. A symbol is imported from
+  the named module that defines it, so its one home is obvious from the import path. A package that
+  holds one module is a module (`tools/builtins.py`, not `tools/builtins/__init__.py`). A leading
+  docstring is the only statement an `__init__` may carry (gated).
 - **Follow-the-flow test** — understanding one verb must not require hopping across files: entry
   point → steps → types, one file, top to bottom. More than two file-hops to trace a flow means
   the seams are wrong — fix the seams.

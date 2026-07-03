@@ -10,7 +10,7 @@ from selfhost.db import workspace_tx
 from selfhost.hub import InProcessHub
 from selfhost.loop.engine import TurnEngine
 from selfhost.loop.transcript import Conversation, Transcript
-from selfhost.models import Message, ModelEvent, ModelRequest, TextDelta
+from selfhost.models.interface import Message, ModelEvent, ModelRequest, TextDelta
 from selfhost.schema import tables
 from selfhost.schema.records import Agent, TerminalFrame, Turn, Usage
 

@@ -8,7 +8,7 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
-from selfhost.models import TextDelta
+from selfhost.models.interface import TextDelta
 from selfhost.schema.records import TerminalFrame
 
 SUBSCRIBER_QUEUE_FRAMES = 256

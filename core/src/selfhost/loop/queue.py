@@ -14,8 +14,8 @@ from selfhost.db import workspace_tx
 from selfhost.hub import Hub, Terminal
 from selfhost.loop.engine import TurnEngine
 from selfhost.loop.transcript import Transcript
-from selfhost.models import ModelClient
 from selfhost.models.anthropic import AnthropicClient, anthropic_sdk_client
+from selfhost.models.interface import ModelClient
 from selfhost.models.openai import OpenAIClient, openai_sdk_client
 from selfhost.o11y import log
 from selfhost.schema import tables
