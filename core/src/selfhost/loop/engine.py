@@ -87,12 +87,8 @@ class TurnEngine:
                 if not await self._mark_running():
                     await self._persist_inbound()
                     return await self._publish_existing_terminal()
-                messages, compaction_usage = await self.compaction.maybe_compact(
-                    await self._load_messages()
-                )
-                usage_events.extend(compaction_usage)
                 final_messages, answer = await self._model_round(
-                    context, messages, usage_events
+                    context, await self._load_messages(), usage_events
                 )
                 frame = await self._commit("done", usage_events, answer=answer)
                 if frame.status == "done":
@@ -139,6 +135,8 @@ class TurnEngine:
         dispatches the calls in the sandbox and feeds the results back as the next user turn."""
         nudged = False
         for _round in range(MAX_TOOL_ROUNDS):
+            messages, compaction_usage = await self.compaction.maybe_compact(messages)
+            usage_events.extend(compaction_usage)
             text, tool_calls = await self._stream_once(messages, usage_events)
             if not tool_calls:
                 if text.strip():

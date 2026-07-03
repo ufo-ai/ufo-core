@@ -290,6 +290,25 @@ async def test_engine_compacts_history_before_the_round_and_bills_the_summary(
     assert any("history 0" in str(message.content) for message in record.before)
 
 
+async def test_compaction_fires_mid_round_when_a_tool_loop_grows_the_window(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    carrier = RecordingCarrier(result=ExecResult(stdout="ok", stderr="", exit_code=0))
+    compaction = Compaction(
+        client=EchoModel(),
+        model="claude-opus-4-8",
+        blob=FilesystemBlobStore(root=tmp_path),
+        conversation_id=turn.conversation_id,
+        trigger_tokens=1,
+        keep_messages=2,
+    )
+    engine = _engine(turn, ToolCallingModel(), tmp_path, carrier=carrier, compaction=compaction)
+    frame = await engine.run()
+    assert frame.status == "done"
+    assert await compaction.read_record(1) is not None
+
+
 async def test_cancel_winning_mid_round_keeps_cancelled_terminal_bills_and_preserves_inbound(
     db: None, tmp_path: Path
 ) -> None:
