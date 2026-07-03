@@ -108,6 +108,8 @@ def test_registry_schemas_cover_every_tool() -> None:
         "write",
         "edit",
         "spawn_subagent",
+        "memory_search",
+        "memory_update",
     }
     bash = next(schema for schema in schemas if schema.name == "bash")
     assert "command" in bash.input_schema["properties"]
