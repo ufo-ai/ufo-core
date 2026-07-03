@@ -22,6 +22,7 @@ from selfhost.blob import FilesystemBlobStore
 from selfhost.credentials import CredentialSlotUnset, CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.ext.context import (
+    MemoryAccess,
     ScopedStore,
     TrajectoryCorpus,
     UndeclaredCredentialSlot,
@@ -281,6 +282,33 @@ async def test_undeclared_credential_slot_is_refused(db: None) -> None:
     assert sample.UNDECLARED_SLOT not in declared
     with pytest.raises(UndeclaredCredentialSlot, match=sample.UNDECLARED_SLOT):
         await context.credentials.get(sample.UNDECLARED_SLOT)
+
+
+async def test_context_confines_the_credential_and_memory_handles(db: None) -> None:
+    """The credential and memory handles a context carries expose only their gated methods: no raw
+    CredentialStore field to read an undeclared slot, no raw MemoryService to recall or commit under
+    another member's subject. The same confinement holds whether the context is built for a
+    job/route (`context_for`) or a tool (`turn_tools`)."""
+    workspace_id = await _workspace()
+    manifest = _sample_manifest()
+    declared = frozenset(slot.name for slot in manifest.credentials)
+    _, ext_by_tool = turn_tools((manifest,), workspace_id, _credential_store(), StubMemory())
+    for context in (
+        context_for(workspace_id, manifest.name, declared, _credential_store(), StubMemory()),
+        ext_by_tool[sample.TOOL_NAME],
+    ):
+        assert {name for name in dir(context.credentials) if not name.startswith("_")} == {
+            "get",
+            "workspace_id",
+            "declared",
+        }
+        with pytest.raises(UndeclaredCredentialSlot, match=sample.UNDECLARED_SLOT):
+            await context.credentials.get(sample.UNDECLARED_SLOT)
+        assert isinstance(context.memory, MemoryAccess)
+        assert {name for name in dir(context.memory) if not name.startswith("_")} == {
+            "recall",
+            "commit",
+        }
 
 
 def test_a_route_without_a_credential_key_fails_loud() -> None:

@@ -17,7 +17,7 @@ from selfhost.blob import BlobNotFound, BlobStore
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.governance import Governance, prompt_digest
-from selfhost.memory.service import MemoryService
+from selfhost.memory.service import SHARED_SUBJECT, MemoryService, Recalled
 from selfhost.models.interface import Message
 from selfhost.o11y import log
 from selfhost.schema import tables
@@ -29,6 +29,10 @@ type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, J
 
 class UndeclaredCredentialSlot(KeyError):
     """A handler asked for a credential slot its manifest never declared."""
+
+
+class OutOfScopeSubject(ValueError):
+    """A handler tried to recall or commit memory under a subject its context does not scope to."""
 
 
 @dataclass(frozen=True)
@@ -92,16 +96,39 @@ class ScopedStore:
 
 @dataclass(frozen=True)
 class CredentialAccess:
-    """Reads only the slots a manifest declared; an undeclared slot never reaches the store."""
+    """Reads only the slots a manifest declared; an undeclared slot never reaches the store. The
+    store stays module-private (`_store`), so `get` — which checks the declaration first — is the
+    only path to a secret; the raw store is never a public field an undeclared read could bypass."""
 
     workspace_id: UUID
     declared: frozenset[str]
-    store: CredentialStore
+    _store: CredentialStore
 
     async def get(self, slot: str) -> str:
         if slot not in self.declared:
             raise UndeclaredCredentialSlot(slot)
-        return await self.store.get(self.workspace_id, slot)
+        return await self._store.get(self.workspace_id, slot)
+
+
+EXTENSION_MEMORY_SUBJECTS = frozenset({SHARED_SUBJECT})
+
+
+@dataclass(frozen=True)
+class MemoryAccess:
+    """An extension acts for the workspace, never for a member, so its memory reach is the shared
+    subject alone: recall derives that subject rather than trusting a caller-supplied one, and
+    commit refuses any other subject. The service stays module-private (`_memory`), so a member's
+    private space is unreachable through this handle — no arbitrary-subject read or write."""
+
+    _memory: MemoryService
+
+    async def recall(self, query: str, limit: int) -> tuple[Recalled, ...]:
+        return await self._memory.recall(query, EXTENSION_MEMORY_SUBJECTS, limit)
+
+    async def commit(self, write: MemoryWrite) -> None:
+        if write.subject not in EXTENSION_MEMORY_SUBJECTS:
+            raise OutOfScopeSubject(write.subject)
+        await self._memory.commit(write)
 
 
 @dataclass(frozen=True)
@@ -179,7 +206,7 @@ class TrajectoryCorpus:
 class ExtensionContext:
     store: ScopedStore
     credentials: CredentialAccess
-    memory: MemoryService | None = None
+    memory: MemoryAccess | None = None
     corpus: TrajectoryCorpus | None = None
 
     async def memory_write(self, write: MemoryWrite) -> None:
@@ -215,7 +242,10 @@ def context_for(
 ) -> ExtensionContext:
     store = ScopedStore(workspace_id=workspace_id, extension=extension)
     credentials = CredentialAccess(
-        workspace_id=workspace_id, declared=declared, store=credential_store
+        workspace_id=workspace_id, declared=declared, _store=credential_store
     )
+    scoped_memory = None if memory is None else MemoryAccess(memory)
     corpus = None if blob is None else TrajectoryCorpus(workspace_id, blob)
-    return ExtensionContext(store=store, credentials=credentials, memory=memory, corpus=corpus)
+    return ExtensionContext(
+        store=store, credentials=credentials, memory=scoped_memory, corpus=corpus
+    )
