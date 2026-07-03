@@ -3,13 +3,14 @@
 import asyncio
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import sqlalchemy as sa
 
 from selfhost.accounting import read_turn_cost, record_turn_usage
 from selfhost.blob import BlobStore
 from selfhost.db import workspace_tx
+from selfhost.ext.context import ExtensionContext
 from selfhost.hub import Hub, Terminal
 from selfhost.loop.compaction import Compaction
 from selfhost.loop.transcript import Conversation, Transcript
@@ -66,6 +67,7 @@ class TurnEngine:
     hub: Hub
     sandbox: SandboxSession
     tools: ToolRegistry
+    tool_ext: dict[str, ExtensionContext]
     blob: BlobStore
     spawn: Spawn
 
@@ -213,11 +215,12 @@ class TurnEngine:
 
     async def _dispatch(self, context: ToolContext, call: ToolUseBlock) -> ToolResultBlock:
         """Run one tool call in the sandbox; a bad name, bad arguments, or a raising handler
-        become an is_error result the model can recover from, never a turn failure."""
+        become an is_error result the model can recover from, never a turn failure. An extension
+        tool is handed its owning ExtensionContext; a builtin has no entry and runs ext=None."""
         try:
             tool = self.tools.get(call.name)
             args = tool.input_model.model_validate(call.input)
-            result = await tool.handler(context, args)
+            result = await tool.handler(replace(context, ext=self.tool_ext.get(call.name)), args)
         except Exception as error:
             return ToolResultBlock(
                 tool_use_id=call.id, content=f"{type(error).__name__}: {error}", is_error=True

@@ -10,7 +10,10 @@ from dbos import DBOS, DBOSClient, Queue
 
 from selfhost.blob import BlobStore, FilesystemBlobStore
 from selfhost.config import Config
+from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
+from selfhost.ext.loader import turn_tools
+from selfhost.ext.manifest import Manifest
 from selfhost.hub import Hub, Terminal
 from selfhost.loop.compaction import Compaction
 from selfhost.loop.engine import TurnEngine
@@ -35,11 +38,9 @@ from selfhost.schema.records import (
     TerminalFrame,
     Turn,
 )
-from selfhost.tools.builtins import BUILTIN_TOOLS
 from selfhost.tools.registry import ToolRegistry
 
 SANDBOX_IMAGE_REF = "selfhost-sandbox:latest"
-BUILTIN_REGISTRY = ToolRegistry(BUILTIN_TOOLS)
 TURN_QUEUE_POLL_SECONDS = 0.1
 FAILED_TERMINAL_RETRY_SECONDS = 1.0
 FAILED_TERMINAL_RETRY_MAX_SECONDS = 30.0
@@ -62,6 +63,8 @@ class Runtime:
     proxy: ProxyEndpoint
     dbos: DBOSClient
     subagents: SubagentRegistry
+    manifests: tuple[Manifest, ...]
+    credentials: CredentialStore | None
 
 
 _runtime: Runtime | None = None
@@ -82,13 +85,16 @@ async def _execute_turn(turn_id: str) -> str:
     try:
         turn, agent = await _load_turn(UUID(turn_id))
         subagents = Subagents(client=runtime.dbos, registry=runtime.subagents, parent=turn)
+        all_tools, tool_ext = turn_tools(
+            runtime.manifests, turn.workspace_id, runtime.credentials
+        )
         if turn.subagent_profile is None:
-            resolved, tools = agent, BUILTIN_REGISTRY
+            resolved, tools = agent, ToolRegistry(all_tools)
         else:
             profile = runtime.subagents.get(turn.subagent_profile)
             resolved = Agent(prompt=subagent_system_prompt(profile), model=agent.model)
             tools = ToolRegistry(
-                tuple(tool for tool in BUILTIN_TOOLS if tool.name in profile.tool_names)
+                tuple(tool for tool in all_tools if tool.name in profile.tool_names)
             )
         model = _model_client(agent.model, runtime.config)
         handle = await runtime.carrier.create(
@@ -113,6 +119,7 @@ async def _execute_turn(turn_id: str) -> str:
             hub=runtime.hub,
             sandbox=SandboxSession(carrier=runtime.carrier, handle=handle),
             tools=tools,
+            tool_ext=tool_ext,
             blob=runtime.blob,
             spawn=subagents.spawn,
         )

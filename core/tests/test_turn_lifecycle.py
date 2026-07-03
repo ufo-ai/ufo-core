@@ -125,6 +125,8 @@ def dbos_runtime(
             proxy=proxy,
             dbos=dbos_client,
             subagents=SubagentRegistry((ROUNDTRIP_PROFILE,)),
+            manifests=(),
+            credentials=None,
         )
     )
     yield config, hub, blob

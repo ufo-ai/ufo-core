@@ -3,7 +3,8 @@
 A handler reaches the outside world only through the fields here: the sandbox for filesystem and
 shell, the blob store for artifacts, the turn/agent it runs under, and `spawn` to delegate a typed
 subtask to a child turn. `read_paths` is the working set that lets `edit` refuse to touch a file
-the turn has not read first."""
+the turn has not read first. An extension tool also gets `ext`, its owning extension's
+workspace-scoped ExtensionContext; a builtin tool gets `ext=None`."""
 
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
@@ -12,6 +13,7 @@ from uuid import UUID
 from pydantic import BaseModel
 
 from selfhost.blob import BlobStore
+from selfhost.ext.context import ExtensionContext
 from selfhost.sandbox.session import SandboxSession
 from selfhost.schema.records import Agent, Turn
 
@@ -55,3 +57,4 @@ class ToolContext:
     agent: Agent
     spawn: Spawn
     read_paths: set[str] = field(default_factory=set)
+    ext: ExtensionContext | None = None

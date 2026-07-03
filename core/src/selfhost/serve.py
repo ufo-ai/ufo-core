@@ -42,6 +42,9 @@ def run() -> None:
     init_o11y(config.o11y.otlp_endpoint)
     init_db(config.database.url)
     asyncio.run(_require_bootstrap())
+    manifests = load_manifests()
+    key = os.environ.get(config.credentials.key_env)
+    credentials = CredentialStore(fernet=Fernet(key.encode())) if key else None
     hub = InProcessHub()
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
     init_runtime(
@@ -53,6 +56,8 @@ def run() -> None:
             proxy=_egress_proxy(asyncio.run(_assemble_rules(config))),
             dbos=dbos_client,
             subagents=SubagentRegistry(()),
+            manifests=manifests,
+            credentials=credentials,
         )
     )
     DBOS(
