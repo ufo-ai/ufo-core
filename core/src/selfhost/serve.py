@@ -16,14 +16,14 @@ from fastapi import FastAPI
 from starlette.requests import Request
 from starlette.responses import Response
 
-from selfhost.blob import blob_store_for
+from selfhost.blob import BlobStore, blob_store_for
 from selfhost.config import Config, load_config
 from selfhost.credentials import CredentialStore
 from selfhost.db import init_db, workspace_tx
 from selfhost.ext.context import context_for
 from selfhost.ext.loader import load_manifests, validate_ext_tools
 from selfhost.ext.manifest import Manifest
-from selfhost.hub import InProcessHub
+from selfhost.hub import Hub, InProcessHub
 from selfhost.jobs import JobRunner, bindings_from, core_jobs
 from selfhost.loop.queue import Runtime, init_runtime
 from selfhost.loop.subagents import SubagentRegistry
@@ -50,6 +50,8 @@ from selfhost.surfaces.admission import Admission
 from selfhost.surfaces.cli import router
 from selfhost.surfaces.slack import SlackSurface, WritebackPoller
 from selfhost.surfaces.slack import router as slack_router
+from selfhost.surfaces.web import WebSurface
+from selfhost.surfaces.web import router as web_router
 
 PROXY_STARTUP_TIMEOUT_SECONDS = 30
 SLACK_HTTP_TIMEOUT_SECONDS = 20
@@ -113,6 +115,7 @@ def run() -> None:
     app.include_router(router)
     _mount_ext_routes(app, manifests, workspace_id, credentials, memory)
     _mount_slack_surface(app, config, workspace_id, credentials, dbos_client)
+    _mount_web_surface(app, config, blob, hub, dbos_client)
     log("serve.started", host=config.serve.host, port=config.serve.port)
     try:
         uvicorn.run(app, host=config.serve.host, port=config.serve.port, log_level="warning")
@@ -223,6 +226,29 @@ def _mount_slack_surface(
         credentials=credentials, http=http, workspace_id=workspace_id, worker_id=uuid4().hex
     )
     app.include_router(slack_router)
+
+
+def _mount_web_surface(
+    app: FastAPI, config: Config, blob: BlobStore, hub: Hub, dbos_client: DBOSClient
+) -> None:
+    """Mount the web chat surface when the deploy enables it. The surface verifies artifact tokens
+    with the secret named by the config, so an enabled web surface without that env set fails loud
+    at boot rather than on the first download."""
+    web = config.surfaces.web
+    if web is None or not web.enable:
+        return
+    secret = os.environ.get(web.artifact_token_secret_env)
+    if not secret:
+        raise RuntimeError(
+            f"web surface is enabled but {web.artifact_token_secret_env!r} is unset"
+        )
+    app.state.web = WebSurface(
+        admission=Admission(dbos=dbos_client),
+        hub=hub,
+        blob=blob,
+        artifact_token_secret=secret,
+    )
+    app.include_router(web_router)
 
 
 @asynccontextmanager

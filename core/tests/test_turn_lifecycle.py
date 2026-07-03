@@ -125,6 +125,7 @@ def dbos_runtime(
     blob = FilesystemBlobStore(root=config.blob.root)
     proxy = ProxyEndpoint(port=0, ca_cert="test-ca")
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
+    loop_queue.reset_runtime()
     loop_queue.init_runtime(
         loop_queue.Runtime(
             config=config,
@@ -141,7 +142,7 @@ def dbos_runtime(
     )
     yield config, hub, blob
     dbos_client.destroy()
-    loop_queue._runtime = None
+    loop_queue.reset_runtime()
 
 
 @pytest.fixture

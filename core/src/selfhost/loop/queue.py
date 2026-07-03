@@ -79,6 +79,14 @@ def init_runtime(runtime: Runtime) -> None:
     _runtime = runtime
 
 
+def reset_runtime() -> None:
+    """Clear the process runtime so a fresh one can be installed. `serve` installs exactly once and
+    never resets; this is the seam a test uses to swap in its own runtime without tripping the
+    single-init guard, replacing what would otherwise be a poke at the module global."""
+    global _runtime
+    _runtime = None
+
+
 @DBOS.step(preemptible=True)
 async def _execute_turn(turn_id: str) -> str:
     runtime = _runtime
