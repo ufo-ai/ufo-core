@@ -2,19 +2,32 @@ import base64
 import shutil
 import subprocess
 from collections.abc import Iterator
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
+from selfhost.sandbox import session as session_module
 from selfhost.sandbox.carrier import DockerCarrier
 from selfhost.sandbox.session import (
     MAX_READ_BYTES,
+    SANDBOX_GID,
+    SANDBOX_UID,
     RunToken,
     SandboxHandle,
     SandboxSession,
 )
 
 SANDBOX_TEST_IMAGE = "python:3.12-slim"
+
+
+def test_dockerfile_pins_the_sandbox_uid_to_the_constant() -> None:
+    """serve chowns the workspace mount to SANDBOX_UID/GID so the non-root sandbox user can write
+    it; that only holds if the image's sandbox user really has those ids. This gate keeps the
+    Dockerfile's build args and the constant from drifting apart."""
+    dockerfile = (Path(session_module.__file__).parent / "image" / "Dockerfile").read_text()
+    assert f"ARG SANDBOX_UID={SANDBOX_UID}" in dockerfile
+    assert f"ARG SANDBOX_GID={SANDBOX_GID}" in dockerfile
 
 
 def _basic(username: str) -> str:

@@ -6,7 +6,6 @@ here asserts a fake."""
 import base64
 import hashlib
 import json
-import os
 import shutil
 import struct
 import subprocess
@@ -24,6 +23,8 @@ from selfhost.sandbox import session as session_module
 from selfhost.sandbox.carrier import DockerCarrier
 from selfhost.sandbox.session import (
     MAX_READ_BYTES,
+    SANDBOX_GID,
+    SANDBOX_UID,
     MountSpec,
     SandboxHandle,
     SandboxSession,
@@ -107,19 +108,27 @@ def sandbox_image() -> str:
 
 @pytest.fixture
 def file_ctx(sandbox_image: str, tmp_path: Path) -> Iterator[tuple[ToolContext, Path]]:
-    """A tool context over a live container whose /workspace is a host bind mount, so the streamed
-    `share_file` export reads the same files the tools write — the real carrier, not a stand-in.
-
-    The container runs as the mount-owner uid, not the image's non-root `sandbox` user (uid 1000):
-    on Linux a bind mount is owned by whoever created the host dir (this test process), and uid 1000
-    cannot write it. Matching the uid keeps the mount writable without touching the confinement (the
-    `-v` mount and the workspace_path guard). The real DockerCarrier omits this, so the sandbox user
-    cannot write a serve-created workspace on Linux — a prod gap, reported in the summary."""
+    """A tool context over a live container whose /workspace is a host bind mount, set up exactly as
+    prod: the mount is chowned to the sandbox uid (as `_workspace_mount` does when serve runs as
+    root) and the container then runs as the image's default non-root `sandbox` user. So the tools
+    write as the real sandbox user against a real carrier and a real bind mount the export streams
+    out of — no `--user` override, no stand-in. The chown runs in a throwaway `--user 0` container,
+    so the test needs no host root; input files are created through the sandbox (as the agent would)
+    so they too are sandbox-owned."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    chowned = subprocess.run(
+        ["docker", "run", "--rm", "--user", "0:0", "-v", f"{workspace}:/workspace", sandbox_image,
+         "chown", "-R", f"{SANDBOX_UID}:{SANDBOX_GID}", "/workspace"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if chowned.returncode != 0:
+        pytest.skip(f"docker cannot chown the workspace mount: {chowned.stderr.strip()}")
     started = subprocess.run(
-        ["docker", "run", "-d", "--rm", "--user", f"{os.getuid()}:{os.getgid()}",
-         "-v", f"{workspace}:/workspace", sandbox_image, "sleep", "infinity"],
+        ["docker", "run", "-d", "--rm", "-v", f"{workspace}:/workspace", sandbox_image,
+         "sleep", "infinity"],
         capture_output=True,
         text=True,
         check=False,
@@ -165,8 +174,8 @@ async def _run(tool_name: str, ctx: ToolContext, **args: object):
 async def test_read_numbers_lines_and_appends_truncation_footer(
     file_ctx: tuple[ToolContext, Path],
 ) -> None:
-    ctx, workspace = file_ctx
-    (workspace / "notes.txt").write_text("a\nb\nc\nd\ne\n")
+    ctx, _ = file_ctx
+    await ctx.sandbox.write_file("notes.txt", b"a\nb\nc\nd\ne\n")
     result = await _run("read", ctx, file_path="notes.txt", offset=1, limit=2)
     assert result.content[0].text == "1\ta\n2\tb\n\n[lines 1-2 of 5]; 3 more - read with offset=3"
     assert "notes.txt" in ctx.read_paths
@@ -175,8 +184,8 @@ async def test_read_numbers_lines_and_appends_truncation_footer(
 async def test_read_is_one_based_and_windows_from_offset(
     file_ctx: tuple[ToolContext, Path],
 ) -> None:
-    ctx, workspace = file_ctx
-    (workspace / "notes.txt").write_text("a\nb\nc\nd\ne\n")
+    ctx, _ = file_ctx
+    await ctx.sandbox.write_file("notes.txt", b"a\nb\nc\nd\ne\n")
     result = await _run("read", ctx, file_path="notes.txt", offset=2, limit=2)
     assert result.content[0].text == "2\tb\n3\tc\n\n[lines 2-3 of 5]; 2 more - read with offset=4"
 
@@ -184,9 +193,9 @@ async def test_read_is_one_based_and_windows_from_offset(
 async def test_read_image_returns_base64_and_media_type(
     file_ctx: tuple[ToolContext, Path],
 ) -> None:
-    ctx, workspace = file_ctx
+    ctx, _ = file_ctx
     png = _png_1x1()
-    (workspace / "pixel.png").write_bytes(png)
+    await ctx.sandbox.write_file("pixel.png", png)
     result = await _run("read", ctx, file_path="pixel.png")
     payload = json.loads(result.content[0].text)
     assert payload["type"] == "image"
@@ -197,8 +206,8 @@ async def test_read_image_returns_base64_and_media_type(
 async def test_read_pdf_returns_text_and_page_render(
     file_ctx: tuple[ToolContext, Path],
 ) -> None:
-    ctx, workspace = file_ctx
-    (workspace / "doc.pdf").write_bytes(MINIMAL_PDF)
+    ctx, _ = file_ctx
+    await ctx.sandbox.write_file("doc.pdf", MINIMAL_PDF)
     result = await _run("read", ctx, file_path="doc.pdf")
     payload = json.loads(result.content[0].text)
     assert payload["type"] == "pdf"
@@ -209,8 +218,8 @@ async def test_read_pdf_returns_text_and_page_render(
 
 
 async def test_read_refuses_a_binary_file(file_ctx: tuple[ToolContext, Path]) -> None:
-    ctx, workspace = file_ctx
-    (workspace / "data.bin").write_bytes(bytes(range(256)))
+    ctx, _ = file_ctx
+    await ctx.sandbox.write_file("data.bin", bytes(range(256)))
     with pytest.raises(ValueError, match="binary file"):
         await _run("read", ctx, file_path="data.bin")
 
@@ -229,7 +238,7 @@ async def test_write_guard_refuses_overwriting_an_unread_file(
     file_ctx: tuple[ToolContext, Path],
 ) -> None:
     ctx, workspace = file_ctx
-    (workspace / "exist.txt").write_text("original")
+    await ctx.sandbox.write_file("exist.txt", b"original")
     with pytest.raises(ValueError, match="must be read before it is written"):
         await _run("write", ctx, file_path="exist.txt", content="clobber")
     assert (workspace / "exist.txt").read_text() == "original"
@@ -237,7 +246,7 @@ async def test_write_guard_refuses_overwriting_an_unread_file(
 
 async def test_write_overwrites_after_read(file_ctx: tuple[ToolContext, Path]) -> None:
     ctx, workspace = file_ctx
-    (workspace / "exist.txt").write_text("original\n")
+    await ctx.sandbox.write_file("exist.txt", b"original\n")
     await _run("read", ctx, file_path="exist.txt")
     result = await _run("write", ctx, file_path="exist.txt", content="replaced\n")
     assert json.loads(result.content[0].text)["created"] is False
@@ -248,7 +257,7 @@ async def test_edit_applies_multiple_edits_sequentially_with_snippet(
     file_ctx: tuple[ToolContext, Path],
 ) -> None:
     ctx, workspace = file_ctx
-    (workspace / "code.py").write_text("alpha = 1\nbeta = 2\n")
+    await ctx.sandbox.write_file("code.py", b"alpha = 1\nbeta = 2\n")
     await _run("read", ctx, file_path="code.py")
     result = await _run(
         "edit",
@@ -267,7 +276,7 @@ async def test_edit_applies_multiple_edits_sequentially_with_snippet(
 
 async def test_edit_replace_all(file_ctx: tuple[ToolContext, Path]) -> None:
     ctx, workspace = file_ctx
-    (workspace / "dup.py").write_text("x\nx\nx\n")
+    await ctx.sandbox.write_file("dup.py", b"x\nx\nx\n")
     await _run("read", ctx, file_path="dup.py")
     result = await _run(
         "edit",
@@ -282,8 +291,8 @@ async def test_edit_replace_all(file_ctx: tuple[ToolContext, Path]) -> None:
 async def test_edit_non_unique_without_replace_all_raises(
     file_ctx: tuple[ToolContext, Path],
 ) -> None:
-    ctx, workspace = file_ctx
-    (workspace / "dup.py").write_text("x\nx\n")
+    ctx, _ = file_ctx
+    await ctx.sandbox.write_file("dup.py", b"x\nx\n")
     await _run("read", ctx, file_path="dup.py")
     with pytest.raises(ValueError, match="found 2 times"):
         await _run(
@@ -294,10 +303,10 @@ async def test_edit_non_unique_without_replace_all_raises(
 async def test_share_file_streams_a_file_over_the_read_cap_byte_exact(
     file_ctx: tuple[ToolContext, Path],
 ) -> None:
-    ctx, workspace = file_ctx
+    ctx, _ = file_ctx
     payload = b"\x00\x01\x02\x03\x04\x05\x06\x07" * (MAX_READ_BYTES // 8 + 200000)
     assert len(payload) > MAX_READ_BYTES
-    (workspace / "big.bin").write_bytes(payload)
+    await ctx.sandbox.write_file("big.bin", payload)
     result = await _run("share_file", ctx, file_path="big.bin")
     shared = json.loads(result.content[0].text)
     assert shared["size_bytes"] == len(payload)
@@ -312,9 +321,9 @@ async def test_share_file_streams_a_file_over_the_read_cap_byte_exact(
 async def test_share_file_text_preflight_and_download_url(
     file_ctx: tuple[ToolContext, Path],
 ) -> None:
-    ctx, workspace = file_ctx
+    ctx, _ = file_ctx
     body = b"the produced report\n"
-    (workspace / "report.txt").write_text(body.decode())
+    await ctx.sandbox.write_file("report.txt", body)
     result = await _run("share_file", ctx, file_path="report.txt")
     shared = json.loads(result.content[0].text)
     assert shared["is_text"] is True
@@ -329,8 +338,8 @@ async def test_share_file_text_preflight_and_download_url(
 async def test_share_file_confines_a_traversal_name(
     file_ctx: tuple[ToolContext, Path],
 ) -> None:
-    ctx, workspace = file_ctx
-    (workspace / "report.txt").write_text("data")
+    ctx, _ = file_ctx
+    await ctx.sandbox.write_file("report.txt", b"data")
     result = await _run("share_file", ctx, file_path="report.txt", name="../../conversations/x")
     token = json.loads(result.content[0].text)["url"].split("token=", 1)[1]
     claims = verify_artifact_token(token, ARTIFACT_SECRET, datetime.now(UTC))
