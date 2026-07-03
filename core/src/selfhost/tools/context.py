@@ -69,16 +69,27 @@ class ToolContext:
     read_paths: set[str] = field(default_factory=set)
     ext: ExtensionContext | None = None
 
-    async def connector_authorization(self, provider: str) -> str:
+    async def connector_authorization(self, provider: str, account_id: str | None = None) -> str:
         """The `Authorization` header value a connector tool sends to reach `provider`: the exact
         sentinel the egress proxy swaps for the turn-agent's real OAuth token, so the raw secret
         never enters the sandbox. Resolves strictly the turn's own workspace and agent, so a tool
-        builds a sentinel for the turn-agent's grants alone, never another agent's. Fails loud when
-        no grant subsystem is configured or the agent holds no grant for the provider."""
+        builds a sentinel for the turn-agent's grants alone, never another agent's. `account_id`
+        targets a specific account when the agent holds several for one provider (its sentinel draws
+        only its own token at the proxy); omitted, any of the agent's grants for the provider
+        answers. Fails loud when no grant subsystem is configured or the agent holds no matching
+        grant."""
         if self.grants is None:
             raise ConnectUnavailable("grants unavailable: no credential key configured")
         granted = await self.grants.active_grants(self.turn.workspace_id, self.turn.agent_id)
-        grant = next((g for g in granted if g.provider == provider), None)
+        grant = next(
+            (
+                g
+                for g in granted
+                if g.provider == provider and (account_id is None or g.account_id == account_id)
+            ),
+            None,
+        )
         if grant is None:
-            raise ValueError(f"agent has no active {provider!r} grant to authenticate")
+            target = f"{provider!r} account {account_id!r}" if account_id else f"{provider!r}"
+            raise ValueError(f"agent has no active {target} grant to authenticate")
         return grant.sentinel_header

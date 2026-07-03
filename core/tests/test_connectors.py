@@ -336,6 +336,33 @@ async def test_connector_authorization_is_scoped_to_the_turn_agents_own_grants(d
     assert "acct-b" not in sentinel_a
 
 
+async def test_connector_authorization_selects_the_named_account(db: None) -> None:
+    """An agent holding two accounts for one provider: `connector_authorization(provider,
+    account_id=X)` returns X's sentinel, not the other account's, and a name it does not hold
+    fails loud."""
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    store = GrantStore(fernet=Fernet(Fernet.generate_key()))
+    for account in ("acct-1", "acct-2"):
+        await store.record(
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            provider=sample.CONNECTOR_PROVIDER,
+            account_id=account,
+            host=sample.CONNECTOR_HOST,
+            token=f"tok-{account}",
+            grantor_member_id=member_id,
+            conversation_id=conversation_id,
+        )
+    ctx = _turn_context(workspace_id, agent_id, conversation_id, member_id, grants=store)
+    sentinel = await ctx.connector_authorization(sample.CONNECTOR_PROVIDER, account_id="acct-2")
+    assert sentinel.endswith("acct-2")
+    assert "acct-1" not in sentinel
+    with pytest.raises(ValueError, match="acct-9"):
+        await ctx.connector_authorization(sample.CONNECTOR_PROVIDER, account_id="acct-9")
+
+
 def _turn_context(
     workspace_id: UUID,
     agent_id: UUID,

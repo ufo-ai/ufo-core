@@ -158,6 +158,25 @@ async def test_grant_round_trips_and_encrypts_the_token(db: None) -> None:
     assert b"tok-secret-abc" not in ciphertext
 
 
+async def test_record_rejects_a_control_char_account_id(db: None) -> None:
+    """The account_id is external (the provider's OAuth exchange) and flows into the wire
+    Authorization sentinel, so a CR/LF that could split or forge a header is refused at record."""
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    with pytest.raises(ValueError, match="control character"):
+        await _store().record(
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            provider="stub",
+            account_id="acct-42\r\nX-Injected: 1",
+            host=GRANTED_HOST,
+            token="tok",
+            grantor_member_id=member_id,
+            conversation_id=conversation_id,
+        )
+
+
 async def test_reconnecting_the_same_account_updates_not_duplicates(db: None) -> None:
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)

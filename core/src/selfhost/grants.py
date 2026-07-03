@@ -142,7 +142,12 @@ class GrantStore:
         """Upsert on (workspace, agent, provider, account): re-connecting the same account refreshes
         its token and audit fields rather than duplicating the grant. One atomic insert-on-conflict,
         so two near-simultaneous first connects of the same account settle on one row instead of
-        colliding on the unique identity — the loser updates, never raises."""
+        colliding on the unique identity — the loser updates, never raises. `account_id` comes from
+        the provider's OAuth exchange and flows into the wire `Authorization` sentinel, so a control
+        character (CR/LF and friends) that could split or forge a header is refused here, before any
+        grant it would malform is recorded."""
+        if any(ord(char) < 0x20 or ord(char) == 0x7F for char in account_id):
+            raise ValueError("account_id has a control character; refusing to record the grant")
         ciphertext = self.fernet.encrypt(token.encode())
         async with workspace_tx() as connection:
             insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
