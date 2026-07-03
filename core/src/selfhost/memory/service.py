@@ -50,20 +50,18 @@ class Fused:
 
 
 def fuse_hits(
-    lexical: tuple[Hit, ...], vector: tuple[Hit, ...], owner_kind: str, limit: int
+    lexical: tuple[Hit, ...], vector: tuple[Hit, ...], limit: int
 ) -> tuple[Fused, ...]:
-    """Reciprocal-rank fusion (K=60) over the two legs, collapsed to one score per owning row of the
-    given kind: each leg ranks its chunk hits, a chunk's RRF score sums 1/(K+rank) across the legs
-    it placed in, and a row takes its best-scoring chunk — that chunk's text rides along as the
-    matched snippet."""
+    """Reciprocal-rank fusion (K=60) over the two legs, collapsed to one score per owning row: each
+    leg ranks its chunk hits, a chunk's RRF score sums 1/(K+rank) across the legs it placed in, and
+    a row takes its best-scoring chunk — that chunk's text rides along as the matched snippet. Both
+    legs are already scoped to one owner kind by the backend, so every rank position counts."""
     ranks = tuple(
         {hit.chunk_digest: rank for rank, hit in enumerate(leg, start=1) if hit.score > 0}
         for leg in (lexical, vector)
     )
     best: dict[str, tuple[float, str]] = {}
     for hit in (*lexical, *vector):
-        if hit.owner_kind != owner_kind:
-            continue
         rrf = sum(
             1.0 / (RRF_K + leg[hit.chunk_digest]) for leg in ranks if hit.chunk_digest in leg
         )
@@ -121,7 +119,7 @@ class MemoryService:
     async def recall(
         self, query: str, subjects: frozenset[str], limit: int
     ) -> tuple[Recalled, ...]:
-        fused = fuse_hits(*await self._legs(query, subjects, limit), OWNER_KIND_MEMORY_ITEM, limit)
+        fused = fuse_hits(*await self._legs(query, subjects, OWNER_KIND_MEMORY_ITEM, limit), limit)
         return await self._enrich(fused)
 
     async def search_sources(
@@ -129,16 +127,19 @@ class MemoryService:
     ) -> tuple[SourceMatch, ...]:
         """Search synced source pages the same way recall searches facts: fuse the two index legs
         under the subject filter, then read the surviving (non-tombstoned) pages back with the
-        matched snippet."""
-        fused = fuse_hits(*await self._legs(query, subjects, limit), OWNER_KIND_PAGE, limit)
+        matched snippet. Pages and facts query the index under separate owner kinds, so a synced
+        folder can never crowd facts out of recall's candidate window (or vice versa)."""
+        fused = fuse_hits(*await self._legs(query, subjects, OWNER_KIND_PAGE, limit), limit)
         return await self._enrich_pages(fused)
 
     async def _legs(
-        self, query: str, subjects: frozenset[str], limit: int
+        self, query: str, subjects: frozenset[str], owner_kind: str, limit: int
     ) -> tuple[tuple[Hit, ...], tuple[Hit, ...]]:
         embedding = await self._embed_query(query)
-        lexical = await self.index.lexical(query, subjects, limit)
-        vector = await self.index.vector(embedding, subjects, limit) if embedding else ()
+        lexical = await self.index.lexical(query, subjects, owner_kind, limit)
+        vector = (
+            await self.index.vector(embedding, subjects, owner_kind, limit) if embedding else ()
+        )
         return lexical, vector
 
     async def _embed_query(self, query: str) -> tuple[float, ...]:

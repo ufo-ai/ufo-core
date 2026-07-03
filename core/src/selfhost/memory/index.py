@@ -24,11 +24,11 @@ class IndexBackend(Protocol):
     async def delete(self, scope: IndexScope) -> None: ...
 
     async def lexical(
-        self, query: str, subjects: frozenset[str], limit: int
+        self, query: str, subjects: frozenset[str], owner_kind: str, limit: int
     ) -> tuple[Hit, ...]: ...
 
     async def vector(
-        self, embedding: tuple[float, ...], subjects: frozenset[str], limit: int
+        self, embedding: tuple[float, ...], subjects: frozenset[str], owner_kind: str, limit: int
     ) -> tuple[Hit, ...]: ...
 
     async def reindex(self, scope: IndexScope) -> None: ...
@@ -77,7 +77,8 @@ LEXICAL_PG = sa.text(
     select chunk_digest, owner_kind, owner_id, subject, ordinal, text,
            ts_rank(tsv, plainto_tsquery('english', :query)) as score
     from chunk
-    where subject = any(:subjects) and tsv @@ plainto_tsquery('english', :query)
+    where subject = any(:subjects) and owner_kind = :owner_kind
+      and tsv @@ plainto_tsquery('english', :query)
     order by score desc
     limit :limit
     """
@@ -87,7 +88,7 @@ VECTOR_PG = sa.text(
     select chunk_digest, owner_kind, owner_id, subject, ordinal, text,
            1 - (embedding <=> cast(:query as halfvec)) as score
     from chunk
-    where subject = any(:subjects) and embedding is not null
+    where subject = any(:subjects) and owner_kind = :owner_kind and embedding is not null
     order by embedding <=> cast(:query as halfvec)
     limit :limit
     """
@@ -129,19 +130,27 @@ class PgvectorIndex:
                 DELETE_PG, {"owner_kind": scope.owner_kind, "owner_id": scope.owner_id}
             )
 
-    async def lexical(self, query: str, subjects: frozenset[str], limit: int) -> tuple[Hit, ...]:
+    async def lexical(
+        self, query: str, subjects: frozenset[str], owner_kind: str, limit: int
+    ) -> tuple[Hit, ...]:
         if not query.strip() or not subjects:
             return ()
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
-                    LEXICAL_PG, {"query": query, "subjects": list(subjects), "limit": limit}
+                    LEXICAL_PG,
+                    {
+                        "query": query,
+                        "subjects": list(subjects),
+                        "owner_kind": owner_kind,
+                        "limit": limit,
+                    },
                 )
             ).mappings()
             return tuple(_hit(row, row["score"]) for row in rows)
 
     async def vector(
-        self, embedding: tuple[float, ...], subjects: frozenset[str], limit: int
+        self, embedding: tuple[float, ...], subjects: frozenset[str], owner_kind: str, limit: int
     ) -> tuple[Hit, ...]:
         if not embedding or not subjects:
             return ()
@@ -152,6 +161,7 @@ class PgvectorIndex:
                     {
                         "query": pgvector_literal(embedding),
                         "subjects": list(subjects),
+                        "owner_kind": owner_kind,
                         "limit": limit,
                     },
                 )
@@ -202,7 +212,7 @@ LEXICAL_SQLITE = sa.text(
            -bm25(chunk_fts) as score
     from chunk_fts
     join chunk c on c.chunk_digest = chunk_fts.chunk_digest
-    where chunk_fts match :query and c.subject in :subjects
+    where chunk_fts match :query and c.subject in :subjects and c.owner_kind = :owner_kind
     order by bm25(chunk_fts)
     limit :limit
     """
@@ -211,7 +221,7 @@ VECTOR_ROWS_SQLITE = sa.text(
     """
     select chunk_digest, owner_kind, owner_id, subject, ordinal, text, embedding
     from chunk
-    where subject in :subjects and embedding is not null
+    where subject in :subjects and owner_kind = :owner_kind and embedding is not null
     """
 ).bindparams(sa.bindparam("subjects", expanding=True))
 DELETE_SQLITE = sa.text(
@@ -267,26 +277,36 @@ class SqliteFtsIndex:
                 DELETE_SQLITE, {"owner_kind": scope.owner_kind, "owner_id": scope.owner_id}
             )
 
-    async def lexical(self, query: str, subjects: frozenset[str], limit: int) -> tuple[Hit, ...]:
+    async def lexical(
+        self, query: str, subjects: frozenset[str], owner_kind: str, limit: int
+    ) -> tuple[Hit, ...]:
         match = " ".join(f'"{term}"' for term in query.split() if term)
         if not match or not subjects:
             return ()
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
-                    LEXICAL_SQLITE, {"query": match, "subjects": list(subjects), "limit": limit}
+                    LEXICAL_SQLITE,
+                    {
+                        "query": match,
+                        "subjects": list(subjects),
+                        "owner_kind": owner_kind,
+                        "limit": limit,
+                    },
                 )
             ).mappings()
             return tuple(_hit(row, row["score"]) for row in rows)
 
     async def vector(
-        self, embedding: tuple[float, ...], subjects: frozenset[str], limit: int
+        self, embedding: tuple[float, ...], subjects: frozenset[str], owner_kind: str, limit: int
     ) -> tuple[Hit, ...]:
         if not embedding or not subjects:
             return ()
         async with workspace_tx() as connection:
             rows = (
-                await connection.execute(VECTOR_ROWS_SQLITE, {"subjects": list(subjects)})
+                await connection.execute(
+                    VECTOR_ROWS_SQLITE, {"subjects": list(subjects), "owner_kind": owner_kind}
+                )
             ).mappings().all()
         scored = sorted(
             ((row, cosine(unpack_embedding(row["embedding"]), embedding)) for row in rows),

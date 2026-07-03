@@ -53,11 +53,11 @@ async def test_upsert_lexical_and_vector_return_ordered_hits(
         )
     )
 
-    lexical = await backend.lexical("apple", frozenset({SUBJECT}), 10)
+    lexical = await backend.lexical("apple", frozenset({SUBJECT}), "memory_item", 10)
     assert [hit.chunk_digest for hit in lexical] == ["d-alpha", "d-beta"]
     assert all(hit.subject == SUBJECT for hit in lexical)
 
-    vector = await backend.vector(vec((0, 1.0)), frozenset({SUBJECT}), 10)
+    vector = await backend.vector(vec((0, 1.0)), frozenset({SUBJECT}), "memory_item", 10)
     assert [hit.chunk_digest for hit in vector] == ["d-alpha", "d-beta"]
     assert vector[0].score == pytest.approx(1.0, abs=1e-2)
     assert vector[1].score == pytest.approx(0.7071, abs=1e-2)
@@ -71,9 +71,9 @@ async def test_foreign_subject_is_excluded(clean_chunk: None, database_url: str)
             Chunk("theirs", "memory_item", "m2", FOREIGN, 0, "shared secret token", vec((0, 1.0))),
         )
     )
-    lexical = await backend.lexical("secret", frozenset({SUBJECT}), 10)
+    lexical = await backend.lexical("secret", frozenset({SUBJECT}), "memory_item", 10)
     assert [hit.chunk_digest for hit in lexical] == ["mine"]
-    vector = await backend.vector(vec((0, 1.0)), frozenset({SUBJECT}), 10)
+    vector = await backend.vector(vec((0, 1.0)), frozenset({SUBJECT}), "memory_item", 10)
     assert [hit.chunk_digest for hit in vector] == ["mine"]
 
 
@@ -86,9 +86,9 @@ async def test_delete_removes_only_its_scope(clean_chunk: None, database_url: st
         )
     )
     await backend.delete(IndexScope("memory_item", "drop-owner"))
-    lexical = await backend.lexical("apple", frozenset({SUBJECT}), 10)
+    lexical = await backend.lexical("apple", frozenset({SUBJECT}), "memory_item", 10)
     assert [hit.chunk_digest for hit in lexical] == ["keep"]
-    vector = await backend.vector(vec((0, 1.0)), frozenset({SUBJECT}), 10)
+    vector = await backend.vector(vec((0, 1.0)), frozenset({SUBJECT}), "memory_item", 10)
     assert [hit.chunk_digest for hit in vector] == ["keep"]
 
 
@@ -96,10 +96,10 @@ async def test_reindex_reembeds_scope_through_client(clean_chunk: None, database
     backend = index_backend_for(database_url, StubEmbed(vec((5, 1.0))))
     await backend.upsert((Chunk("c", "memory_item", "o", SUBJECT, 0, "apple", vec((0, 1.0))),))
     probe = vec((5, 1.0))
-    before = await backend.vector(probe, frozenset({SUBJECT}), 10)
+    before = await backend.vector(probe, frozenset({SUBJECT}), "memory_item", 10)
     assert before[0].score == pytest.approx(0.0, abs=1e-2)
     await backend.reindex(IndexScope("memory_item", "o"))
-    after = await backend.vector(probe, frozenset({SUBJECT}), 10)
+    after = await backend.vector(probe, frozenset({SUBJECT}), "memory_item", 10)
     assert after[0].score == pytest.approx(1.0, abs=1e-2)
 
 

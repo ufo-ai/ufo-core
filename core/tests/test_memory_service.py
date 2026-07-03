@@ -10,6 +10,7 @@ from selfhost.memory.embed import EMBED_DIM
 from selfhost.memory.index import index_backend_for
 from selfhost.memory.service import (
     OWNER_KIND_MEMORY_ITEM,
+    OWNER_KIND_PAGE,
     SHARED_SUBJECT,
     MemoryService,
     member_subject,
@@ -90,6 +91,59 @@ async def _seed_item(
     return item_id
 
 
+async def _seed_source(workspace_id: UUID) -> UUID:
+    source_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.source).values(
+                id=source_id,
+                workspace_id=workspace_id,
+                backend="folder",
+                config={},
+                cursor=None,
+                next_sync_at=sa.func.now(),
+                claimed_by=None,
+                claim_expires_at=None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return source_id
+
+
+async def _seed_page(
+    database_url: str,
+    workspace_id: UUID,
+    source_id: UUID,
+    subject: str,
+    body: str,
+    vector: tuple[float, ...],
+) -> UUID:
+    """Insert a source page and its one already-derived chunk directly, mirroring `_seed_item` for
+    the page owner kind so recall and source search can be exercised over one shared index."""
+    page_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.page).values(
+                id=page_id,
+                workspace_id=workspace_id,
+                source_id=source_id,
+                digest="sha256:seeded",
+                body_ref=f"sources/{source_id}/{page_id}",
+                subject=subject,
+                embedding_digest="sha256:seeded",
+                tombstone=False,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    backend = index_backend_for(database_url, StubEmbed(vector))
+    await backend.upsert(
+        (Chunk("p-" + page_id.hex, OWNER_KIND_PAGE, str(page_id), subject, 0, body, vector),)
+    )
+    return page_id
+
+
 def _service(
     database_url: str, vector: tuple[float, ...], embed: object | None = None
 ) -> MemoryService:
@@ -166,3 +220,36 @@ async def test_recall_degrades_to_lexical_when_embed_fails(clean: None, database
     )
     assert len(hits) == 1
     assert "zoltar" in hits[0].body
+
+
+async def test_pages_and_facts_do_not_crowd_each_others_candidate_window(
+    clean: None, database_url: str
+) -> None:
+    """Facts and pages share the chunk index; each retrieval must get a full limit of its own kind.
+    With the limit equal to the fact count (and the page count), one shared candidate window could
+    return at most `limit` rows across both kinds — so recall returning every fact AND search
+    returning every page at that limit proves neither kind crowds the other out."""
+    workspace_id = await _workspace()
+    probe = vec((4, 1.0))
+    source_id = await _seed_source(workspace_id)
+    fact_a = await _seed_item(
+        database_url, workspace_id, SHARED_SUBJECT, "quarterly report figures", probe
+    )
+    fact_b = await _seed_item(
+        database_url, workspace_id, SHARED_SUBJECT, "quarterly report summary", probe
+    )
+    await _seed_page(
+        database_url, workspace_id, source_id, SHARED_SUBJECT, "quarterly report appendix", probe
+    )
+    await _seed_page(
+        database_url, workspace_id, source_id, SHARED_SUBJECT, "quarterly report preface", probe
+    )
+
+    service = _service(database_url, probe)
+    subjects = frozenset({SHARED_SUBJECT})
+    facts = await service.recall("quarterly report", subjects, 2)
+    pages = await service.search_sources("quarterly report", subjects, 2)
+
+    assert {item.memory_id for item in facts} == {fact_a, fact_b}
+    assert len(pages) == 2
+    assert all("quarterly report" in page.text for page in pages)
