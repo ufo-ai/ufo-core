@@ -5,7 +5,8 @@ Slack/CLI/web surfaces, accounting, Anthropic/OpenAI model abstraction — plus 
 for everything else (connectors, data sources, triggers, tools, subagents, onboarding).
 
 - `spec.md` — source of truth: doctrine, fixed decisions, workspace model, non-goals.
-- `docs/plan.md` — build order. `docs/salvage.md` — what ports from the previous repo.
+- `docs/contracts.md` — core contracts per unit (sections delete as code lands).
+- `docs/plan.md` — build order. `docs/salvage.md` — file-level port map from the previous repo.
 - `core/` — the axiomatic unit. `extensions/` — first-party extensions. `packs/` — skill packs.
 
 Requires Postgres and Docker.
