@@ -28,6 +28,7 @@ from selfhost.sandbox.session import (
     Carrier,
     MountSpec,
     ProxyEndpoint,
+    RunToken,
     SandboxSession,
     SandboxSpec,
 )
@@ -112,6 +113,9 @@ async def _execute_turn(turn_id: str) -> str:
                 image_ref=SANDBOX_IMAGE_REF,
                 mount=await _workspace_mount(runtime.blob, turn.conversation_id),
                 proxy=runtime.proxy,
+                run_token=RunToken(
+                    workspace_id=turn.workspace_id, turn_id=turn.id
+                ).encode(),
             )
         )
         engine = TurnEngine(

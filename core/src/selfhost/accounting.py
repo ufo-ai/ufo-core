@@ -7,6 +7,8 @@ from typing import Literal
 from uuid import UUID
 
 import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from selfhost.o11y import log
@@ -15,6 +17,9 @@ from selfhost.schema.records import Usage, ledger_id_for
 
 TOKENS_PER_MTOK = 1_000_000
 MICRO_USD_PER_USD = 1_000_000
+
+TOKENS_DIMENSION = "tokens"
+EGRESS_DIMENSION = "egress"
 
 CapScope = Literal["workspace", "member", "agent"]
 WORKSPACE_SCOPE: CapScope = "workspace"
@@ -105,7 +110,7 @@ async def record_turn_usage(
     )
     if total == 0:
         return
-    ledger_id = ledger_id_for(workspace_id, turn_id, "tokens", attempt)
+    ledger_id = ledger_id_for(workspace_id, turn_id, TOKENS_DIMENSION, attempt)
     billed = await connection.execute(
         sa.select(tables.ledger.c.id).where(tables.ledger.c.id == ledger_id)
     )
@@ -116,7 +121,7 @@ async def record_turn_usage(
             id=ledger_id,
             workspace_id=workspace_id,
             turn_id=turn_id,
-            dimension="tokens",
+            dimension=TOKENS_DIMENSION,
             amount=total,
             priced_micro_usd=usage_priced_micro_usd(model, usage),
             model=model,
@@ -139,13 +144,46 @@ async def read_turn_cost(
                 sa.func.sum(tables.ledger.c.priced_micro_usd),
                 sa.func.max(tables.ledger.c.model),
             ).where(
-                (tables.ledger.c.turn_id == turn_id) & (tables.ledger.c.dimension == "tokens")
+                (tables.ledger.c.turn_id == turn_id)
+                & (tables.ledger.c.dimension == TOKENS_DIMENSION)
             )
         )
     ).one()
     if row[0] is None:
         return None
     return int(row[0]), int(row[1]), row[2]
+
+
+async def record_egress_request(
+    connection: AsyncConnection, workspace_id: UUID, turn_id: UUID
+) -> None:
+    """Meter one sandbox egress request as an `egress` ledger row per turn, incremented atomically
+    so concurrent proxy writes never lose a count. A request COUNT priced at zero, never a dollar
+    charge, under a dimension distinct from `tokens`: it neither re-bills the model tokens
+    `record_turn_usage` bills at terminal nor moves a spend cap. Keyed with an empty attempt — the
+    egress proxy has no run attempt, and a turn's egress count is per turn, not per run — so the id
+    can never collide with a token row (different dimension) and a parked-then-resumed turn keeps
+    accumulating into the one row."""
+    ledger_id = ledger_id_for(workspace_id, turn_id, EGRESS_DIMENSION)
+    insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
+    await connection.execute(
+        insert(tables.ledger)
+        .values(
+            id=ledger_id,
+            workspace_id=workspace_id,
+            turn_id=turn_id,
+            dimension=EGRESS_DIMENSION,
+            amount=1,
+            priced_micro_usd=0,
+            model="",
+            created_at=sa.func.now(),
+            updated_at=sa.func.now(),
+        )
+        .on_conflict_do_update(
+            index_elements=[tables.ledger.c.id],
+            set_={"amount": tables.ledger.c.amount + 1, "updated_at": sa.func.now()},
+        )
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,3 +303,101 @@ class SpendEvaluator:
             f"This turn is parked: the {tightest.scope} spend cap of ${dollars:,.2f} is reached. "
             "It resumes when the cap is raised."
         )
+
+
+@dataclass(frozen=True, slots=True)
+class DimensionTotal:
+    dimension: str
+    amount: int
+    priced_micro_usd: int
+
+
+@dataclass(frozen=True, slots=True)
+class SubjectTotal:
+    subject_id: UUID
+    label: str
+    priced_micro_usd: int
+
+
+@dataclass(frozen=True, slots=True)
+class SpendReport:
+    """A window's ledger, summed three ways: the workspace total, per member, and per agent, plus
+    the per-dimension split so a reader sees priced tokens beside the egress request count."""
+
+    window_seconds: int
+    total_micro_usd: int
+    by_dimension: tuple[DimensionTotal, ...]
+    by_member: tuple[SubjectTotal, ...]
+    by_agent: tuple[SubjectTotal, ...]
+
+
+@dataclass(frozen=True)
+class SpendRollup:
+    """Sum the workspace's ledger over a rolling window for the `selfhost spend` CLI and the web
+    view. `read` is the whole workflow: the window total, then the per-dimension, per-member, and
+    per-agent breakdowns — each a grouped sum the caller renders. Member and agent rows join through
+    the turn, so a turn with no member (a subagent conversation) drops out of the member breakdown
+    while still counting in the workspace total."""
+
+    workspace_id: UUID
+
+    async def read(self, connection: AsyncConnection, window_seconds: int) -> SpendReport:
+        cutoff = datetime.now(UTC) - timedelta(seconds=window_seconds)
+        window = (tables.ledger.c.workspace_id == self.workspace_id) & (
+            tables.ledger.c.created_at >= cutoff
+        )
+        total = int(
+            (
+                await connection.execute(
+                    sa.select(
+                        sa.func.coalesce(sa.func.sum(tables.ledger.c.priced_micro_usd), 0)
+                    ).where(window)
+                )
+            ).scalar_one()
+        )
+        by_dimension = tuple(
+            DimensionTotal(row.dimension, int(row.amount), int(row.priced))
+            for row in await connection.execute(
+                sa.select(
+                    tables.ledger.c.dimension,
+                    sa.func.sum(tables.ledger.c.amount).label("amount"),
+                    sa.func.sum(tables.ledger.c.priced_micro_usd).label("priced"),
+                )
+                .where(window)
+                .group_by(tables.ledger.c.dimension)
+                .order_by(tables.ledger.c.dimension)
+            )
+        )
+        by_member = tuple(
+            SubjectTotal(row.member_id, row.email, int(row.priced))
+            for row in await connection.execute(
+                sa.select(
+                    tables.conversation.c.member_id,
+                    tables.member.c.email,
+                    sa.func.sum(tables.ledger.c.priced_micro_usd).label("priced"),
+                )
+                .select_from(
+                    tables.ledger.join(tables.turn)
+                    .join(tables.conversation)
+                    .join(tables.member)
+                )
+                .where(window)
+                .group_by(tables.conversation.c.member_id, tables.member.c.email)
+                .order_by(tables.member.c.email)
+            )
+        )
+        by_agent = tuple(
+            SubjectTotal(row.agent_id, row.name, int(row.priced))
+            for row in await connection.execute(
+                sa.select(
+                    tables.turn.c.agent_id,
+                    tables.agent.c.name,
+                    sa.func.sum(tables.ledger.c.priced_micro_usd).label("priced"),
+                )
+                .select_from(tables.ledger.join(tables.turn).join(tables.agent))
+                .where(window)
+                .group_by(tables.turn.c.agent_id, tables.agent.c.name)
+                .order_by(tables.agent.c.name)
+            )
+        )
+        return SpendReport(window_seconds, total, by_dimension, by_member, by_agent)

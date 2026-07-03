@@ -5,6 +5,7 @@ egress proxy implement against it. A deploy swaps the carrier (E2B, remote) with
 tool. The invariant the session exists to hold: a tool reaches only the conversation's
 `workspace/` subtree, never the transcript or compaction records above it."""
 
+import base64
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -14,6 +15,37 @@ from uuid import UUID
 WORKSPACE_DIR = "/workspace"
 DEFAULT_EXEC_TIMEOUT_SECONDS = 120
 SENTINEL_MODEL_KEY = "SELFHOST_SENTINEL_MODEL_KEY"
+
+
+@dataclass(frozen=True, slots=True)
+class RunToken:
+    """Attributes a sandbox egress request to the turn that made it. Minted per turn, carried as the
+    proxy basic-auth username in the container's HTTP(S)_PROXY URL (`http://<token>:@host:port`),
+    and recovered by the egress proxy from the `Proxy-Authorization` header so a metered request
+    keys its ledger row to (workspace, turn). The encoding is base64url of `workspace_id/turn_id`,
+    whose alphabet is URL-safe, so the token drops straight into the URL's userinfo unescaped."""
+
+    workspace_id: UUID
+    turn_id: UUID
+
+    def encode(self) -> str:
+        raw = f"{self.workspace_id}/{self.turn_id}".encode()
+        return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+    @classmethod
+    def from_proxy_auth(cls, header: str) -> "RunToken":
+        """Recover the turn from a `Proxy-Authorization: Basic …` header — the basic-auth username
+        is the run token. Raises on a missing, non-basic, or malformed header: an unattributed
+        metered request is a wiring fault, surfaced loud, never a silently dropped ledger row."""
+        scheme, _, encoded = header.partition(" ")
+        if scheme.lower() != "basic" or not encoded:
+            raise ValueError("proxy authorization is not basic auth")
+        username = base64.b64decode(encoded).decode("utf-8", "replace").split(":", 1)[0]
+        padded = username + "=" * (-len(username) % 4)
+        workspace, _, turn = base64.urlsafe_b64decode(padded).decode("utf-8").partition("/")
+        if not workspace or not turn:
+            raise ValueError(f"invalid run token {username!r}")
+        return cls(workspace_id=UUID(workspace), turn_id=UUID(turn))
 
 
 @dataclass(frozen=True)
@@ -43,6 +75,7 @@ class SandboxSpec:
     image_ref: str
     mount: MountSpec
     proxy: ProxyEndpoint
+    run_token: str
 
 
 @dataclass(frozen=True)

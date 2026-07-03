@@ -14,6 +14,7 @@ import httpx
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 
+from selfhost.accounting import SpendReport, SpendRollup
 from selfhost.config import Config, load_config
 from selfhost.credentials import CredentialStore
 from selfhost.db import apply_migrations, dispose_db, init_db, workspace_tx
@@ -198,6 +199,11 @@ async def _stream_turn(
                             click.echo()
                             click.echo(click.style(frame["message"], dim=True))
                             return
+                        if "cost_micro_usd" in frame:
+                            dollars = frame["cost_micro_usd"] / MICRO_USD_PER_USD
+                            meter = f"\r{frame['tokens']} tok · ${dollars:.6f}"
+                            click.echo(click.style(meter, dim=True), nl=False, err=True)
+                            continue
                         click.echo(frame["text"], nl=False)
                         streamed = True
             except httpx.TransportError:
@@ -364,5 +370,42 @@ async def _read_spend_caps(
             (r.id, r.scope, r.subject_id, r.window_seconds, r.limit_micro_usd, r.on_breach)
             for r in rows
         ]
+    finally:
+        await dispose_db()
+
+
+SPEND_WINDOW_DEFAULT_SECONDS = 86_400
+
+
+@main.command()
+@click.option(
+    "--window-seconds", type=int, default=SPEND_WINDOW_DEFAULT_SECONDS, show_default=True
+)
+def spend(window_seconds: int) -> None:
+    """Sum the ledger over a window: the workspace total, then a per-dimension, per-member, and
+    per-agent breakdown — the rollups that match the ledger."""
+    config = load_config()
+    report = asyncio.run(_read_spend(config, window_seconds))
+    total = report.total_micro_usd / MICRO_USD_PER_USD
+    click.echo(f"spend · last {window_seconds / 3600:g}h · ${total:,.6f}")
+    for dim in report.by_dimension:
+        priced = dim.priced_micro_usd / MICRO_USD_PER_USD
+        click.echo(f"  {dim.dimension:<10}{dim.amount:>14,}  ${priced:,.6f}")
+    click.echo("by member:")
+    for member in report.by_member:
+        click.echo(f"  {member.label:<32}${member.priced_micro_usd / MICRO_USD_PER_USD:,.6f}")
+    click.echo("by agent:")
+    for agent in report.by_agent:
+        click.echo(f"  {agent.label:<32}${agent.priced_micro_usd / MICRO_USD_PER_USD:,.6f}")
+
+
+async def _read_spend(config: Config, window_seconds: int) -> SpendReport:
+    init_db(config.database.url)
+    try:
+        async with workspace_tx() as connection:
+            workspace_id = (
+                await connection.execute(sa.select(tables.workspace.c.id))
+            ).scalar_one()
+            return await SpendRollup(workspace_id).read(connection, window_seconds)
     finally:
         await dispose_db()
