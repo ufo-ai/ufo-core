@@ -15,7 +15,7 @@ from selfhost.grants import ConnectFlow, GrantStore, OAuthAccount, install_conne
 from selfhost.hub import InProcessHub
 from selfhost.loop.compaction import COMPACTED_CONTEXT_PREFIX, Compaction
 from selfhost.loop.engine import RECALL_CONTEXT_PREFIX, TurnEngine, TurnParked
-from selfhost.loop.transcript import Conversation, Transcript
+from selfhost.loop.transcript import Transcript
 from selfhost.memory.service import Recalled
 from selfhost.models.interface import (
     Message,
@@ -33,6 +33,7 @@ from selfhost.schema.records import Agent, TerminalFrame, Turn, Usage
 from selfhost.tools.builtins import BUILTIN_TOOLS
 from selfhost.tools.context import SpawnResult
 from selfhost.tools.registry import ToolRegistry
+from selfhost.transcript import Conversation
 
 
 @dataclass(frozen=True)

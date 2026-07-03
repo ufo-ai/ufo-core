@@ -119,7 +119,7 @@ def run() -> None:
         }
     )
     DBOS.launch()
-    _launch_jobs(config, indexer, page_indexer, sync_driver, memory, dbos_client)
+    _launch_jobs(config, indexer, page_indexer, sync_driver, memory, dbos_client, blob)
     app = FastAPI(lifespan=_serve_lifespan)
     app.state.hub = hub
     app.state.dbos = dbos_client
@@ -154,6 +154,7 @@ def _launch_jobs(
     sync_driver: SyncDriver,
     memory: MemoryService,
     dbos_client: DBOSClient,
+    blob: BlobStore,
 ) -> None:
     """Register this workspace's jobs — core's own (the memory + page index derivations, the source
     sync driver, and the spend-resume sweep that re-admits parked turns) plus every installed
@@ -176,6 +177,7 @@ def _launch_jobs(
         credential_store=CredentialStore(fernet=Fernet(key.encode())),
         bindings=bindings,
         memory=memory,
+        blob=blob,
     ).launch()
 
 

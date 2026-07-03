@@ -22,7 +22,7 @@ from selfhost.jobs import SpendResume
 from selfhost.loop import queue as loop_queue
 from selfhost.loop.engine import EMPTY_RESPONSE_NUDGE
 from selfhost.loop.subagents import SubagentProfile, SubagentRegistry
-from selfhost.loop.transcript import Conversation, Transcript
+from selfhost.loop.transcript import Transcript
 from selfhost.models.interface import (
     ModelEvent,
     ModelRequest,
@@ -35,6 +35,7 @@ from selfhost.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, S
 from selfhost.schema import tables
 from selfhost.schema.records import TerminalFrame, Usage
 from selfhost.surfaces.cli import router
+from selfhost.transcript import Conversation
 
 STREAM_TIMEOUT_SECONDS = 30
 

@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 members = [
     "selfhost",
     "selfhost-ext-sample",
+    "selfhost-ext-self-improvement",
 ]
 
 [[package]]
@@ -1693,6 +1694,21 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "selfhost", editable = "core" }]
+
+[[package]]
+name = "selfhost-ext-self-improvement"
+version = "0.1.0"
+source = { editable = "extensions/self_improvement" }
+dependencies = [
+    { name = "anthropic" },
+    { name = "selfhost" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "anthropic", specifier = ">=0.40" },
+    { name = "selfhost", editable = "core" },
+]
 
 [[package]]
 name = "shellingham"

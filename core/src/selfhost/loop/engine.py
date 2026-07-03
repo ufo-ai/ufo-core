@@ -22,7 +22,7 @@ from selfhost.ext.context import ExtensionContext
 from selfhost.grants import GrantStore
 from selfhost.hub import CostTick, Hub, LiveFrame, Parked, Terminal
 from selfhost.loop.compaction import Compaction
-from selfhost.loop.transcript import Conversation, Transcript
+from selfhost.loop.transcript import Transcript
 from selfhost.memory.service import MemoryService, recall_subjects
 from selfhost.models.interface import (
     Message,
@@ -49,6 +49,7 @@ from selfhost.schema.records import (
 )
 from selfhost.tools.context import Spawn, ToolContext
 from selfhost.tools.registry import ToolRegistry
+from selfhost.transcript import Conversation
 
 MAX_OUTPUT_TOKENS = 16_000
 MAX_TOOL_ROUNDS = 50

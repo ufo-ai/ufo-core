@@ -16,6 +16,7 @@ import sqlalchemy as sa
 from dbos import DBOS, DBOSClient, EnqueueOptions, Queue, ScheduleInput
 
 from selfhost.accounting import ALLOW, SpendEvaluator
+from selfhost.blob import BlobStore
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.ext.context import ExtensionContext, context_for
@@ -204,6 +205,7 @@ class JobRunner:
     credential_store: CredentialStore
     bindings: tuple[_Binding, ...]
     memory: MemoryService | None = None
+    blob: BlobStore | None = None
 
     def launch(self) -> None:
         global _firing
@@ -237,6 +239,7 @@ class JobRunner:
             binding.declared,
             self.credential_store,
             self.memory,
+            self.blob,
         )
         await binding.spec.handler(context)
 

@@ -7,7 +7,7 @@ sample's own recorded rows back through `ScopedStore`. The negative cases ride a
 slot is refused, and a second workspace can reach none of the first's rows. Breaking the sample
 breaks this probe, and a Manifest field the sample stops registering breaks the conformance gate."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -21,11 +21,19 @@ from httpx import ASGITransport, AsyncClient
 from selfhost.blob import FilesystemBlobStore
 from selfhost.credentials import CredentialSlotUnset, CredentialStore
 from selfhost.db import workspace_tx
-from selfhost.ext.context import ScopedStore, UndeclaredCredentialSlot, context_for
+from selfhost.ext.context import (
+    ScopedStore,
+    TrajectoryCorpus,
+    UndeclaredCredentialSlot,
+    context_for,
+)
 from selfhost.ext.loader import load_manifests, turn_tools
 from selfhost.ext.manifest import Manifest
+from selfhost.governance import prompt_digest
 from selfhost.grants import GrantStore
 from selfhost.jobs import JobRunner, bindings_from
+from selfhost.loop.transcript import Transcript
+from selfhost.models.interface import Message
 from selfhost.onboarding import run_onboarding_steps
 from selfhost.sandbox.proxy.rules import InjectionRule, MeterRule, derive_credential_rules
 from selfhost.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
@@ -33,6 +41,7 @@ from selfhost.schema import tables
 from selfhost.schema.records import Agent, Turn
 from selfhost.serve import _mount_ext_routes
 from selfhost.tools.context import SpawnResult, ToolContext
+from selfhost.transcript import Conversation, transcript_key
 
 SANDBOX_UNTOUCHED = "the sample tool records through its store and must not reach the sandbox"
 
@@ -333,3 +342,149 @@ async def test_a_second_workspace_reaches_none_of_the_firsts_rows(db: None) -> N
     assert await ScopedStore(workspace_id=first, extension=sample.NAME).get(sample.JOB_KEY) == {
         "ran": True
     }
+
+
+SEED_PROMPT = "You are helpful."
+
+
+async def _seed_trajectory(
+    workspace_id: UUID, blob: FilesystemBlobStore, *, corrupt: bool = False
+) -> UUID:
+    """A real agent, conversation, terminal turn, and durable transcript — the corpus the trajectory
+    read enumerates and the target the governed proposal is pinned against. `corrupt` lands
+    undecodable bytes at the transcript key instead, to prove one bad transcript is skipped."""
+    agent_id, conversation_id, turn_id = uuid4(), uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name=agent_id.hex,
+                prompt=SEED_PROMPT,
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                surface="cli",
+                queue_key=str(conversation_id),
+                member_id=None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="done",
+                inbound="hi",
+                terminal={"status": "done", "text": "hello", "model": "claude-opus-4-8"},
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    if corrupt:
+        await blob.put(transcript_key(conversation_id), b"\x00 not a transcript")
+    else:
+        await Transcript(blob=blob, conversation_id=conversation_id).write(
+            Conversation(
+                seq=2,
+                messages=(
+                    Message(role="user", content="hi"),
+                    Message(role="assistant", content="hello"),
+                ),
+            )
+        )
+    return agent_id
+
+
+async def test_job_reads_trajectories_and_opens_a_governed_proposal(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    manifest = _sample_manifest()
+    blob = FilesystemBlobStore(root=tmp_path)
+    agent_id = await _seed_trajectory(workspace_id, blob)
+    await JobRunner(
+        workspace_id=workspace_id,
+        credential_store=_credential_store(),
+        bindings=bindings_from((manifest,), ()),
+        blob=blob,
+    ).fire(f"{manifest.name}:{sample.JOB_NAME}")
+
+    scoped = ScopedStore(workspace_id=workspace_id, extension=sample.NAME)
+    assert await scoped.get(sample.TRAJECTORY_KEY) == {"count": 1}
+    assert await scoped.get(sample.PROPOSAL_KEY) is not None
+
+    async with workspace_tx() as connection:
+        proposal = (
+            await connection.execute(
+                sa.select(
+                    tables.proposal.c.extension,
+                    tables.proposal.c.agent_id,
+                    tables.proposal.c.status,
+                    tables.proposal.c.from_digest,
+                    tables.proposal.c.body,
+                ).where(tables.proposal.c.workspace_id == workspace_id)
+            )
+        ).one()
+        prompt = (
+            await connection.execute(
+                sa.select(tables.agent.c.prompt).where(tables.agent.c.id == agent_id)
+            )
+        ).scalar_one()
+    assert proposal.extension == sample.NAME
+    assert proposal.agent_id == agent_id
+    assert proposal.status == "pending"
+    assert proposal.from_digest == prompt_digest(SEED_PROMPT)
+    assert proposal.body == {"prompt": SEED_PROMPT + sample.PROPOSAL_SUFFIX}
+    assert prompt == SEED_PROMPT
+
+
+async def test_job_context_confines_blob_to_a_workspace_scoped_trajectory_read(
+    db: None, tmp_path: Path
+) -> None:
+    """The context a job receives carries no raw blob handle — only a workspace-scoped, read-only
+    TrajectoryCorpus. It cannot get or put an arbitrary key (another workspace's transcript, an
+    artifact), and its trajectory read returns only this workspace's conversations."""
+    first = await _workspace()
+    second = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    first_agent = await _seed_trajectory(first, blob)
+    await _seed_trajectory(second, blob)
+    await blob.put("artifacts/leak/report.txt", b"private")
+
+    context = context_for(first, sample.NAME, frozenset(), _credential_store(), None, blob)
+
+    assert "blob" not in {field.name for field in fields(context)}
+    assert isinstance(context.corpus, TrajectoryCorpus)
+    assert {name for name in dir(context.corpus) if not name.startswith("_")} == {
+        "trajectories",
+        "workspace_id",
+    }
+
+    trajectories = await context.trajectories()
+    assert len(trajectories) == 1
+    assert trajectories[0].agent_id == first_agent
+
+
+async def test_a_corrupt_transcript_is_skipped_not_aborting_the_corpus(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    good_agent = await _seed_trajectory(workspace_id, blob)
+    await _seed_trajectory(workspace_id, blob, corrupt=True)
+
+    context = context_for(workspace_id, sample.NAME, frozenset(), _credential_store(), None, blob)
+    trajectories = await context.trajectories()
+    assert len(trajectories) == 1
+    assert trajectories[0].agent_id == good_agent
