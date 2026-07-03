@@ -12,7 +12,7 @@ from selfhost.blob import BlobStore, FilesystemBlobStore
 from selfhost.config import Config
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
-from selfhost.ext.loader import turn_tools
+from selfhost.ext.loader import turn_hooks, turn_tools
 from selfhost.ext.manifest import Manifest
 from selfhost.grants import GrantStore
 from selfhost.hub import Hub, Terminal
@@ -99,6 +99,9 @@ async def _execute_turn(turn_id: str) -> str:
         all_tools, tool_ext = turn_tools(
             runtime.manifests, turn.workspace_id, runtime.credentials, runtime.memory
         )
+        hooks = turn_hooks(
+            runtime.manifests, turn.workspace_id, runtime.credentials, runtime.memory
+        )
         if turn.subagent_profile is None:
             resolved, tools = agent, ToolRegistry(all_tools)
         else:
@@ -134,6 +137,7 @@ async def _execute_turn(turn_id: str) -> str:
             sandbox=SandboxSession(carrier=runtime.carrier, handle=handle),
             tools=tools,
             tool_ext=tool_ext,
+            hooks=hooks,
             blob=runtime.blob,
             spawn=subagents.spawn,
             memory=runtime.memory,

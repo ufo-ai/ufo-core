@@ -19,6 +19,8 @@ from selfhost.accounting import (
 from selfhost.blob import BlobStore
 from selfhost.db import workspace_tx
 from selfhost.ext.context import ExtensionContext
+from selfhost.ext.loader import HookChain
+from selfhost.ext.manifest import OnInbound, PostToolUse, PreToolUse
 from selfhost.grants import GrantStore
 from selfhost.hub import CostTick, Hub, LiveFrame, Parked, Terminal
 from selfhost.loop.compaction import Compaction
@@ -98,6 +100,7 @@ class TurnEngine:
     sandbox: SandboxSession
     tools: ToolRegistry
     tool_ext: dict[str, ExtensionContext]
+    hooks: HookChain
     blob: BlobStore
     spawn: Spawn
     memory: MemoryService
@@ -131,6 +134,19 @@ class TurnEngine:
                     if not recalled
                     else f"{self.agent.prompt}\n\n{RECALL_CONTEXT_PREFIX}{recalled}"
                 )
+                inbound = await self.hooks.fire(
+                    "on_inbound",
+                    OnInbound(text=self.turn.inbound),
+                    self.turn,
+                    self.agent,
+                    self.member_id,
+                )
+                if inbound.denied is not None:
+                    frame = await self._commit("done", usage_events, answer=inbound.denied)
+                    await self._persist_transcript(await self._load_messages(), inbound.denied)
+                    return frame
+                if inbound.injected:
+                    system = f"{system}\n\n{inbound.injected}"
                 final_messages, answer = await self._model_round(
                     context, await self._load_messages(), usage_events, system
                 )
@@ -335,22 +351,47 @@ class TurnEngine:
         )
 
     async def _dispatch(self, context: ToolContext, call: ToolUseBlock) -> ToolResultBlock:
-        """Run one tool call in the sandbox; a bad name, bad arguments, or a raising handler
-        become an is_error result the model can recover from, never a turn failure. An extension
-        tool is handed its owning ExtensionContext; a builtin has no entry and runs ext=None."""
+        """Run one tool call end to end. A bad name or bad arguments become an is_error result
+        before any hook fires (there is no validated input to police). Then pre_tool_use may Deny
+        (the tool never dispatches) or ModifyInput (fold the args); the handler runs in the sandbox
+        with the folded args (a raising handler is an is_error result); post_tool_use may
+        ModifyOutput (replace the result) or InjectContext (append to it), and fires on the error
+        path too. An extension tool gets its owning ExtensionContext; a builtin runs ext=None."""
         try:
             tool = self.tools.get(call.name)
             args = tool.input_model.model_validate(call.input)
-            result = await tool.handler(replace(context, ext=self.tool_ext.get(call.name)), args)
         except Exception as error:
             return ToolResultBlock(
                 tool_use_id=call.id, content=f"{type(error).__name__}: {error}", is_error=True
             )
-        return ToolResultBlock(
-            tool_use_id=call.id,
-            content="".join(block.text for block in result.content),
-            is_error=result.is_error,
+        pre = await self.hooks.fire(
+            "pre_tool_use",
+            PreToolUse(tool_name=call.name, tool_input=args),
+            self.turn,
+            self.agent,
+            self.member_id,
         )
+        if pre.denied is not None:
+            return ToolResultBlock(tool_use_id=call.id, content=pre.denied, is_error=True)
+        args = pre.tool_input if pre.tool_input is not None else args
+        try:
+            result = await tool.handler(replace(context, ext=self.tool_ext.get(call.name)), args)
+            content = "".join(block.text for block in result.content)
+            is_error = result.is_error
+        except Exception as error:
+            content, is_error = f"{type(error).__name__}: {error}", True
+        post = await self.hooks.fire(
+            "post_tool_use",
+            PostToolUse(tool_name=call.name, tool_input=args, output=content, is_error=is_error),
+            self.turn,
+            self.agent,
+            self.member_id,
+        )
+        if post.output is not None:
+            content = post.output
+        if post.injected:
+            content = f"{content}\n{post.injected}"
+        return ToolResultBlock(tool_use_id=call.id, content=content, is_error=is_error)
 
     async def _commit(
         self,

@@ -11,11 +11,14 @@ and `selfhost bundle` write this file; `load_manifests` reads it, so the set the
 exactly what every derivation (tools, jobs, routes, proxy rules) sees.
 
 `turn_tools` reads the active manifests into the set a turn dispatches against and the owning
-ExtensionContext for each extension tool."""
+ExtensionContext for each extension tool; `turn_hooks` reads them into the turn's reactive
+`HookChain` — every declared hook bound to its extension's scoped context, grouped by event."""
 
+import asyncio
 import hashlib
 import importlib.util
 import os
+from dataclasses import dataclass, replace
 from importlib.metadata import EntryPoint, entry_points
 from pathlib import Path
 from uuid import UUID
@@ -24,8 +27,22 @@ from pydantic import BaseModel, ConfigDict
 
 from selfhost.credentials import CredentialStore
 from selfhost.ext.context import ExtensionContext, context_for
-from selfhost.ext.manifest import Manifest
+from selfhost.ext.manifest import (
+    Deny,
+    HookContext,
+    HookEvent,
+    HookPayload,
+    HookSpec,
+    InjectContext,
+    Manifest,
+    ModifyInput,
+    ModifyOutput,
+    PostToolUse,
+    PreToolUse,
+)
 from selfhost.memory.service import MemoryService
+from selfhost.o11y import log
+from selfhost.schema.records import Agent, Turn
 from selfhost.tools.builtins import BUILTIN_TOOLS
 from selfhost.tools.registry import ToolDef, ToolRegistry
 
@@ -33,6 +50,13 @@ EXTENSION_ENTRY_POINT_GROUP = "selfhost.extension"
 LOCKFILE_PATH_ENV = "SELFHOST_LOCKFILE"
 DEFAULT_LOCKFILE_PATH = Path("selfhost.lock")
 DIGEST_PREFIX = "sha256:"
+HOOK_TIMEOUT_SECONDS = 5.0
+GATING_EVENTS: frozenset[HookEvent] = frozenset({"pre_tool_use", "on_inbound"})
+ALLOWED_OUTCOMES: dict[HookEvent, tuple[type, ...]] = {
+    "pre_tool_use": (Deny, ModifyInput),
+    "post_tool_use": (ModifyOutput, InjectContext),
+    "on_inbound": (Deny, InjectContext),
+}
 
 
 class ExtensionPin(BaseModel):
@@ -172,3 +196,140 @@ def validate_ext_tools(
     start rather than coming up healthy and then failing every turn that builds the registry."""
     tools, _ = turn_tools(manifests, workspace_id, credential_store)
     ToolRegistry(tools)
+
+
+class HookOutcomeNotAllowed(TypeError):
+    """A hook returned an outcome its event does not permit (a Deny from post_tool_use, a
+    ModifyInput from on_inbound); treated as the hook malfunctioning under the failure policy."""
+
+
+@dataclass(frozen=True)
+class BoundHook:
+    spec: HookSpec
+    ext: ExtensionContext
+
+
+@dataclass(frozen=True)
+class HookResolution:
+    """The folded outcome of firing an event's hooks. `denied` is set (short-circuit) the moment a
+    hook Denies; otherwise `tool_input`/`output` carry the left-to-right ModifyInput/ModifyOutput
+    fold (each hook saw the prior's) and `injected` concatenates every InjectContext in order."""
+
+    denied: str | None = None
+    tool_input: BaseModel | None = None
+    output: str | None = None
+    injected: str = ""
+
+
+@dataclass(frozen=True)
+class HookChain:
+    """The turn's reactive hooks, grouped by event in lockfile pin order. `fire` runs one event's
+    hooks and folds their outcomes into a HookResolution the engine applies at the fire point."""
+
+    pre_tool_use: tuple[BoundHook, ...] = ()
+    post_tool_use: tuple[BoundHook, ...] = ()
+    on_inbound: tuple[BoundHook, ...] = ()
+
+    async def fire(
+        self,
+        event: HookEvent,
+        payload: HookPayload,
+        turn: Turn,
+        agent: Agent,
+        member_id: UUID | None,
+    ) -> HookResolution:
+        """Run every hook bound to `event` in order and fold their outcomes. Any Deny denies and
+        short-circuits (later hooks skip); ModifyInput/ModifyOutput fold left-to-right so each hook
+        sees the prior's result; InjectContext concatenates in order. Composition trust is the pin
+        alone — no hook can admit a tool grants withheld. A gating hook (pre_tool_use, on_inbound)
+        that raises or exceeds the timeout fails closed to a Deny (fail loud); an observe hook
+        (post_tool_use) that raises is swallowed with a log, never failing the turn."""
+        bound = {
+            "pre_tool_use": self.pre_tool_use,
+            "post_tool_use": self.post_tool_use,
+            "on_inbound": self.on_inbound,
+        }[event]
+        gating = event in GATING_EVENTS
+        tool_input = payload.tool_input if isinstance(payload, PreToolUse) else None
+        output = payload.output if isinstance(payload, PostToolUse) else None
+        injected: list[str] = []
+        for hook in bound:
+            match payload:
+                case PreToolUse() | PostToolUse() if hook.spec.tools and (
+                    payload.tool_name not in hook.spec.tools
+                ):
+                    continue
+                case PreToolUse():
+                    current = replace(payload, tool_input=tool_input)
+                case PostToolUse():
+                    current = replace(payload, output=output)
+                case _:
+                    current = payload
+            context = HookContext(
+                ext=hook.ext, turn=turn, agent=agent, member_id=member_id, payload=current
+            )
+            try:
+                async with asyncio.timeout(HOOK_TIMEOUT_SECONDS):
+                    outcome = await hook.spec.handler(context)
+                if outcome is not None and not isinstance(outcome, ALLOWED_OUTCOMES[event]):
+                    raise HookOutcomeNotAllowed(f"{event} hook returned {type(outcome).__name__}")
+            except Exception as error:
+                if gating:
+                    return HookResolution(
+                        denied=(
+                            f"hook {hook.ext.store.extension!r} failed closed on {event}: "
+                            f"{type(error).__name__}"
+                        )
+                    )
+                log(
+                    "hook.swallowed",
+                    extension=hook.ext.store.extension,
+                    hook_event=event,
+                    error_class=type(error).__name__,
+                )
+                continue
+            match outcome:
+                case Deny(reason=reason):
+                    return HookResolution(denied=reason)
+                case ModifyInput(tool_input=new_input):
+                    tool_input = new_input
+                case ModifyOutput(output=new_output):
+                    output = new_output
+                case InjectContext(text=text):
+                    injected.append(text)
+                case None:
+                    continue
+        return HookResolution(tool_input=tool_input, output=output, injected="\n".join(injected))
+
+
+def turn_hooks(
+    manifests: tuple[Manifest, ...],
+    workspace_id: UUID,
+    credential_store: CredentialStore | None,
+    memory: MemoryService | None = None,
+) -> HookChain:
+    """The turn's reactive hook chain — every declared hook bound to its extension's
+    workspace-scoped ExtensionContext (the same handle its tools and jobs receive), grouped by
+    event in the order `load_manifests` returns (lockfile pin order). An extension that declares
+    hooks without a credential key set fails loud, since its context needs the credential store."""
+    grouped: dict[HookEvent, list[BoundHook]] = {
+        "pre_tool_use": [],
+        "post_tool_use": [],
+        "on_inbound": [],
+    }
+    for manifest in manifests:
+        if not manifest.hooks:
+            continue
+        if credential_store is None:
+            raise RuntimeError(
+                f"extension {manifest.name!r} declares hooks but no credential key is set"
+            )
+        declared = frozenset(slot.name for slot in manifest.credentials)
+        context = context_for(workspace_id, manifest.name, declared, credential_store, memory)
+        for spec in manifest.hooks:
+            grouped[spec.event].append(BoundHook(spec=spec, ext=context))
+    return HookChain(
+        pre_tool_use=tuple(grouped["pre_tool_use"]),
+        post_tool_use=tuple(grouped["post_tool_use"]),
+        on_inbound=tuple(grouped["on_inbound"]),
+    )
