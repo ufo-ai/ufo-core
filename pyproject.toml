@@ -1,0 +1,13 @@
+[tool.uv.workspace]
+members = ["core", "extensions/*", "packs/*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "ASYNC", "PTH", "RUF"]
+
+[tool.pytest.ini_options]
+testpaths = ["core/tests"]
+asyncio_mode = "auto"

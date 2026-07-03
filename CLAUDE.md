@@ -79,6 +79,12 @@ hard-to-vary decision; cut the words around it. Prefer a table to prose. One exa
 - New function → new test; bug fix → the test that would have caught it.
 - **Never test fakes**: test pure logic directly, or integrate against the real dependency
   (Postgres, Docker). A fake may stand in for a dependency, never be the thing asserted.
+- **The sample extension is the probe for the extension seam** — it is a real consumer (real entry
+  point, real manifest, real dispatch, real scoped context), so asserting how core calls it tests
+  the system, not a fake. It records received calls through its own capability APIs (its store,
+  memory writes) and tests read those back through public surfaces — no mock call-logs. It proves
+  the seam (that core calls correctly, and that forbidden acts raise), never a subsystem's logic —
+  those keep their real end-to-end proofs.
 - Run the focused tests for the touched path before claiming done; never the full suite locally.
 - `uv run pytest`, `uv run ruff`. uv for everything Python.
 

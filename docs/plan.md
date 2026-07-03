@@ -37,7 +37,11 @@ A real streamed chat turn against Anthropic with durable everything, no sandbox 
   derivation), `credentials.py` (encrypted BYOK slots), onboarding-step registry (engine in U6).
 - CI gates: extensions import `selfhost.sdk` only; no k8s anywhere; no vendor o11y SDKs.
 - `extensions/sample/`: registers one of each — tool, subagent, connector stub, source, trigger,
-  job, route, credential slot, onboarding step, condenser — the acceptance harness for the API.
+  job, route, credential slot, onboarding step, condenser — the conformance harness for the API.
+  It records every call it receives via its own `ExtensionContext` (durable, no mock call-logs);
+  `tests/ext_conformance/` drives each point through public surfaces and reads the records back.
+  Negative cases ride along: undeclared credential slot raises, cross-workspace access is
+  unrepresentable, core-internal import fails CI. Breaking the sample = breaking the public SDK.
 - `ExtensionContext` incl. `trajectories_read` + `propose_change` (approval = owner ack in chat).
 - **Proof**: sample extension's tool/job/route/credential all fire; its credential slot injects via
   proxy rule; a `propose_change` round-trips through approval into agent config; an
@@ -122,4 +126,5 @@ call site fails CI (`sdk/` re-exports exempt); no module named `utils`/`helpers`
 `arbitrary_types_allowed` forbidden (a BaseModel needing it is a misclassified internal object) ·
 **wiring gate (from U1)**: every schema column has ≥1 write site and ≥1 read site outside tests;
 every persisted enum/`Literal` member has a producer; every `LiveFrame` kind has an emitter —
-"both ends or neither".
+"both ends or neither" · **ext conformance (from U3)**: the sample extension exercises every
+Manifest point + the negative cases; a change that breaks it is a public-SDK break.
