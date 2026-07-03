@@ -8,6 +8,7 @@ members = [
     "selfhost-ext-connectors",
     "selfhost-ext-sample",
     "selfhost-ext-self-improvement",
+    "selfhost-ext-slack",
 ]
 
 [[package]]
@@ -1723,6 +1724,21 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "anthropic", specifier = ">=0.40" },
+    { name = "selfhost", editable = "core" },
+]
+
+[[package]]
+name = "selfhost-ext-slack"
+version = "0.1.0"
+source = { editable = "extensions/slack" }
+dependencies = [
+    { name = "httpx" },
+    { name = "selfhost" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.27" },
     { name = "selfhost", editable = "core" },
 ]
 

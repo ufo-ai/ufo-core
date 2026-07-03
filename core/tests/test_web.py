@@ -338,17 +338,60 @@ async def _unused_spawn(profile: str, payload: dict[str, object], background: bo
 
 
 async def test_share_file_mints_a_token_the_download_endpoint_serves(
+    db: None,
     artifact_client: tuple[AsyncClient, FilesystemBlobStore],
 ) -> None:
     client, blob = artifact_client
+    workspace_id, conversation_id, agent_id, turn_id = uuid4(), uuid4(), uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="assistant",
+                prompt="p",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                surface="cli",
+                queue_key=conversation_id.hex,
+                member_id=None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="running",
+                inbound="make a report",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
     context = ToolContext(
         sandbox=_ProducedFile(b"produced report bytes"),
         blob=blob,
         turn=Turn(
-            id=uuid4(),
-            workspace_id=uuid4(),
-            conversation_id=uuid4(),
-            agent_id=uuid4(),
+            id=turn_id,
+            workspace_id=workspace_id,
+            conversation_id=conversation_id,
+            agent_id=agent_id,
             seq=1,
             status="running",
             inbound="make a report",

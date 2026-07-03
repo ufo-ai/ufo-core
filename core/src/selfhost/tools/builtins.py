@@ -11,11 +11,13 @@ delegates a typed subtask to a child turn through `ctx.spawn`. `memory_search` r
 searches synced source pages through `ctx.memory`, and `memory_update` commits — both scoped to the
 conversation's subject (`{member, shared}`)."""
 
+import mimetypes
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import Any
 from uuid import uuid4
 
+import sqlalchemy as sa
 from pydantic import BaseModel, Field
 
 from selfhost.artifact_token import (
@@ -23,8 +25,10 @@ from selfhost.artifact_token import (
     ARTIFACT_TOKEN_TTL_SECONDS,
     mint_artifact_token,
 )
+from selfhost.db import workspace_tx
 from selfhost.grants import installed_connect_flow
 from selfhost.memory.service import SHARED_SUBJECT, member_subject, recall_subjects
+from selfhost.schema import tables
 from selfhost.schema.records import FACT, ItemClass, MemoryWrite
 from selfhost.tools.context import TextContent, ToolContext, ToolResult
 from selfhost.tools.registry import ToolDef
@@ -59,6 +63,7 @@ class EditInput(BaseModel):
 class ShareFileInput(BaseModel):
     path: str
     filename: str | None = None
+    subject: str | None = None
 
 
 class SpawnSubagentInput(BaseModel):
@@ -122,10 +127,11 @@ async def edit_handler(ctx: ToolContext, args: EditInput) -> ToolResult:
 
 
 async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResult:
-    """Store a workspace file as an artifact under `artifacts/<uuid>/<sanitized-name>` and mint a
-    TTL download token. The returned URL is served only where a delivery surface (the web surface)
-    is mounted. The sandbox read is raw bytes, so any file — text or binary — round-trips exactly;
-    a file over the read cap is refused rather than streamed into memory."""
+    """Store a workspace file as an artifact under `artifacts/<uuid>/<sanitized-name>`, record it as
+    a shared_artifact of this turn, and mint a TTL download token. The record is what an async
+    surface (Slack) reads to upload the file into the turn's posted reply; the token URL is served
+    wherever a delivery surface (the web surface) is mounted. `subject` is an optional caption —
+    absent, the file renders under its plain name. Any file type round-trips exactly."""
     if not ctx.artifact_token_secret:
         raise RuntimeError("artifact sharing is not configured (no artifact token secret set)")
     data = await ctx.sandbox.read_file(args.path)
@@ -133,6 +139,21 @@ async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResu
     safe_name = basename if basename not in ("", ".", "..") else ARTIFACT_FALLBACK_NAME
     key = f"{ARTIFACT_KEY_PREFIX}{uuid4()}/{safe_name}"
     await ctx.blob.put(key, data)
+    media_type = mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.shared_artifact).values(
+                turn_id=ctx.turn.id,
+                blob_key=key,
+                workspace_id=ctx.turn.workspace_id,
+                filename=safe_name,
+                subject=args.subject,
+                media_type=media_type,
+                size_bytes=len(data),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
     expires_at = int(datetime.now(UTC).timestamp()) + ARTIFACT_TOKEN_TTL_SECONDS
     token = mint_artifact_token(ctx.artifact_token_secret, key, safe_name, expires_at)
     return ToolResult(content=(TextContent(text=f"{ARTIFACT_DOWNLOAD_PATH}?token={token}"),))
@@ -223,7 +244,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
             "the only way to deliver a produced file outside the sandbox. Any file type works "
             "(reports, code, csv, json, images, PDFs); a file larger than the sandbox read cap is "
             "refused. `filename` sets the download name; any directory components in it are "
-            "stripped."
+            "stripped. `subject` is an optional caption shown when a chat surface posts the file."
         ),
         input_model=ShareFileInput,
         handler=share_file_handler,

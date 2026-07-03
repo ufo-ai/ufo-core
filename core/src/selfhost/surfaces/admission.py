@@ -135,3 +135,25 @@ class Admission:
                     )
                 )
             raise
+
+
+@dataclass(frozen=True)
+class AdmissionInvoker:
+    """A workspace-bound turn invoker: it fixes the workspace an invoke runs in and delegates to the
+    shared `Admission.admit`, so a surface, a job, or an extension `invoke` all admit a turn through
+    the one boundary that evaluates the spend cap. The composition root knows the workspace and
+    binds it here; callers pass only the conversation, agent, and message."""
+
+    workspace_id: UUID
+    admission: Admission
+
+    async def invoke(
+        self,
+        conversation_id: UUID,
+        agent_id: UUID,
+        message: str,
+        idempotency_key: str | None = None,
+    ) -> UUID:
+        return await self.admission.admit(
+            self.workspace_id, conversation_id, agent_id, message, idempotency_key=idempotency_key
+        )

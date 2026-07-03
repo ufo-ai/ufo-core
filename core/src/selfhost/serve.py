@@ -8,7 +8,6 @@ from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
-import httpx
 import sqlalchemy as sa
 import uvicorn
 from cryptography.fernet import Fernet
@@ -24,6 +23,7 @@ from selfhost.db import init_db, workspace_tx
 from selfhost.ext.context import context_for
 from selfhost.ext.loader import load_manifests, validate_ext_tools
 from selfhost.ext.manifest import Manifest
+from selfhost.ext.surface import SurfaceContext, SurfaceSpec, WritebackPoller
 from selfhost.grants import ConnectFlow, GrantStore, OAuthProvider, install_connect_flow
 from selfhost.hub import Hub, InProcessHub
 from selfhost.jobs import JobRunner, SpendResume, bindings_from, core_jobs
@@ -49,15 +49,12 @@ from selfhost.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_c
 from selfhost.sandbox.session import ProxyEndpoint
 from selfhost.schema import tables
 from selfhost.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION
-from selfhost.surfaces.admission import Admission
+from selfhost.surfaces.admission import Admission, AdmissionInvoker
 from selfhost.surfaces.cli import CONNECT_CALLBACK_PATH, router
-from selfhost.surfaces.slack import SlackSurface, WritebackPoller
-from selfhost.surfaces.slack import router as slack_router
 from selfhost.surfaces.web import WebSurface
 from selfhost.surfaces.web import router as web_router
 
 PROXY_STARTUP_TIMEOUT_SECONDS = 30
-SLACK_HTTP_TIMEOUT_SECONDS = 20
 
 
 def run() -> None:
@@ -128,7 +125,7 @@ def run() -> None:
     app.state.writeback_poller = None
     app.include_router(router)
     _mount_ext_routes(app, manifests, workspace_id, credentials, memory)
-    _mount_slack_surface(app, config, workspace_id, credentials, dbos_client)
+    _mount_surfaces(app, manifests, workspace_id, credentials, blob, dbos_client)
     _mount_web_surface(app, config, blob, hub, dbos_client, artifact_secret)
     log("serve.started", host=config.serve.host, port=config.serve.port)
     try:
@@ -219,33 +216,45 @@ def _mount_ext_routes(
             )
 
 
-def _mount_slack_surface(
+def _mount_surfaces(
     app: FastAPI,
-    config: Config,
+    manifests: tuple[Manifest, ...],
     workspace_id: UUID,
     credentials: CredentialStore | None,
+    blob: BlobStore,
     dbos_client: DBOSClient,
 ) -> None:
-    """Mount the Slack ingress when the deploy enables it. The surface reads its signing secret and
-    bot token from the credential store, so an enabled Slack surface without a credential key set
-    fails loud at boot rather than on the first event."""
-    slack = config.surfaces.slack
-    if slack is None or not slack.enable:
-        return
-    if credentials is None:
-        raise RuntimeError("Slack surface is enabled but no credential key is set")
-    http = httpx.AsyncClient(timeout=SLACK_HTTP_TIMEOUT_SECONDS)
-    app.state.slack = SlackSurface(
-        admission=Admission(dbos=dbos_client),
-        credentials=credentials,
-        http=http,
-        config=slack,
-        workspace_id=workspace_id,
-    )
-    app.state.writeback_poller = WritebackPoller(
-        credentials=credentials, http=http, workspace_id=workspace_id, worker_id=uuid4().hex
-    )
-    app.include_router(slack_router)
+    """Mount every installed surface's ingest at `/surface/<name>`, each request bound to that
+    surface's privileged SurfaceContext, and run one writeback poller over them all. A surface reads
+    its own credential slots (a bot token, a signing secret) in-process, so an installed surface
+    without a credential key set fails loud at boot rather than on the first event."""
+    invoker = AdmissionInvoker(workspace_id=workspace_id, admission=Admission(dbos=dbos_client))
+    registered: dict[str, tuple[SurfaceSpec, SurfaceContext]] = {}
+    for manifest in manifests:
+        for spec in manifest.surfaces:
+            if credentials is None:
+                raise RuntimeError(
+                    f"surface {spec.name!r} needs a credential key but none is set"
+                )
+            context = SurfaceContext(
+                workspace_id=workspace_id,
+                surface=spec.name,
+                blob=blob,
+                _invoker=invoker,
+                _credentials=credentials,
+            )
+            registered[spec.name] = (spec, context)
+
+            async def endpoint(
+                request: Request, handler=spec.ingest, surface_context=context
+            ) -> Response:
+                return await handler(surface_context, request)
+
+            app.add_route(f"/surface/{spec.name}", endpoint, methods=["POST"])
+    if registered:
+        app.state.writeback_poller = WritebackPoller(
+            workspace_id=workspace_id, worker_id=uuid4().hex, surfaces=registered
+        )
 
 
 def _mount_web_surface(
@@ -279,8 +288,8 @@ def _mount_web_surface(
 async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Run this instance's background loops for the life of the process: the heartbeat that keeps
     its runtime_instance row live — and retires it on graceful shutdown so peers see the seat free
-    at once — and, when Slack is enabled, the writeback poller, the durable half of Slack delivery
-    off the hub and off the turn loop."""
+    at once — and, when a surface is installed, the writeback poller, the durable half of surface
+    delivery off the hub and off the turn loop."""
     heartbeat = Heartbeat(instance_id=app.state.instance_id, workspace_id=app.state.workspace_id)
     tasks = [asyncio.create_task(heartbeat.run())]
     poller = app.state.writeback_poller

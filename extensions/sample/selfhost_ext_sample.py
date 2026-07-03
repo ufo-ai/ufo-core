@@ -8,6 +8,7 @@ those rows back through the same public surfaces core writes them by. `UNDECLARE
 the Manifest never declares — the probe that a handler asking for an undeclared slot is refused."""
 
 import shlex
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -15,7 +16,7 @@ from pydantic import BaseModel
 
 from selfhost.sdk.connectors import OAuthAccount
 from selfhost.sdk.context import AgentChange, ExtensionContext
-from selfhost.sdk.http import PlainTextResponse, Request, Response
+from selfhost.sdk.http import JSONResponse, PlainTextResponse, Request, Response
 from selfhost.sdk.jobs import JobSpec
 from selfhost.sdk.manifest import (
     ConnectorProvider,
@@ -25,6 +26,7 @@ from selfhost.sdk.manifest import (
     OnboardingStep,
     RouteSpec,
 )
+from selfhost.sdk.surfaces import SurfaceContext, SurfaceSpec, Writeback
 from selfhost.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 
 NAME = "sample"
@@ -53,6 +55,10 @@ ROUTE_KEY = "route:hit"
 ONBOARDING_KEY = "onboarding:done"
 CONNECTOR_KEY = "connector:called"
 PROPOSAL_SUFFIX = "\nBe concise."
+SURFACE_NAME = "sample_surface"
+SURFACE_INBOX_REL = "sample-inbox/note.txt"
+SURFACE_DELIVERED_PREFIX = "sample-delivered"
+SURFACE_POST_REF = "sample-posted-ref"
 
 
 class EchoInput(BaseModel):
@@ -136,6 +142,49 @@ async def _connector_call(ctx: ToolContext, args: ConnectorCallInput) -> ToolRes
     )
 
 
+class SurfaceIngestInput(BaseModel):
+    external_id: str
+    email: str | None = None
+    message: str
+    inbound_text: str | None = None
+
+
+async def _one_chunk(data: bytes) -> AsyncIterator[bytes]:
+    yield data
+
+
+async def _surface_ingest(ctx: SurfaceContext, request: Request) -> Response:
+    """Exercise the whole surface seam: resolve (and link) a member identity, get-or-create the
+    conversation, optionally stream an inbound file into the workspace, then admit a turn — all
+    read back by the conformance test through the durable rows core writes here."""
+    args = SurfaceIngestInput.model_validate_json(await request.body())
+    member_id = await ctx.linked_member(args.external_id)
+    if member_id is None and args.email is not None:
+        member_id = await ctx.link_member(args.external_id, args.email)
+    conversation_id = await ctx.conversation_for(args.external_id, member_id)
+    if args.inbound_text is not None:
+        await ctx.write_workspace_file(
+            conversation_id, SURFACE_INBOX_REL, _one_chunk(args.inbound_text.encode())
+        )
+    agent_id = await ctx.default_agent()
+    turn_id = await ctx.admit(
+        conversation_id, agent_id, args.message, idempotency_key=args.external_id
+    )
+    return JSONResponse({"turn_id": str(turn_id), "conversation_id": str(conversation_id)})
+
+
+async def _surface_post(ctx: SurfaceContext, writeback: Writeback) -> str:
+    return SURFACE_POST_REF
+
+
+async def _surface_attach(ctx: SurfaceContext, writeback: Writeback, reply_ref: str) -> None:
+    """Stream each shared file out of the blob store and back into a delivered key, so the test
+    reads the round-tripped bytes through the blob store — the streaming get is exercised here."""
+    for artifact in writeback.artifacts:
+        delivered_key = f"{SURFACE_DELIVERED_PREFIX}/{writeback.turn_id}/{artifact.filename}"
+        await ctx.blob.put_stream(delivered_key, ctx.blob.get_stream(artifact.blob_key))
+
+
 def manifest() -> Manifest:
     return Manifest(
         name=NAME,
@@ -174,6 +223,14 @@ def manifest() -> Manifest:
                         handler=_connector_call,
                     ),
                 ),
+            ),
+        ),
+        surfaces=(
+            SurfaceSpec(
+                name=SURFACE_NAME,
+                ingest=_surface_ingest,
+                post=_surface_post,
+                attach=_surface_attach,
             ),
         ),
     )

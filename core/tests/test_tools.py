@@ -4,10 +4,13 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+import sqlalchemy as sa
 
 from selfhost.artifact_token import verify_artifact_token
 from selfhost.blob import FilesystemBlobStore
+from selfhost.db import workspace_tx
 from selfhost.sandbox.session import ExecResult
+from selfhost.schema import tables
 from selfhost.schema.records import Agent, Turn
 from selfhost.tools.builtins import BUILTIN_TOOLS
 from selfhost.tools.context import SpawnResult, ToolContext
@@ -89,6 +92,52 @@ def make_context(
 async def run(name: str, ctx: ToolContext, **args: object):
     tool = REGISTRY.get(name)
     return await tool.handler(ctx, tool.input_model.model_validate(args))
+
+
+async def _persist_turn(ctx: ToolContext) -> None:
+    """Land the workspace/agent/conversation/turn rows the ctx's turn references, so `share_file`'s
+    shared_artifact write satisfies its foreign key."""
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=ctx.turn.workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=ctx.turn.agent_id,
+                workspace_id=ctx.turn.workspace_id,
+                name="assistant",
+                prompt="p",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=ctx.turn.conversation_id,
+                workspace_id=ctx.turn.workspace_id,
+                surface="cli",
+                queue_key=ctx.turn.conversation_id.hex,
+                member_id=None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=ctx.turn.id,
+                workspace_id=ctx.turn.workspace_id,
+                conversation_id=ctx.turn.conversation_id,
+                agent_id=ctx.turn.agent_id,
+                seq=1,
+                status="running",
+                inbound="hello",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
 
 
 def test_registry_rejects_duplicate_names() -> None:
@@ -192,10 +241,13 @@ async def test_edit_rejects_missing_string(tmp_path: Path) -> None:
         await run("edit", ctx, path="code.py", old_string="zzz", new_string="q")
 
 
-async def test_share_file_stores_bytes_and_returns_a_verifiable_url(tmp_path: Path) -> None:
+async def test_share_file_stores_bytes_and_returns_a_verifiable_url(
+    db: None, tmp_path: Path
+) -> None:
     sandbox = FakeSandbox(files={"report.txt": b"the produced report"})
     ctx = make_context(sandbox, tmp_path)
-    result = await run("share_file", ctx, path="report.txt")
+    await _persist_turn(ctx)
+    result = await run("share_file", ctx, path="report.txt", subject="Q3 report")
     url = result.content[0].text
     assert url.startswith("/web/artifacts/download?token=")
     token = url.split("token=", 1)[1]
@@ -203,13 +255,29 @@ async def test_share_file_stores_bytes_and_returns_a_verifiable_url(tmp_path: Pa
     parts = claims.blob_key.split("/")
     assert parts[0] == "artifacts" and len(parts) == 3 and parts[-1] == "report.txt"
     assert await ctx.blob.get(claims.blob_key) == b"the produced report"
+    async with workspace_tx() as connection:
+        artifact = (
+            await connection.execute(
+                sa.select(
+                    tables.shared_artifact.c.blob_key,
+                    tables.shared_artifact.c.filename,
+                    tables.shared_artifact.c.subject,
+                    tables.shared_artifact.c.size_bytes,
+                ).where(tables.shared_artifact.c.turn_id == ctx.turn.id)
+            )
+        ).one()
+    assert artifact.blob_key == claims.blob_key
+    assert artifact.filename == "report.txt"
+    assert artifact.subject == "Q3 report"
+    assert artifact.size_bytes == len(b"the produced report")
 
 
 async def test_share_file_confines_a_traversal_filename_to_the_artifact_namespace(
-    tmp_path: Path,
+    db: None, tmp_path: Path
 ) -> None:
     sandbox = FakeSandbox(files={"report.txt": b"data"})
     ctx = make_context(sandbox, tmp_path)
+    await _persist_turn(ctx)
     for hostile, expected in (("../../conversations/x", "x"), ("/etc/passwd", "passwd")):
         result = await run("share_file", ctx, path="report.txt", filename=hostile)
         token = result.content[0].text.split("token=", 1)[1]

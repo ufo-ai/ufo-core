@@ -13,6 +13,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from selfhost.ext.context import ExtensionContext
+from selfhost.ext.surface import SurfaceSpec
 from selfhost.grants import OAuthProvider
 from selfhost.tools.registry import ToolDef
 
@@ -95,3 +96,4 @@ class Manifest:
     credentials: tuple[CredentialSlot, ...] = ()
     connectors: tuple[ConnectorProvider, ...] = ()
     onboarding_steps: tuple[OnboardingStep, ...] = ()
+    surfaces: tuple[SurfaceSpec, ...] = ()

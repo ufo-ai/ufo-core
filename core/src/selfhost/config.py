@@ -99,13 +99,6 @@ class SourceEntry(BaseModel):
     config: SourceConfig
 
 
-class SlackSurfaceConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    enable: bool = False
-    team_id: str
-    bot_user_id: str
-
-
 class WebSurfaceConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enable: bool = False
@@ -113,7 +106,6 @@ class WebSurfaceConfig(BaseModel):
 
 class SurfacesConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    slack: SlackSurfaceConfig | None = None
     web: WebSurfaceConfig | None = None
 
 

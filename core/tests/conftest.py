@@ -25,6 +25,7 @@ DELETE_ORDER = (
     tables.spend_cap,
     tables.ledger,
     tables.writeback,
+    tables.shared_artifact,
     tables.turn,
     tables.conversation,
     tables.surface_identity,
