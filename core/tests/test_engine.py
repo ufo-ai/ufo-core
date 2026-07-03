@@ -1,3 +1,4 @@
+import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
 from itertools import pairwise
@@ -6,9 +7,11 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
+from cryptography.fernet import Fernet
 
 from selfhost.blob import FilesystemBlobStore
 from selfhost.db import workspace_tx
+from selfhost.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
 from selfhost.hub import InProcessHub
 from selfhost.loop.compaction import COMPACTED_CONTEXT_PREFIX, Compaction
 from selfhost.loop.engine import RECALL_CONTEXT_PREFIX, TurnEngine, TurnParked
@@ -142,6 +145,44 @@ class ToolCallingModel:
             return
         yield ToolCallStart(id="c1", name="bash")
         yield ToolCallDelta(id="c1", partial_json='{"command": "echo hi"}')
+        yield Usage(input_tokens=2, output_tokens=2)
+
+
+STUB_AUTHORIZE_URL = "https://stub.test/oauth"
+
+
+@dataclass(frozen=True)
+class ConnectStubProvider:
+    """Stands in for a connector's OAuth descriptor so the connect tool can authorize without a
+    real provider; `authorize_url` echoes the sealed state, the only leg this engine test drives."""
+
+    provider: str = "stub"
+    host: str = "api.granted.test"
+
+    def authorize_url(self, state: str, redirect_uri: str) -> str:
+        return f"{STUB_AUTHORIZE_URL}?state={state}"
+
+    async def exchange(self, code: str, redirect_uri: str) -> OAuthAccount:
+        return OAuthAccount(account_id="acct-42", token="tok")
+
+
+@dataclass(frozen=True)
+class ConnectCallingModel:
+    """Emits one connect_account tool call, then answers once the tool result comes back — so the
+    engine dispatches the real connect tool in a turn and the authorize URL rides its result."""
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        answered = any(
+            isinstance(message.content, tuple)
+            and any(isinstance(block, ToolResultBlock) for block in message.content)
+            for message in request.messages
+        )
+        if answered:
+            yield TextDelta(text="open the link to connect")
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        yield ToolCallStart(id="c1", name="connect_account")
+        yield ToolCallDelta(id="c1", partial_json=json.dumps({"provider": "stub"}))
         yield Usage(input_tokens=2, output_tokens=2)
 
 
@@ -338,6 +379,33 @@ async def test_tool_call_round_dispatches_in_sandbox_then_answers(
     assert isinstance(tool_result, tuple) and isinstance(tool_result[0], ToolResultBlock)
     assert "hi" in tool_result[0].content
     assert stored.messages[-1] == Message(role="assistant", content="done")
+
+
+async def test_connect_account_tool_call_in_a_turn_yields_the_authorize_url(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    fernet = Fernet(Fernet.generate_key())
+    install_connect_flow(
+        ConnectFlow(
+            providers={"stub": ConnectStubProvider()},
+            fernet=fernet,
+            store=GrantStore(fernet=fernet),
+            redirect_uri="http://surface/v1/connect/callback",
+        )
+    )
+    try:
+        engine = replace(_engine(turn, ConnectCallingModel(), tmp_path), member_id=uuid4())
+        frame = await engine.run()
+    finally:
+        install_connect_flow(None)
+    assert frame.status == "done"
+    stored = await engine.transcript.read()
+    assert stored is not None
+    tool_result = stored.messages[2].content
+    assert isinstance(tool_result, tuple) and isinstance(tool_result[0], ToolResultBlock)
+    assert tool_result[0].is_error is False
+    assert STUB_AUTHORIZE_URL in tool_result[0].content
 
 
 async def test_engine_compacts_history_before_the_round_and_bills_the_summary(

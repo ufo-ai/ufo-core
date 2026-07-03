@@ -23,7 +23,7 @@ from selfhost.db import init_db, workspace_tx
 from selfhost.ext.context import context_for
 from selfhost.ext.loader import load_manifests, validate_ext_tools
 from selfhost.ext.manifest import Manifest
-from selfhost.grants import ConnectFlow, GrantStore
+from selfhost.grants import ConnectFlow, GrantStore, install_connect_flow
 from selfhost.hub import Hub, InProcessHub
 from selfhost.jobs import JobRunner, SpendResume, bindings_from, core_jobs
 from selfhost.loop.queue import Runtime, init_runtime
@@ -48,7 +48,7 @@ from selfhost.sandbox.session import ProxyEndpoint
 from selfhost.schema import tables
 from selfhost.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION
 from selfhost.surfaces.admission import Admission
-from selfhost.surfaces.cli import router
+from selfhost.surfaces.cli import CONNECT_CALLBACK_PATH, router
 from selfhost.surfaces.slack import SlackSurface, WritebackPoller
 from selfhost.surfaces.slack import router as slack_router
 from selfhost.surfaces.web import WebSurface
@@ -101,6 +101,7 @@ def run() -> None:
             artifact_token_secret=artifact_secret,
         )
     )
+    install_connect_flow(_connect_flow(credentials, config))
     DBOS(
         config={
             "name": DBOS_APP_NAME,
@@ -115,7 +116,6 @@ def run() -> None:
     app.state.hub = hub
     app.state.dbos = dbos_client
     app.state.writeback_poller = None
-    app.state.connect_flow = _connect_flow(credentials)
     app.include_router(router)
     _mount_ext_routes(app, manifests, workspace_id, credentials, memory)
     _mount_slack_surface(app, config, workspace_id, credentials, dbos_client)
@@ -290,15 +290,19 @@ def _egress_proxy(resolver: PerAgentRules) -> ProxyEndpoint:
     return asyncio.run_coroutine_threadsafe(_boot(), loop).result(PROXY_STARTUP_TIMEOUT_SECONDS)
 
 
-def _connect_flow(credentials: CredentialStore | None) -> ConnectFlow | None:
-    """The `/connect` flow the CLI surface serves, sharing the credential key that seals its state
-    and encrypts its tokens. No key means grants cannot be recorded, so the routes report 503. The
-    provider map is empty until a connectors extension installs one — direct-provider-host, so core
-    holds only the grant and its flow."""
+def _connect_flow(credentials: CredentialStore | None, config: Config) -> ConnectFlow | None:
+    """The process's connect flow — the `connect_account` tool authorizes through it and the OAuth
+    callback completes through it — sharing the credential key that seals its state and encrypts its
+    tokens. No key means grants cannot be recorded, so both fail loud. The provider map is empty
+    until a connectors extension installs one; the `redirect_uri` is this deploy's callback URL, the
+    one value both legs of the handoff present."""
     if credentials is None:
         return None
     store = GrantStore(fernet=credentials.fernet)
-    return ConnectFlow(providers={}, fernet=credentials.fernet, store=store)
+    redirect_uri = f"http://{config.serve.host}:{config.serve.port}{CONNECT_CALLBACK_PATH}"
+    return ConnectFlow(
+        providers={}, fernet=credentials.fernet, store=store, redirect_uri=redirect_uri
+    )
 
 
 async def _resolver(config: Config, credentials: CredentialStore | None) -> PerAgentRules:

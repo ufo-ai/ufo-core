@@ -23,6 +23,7 @@ from selfhost.artifact_token import (
     ARTIFACT_TOKEN_TTL_SECONDS,
     mint_artifact_token,
 )
+from selfhost.grants import installed_connect_flow
 from selfhost.memory.service import SHARED_SUBJECT, member_subject, recall_subjects
 from selfhost.schema.records import FACT, ItemClass, MemoryWrite
 from selfhost.tools.context import TextContent, ToolContext, ToolResult
@@ -76,6 +77,10 @@ class MemoryUpdateInput(BaseModel):
     item_class: ItemClass = FACT
     shared: bool = False
     source_ref: str | None = None
+
+
+class ConnectAccountInput(BaseModel):
+    provider: str
 
 
 async def bash_handler(ctx: ToolContext, args: BashInput) -> ToolResult:
@@ -166,6 +171,24 @@ async def memory_update_handler(ctx: ToolContext, args: MemoryUpdateInput) -> To
     return ToolResult(content=(TextContent(text=f"Remembered ({subject})."),))
 
 
+async def connect_account_handler(ctx: ToolContext, args: ConnectAccountInput) -> ToolResult:
+    """Begin the OAuth handoff for the speaking member: the grantor is this turn's member and the
+    grant binds to this turn's agent and conversation, all read from the context — the speaker gates
+    the granting act, never the caller identity of a route. Returns the provider's authorize URL so
+    the agent hands the member a link in its reply. A missing speaker, an uninstalled provider, or
+    no credential key raises, surfacing to the model as a recoverable tool error."""
+    if ctx.member_id is None:
+        raise ValueError("connect requires a speaking member to gate the grant")
+    url = installed_connect_flow().authorize(
+        workspace_id=ctx.turn.workspace_id,
+        agent_id=ctx.turn.agent_id,
+        provider=args.provider,
+        grantor_member_id=ctx.member_id,
+        conversation_id=ctx.turn.conversation_id,
+    )
+    return ToolResult(content=(TextContent(text=url),))
+
+
 BUILTIN_TOOLS: tuple[ToolDef, ...] = (
     ToolDef(
         name="bash",
@@ -232,5 +255,17 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=MemoryUpdateInput,
         handler=memory_update_handler,
+    ),
+    ToolDef(
+        name="connect_account",
+        description=(
+            "Connect an external account to this agent through OAuth when the member asks in chat "
+            "to connect a provider (for example their Gmail or GitHub). Returns an authorization "
+            "URL — reply with the link so the member can open it and grant access; the account is "
+            "linked once they finish. The connection is bound to the member who asked and this "
+            "conversation."
+        ),
+        input_model=ConnectAccountInput,
+        handler=connect_account_handler,
     ),
 )

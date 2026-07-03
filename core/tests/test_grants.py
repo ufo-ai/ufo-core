@@ -1,7 +1,6 @@
 import asyncio
 import base64
-import hashlib
-import secrets
+from collections.abc import Iterator
 from dataclasses import dataclass
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID, uuid4
@@ -16,22 +15,34 @@ from selfhost.db import workspace_tx
 from selfhost.grants import (
     ConnectFlow,
     ConnectStateInvalid,
+    ConnectUnavailable,
     Grant,
     GrantStore,
     OAuthAccount,
     UnknownProvider,
     grant_summaries,
+    install_connect_flow,
 )
 from selfhost.sandbox.proxy.rules import InjectionRule, ScopeRule, derive_grant_rules
 from selfhost.sandbox.proxy.server import EgressProxy, PerAgentRules, _inject, generate_ca
 from selfhost.sandbox.session import RunToken
 from selfhost.schema import tables
+from selfhost.schema.records import Agent, Turn
 from selfhost.surfaces.cli import router
+from selfhost.tools.builtins import ConnectAccountInput, connect_account_handler
+from selfhost.tools.context import ToolContext
 
 GRANTED_HOST = "api.granted.test"
 UNGRANTED_HOST = "api.ungranted.test"
 HOST_A = "api.aaa.test"
 HOST_B = "api.bbb.test"
+REDIRECT_URI = "http://surface/v1/connect/callback"
+
+
+@pytest.fixture(autouse=True)
+def _reset_connect_flow() -> Iterator[None]:
+    yield
+    install_connect_flow(None)
 
 
 @dataclass(frozen=True)
@@ -67,7 +78,7 @@ async def _workspace() -> UUID:
     return workspace_id
 
 
-async def _member_agent(workspace_id: UUID, token: str | None = None) -> tuple[UUID, UUID]:
+async def _member_agent(workspace_id: UUID) -> tuple[UUID, UUID]:
     member_id, agent_id = uuid4(), uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -90,17 +101,6 @@ async def _member_agent(workspace_id: UUID, token: str | None = None) -> tuple[U
                 updated_at=sa.func.now(),
             )
         )
-        if token is not None:
-            await connection.execute(
-                sa.insert(tables.surface_identity).values(
-                    workspace_id=workspace_id,
-                    member_id=member_id,
-                    surface="cli",
-                    external_id=hashlib.sha256(token.encode()).hexdigest(),
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
     return member_id, agent_id
 
 
@@ -183,7 +183,10 @@ async def test_connect_flow_records_a_durable_grant_with_account_id(db: None) ->
     conversation_id = await _conversation(workspace_id, member_id)
     fernet = Fernet(Fernet.generate_key())
     flow = ConnectFlow(
-        providers={"stub": StubProvider()}, fernet=fernet, store=GrantStore(fernet=fernet)
+        providers={"stub": StubProvider()},
+        fernet=fernet,
+        store=GrantStore(fernet=fernet),
+        redirect_uri=REDIRECT_URI,
     )
     url = flow.authorize(
         workspace_id=workspace_id,
@@ -191,12 +194,9 @@ async def test_connect_flow_records_a_durable_grant_with_account_id(db: None) ->
         provider="stub",
         grantor_member_id=member_id,
         conversation_id=conversation_id,
-        redirect_uri="http://surface/v1/connect/callback",
     )
     state = parse_qs(urlparse(url).query)["state"][0]
-    recorded = await flow.complete(
-        state=state, code="the-code", redirect_uri="http://surface/v1/connect/callback"
-    )
+    recorded = await flow.complete(state=state, code="the-code")
     assert (recorded.provider, recorded.account_id, recorded.agent_id) == (
         "stub",
         "acct-42",
@@ -222,15 +222,20 @@ async def test_connect_flow_records_a_durable_grant_with_account_id(db: None) ->
 async def test_tampered_connect_state_is_refused() -> None:
     fernet = Fernet(Fernet.generate_key())
     flow = ConnectFlow(
-        providers={"stub": StubProvider()}, fernet=fernet, store=GrantStore(fernet=fernet)
+        providers={"stub": StubProvider()},
+        fernet=fernet,
+        store=GrantStore(fernet=fernet),
+        redirect_uri=REDIRECT_URI,
     )
     with pytest.raises(ConnectStateInvalid):
-        await flow.complete(state="not-a-sealed-token", code="x", redirect_uri="y")
+        await flow.complete(state="not-a-sealed-token", code="x")
 
 
 def test_unknown_provider_is_rejected() -> None:
     fernet = Fernet(Fernet.generate_key())
-    flow = ConnectFlow(providers={}, fernet=fernet, store=GrantStore(fernet=fernet))
+    flow = ConnectFlow(
+        providers={}, fernet=fernet, store=GrantStore(fernet=fernet), redirect_uri=REDIRECT_URI
+    )
     with pytest.raises(UnknownProvider):
         flow.authorize(
             workspace_id=uuid4(),
@@ -238,7 +243,6 @@ def test_unknown_provider_is_rejected() -> None:
             provider="nope",
             grantor_member_id=uuid4(),
             conversation_id=uuid4(),
-            redirect_uri="http://surface/v1/connect/callback",
         )
 
 
@@ -394,36 +398,108 @@ async def test_a_grant_recorded_after_start_is_live_for_the_next_turn(db: None) 
         await proxy.stop()
 
 
-async def test_connect_routes_land_a_grant(db: None) -> None:
-    workspace_id = await _workspace()
-    token = secrets.token_hex(16)
-    _member_id, agent_id = await _member_agent(workspace_id, token=token)
-    fernet = Fernet(Fernet.generate_key())
-    app = FastAPI()
-    app.state.connect_flow = ConnectFlow(
-        providers={"stub": StubProvider()}, fernet=fernet, store=GrantStore(fernet=fernet)
+def _turn_context(
+    workspace_id: UUID, agent_id: UUID, conversation_id: UUID, member_id: UUID | None
+) -> ToolContext:
+    """A tool context whose only live fields the connect tool reads are the turn (workspace, agent,
+    conversation) and the speaking member; the sandbox and other capabilities the tool never touches
+    stay unset."""
+    turn = Turn(
+        id=uuid4(),
+        workspace_id=workspace_id,
+        conversation_id=conversation_id,
+        agent_id=agent_id,
+        seq=1,
+        status="running",
+        inbound="connect my gmail",
     )
+    return ToolContext(
+        sandbox=None,
+        blob=None,
+        turn=turn,
+        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        spawn=None,
+        memory=None,
+        member_id=member_id,
+        artifact_token_secret="",
+    )
+
+
+async def test_connect_account_tool_yields_authorize_url_and_callback_binds_the_speaker(
+    db: None,
+) -> None:
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    fernet = Fernet(Fernet.generate_key())
+    install_connect_flow(
+        ConnectFlow(
+            providers={"stub": StubProvider()},
+            fernet=fernet,
+            store=GrantStore(fernet=fernet),
+            redirect_uri=REDIRECT_URI,
+        )
+    )
+    ctx = _turn_context(workspace_id, agent_id, conversation_id, member_id)
+    result = await connect_account_handler(ctx, ConnectAccountInput(provider="stub"))
+    url = result.content[0].text
+    assert result.is_error is False
+    assert url.startswith("https://stub.test/oauth")
+    state = parse_qs(urlparse(url).query)["state"][0]
+    app = FastAPI()
     app.include_router(router)
-    headers = {"authorization": f"Bearer {token}", "x-selfhost-session": uuid4().hex}
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://surface"
     ) as client:
-        begun = await client.post("/v1/connect", params={"provider": "stub"}, headers=headers)
-        assert begun.status_code == 200
-        state = parse_qs(urlparse(begun.json()["authorize_url"]).query)["state"][0]
-        done = await client.get(
-            "/v1/connect/callback", params={"state": state, "code": "the-code"}
-        )
-    assert done.status_code == 200
-    async with workspace_tx() as connection:
-        row = (
-            await connection.execute(
-                sa.select(tables.grant.c.account_id, tables.grant.c.agent_id).where(
-                    tables.grant.c.workspace_id == workspace_id
-                )
+        for _ in range(2):
+            done = await client.get(
+                "/v1/connect/callback", params={"state": state, "code": "the-code"}
             )
-        ).one()
-    assert (row.account_id, row.agent_id) == ("acct-42", agent_id)
+            assert done.status_code == 200
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(
+                    tables.grant.c.account_id,
+                    tables.grant.c.agent_id,
+                    tables.grant.c.grantor_member_id,
+                    tables.grant.c.conversation_id,
+                ).where(tables.grant.c.workspace_id == workspace_id)
+            )
+        ).all()
+    assert len(rows) == 1
+    assert (rows[0].account_id, rows[0].agent_id) == ("acct-42", agent_id)
+    assert (rows[0].grantor_member_id, rows[0].conversation_id) == (member_id, conversation_id)
+
+
+async def test_connect_account_without_a_speaker_is_refused() -> None:
+    ctx = _turn_context(uuid4(), uuid4(), uuid4(), None)
+    with pytest.raises(ValueError, match="speaking member"):
+        await connect_account_handler(ctx, ConnectAccountInput(provider="stub"))
+
+
+async def test_connect_account_without_an_installed_flow_raises() -> None:
+    install_connect_flow(None)
+    ctx = _turn_context(uuid4(), uuid4(), uuid4(), uuid4())
+    with pytest.raises(ConnectUnavailable):
+        await connect_account_handler(ctx, ConnectAccountInput(provider="stub"))
+
+
+async def test_the_begin_route_is_gone_and_the_callback_reports_unavailable_without_a_flow() -> (
+    None
+):
+    install_connect_flow(None)
+    app = FastAPI()
+    app.include_router(router)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://surface"
+    ) as client:
+        begun = await client.post("/v1/connect", params={"provider": "stub"})
+        callback = await client.get(
+            "/v1/connect/callback", params={"state": "s", "code": "c"}
+        )
+    assert begun.status_code == 404
+    assert callback.status_code == 503
 
 
 async def _agent(workspace_id: UUID, name: str) -> UUID:

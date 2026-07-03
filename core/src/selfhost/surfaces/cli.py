@@ -1,4 +1,4 @@
-"""The CLI surface: bearer-token identity, turn admission, live stream, cancel, OAuth connect."""
+"""The CLI surface: bearer-token identity, turn admission, live stream, cancel, OAuth callback."""
 
 import hashlib
 from collections.abc import AsyncIterator
@@ -12,7 +12,12 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from selfhost.db import workspace_tx
 from selfhost.governance import Governance
-from selfhost.grants import ConnectFlow, ConnectStateInvalid, UnknownProvider
+from selfhost.grants import (
+    ConnectStateInvalid,
+    ConnectUnavailable,
+    UnknownProvider,
+    installed_connect_flow,
+)
 from selfhost.hub import Hub, Terminal
 from selfhost.o11y import log
 from selfhost.schema import tables
@@ -22,6 +27,7 @@ from selfhost.surfaces.hub_tail import tail_frames, terminal_frame
 
 MAX_INBOUND_CHARS = 200_000
 CORE_PROPOSER = "core"
+CONNECT_CALLBACK_PATH = "/v1/connect/callback"
 
 router = APIRouter(prefix="/v1")
 
@@ -148,69 +154,20 @@ async def approve_proposal(
     return {"status": row.status, "approved_by": str(row.approved_by or "")}
 
 
-@router.post("/connect")
-async def connect(
-    request: Request,
-    provider: str,
-    authorization: str = Header(default=""),
-    x_selfhost_session: str = Header(default=""),
-    x_selfhost_agent: str = Header(default=DEFAULT_AGENT_NAME),
-) -> dict[str, str]:
-    """Begin an OAuth grant: the authenticated member is the grantor, binding a provider account to
-    the named agent within this session's conversation. Returns the authorize link the member opens;
-    the provider redirects to the callback, which lands the grant.
-
-    Deploy note: the callback `redirect_uri` is derived from the request URL, so behind a reverse
-    proxy that rewrites host/scheme the provider must be registered against the externally visible
-    callback URL (set the proxy to forward the original host/scheme)."""
-    identity = await _authenticate(authorization)
-    flow: ConnectFlow | None = request.app.state.connect_flow
-    if flow is None:
-        raise HTTPException(503, "grants unavailable: no credential key configured")
-    if not x_selfhost_session:
-        raise HTTPException(400, "missing x-selfhost-session header")
-    conversation = await _conversation_for(identity, x_selfhost_session)
-    if conversation.member_id != identity.member_id:
-        raise HTTPException(403, "conversation belongs to another member")
-    async with workspace_tx() as connection:
-        agent = (
-            await connection.execute(
-                sa.select(tables.agent.c.id).where(
-                    tables.agent.c.workspace_id == identity.workspace_id,
-                    tables.agent.c.name == x_selfhost_agent,
-                )
-            )
-        ).one_or_none()
-    if agent is None:
-        raise HTTPException(404, f"no agent named {x_selfhost_agent!r}")
-    try:
-        url = flow.authorize(
-            workspace_id=identity.workspace_id,
-            agent_id=agent.id,
-            provider=provider,
-            grantor_member_id=identity.member_id,
-            conversation_id=conversation.id,
-            redirect_uri=str(request.url_for("connect_callback")),
-        )
-    except UnknownProvider:
-        raise HTTPException(404, f"no connector provider {provider!r}") from None
-    return {"authorize_url": url}
-
-
-@router.get("/connect/callback", name="connect_callback")
-async def connect_callback(request: Request, state: str = "", code: str = "") -> PlainTextResponse:
+@router.get("/connect/callback")
+async def connect_callback(state: str = "", code: str = "") -> PlainTextResponse:
     """Complete the OAuth handoff the provider redirects to: verify the sealed state, exchange the
-    code for the account and token, and land the grant. State-verified, not bearer-authenticated —
-    the browser carries no token, only the state `begin` sealed."""
-    flow: ConnectFlow | None = request.app.state.connect_flow
-    if flow is None:
-        raise HTTPException(503, "grants unavailable: no credential key configured")
+    code for the account and token, and land the grant. The grant a turn's `connect_account` began
+    lands here. State-verified, not bearer-authenticated — the browser carries no token, only the
+    state the connect tool sealed with the speaking member, agent, and conversation."""
+    try:
+        flow = installed_connect_flow()
+    except ConnectUnavailable as error:
+        raise HTTPException(503, str(error)) from error
     if not state or not code:
         raise HTTPException(400, "missing state or code")
     try:
-        recorded = await flow.complete(
-            state=state, code=code, redirect_uri=str(request.url_for("connect_callback"))
-        )
+        recorded = await flow.complete(state=state, code=code)
     except ConnectStateInvalid as error:
         raise HTTPException(400, str(error)) from error
     except UnknownProvider:
