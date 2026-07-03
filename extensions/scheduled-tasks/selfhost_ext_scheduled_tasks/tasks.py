@@ -1,0 +1,96 @@
+"""The chat-native scheduling tools: an agent schedules, cancels, and lists its recurring tasks.
+
+Each runs inside a turn, so it reads the conversation and agent to re-enter from the turn's context
+and writes through the workspace-scoped `ScheduleStore` its ExtensionContext carries — a scheduled
+fire later re-enters this same conversation as this same agent. `schedule_task` derives a stable
+name from the task so a later `cancel_scheduled_task` addresses it, and re-scheduling an existing
+name updates it in place."""
+
+import re
+from datetime import UTC, datetime
+
+from pydantic import BaseModel
+
+from selfhost.sdk.context import ExtensionContext
+from selfhost.sdk.tools import TextContent, ToolContext, ToolResult
+from selfhost_ext_scheduled_tasks.cron import next_fire, validate_cron
+
+NAME_PREFIX = "scheduled"
+MAX_NAME = 52
+
+
+class ScheduleTaskInput(BaseModel):
+    schedule: str
+    prompt: str
+    name: str | None = None
+    description: str | None = None
+
+
+class CancelScheduledTaskInput(BaseModel):
+    name: str
+
+
+class ListScheduledTasksInput(BaseModel):
+    pass
+
+
+def _require_ext(ctx: ToolContext) -> ExtensionContext:
+    if ctx.ext is None or ctx.ext.scheduler is None:
+        raise RuntimeError("schedule tools require the scheduled-tasks ExtensionContext and store")
+    return ctx.ext
+
+
+def _slug(source: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", source.lower()).strip("-")
+    budget = MAX_NAME - len(NAME_PREFIX) - 1
+    slug = slug[:budget].strip("-")
+    return f"{NAME_PREFIX}-{slug}" if slug else NAME_PREFIX
+
+
+async def schedule_task(ctx: ToolContext, args: ScheduleTaskInput) -> ToolResult:
+    ext = _require_ext(ctx)
+    schedule = validate_cron(args.schedule)
+    task = await ext.scheduler.create(
+        conversation_id=ctx.turn.conversation_id,
+        agent_id=ctx.turn.agent_id,
+        name=_slug(args.name or args.prompt),
+        schedule=schedule,
+        prompt=args.prompt,
+        description=args.description or args.prompt,
+        next_run_at=next_fire(schedule, datetime.now(UTC)),
+    )
+    return ToolResult(
+        content=(
+            TextContent(
+                text=(
+                    f"Scheduled {task.name!r} ({task.schedule}); next run at "
+                    f"{task.next_run_at.isoformat()}. Cancel it with cancel_scheduled_task "
+                    f"name={task.name!r}."
+                )
+            ),
+        )
+    )
+
+
+async def cancel_scheduled_task(ctx: ToolContext, args: CancelScheduledTaskInput) -> ToolResult:
+    ext = _require_ext(ctx)
+    cancelled = await ext.scheduler.cancel(args.name)
+    text = (
+        f"Cancelled scheduled task {args.name!r}."
+        if cancelled
+        else f"No active scheduled task named {args.name!r}."
+    )
+    return ToolResult(content=(TextContent(text=text),))
+
+
+async def list_scheduled_tasks(ctx: ToolContext, args: ListScheduledTasksInput) -> ToolResult:
+    ext = _require_ext(ctx)
+    tasks = await ext.scheduler.list()
+    if not tasks:
+        return ToolResult(content=(TextContent(text="No scheduled tasks."),))
+    lines = [
+        f"- {task.name}: {task.schedule} — {task.description} "
+        f"(last run {task.last_run_at.isoformat() if task.last_run_at else 'never'})"
+        for task in tasks
+    ]
+    return ToolResult(content=(TextContent(text="\n".join(lines)),))

@@ -19,7 +19,7 @@ from selfhost.accounting import ALLOW, SpendEvaluator
 from selfhost.blob import BlobStore
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
-from selfhost.ext.context import ExtensionContext, context_for
+from selfhost.ext.context import ExtensionContext, TurnInvoker, context_for
 from selfhost.ext.manifest import JobSpec, Manifest
 from selfhost.memory.indexer import MemoryIndexer, PageIndexer
 from selfhost.memory.service import MemoryService
@@ -206,6 +206,7 @@ class JobRunner:
     bindings: tuple[_Binding, ...]
     memory: MemoryService | None = None
     blob: BlobStore | None = None
+    invoker: TurnInvoker | None = None
 
     def launch(self) -> None:
         global _firing
@@ -240,6 +241,7 @@ class JobRunner:
             self.credential_store,
             self.memory,
             self.blob,
+            self.invoker,
         )
         await binding.spec.handler(context)
 

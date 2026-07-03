@@ -7,6 +7,7 @@ members = [
     "selfhost",
     "selfhost-ext-connectors",
     "selfhost-ext-sample",
+    "selfhost-ext-scheduled-tasks",
     "selfhost-ext-self-improvement",
 ]
 
@@ -453,6 +454,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d8/53/6f443c9a4a8358a93a6792e2acffb9d9d5cb0a5cfd8802644b7b1c9a02e4/colorama-0.4.6.tar.gz", hash = "sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44", size = 27697, upload-time = "2022-10-25T02:36:22.414Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl", hash = "sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6", size = 25335, upload-time = "2022-10-25T02:36:20.889Z" },
+]
+
+[[package]]
+name = "croniter"
+version = "6.2.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "python-dateutil" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/03/35/96ad0a71eb0b27ab4476a7ed23facd0713d82da9c911edc8af7f34a62d6a/croniter-6.2.3.tar.gz", hash = "sha256:fb129986ef7e2c44e3f4c9f503da83ad914d2afa48f40a43ee3dca4b5c41d476", size = 166174, upload-time = "2026-07-02T14:34:22.166Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5c/dd/6466498a8b69754cffbd7237ce4c66446ca5ffcf53fb397d437666f056d2/croniter-6.2.3-py3-none-any.whl", hash = "sha256:137a97001b4d52fb71c10b750e303db79e6e42d40fff8ff77126102176c9f786", size = 46446, upload-time = "2026-07-02T14:34:20.889Z" },
 ]
 
 [[package]]
@@ -1710,6 +1723,21 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "selfhost", editable = "core" }]
+
+[[package]]
+name = "selfhost-ext-scheduled-tasks"
+version = "0.1.0"
+source = { editable = "extensions/scheduled-tasks" }
+dependencies = [
+    { name = "croniter" },
+    { name = "selfhost" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "croniter", specifier = ">=2.0" },
+    { name = "selfhost", editable = "core" },
+]
 
 [[package]]
 name = "selfhost-ext-self-improvement"

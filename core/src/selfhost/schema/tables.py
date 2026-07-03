@@ -265,6 +265,27 @@ source = sa.Table(
     sa.Index("source_due", "next_sync_at"),
 )
 
+scheduled_task = sa.Table(
+    "scheduled_task",
+    metadata,
+    sa.Column("id", sa.Uuid, primary_key=True),
+    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
+    sa.Column("conversation_id", sa.Uuid, sa.ForeignKey("conversation.id"), nullable=False),
+    sa.Column("agent_id", sa.Uuid, sa.ForeignKey("agent.id"), nullable=False),
+    sa.Column("name", sa.Text, nullable=False),
+    sa.Column("schedule", sa.Text, nullable=False),
+    sa.Column("prompt", sa.Text, nullable=False),
+    sa.Column("description", sa.Text, nullable=False),
+    sa.Column("next_run_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("last_run_at", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("claimed_by", sa.Text, nullable=True),
+    sa.Column("claim_expires_at", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.UniqueConstraint("workspace_id", "name", name="scheduled_task_name"),
+    sa.Index("scheduled_task_due", "next_run_at"),
+)
+
 page = sa.Table(
     "page",
     metadata,

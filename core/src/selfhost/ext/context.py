@@ -9,6 +9,7 @@ path an extension does. The `ExtensionContext` shape is open: later units add me
 writes, governed proposals, invoke) without reshaping what handlers already hold."""
 
 from dataclasses import dataclass
+from typing import Protocol
 from uuid import UUID
 
 import sqlalchemy as sa
@@ -20,6 +21,7 @@ from selfhost.governance import Governance, prompt_digest
 from selfhost.memory.service import SHARED_SUBJECT, MemoryService, Recalled
 from selfhost.models.interface import Message
 from selfhost.o11y import log
+from selfhost.scheduling import ScheduleStore
 from selfhost.schema import tables
 from selfhost.schema.records import AgentChange, MemoryWrite, ProposalRef
 from selfhost.transcript import TranscriptDecodeError, decode, transcript_key
@@ -202,12 +204,33 @@ class TrajectoryCorpus:
         return tuple(trajectories)
 
 
+class TurnInvoker(Protocol):
+    """The admit-turn seam a background handler drives: place one turn for a conversation's agent on
+    the durable queue and return its id. `idempotency_key` collapses a redelivered fire to the turn
+    already admitted, so a refired schedule tick never spawns a second turn."""
+
+    async def invoke(
+        self, conversation_id: UUID, agent_id: UUID, message: str, idempotency_key: str
+    ) -> UUID: ...
+
+
 @dataclass(frozen=True)
 class ExtensionContext:
     store: ScopedStore
     credentials: CredentialAccess
     memory: MemoryAccess | None = None
     corpus: TrajectoryCorpus | None = None
+    scheduler: ScheduleStore | None = None
+    invoker: TurnInvoker | None = None
+
+    async def invoke(
+        self, conversation_id: UUID, agent_id: UUID, message: str, idempotency_key: str
+    ) -> UUID:
+        """Kick a turn for `agent_id` in `conversation_id` through the admit-turn seam. Fails loud
+        when no invoker is wired, rather than silently dropping a scheduled fire."""
+        if self.invoker is None:
+            raise RuntimeError("invoke requires a turn invoker; none is wired")
+        return await self.invoker.invoke(conversation_id, agent_id, message, idempotency_key)
 
     async def memory_write(self, write: MemoryWrite) -> None:
         """Commit a memory item for this workspace. Fails loud when no memory service is wired,
@@ -239,6 +262,7 @@ def context_for(
     credential_store: CredentialStore,
     memory: MemoryService | None = None,
     blob: BlobStore | None = None,
+    invoker: TurnInvoker | None = None,
 ) -> ExtensionContext:
     store = ScopedStore(workspace_id=workspace_id, extension=extension)
     credentials = CredentialAccess(
@@ -247,5 +271,10 @@ def context_for(
     scoped_memory = None if memory is None else MemoryAccess(memory)
     corpus = None if blob is None else TrajectoryCorpus(workspace_id, blob)
     return ExtensionContext(
-        store=store, credentials=credentials, memory=scoped_memory, corpus=corpus
+        store=store,
+        credentials=credentials,
+        memory=scoped_memory,
+        corpus=corpus,
+        scheduler=ScheduleStore(workspace_id=workspace_id),
+        invoker=invoker,
     )
