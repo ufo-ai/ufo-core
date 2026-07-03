@@ -65,6 +65,7 @@ class Runtime:
     manifests: tuple[Manifest, ...]
     credentials: CredentialStore | None
     memory: MemoryService
+    artifact_token_secret: str
 
 
 _runtime: Runtime | None = None
@@ -132,6 +133,7 @@ async def _execute_turn(turn_id: str) -> str:
             spawn=subagents.spawn,
             memory=runtime.memory,
             member_id=member_id,
+            artifact_token_secret=runtime.artifact_token_secret,
         )
         frame = await engine.run()
         return frame.status

@@ -2,9 +2,10 @@
 
 A handler reaches the outside world only through the fields here: the sandbox for filesystem and
 shell, the blob store for artifacts, the turn/agent it runs under, `spawn` to delegate a typed
-subtask to a child turn, and `memory` (with the conversation's `member_id`) for recall and commit
-scoped to the turn's subject. `read_paths` is the working set that lets `edit` refuse to touch a
-file the turn has not read first. An extension tool also gets `ext`, its owning extension's
+subtask to a child turn, `memory` (with the conversation's `member_id`) for recall and commit
+scoped to the turn's subject, and `artifact_token_secret` with which `share_file` mints the signed
+download URLs the web surface verifies. `read_paths` is the working set that lets `edit` refuse to
+touch a file the turn has not read first. An extension tool also gets `ext`, its owning extension's
 workspace-scoped ExtensionContext; a builtin tool gets `ext=None`."""
 
 from dataclasses import dataclass, field
@@ -60,5 +61,6 @@ class ToolContext:
     spawn: Spawn
     memory: MemoryService
     member_id: UUID | None
+    artifact_token_secret: str
     read_paths: set[str] = field(default_factory=set)
     ext: ExtensionContext | None = None

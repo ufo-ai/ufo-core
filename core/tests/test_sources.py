@@ -153,6 +153,7 @@ def _context(memory: MemoryService, member_id: UUID | None, blob_root: Path) -> 
         spawn=_unavailable_spawn,
         memory=memory,
         member_id=member_id,
+        artifact_token_secret="",
     )
 
 

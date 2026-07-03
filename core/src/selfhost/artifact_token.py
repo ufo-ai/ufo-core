@@ -3,8 +3,9 @@
 The web surface serves a shared file's bytes only for a token minted with the deploy's secret — an
 HMAC over the blob key and an expiry — so a tampered or stale token yields nothing, and a key
 outside the artifact namespace (a transcript, a compaction record) is refused even with a valid
-signature. This module ships the verify half the surface enforces and the claims it returns; the
-mint side is the `share_file` builtin, which signs with the same secret."""
+signature. `mint_artifact_token` signs and `verify_artifact_token` checks the same body, so a
+round-trip agrees by construction: the `share_file` builtin mints, the web surface verifies, and
+both read the one deploy secret."""
 
 import base64
 import hashlib
@@ -31,20 +32,31 @@ class ArtifactClaims:
     expires_at: int
 
 
+def _sign(secret: str, body: str) -> str:
+    digest = hmac.new(secret.encode(), body.encode(), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).decode().rstrip("=")
+
+
+def mint_artifact_token(secret: str, blob_key: str, filename: str, expires_at: int) -> str:
+    if not secret:
+        raise ArtifactTokenError("artifact token secret is not configured")
+    body = (
+        base64.urlsafe_b64encode(
+            json.dumps({"key": blob_key, "filename": filename, "expires_at": expires_at}).encode()
+        )
+        .decode()
+        .rstrip("=")
+    )
+    return f"{body}.{_sign(secret, body)}"
+
+
 def verify_artifact_token(token: str, secret: str, now: datetime) -> ArtifactClaims:
     if not secret:
         raise ArtifactTokenError("artifact token secret is not configured")
     body, _, signature = token.partition(".")
     if not signature:
         raise ArtifactTokenError("artifact token is malformed")
-    expected = (
-        base64.urlsafe_b64encode(
-            hmac.new(secret.encode(), body.encode(), hashlib.sha256).digest()
-        )
-        .decode()
-        .rstrip("=")
-    )
-    if not hmac.compare_digest(signature, expected):
+    if not hmac.compare_digest(signature, _sign(secret, body)):
         raise ArtifactTokenError("artifact token signature does not match")
     try:
         payload = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))

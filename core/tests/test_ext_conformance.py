@@ -121,6 +121,7 @@ async def test_tool_dispatches_with_its_scoped_context(db: None, tmp_path: Path)
         spawn=_unavailable_spawn,
         memory=StubMemory(),
         member_id=None,
+        artifact_token_secret="",
         ext=ext_by_tool[tool.name],
     )
     args = tool.input_model.model_validate({"message": "conformance-echo"})

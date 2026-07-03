@@ -89,18 +89,23 @@ class SlackSurfaceConfig(BaseModel):
 
 
 class WebSurfaceConfig(BaseModel):
-    """The web chat surface. `artifact_token_secret_env` names the env var holding the HMAC secret
-    the surface verifies artifact delivery tokens with — the same secret `share_file` mints with."""
-
     model_config = ConfigDict(extra="forbid")
     enable: bool = False
-    artifact_token_secret_env: str = "SELFHOST_ARTIFACT_TOKEN_SECRET"
 
 
 class SurfacesConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     slack: SlackSurfaceConfig | None = None
     web: WebSurfaceConfig | None = None
+
+
+class ArtifactsConfig(BaseModel):
+    """The HMAC secret that signs artifact delivery tokens. `share_file` mints with it and the web
+    surface verifies with it, so it belongs to neither consumer: `token_secret_env` names the env
+    var holding the secret."""
+
+    model_config = ConfigDict(extra="forbid")
+    token_secret_env: str = "SELFHOST_ARTIFACT_TOKEN_SECRET"
 
 
 class Config(BaseModel):
@@ -113,6 +118,7 @@ class Config(BaseModel):
     o11y: O11yConfig = O11yConfig()
     sources: tuple[SourceEntry, ...] = ()
     surfaces: SurfacesConfig = SurfacesConfig()
+    artifacts: ArtifactsConfig = ArtifactsConfig()
 
 
 def load_config(path: Path | None = None) -> Config:

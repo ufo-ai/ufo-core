@@ -76,6 +76,7 @@ class TurnEngine:
     spawn: Spawn
     memory: MemoryService
     member_id: UUID | None
+    artifact_token_secret: str
 
     async def run(self) -> TerminalFrame:
         with turn_span(self.turn.id, self.turn.conversation_id):
@@ -90,6 +91,7 @@ class TurnEngine:
                 spawn=self.spawn,
                 memory=self.memory,
                 member_id=self.member_id,
+                artifact_token_secret=self.artifact_token_secret,
             )
             try:
                 if not await self._mark_running():

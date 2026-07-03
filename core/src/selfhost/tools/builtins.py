@@ -1,17 +1,28 @@
-"""The builtin tool set: bash, read, write, edit, spawn_subagent, memory_search, memory_update.
+"""The builtin tool set: bash, read, write, edit, share_file, spawn_subagent, memory_search,
+memory_update.
 
 Each file/shell handler reaches the workspace only through `ctx.sandbox`, so the carrier's scoping
 and egress rules apply whether a byte arrives via a shell command or a file op. `read` records every
 path it returns so `edit` can refuse to touch a file the turn has not read — the guard that keeps a
-blind string-replace from clobbering content the model never saw. `spawn_subagent` delegates a typed
-subtask to a child turn through `ctx.spawn`. `memory_search` recalls facts and searches synced
-source pages through `ctx.memory`, and `memory_update` commits — both scoped to the conversation's
-subject (`{member, shared}`)."""
+blind string-replace from clobbering content the model never saw. `share_file` takes a workspace
+file's bytes into the blob store under `artifacts/<uuid>/` and returns a TTL-token URL the web
+surface serves — the only path that hands a produced file back outside the sandbox. `spawn_subagent`
+delegates a typed subtask to a child turn through `ctx.spawn`. `memory_search` recalls facts and
+searches synced source pages through `ctx.memory`, and `memory_update` commits — both scoped to the
+conversation's subject (`{member, shared}`)."""
 
+from datetime import UTC, datetime
+from pathlib import PurePosixPath
 from typing import Any
+from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+from selfhost.artifact_token import (
+    ARTIFACT_KEY_PREFIX,
+    ARTIFACT_TOKEN_TTL_SECONDS,
+    mint_artifact_token,
+)
 from selfhost.memory.service import SHARED_SUBJECT, member_subject, recall_subjects
 from selfhost.schema.records import FACT, ItemClass, MemoryWrite
 from selfhost.tools.context import TextContent, ToolContext, ToolResult
@@ -19,6 +30,8 @@ from selfhost.tools.registry import ToolDef
 
 DEFAULT_READ_LIMIT = 2000
 MEMORY_SEARCH_LIMIT = 8
+ARTIFACT_DOWNLOAD_PATH = "/web/artifacts/download"
+ARTIFACT_FALLBACK_NAME = "download"
 
 
 class BashInput(BaseModel):
@@ -40,6 +53,11 @@ class EditInput(BaseModel):
     path: str
     old_string: str
     new_string: str
+
+
+class ShareFileInput(BaseModel):
+    path: str
+    filename: str | None = None
 
 
 class SpawnSubagentInput(BaseModel):
@@ -96,6 +114,19 @@ async def edit_handler(ctx: ToolContext, args: EditInput) -> ToolResult:
     updated = current.replace(args.old_string, args.new_string)
     await ctx.sandbox.write_file(args.path, updated.encode())
     return ToolResult(content=(TextContent(text=f"edited {args.path}"),))
+
+
+async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResult:
+    if not ctx.artifact_token_secret:
+        raise RuntimeError("artifact sharing is not configured (no artifact token secret set)")
+    data = await ctx.sandbox.read_file(args.path)
+    basename = PurePosixPath((args.filename or args.path).replace("\\", "/")).name
+    safe_name = basename if basename not in ("", ".", "..") else ARTIFACT_FALLBACK_NAME
+    key = f"{ARTIFACT_KEY_PREFIX}{uuid4()}/{safe_name}"
+    await ctx.blob.put(key, data)
+    expires_at = int(datetime.now(UTC).timestamp()) + ARTIFACT_TOKEN_TTL_SECONDS
+    token = mint_artifact_token(ctx.artifact_token_secret, key, safe_name, expires_at)
+    return ToolResult(content=(TextContent(text=f"{ARTIFACT_DOWNLOAD_PATH}?token={token}"),))
 
 
 async def spawn_subagent_handler(ctx: ToolContext, args: SpawnSubagentInput) -> ToolResult:
@@ -156,6 +187,17 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         description="Replace a unique string in a workspace file that has already been read.",
         input_model=EditInput,
         handler=edit_handler,
+    ),
+    ToolDef(
+        name="share_file",
+        description=(
+            "Share a workspace file the agent produced as a downloadable link: read its bytes, "
+            "store them as an artifact, and return a time-limited URL to hand back to the user — "
+            "the only way to deliver a produced file outside the sandbox. `filename` sets the "
+            "download name; any directory components in it are stripped."
+        ),
+        input_model=ShareFileInput,
+        handler=share_file_handler,
     ),
     ToolDef(
         name="spawn_subagent",
