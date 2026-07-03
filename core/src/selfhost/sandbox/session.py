@@ -29,10 +29,12 @@ class MountSpec:
 
 @dataclass(frozen=True)
 class ProxyEndpoint:
-    """The sole egress route the container is allowed to reach: the proxy's URL plus the CA the
-    container trusts so the proxy can terminate TLS and swap sentinels onto the wire."""
+    """Where the egress proxy listens, backend-neutral: the port plus the CA the sandbox trusts so
+    the proxy can terminate TLS and swap sentinels onto the wire. Each carrier decides how its
+    sandbox addresses the host the proxy runs on — that reachability detail is the carrier's, not
+    the proxy's."""
 
-    url: str
+    port: int
     ca_cert: str
 
 

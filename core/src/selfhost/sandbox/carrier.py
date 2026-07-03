@@ -2,8 +2,10 @@
 
 Create-or-attach keeps the container a disposable cache over the durable workspace — a killed
 container is recreated on the next turn from the same bind-mounted `workspace/` subtree, and the
-turn notices only latency. Every command runs through `docker exec`; the container joins an
-internal network with no gateway, so its sole route out is the proxy named in the spec."""
+turn notices only latency. Every command runs through `docker exec`. The container's HTTP(S)_PROXY
+points at the egress proxy running on the host, reached at `host.docker.internal`; the proxy refuses
+any host its rules do not allow and swaps the sentinel key for the real one on the wire, so the raw
+credential never enters the sandbox."""
 
 import asyncio
 from dataclasses import dataclass
@@ -17,6 +19,8 @@ from selfhost.sandbox.session import (
 CONTAINER_NAME_PREFIX = "selfhost-sbx-"
 CREATE_TIMEOUT_SECONDS = 120
 DEFAULT_NETWORK = "selfhost-sandbox"
+HOST_GATEWAY_NAME = "host.docker.internal"
+HOST_GATEWAY_MAPPING = f"{HOST_GATEWAY_NAME}:host-gateway"
 
 
 async def _docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60) -> tuple[int, bytes, bytes]:
@@ -46,6 +50,7 @@ class DockerCarrier:
         if running is not None:
             return SandboxHandle(conversation_id=spec.conversation_id, container_id=running)
         await self._ensure_network()
+        proxy_url = f"http://{HOST_GATEWAY_NAME}:{spec.proxy.port}"
         argv = [
             "run",
             "-d",
@@ -54,14 +59,16 @@ class DockerCarrier:
             name,
             "--network",
             self.network,
+            "--add-host",
+            HOST_GATEWAY_MAPPING,
             "--env",
-            f"HTTP_PROXY={spec.proxy.url}",
+            f"HTTP_PROXY={proxy_url}",
             "--env",
-            f"HTTPS_PROXY={spec.proxy.url}",
+            f"HTTPS_PROXY={proxy_url}",
             "--env",
-            f"http_proxy={spec.proxy.url}",
+            f"http_proxy={proxy_url}",
             "--env",
-            f"https_proxy={spec.proxy.url}",
+            f"https_proxy={proxy_url}",
         ]
         if spec.mount.kind == "filesystem" and spec.mount.host_path is not None:
             argv += ["-v", f"{spec.mount.host_path}:/workspace"]
@@ -111,12 +118,14 @@ class DockerCarrier:
     async def _ensure_network(self) -> None:
         code, _, _ = await _docker("network", "inspect", self.network)
         if code != 0:
-            await _docker("network", "create", "--internal", self.network)
+            await _docker("network", "create", self.network)
 
     async def _install_ca(self, container_id: str, ca_cert: str) -> None:
         write = await _docker(
             "exec",
             "-i",
+            "-u",
+            "root",
             container_id,
             "sh",
             "-c",

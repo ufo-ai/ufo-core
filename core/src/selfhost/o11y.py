@@ -18,7 +18,7 @@ from opentelemetry.trace import Span, SpanKind
 
 INSTRUMENTATION_NAME = "selfhost"
 METRIC_EXPORT_INTERVAL_MILLIS = 30_000
-METRICS = ("turn_started_total", "turn_terminal_total")
+METRICS = ("turn_started_total", "turn_terminal_total", "sandbox_egress_total")
 SENSITIVE_FIELD_KEYS = frozenset(
     {
         "prompt",

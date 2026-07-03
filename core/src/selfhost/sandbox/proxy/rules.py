@@ -19,6 +19,10 @@ PROVIDER_HOSTS = {
     "o4": OPENAI_HOST,
     "chatgpt-": OPENAI_HOST,
 }
+PROVIDER_AUTH = {
+    ANTHROPIC_HOST: ("x-api-key", ""),
+    OPENAI_HOST: ("authorization", "Bearer "),
+}
 
 
 @dataclass(frozen=True)
@@ -60,15 +64,17 @@ def provider_host(model: str) -> str:
 
 def derive_model_rules(model: str, real_key: str) -> tuple[Rule, ...]:
     """The U2 rule set: the deploy's model provider is reachable and its key is injected from the
-    sentinel the sandbox sees; nothing else is allowed out."""
+    sentinel the sandbox sees; nothing else is allowed out. The auth header is provider-shaped —
+    Anthropic reads a raw key from `x-api-key`, OpenAI a `Bearer` token from `authorization`."""
     host = provider_host(model)
+    header, prefix = PROVIDER_AUTH[host]
     return (
         ScopeRule(allowed_hosts=frozenset({host})),
         InjectionRule(
             host=host,
-            header="authorization",
-            sentinel=f"Bearer {SENTINEL_MODEL_KEY}",
-            real=f"Bearer {real_key}",
+            header=header,
+            sentinel=f"{prefix}{SENTINEL_MODEL_KEY}",
+            real=f"{prefix}{real_key}",
         ),
         MeterRule(host=host, dimension="tokens"),
     )

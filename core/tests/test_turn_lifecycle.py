@@ -85,7 +85,7 @@ def dbos_runtime(
         asyncio.run(reset_postgres_database(make_url(system_url).database))
     hub = InProcessHub()
     blob = FilesystemBlobStore(root=blob_root)
-    proxy = ProxyEndpoint(url="http://proxy.test", ca_cert="test-ca")
+    proxy = ProxyEndpoint(port=0, ca_cert="test-ca")
     loop_queue.init_runtime(
         loop_queue.Runtime(
             config=config, blob=blob, hub=hub, carrier=StandInCarrier(), proxy=proxy
