@@ -19,6 +19,7 @@ from selfhost.config import Config, load_config
 from selfhost.credentials import CredentialStore
 from selfhost.db import apply_migrations, dispose_db, init_db, workspace_tx
 from selfhost.ext.loader import load_manifests
+from selfhost.grants import GrantSummary, grant_summaries
 from selfhost.onboarding import AlreadyInitialized, Onboarded, Onboarding
 from selfhost.schema import tables
 from selfhost.schema.records import DEFAULT_AGENT_NAME
@@ -407,5 +408,32 @@ async def _read_spend(config: Config, window_seconds: int) -> SpendReport:
                 await connection.execute(sa.select(tables.workspace.c.id))
             ).scalar_one()
             return await SpendRollup(workspace_id).read(connection, window_seconds)
+    finally:
+        await dispose_db()
+
+
+@main.command()
+def grants() -> None:
+    """List the OAuth accounts granted to each agent through `/connect`."""
+    config = load_config()
+    summaries = asyncio.run(_read_grants(config))
+    if not summaries:
+        click.echo("no grants")
+        return
+    for summary in summaries:
+        granted = summary.granted_at.strftime("%Y-%m-%d")
+        click.echo(
+            f"{summary.agent:<20}{summary.provider:<16}{summary.account_id:<28}{granted}"
+        )
+
+
+async def _read_grants(config: Config) -> tuple[GrantSummary, ...]:
+    init_db(config.database.url)
+    try:
+        async with workspace_tx() as connection:
+            workspace_id = (
+                await connection.execute(sa.select(tables.workspace.c.id))
+            ).scalar_one()
+        return await grant_summaries(workspace_id)
     finally:
         await dispose_db()

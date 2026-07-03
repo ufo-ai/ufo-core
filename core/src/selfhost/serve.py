@@ -23,6 +23,7 @@ from selfhost.db import init_db, workspace_tx
 from selfhost.ext.context import context_for
 from selfhost.ext.loader import load_manifests, validate_ext_tools
 from selfhost.ext.manifest import Manifest
+from selfhost.grants import ConnectFlow, GrantStore
 from selfhost.hub import Hub, InProcessHub
 from selfhost.jobs import JobRunner, SpendResume, bindings_from, core_jobs
 from selfhost.loop.queue import Runtime, init_runtime
@@ -40,6 +41,7 @@ from selfhost.sandbox.proxy.rules import (
     Rule,
     ScopeRule,
     derive_credential_rules,
+    derive_grant_rules,
     derive_model_rules,
 )
 from selfhost.sandbox.proxy.server import EgressProxy, generate_ca
@@ -114,6 +116,7 @@ def run() -> None:
     app.state.hub = hub
     app.state.dbos = dbos_client
     app.state.writeback_poller = None
+    app.state.connect_flow = _connect_flow(credentials)
     app.include_router(router)
     _mount_ext_routes(app, manifests, workspace_id, credentials, memory)
     _mount_slack_surface(app, config, workspace_id, credentials, dbos_client)
@@ -287,12 +290,25 @@ def _egress_proxy(rules: tuple[Rule, ...]) -> ProxyEndpoint:
     return asyncio.run_coroutine_threadsafe(_boot(), loop).result(PROXY_STARTUP_TIMEOUT_SECONDS)
 
 
+def _connect_flow(credentials: CredentialStore | None) -> ConnectFlow | None:
+    """The `/connect` flow the CLI surface serves, sharing the credential key that seals its state
+    and encrypts its tokens. No key means grants cannot be recorded, so the routes report 503. The
+    provider map is empty until a connectors extension installs one — direct-provider-host, so core
+    holds only the grant and its flow."""
+    if credentials is None:
+        return None
+    store = GrantStore(fernet=credentials.fernet)
+    return ConnectFlow(providers={}, fernet=credentials.fernet, store=store)
+
+
 async def _assemble_rules(config: Config) -> tuple[Rule, ...]:
-    """The proxy's full rule set: the model providers the deploy holds keys for, plus every
-    extension credential slot whose secret is stored — derived, never registered."""
+    """The proxy's full rule set: the model providers the deploy holds keys for, every extension
+    credential slot whose secret is stored, and every OAuth grant this workspace holds — derived,
+    never registered."""
     model = _model_rules(config)
     credential = await _credential_rules(config)
-    return (*model, *credential)
+    grant = await _grant_rules(config)
+    return (*model, *credential, *grant)
 
 
 def _model_rules(config: Config) -> tuple[Rule, ...]:
@@ -335,3 +351,17 @@ async def _credential_rules(config: Config) -> tuple[Rule, ...]:
             await connection.execute(sa.select(tables.workspace.c.id))
         ).scalar_one()
     return await derive_credential_rules(manifests, workspace_id, store)
+
+
+async def _grant_rules(config: Config) -> tuple[Rule, ...]:
+    """Every OAuth grant this workspace holds becomes the egress rules that admit its provider host
+    and swap its token onto the wire; with no credential key no token can be decrypted, so none."""
+    key = os.environ.get(config.credentials.key_env)
+    if not key:
+        return ()
+    store = GrantStore(fernet=Fernet(key.encode()))
+    async with workspace_tx() as connection:
+        workspace_id = (
+            await connection.execute(sa.select(tables.workspace.c.id))
+        ).scalar_one()
+    return derive_grant_rules(await store.active_grants(workspace_id))
