@@ -16,6 +16,10 @@ COMPOSITION_ROOT = CORE_SRC / "serve.py"
 ROLE_PACKAGES = ("selfhost.surfaces", "selfhost.loop", "selfhost.jobs", "selfhost.sandbox.proxy")
 ENVELOPE_COLUMNS = {"workspace_id", "created_at", "updated_at"}
 SCHEMA_TABLES = CORE_SRC / "schema" / "tables.py"
+EXTENSIONS_ROOT = "extensions"
+SDK_PUBLIC_PREFIX = "selfhost.sdk"
+MANIFEST_MODULE = CORE_SRC / "ext" / "manifest.py"
+SAMPLE_MODULE = Path(EXTENSIONS_ROOT) / "sample" / "selfhost_ext_sample.py"
 
 
 def _python_files() -> list[Path]:
@@ -89,6 +93,77 @@ def _boundary_failures(trees: dict[Path, ast.Module]) -> list[str]:
                     f"(roles talk through queues/blob/hub/HTTP)"
                 )
     return failures
+
+
+def _sdk_import_failures(trees: dict[Path, ast.Module]) -> list[str]:
+    """Every file under `extensions/` reaches core only through the public `selfhost.sdk` surface;
+    any other `selfhost.<internal>` import is a break of the seam the SDK exists to pin."""
+    failures = []
+    for rel, tree in trees.items():
+        if rel.parts[0] != EXTENSIONS_ROOT:
+            continue
+        for imported in _imported_modules(tree):
+            in_sdk = imported == SDK_PUBLIC_PREFIX or imported.startswith(SDK_PUBLIC_PREFIX + ".")
+            in_core = imported == "selfhost" or imported.startswith("selfhost.")
+            if in_core and not in_sdk:
+                failures.append(
+                    f"{rel}: extensions import selfhost only via {SDK_PUBLIC_PREFIX} "
+                    f"(found {imported!r})"
+                )
+    return failures
+
+
+def _manifest_point_fields(trees: dict[Path, ast.Module]) -> set[str]:
+    tree = trees.get(MANIFEST_MODULE)
+    fields: set[str] = set()
+    for node in ast.walk(tree) if tree else ():
+        match node:
+            case ast.ClassDef(name="Manifest", body=body):
+                fields = {
+                    stmt.target.id
+                    for stmt in body
+                    if isinstance(stmt, ast.AnnAssign)
+                    and isinstance(stmt.target, ast.Name)
+                    and isinstance(stmt.value, ast.Tuple)
+                    and not stmt.value.elts
+                }
+    return fields
+
+
+def _sample_declared_points(trees: dict[Path, ast.Module]) -> set[str] | None:
+    tree = trees.get(SAMPLE_MODULE)
+    if tree is None:
+        return None
+    declared: set[str] = set()
+    for node in ast.walk(tree):
+        match node:
+            case ast.Call(func=ast.Name(id="Manifest"), keywords=keywords):
+                declared = {
+                    keyword.arg
+                    for keyword in keywords
+                    if keyword.arg not in (None, "name", "version")
+                    and not (isinstance(keyword.value, ast.Tuple) and not keyword.value.elts)
+                }
+    return declared
+
+
+def _conformance_failures(trees: dict[Path, ast.Module]) -> list[str]:
+    """The sample's non-empty Manifest points must equal the Manifest's point fields, so a field
+    added to the Manifest without the sample exercising it fails CI (the sample is the probe)."""
+    declared = _sample_declared_points(trees)
+    if declared is None:
+        return [f"conformance: sample extension missing at {SAMPLE_MODULE}"]
+    points = _manifest_point_fields(trees)
+    return [
+        *(
+            f"conformance: sample does not register Manifest point {point!r}"
+            for point in sorted(points - declared)
+        ),
+        *(
+            f"conformance: sample registers {point!r}, not a Manifest point"
+            for point in sorted(declared - points)
+        ),
+    ]
 
 
 def _schema_columns(trees: dict[Path, ast.Module]) -> tuple[list[tuple[str, str]], set[str]]:
@@ -240,6 +315,8 @@ def main() -> int:
     )
     failures.extend(_init_code_failures(trees))
     failures.extend(_boundary_failures(trees))
+    failures.extend(_sdk_import_failures(trees))
+    failures.extend(_conformance_failures(trees))
     failures.extend(_wiring_failures(trees))
     failures.extend(_live_frame_failures(trees))
     failures.extend(_to_thread_failures(trees))

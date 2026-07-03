@@ -1,0 +1,72 @@
+"""Unit tests for the U3 gates: the sdk-only import boundary and the sample-conformance check.
+
+`gates.py` lives at the repo root, outside the package path, so it is loaded here by file location
+and its pure AST helpers are driven with hand-built trees — no filesystem, no subprocess."""
+
+import ast
+import importlib.util
+from pathlib import Path
+
+_GATES_PATH = Path(__file__).resolve().parents[2] / "gates.py"
+_spec = importlib.util.spec_from_file_location("selfhost_gates", _GATES_PATH)
+gates = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(gates)
+
+ROGUE = Path("extensions/rogue/rogue.py")
+CORE_FILE = Path("core/src/selfhost/db.py")
+
+
+def test_sdk_only_gate_rejects_core_internal_import_from_extensions() -> None:
+    trees = {ROGUE: ast.parse("from selfhost.db import workspace_tx\n")}
+    failures = gates._sdk_import_failures(trees)
+    assert failures and "selfhost.db" in failures[0]
+
+
+def test_sdk_only_gate_rejects_bare_selfhost_import_from_extensions() -> None:
+    trees = {ROGUE: ast.parse("import selfhost\n")}
+    assert gates._sdk_import_failures(trees)
+
+
+def test_sdk_only_gate_allows_sdk_import_from_extensions() -> None:
+    trees = {ROGUE: ast.parse("from selfhost.sdk.tools import ToolDef\nimport selfhost.sdk.jobs\n")}
+    assert gates._sdk_import_failures(trees) == []
+
+
+def test_sdk_only_gate_ignores_core_internal_imports() -> None:
+    trees = {CORE_FILE: ast.parse("from selfhost.db import workspace_tx\n")}
+    assert gates._sdk_import_failures(trees) == []
+
+
+def test_conformance_gate_flags_a_manifest_point_the_sample_drops() -> None:
+    manifest_src = (
+        "class Manifest:\n"
+        "    name: str\n"
+        "    version: str\n"
+        "    tools: tuple[int, ...] = ()\n"
+        "    jobs: tuple[int, ...] = ()\n"
+    )
+    sample_src = "def manifest():\n    return Manifest(name='s', version='1', tools=(T,))\n"
+    trees = {
+        gates.MANIFEST_MODULE: ast.parse(manifest_src),
+        gates.SAMPLE_MODULE: ast.parse(sample_src),
+    }
+    failures = gates._conformance_failures(trees)
+    assert any("jobs" in failure for failure in failures)
+
+
+def test_conformance_gate_passes_when_sample_covers_every_point() -> None:
+    manifest_src = (
+        "class Manifest:\n"
+        "    name: str\n"
+        "    version: str\n"
+        "    tools: tuple[int, ...] = ()\n"
+        "    jobs: tuple[int, ...] = ()\n"
+    )
+    sample_src = (
+        "def manifest():\n    return Manifest(name='s', version='1', tools=(T,), jobs=(J,))\n"
+    )
+    trees = {
+        gates.MANIFEST_MODULE: ast.parse(manifest_src),
+        gates.SAMPLE_MODULE: ast.parse(sample_src),
+    }
+    assert gates._conformance_failures(trees) == []
