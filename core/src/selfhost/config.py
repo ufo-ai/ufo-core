@@ -64,6 +64,18 @@ class O11yConfig(BaseModel):
     otlp_endpoint: str | None = None
 
 
+class SlackSurfaceConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enable: bool = False
+    team_id: str
+    bot_user_id: str
+
+
+class SurfacesConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    slack: SlackSurfaceConfig | None = None
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
     database: DatabaseConfig
@@ -72,6 +84,7 @@ class Config(BaseModel):
     credentials: CredentialsConfig = CredentialsConfig()
     serve: ServeConfig = ServeConfig()
     o11y: O11yConfig = O11yConfig()
+    surfaces: SurfacesConfig = SurfacesConfig()
 
 
 def load_config(path: Path | None = None) -> Config:
