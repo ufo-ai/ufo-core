@@ -95,8 +95,14 @@ class TurnEngine:
                 if not await self._mark_running():
                     await self._persist_inbound()
                     return await self._publish_existing_terminal()
+                recalled = await self._recalled_context()
+                system = (
+                    self.agent.prompt
+                    if not recalled
+                    else f"{self.agent.prompt}\n\n{RECALL_CONTEXT_PREFIX}{recalled}"
+                )
                 final_messages, answer = await self._model_round(
-                    context, await self._recall(await self._load_messages()), usage_events
+                    context, await self._load_messages(), usage_events, system
                 )
                 frame = await self._commit("done", usage_events, answer=answer)
                 if frame.status == "done":
@@ -136,29 +142,27 @@ class TurnEngine:
             return ()
         return stored.messages
 
-    async def _recall(self, messages: tuple[Message, ...]) -> tuple[Message, ...]:
-        """Fold memory relevant to the inbound into the inbound turn itself, scoped to the turn's
-        member and shared subjects. Folding into the inbound (rather than prepending a separate user
-        message) keeps roles alternating — a lone user-role recall message ahead of the user inbound
-        would be two user turns in a row, which the provider rejects. Best-effort: a recall failure
-        yields no context and never fails the turn — the live leg never fails the turn."""
+    async def _recalled_context(self) -> str:
+        """Memory relevant to the inbound, rendered for the turn's system prompt — recomputed each
+        turn and never written into the transcript, scoped to the turn's member and shared subjects.
+        It rides the system (not a leading user message) so it neither breaks role alternation nor
+        pollutes the durable conversation. Best-effort: a recall failure yields no context and never
+        fails the turn — the live leg never fails the turn."""
         try:
             recalled = await self.memory.recall(
                 self.turn.inbound, recall_subjects(self.member_id), RECALL_LIMIT
             )
         except Exception as error:
             log("recall.failed", turn_id=str(self.turn.id), error_class=type(error).__name__)
-            return messages
-        if not recalled:
-            return messages
-        rendered = "\n".join(f"- {item.body}" for item in recalled)
-        folded = Message(
-            role="user", content=f"{RECALL_CONTEXT_PREFIX}{rendered}\n\n{self.turn.inbound}"
-        )
-        return (*messages[:-1], folded)
+            return ""
+        return "\n".join(f"- {item.body}" for item in recalled)
 
     async def _model_round(
-        self, context: ToolContext, messages: tuple[Message, ...], usage_events: list[Usage]
+        self,
+        context: ToolContext,
+        messages: tuple[Message, ...],
+        usage_events: list[Usage],
+        system: str,
     ) -> tuple[tuple[Message, ...], str]:
         """Call the model until it answers with text and no tool calls; each tool-calling round
         dispatches the calls in the sandbox and feeds the results back as the next user turn."""
@@ -166,7 +170,7 @@ class TurnEngine:
         for _round in range(MAX_TOOL_ROUNDS):
             messages, compaction_usage = await self.compaction.maybe_compact(messages)
             usage_events.extend(compaction_usage)
-            text, tool_calls = await self._stream_once(messages, usage_events)
+            text, tool_calls = await self._stream_once(messages, usage_events, system)
             if not tool_calls:
                 if text.strip():
                     return messages, text
@@ -185,11 +189,11 @@ class TurnEngine:
         raise RuntimeError(f"tool round limit exceeded ({MAX_TOOL_ROUNDS})")
 
     async def _stream_once(
-        self, messages: tuple[Message, ...], usage_events: list[Usage]
+        self, messages: tuple[Message, ...], usage_events: list[Usage], system: str
     ) -> tuple[str, tuple[ToolUseBlock, ...]]:
         request = ModelRequest(
             model=self.agent.model,
-            system=self.agent.prompt,
+            system=system,
             messages=messages,
             max_tokens=MAX_OUTPUT_TOKENS,
             tools=self.tools.schemas(),

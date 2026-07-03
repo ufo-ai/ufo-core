@@ -83,9 +83,11 @@ class CapturingModel:
     the engine put in front of the model."""
 
     seen: list[tuple[Message, ...]] = field(default_factory=list)
+    seen_system: list[str] = field(default_factory=list)
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         self.seen.append(request.messages)
+        self.seen_system.append(request.system)
         yield TextDelta(text="ok")
         yield Usage(input_tokens=1, output_tokens=1)
 
@@ -395,7 +397,7 @@ async def test_cancel_winning_mid_round_keeps_cancelled_terminal_bills_and_prese
     assert stored.messages == (Message(role="user", content="hi"),)
 
 
-async def test_recall_folds_memory_into_the_inbound_keeping_roles_alternating(
+async def test_recall_rides_the_system_prompt_not_the_messages_and_is_not_persisted(
     db: None, tmp_path: Path
 ) -> None:
     turn = await _seed_turn("queued", None)
@@ -403,14 +405,15 @@ async def test_recall_folds_memory_into_the_inbound_keeping_roles_alternating(
     engine = _engine(turn, model, tmp_path, memory=OneHitMemory("the launch is on tuesday"))
     frame = await engine.run()
     assert frame.status == "done"
+    assert RECALL_CONTEXT_PREFIX in model.seen_system[0]
+    assert "the launch is on tuesday" in model.seen_system[0]
     sent = model.seen[0]
-    first = sent[0]
-    assert isinstance(first.content, str)
-    assert first.content.startswith(RECALL_CONTEXT_PREFIX)
-    assert "the launch is on tuesday" in first.content
-    assert "hi" in first.content
+    assert all(RECALL_CONTEXT_PREFIX not in str(message.content) for message in sent)
     roles = [message.role for message in sent]
     assert all(earlier != later for earlier, later in pairwise(roles))
+    stored = await engine.transcript.read()
+    assert stored is not None
+    assert all(RECALL_CONTEXT_PREFIX not in str(message.content) for message in stored.messages)
 
 
 async def test_recall_failure_degrades_to_no_context_and_never_fails_the_turn(
