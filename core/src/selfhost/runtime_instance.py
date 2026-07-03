@@ -1,12 +1,11 @@
 """The scale-out boot guard and its heartbeat — the only instance-aware code in core.
 
 Every live serve process holds a `runtime_instance` row it heartbeats. At boot the guard reads the
-live peers (a stale row, past its heartbeat window, does not count): a second instance is safe only
-when nothing it depends on is a dev default — SQLite, filesystem blobs, or an in-process hub cannot
-be shared across processes, so an instance configured with any of them refuses to start when a peer
-is live. With Postgres, a shared blob store, and a shared hub, instances coordinate through Postgres
-and any number may run. The heartbeat is a per-process loop, not a shared job, so each instance
-keeps only its own row fresh."""
+live peers (a stale row, past its heartbeat window, does not count) and refuses to start when any
+peer is live: core ships only the in-process hub, which has no cross-process fan-out, so a second
+instance can never share it. Multi-instance deploys wait on a shared-hub extension; until one lands
+core runs a single instance per workspace. The heartbeat is a per-process loop, not a shared job, so
+each instance keeps only its own row fresh."""
 
 import asyncio
 from dataclasses import dataclass
@@ -25,19 +24,20 @@ STALE_AFTER_SECONDS = 30
 
 
 def fingerprint_of(config: Config) -> str:
-    """The backend selection a peer can read off the row: which database, blob store, and hub this
-    instance runs, so a divergent second instance is legible in the guard's refusal."""
+    """The backend selection a peer can read off the row: which database and blob store this
+    instance runs, and its hub — always the in-process hub in core — so a divergent second instance
+    is legible in the guard's refusal."""
     dialect = "sqlite" if config.database.url.startswith("sqlite") else "postgres"
-    hub = "shared" if config.hub.shared else "in_process"
-    return f"db={dialect};blob={config.blob.backend};hub={hub}"
+    return f"db={dialect};blob={config.blob.backend};hub=in_process"
 
 
 def uses_dev_default(config: Config) -> bool:
-    """A backend a second instance cannot safely share: SQLite (single-writer file), filesystem
-    blobs (local disk), or the in-process hub (no cross-process fan-out)."""
-    sqlite = config.database.url.startswith("sqlite")
-    filesystem = config.blob.backend == "filesystem"
-    return sqlite or filesystem or not config.hub.shared
+    """Core ships only the in-process hub — no cross-process fan-out — so every core instance
+    carries a dev default a second process cannot share, and the guard refuses any second live
+    instance. SQLite (single-writer file) and filesystem blobs (local disk) are the other two dev
+    defaults, named in the fingerprint the refusal prints; a shared-hub extension is what would make
+    this conditional."""
+    return True
 
 
 @dataclass(frozen=True)
@@ -77,9 +77,10 @@ class BootGuard:
                     f"{p.id} started {p.started_at} ({p.fingerprint})" for p in peers
                 )
                 raise RuntimeError(
-                    f"a live instance is already running [{listed}]; this instance's backend "
-                    f"({fingerprint}) has a dev default that cannot be shared — scale out needs "
-                    f"Postgres, a shared blob store, and a shared hub"
+                    f"a live instance is already running [{listed}]; this instance ({fingerprint}) "
+                    f"carries a dev default that cannot be shared across processes — core's "
+                    f"in-process hub has no cross-process fan-out, so it runs a single instance "
+                    "per workspace"
                 )
             await connection.execute(
                 sa.insert(tables.runtime_instance).values(

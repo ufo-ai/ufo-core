@@ -7,7 +7,7 @@ import pytest
 import sqlalchemy as sa
 
 from selfhost import runtime_instance
-from selfhost.config import BlobConfig, Config, DatabaseConfig, HubConfig
+from selfhost.config import BlobConfig, Config, DatabaseConfig
 from selfhost.db import workspace_tx
 from selfhost.runtime_instance import (
     STALE_AFTER_SECONDS,
@@ -18,7 +18,7 @@ from selfhost.runtime_instance import (
 )
 from selfhost.schema import tables
 
-PRODUCTION_FINGERPRINT = "db=postgres;blob=s3;hub=shared"
+PRODUCTION_FINGERPRINT = "db=postgres;blob=s3;hub=in_process"
 
 
 def _dev_config() -> Config:
@@ -32,7 +32,6 @@ def _production_config() -> Config:
     return Config(
         database=DatabaseConfig(url="postgresql+asyncpg://u:p@h:5432/db"),
         blob=BlobConfig(backend="s3", bucket="b"),
-        hub=HubConfig(shared=True),
     )
 
 
@@ -91,20 +90,9 @@ async def _row_live(instance_id: UUID) -> bool:
     return row is not None
 
 
-def test_dev_default_is_any_of_sqlite_filesystem_or_unshared_hub() -> None:
+def test_every_core_config_is_a_dev_default_via_the_in_process_hub() -> None:
     assert uses_dev_default(_dev_config()) is True
-    assert uses_dev_default(_production_config()) is False
-    postgres_s3_unshared = Config(
-        database=DatabaseConfig(url="postgresql+asyncpg://u:p@h/db"),
-        blob=BlobConfig(backend="s3", bucket="b"),
-    )
-    assert uses_dev_default(postgres_s3_unshared) is True
-    postgres_filesystem_shared = Config(
-        database=DatabaseConfig(url="postgresql+asyncpg://u:p@h/db"),
-        blob=BlobConfig(backend="filesystem", root=Path()),
-        hub=HubConfig(shared=True),
-    )
-    assert uses_dev_default(postgres_filesystem_shared) is True
+    assert uses_dev_default(_production_config()) is True
 
 
 def test_fingerprint_names_the_backend_selection() -> None:
@@ -136,12 +124,13 @@ async def test_a_stale_peer_does_not_block_a_dev_default_instance(db: None) -> N
     assert await _row_present(guard.instance_id)
 
 
-async def test_production_backends_admit_a_second_instance_beside_a_live_peer(db: None) -> None:
+async def test_a_second_live_instance_is_refused_even_with_production_backends(db: None) -> None:
     workspace_id = await _workspace()
     await _insert_instance(workspace_id, heartbeat_age_seconds=0)
     guard = BootGuard(config=_production_config(), workspace_id=workspace_id, instance_id=uuid4())
-    await guard.admit()
-    assert await _row_present(guard.instance_id)
+    with pytest.raises(RuntimeError, match="in-process hub"):
+        await guard.admit()
+    assert not await _row_present(guard.instance_id)
 
 
 async def test_two_instances_booting_at_once_admit_exactly_one(db: None) -> None:

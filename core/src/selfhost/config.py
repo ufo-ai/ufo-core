@@ -64,15 +64,6 @@ class O11yConfig(BaseModel):
     otlp_endpoint: str | None = None
 
 
-class HubConfig(BaseModel):
-    """Which stream hub backs live deltas. Core ships only the in-process hub; `shared` declares a
-    shared-hub extension (Redis) is wired, and the boot guard treats an unshared hub as a dev
-    default no second instance may run against."""
-
-    model_config = ConfigDict(extra="forbid")
-    shared: bool = False
-
-
 class ExtConfig(BaseModel):
     """The extension store toggle. `store` names a catalog file the `selfhost ext` commands search
     and install from; omit it and the store is off — the deploy runs only what its bundle pinned."""
@@ -133,7 +124,6 @@ class Config(BaseModel):
     credentials: CredentialsConfig = CredentialsConfig()
     serve: ServeConfig = ServeConfig()
     o11y: O11yConfig = O11yConfig()
-    hub: HubConfig = HubConfig()
     ext: ExtConfig = ExtConfig()
     sources: tuple[SourceEntry, ...] = ()
     surfaces: SurfacesConfig = SurfacesConfig()

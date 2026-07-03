@@ -59,20 +59,23 @@ def test_config_path_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     assert load_config().serve.host == "127.0.0.1"
 
 
-def test_hub_and_ext_default_to_dev(tmp_path: Path) -> None:
+def test_ext_defaults_to_off(tmp_path: Path) -> None:
     path = tmp_path / "selfhost.toml"
     path.write_text(VALID)
-    config = load_config(path)
-    assert config.hub.shared is False
-    assert config.ext.store is None
+    assert load_config(path).ext.store is None
 
 
-def test_hub_shared_and_ext_store_parse(tmp_path: Path) -> None:
+def test_ext_store_parses(tmp_path: Path) -> None:
     path = tmp_path / "selfhost.toml"
-    path.write_text(VALID + '\n[hub]\nshared = true\n\n[ext]\nstore = "extensions.catalog.toml"\n')
-    config = load_config(path)
-    assert config.hub.shared is True
-    assert config.ext.store == Path("extensions.catalog.toml")
+    path.write_text(VALID + '\n[ext]\nstore = "extensions.catalog.toml"\n')
+    assert load_config(path).ext.store == Path("extensions.catalog.toml")
+
+
+def test_hub_section_is_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "selfhost.toml"
+    path.write_text(VALID + "\n[hub]\nshared = true\n")
+    with pytest.raises(ValidationError):
+        load_config(path)
 
 
 def test_postgres_system_url_uses_sync_driver(tmp_path: Path) -> None:
