@@ -18,7 +18,7 @@ from selfhost.config import Config, load_config
 from selfhost.credentials import CredentialStore
 from selfhost.db import init_db, workspace_tx
 from selfhost.ext.context import context_for
-from selfhost.ext.loader import load_manifests
+from selfhost.ext.loader import load_manifests, validate_ext_tools
 from selfhost.ext.manifest import Manifest
 from selfhost.hub import InProcessHub
 from selfhost.jobs import CORE_JOBS, JobRunner, bindings_from
@@ -50,6 +50,7 @@ def run() -> None:
     workspace_id = asyncio.run(_sole_workspace_id())
     key = os.environ.get(config.credentials.key_env)
     credentials = CredentialStore(fernet=Fernet(key.encode())) if key else None
+    validate_ext_tools(manifests, workspace_id, credentials)
     hub = InProcessHub()
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
     init_runtime(

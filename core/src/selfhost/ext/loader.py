@@ -13,7 +13,7 @@ from selfhost.credentials import CredentialStore
 from selfhost.ext.context import ExtensionContext, context_for
 from selfhost.ext.manifest import Manifest
 from selfhost.tools.builtins import BUILTIN_TOOLS
-from selfhost.tools.registry import ToolDef
+from selfhost.tools.registry import ToolDef, ToolRegistry
 
 EXTENSION_ENTRY_POINT_GROUP = "selfhost.extension"
 
@@ -51,3 +51,15 @@ def turn_tools(
             tools.append(tool)
             ext_by_tool[tool.name] = context
     return tuple(tools), ext_by_tool
+
+
+def validate_ext_tools(
+    manifests: tuple[Manifest, ...],
+    workspace_id: UUID,
+    credential_store: CredentialStore | None,
+) -> None:
+    """Fail loud at boot on a misconfigured extension — a tool whose name collides with a builtin or
+    another extension, or a tools-declaring extension with no credential key — so a deploy fails to
+    start rather than coming up healthy and then failing every turn that builds the registry."""
+    tools, _ = turn_tools(manifests, workspace_id, credential_store)
+    ToolRegistry(tools)

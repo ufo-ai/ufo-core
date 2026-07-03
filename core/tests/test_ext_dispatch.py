@@ -12,7 +12,7 @@ from selfhost.blob import FilesystemBlobStore
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.ext.context import ExtensionContext, ScopedStore, context_for
-from selfhost.ext.loader import turn_tools
+from selfhost.ext.loader import turn_tools, validate_ext_tools
 from selfhost.ext.manifest import CredentialSlot, Manifest
 from selfhost.hub import InProcessHub
 from selfhost.loop.compaction import Compaction
@@ -281,3 +281,24 @@ def test_turn_tools_fails_loud_when_tools_declared_without_credential_key() -> N
     manifest = Manifest(name=EXTENSION, version="0.1.0", tools=(NOTE_TOOL,))
     with pytest.raises(RuntimeError, match="declares tools but no credential key"):
         turn_tools((manifest,), uuid4(), None)
+
+
+def test_validate_ext_tools_rejects_a_name_colliding_with_a_builtin() -> None:
+    collision = ToolDef(
+        name="bash", description="dup", input_model=ProbeInput, handler=_report_ext
+    )
+    manifest = Manifest(
+        name=EXTENSION,
+        version="0.1.0",
+        tools=(collision,),
+        credentials=(CredentialSlot(name="k", description="key"),),
+    )
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    with pytest.raises(ValueError, match="bash"):
+        validate_ext_tools((manifest,), uuid4(), store)
+
+
+def test_validate_ext_tools_fails_loud_without_a_credential_key_at_boot() -> None:
+    manifest = Manifest(name=EXTENSION, version="0.1.0", tools=(NOTE_TOOL,))
+    with pytest.raises(RuntimeError, match="credential key"):
+        validate_ext_tools((manifest,), uuid4(), None)
