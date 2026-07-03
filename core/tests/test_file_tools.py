@@ -16,9 +16,11 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+import sqlalchemy as sa
 
 from selfhost.artifact_token import verify_artifact_token
 from selfhost.blob import FilesystemBlobStore
+from selfhost.db import workspace_tx
 from selfhost.sandbox import session as session_module
 from selfhost.sandbox.carrier import DockerCarrier
 from selfhost.sandbox.session import (
@@ -28,6 +30,7 @@ from selfhost.sandbox.session import (
     SandboxHandle,
     SandboxSession,
 )
+from selfhost.schema import tables
 from selfhost.schema.records import Agent, Turn
 from selfhost.tools.builtins import BUILTIN_TOOLS
 from selfhost.tools.context import SpawnResult, ToolContext
@@ -166,6 +169,52 @@ def file_ctx(sandbox_image: str, tmp_path: Path) -> Iterator[tuple[ToolContext, 
         subprocess.run(["docker", "rm", "-f", container], capture_output=True, check=False)
 
 
+async def _seed_turn_rows(turn: Turn) -> None:
+    """share_file records a `shared_artifact` row (FK → turn, workspace); seed the file_ctx turn's
+    FK chain so the insert holds against the real db."""
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=turn.workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=turn.agent_id,
+                workspace_id=turn.workspace_id,
+                name="assistant",
+                prompt="p",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=turn.conversation_id,
+                workspace_id=turn.workspace_id,
+                surface="cli",
+                queue_key="file-tools",
+                member_id=None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn.id,
+                workspace_id=turn.workspace_id,
+                conversation_id=turn.conversation_id,
+                agent_id=turn.agent_id,
+                seq=turn.seq or 1,
+                status=turn.status,
+                inbound=turn.inbound,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+
 async def _run(tool_name: str, ctx: ToolContext, **args: object):
     tool = REGISTRY.get(tool_name)
     return await tool.handler(ctx, tool.input_model.model_validate(args))
@@ -302,8 +351,10 @@ async def test_edit_non_unique_without_replace_all_raises(
 
 async def test_share_file_streams_a_file_over_the_read_cap_byte_exact(
     file_ctx: tuple[ToolContext, Path],
+    db: None,
 ) -> None:
     ctx, _ = file_ctx
+    await _seed_turn_rows(ctx.turn)
     payload = b"\x00\x01\x02\x03\x04\x05\x06\x07" * (OVER_INMEMORY_BYTES // 8 + 200000)
     assert len(payload) > OVER_INMEMORY_BYTES
     await ctx.sandbox.write_file("big.bin", payload)
@@ -320,8 +371,10 @@ async def test_share_file_streams_a_file_over_the_read_cap_byte_exact(
 
 async def test_share_file_text_preflight_and_download_url(
     file_ctx: tuple[ToolContext, Path],
+    db: None,
 ) -> None:
     ctx, _ = file_ctx
+    await _seed_turn_rows(ctx.turn)
     body = b"the produced report\n"
     await ctx.sandbox.write_file("report.txt", body)
     result = await _run("share_file", ctx, file_path="report.txt")
@@ -337,8 +390,10 @@ async def test_share_file_text_preflight_and_download_url(
 
 async def test_share_file_confines_a_traversal_name(
     file_ctx: tuple[ToolContext, Path],
+    db: None,
 ) -> None:
     ctx, _ = file_ctx
+    await _seed_turn_rows(ctx.turn)
     await ctx.sandbox.write_file("report.txt", b"data")
     result = await _run("share_file", ctx, file_path="report.txt", name="../../conversations/x")
     token = json.loads(result.content[0].text)["url"].split("token=", 1)[1]

@@ -126,6 +126,7 @@ Manifest registers (each optional):
 | `hooks` | Turn-lifecycle policy filters — `pre_tool_use`/`post_tool_use`/`on_inbound` handlers, scoped like a job, that observe, deny, modify, or inject over the tools grants already admit; a runtime filter on top of grants, never a second grant path. Distinct axis from `triggers` (data-plane). |
 | `jobs` | Recurring/one-time background work. |
 | `routes` | HTTP endpoints under `/ext/<name>/` (webhooks, OAuth callbacks, plugin UIs). |
+| `surfaces` | A chat surface on the privileged surface seam: an ingest mounted at `/surface/<name>` plus two-phase writeback delivery (`post` then `attach`). Slack is one. |
 | `credentials` | Named BYOK slots the workspace must fill (drives onboarding). |
 | `onboarding` | Steps contributed to the workspace/pack onboarding flow. |
 | `packs` | Bundled skill packs. |
@@ -151,13 +152,31 @@ the CLI (and, when granted, an agent in chat) searches and installs from: `selfh
 install / remove`. Installs pin version + digest and are recorded in the bundle lockfile; with the
 store disabled, a deploy runs only what its bundle ships.
 
-## Surfaces (core)
+## Surfaces
 
-| Surface | Identity | Conversation key |
-|---|---|---|
-| Slackbot | Slack user → linked member | channel:thread_ts (shared) |
-| CLI | member token | session (private) |
-| Web | web session → member | session (private) |
+Core owns the **surface seam**, not every surface. A surface is trusted infrastructure — it asserts
+a member's identity and admits turns as that member — so its `SurfaceContext` is deliberately
+privileged (distinct from the scoped extension context): the three capabilities are (1) **admit** an
+inbound message onto the durable turn queue (the one `invoke` boundary scheduled tasks and the eval
+harness also call, so the spend cap is evaluated once), (2) **identity** resolution — an external id
+→ member + conversation, provisioning and linking a `surface_identity` on first contact, (3) durable
+**writeback** — a `WritebackPoller` delivers the terminal reply at-least-once (the hub is lossy),
+with attachments and rich rendering. Delivery is two-phase: `post` returns the reply's durable
+reference (recorded before any upload), then `attach` streams the turn's shared files into that
+reply. An extension registers a `surfaces` Manifest point; core mounts its ingest at
+`/surface/<name>` and drives the poller.
+
+| Surface | Home | Identity | Conversation key |
+|---|---|---|---|
+| CLI | core | member token | session (private) |
+| Web | core | web session → member | session (private) |
+| Slackbot | `extensions/slack` | Slack user → linked member | channel:thread_ts (shared) |
+
+Two-way attachments stream end to end, never buffering a whole file: an inbound Slack file streams
+from `url_private` into the conversation's workspace before the turn runs; a shared file
+(`share_file` → a `shared_artifact` record) streams from the blob store to Slack's chunked
+external-upload API, into the posted reply's thread. `surface_identity` and `conversation.surface`
+are open namespaces validated by surface registration, not a fixed enum.
 
 Onboarding flow engine is core (steps are contributed by extensions/packs); first-run creates the
 workspace and its first `owner`.
@@ -247,6 +266,7 @@ bundle installs OSS, on-prem, or hosted.
 | Extension | Points it exercises |
 |---|---|
 | OpenRouter (any model router) | models |
+| Slack surface (ingest + writeback + attachments) | surfaces, credentials |
 | Composio connectors | connectors, credentials, routes (OAuth) |
 | E2B | carriers |
 | Redis stream hub | hubs |

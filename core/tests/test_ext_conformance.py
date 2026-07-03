@@ -7,7 +7,8 @@ sample's own recorded rows back through `ScopedStore`. The negative cases ride a
 slot is refused, and a second workspace can reach none of the first's rows. Breaking the sample
 breaks this probe, and a Manifest field the sample stops registering breaks the conformance gate."""
 
-from dataclasses import dataclass, fields
+import json
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -30,6 +31,7 @@ from selfhost.ext.context import (
 )
 from selfhost.ext.loader import load_manifests, turn_subagents, turn_tools
 from selfhost.ext.manifest import Manifest
+from selfhost.ext.surface import WRITEBACK_DELIVERED, WRITEBACK_PENDING, workspace_key
 from selfhost.governance import prompt_digest
 from selfhost.grants import GrantStore
 from selfhost.jobs import JobRunner, bindings_from
@@ -42,7 +44,7 @@ from selfhost.sandbox.proxy.rules import InjectionRule, MeterRule, derive_creden
 from selfhost.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from selfhost.schema import tables
 from selfhost.schema.records import Agent, Turn
-from selfhost.serve import _mount_ext_routes
+from selfhost.serve import _mount_ext_routes, _mount_surfaces
 from selfhost.tools.context import SpawnResult, ToolContext
 from selfhost.transcript import Conversation, transcript_key
 
@@ -172,6 +174,7 @@ async def test_sample_is_discovered_via_its_entry_point() -> None:
     } == {sample.CONNECTOR_TOOL_NAME}
     assert {section.name for section in manifest.prompt_sections} == {sample.SECTION_NAME}
     assert {profile.name for profile in manifest.subagents} == {sample.SUBAGENT_NAME}
+    assert {surface.name for surface in manifest.surfaces} == {sample.SURFACE_NAME}
 
 
 def test_pack_prompt_section_reaches_the_rendered_system_prompt() -> None:
@@ -540,3 +543,127 @@ async def test_a_corrupt_transcript_is_skipped_not_aborting_the_corpus(
     trajectories = await context.trajectories()
     assert len(trajectories) == 1
     assert trajectories[0].agent_id == good_agent
+
+
+@dataclass
+class _StubDbos:
+    enqueued: list[str] = field(default_factory=list)
+
+    async def enqueue_async(self, options: object, workflow_id: str) -> None:
+        self.enqueued.append(workflow_id)
+
+
+async def _surface_workspace() -> tuple[UUID, UUID, str]:
+    workspace_id, member_id, agent_id = uuid4(), uuid4(), uuid4()
+    email = "member@x.test"
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email=email,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="assistant",
+                prompt="p",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return workspace_id, member_id, email
+
+
+async def test_sample_surface_admits_links_streams_and_delivers(db: None, tmp_path: Path) -> None:
+    """The surface seam end to end through the probe: an inbound event admits a turn, links a
+    surface identity, and streams an inbound file into the workspace; then the writeback poller
+    delivers the terminal turn and streams a shared file back out — every step read through the
+    durable rows and blobs core wrote, never a mock."""
+    workspace_id, member_id, email = await _surface_workspace()
+    manifest = _sample_manifest()
+    blob = FilesystemBlobStore(root=tmp_path)
+    dbos = _StubDbos()
+    app = FastAPI()
+    _mount_surfaces(app, (manifest,), workspace_id, _credential_store(), blob, dbos)
+    body = json.dumps(
+        {"external_id": "ext-1", "email": email, "message": "hello", "inbound_text": "note!"}
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://surface") as client:
+        response = await client.post(f"/surface/{sample.SURFACE_NAME}", content=body)
+    assert response.status_code == 200
+    turn_id = UUID(response.json()["turn_id"])
+    conversation_id = UUID(response.json()["conversation_id"])
+
+    assert dbos.enqueued == [str(turn_id)]
+    async with workspace_tx() as connection:
+        turn = (
+            await connection.execute(
+                sa.select(tables.turn.c.status, tables.turn.c.inbound).where(
+                    tables.turn.c.id == turn_id
+                )
+            )
+        ).one()
+        linked = (
+            await connection.execute(
+                sa.select(tables.surface_identity.c.member_id).where(
+                    tables.surface_identity.c.surface == sample.SURFACE_NAME,
+                    tables.surface_identity.c.external_id == "ext-1",
+                )
+            )
+        ).one()
+        writeback_status = (
+            await connection.execute(
+                sa.select(tables.writeback.c.status).where(tables.writeback.c.turn_id == turn_id)
+            )
+        ).scalar_one()
+    assert turn.status == "queued"
+    assert "note!" in turn.inbound or turn.inbound == "hello"
+    assert linked.member_id == member_id
+    assert writeback_status == WRITEBACK_PENDING
+    inbound = await blob.get(workspace_key(conversation_id, sample.SURFACE_INBOX_REL))
+    assert inbound == b"note!"
+
+    await blob.put("artifacts/z/out.txt", b"shared-bytes")
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == turn_id)
+            .values(status="done", terminal={"status": "done", "text": "done!"})
+        )
+        await connection.execute(
+            sa.insert(tables.shared_artifact).values(
+                turn_id=turn_id,
+                blob_key="artifacts/z/out.txt",
+                workspace_id=workspace_id,
+                filename="out.txt",
+                subject=None,
+                media_type="text/plain",
+                size_bytes=12,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    await app.state.writeback_poller.drain()
+    async with workspace_tx() as connection:
+        delivered = (
+            await connection.execute(
+                sa.select(tables.writeback.c.status, tables.writeback.c.reply_ref).where(
+                    tables.writeback.c.turn_id == turn_id
+                )
+            )
+        ).one()
+    assert delivered.status == WRITEBACK_DELIVERED
+    assert delivered.reply_ref == sample.SURFACE_POST_REF
+    round_tripped = await blob.get(f"{sample.SURFACE_DELIVERED_PREFIX}/{turn_id}/out.txt")
+    assert round_tripped == b"shared-bytes"

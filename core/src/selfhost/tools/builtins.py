@@ -18,12 +18,14 @@ next message — no out-of-band prompt. `load_skill` mounts a skill's `SKILL.md`
 workspace and returns its workflow instructions."""
 
 import json
+import mimetypes
 import shlex
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import Any
 from uuid import uuid4
 
+import sqlalchemy as sa
 from pydantic import BaseModel, Field
 
 from selfhost.artifact_token import (
@@ -31,9 +33,11 @@ from selfhost.artifact_token import (
     ARTIFACT_TOKEN_TTL_SECONDS,
     mint_artifact_token,
 )
+from selfhost.db import workspace_tx
 from selfhost.grants import installed_connect_flow
 from selfhost.memory.service import SHARED_SUBJECT, member_subject, recall_subjects
 from selfhost.sandbox.session import workspace_path
+from selfhost.schema import tables
 from selfhost.schema.records import FACT, ItemClass, MemoryWrite
 from selfhost.skills.runtime import mount_skill, skill_tree
 from selfhost.tools.context import TextContent, ToolContext, ToolResult
@@ -93,6 +97,7 @@ class EditInput(BaseModel):
 class ShareFileInput(BaseModel):
     file_path: str
     name: str | None = None
+    subject: str | None = None
 
 
 class SpawnSubagentInput(BaseModel):
@@ -218,11 +223,14 @@ async def edit_handler(ctx: ToolContext, args: EditInput) -> ToolResult:
 
 
 async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResult:
-    """Stream a produced workspace file into the artifact store under `artifacts/<uuid>/<name>` and
-    mint a TTL download token the web surface serves — the only path a produced file leaves the
-    sandbox. A preflight in the container streams the file to derive its size and sha256 without
-    loading it whole; the carrier then copies it out of the workspace mount into the blob store the
-    same way, so any file type and size shares without a read cap or a whole-file host buffer."""
+    """Stream a produced workspace file into the artifact store under `artifacts/<uuid>/<name>`,
+    record it as a shared_artifact of this turn, and mint a TTL download token the web surface
+    serves — the only path a produced file leaves the sandbox. A preflight in the container streams
+    the file to derive its size and sha256 without loading it whole; the carrier then copies it out
+    of the workspace mount into the blob store the same way, so any file type and size shares
+    without a read cap or a whole-file host buffer. The shared_artifact record is what an async
+    surface (Slack) reads to upload the file into the turn's posted reply; `subject` is an optional
+    caption — absent, the file renders under its plain name."""
     if not ctx.artifact_token_secret:
         raise RuntimeError("artifact sharing is not configured (no artifact token secret set)")
     scoped = workspace_path(args.file_path)
@@ -237,6 +245,21 @@ async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResu
     safe_name = basename if basename not in ("", ".", "..") else ARTIFACT_FALLBACK_NAME
     key = f"{ARTIFACT_KEY_PREFIX}{uuid4()}/{safe_name}"
     await ctx.sandbox.export_file(args.file_path, ctx.blob, key)
+    media_type = mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.shared_artifact).values(
+                turn_id=ctx.turn.id,
+                blob_key=key,
+                workspace_id=ctx.turn.workspace_id,
+                filename=safe_name,
+                subject=args.subject,
+                media_type=media_type,
+                size_bytes=stat["size"],
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
     expires_at = int(datetime.now(UTC).timestamp()) + ARTIFACT_TOKEN_TTL_SECONDS
     token = mint_artifact_token(ctx.artifact_token_secret, key, safe_name, expires_at)
     return ToolResult(
@@ -384,7 +407,8 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
             "called. The file must be under the /workspace directory. Any file type and size works "
             "(reports, code, csv, json, images, PDFs, large archives); it is streamed out, never "
             "read whole into memory. `name` sets the download name; any directory components in it "
-            "are stripped."
+            "are stripped. `subject` is an optional caption shown when a chat surface posts the "
+            "file."
         ),
         input_model=ShareFileInput,
         handler=share_file_handler,

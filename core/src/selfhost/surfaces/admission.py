@@ -141,16 +141,20 @@ class Admission:
 class AdmissionInvoker:
     """The admit-turn seam bound to one workspace: a background handler that holds it (through its
     ExtensionContext) invokes a turn for a conversation's agent without knowing the workspace or
-    reaching admission's internals — it delegates to the one shared producer, so a scheduled fire is
-    admitted, spend-checked, and deduped by the same path every surface uses. Structurally a
-    `TurnInvoker`; the composition root binds the workspace and hands it down."""
+    reaching admission's internals — it delegates to the one shared producer, so a surface, a job,
+    or an extension `invoke` all admit through the one boundary that evaluates the spend cap.
+    Structurally a `TurnInvoker`; the composition root binds the workspace and hands it down."""
 
     admission: Admission
     workspace_id: UUID
 
     async def invoke(
-        self, conversation_id: UUID, agent_id: UUID, message: str, idempotency_key: str
+        self,
+        conversation_id: UUID,
+        agent_id: UUID,
+        message: str,
+        idempotency_key: str | None = None,
     ) -> UUID:
         return await self.admission.admit(
-            self.workspace_id, conversation_id, agent_id, message, idempotency_key
+            self.workspace_id, conversation_id, agent_id, message, idempotency_key=idempotency_key
         )

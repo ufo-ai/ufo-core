@@ -16,6 +16,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from selfhost.ext.context import ExtensionContext
+from selfhost.ext.surface import SurfaceSpec
 from selfhost.grants import OAuthProvider
 from selfhost.schema.records import Agent, Turn
 from selfhost.tools.registry import ToolDef
@@ -222,3 +223,4 @@ class Manifest:
     hooks: tuple[HookSpec, ...] = ()
     prompt_sections: tuple[PromptSection, ...] = ()
     subagents: tuple[SubagentProfile, ...] = ()
+    surfaces: tuple[SurfaceSpec, ...] = ()

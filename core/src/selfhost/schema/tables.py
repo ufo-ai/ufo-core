@@ -32,7 +32,6 @@ surface_identity = sa.Table(
     sa.Column("external_id", sa.Text, primary_key=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-    sa.CheckConstraint("surface in ('cli', 'slack', 'web')", name="surface_identity_surface"),
 )
 
 agent = sa.Table(
@@ -59,9 +58,6 @@ conversation = sa.Table(
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint("surface", "queue_key"),
-    sa.CheckConstraint(
-        "surface in ('cli', 'subagent', 'slack', 'web')", name="conversation_surface"
-    ),
 )
 
 turn = sa.Table(
@@ -222,6 +218,21 @@ writeback = sa.Table(
     sa.CheckConstraint(
         "status in ('pending', 'claimed', 'delivered', 'failed')", name="writeback_status"
     ),
+)
+
+shared_artifact = sa.Table(
+    "shared_artifact",
+    metadata,
+    sa.Column("turn_id", sa.Uuid, sa.ForeignKey("turn.id"), primary_key=True),
+    sa.Column("blob_key", sa.Text, primary_key=True),
+    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
+    sa.Column("filename", sa.Text, nullable=False),
+    sa.Column("subject", sa.Text, nullable=True),
+    sa.Column("media_type", sa.Text, nullable=False),
+    sa.Column("size_bytes", sa.BigInteger, nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint("size_bytes >= 0", name="shared_artifact_size"),
 )
 
 ext_store = sa.Table(
