@@ -11,6 +11,7 @@ from selfhost.accounting import read_turn_cost, record_turn_usage
 from selfhost.blob import BlobStore
 from selfhost.db import workspace_tx
 from selfhost.hub import Hub, Terminal
+from selfhost.loop.compaction import Compaction
 from selfhost.loop.transcript import Conversation, Transcript
 from selfhost.models.interface import (
     Message,
@@ -61,6 +62,7 @@ class TurnEngine:
     agent: Agent
     model: ModelClient
     transcript: Transcript
+    compaction: Compaction
     hub: Hub
     sandbox: SandboxSession
     tools: ToolRegistry
@@ -78,8 +80,12 @@ class TurnEngine:
                 if not await self._mark_running():
                     await self._persist_inbound()
                     return await self._publish_existing_terminal()
+                messages, compaction_usage = await self.compaction.maybe_compact(
+                    await self._load_messages()
+                )
+                usage_events.extend(compaction_usage)
                 final_messages, answer = await self._model_round(
-                    context, await self._load_messages(), usage_events
+                    context, messages, usage_events
                 )
                 frame = await self._commit("done", usage_events, answer=answer)
                 if frame.status == "done":

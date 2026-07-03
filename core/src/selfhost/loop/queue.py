@@ -12,6 +12,7 @@ from selfhost.blob import BlobStore, FilesystemBlobStore
 from selfhost.config import Config
 from selfhost.db import workspace_tx
 from selfhost.hub import Hub, Terminal
+from selfhost.loop.compaction import Compaction
 from selfhost.loop.engine import TurnEngine
 from selfhost.loop.transcript import Transcript
 from selfhost.models.anthropic import AnthropicClient, anthropic_sdk_client
@@ -77,6 +78,7 @@ async def _execute_turn(turn_id: str) -> str:
         raise RuntimeError("runtime not initialized (init_runtime runs in serve)")
     try:
         turn, agent = await _load_turn(UUID(turn_id))
+        model = _model_client(agent.model, runtime.config)
         handle = await runtime.carrier.create(
             SandboxSpec(
                 conversation_id=turn.conversation_id,
@@ -88,8 +90,14 @@ async def _execute_turn(turn_id: str) -> str:
         engine = TurnEngine(
             turn=turn,
             agent=agent,
-            model=_model_client(agent.model, runtime.config),
+            model=model,
             transcript=Transcript(blob=runtime.blob, conversation_id=turn.conversation_id),
+            compaction=Compaction(
+                client=model,
+                model=agent.model,
+                blob=runtime.blob,
+                conversation_id=turn.conversation_id,
+            ),
             hub=runtime.hub,
             sandbox=SandboxSession(carrier=runtime.carrier, handle=handle),
             tools=BUILTIN_REGISTRY,

@@ -53,9 +53,9 @@ attribution + price-digest audit columns.
 class BlobStore(Protocol):        # put/get/exists landed U1
     def workspace_mount(self, conversation_id: UUID) -> MountSpec: ...   # reaches ONLY .../workspace/
 ```
-Key layout still to land: `conversations/<cid>/compactions/<n>/{before,after}.json.lz4` (U5),
-`conversations/<cid>/workspace/**` (U2), `artifacts/<digest>` (U5). `MountSpec`: bind mount on
-filesystem, sandbox-fs cred scoped to the `workspace/` prefix on S3.
+Key layout still to land: `conversations/<cid>/workspace/**` (U2), `artifacts/<digest>` (U5).
+`conversations/<cid>/compactions/<n>/{before,after}.json.lz4` (U5) has landed. `MountSpec`: bind
+mount on filesystem, sandbox-fs cred scoped to the `workspace/` prefix on S3.
 
 ## hub.py (later-unit remainder)
 

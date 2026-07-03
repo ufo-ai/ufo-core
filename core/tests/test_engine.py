@@ -8,6 +8,7 @@ import sqlalchemy as sa
 from selfhost.blob import FilesystemBlobStore
 from selfhost.db import workspace_tx
 from selfhost.hub import InProcessHub
+from selfhost.loop.compaction import COMPACTED_CONTEXT_PREFIX, Compaction
 from selfhost.loop.engine import TurnEngine
 from selfhost.loop.transcript import Conversation, Transcript
 from selfhost.models.interface import (
@@ -104,7 +105,7 @@ class RecordingCarrier:
     async def destroy(self, handle: SandboxHandle) -> None: ...
 
 
-async def _seed_turn(status: str, terminal: TerminalFrame | None) -> Turn:
+async def _seed_turn(status: str, terminal: TerminalFrame | None, seq: int = 1) -> Turn:
     workspace_id, member_id, agent_id, conversation_id, turn_id = (uuid4() for _ in range(5))
     async with workspace_tx() as connection:
         await connection.execute(
@@ -149,7 +150,7 @@ async def _seed_turn(status: str, terminal: TerminalFrame | None) -> Turn:
                 workspace_id=workspace_id,
                 conversation_id=conversation_id,
                 agent_id=agent_id,
-                seq=1,
+                seq=seq,
                 status=status,
                 inbound="hi",
                 terminal=None if terminal is None else terminal.model_dump(mode="json"),
@@ -162,7 +163,7 @@ async def _seed_turn(status: str, terminal: TerminalFrame | None) -> Turn:
         workspace_id=workspace_id,
         conversation_id=conversation_id,
         agent_id=agent_id,
-        seq=1,
+        seq=seq,
         status=status,
         inbound="hi",
         terminal=terminal,
@@ -170,7 +171,11 @@ async def _seed_turn(status: str, terminal: TerminalFrame | None) -> Turn:
 
 
 def _engine(
-    turn: Turn, model: object, tmp_path: Path, carrier: RecordingCarrier | None = None
+    turn: Turn,
+    model: object,
+    tmp_path: Path,
+    carrier: RecordingCarrier | None = None,
+    compaction: Compaction | None = None,
 ) -> TurnEngine:
     carrier = carrier or RecordingCarrier()
     blob = FilesystemBlobStore(root=tmp_path)
@@ -180,6 +185,10 @@ def _engine(
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         model=model,
         transcript=Transcript(blob=blob, conversation_id=turn.conversation_id),
+        compaction=compaction
+        or Compaction(
+            client=model, model="claude-opus-4-8", blob=blob, conversation_id=turn.conversation_id
+        ),
         hub=InProcessHub(),
         sandbox=SandboxSession(carrier=carrier, handle=handle),
         tools=ToolRegistry(BUILTIN_TOOLS),
@@ -231,6 +240,45 @@ async def test_tool_call_round_dispatches_in_sandbox_then_answers(
     assert isinstance(tool_result, tuple) and isinstance(tool_result[0], ToolResultBlock)
     assert "hi" in tool_result[0].content
     assert stored.messages[-1] == Message(role="assistant", content="done")
+
+
+async def test_engine_compacts_history_before_the_round_and_bills_the_summary(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None, seq=2)
+    blob = FilesystemBlobStore(root=tmp_path)
+    transcript = Transcript(blob=blob, conversation_id=turn.conversation_id)
+    await transcript.write(
+        Conversation(
+            seq=1,
+            messages=tuple(
+                Message(
+                    role="user" if index % 2 == 0 else "assistant",
+                    content=f"history {index} " + "y" * 80,
+                )
+                for index in range(6)
+            ),
+        )
+    )
+    compaction = Compaction(
+        client=EchoModel(),
+        model="claude-opus-4-8",
+        blob=blob,
+        conversation_id=turn.conversation_id,
+        trigger_tokens=10,
+        keep_messages=2,
+    )
+    engine = _engine(turn, EchoModel(), tmp_path, compaction=compaction)
+    frame = await engine.run()
+    assert frame.status == "done"
+    assert frame.tokens == 20
+    stored = await transcript.read()
+    assert stored is not None and stored.seq == 2
+    assert isinstance(stored.messages[0].content, str)
+    assert stored.messages[0].content.startswith(COMPACTED_CONTEXT_PREFIX)
+    record = await compaction.read_record(1)
+    assert record is not None
+    assert any("history 0" in str(message.content) for message in record.before)
 
 
 async def test_cancel_winning_mid_round_keeps_cancelled_terminal_bills_and_preserves_inbound(
