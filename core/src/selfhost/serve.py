@@ -36,6 +36,7 @@ from selfhost.memory.service import MemoryService
 from selfhost.memory.sources import FOLDER_BACKEND, FolderSource, SyncDriver, register_sources
 from selfhost.models.openai import openai_sdk_client
 from selfhost.o11y import init_o11y, log
+from selfhost.runtime_instance import BootGuard, Heartbeat
 from selfhost.sandbox.carrier import DockerCarrier
 from selfhost.sandbox.proxy.rules import (
     Rule,
@@ -65,6 +66,9 @@ def run() -> None:
     asyncio.run(_require_bootstrap())
     manifests = load_manifests()
     workspace_id = asyncio.run(_sole_workspace_id())
+    instance_id = uuid4()
+    guard = BootGuard(config=config, workspace_id=workspace_id, instance_id=instance_id)
+    asyncio.run(guard.admit())
     key = os.environ.get(config.credentials.key_env)
     credentials = CredentialStore(fernet=Fernet(key.encode())) if key else None
     validate_ext_tools(manifests, workspace_id, credentials)
@@ -112,9 +116,11 @@ def run() -> None:
     )
     DBOS.launch()
     _launch_jobs(config, indexer, page_indexer, sync_driver, memory, dbos_client)
-    app = FastAPI(lifespan=_writeback_lifespan)
+    app = FastAPI(lifespan=_serve_lifespan)
     app.state.hub = hub
     app.state.dbos = dbos_client
+    app.state.instance_id = instance_id
+    app.state.workspace_id = workspace_id
     app.state.writeback_poller = None
     app.include_router(router)
     _mount_ext_routes(app, manifests, workspace_id, credentials, memory)
@@ -264,16 +270,22 @@ def _mount_web_surface(
 
 
 @asynccontextmanager
-async def _writeback_lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Run the Slack writeback poller for the life of the process when the surface is enabled — the
-    durable half of Slack delivery, off the hub and off the turn loop."""
+async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Run this instance's background loops for the life of the process: the heartbeat that keeps
+    its runtime_instance row live — and retires it on graceful shutdown so peers see the seat free
+    at once — and, when Slack is enabled, the writeback poller, the durable half of Slack delivery
+    off the hub and off the turn loop."""
+    heartbeat = Heartbeat(instance_id=app.state.instance_id, workspace_id=app.state.workspace_id)
+    tasks = [asyncio.create_task(heartbeat.run())]
     poller = app.state.writeback_poller
-    task = None if poller is None else asyncio.create_task(poller.run())
+    if poller is not None:
+        tasks.append(asyncio.create_task(poller.run()))
     try:
         yield
     finally:
-        if task is not None:
+        for task in tasks:
             task.cancel()
+        await heartbeat.retire()
 
 
 def _egress_proxy(resolver: PerAgentRules) -> ProxyEndpoint:

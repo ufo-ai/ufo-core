@@ -234,6 +234,19 @@ ext_store = sa.Table(
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
 )
 
+runtime_instance = sa.Table(
+    "runtime_instance",
+    metadata,
+    sa.Column("id", sa.Uuid, primary_key=True),
+    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
+    sa.Column("started_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("heartbeat_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("fingerprint", sa.Text, nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Index("runtime_instance_live", "workspace_id", "heartbeat_at"),
+)
+
 source = sa.Table(
     "source",
     metadata,

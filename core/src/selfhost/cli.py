@@ -1,4 +1,4 @@
-"""The selfhost CLI: init, serve, chat."""
+"""The selfhost CLI: init, serve, chat, ext, bundle."""
 
 import asyncio
 import hashlib
@@ -15,10 +15,12 @@ import sqlalchemy as sa
 from cryptography.fernet import Fernet
 
 from selfhost.accounting import SpendReport, SpendRollup
-from selfhost.config import Config, load_config
+from selfhost.bundle import Bundle
+from selfhost.config import Config, config_path, load_config
 from selfhost.credentials import CredentialStore
 from selfhost.db import apply_migrations, dispose_db, init_db, workspace_tx
-from selfhost.ext.loader import load_manifests
+from selfhost.ext.loader import load_manifests, lockfile_path
+from selfhost.ext.store import ExtensionStore, read_catalog
 from selfhost.grants import GrantSummary, grant_summaries
 from selfhost.onboarding import AlreadyInitialized, Onboarded, Onboarding
 from selfhost.schema import tables
@@ -437,3 +439,71 @@ async def _read_grants(config: Config) -> tuple[GrantSummary, ...]:
         return await grant_summaries(workspace_id)
     finally:
         await dispose_db()
+
+
+@main.group()
+def ext() -> None:
+    """Search the extension store and pin installs into the deploy's lockfile."""
+
+
+def _store(config: Config) -> ExtensionStore:
+    if config.ext.store is None:
+        raise click.ClickException("extension store not enabled (set [ext].store in selfhost.toml)")
+    return ExtensionStore(catalog=read_catalog(config.ext.store), lockfile=lockfile_path())
+
+
+@ext.command(name="search")
+@click.argument("query", default="")
+def ext_search(query: str) -> None:
+    """List the extensions the store offers, marking installed and bundle-only ones."""
+    listings = _store(load_config()).search(query)
+    if not listings:
+        click.echo("no matching extensions")
+        return
+    for listing in listings:
+        if listing.installed:
+            state = "installed"
+        elif listing.disabled:
+            state = "bundle-only"
+        else:
+            state = "available"
+        click.echo(f"{listing.name:<24}{listing.version:<12}{state}")
+
+
+@ext.command(name="install")
+@click.argument("name")
+def ext_install(name: str) -> None:
+    """Pin an extension from the store into the lockfile; the next serve loads it."""
+    try:
+        pin = _store(load_config()).install(name)
+    except (ValueError, RuntimeError) as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(f"installed {pin.name} {pin.version} ({pin.digest})")
+
+
+@ext.command(name="remove")
+@click.argument("name")
+def ext_remove(name: str) -> None:
+    """Drop an extension from the lockfile; the next serve stops loading it."""
+    try:
+        _store(load_config()).remove(name)
+    except (ValueError, RuntimeError) as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(f"removed {name}")
+
+
+DEFAULT_BUNDLE_DIR = Path("bundle")
+
+
+@main.command()
+@click.option(
+    "--out", type=click.Path(path_type=Path), default=DEFAULT_BUNDLE_DIR, show_default=True
+)
+def bundle(out: Path) -> None:
+    """Freeze this deploy into a runnable artifact: OCI image recipe, pinned config, lockfile."""
+    config = load_config()
+    catalog = read_catalog(config.ext.store) if config.ext.store is not None else None
+    result = Bundle(config_path=config_path(), catalog=catalog, out=out).build()
+    click.echo(f"bundle at {result.out} — {len(result.pins)} extension(s) pinned")
+    for pin in result.pins:
+        click.echo(f"  {pin.name} {pin.version} {pin.digest}")
