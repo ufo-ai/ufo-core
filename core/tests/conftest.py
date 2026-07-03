@@ -1,15 +1,18 @@
 import asyncio
 import os
 import socket
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 
 import asyncpg
 import pytest
 import sqlalchemy as sa
+from dbos import DBOS
 from sqlalchemy.engine import make_url
 
+from selfhost.config import BlobConfig, Config, DatabaseConfig
 from selfhost.db import apply_migrations, dispose_db, init_db, workspace_tx
 from selfhost.schema import tables
+from selfhost.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION
 
 POSTGRES_TEST_URL = os.environ.get(
     "SELFHOST_TEST_POSTGRES_URL",
@@ -22,6 +25,7 @@ DELETE_ORDER = (
     tables.conversation,
     tables.surface_identity,
     tables.agent,
+    tables.ext_store,
     tables.credential,
     tables.member,
     tables.workspace,
@@ -70,3 +74,30 @@ async def db(database_url: str) -> AsyncIterator[None]:
             await connection.execute(sa.delete(table))
     yield
     await dispose_db()
+
+
+@pytest.fixture(scope="session")
+def dbos_launched(
+    database_url: str, tmp_path_factory: pytest.TempPathFactory
+) -> Iterator[Config]:
+    """The one DBOS instance per session: DBOS is a process singleton that cannot launch twice, so
+    every DBOS-driving test module shares this launch."""
+    config = Config(
+        database=DatabaseConfig(url=database_url),
+        blob=BlobConfig(backend="filesystem", root=tmp_path_factory.mktemp("blobs")),
+    )
+    system_url = config.database.system_url
+    if system_url.startswith("postgresql"):
+        asyncio.run(reset_postgres_database(make_url(system_url).database))
+    DBOS(
+        config={
+            "name": DBOS_APP_NAME,
+            "application_version": DBOS_APP_VERSION,
+            "system_database_url": system_url,
+            "run_admin_server": False,
+            "scheduler_polling_interval_sec": 1.0,
+        }
+    )
+    DBOS.launch()
+    yield config
+    DBOS.destroy()

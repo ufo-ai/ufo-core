@@ -4,7 +4,10 @@ An extension's entry point returns a Manifest — a frozen bundle of declared po
 and derives from, never a registration API it calls. The Manifest grows unit by unit: each declared
 point lands beside the consumer that gives it meaning, never before it."""
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+
+from selfhost.ext.context import ExtensionContext
 
 
 @dataclass(frozen=True)
@@ -29,9 +32,21 @@ class CredentialSlot:
 
 
 @dataclass(frozen=True)
+class JobSpec:
+    """Recurring or one-shot background work. `schedule` is a cron string (6 fields, seconds first)
+    for recurring jobs, or None to fire once at boot; `handler` runs with the extension's scoped
+    ExtensionContext, never a raw handle."""
+
+    name: str
+    schedule: str | None
+    handler: Callable[[ExtensionContext], Awaitable[None]]
+
+
+@dataclass(frozen=True)
 class Manifest:
     """What one extension declares, returned by its `selfhost.extension` entry point."""
 
     name: str
     version: str
     credentials: tuple[CredentialSlot, ...] = ()
+    jobs: tuple[JobSpec, ...] = ()

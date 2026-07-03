@@ -8,15 +8,13 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
-from conftest import reset_postgres_database
-from dbos import DBOS, DBOSClient
+from dbos import DBOSClient
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from pydantic import BaseModel
-from sqlalchemy.engine import make_url
 
 from selfhost.blob import FilesystemBlobStore
-from selfhost.config import BlobConfig, Config, DatabaseConfig
+from selfhost.config import Config
 from selfhost.db import workspace_tx
 from selfhost.hub import InProcessHub
 from selfhost.loop import queue as loop_queue
@@ -33,7 +31,7 @@ from selfhost.models.interface import (
 )
 from selfhost.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
 from selfhost.schema import tables
-from selfhost.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION, TerminalFrame, Usage
+from selfhost.schema.records import TerminalFrame, Usage
 from selfhost.surfaces.cli import router
 
 STREAM_TIMEOUT_SECONDS = 30
@@ -111,20 +109,13 @@ class StandInCarrier:
 
 @pytest.fixture(scope="session")
 def dbos_runtime(
-    database_url: str, tmp_path_factory: pytest.TempPathFactory
+    dbos_launched: Config,
 ) -> Iterator[tuple[Config, InProcessHub, FilesystemBlobStore]]:
-    blob_root = tmp_path_factory.mktemp("blobs")
-    config = Config(
-        database=DatabaseConfig(url=database_url),
-        blob=BlobConfig(backend="filesystem", root=blob_root),
-    )
-    system_url = config.database.system_url
-    if system_url.startswith("postgresql"):
-        asyncio.run(reset_postgres_database(make_url(system_url).database))
+    config = dbos_launched
     hub = InProcessHub()
-    blob = FilesystemBlobStore(root=blob_root)
+    blob = FilesystemBlobStore(root=config.blob.root)
     proxy = ProxyEndpoint(port=0, ca_cert="test-ca")
-    dbos_client = DBOSClient(system_database_url=system_url)
+    dbos_client = DBOSClient(system_database_url=config.database.system_url)
     loop_queue.init_runtime(
         loop_queue.Runtime(
             config=config,
@@ -136,17 +127,7 @@ def dbos_runtime(
             subagents=SubagentRegistry((ROUNDTRIP_PROFILE,)),
         )
     )
-    DBOS(
-        config={
-            "name": DBOS_APP_NAME,
-            "application_version": DBOS_APP_VERSION,
-            "system_database_url": system_url,
-            "run_admin_server": False,
-        }
-    )
-    DBOS.launch()
     yield config, hub, blob
-    DBOS.destroy()
     dbos_client.destroy()
     loop_queue._runtime = None
 

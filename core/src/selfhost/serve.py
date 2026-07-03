@@ -3,6 +3,7 @@
 import asyncio
 import os
 import threading
+from uuid import UUID
 
 import sqlalchemy as sa
 import uvicorn
@@ -16,6 +17,7 @@ from selfhost.credentials import CredentialStore
 from selfhost.db import init_db, workspace_tx
 from selfhost.ext.loader import load_manifests
 from selfhost.hub import InProcessHub
+from selfhost.jobs import CORE_JOBS, JobRunner, bindings_from
 from selfhost.loop.queue import Runtime, init_runtime
 from selfhost.loop.subagents import SubagentRegistry
 from selfhost.o11y import init_o11y, log
@@ -62,6 +64,7 @@ def run() -> None:
         }
     )
     DBOS.launch()
+    _launch_jobs(config)
     app = FastAPI()
     app.state.hub = hub
     app.state.dbos = dbos_client
@@ -81,6 +84,31 @@ async def _require_bootstrap() -> None:
         raise RuntimeError("schema missing — run `selfhost init` first") from error
     if row is None:
         raise RuntimeError("workspace missing — run `selfhost init` first")
+
+
+def _launch_jobs(config: Config) -> None:
+    """Register this workspace's jobs — core's own plus every installed extension's — as DBOS
+    schedules and one-shot enqueues, after launch so the system store is live. Registration is the
+    synchronous DBOS API (off the loop, at startup); a handler may read a declared credential, so
+    once any job is registered the credential key must be set."""
+    bindings = bindings_from(load_manifests(), CORE_JOBS)
+    if not bindings:
+        return
+    key = os.environ.get(config.credentials.key_env)
+    if not key:
+        raise RuntimeError(
+            f"credential key env {config.credentials.key_env!r} is unset but jobs are registered"
+        )
+    JobRunner(
+        workspace_id=asyncio.run(_sole_workspace_id()),
+        credential_store=CredentialStore(fernet=Fernet(key.encode())),
+        bindings=bindings,
+    ).launch()
+
+
+async def _sole_workspace_id() -> UUID:
+    async with workspace_tx() as connection:
+        return (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
 
 
 def _egress_proxy(rules: tuple[Rule, ...]) -> ProxyEndpoint:

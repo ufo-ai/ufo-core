@@ -131,3 +131,14 @@ proposal = sa.Table(
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.CheckConstraint("status in ('pending', 'approved', 'rejected')", name="proposal_status"),
 )
+
+ext_store = sa.Table(
+    "ext_store",
+    metadata,
+    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), primary_key=True),
+    sa.Column("extension", sa.Text, primary_key=True),
+    sa.Column("key", sa.Text, primary_key=True),
+    sa.Column("value", sa.JSON, nullable=True),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+)
