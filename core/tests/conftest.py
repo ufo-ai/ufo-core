@@ -21,6 +21,7 @@ DELETE_ORDER = (
     tables.conversation,
     tables.surface_identity,
     tables.agent,
+    tables.ext_store,
     tables.credential,
     tables.member,
     tables.workspace,
