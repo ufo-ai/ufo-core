@@ -1,0 +1,813 @@
+#!/usr/bin/env python3
+"""sbxfs — in-sandbox filesystem CLI (stdlib only, + ripgrep for grep).
+
+File work runs inside the sandbox and returns structured JSON, so the host never
+pulls whole files across the boundary to loop over them. Invoked as:
+
+    sbxfs <op> '<json-params>'
+
+ops: read, write, edit, grep, glob. Output is a single JSON object on stdout — the
+result on success, or {"error": "..."} (exit 1) on a handled failure. grep shells out
+to `rg --json` when ripgrep is on PATH and falls back to a stdlib walk with identical
+semantics otherwise; a .pdf read shells out to poppler-utils (pdfinfo/pdftotext/pdftoppm)
+to return extracted text plus page images, degrading to text-only when poppler is absent;
+everything else is pure stdlib.
+"""
+
+from __future__ import annotations
+
+import base64
+import fnmatch
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+READ_DEFAULT_LIMIT = 2000
+LINE_CHAR_CAP = 2000
+GREP_DEFAULT_HEAD = 100
+GREP_LINE_CHAR_CAP = 2000
+GLOB_MAX_RESULTS = 1000
+BINARY_SNIFF_BYTES = 8192
+IMAGE_MAX_BYTES = 5 * 1024 * 1024
+PDF_DEFAULT_MAX_PAGES = 20
+PDF_RENDER_DPI = 100
+PDF_QUALITY_REMINDER = (
+    "CRITICAL: Before sharing, carefully examine each page for quality issues "
+    "(e.g. overlapping text, hidden/cut-off text, text squished together). "
+    "These are common and must be fixed."
+)
+
+IMAGE_MEDIA_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+
+BINARY_EXTENSIONS = frozenset(
+    {
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".bmp",
+        ".ico",
+        ".webp",
+        ".tiff",
+        ".heic",
+        ".svgz",
+        ".pdf",
+        ".zip",
+        ".gz",
+        ".bz2",
+        ".xz",
+        ".7z",
+        ".tar",
+        ".rar",
+        ".jar",
+        ".war",
+        ".class",
+        ".pyc",
+        ".pyo",
+        ".so",
+        ".dylib",
+        ".dll",
+        ".exe",
+        ".o",
+        ".a",
+        ".obj",
+        ".bin",
+        ".dat",
+        ".db",
+        ".sqlite",
+        ".sqlite3",
+        ".mp3",
+        ".mp4",
+        ".m4a",
+        ".wav",
+        ".flac",
+        ".ogg",
+        ".avi",
+        ".mov",
+        ".mkv",
+        ".webm",
+        ".woff",
+        ".woff2",
+        ".ttf",
+        ".otf",
+        ".eot",
+        ".wasm",
+    }
+)
+
+TEXT_EXTENSIONS = frozenset(
+    {
+        ".txt",
+        ".md",
+        ".markdown",
+        ".rst",
+        ".py",
+        ".pyi",
+        ".ipynb",
+        ".js",
+        ".jsx",
+        ".ts",
+        ".tsx",
+        ".mjs",
+        ".cjs",
+        ".json",
+        ".jsonl",
+        ".yaml",
+        ".yml",
+        ".toml",
+        ".ini",
+        ".cfg",
+        ".conf",
+        ".env",
+        ".sh",
+        ".bash",
+        ".zsh",
+        ".fish",
+        ".ps1",
+        ".bat",
+        ".html",
+        ".htm",
+        ".xml",
+        ".css",
+        ".scss",
+        ".sass",
+        ".less",
+        ".c",
+        ".h",
+        ".cc",
+        ".cpp",
+        ".cxx",
+        ".hpp",
+        ".hh",
+        ".go",
+        ".rs",
+        ".java",
+        ".kt",
+        ".kts",
+        ".scala",
+        ".rb",
+        ".php",
+        ".pl",
+        ".pm",
+        ".lua",
+        ".r",
+        ".jl",
+        ".swift",
+        ".m",
+        ".mm",
+        ".cs",
+        ".fs",
+        ".clj",
+        ".cljs",
+        ".ex",
+        ".exs",
+        ".erl",
+        ".hs",
+        ".ml",
+        ".dart",
+        ".sql",
+        ".graphql",
+        ".gql",
+        ".proto",
+        ".tf",
+        ".tfvars",
+        ".dockerfile",
+        ".makefile",
+        ".mk",
+        ".gradle",
+        ".properties",
+        ".csv",
+        ".tsv",
+        ".log",
+        ".gitignore",
+        ".gitattributes",
+        ".editorconfig",
+        ".lock",
+    }
+)
+
+SKIP_DIRS = frozenset(
+    {
+        ".git",
+        "node_modules",
+        "__pycache__",
+        ".venv",
+        "venv",
+        "dist",
+        "build",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".pytest_cache",
+        ".tox",
+        ".cache",
+        ".next",
+        ".svelte-kit",
+        "target",
+        "vendor",
+    }
+)
+
+EDIT_SNIPPET_CONTEXT = 4
+
+
+class FsError(RuntimeError):
+    pass
+
+
+def _has_binary_extension(path: Path) -> bool:
+    return path.suffix.lower() in BINARY_EXTENSIONS
+
+
+def _is_binary(path: Path) -> bool:
+    if _has_binary_extension(path):
+        return True
+    try:
+        with path.open("rb") as handle:
+            return b"\x00" in handle.read(BINARY_SNIFF_BYTES)
+    except OSError:
+        return True
+
+
+def _read_text(path: Path) -> str:
+    return path.read_text("utf-8", errors="replace")
+
+
+def _split_lines(text: str) -> list[str]:
+    return text.split("\n")
+
+
+def _cap_line(line: str) -> str:
+    if len(line) <= LINE_CHAR_CAP:
+        return line
+    return f"{line[:LINE_CHAR_CAP]}... [+{len(line) - LINE_CHAR_CAP} chars]"
+
+
+def _number_lines(lines: list[str], start: int, width: int) -> list[str]:
+    return [f"{number:>{width}}\t{_cap_line(line)}" for number, line in enumerate(lines, start)]
+
+
+def _read_image(path: Path) -> dict:
+    media_type = IMAGE_MEDIA_TYPES[path.suffix.lower()]
+    size = path.stat().st_size
+    if size > IMAGE_MAX_BYTES:
+        raise FsError(
+            f"{path} is {size} bytes; over the {IMAGE_MAX_BYTES}-byte image read cap. "
+            "Resize it (e.g. with a bash tool) before reading."
+        )
+    return {
+        "path": str(path),
+        "type": "image",
+        "media_type": media_type,
+        "data": base64.b64encode(path.read_bytes()).decode("ascii"),
+        "size_bytes": size,
+    }
+
+
+def _pdf_total_pages(path: Path) -> int:
+    proc = subprocess.run(["pdfinfo", str(path)], capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        raise FsError(proc.stderr.strip() or f"pdfinfo exited {proc.returncode}")
+    for line in proc.stdout.splitlines():
+        if line.startswith("Pages:"):
+            return int(line.split(":", 1)[1].strip())
+    raise FsError(f"pdfinfo gave no page count for {path}")
+
+
+def _pdf_text(path: Path, start: int, end: int) -> str:
+    if shutil.which("pdftotext") is None:
+        return ""
+    proc = subprocess.run(
+        ["pdftotext", "-f", str(start), "-l", str(end), str(path), "-"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return proc.stdout if proc.returncode == 0 else ""
+
+
+def _pdf_pages(path: Path, start: int, end: int) -> list[dict]:
+    with tempfile.TemporaryDirectory() as tmp:
+        prefix = str(Path(tmp) / "page")
+        proc = subprocess.run(
+            [
+                "pdftoppm",
+                "-png",
+                "-r",
+                str(PDF_RENDER_DPI),
+                "-f",
+                str(start),
+                "-l",
+                str(end),
+                str(path),
+                prefix,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise FsError(proc.stderr.strip() or f"pdftoppm exited {proc.returncode}")
+        pages = []
+        for png in sorted(Path(tmp).glob("page*.png")):
+            data = png.read_bytes()
+            if len(data) > IMAGE_MAX_BYTES:
+                raise FsError(
+                    f"{path} page render is {len(data)} bytes; over the {IMAGE_MAX_BYTES}-byte "
+                    f"image cap. Re-read a smaller page range or a lower-DPI export."
+                )
+            pages.append(
+                {"media_type": "image/png", "data": base64.b64encode(data).decode("ascii")}
+            )
+        return pages
+
+
+def _read_pdf(path: Path, offset: int, limit: int) -> dict:
+    if shutil.which("pdfinfo") is None or shutil.which("pdftoppm") is None:
+        return {
+            "path": str(path),
+            "type": "pdf",
+            "text": _pdf_text(path, 1, PDF_DEFAULT_MAX_PAGES),
+            "pages": [],
+            "total_pages": None,
+            "render_unavailable": True,
+            "note": "page rendering requires poppler-utils",
+        }
+    total = _pdf_total_pages(path)
+    start = min(max(offset, 1), max(total, 1))
+    count = min(limit, PDF_DEFAULT_MAX_PAGES)
+    end = min(start + count - 1, total)
+    pages = _pdf_pages(path, start, end)
+    returned = len(pages)
+    next_page = start + returned if start + returned <= total else None
+    return {
+        "path": str(path),
+        "type": "pdf",
+        "text": _pdf_text(path, start, end),
+        "total_pages": total,
+        "start_page": start,
+        "pages_returned": returned,
+        "next_page": next_page,
+        "pages": pages,
+        "quality_reminder": PDF_QUALITY_REMINDER,
+    }
+
+
+def op_read(params: dict) -> dict:
+    path = Path(params["path"])
+    offset = max(int(params.get("offset") or 1), 1)
+    limit = int(params.get("limit") or READ_DEFAULT_LIMIT)
+    if not path.exists():
+        raise FsError(f"{path} not found")
+    if path.is_dir():
+        raise FsError(f"{path} is a directory")
+    suffix = path.suffix.lower()
+    if suffix in IMAGE_MEDIA_TYPES:
+        return _read_image(path)
+    if suffix == ".pdf":
+        return _read_pdf(path, offset, limit)
+    if path.stat().st_size == 0:
+        return {
+            "path": str(path),
+            "content": "",
+            "total_lines": 0,
+            "start_line": offset,
+            "lines_returned": 0,
+            "remaining_lines": 0,
+            "next_offset": None,
+            "truncated": False,
+            "is_empty": True,
+        }
+    if _is_binary(path):
+        raise FsError(f"{path} is a binary file")
+    text = _read_text(path)
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    total = len(lines)
+    window = lines[offset - 1 : offset - 1 + limit]
+    returned = len(window)
+    consumed = offset - 1 + returned
+    remaining = max(total - consumed, 0)
+    truncated = remaining > 0
+    width = len(str(total))
+    content = "\n".join(_number_lines(window, offset, width))
+    return {
+        "path": str(path),
+        "content": content,
+        "total_lines": total,
+        "start_line": offset,
+        "lines_returned": returned,
+        "remaining_lines": remaining,
+        "next_offset": consumed + 1 if remaining > 0 else None,
+        "truncated": truncated,
+        "is_empty": False,
+    }
+
+
+def op_write(params: dict) -> dict:
+    path = Path(params["path"])
+    content = params["content"]
+    if not isinstance(content, str):
+        raise FsError("content must be a string")
+    if path.is_dir():
+        raise FsError(f"{path} is a directory")
+    created = not path.exists()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = content.encode("utf-8")
+    path.write_bytes(data)
+    trailing = 0 if content == "" or content.endswith("\n") else 1
+    return {
+        "path": str(path),
+        "size_bytes": len(data),
+        "lines": content.count("\n") + trailing,
+        "created": created,
+    }
+
+
+def _edit_list(params: dict) -> list[dict]:
+    edits = params.get("edits")
+    if edits is None:
+        return [
+            {
+                "old_string": params["old_string"],
+                "new_string": params["new_string"],
+                "replace_all": bool(params.get("replace_all")),
+            }
+        ]
+    if not isinstance(edits, list) or not edits:
+        raise FsError("edits must be a non-empty list")
+    return edits
+
+
+def _apply_edit(text: str, edit: dict) -> tuple[str, int]:
+    old = edit["old_string"]
+    new = edit["new_string"]
+    replace_all = bool(edit.get("replace_all"))
+    count = text.count(old)
+    if count == 0:
+        raise FsError("old_string not found")
+    if count > 1 and not replace_all:
+        raise FsError(
+            f"search text found {count} times. Provide more context or use replace_all=true."
+        )
+    return (text.replace(old, new), count) if replace_all else (text.replace(old, new, 1), 1)
+
+
+def _edit_snippet(text: str, marker: str) -> str:
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    index = text.find(marker)
+    if index < 0:
+        hit_line, span = 0, 0
+    else:
+        hit_line = text[:index].count("\n")
+        span = marker.count("\n")
+    start = max(hit_line - EDIT_SNIPPET_CONTEXT, 0)
+    end = min(hit_line + span + EDIT_SNIPPET_CONTEXT + 1, len(lines))
+    width = len(str(max(end, 1)))
+    return "\n".join(_number_lines(lines[start:end], start + 1, width))
+
+
+def op_edit(params: dict) -> dict:
+    path = Path(params["path"])
+    if not path.exists():
+        raise FsError(f"{path} not found")
+    if path.is_dir():
+        raise FsError(f"{path} is a directory")
+    edits = _edit_list(params)
+    text = _read_text(path)
+    total = 0
+    for edit in edits:
+        text, count = _apply_edit(text, edit)
+        total += count
+    path.write_text(text, "utf-8")
+    return {
+        "path": str(path),
+        "message": f"{path}: {total} replacements",
+        "replacements": total,
+        "snippet": _edit_snippet(text, edits[0]["new_string"]),
+    }
+
+
+def _walk(root: Path):
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [name for name in dirnames if name not in SKIP_DIRS]
+        for name in sorted(filenames):
+            yield Path(dirpath) / name
+
+
+TYPE_EXTENSIONS: dict[str, frozenset[str]] = {
+    "py": frozenset({".py", ".pyi"}),
+    "js": frozenset({".js", ".jsx", ".mjs", ".cjs"}),
+    "ts": frozenset({".ts", ".tsx"}),
+    "rust": frozenset({".rs"}),
+    "go": frozenset({".go"}),
+    "java": frozenset({".java"}),
+    "c": frozenset({".c", ".h"}),
+    "cpp": frozenset({".cc", ".cpp", ".cxx", ".hpp", ".hh", ".h"}),
+    "md": frozenset({".md", ".markdown"}),
+    "json": frozenset({".json", ".jsonl"}),
+    "yaml": frozenset({".yaml", ".yml"}),
+    "html": frozenset({".html", ".htm"}),
+    "css": frozenset({".css", ".scss", ".sass", ".less"}),
+    "sh": frozenset({".sh", ".bash", ".zsh"}),
+}
+
+
+def _grep_candidates(root: Path, glob: str | None, type_name: str | None) -> list[Path]:
+    files = [root] if root.is_file() else list(_walk(root))
+    if glob:
+        return [
+            path
+            for path in files
+            if fnmatch.fnmatch(path.name, glob) or fnmatch.fnmatch(str(path), glob)
+        ]
+    if type_name:
+        wanted = TYPE_EXTENSIONS.get(type_name, frozenset())
+        return [path for path in files if path.suffix.lower() in wanted]
+    return [path for path in files if path.suffix.lower() in TEXT_EXTENSIONS]
+
+
+def _truncate_match_line(line: str) -> str:
+    if len(line) <= GREP_LINE_CHAR_CAP:
+        return line
+    return f"{line[:GREP_LINE_CHAR_CAP]}... [+{len(line) - GREP_LINE_CHAR_CAP} chars]"
+
+
+def _grep_context(params: dict) -> tuple[int, int]:
+    context = int(params.get("context") or 0)
+    before = int(params.get("before_context") or 0) or context
+    after = int(params.get("after_context") or 0) or context
+    return before, after
+
+
+def _rg_argv(params: dict, before: int, after: int) -> list[str] | None:
+    rg = shutil.which("rg")
+    if rg is None:
+        return None
+    argv = [rg, "--json", "-n"]
+    if params.get("ignore_case"):
+        argv.append("-i")
+    if params.get("multiline"):
+        argv.append("-U")
+    if before:
+        argv += ["-B", str(before)]
+    if after:
+        argv += ["-A", str(after)]
+    glob = params.get("glob")
+    if glob:
+        argv += ["--glob", glob]
+    type_name = params.get("type")
+    if type_name:
+        argv += ["-t", str(type_name)]
+    argv += ["--", params["pattern"], str(Path(params.get("path") or "."))]
+    return argv
+
+
+def _rg_run(argv: list[str]) -> list[dict]:
+    proc = subprocess.run(argv, capture_output=True, text=True)
+    if proc.returncode not in (0, 1):
+        raise FsError(proc.stderr.strip() or f"rg exited {proc.returncode}")
+    events: list[dict] = []
+    for raw in proc.stdout.splitlines():
+        if not raw:
+            continue
+        event = json.loads(raw)
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def _rg_text(field: object) -> str:
+    if isinstance(field, dict):
+        text = field.get("text")
+        if isinstance(text, str):
+            return text
+        return ""
+    return field if isinstance(field, str) else ""
+
+
+def _grep_rg(params: dict, mode: str, head: int, before: int, after: int) -> dict:
+    argv = _rg_argv(params, before, after)
+    if argv is None:
+        raise FsError("rg unavailable")
+    events = _rg_run(argv)
+
+    if mode == "files_with_matches":
+        files: list[str] = []
+        for event in events:
+            if event.get("type") != "begin":
+                continue
+            files.append(_rg_text(event["data"]["path"]))
+            if len(files) >= head:
+                return {"files": files, "count": len(files), "truncated": True}
+        return {"files": files, "count": len(files), "truncated": False}
+
+    if mode == "count":
+        counts: list[dict] = []
+        for event in events:
+            if event.get("type") != "end":
+                continue
+            stats = event["data"].get("stats", {})
+            hit = int(stats.get("matched_lines") or stats.get("matches") or 0)
+            if hit:
+                counts.append({"file": _rg_text(event["data"]["path"]), "count": hit})
+        return {"counts": counts, "total_matches": sum(c["count"] for c in counts)}
+
+    return _rg_content(events, head, before, after)
+
+
+def _rg_content(events: list[dict], head: int, before: int, after: int) -> dict:
+    by_file_context: dict[str, dict[int, str]] = {}
+    raw_matches: list[tuple[str, int, str]] = []
+    for event in events:
+        kind = event.get("type")
+        if kind not in {"context", "match"}:
+            continue
+        data = event["data"]
+        file = _rg_text(data["path"])
+        line = data["line_number"]
+        content = _truncate_match_line(_rg_text(data["lines"]).rstrip("\n"))
+        if kind == "context":
+            by_file_context.setdefault(file, {})[line] = content
+        else:
+            raw_matches.append((file, line, content))
+
+    matches: list[dict] = []
+    truncated = False
+    for file, line, content in raw_matches:
+        if len(matches) >= head:
+            truncated = True
+            break
+        entry: dict = {"file": file, "line": line, "content": content}
+        rows = [
+            {"line": number, "content": text}
+            for number, text in sorted(by_file_context.get(file, {}).items())
+            if line - before <= number <= line + after and number != line
+        ]
+        if rows:
+            entry["context"] = rows
+        matches.append(entry)
+    return {"matches": matches, "count": len(matches), "truncated": truncated}
+
+
+def _grep_stdlib(params: dict, mode: str, head: int, before: int, after: int) -> dict:
+    flags = re.IGNORECASE if params.get("ignore_case") else 0
+    if params.get("multiline"):
+        flags |= re.DOTALL | re.MULTILINE
+    try:
+        regex = re.compile(params["pattern"], flags)
+    except re.error as error:
+        raise FsError(f"invalid regex: {error}") from error
+    root = Path(params.get("path") or ".")
+    if not root.exists():
+        raise FsError(f"{root} not found")
+    files = _grep_candidates(root, params.get("glob"), params.get("type"))
+    multiline = bool(params.get("multiline"))
+
+    if mode == "files_with_matches":
+        matched: list[str] = []
+        for path in files:
+            if _is_binary(path):
+                continue
+            text = _read_text(path)
+            hit = (
+                regex.search(text)
+                if multiline
+                else any(regex.search(line) for line in text.split("\n"))
+            )
+            if hit:
+                matched.append(str(path))
+                if len(matched) >= head:
+                    return {"files": matched, "count": len(matched), "truncated": True}
+        return {"files": matched, "count": len(matched), "truncated": False}
+
+    if mode == "count":
+        counts: list[dict] = []
+        total = 0
+        for path in files:
+            if _is_binary(path):
+                continue
+            text = _read_text(path)
+            hit = (
+                len(regex.findall(text))
+                if multiline
+                else sum(1 for line in text.split("\n") if regex.search(line))
+            )
+            if hit:
+                counts.append({"file": str(path), "count": hit})
+                total += hit
+        return {"counts": counts, "total_matches": total}
+
+    matches: list[dict] = []
+    for path in files:
+        if _is_binary(path):
+            continue
+        lines = _read_text(path).split("\n")
+        for index, line in enumerate(lines):
+            if not regex.search(line):
+                continue
+            entry: dict = {
+                "file": str(path),
+                "line": index + 1,
+                "content": _truncate_match_line(line),
+            }
+            context_rows: list[dict] = []
+            for offset in range(max(0, index - before), index):
+                context_rows.append(
+                    {"line": offset + 1, "content": _truncate_match_line(lines[offset])}
+                )
+            for offset in range(index + 1, min(len(lines), index + 1 + after)):
+                context_rows.append(
+                    {"line": offset + 1, "content": _truncate_match_line(lines[offset])}
+                )
+            if context_rows:
+                entry["context"] = context_rows
+            matches.append(entry)
+            if len(matches) >= head:
+                return {"matches": matches, "count": len(matches), "truncated": True}
+    return {"matches": matches, "count": len(matches), "truncated": False}
+
+
+def op_grep(params: dict) -> dict:
+    mode = params.get("output_mode") or "files_with_matches"
+    if mode not in {"content", "files_with_matches", "count"}:
+        raise FsError(f"invalid output_mode: {mode}")
+    head = int(params.get("head_limit") or GREP_DEFAULT_HEAD)
+    before, after = _grep_context(params)
+    if shutil.which("rg") is not None:
+        return _grep_rg(params, mode, head, before, after)
+    return _grep_stdlib(params, mode, head, before, after)
+
+
+def op_glob(params: dict) -> dict:
+    pattern = params["pattern"]
+    root = Path(params.get("path") or ".")
+    if Path(pattern).is_absolute():
+        root = Path(Path(pattern).anchor)
+        pattern = str(Path(pattern).relative_to(root))
+        if pattern == ".":
+            raise FsError(f"pattern {params['pattern']!r} matches a directory root")
+    if not root.exists():
+        raise FsError(f"{root} not found")
+    hits = [path for path in root.glob(pattern) if path.is_file()]
+    hits.sort(key=lambda path: path.stat().st_mtime if path.exists() else 0.0, reverse=True)
+    truncated = len(hits) > GLOB_MAX_RESULTS
+    capped = hits[:GLOB_MAX_RESULTS]
+    files = [
+        {
+            "path": str(path),
+            "size": path.stat().st_size,
+            "modified": path.stat().st_mtime,
+        }
+        for path in capped
+    ]
+    result: dict = {"files": files, "count": len(files), "truncated": truncated}
+    if truncated:
+        result["truncated_message"] = (
+            f"showing {GLOB_MAX_RESULTS} of {len(hits)} matches; refine the pattern"
+        )
+    return result
+
+
+OPS = {
+    "read": op_read,
+    "write": op_write,
+    "edit": op_edit,
+    "grep": op_grep,
+    "glob": op_glob,
+}
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if len(argv) != 2 or argv[0] not in OPS:
+        sys.stderr.write(f"usage: sbxfs {{{'|'.join(OPS)}}} <json>\n")
+        return 2
+    try:
+        params = json.loads(argv[1])
+        if not isinstance(params, dict):
+            raise FsError("params must be a JSON object")
+        result = OPS[argv[0]](params)
+    except (FsError, KeyError, ValueError) as error:
+        message = str(error) if isinstance(error, FsError) else f"{type(error).__name__}: {error}"
+        sys.stdout.write(json.dumps({"error": message}))
+        return 1
+    sys.stdout.write(json.dumps(result))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
