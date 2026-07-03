@@ -14,6 +14,7 @@ from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.ext.loader import turn_tools
 from selfhost.ext.manifest import Manifest
+from selfhost.grants import GrantStore
 from selfhost.hub import Hub, Terminal
 from selfhost.loop.compaction import Compaction
 from selfhost.loop.engine import TurnEngine, TurnParked
@@ -138,6 +139,11 @@ async def _execute_turn(turn_id: str) -> str:
             memory=runtime.memory,
             member_id=member_id,
             artifact_token_secret=runtime.artifact_token_secret,
+            grants=(
+                GrantStore(fernet=runtime.credentials.fernet)
+                if runtime.credentials is not None
+                else None
+            ),
             attempt=DBOS.workflow_id or turn_id,
         )
         frame = await engine.run()

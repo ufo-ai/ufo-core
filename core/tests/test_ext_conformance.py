@@ -24,6 +24,7 @@ from selfhost.db import workspace_tx
 from selfhost.ext.context import ScopedStore, UndeclaredCredentialSlot, context_for
 from selfhost.ext.loader import load_manifests, turn_tools
 from selfhost.ext.manifest import Manifest
+from selfhost.grants import GrantStore
 from selfhost.jobs import JobRunner, bindings_from
 from selfhost.onboarding import run_onboarding_steps
 from selfhost.sandbox.proxy.rules import InjectionRule, MeterRule, derive_credential_rules
@@ -67,6 +68,45 @@ async def _workspace() -> UUID:
             )
         )
     return workspace_id
+
+
+async def _grantable(workspace_id: UUID) -> tuple[UUID, UUID, UUID]:
+    """A member, an agent, and their conversation — the foreign-key rows a recorded grant
+    references, so the connector tool can authenticate the turn-agent's grant."""
+    member_id, agent_id, conversation_id = uuid4(), uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email=f"{member_id.hex[:8]}@x.test",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="assistant",
+                prompt="p",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                surface="cli",
+                queue_key=uuid4().hex,
+                member_id=member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return member_id, agent_id, conversation_id
 
 
 class _UntouchedCarrier:
@@ -158,6 +198,18 @@ async def test_connector_tool_joins_the_turn_set_and_reaches_its_provider_host(
     db: None, tmp_path: Path
 ) -> None:
     workspace_id = await _workspace()
+    member_id, agent_id, conversation_id = await _grantable(workspace_id)
+    grants = GrantStore(fernet=Fernet(Fernet.generate_key()))
+    await grants.record(
+        workspace_id=workspace_id,
+        agent_id=agent_id,
+        provider=sample.CONNECTOR_PROVIDER,
+        account_id=sample.CONNECTOR_ACCOUNT,
+        host=sample.CONNECTOR_HOST,
+        token=sample.CONNECTOR_TOKEN,
+        grantor_member_id=member_id,
+        conversation_id=conversation_id,
+    )
     manifest = _sample_manifest()
     tools, ext_by_tool = turn_tools((manifest,), workspace_id, _credential_store())
     assert sample.CONNECTOR_TOOL_NAME in {tool.name for tool in tools}
@@ -165,14 +217,14 @@ async def test_connector_tool_joins_the_turn_set_and_reaches_its_provider_host(
     context = ToolContext(
         sandbox=SandboxSession(
             carrier=_StubCarrier(),
-            handle=SandboxHandle(conversation_id=uuid4(), container_id="test"),
+            handle=SandboxHandle(conversation_id=conversation_id, container_id="test"),
         ),
         blob=FilesystemBlobStore(root=tmp_path),
         turn=Turn(
             id=uuid4(),
             workspace_id=workspace_id,
-            conversation_id=uuid4(),
-            agent_id=uuid4(),
+            conversation_id=conversation_id,
+            agent_id=agent_id,
             seq=1,
             status="running",
             inbound="hi",
@@ -180,8 +232,9 @@ async def test_connector_tool_joins_the_turn_set_and_reaches_its_provider_host(
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
         memory=StubMemory(),
-        member_id=None,
+        member_id=member_id,
         artifact_token_secret="",
+        grants=grants,
         ext=ext_by_tool[tool.name],
     )
     args = tool.input_model.model_validate({"path": "me"})

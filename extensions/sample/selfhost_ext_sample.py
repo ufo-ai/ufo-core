@@ -7,6 +7,7 @@ its own `ExtensionContext.store` (durable `ext_store` rows, never a mock log), s
 those rows back through the same public surfaces core writes them by. `UNDECLARED_SLOT` names a slot
 the Manifest never declares — the probe that a handler asking for an undeclared slot is refused."""
 
+import shlex
 from dataclasses import dataclass
 
 from pydantic import BaseModel
@@ -96,15 +97,19 @@ class ConnectorCallInput(BaseModel):
 
 
 async def _connector_call(ctx: ToolContext, args: ConnectorCallInput) -> ToolResult:
-    """The stub connector action: reach the provider host through the sandbox's egress proxy,
-    demonstrating the grant's ScopeRule admits the host (an ungranted host is refused at CONNECT),
-    and recording the call through the extension's scoped store so the seam is read back through a
-    public surface. It sends no Authorization header, so no token is swapped — emitting the grant's
-    per-account sentinel for the proxy to swap is the real connector unit's job, not the stub's."""
+    """The stub connector action: authenticate to the provider by asking the turn's context for the
+    per-account sentinel `Authorization` value, send it as the request's `Authorization` header, and
+    reach the provider host through the sandbox's egress proxy. The proxy admits the granted host
+    (an ungranted host is refused at CONNECT) and swaps the sentinel for the turn-agent's real token
+    on the wire, so the raw secret never enters the sandbox. Records the call through the
+    extension's scoped store so the seam is read back through a public surface; an agent with no
+    grant for the provider fails loud here, before any egress."""
     if ctx.ext is None:
         raise RuntimeError("sample connector tool dispatched without its ExtensionContext")
+    authorization = await ctx.connector_authorization(CONNECTOR_PROVIDER)
+    header = shlex.quote(f"Authorization: {authorization}")
     result = await ctx.sandbox.bash(
-        f"curl -sS -o /dev/null -w '%{{http_code}}' https://{CONNECTOR_HOST}/{args.path}"
+        f"curl -sS -o /dev/null -w '%{{http_code}}' -H {header} https://{CONNECTOR_HOST}/{args.path}"
     )
     await ctx.ext.store.put(CONNECTOR_KEY, {"host": CONNECTOR_HOST, "path": args.path})
     return ToolResult(

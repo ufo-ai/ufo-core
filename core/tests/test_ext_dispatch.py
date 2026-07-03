@@ -218,6 +218,7 @@ def _engine(
         memory=StubMemory(),
         member_id=None,
         artifact_token_secret="",
+        grants=None,
     )
 
 
