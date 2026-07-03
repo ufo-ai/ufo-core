@@ -4,11 +4,14 @@ from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
 
 from selfhost.db import workspace_tx
 from selfhost.governance import Governance, prompt_digest
 from selfhost.schema import tables
 from selfhost.schema.records import AgentChange
+from selfhost.surfaces.cli import router
 
 BASE_PROMPT = "you are base"
 SHARPER_PROMPT = "you are sharper"
@@ -147,3 +150,27 @@ async def test_stale_from_digest_is_rejected_and_prompt_unchanged(db: None) -> N
     row = await _proposal_row(ref.proposal_id)
     assert row.status == "rejected"
     assert row.approved_by is None
+
+
+async def test_cli_approve_endpoint_applies_the_change(db: None) -> None:
+    seed = await _seed(BASE_PROMPT)
+    governance = Governance(workspace_id=seed.workspace_id, extension="core")
+    ref = await governance.propose_change(
+        AgentChange(
+            agent_id=seed.agent_id,
+            new_prompt=SHARPER_PROMPT,
+            from_digest=prompt_digest(BASE_PROMPT),
+        )
+    )
+    app = FastAPI()
+    app.include_router(router)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://surface"
+    ) as client:
+        response = await client.post(
+            f"/v1/proposals/{ref.proposal_id}/approve",
+            headers={"authorization": f"Bearer {seed.token}"},
+        )
+    assert response.status_code == 200
+    assert response.json() == {"status": "approved", "approved_by": str(seed.member_id)}
+    assert await _agent_prompt(seed.agent_id) == SHARPER_PROMPT

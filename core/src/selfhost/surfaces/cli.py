@@ -12,6 +12,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from selfhost.db import workspace_tx
+from selfhost.governance import Governance
 from selfhost.hub import Hub, LiveFrame, Terminal
 from selfhost.o11y import log
 from selfhost.schema import tables
@@ -26,6 +27,7 @@ from selfhost.schema.records import (
 
 MAX_INBOUND_CHARS = 200_000
 TERMINAL_POLL_SECONDS = 1.0
+CORE_PROPOSER = "core"
 
 router = APIRouter(prefix="/v1")
 
@@ -185,6 +187,27 @@ async def cancel_turn(
     if stored is None:
         raise HTTPException(409, "turn could not be cancelled")
     return {"status": stored.status}
+
+
+@router.post("/proposals/{proposal_id}/approve")
+async def approve_proposal(
+    proposal_id: UUID, authorization: str = Header(default="")
+) -> dict[str, str]:
+    identity = await _authenticate(authorization)
+    governance = Governance(workspace_id=identity.workspace_id, extension=CORE_PROPOSER)
+    await governance.approve_proposal(proposal_id, identity.member_id)
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.proposal.c.status, tables.proposal.c.approved_by).where(
+                    tables.proposal.c.id == proposal_id,
+                    tables.proposal.c.workspace_id == identity.workspace_id,
+                )
+            )
+        ).one_or_none()
+    if row is None:
+        raise HTTPException(404, "no such proposal")
+    return {"status": row.status, "approved_by": str(row.approved_by or "")}
 
 
 async def _conversation_for(identity: CliIdentity, queue_key: str) -> sa.Row:
