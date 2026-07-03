@@ -38,9 +38,21 @@ hard-to-vary decision; cut the words around it. Prefer a table to prose. One exa
 - **Lean and concrete by default** — small direct implementations; three similar lines beat a
   clever helper; generic only where a real matrix demands it (tool/connector/carrier type tables).
 - **Organize by workflow, not by layer** — a flow with ≥2 steps and a live dependency is ONE frozen
-  dataclass: deps in fields, one public method that is the workflow, steps as private methods read
-  top-to-bottom. Pydantic at boundaries (wire/persisted); frozen dataclasses for internal workflow
-  and value objects.
+  dataclass: deps in fields, one public method that *is* the workflow, private steps beneath it
+  **in execution order** — the reader reaches the whole flow by reading downward once. Free
+  module-level functions are for genuinely shared stateless primitives only, never a workflow's
+  steps. Pydantic at boundaries (wire/persisted); frozen dataclasses for internal workflow and
+  value objects.
+- **Inline the trivial** — a function whose body is a single return earns a name only when that
+  name is a reused domain concept (≥2 callers) or a Protocol implementation. One caller → inline;
+  a private method survives only as a narrative step, recursion, or reuse. The test is "does the
+  module read more cleanly?", never "might someone reuse it?".
+- **Localize next to the user** — a type, constant, or helper lives beside its only user; nothing
+  moves to a shared module before the second user exists. No `utils.py`, `helpers.py`, or grab-bag
+  modules, ever.
+- **Follow-the-flow test** — understanding one verb must not require hopping across files: entry
+  point → steps → types, one file, top to bottom. More than two file-hops to trace a flow means
+  the seams are wrong — fix the seams.
 - **Fail loud** — raise on missing config or unexpected values; no silent fallbacks.
 - **Async-native** — async DB driver and HTTP; `asyncio.to_thread` only for libraries with no
   async API; never block the event loop.

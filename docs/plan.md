@@ -112,9 +112,10 @@ merge) · self-improvement from o11y (PR #62 replay design on `trajectories_read
 security review pack · websites extension (serve tool + routes) · startup + support-bot packs ·
 eval harness port · enterprise k8s layer (apiserver rewriter module, multi-workspace hosting).
 
-## Standing gates (from U3 on)
+## Standing gates (legibility gates from U1; sdk gates from U3)
 
 sdk-only imports in `extensions/` · no k8s imports anywhere · no vendor o11y SDKs (OTel APIs only) ·
 Redis only inside the hubs extension · engine/`begin()` only inside `db.py` · no proxy-rule
 registration API (derivation only) · tool-count budget (a new tool must prove no existing tool
-subsumes it).
+subsumes it) · **legibility (AST gate)**: a module-level single-return function with exactly one
+call site fails CI (`sdk/` re-exports exempt); no module named `utils`/`helpers`/`common`.
