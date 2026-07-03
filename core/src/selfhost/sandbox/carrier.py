@@ -11,6 +11,7 @@ import asyncio
 from dataclasses import dataclass
 
 from selfhost.sandbox.session import (
+    SENTINEL_MODEL_KEY,
     ExecResult,
     SandboxHandle,
     SandboxSpec,
@@ -69,6 +70,10 @@ class DockerCarrier:
             f"http_proxy={proxy_url}",
             "--env",
             f"https_proxy={proxy_url}",
+            "--env",
+            f"ANTHROPIC_API_KEY={SENTINEL_MODEL_KEY}",
+            "--env",
+            f"OPENAI_API_KEY={SENTINEL_MODEL_KEY}",
         ]
         if spec.mount.kind == "filesystem" and spec.mount.host_path is not None:
             argv += ["-v", f"{spec.mount.host_path}:/workspace"]

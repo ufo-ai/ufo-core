@@ -10,8 +10,8 @@ from uuid import UUID
 
 from selfhost.credentials import CredentialSlotUnset, CredentialStore
 from selfhost.ext.manifest import Manifest
+from selfhost.sandbox.session import SENTINEL_MODEL_KEY
 
-SENTINEL_MODEL_KEY = "SELFHOST_SENTINEL_MODEL_KEY"
 ANTHROPIC_HOST = "api.anthropic.com"
 OPENAI_HOST = "api.openai.com"
 PROVIDER_HOSTS = {

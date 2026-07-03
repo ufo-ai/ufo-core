@@ -13,6 +13,7 @@ from uuid import UUID
 
 WORKSPACE_DIR = "/workspace"
 DEFAULT_EXEC_TIMEOUT_SECONDS = 120
+SENTINEL_MODEL_KEY = "SELFHOST_SENTINEL_MODEL_KEY"
 
 
 @dataclass(frozen=True)
