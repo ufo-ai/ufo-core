@@ -27,6 +27,7 @@ DELETE_ORDER = (
     tables.agent,
     tables.ext_store,
     tables.credential,
+    tables.memory_item,
     tables.member,
     tables.workspace,
 )

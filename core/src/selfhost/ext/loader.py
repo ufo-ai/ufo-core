@@ -12,6 +12,7 @@ from uuid import UUID
 from selfhost.credentials import CredentialStore
 from selfhost.ext.context import ExtensionContext, context_for
 from selfhost.ext.manifest import Manifest
+from selfhost.memory.service import MemoryService
 from selfhost.tools.builtins import BUILTIN_TOOLS
 from selfhost.tools.registry import ToolDef, ToolRegistry
 
@@ -31,6 +32,7 @@ def turn_tools(
     manifests: tuple[Manifest, ...],
     workspace_id: UUID,
     credential_store: CredentialStore | None,
+    memory: MemoryService | None = None,
 ) -> tuple[tuple[ToolDef, ...], dict[str, ExtensionContext]]:
     """The full tool set a turn dispatches against — core builtins plus every extension's declared
     tools — and, per extension tool, the workspace-scoped ExtensionContext its handler receives. A
@@ -46,7 +48,7 @@ def turn_tools(
                 f"extension {manifest.name!r} declares tools but no credential key is set"
             )
         declared = frozenset(slot.name for slot in manifest.credentials)
-        context = context_for(workspace_id, manifest.name, declared, credential_store)
+        context = context_for(workspace_id, manifest.name, declared, credential_store, memory)
         for tool in manifest.tools:
             tools.append(tool)
             ext_by_tool[tool.name] = context

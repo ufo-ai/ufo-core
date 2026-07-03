@@ -46,6 +46,18 @@ async def _unavailable_spawn(
     raise RuntimeError("spawn is not wired in this context")
 
 
+@dataclass
+class StubMemory:
+    """Stand-in for the memory service: these tests drive the file/shell builtins, not the memory
+    tools, so recall/commit are never asserted here (their own tests cover them)."""
+
+    async def recall(self, query: str, subjects: frozenset[str], limit: int) -> tuple:
+        return ()
+
+    async def commit(self, write: object) -> None:
+        return None
+
+
 def make_context(sandbox: FakeSandbox, tmp_path: Path) -> ToolContext:
     workspace_id, conversation_id, agent_id = uuid4(), uuid4(), uuid4()
     turn = Turn(
@@ -63,6 +75,8 @@ def make_context(sandbox: FakeSandbox, tmp_path: Path) -> ToolContext:
         turn=turn,
         agent=Agent(prompt="be terse", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
+        memory=StubMemory(),
+        member_id=None,
     )
 
 
@@ -94,6 +108,8 @@ def test_registry_schemas_cover_every_tool() -> None:
         "write",
         "edit",
         "spawn_subagent",
+        "memory_search",
+        "memory_update",
     }
     bash = next(schema for schema in schemas if schema.name == "bash")
     assert "command" in bash.input_schema["properties"]

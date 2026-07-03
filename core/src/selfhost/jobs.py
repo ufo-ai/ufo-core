@@ -15,15 +15,28 @@ from uuid import UUID
 from dbos import DBOS, Queue, ScheduleInput
 
 from selfhost.credentials import CredentialStore
-from selfhost.ext.context import context_for
+from selfhost.ext.context import ExtensionContext, context_for
 from selfhost.ext.manifest import JobSpec, Manifest
+from selfhost.memory.indexer import MemoryIndexer
+from selfhost.memory.service import MemoryService
 from selfhost.o11y import log
 
 JOB_QUEUE_NAME = "jobs"
 JOB_WORKFLOW_NAME = "job"
 CORE_EXTENSION = "core"
-CORE_JOBS: tuple[JobSpec, ...] = ()
+MEMORY_INDEX_JOB = "memory_index"
+MEMORY_INDEX_SCHEDULE = "*/10 * * * * *"
 JOB_QUEUE = Queue(JOB_QUEUE_NAME)
+
+
+def core_jobs(indexer: MemoryIndexer) -> tuple[JobSpec, ...]:
+    """The jobs a deploy always runs, before any extension's. The memory index job is core because
+    recall is core: it derives — batch-at-interval, off the write path — the chunks recall reads."""
+
+    async def _index(context: ExtensionContext) -> None:
+        await indexer.run()
+
+    return (JobSpec(name=MEMORY_INDEX_JOB, schedule=MEMORY_INDEX_SCHEDULE, handler=_index),)
 
 
 @dataclass(frozen=True)
@@ -70,6 +83,7 @@ class JobRunner:
     workspace_id: UUID
     credential_store: CredentialStore
     bindings: tuple[_Binding, ...]
+    memory: MemoryService | None = None
 
     def launch(self) -> None:
         global _firing
@@ -98,7 +112,11 @@ class JobRunner:
         if binding is None:
             raise RuntimeError(f"no job registered for key {key!r}")
         context = context_for(
-            self.workspace_id, binding.extension, binding.declared, self.credential_store
+            self.workspace_id,
+            binding.extension,
+            binding.declared,
+            self.credential_store,
+            self.memory,
         )
         await binding.spec.handler(context)
 

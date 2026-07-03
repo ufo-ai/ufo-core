@@ -1,19 +1,23 @@
-"""The builtin tool set: bash, read, write, edit, spawn_subagent.
+"""The builtin tool set: bash, read, write, edit, spawn_subagent, memory_search, memory_update.
 
 Each file/shell handler reaches the workspace only through `ctx.sandbox`, so the carrier's scoping
 and egress rules apply whether a byte arrives via a shell command or a file op. `read` records every
 path it returns so `edit` can refuse to touch a file the turn has not read — the guard that keeps a
 blind string-replace from clobbering content the model never saw. `spawn_subagent` delegates a typed
-subtask to a child turn through `ctx.spawn`."""
+subtask to a child turn through `ctx.spawn`. `memory_search` and `memory_update` recall and commit
+through `ctx.memory`, scoped to the conversation's subject (`{member, shared}`)."""
 
 from typing import Any
 
 from pydantic import BaseModel, Field
 
+from selfhost.memory.service import SHARED_SUBJECT, member_subject, recall_subjects
+from selfhost.schema.records import FACT, ItemClass, MemoryWrite
 from selfhost.tools.context import TextContent, ToolContext, ToolResult
 from selfhost.tools.registry import ToolDef
 
 DEFAULT_READ_LIMIT = 2000
+MEMORY_SEARCH_LIMIT = 8
 
 
 class BashInput(BaseModel):
@@ -41,6 +45,18 @@ class SpawnSubagentInput(BaseModel):
     profile: str
     payload: dict[str, Any] = Field(default_factory=dict)
     background: bool = False
+
+
+class MemorySearchInput(BaseModel):
+    query: str
+    limit: int = MEMORY_SEARCH_LIMIT
+
+
+class MemoryUpdateInput(BaseModel):
+    body: str
+    item_class: ItemClass = FACT
+    shared: bool = False
+    source_ref: str | None = None
 
 
 async def bash_handler(ctx: ToolContext, args: BashInput) -> ToolResult:
@@ -90,6 +106,28 @@ async def spawn_subagent_handler(ctx: ToolContext, args: SpawnSubagentInput) -> 
     return ToolResult(content=(TextContent(text=text),))
 
 
+async def memory_search_handler(ctx: ToolContext, args: MemorySearchInput) -> ToolResult:
+    recalled = await ctx.memory.recall(args.query, recall_subjects(ctx.member_id), args.limit)
+    if not recalled:
+        return ToolResult(content=(TextContent(text="No matching memory."),))
+    text = "\n".join(f"- [{item.item_class}] {item.body}" for item in recalled)
+    return ToolResult(content=(TextContent(text=text),))
+
+
+async def memory_update_handler(ctx: ToolContext, args: MemoryUpdateInput) -> ToolResult:
+    subject = (
+        SHARED_SUBJECT
+        if args.shared or ctx.member_id is None
+        else member_subject(ctx.member_id)
+    )
+    await ctx.memory.commit(
+        MemoryWrite(
+            subject=subject, body=args.body, item_class=args.item_class, source_ref=args.source_ref
+        )
+    )
+    return ToolResult(content=(TextContent(text=f"Remembered ({subject})."),))
+
+
 BUILTIN_TOOLS: tuple[ToolDef, ...] = (
     ToolDef(
         name="bash",
@@ -124,5 +162,24 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=SpawnSubagentInput,
         handler=spawn_subagent_handler,
+    ),
+    ToolDef(
+        name="memory_search",
+        description=(
+            "Search memory for facts and notes relevant to a query, over the current member's "
+            "memory and shared memory. Returns the best-matching items; use it to recall context "
+            "from earlier conversations before answering."
+        ),
+        input_model=MemorySearchInput,
+        handler=memory_search_handler,
+    ),
+    ToolDef(
+        name="memory_update",
+        description=(
+            "Record a durable memory item so later turns and conversations can recall it. Writes "
+            "to the current member's memory by default, or shared memory when `shared` is true."
+        ),
+        input_model=MemoryUpdateInput,
+        handler=memory_update_handler,
     ),
 )

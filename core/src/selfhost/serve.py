@@ -21,9 +21,15 @@ from selfhost.ext.context import context_for
 from selfhost.ext.loader import load_manifests, validate_ext_tools
 from selfhost.ext.manifest import Manifest
 from selfhost.hub import InProcessHub
-from selfhost.jobs import CORE_JOBS, JobRunner, bindings_from
+from selfhost.jobs import JobRunner, bindings_from, core_jobs
 from selfhost.loop.queue import Runtime, init_runtime
 from selfhost.loop.subagents import SubagentRegistry
+from selfhost.memory.chunk import TextChunker
+from selfhost.memory.embed import OpenAIEmbedClient
+from selfhost.memory.index import index_backend_for
+from selfhost.memory.indexer import MemoryIndexer
+from selfhost.memory.service import MemoryService
+from selfhost.models.openai import openai_sdk_client
 from selfhost.o11y import init_o11y, log
 from selfhost.sandbox.carrier import DockerCarrier
 from selfhost.sandbox.proxy.rules import (
@@ -51,6 +57,12 @@ def run() -> None:
     key = os.environ.get(config.credentials.key_env)
     credentials = CredentialStore(fernet=Fernet(key.encode())) if key else None
     validate_ext_tools(manifests, workspace_id, credentials)
+    embed = OpenAIEmbedClient(
+        client=openai_sdk_client(os.environ.get(config.models.openai_api_key_env, ""))
+    )
+    index = index_backend_for(config.database.url, embed)
+    memory = MemoryService(index=index, embed=embed)
+    indexer = MemoryIndexer(index=index, embed=embed, chunker=TextChunker())
     hub = InProcessHub()
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
     init_runtime(
@@ -64,6 +76,7 @@ def run() -> None:
             subagents=SubagentRegistry(()),
             manifests=manifests,
             credentials=credentials,
+            memory=memory,
         )
     )
     DBOS(
@@ -75,12 +88,12 @@ def run() -> None:
         }
     )
     DBOS.launch()
-    _launch_jobs(config)
+    _launch_jobs(config, indexer, memory)
     app = FastAPI()
     app.state.hub = hub
     app.state.dbos = dbos_client
     app.include_router(router)
-    _mount_ext_routes(app, manifests, workspace_id, credentials)
+    _mount_ext_routes(app, manifests, workspace_id, credentials, memory)
     log("serve.started", host=config.serve.host, port=config.serve.port)
     try:
         uvicorn.run(app, host=config.serve.host, port=config.serve.port, log_level="warning")
@@ -98,12 +111,12 @@ async def _require_bootstrap() -> None:
         raise RuntimeError("workspace missing — run `selfhost init` first")
 
 
-def _launch_jobs(config: Config) -> None:
-    """Register this workspace's jobs — core's own plus every installed extension's — as DBOS
-    schedules and one-shot enqueues, after launch so the system store is live. Registration is the
-    synchronous DBOS API (off the loop, at startup); a handler may read a declared credential, so
-    once any job is registered the credential key must be set."""
-    bindings = bindings_from(load_manifests(), CORE_JOBS)
+def _launch_jobs(config: Config, indexer: MemoryIndexer, memory: MemoryService) -> None:
+    """Register this workspace's jobs — core's own (the memory index derivation) plus every
+    installed extension's — as DBOS schedules and one-shot enqueues, after launch so the system
+    store is live. Registration is the synchronous DBOS API (off the loop, at startup); a handler
+    may read a declared credential, so once any job is registered the credential key must be set."""
+    bindings = bindings_from(load_manifests(), core_jobs(indexer))
     if not bindings:
         return
     key = os.environ.get(config.credentials.key_env)
@@ -115,6 +128,7 @@ def _launch_jobs(config: Config) -> None:
         workspace_id=asyncio.run(_sole_workspace_id()),
         credential_store=CredentialStore(fernet=Fernet(key.encode())),
         bindings=bindings,
+        memory=memory,
     ).launch()
 
 
@@ -128,6 +142,7 @@ def _mount_ext_routes(
     manifests: tuple[Manifest, ...],
     workspace_id: UUID,
     credentials: CredentialStore | None,
+    memory: MemoryService,
 ) -> None:
     """Mount each extension's declared routes at `/ext/<name>/<path>`, every request bound to that
     extension's workspace-scoped ExtensionContext. An extension serving routes without a credential
@@ -140,7 +155,7 @@ def _mount_ext_routes(
                 f"extension {manifest.name!r} serves routes but no credential key is set"
             )
         declared = frozenset(slot.name for slot in manifest.credentials)
-        context = context_for(workspace_id, manifest.name, declared, credentials)
+        context = context_for(workspace_id, manifest.name, declared, credentials, memory)
         for spec in manifest.routes:
 
             async def endpoint(

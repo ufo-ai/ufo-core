@@ -4,6 +4,7 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass, replace
+from uuid import UUID
 
 import sqlalchemy as sa
 
@@ -14,6 +15,7 @@ from selfhost.ext.context import ExtensionContext
 from selfhost.hub import Hub, Terminal
 from selfhost.loop.compaction import Compaction
 from selfhost.loop.transcript import Conversation, Transcript
+from selfhost.memory.service import MemoryService, recall_subjects
 from selfhost.models.interface import (
     Message,
     ModelClient,
@@ -41,6 +43,8 @@ TRANSCRIPT_WRITE_ATTEMPTS = 3
 TRANSCRIPT_WRITE_RETRY_SECONDS = 0.5
 COMMIT_RETRY_INITIAL_SECONDS = 1.0
 COMMIT_RETRY_MAX_SECONDS = 30.0
+RECALL_LIMIT = 8
+RECALL_CONTEXT_PREFIX = "Relevant memory:\n"
 
 
 def _parse_args(partials: list[str]) -> dict[str, object]:
@@ -70,6 +74,8 @@ class TurnEngine:
     tool_ext: dict[str, ExtensionContext]
     blob: BlobStore
     spawn: Spawn
+    memory: MemoryService
+    member_id: UUID | None
 
     async def run(self) -> TerminalFrame:
         with turn_span(self.turn.id, self.turn.conversation_id):
@@ -82,13 +88,15 @@ class TurnEngine:
                 turn=self.turn,
                 agent=self.agent,
                 spawn=self.spawn,
+                memory=self.memory,
+                member_id=self.member_id,
             )
             try:
                 if not await self._mark_running():
                     await self._persist_inbound()
                     return await self._publish_existing_terminal()
                 final_messages, answer = await self._model_round(
-                    context, await self._load_messages(), usage_events
+                    context, await self._recall(await self._load_messages()), usage_events
                 )
                 frame = await self._commit("done", usage_events, answer=answer)
                 if frame.status == "done":
@@ -127,6 +135,27 @@ class TurnEngine:
         if stored is None or stored.seq >= self.turn.seq:
             return ()
         return stored.messages
+
+    async def _recall(self, messages: tuple[Message, ...]) -> tuple[Message, ...]:
+        """Fold memory relevant to the inbound into the inbound turn itself, scoped to the turn's
+        member and shared subjects. Folding into the inbound (rather than prepending a separate user
+        message) keeps roles alternating — a lone user-role recall message ahead of the user inbound
+        would be two user turns in a row, which the provider rejects. Best-effort: a recall failure
+        yields no context and never fails the turn — the live leg never fails the turn."""
+        try:
+            recalled = await self.memory.recall(
+                self.turn.inbound, recall_subjects(self.member_id), RECALL_LIMIT
+            )
+        except Exception as error:
+            log("recall.failed", turn_id=str(self.turn.id), error_class=type(error).__name__)
+            return messages
+        if not recalled:
+            return messages
+        rendered = "\n".join(f"- {item.body}" for item in recalled)
+        folded = Message(
+            role="user", content=f"{RECALL_CONTEXT_PREFIX}{rendered}\n\n{self.turn.inbound}"
+        )
+        return (*messages[:-1], folded)
 
     async def _model_round(
         self, context: ToolContext, messages: tuple[Message, ...], usage_events: list[Usage]

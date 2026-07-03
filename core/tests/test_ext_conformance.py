@@ -7,6 +7,7 @@ sample's own recorded rows back through `ScopedStore`. The negative cases ride a
 slot is refused, and a second workspace can reach none of the first's rows. Breaking the sample
 breaks this probe, and a Manifest field the sample stops registering breaks the conformance gate."""
 
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -32,6 +33,18 @@ from selfhost.serve import _mount_ext_routes
 from selfhost.tools.context import SpawnResult, ToolContext
 
 SANDBOX_UNTOUCHED = "the sample tool records through its store and must not reach the sandbox"
+
+
+@dataclass(frozen=True)
+class StubMemory:
+    """Stand-in memory service for the conformance context: the sample tool records through its own
+    store and never touches memory, so recall/commit are inert here."""
+
+    async def recall(self, query: str, subjects: frozenset[str], limit: int) -> tuple:
+        return ()
+
+    async def commit(self, write: object) -> None:
+        return None
 
 
 def _sample_manifest() -> Manifest:
@@ -107,6 +120,8 @@ async def test_tool_dispatches_with_its_scoped_context(db: None, tmp_path: Path)
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
+        memory=StubMemory(),
+        member_id=None,
         ext=ext_by_tool[tool.name],
     )
     args = tool.input_model.model_validate({"message": "conformance-echo"})
@@ -158,7 +173,7 @@ async def test_route_reaches_its_scoped_context(db: None) -> None:
     workspace_id = await _workspace()
     manifest = _sample_manifest()
     app = FastAPI()
-    _mount_ext_routes(app, (manifest,), workspace_id, _credential_store())
+    _mount_ext_routes(app, (manifest,), workspace_id, _credential_store(), StubMemory())
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://serve") as client:
         response = await client.post(f"/ext/{sample.NAME}/{sample.ROUTE_PATH}", content="ping")
     assert response.status_code == 200
