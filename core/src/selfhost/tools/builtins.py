@@ -4,8 +4,9 @@ Each file/shell handler reaches the workspace only through `ctx.sandbox`, so the
 and egress rules apply whether a byte arrives via a shell command or a file op. `read` records every
 path it returns so `edit` can refuse to touch a file the turn has not read — the guard that keeps a
 blind string-replace from clobbering content the model never saw. `spawn_subagent` delegates a typed
-subtask to a child turn through `ctx.spawn`. `memory_search` and `memory_update` recall and commit
-through `ctx.memory`, scoped to the conversation's subject (`{member, shared}`)."""
+subtask to a child turn through `ctx.spawn`. `memory_search` recalls facts and searches synced
+source pages through `ctx.memory`, and `memory_update` commits — both scoped to the conversation's
+subject (`{member, shared}`)."""
 
 from typing import Any
 
@@ -107,11 +108,14 @@ async def spawn_subagent_handler(ctx: ToolContext, args: SpawnSubagentInput) -> 
 
 
 async def memory_search_handler(ctx: ToolContext, args: MemorySearchInput) -> ToolResult:
-    recalled = await ctx.memory.recall(args.query, recall_subjects(ctx.member_id), args.limit)
-    if not recalled:
+    subjects = recall_subjects(ctx.member_id)
+    recalled = await ctx.memory.recall(args.query, subjects, args.limit)
+    sources = await ctx.memory.search_sources(args.query, subjects, args.limit)
+    if not recalled and not sources:
         return ToolResult(content=(TextContent(text="No matching memory."),))
-    text = "\n".join(f"- [{item.item_class}] {item.body}" for item in recalled)
-    return ToolResult(content=(TextContent(text=text),))
+    lines = [f"- [{item.item_class}] {item.body}" for item in recalled]
+    lines.extend(f"- [source] {match.text}" for match in sources)
+    return ToolResult(content=(TextContent(text="\n".join(lines)),))
 
 
 async def memory_update_handler(ctx: ToolContext, args: MemoryUpdateInput) -> ToolResult:
@@ -166,9 +170,9 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
     ToolDef(
         name="memory_search",
         description=(
-            "Search memory for facts and notes relevant to a query, over the current member's "
-            "memory and shared memory. Returns the best-matching items; use it to recall context "
-            "from earlier conversations before answering."
+            "Search memory for facts, notes, and synced source documents relevant to a query, "
+            "over the current member's memory and shared memory. Returns the best-matching items "
+            "and document snippets; use it to recall context before answering."
         ),
         input_model=MemorySearchInput,
         handler=memory_search_handler,

@@ -37,7 +37,7 @@ class Grant(BaseModel):            id: UUID; agent_id: UUID; kind: Literal["conn
 class Credential(BaseModel):       slot: str; ciphertext: bytes                            # encrypted at rest, values never logged
 class MemoryItem(BaseModel):       id: UUID; subject: str; body: str; item_class: Literal["fact", "episodic", "semantic"]
                                    embedding_digest: str; superseded_by: UUID | None
-class Page(BaseModel):             id: UUID; source_ref: str; digest: str; body_ref: BlobKey; meta: PageMeta
+class Page(BaseModel):             source_ref: str; digest: str; subject: str; body: str   # one fetched doc; driver assigns id + body_ref
 class SpendCap(BaseModel):         scope: Literal["workspace", "member", "agent"]; subject_id: UUID | None
                                    dimension: Dimension; cap: Decimal; window: Window
                                    on_breach: Literal["reject", "park"]
@@ -123,6 +123,7 @@ Rule = InjectionRule(host_pattern, header, sentinel → real)   \
 ```python
 class MemoryService(Protocol):
     async def recall(self, query: str, subjects: frozenset[str], limit: int) -> tuple[Recalled, ...]: ...
+    async def search_sources(self, query, subjects, limit) -> tuple[SourceMatch, ...]: ...  # source pages
     async def commit(self, write: MemoryWrite) -> None: ...
 class IndexBackend(Protocol):                                  # pgvector core; turbopuffer ext
     async def upsert(self, chunks: tuple[Chunk, ...]) -> None: ...
@@ -139,11 +140,14 @@ as jobs, batch-at-interval, never inline with a write.
 
 ```python
 class SourceBackend(Protocol):
-    async def sync(self, config: SourceConfig, cursor: str | None) -> SyncResult: ...
+    async def fetch(self, config: SourceConfig, cursor: str | None) -> SyncResult: ...
 class SyncResult(BaseModel):  pages: tuple[Page, ...]; next_cursor: str | None
 ```
-Core ships `folder`; S3/GitHub/connector-API backends are extensions. The sync driver is a core
-job: claim → sync → commit pages + due-mark for derivation.
+Core ships `folder`; S3/GitHub/connector-API backends are extensions. Config `[[sources]]` blocks
+register source rows at boot. The sync driver is a core job — claim (dialect-native lock) → fetch →
+store bodies + upsert pages (skip unchanged by digest, tombstone removed) → advance cursor; it
+writes no chunks. The page index job derives chunks (owner_kind `page`), and `memory_search` recalls
+them via `search_sources`.
 
 ## surfaces/ (U6 remainder)
 

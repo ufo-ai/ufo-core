@@ -27,8 +27,9 @@ from selfhost.loop.subagents import SubagentRegistry
 from selfhost.memory.chunk import TextChunker
 from selfhost.memory.embed import OpenAIEmbedClient
 from selfhost.memory.index import index_backend_for
-from selfhost.memory.indexer import MemoryIndexer
+from selfhost.memory.indexer import MemoryIndexer, PageIndexer
 from selfhost.memory.service import MemoryService
+from selfhost.memory.sources import FOLDER_BACKEND, FolderSource, SyncDriver, register_sources
 from selfhost.models.openai import openai_sdk_client
 from selfhost.o11y import init_o11y, log
 from selfhost.sandbox.carrier import DockerCarrier
@@ -61,14 +62,23 @@ def run() -> None:
         client=openai_sdk_client(os.environ.get(config.models.openai_api_key_env, ""))
     )
     index = index_backend_for(config.database.url, embed)
+    chunker = TextChunker()
+    blob = blob_store_for(config.blob)
     memory = MemoryService(index=index, embed=embed)
-    indexer = MemoryIndexer(index=index, embed=embed, chunker=TextChunker())
+    indexer = MemoryIndexer(index=index, embed=embed, chunker=chunker)
+    page_indexer = PageIndexer(index=index, embed=embed, chunker=chunker, blob=blob)
+    sync_driver = SyncDriver(
+        backends={FOLDER_BACKEND: FolderSource()},
+        blob=blob,
+        postgres=config.database.url.startswith("postgresql"),
+    )
+    asyncio.run(register_sources(config.sources))
     hub = InProcessHub()
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
     init_runtime(
         Runtime(
             config=config,
-            blob=blob_store_for(config.blob),
+            blob=blob,
             hub=hub,
             carrier=DockerCarrier(),
             proxy=_egress_proxy(asyncio.run(_assemble_rules(config))),
@@ -88,7 +98,7 @@ def run() -> None:
         }
     )
     DBOS.launch()
-    _launch_jobs(config, indexer, memory)
+    _launch_jobs(config, indexer, page_indexer, sync_driver, memory)
     app = FastAPI()
     app.state.hub = hub
     app.state.dbos = dbos_client
@@ -111,12 +121,19 @@ async def _require_bootstrap() -> None:
         raise RuntimeError("workspace missing — run `selfhost init` first")
 
 
-def _launch_jobs(config: Config, indexer: MemoryIndexer, memory: MemoryService) -> None:
-    """Register this workspace's jobs — core's own (the memory index derivation) plus every
-    installed extension's — as DBOS schedules and one-shot enqueues, after launch so the system
-    store is live. Registration is the synchronous DBOS API (off the loop, at startup); a handler
-    may read a declared credential, so once any job is registered the credential key must be set."""
-    bindings = bindings_from(load_manifests(), core_jobs(indexer))
+def _launch_jobs(
+    config: Config,
+    indexer: MemoryIndexer,
+    page_indexer: PageIndexer,
+    sync_driver: SyncDriver,
+    memory: MemoryService,
+) -> None:
+    """Register this workspace's jobs — core's own (the memory + page index derivations and the
+    source sync driver) plus every installed extension's — as DBOS schedules and one-shot enqueues,
+    after launch so the system store is live. Registration is the synchronous DBOS API (off the
+    loop, at startup); a handler may read a declared credential, so once any job is registered the
+    credential key must be set."""
+    bindings = bindings_from(load_manifests(), core_jobs(indexer, page_indexer, sync_driver))
     if not bindings:
         return
     key = os.environ.get(config.credentials.key_env)
