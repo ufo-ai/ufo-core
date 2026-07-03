@@ -1,7 +1,13 @@
-"""Shared turn admission: the one producer both surfaces call to place an inbound message on the
-durable turn queue. A conversation-row lock serializes seq allocation; the turn id is the DBOS
-workflow id, so a re-enqueue is idempotent. When an idempotency key is given, a redelivery of the
-same message joins the turn already admitted for it instead of spawning a second."""
+"""Shared turn admission: the one producer every surface, job, and extension-invoked turn calls to
+place an inbound message on the durable turn queue — so the spend cap is evaluated once here, at the
+boundary, and no caller can bypass it. A conversation-row lock serializes seq allocation; the turn
+id is the DBOS workflow id, so a re-enqueue is idempotent. When an idempotency key is given, a
+redelivery of the same message joins the turn already admitted for it instead of spawning a second.
+
+The inbound spend decision routes the turn before it is enqueued: allow queues it; a breached cap
+either parks it (held, not enqueued — the resume job re-admits it when the cap is raised) or, when
+the cap rejects, commits it cancelled with the reason, so a client's wait ends in-surface either
+way."""
 
 from dataclasses import dataclass
 from uuid import UUID
@@ -9,15 +15,21 @@ from uuid import UUID
 import sqlalchemy as sa
 from dbos import DBOSClient, EnqueueOptions
 
+from selfhost.accounting import SpendEvaluator
 from selfhost.db import workspace_tx
 from selfhost.schema import tables
 from selfhost.schema.records import (
     DBOS_APP_VERSION,
+    PARKED,
     TURN_QUEUE_NAME,
     TURN_WORKFLOW_NAME,
     TerminalFrame,
+    TurnStatus,
     turn_id_for,
 )
+
+QUEUED: TurnStatus = "queued"
+CANCELLED: TurnStatus = "cancelled"
 
 
 @dataclass(frozen=True)
@@ -33,11 +45,13 @@ class Admission:
         idempotency_key: str | None = None,
     ) -> UUID:
         async with workspace_tx() as connection:
-            await connection.execute(
-                sa.select(tables.conversation.c.id)
-                .where(tables.conversation.c.id == conversation_id)
-                .with_for_update()
-            )
+            conversation = (
+                await connection.execute(
+                    sa.select(tables.conversation.c.member_id)
+                    .where(tables.conversation.c.id == conversation_id)
+                    .with_for_update()
+                )
+            ).one()
             if idempotency_key is not None:
                 deduped = (
                     await connection.execute(
@@ -57,12 +71,25 @@ class Admission:
                 )
             ).scalar_one()
             turn_id = turn_id_for(workspace_id, conversation_id, seq)
-            already_admitted = (
+            existing = (
                 await connection.execute(
-                    sa.select(tables.turn.c.id).where(tables.turn.c.id == turn_id)
+                    sa.select(tables.turn.c.status).where(tables.turn.c.id == turn_id)
                 )
             ).one_or_none()
-            if already_admitted is None:
+            if existing is not None:
+                status = existing.status
+            else:
+                decision = await SpendEvaluator(
+                    workspace_id, conversation.member_id, agent_id
+                ).decide(connection, 0)
+                match decision.outcome:
+                    case "allow":
+                        status, terminal = QUEUED, None
+                    case "park":
+                        status, terminal = PARKED, None
+                    case _:
+                        status = CANCELLED
+                        terminal = TerminalFrame(status=CANCELLED, text=decision.message)
                 await connection.execute(
                     sa.insert(tables.turn).values(
                         id=turn_id,
@@ -70,15 +97,16 @@ class Admission:
                         conversation_id=conversation_id,
                         agent_id=agent_id,
                         seq=seq,
-                        status="queued",
+                        status=status,
                         inbound=body,
-                        terminal=None,
+                        terminal=None if terminal is None else terminal.model_dump(mode="json"),
                         idempotency_key=idempotency_key,
                         created_at=sa.func.now(),
                         updated_at=sa.func.now(),
                     )
                 )
-        await self._enqueue(conversation_id, turn_id)
+        if status == QUEUED:
+            await self._enqueue(conversation_id, turn_id)
         return turn_id
 
     async def _enqueue(self, conversation_id: UUID, turn_id: UUID) -> None:

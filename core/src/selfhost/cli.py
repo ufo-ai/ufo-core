@@ -6,7 +6,7 @@ import json
 import os
 import secrets
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import asyncpg
 import click
@@ -194,6 +194,10 @@ async def _stream_turn(
                         if "frame" in frame:
                             _render_terminal(frame["frame"], streamed)
                             return
+                        if "message" in frame:
+                            click.echo()
+                            click.echo(click.style(frame["message"], dim=True))
+                            return
                         click.echo(frame["text"], nl=False)
                         streamed = True
             except httpx.TransportError:
@@ -215,6 +219,150 @@ def _render_terminal(terminal: dict[str, object], streamed: bool) -> None:
             cost = f"{terminal['model']} · {terminal['tokens']} tok · ${dollars:.6f}"
             click.echo(click.style(cost, dim=True))
         case "cancelled":
-            click.echo("\n(cancelled)")
+            reason = terminal.get("text")
+            click.echo(f"\n{reason}" if reason else "\n(cancelled)")
         case _:
             raise click.ClickException(f"turn failed: {terminal['error_class']}")
+
+
+MICRO_USD_PER_USD = 1_000_000
+
+
+@main.group(name="spend-cap")
+def spend_cap() -> None:
+    """Read and set the workspace spend caps enforced at turn admission and per model round."""
+
+
+@spend_cap.command(name="set")
+@click.option("--scope", type=click.Choice(["workspace", "member", "agent"]), required=True)
+@click.option("--subject-id", default="", help="member or agent id; omit for workspace scope")
+@click.option("--window-seconds", type=int, required=True)
+@click.option("--limit-micro-usd", type=int, required=True)
+@click.option(
+    "--on-breach", type=click.Choice(["park", "reject"]), default="park", show_default=True
+)
+def spend_cap_set(
+    scope: str,
+    subject_id: str,
+    window_seconds: int,
+    limit_micro_usd: int,
+    on_breach: str,
+) -> None:
+    """Create or update a spend cap; raising a cap lets the sweep re-admit its parked turns."""
+    if scope == "workspace" and subject_id:
+        raise click.ClickException("workspace scope takes no --subject-id")
+    if scope != "workspace" and not subject_id:
+        raise click.ClickException(f"{scope} scope requires --subject-id")
+    subject = UUID(subject_id) if subject_id else None
+    config = load_config()
+    cap_id = asyncio.run(
+        _write_spend_cap(config, scope, subject, window_seconds, limit_micro_usd, on_breach)
+    )
+    dollars = limit_micro_usd / MICRO_USD_PER_USD
+    click.echo(f"spend cap {cap_id} — {scope} ${dollars:,.2f} / {window_seconds}s ({on_breach})")
+
+
+@spend_cap.command(name="list")
+def spend_cap_list() -> None:
+    """Show the workspace's spend caps."""
+    config = load_config()
+    caps = asyncio.run(_read_spend_caps(config))
+    if not caps:
+        click.echo("no spend caps set")
+        return
+    for cap_id, scope, subject, window_seconds, limit_micro_usd, on_breach in caps:
+        dollars = limit_micro_usd / MICRO_USD_PER_USD
+        target = f" {subject}" if subject is not None else ""
+        click.echo(
+            f"{cap_id}  {scope}{target}  ${dollars:,.2f} / {window_seconds}s  {on_breach}"
+        )
+
+
+async def _write_spend_cap(
+    config: Config,
+    scope: str,
+    subject: UUID | None,
+    window_seconds: int,
+    limit_micro_usd: int,
+    on_breach: str,
+) -> UUID:
+    init_db(config.database.url)
+    try:
+        async with workspace_tx() as connection:
+            workspace_id = (
+                await connection.execute(sa.select(tables.workspace.c.id))
+            ).scalar_one()
+            subject_match = (
+                tables.spend_cap.c.subject_id.is_(None)
+                if subject is None
+                else tables.spend_cap.c.subject_id == subject
+            )
+            existing = (
+                await connection.execute(
+                    sa.select(tables.spend_cap.c.id).where(
+                        tables.spend_cap.c.workspace_id == workspace_id,
+                        tables.spend_cap.c.scope == scope,
+                        subject_match,
+                        tables.spend_cap.c.window_seconds == window_seconds,
+                    )
+                )
+            ).one_or_none()
+            if existing is not None:
+                await connection.execute(
+                    sa.update(tables.spend_cap)
+                    .values(
+                        limit_micro_usd=limit_micro_usd,
+                        on_breach=on_breach,
+                        updated_at=sa.func.now(),
+                    )
+                    .where(tables.spend_cap.c.id == existing.id)
+                )
+                return existing.id
+            cap_id = uuid4()
+            await connection.execute(
+                sa.insert(tables.spend_cap).values(
+                    id=cap_id,
+                    workspace_id=workspace_id,
+                    scope=scope,
+                    subject_id=subject,
+                    window_seconds=window_seconds,
+                    limit_micro_usd=limit_micro_usd,
+                    on_breach=on_breach,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+            return cap_id
+    finally:
+        await dispose_db()
+
+
+async def _read_spend_caps(
+    config: Config,
+) -> list[tuple[UUID, str, UUID | None, int, int, str]]:
+    init_db(config.database.url)
+    try:
+        async with workspace_tx() as connection:
+            workspace_id = (
+                await connection.execute(sa.select(tables.workspace.c.id))
+            ).scalar_one()
+            rows = (
+                await connection.execute(
+                    sa.select(
+                        tables.spend_cap.c.id,
+                        tables.spend_cap.c.scope,
+                        tables.spend_cap.c.subject_id,
+                        tables.spend_cap.c.window_seconds,
+                        tables.spend_cap.c.limit_micro_usd,
+                        tables.spend_cap.c.on_breach,
+                    )
+                    .where(tables.spend_cap.c.workspace_id == workspace_id)
+                    .order_by(tables.spend_cap.c.scope)
+                )
+            ).all()
+        return [
+            (r.id, r.scope, r.subject_id, r.window_seconds, r.limit_micro_usd, r.on_breach)
+            for r in rows
+        ]
+    finally:
+        await dispose_db()

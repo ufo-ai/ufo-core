@@ -83,10 +83,11 @@ turn = sa.Table(
     sa.UniqueConstraint("conversation_id", "seq"),
     sa.CheckConstraint("seq >= 1", name="turn_seq"),
     sa.CheckConstraint(
-        "status in ('queued', 'running', 'done', 'failed', 'cancelled')", name="turn_status"
+        "status in ('queued', 'running', 'parked', 'done', 'failed', 'cancelled')",
+        name="turn_status",
     ),
     sa.CheckConstraint(
-        "(status in ('queued', 'running')) = (terminal is null)", name="turn_terminal"
+        "(status in ('queued', 'running', 'parked')) = (terminal is null)", name="turn_terminal"
     ),
     sa.Index("turn_idempotency_key", "workspace_id", "idempotency_key", unique=True),
 )
@@ -107,6 +108,31 @@ ledger = sa.Table(
     sa.CheckConstraint("amount > 0", name="ledger_amount"),
     sa.CheckConstraint("priced_micro_usd >= 0", name="ledger_priced"),
     sa.Index("ledger_turn", "turn_id"),
+)
+
+spend_cap = sa.Table(
+    "spend_cap",
+    metadata,
+    sa.Column("id", sa.Uuid, primary_key=True),
+    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
+    sa.Column("scope", sa.Text, nullable=False),
+    sa.Column("subject_id", sa.Uuid, nullable=True),
+    sa.Column("window_seconds", sa.Integer, nullable=False),
+    sa.Column("limit_micro_usd", sa.BigInteger, nullable=False),
+    sa.Column("on_breach", sa.Text, nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint("scope in ('workspace', 'member', 'agent')", name="spend_cap_scope"),
+    sa.CheckConstraint(
+        "(scope = 'workspace') = (subject_id is null)", name="spend_cap_subject"
+    ),
+    sa.CheckConstraint("window_seconds > 0", name="spend_cap_window"),
+    sa.CheckConstraint("limit_micro_usd > 0", name="spend_cap_limit"),
+    sa.CheckConstraint("on_breach in ('park', 'reject')", name="spend_cap_on_breach"),
+    sa.UniqueConstraint(
+        "workspace_id", "scope", "subject_id", "window_seconds", name="spend_cap_identity"
+    ),
+    sa.Index("spend_cap_workspace", "workspace_id"),
 )
 
 credential = sa.Table(

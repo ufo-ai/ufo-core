@@ -8,11 +8,17 @@ from uuid import UUID
 
 import sqlalchemy as sa
 
-from selfhost.accounting import read_turn_cost, record_turn_usage
+from selfhost.accounting import (
+    ALLOW,
+    SpendEvaluator,
+    read_turn_cost,
+    record_turn_usage,
+    usage_priced_micro_usd,
+)
 from selfhost.blob import BlobStore
 from selfhost.db import workspace_tx
 from selfhost.ext.context import ExtensionContext
-from selfhost.hub import Hub, Terminal
+from selfhost.hub import Hub, LiveFrame, Parked, Terminal
 from selfhost.loop.compaction import Compaction
 from selfhost.loop.transcript import Conversation, Transcript
 from selfhost.memory.service import MemoryService, recall_subjects
@@ -30,7 +36,15 @@ from selfhost.models.interface import (
 from selfhost.o11y import emit_metric, log, turn_span
 from selfhost.sandbox.session import SandboxSession
 from selfhost.schema import tables
-from selfhost.schema.records import Agent, TerminalFrame, TerminalStatus, Turn, Usage
+from selfhost.schema.records import (
+    NON_TERMINAL_STATUSES,
+    PARKED,
+    Agent,
+    TerminalFrame,
+    TerminalStatus,
+    Turn,
+    Usage,
+)
 from selfhost.tools.context import Spawn, ToolContext
 from selfhost.tools.registry import ToolRegistry
 
@@ -45,6 +59,15 @@ COMMIT_RETRY_INITIAL_SECONDS = 1.0
 COMMIT_RETRY_MAX_SECONDS = 30.0
 RECALL_LIMIT = 8
 RECALL_CONTEXT_PREFIX = "Relevant memory:\n"
+
+
+class TurnParked(Exception):
+    """A running turn crossed a spend cap: it stops mid-run and is held non-terminally, resumable by
+    the resume job once the cap is raised. Carries the in-surface reason for the Parked frame."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
 
 
 def _parse_args(partials: list[str]) -> dict[str, object]:
@@ -112,6 +135,10 @@ class TurnEngine:
                 else:
                     await self._persist_inbound()
                 return frame
+            except TurnParked as parked:
+                await self._park(parked.message)
+                await self._persist_inbound()
+                raise
             except asyncio.CancelledError:
                 await self._bill_cancelled(usage_events)
                 await self._persist_inbound()
@@ -170,6 +197,7 @@ class TurnEngine:
         dispatches the calls in the sandbox and feeds the results back as the next user turn."""
         nudged = False
         for _round in range(MAX_TOOL_ROUNDS):
+            await self._enforce_spend(usage_events)
             messages, compaction_usage = await self.compaction.maybe_compact(messages)
             usage_events.extend(compaction_usage)
             text, tool_calls = await self._stream_once(messages, usage_events, system)
@@ -189,6 +217,20 @@ class TurnEngine:
                 Message(role="user", content=results),
             )
         raise RuntimeError(f"tool round limit exceeded ({MAX_TOOL_ROUNDS})")
+
+    async def _enforce_spend(self, usage_events: list[Usage]) -> None:
+        """Before each model round, re-decide against the caps with this turn's in-flight spend
+        priced in (its tokens are not yet on the ledger — that lands at terminal), so a turn that
+        crosses a cap mid-run is held rather than left to run the workspace past its limit. Any
+        breach parks: the committed work is held and resumable, not discarded — reject is the
+        inbound gate, before any tokens are spent."""
+        pending = usage_priced_micro_usd(self.agent.model, _total_usage(usage_events))
+        async with workspace_tx() as connection:
+            decision = await SpendEvaluator(
+                self.turn.workspace_id, self.member_id, self.turn.agent_id
+            ).decide(connection, pending)
+        if decision.outcome != ALLOW:
+            raise TurnParked(decision.message)
 
     async def _stream_once(
         self, messages: tuple[Message, ...], usage_events: list[Usage], system: str
@@ -334,8 +376,26 @@ class TurnEngine:
                 frame = TerminalFrame.model_validate(row.terminal)
         return frame
 
-    async def _publish(self, frame: Terminal) -> None:
-        """The live leg never fails the turn; the durable terminal is authoritative."""
+    async def _park(self, message: str) -> None:
+        """Hold the turn at a spend cap: commit the non-terminal parked state (durable, resumable)
+        and end the surface's stream with the reason. Consumed tokens are not billed here — the
+        resumed run bills its own terminal under the same ledger id, so park never double-bills."""
+        async with workspace_tx() as connection:
+            updated = await connection.execute(
+                sa.update(tables.turn)
+                .values(status=PARKED, updated_at=sa.func.now())
+                .where(
+                    tables.turn.c.id == self.turn.id,
+                    tables.turn.c.status.in_(NON_TERMINAL_STATUSES),
+                )
+            )
+        if updated.rowcount == 1:
+            await self._publish(Parked(message=message))
+            emit_metric("turn_parked_total")
+            log("turn.parked", turn_id=str(self.turn.id))
+
+    async def _publish(self, frame: LiveFrame) -> None:
+        """The live leg never fails the turn; the durable terminal/parked state is authoritative."""
         try:
             await self.hub.publish(self.turn.id, frame)
         except Exception as error:

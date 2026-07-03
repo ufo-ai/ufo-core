@@ -16,7 +16,7 @@ from selfhost.ext.loader import turn_tools
 from selfhost.ext.manifest import Manifest
 from selfhost.hub import Hub, Terminal
 from selfhost.loop.compaction import Compaction
-from selfhost.loop.engine import TurnEngine
+from selfhost.loop.engine import TurnEngine, TurnParked
 from selfhost.loop.subagents import SubagentRegistry, Subagents, subagent_system_prompt
 from selfhost.loop.transcript import Transcript
 from selfhost.memory.service import MemoryService
@@ -137,6 +137,8 @@ async def _execute_turn(turn_id: str) -> str:
         )
         frame = await engine.run()
         return frame.status
+    except TurnParked:
+        return "parked"
     except asyncio.CancelledError:
         raise
     except Exception as error:

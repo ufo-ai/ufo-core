@@ -24,7 +24,7 @@ from selfhost.ext.context import context_for
 from selfhost.ext.loader import load_manifests, validate_ext_tools
 from selfhost.ext.manifest import Manifest
 from selfhost.hub import Hub, InProcessHub
-from selfhost.jobs import JobRunner, bindings_from, core_jobs
+from selfhost.jobs import JobRunner, SpendResume, bindings_from, core_jobs
 from selfhost.loop.queue import Runtime, init_runtime
 from selfhost.loop.subagents import SubagentRegistry
 from selfhost.memory.chunk import TextChunker
@@ -109,7 +109,7 @@ def run() -> None:
         }
     )
     DBOS.launch()
-    _launch_jobs(config, indexer, page_indexer, sync_driver, memory)
+    _launch_jobs(config, indexer, page_indexer, sync_driver, memory, dbos_client)
     app = FastAPI(lifespan=_writeback_lifespan)
     app.state.hub = hub
     app.state.dbos = dbos_client
@@ -141,13 +141,17 @@ def _launch_jobs(
     page_indexer: PageIndexer,
     sync_driver: SyncDriver,
     memory: MemoryService,
+    dbos_client: DBOSClient,
 ) -> None:
-    """Register this workspace's jobs — core's own (the memory + page index derivations and the
-    source sync driver) plus every installed extension's — as DBOS schedules and one-shot enqueues,
-    after launch so the system store is live. Registration is the synchronous DBOS API (off the
-    loop, at startup); a handler may read a declared credential, so once any job is registered the
-    credential key must be set."""
-    bindings = bindings_from(load_manifests(), core_jobs(indexer, page_indexer, sync_driver))
+    """Register this workspace's jobs — core's own (the memory + page index derivations, the source
+    sync driver, and the spend-resume sweep that re-admits parked turns) plus every installed
+    extension's — as DBOS schedules and one-shot enqueues, after launch so the system store is live.
+    Registration is the synchronous DBOS API (off the loop, at startup); a handler may read a
+    declared credential, so once any job is registered the credential key must be set."""
+    bindings = bindings_from(
+        load_manifests(),
+        core_jobs(indexer, page_indexer, sync_driver, SpendResume(client=dbos_client)),
+    )
     if not bindings:
         return
     key = os.environ.get(config.credentials.key_env)

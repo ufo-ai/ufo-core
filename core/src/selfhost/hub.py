@@ -18,7 +18,15 @@ class Terminal(BaseModel):
     frame: TerminalFrame
 
 
-LiveFrame = TextDelta | Terminal
+class Parked(BaseModel):
+    """A turn held by a spend cap: non-terminal, so the durable turn stays resumable, but it ends a
+    surface's live stream with the reason the way a Terminal does. Carries only `message` so the CLI
+    and web streams distinguish it from a TextDelta (`text`) and a Terminal (`frame`)."""
+
+    message: str
+
+
+LiveFrame = TextDelta | Terminal | Parked
 
 
 class Hub(Protocol):

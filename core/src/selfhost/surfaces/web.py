@@ -22,7 +22,7 @@ from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from selfhost.artifact_token import ArtifactTokenError, verify_artifact_token
 from selfhost.blob import BlobNotFound, BlobStore
 from selfhost.db import workspace_tx
-from selfhost.hub import Hub, LiveFrame, Terminal
+from selfhost.hub import Hub, LiveFrame, Parked, Terminal
 from selfhost.o11y import log
 from selfhost.schema import tables
 from selfhost.schema.records import DEFAULT_AGENT_NAME
@@ -210,6 +210,8 @@ class WebSurface:
 def _sse(frame: LiveFrame) -> bytes:
     if isinstance(frame, Terminal):
         return b"event: terminal\ndata: " + frame.frame.model_dump_json().encode() + b"\n\n"
+    if isinstance(frame, Parked):
+        return b"event: parked\ndata: " + frame.model_dump_json().encode() + b"\n\n"
     return b"data: " + frame.model_dump_json().encode() + b"\n\n"
 
 
@@ -327,9 +329,17 @@ form.addEventListener('submit', async (event) => {
         + (frame.cost_micro_usd / 1e6).toFixed(6);
       reply.appendChild(meta);
     } else {
-      const suffix = '(' + frame.status + (frame.error_class ? ': ' + frame.error_class : '') + ')';
-      reply.textContent += (reply.textContent ? '\\n' : '') + suffix;
+      const detail = frame.text
+        || '(' + frame.status + (frame.error_class ? ': ' + frame.error_class : '') + ')';
+      reply.textContent += (reply.textContent ? '\\n' : '') + detail;
     }
+    source.close();
+    button.disabled = false;
+    input.focus();
+  });
+  source.addEventListener('parked', (event) => {
+    const frame = JSON.parse(event.data);
+    reply.textContent += (reply.textContent ? '\\n' : '') + frame.message;
     source.close();
     button.disabled = false;
     input.focus();
