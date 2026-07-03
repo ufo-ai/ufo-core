@@ -64,6 +64,23 @@ class O11yConfig(BaseModel):
     otlp_endpoint: str | None = None
 
 
+class HubConfig(BaseModel):
+    """Which stream hub backs live deltas. Core ships only the in-process hub; `shared` declares a
+    shared-hub extension (Redis) is wired, and the boot guard treats an unshared hub as a dev
+    default no second instance may run against."""
+
+    model_config = ConfigDict(extra="forbid")
+    shared: bool = False
+
+
+class ExtConfig(BaseModel):
+    """The extension store toggle. `store` names a catalog file the `selfhost ext` commands search
+    and install from; omit it and the store is off — the deploy runs only what its bundle pinned."""
+
+    model_config = ConfigDict(extra="forbid")
+    store: Path | None = None
+
+
 class SourceConfig(BaseModel):
     """The folder backend's parameters — the local directory it syncs. Crosses two boundaries: the
     config file and the `source.config` JSON column, so it validates at construction both times."""
@@ -116,13 +133,19 @@ class Config(BaseModel):
     credentials: CredentialsConfig = CredentialsConfig()
     serve: ServeConfig = ServeConfig()
     o11y: O11yConfig = O11yConfig()
+    hub: HubConfig = HubConfig()
+    ext: ExtConfig = ExtConfig()
     sources: tuple[SourceEntry, ...] = ()
     surfaces: SurfacesConfig = SurfacesConfig()
     artifacts: ArtifactsConfig = ArtifactsConfig()
 
 
+def config_path() -> Path:
+    return Path(os.environ.get(CONFIG_PATH_ENV, str(DEFAULT_CONFIG_PATH)))
+
+
 def load_config(path: Path | None = None) -> Config:
-    resolved = path or Path(os.environ.get(CONFIG_PATH_ENV, DEFAULT_CONFIG_PATH))
+    resolved = path or config_path()
     if not resolved.exists():
         raise FileNotFoundError(
             f"missing config file {resolved} (create selfhost.toml or set {CONFIG_PATH_ENV})"

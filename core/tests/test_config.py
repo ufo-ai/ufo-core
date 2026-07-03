@@ -59,6 +59,22 @@ def test_config_path_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     assert load_config().serve.host == "127.0.0.1"
 
 
+def test_hub_and_ext_default_to_dev(tmp_path: Path) -> None:
+    path = tmp_path / "selfhost.toml"
+    path.write_text(VALID)
+    config = load_config(path)
+    assert config.hub.shared is False
+    assert config.ext.store is None
+
+
+def test_hub_shared_and_ext_store_parse(tmp_path: Path) -> None:
+    path = tmp_path / "selfhost.toml"
+    path.write_text(VALID + '\n[hub]\nshared = true\n\n[ext]\nstore = "extensions.catalog.toml"\n')
+    config = load_config(path)
+    assert config.hub.shared is True
+    assert config.ext.store == Path("extensions.catalog.toml")
+
+
 def test_postgres_system_url_uses_sync_driver(tmp_path: Path) -> None:
     path = tmp_path / "selfhost.toml"
     path.write_text(

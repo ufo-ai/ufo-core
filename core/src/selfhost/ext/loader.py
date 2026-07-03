@@ -3,11 +3,24 @@
 Each `selfhost.extension` entry point is a zero-arg callable returning a Manifest; the loader
 collects them, rejects duplicate names, and hands the tuple to the derivations that read it.
 Discovery is the only path in — extensions declare, they never call a registration API.
-`turn_tools` reads those manifests into the set a turn dispatches against and the owning
+
+The lockfile is the deploy's pinned extension set: when it exists, only the extensions it pins load,
+and each must match its pinned digest or boot fails loud — tamper and drift are refused, not run.
+With no lockfile the deploy is in dev mode and every discovered extension is active. `selfhost ext`
+and `selfhost bundle` write this file; `load_manifests` reads it, so the set the operator pinned is
+exactly what every derivation (tools, jobs, routes, proxy rules) sees.
+
+`turn_tools` reads the active manifests into the set a turn dispatches against and the owning
 ExtensionContext for each extension tool."""
 
-from importlib.metadata import entry_points
+import hashlib
+import importlib.util
+import os
+from importlib.metadata import EntryPoint, entry_points
+from pathlib import Path
 from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict
 
 from selfhost.credentials import CredentialStore
 from selfhost.ext.context import ExtensionContext, context_for
@@ -17,15 +30,87 @@ from selfhost.tools.builtins import BUILTIN_TOOLS
 from selfhost.tools.registry import ToolDef, ToolRegistry
 
 EXTENSION_ENTRY_POINT_GROUP = "selfhost.extension"
+LOCKFILE_PATH_ENV = "SELFHOST_LOCKFILE"
+DEFAULT_LOCKFILE_PATH = Path("selfhost.lock")
+DIGEST_PREFIX = "sha256:"
+
+
+class ExtensionPin(BaseModel):
+    """One extension the lockfile pins: its name, the version pinned, and the digest of its
+    installed source the loader re-checks at boot."""
+
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    version: str
+    digest: str
+
+
+class Lockfile(BaseModel):
+    """The deploy's pinned components — the selfhost version that anchors dependencies and each
+    pinned extension. Crosses the boundary between the `selfhost ext`/`bundle` writers and the boot
+    reader as a file, so it validates at construction both ways."""
+
+    model_config = ConfigDict(extra="forbid")
+    selfhost_version: str
+    extensions: tuple[ExtensionPin, ...] = ()
+
+
+def lockfile_path() -> Path:
+    return Path(os.environ.get(LOCKFILE_PATH_ENV, str(DEFAULT_LOCKFILE_PATH)))
+
+
+def read_lockfile(path: Path) -> Lockfile:
+    return Lockfile.model_validate_json(path.read_text())
+
+
+def write_lockfile(path: Path, lockfile: Lockfile) -> None:
+    path.write_text(lockfile.model_dump_json(indent=2) + "\n")
+
+
+def discovered() -> dict[str, tuple[Manifest, EntryPoint]]:
+    """Every extension installed in this environment, keyed by manifest name, with the entry point
+    its digest is computed from. Duplicate manifest names are rejected here so no reader downstream
+    has to."""
+    found: dict[str, tuple[Manifest, EntryPoint]] = {}
+    for entry in entry_points(group=EXTENSION_ENTRY_POINT_GROUP):
+        manifest = entry.load()()
+        if manifest.name in found:
+            raise ValueError(f"duplicate extension name: {manifest.name}")
+        found[manifest.name] = (manifest, entry)
+    return found
+
+
+def extension_digest(entry: EntryPoint) -> str:
+    """The digest that pins an extension: sha256 over its entry-point module source, so an edit to
+    the installed code changes the digest and a pinned deploy refuses to run it."""
+    spec = importlib.util.find_spec(entry.module)
+    if spec is None or spec.origin is None:
+        raise RuntimeError(f"extension module {entry.module!r} has no importable source")
+    body = Path(spec.origin).read_bytes()
+    return DIGEST_PREFIX + hashlib.sha256(body).hexdigest()
 
 
 def load_manifests() -> tuple[Manifest, ...]:
-    manifests = tuple(entry.load()() for entry in entry_points(group=EXTENSION_ENTRY_POINT_GROUP))
-    names = [manifest.name for manifest in manifests]
-    duplicates = sorted({name for name in names if names.count(name) > 1})
-    if duplicates:
-        raise ValueError(f"duplicate extension names: {', '.join(duplicates)}")
-    return manifests
+    """The active extension set. With a lockfile present it is exactly the pinned extensions, each
+    verified against its pinned digest (a missing or drifted extension fails loud); with none, every
+    discovered extension is active."""
+    installed = discovered()
+    path = lockfile_path()
+    if not path.exists():
+        return tuple(manifest for manifest, _ in installed.values())
+    manifests: list[Manifest] = []
+    for pin in read_lockfile(path).extensions:
+        found = installed.get(pin.name)
+        if found is None:
+            raise RuntimeError(f"lockfile pins extension {pin.name!r} but it is not installed")
+        manifest, entry = found
+        actual = extension_digest(entry)
+        if actual != pin.digest:
+            raise RuntimeError(
+                f"extension {pin.name!r} digest {actual} does not match pinned {pin.digest}"
+            )
+        manifests.append(manifest)
+    return tuple(manifests)
 
 
 def turn_tools(
