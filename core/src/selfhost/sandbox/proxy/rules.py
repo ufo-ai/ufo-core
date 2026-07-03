@@ -1,10 +1,9 @@
 """What the egress proxy is allowed to do, derived — never registered.
 
 Rules are values the proxy reads, not an API extensions call: a credential slot implies its
-sentinel→real injection, a granted account implies its host scope, a metered host implies its
-ledger dimension. U2 derives the one rule set it can without the extension system: the model
-provider the deploy already holds a key for. Manifests (U3) and connector grants (U8) widen the
-inputs; the derivation stays the only path in."""
+sentinel→real injection, a granted host implies its scope, a metered host implies its dimension.
+Two derivations produce them — the deploy's model provider from its key, and each manifest
+credential slot from its stored secret — and derivation is the only path in."""
 
 from dataclasses import dataclass
 from uuid import UUID
@@ -50,7 +49,7 @@ class InjectionRule:
 
 @dataclass(frozen=True)
 class MeterRule:
-    """Every request to `host` is metered under `dimension`; the ledger write lands in U7."""
+    """Every request to `host` is metered under `dimension`."""
 
     host: str
     dimension: str

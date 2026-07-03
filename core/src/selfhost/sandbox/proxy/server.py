@@ -6,7 +6,7 @@ admitted host carrying an InjectionRule is MITM'd — the proxy terminates TLS w
 the per-process CA (in the container's trust store), swaps the sentinel Authorization value the
 sandbox sees for the real credential, and re-originates upstream over its own verified TLS, so the
 raw key is never inside the sandbox. An admitted host with no InjectionRule is tunnelled opaquely.
-Each forwarded request is metered under its MeterRule (the durable ledger write is U7)."""
+Each forwarded request is metered under its MeterRule."""
 
 import asyncio
 import ssl
