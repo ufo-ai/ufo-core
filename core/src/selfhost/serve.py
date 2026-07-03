@@ -3,8 +3,9 @@
 import asyncio
 import os
 import threading
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
+from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
 import httpx
@@ -23,7 +24,7 @@ from selfhost.db import init_db, workspace_tx
 from selfhost.ext.context import context_for
 from selfhost.ext.loader import load_manifests, validate_ext_tools
 from selfhost.ext.manifest import Manifest
-from selfhost.grants import ConnectFlow, GrantStore, install_connect_flow
+from selfhost.grants import ConnectFlow, GrantStore, OAuthProvider, install_connect_flow
 from selfhost.hub import Hub, InProcessHub
 from selfhost.jobs import JobRunner, SpendResume, bindings_from, core_jobs
 from selfhost.loop.queue import Runtime, init_runtime
@@ -108,7 +109,7 @@ def run() -> None:
             artifact_token_secret=artifact_secret,
         )
     )
-    install_connect_flow(_connect_flow(credentials, config))
+    install_connect_flow(_connect_flow(credentials, config, manifests))
     DBOS(
         config={
             "name": DBOS_APP_NAME,
@@ -305,19 +306,57 @@ def _egress_proxy(resolver: PerAgentRules) -> ProxyEndpoint:
     return asyncio.run_coroutine_threadsafe(_boot(), loop).result(PROXY_STARTUP_TIMEOUT_SECONDS)
 
 
-def _connect_flow(credentials: CredentialStore | None, config: Config) -> ConnectFlow | None:
+BIND_ADDRESSES = frozenset({"0.0.0.0", "127.0.0.1", "localhost", "::", "::1"})
+
+
+def _connect_flow(
+    credentials: CredentialStore | None, config: Config, manifests: tuple[Manifest, ...]
+) -> ConnectFlow | None:
     """The process's connect flow — the `connect_account` tool authorizes through it and the OAuth
     callback completes through it — sharing the credential key that seals its state and encrypts its
-    tokens. No key means grants cannot be recorded, so both fail loud. The provider map is empty
-    until a connectors extension installs one; the `redirect_uri` is this deploy's callback URL, the
-    one value both legs of the handoff present."""
+    tokens. No key means grants cannot be recorded, so both fail loud. The provider registry is
+    every installed connector's OAuth descriptor keyed by its provider name; the `redirect_uri` is
+    this deploy's external callback URL, the one value both legs of the handoff present."""
     if credentials is None:
         return None
-    store = GrantStore(fernet=credentials.fernet)
-    redirect_uri = f"http://{config.serve.host}:{config.serve.port}{CONNECT_CALLBACK_PATH}"
+    providers: Mapping[str, OAuthProvider] = {
+        connector.oauth.provider: connector.oauth
+        for manifest in manifests
+        for connector in manifest.connectors
+    }
     return ConnectFlow(
-        providers={}, fernet=credentials.fernet, store=store, redirect_uri=redirect_uri
+        providers=providers,
+        fernet=credentials.fernet,
+        store=GrantStore(fernet=credentials.fernet),
+        redirect_uri=_connect_redirect_uri(config, providers),
     )
+
+
+def _connect_redirect_uri(config: Config, providers: Mapping[str, OAuthProvider]) -> str:
+    """The external callback URL both OAuth legs present, derived from `connect.public_base_url`. A
+    provider redirects the member's browser here, so a bind address (0.0.0.0 / 127.0.0.1) or a
+    scheme-less value is unreachable and fails loud the moment a connector is registered. With no
+    connector installed connect is inert, so the config may be absent."""
+    base = config.connect.public_base_url
+    if not providers:
+        return f"{base.rstrip('/')}{CONNECT_CALLBACK_PATH}" if base else ""
+    if not base:
+        raise RuntimeError(
+            "connect.public_base_url must be this deploy's externally reachable base URL when a "
+            "connector provider is registered"
+        )
+    parsed = urlparse(base)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise RuntimeError(
+            f"connect.public_base_url {base!r} must include a scheme and host — the provider "
+            "redirects the member's browser to it"
+        )
+    if parsed.hostname in BIND_ADDRESSES:
+        raise RuntimeError(
+            f"connect.public_base_url {base!r} is a bind address, not reachable by the provider's "
+            "OAuth redirect; set the deploy's public URL"
+        )
+    return f"{base.rstrip('/')}{CONNECT_CALLBACK_PATH}"
 
 
 async def _resolver(config: Config, credentials: CredentialStore | None) -> PerAgentRules:

@@ -82,6 +82,23 @@ class _UntouchedCarrier:
         raise AssertionError(SANDBOX_UNTOUCHED)
 
 
+class _StubCarrier:
+    """A carrier that answers `exec` with a canned egress result — a stand-in dependency for the
+    connector tool's `ctx.sandbox.bash`, never the thing asserted. The tool records what it did
+    through its own store; the test reads that back. `create`/`destroy` stay unreachable here."""
+
+    async def create(self, spec: SandboxSpec) -> SandboxHandle:
+        raise AssertionError("the connector tool reaches the sandbox only through exec")
+
+    async def exec(
+        self, handle: SandboxHandle, argv: tuple[str, ...], stdin: bytes, timeout_s: int
+    ) -> ExecResult:
+        return ExecResult(stdout="200", stderr="", exit_code=0)
+
+    async def destroy(self, handle: SandboxHandle) -> None:
+        raise AssertionError("the connector tool reaches the sandbox only through exec")
+
+
 async def _unavailable_spawn(
     profile: str, payload: dict[str, object], background: bool = False
 ) -> SpawnResult:
@@ -95,6 +112,12 @@ async def test_sample_is_discovered_via_its_entry_point() -> None:
     assert {route.path for route in manifest.routes} == {sample.ROUTE_PATH}
     assert {slot.name for slot in manifest.credentials} == {sample.API_SLOT}
     assert {step.name for step in manifest.onboarding_steps} == {sample.ONBOARDING_NAME}
+    assert {connector.oauth.provider for connector in manifest.connectors} == {
+        sample.CONNECTOR_PROVIDER
+    }
+    assert {
+        tool.name for connector in manifest.connectors for tool in connector.tools
+    } == {sample.CONNECTOR_TOOL_NAME}
 
 
 async def test_tool_dispatches_with_its_scoped_context(db: None, tmp_path: Path) -> None:
@@ -129,6 +152,46 @@ async def test_tool_dispatches_with_its_scoped_context(db: None, tmp_path: Path)
     assert result.is_error is False
     scoped = ScopedStore(workspace_id=workspace_id, extension=sample.NAME)
     assert await scoped.get(sample.TOOL_KEY) == {"message": "conformance-echo"}
+
+
+async def test_connector_tool_joins_the_turn_set_and_reaches_its_provider_host(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    manifest = _sample_manifest()
+    tools, ext_by_tool = turn_tools((manifest,), workspace_id, _credential_store())
+    assert sample.CONNECTOR_TOOL_NAME in {tool.name for tool in tools}
+    tool = next(tool for tool in tools if tool.name == sample.CONNECTOR_TOOL_NAME)
+    context = ToolContext(
+        sandbox=SandboxSession(
+            carrier=_StubCarrier(),
+            handle=SandboxHandle(conversation_id=uuid4(), container_id="test"),
+        ),
+        blob=FilesystemBlobStore(root=tmp_path),
+        turn=Turn(
+            id=uuid4(),
+            workspace_id=workspace_id,
+            conversation_id=uuid4(),
+            agent_id=uuid4(),
+            seq=1,
+            status="running",
+            inbound="hi",
+        ),
+        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        spawn=_unavailable_spawn,
+        memory=StubMemory(),
+        member_id=None,
+        artifact_token_secret="",
+        ext=ext_by_tool[tool.name],
+    )
+    args = tool.input_model.model_validate({"path": "me"})
+    result = await tool.handler(context, args)
+    assert result.is_error is False
+    scoped = ScopedStore(workspace_id=workspace_id, extension=sample.NAME)
+    assert await scoped.get(sample.CONNECTOR_KEY) == {
+        "host": sample.CONNECTOR_HOST,
+        "path": "me",
+    }
 
 
 async def test_credential_slot_derives_its_injection_and_meter_rules(db: None) -> None:

@@ -136,13 +136,19 @@ def turn_tools(
     memory: MemoryService | None = None,
 ) -> tuple[tuple[ToolDef, ...], dict[str, ExtensionContext]]:
     """The full tool set a turn dispatches against — core builtins plus every extension's declared
-    tools — and, per extension tool, the workspace-scoped ExtensionContext its handler receives. A
-    builtin has no entry, so the engine dispatches it with ext=None. An extension that declares
-    tools without a credential key set fails loud, since its context needs the credential store."""
+    tools and connector tools — and, per extension tool, the workspace-scoped ExtensionContext its
+    handler receives. A builtin has no entry, so the engine dispatches it with ext=None. A connector
+    tool is scoped to its declaring extension exactly as a plain tool is, so its egress reaches the
+    provider host under that extension's context. An extension that declares tools without a
+    credential key set fails loud, since its context needs the credential store."""
     tools: list[ToolDef] = list(BUILTIN_TOOLS)
     ext_by_tool: dict[str, ExtensionContext] = {}
     for manifest in manifests:
-        if not manifest.tools:
+        declared_tools = (
+            *manifest.tools,
+            *(tool for connector in manifest.connectors for tool in connector.tools),
+        )
+        if not declared_tools:
             continue
         if credential_store is None:
             raise RuntimeError(
@@ -150,7 +156,7 @@ def turn_tools(
             )
         declared = frozenset(slot.name for slot in manifest.credentials)
         context = context_for(workspace_id, manifest.name, declared, credential_store, memory)
-        for tool in manifest.tools:
+        for tool in declared_tools:
             tools.append(tool)
             ext_by_tool[tool.name] = context
     return tuple(tools), ext_by_tool

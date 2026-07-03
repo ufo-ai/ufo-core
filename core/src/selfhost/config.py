@@ -59,6 +59,16 @@ class ServeConfig(BaseModel):
     port: int = 8710
 
 
+class ConnectConfig(BaseModel):
+    """OAuth connect settings. `public_base_url` is the deploy's externally reachable base (scheme
+    and host, e.g. `https://selfhost.example.com`) that a provider redirects the member's browser
+    back to; `ConnectFlow.redirect_uri` derives from it. Absent when no connector provider is
+    installed (connect is inert); required, and never a bind address, once one is."""
+
+    model_config = ConfigDict(extra="forbid")
+    public_base_url: str | None = None
+
+
 class O11yConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     otlp_endpoint: str | None = None
@@ -123,6 +133,7 @@ class Config(BaseModel):
     models: ModelsConfig = ModelsConfig()
     credentials: CredentialsConfig = CredentialsConfig()
     serve: ServeConfig = ServeConfig()
+    connect: ConnectConfig = ConnectConfig()
     o11y: O11yConfig = O11yConfig()
     ext: ExtConfig = ExtConfig()
     sources: tuple[SourceEntry, ...] = ()

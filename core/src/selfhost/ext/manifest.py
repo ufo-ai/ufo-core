@@ -13,6 +13,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from selfhost.ext.context import ExtensionContext
+from selfhost.grants import OAuthProvider
 from selfhost.tools.registry import ToolDef
 
 
@@ -60,6 +61,18 @@ class RouteSpec:
 
 
 @dataclass(frozen=True)
+class ConnectorProvider:
+    """One connector an extension registers: the OAuth descriptor behind `/connect` for this
+    provider and the agent tools that call its granted account. The descriptor's `provider` keys the
+    connect-flow registry `serve` builds; its `host` is the one the derived grant admits, injects,
+    and meters at the egress proxy. The tools join the turn's tool set scoped to the extension, so a
+    connector call reaches the provider host only for an agent the grant covers."""
+
+    oauth: OAuthProvider
+    tools: tuple[ToolDef, ...] = ()
+
+
+@dataclass(frozen=True)
 class OnboardingStep:
     """A first-run step an extension contributes to workspace onboarding. `handler` runs once, after
     the core steps, with the extension's scoped ExtensionContext — the same handle its jobs receive,
@@ -80,4 +93,5 @@ class Manifest:
     jobs: tuple[JobSpec, ...] = ()
     routes: tuple[RouteSpec, ...] = ()
     credentials: tuple[CredentialSlot, ...] = ()
+    connectors: tuple[ConnectorProvider, ...] = ()
     onboarding_steps: tuple[OnboardingStep, ...] = ()
