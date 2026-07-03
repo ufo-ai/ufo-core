@@ -33,9 +33,12 @@ def turn_id_for(workspace_id: UUID, conversation_id: UUID, seq: int) -> UUID:
     return uuid5(NAMESPACE_URL, f"{workspace_id}/{conversation_id}/{seq}")
 
 
-def ledger_id_for(workspace_id: UUID, turn_id: UUID, dimension: str) -> UUID:
-    """One billing write per turn per dimension, at terminal commit — replay collapses on id."""
-    return uuid5(NAMESPACE_URL, f"{workspace_id}/turn/{turn_id}/{dimension}")
+def ledger_id_for(workspace_id: UUID, turn_id: UUID, dimension: str, attempt: str = "") -> UUID:
+    """One billing write per turn per dimension per run attempt (the DBOS workflow id of the run
+    that spent the tokens). Replay of the same attempt collapses on this id; a resumed run is a
+    distinct attempt, so a turn parked and resumed bills both partial burns — the true provider
+    total — as separate rows the cap sum and terminal read aggregate."""
+    return uuid5(NAMESPACE_URL, f"{workspace_id}/turn/{turn_id}/{dimension}/{attempt}")
 
 
 class Usage(BaseModel):

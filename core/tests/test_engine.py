@@ -465,3 +465,58 @@ async def test_per_step_cap_parks_a_running_turn(db: None, tmp_path: Path) -> No
             )
         ).scalar_one()
     assert status == "parked"
+
+
+async def test_per_step_park_then_resume_persists_full_transcript(db: None, tmp_path: Path) -> None:
+    turn = await _seed_turn("queued", None)
+    async with workspace_tx() as connection:
+        cap = uuid4()
+        await connection.execute(
+            sa.insert(tables.spend_cap).values(
+                id=cap,
+                workspace_id=turn.workspace_id,
+                scope="workspace",
+                subject_id=None,
+                window_seconds=3600,
+                limit_micro_usd=1,
+                on_breach="park",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.ledger).values(
+                id=uuid4(),
+                workspace_id=turn.workspace_id,
+                turn_id=turn.id,
+                dimension="tokens",
+                amount=10,
+                priced_micro_usd=100,
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    with pytest.raises(TurnParked):
+        await _engine(turn, EchoModel(), tmp_path).run()
+    transcript = Transcript(
+        blob=FilesystemBlobStore(root=tmp_path), conversation_id=turn.conversation_id
+    )
+    assert await transcript.read() is None
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.spend_cap)
+            .values(limit_micro_usd=10_000_000, updated_at=sa.func.now())
+            .where(tables.spend_cap.c.id == cap)
+        )
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(status="queued", updated_at=sa.func.now())
+            .where(tables.turn.c.id == turn.id)
+        )
+    resumed = turn.model_copy(update={"status": "queued"})
+    frame = await _engine(resumed, EchoModel(), tmp_path).run()
+    assert frame is not None and frame.status == "done"
+    stored = await transcript.read()
+    assert stored is not None and stored.seq == turn.seq
+    assert [m.content for m in stored.messages] == ["hi", "answer"]

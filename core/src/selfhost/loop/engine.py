@@ -11,6 +11,7 @@ import sqlalchemy as sa
 from selfhost.accounting import (
     ALLOW,
     SpendEvaluator,
+    applicable_caps_absent,
     read_turn_cost,
     record_turn_usage,
     usage_priced_micro_usd,
@@ -100,8 +101,9 @@ class TurnEngine:
     memory: MemoryService
     member_id: UUID | None
     artifact_token_secret: str
+    attempt: str = ""
 
-    async def run(self) -> TerminalFrame:
+    async def run(self) -> TerminalFrame | None:
         with turn_span(self.turn.id, self.turn.conversation_id):
             emit_metric("turn_started_total")
             log("turn.started", turn_id=str(self.turn.id), seq=self.turn.seq)
@@ -118,8 +120,7 @@ class TurnEngine:
             )
             try:
                 if not await self._mark_running():
-                    await self._persist_inbound()
-                    return await self._publish_existing_terminal()
+                    return await self._resolve_unclaimed()
                 recalled = await self._recalled_context()
                 system = (
                     self.agent.prompt
@@ -136,8 +137,7 @@ class TurnEngine:
                     await self._persist_inbound()
                 return frame
             except TurnParked as parked:
-                await self._park(parked.message)
-                await self._persist_inbound()
+                await self._park(parked.message, usage_events)
                 raise
             except asyncio.CancelledError:
                 await self._bill_cancelled(usage_events)
@@ -149,13 +149,17 @@ class TurnEngine:
                 raise
 
     async def _mark_running(self) -> bool:
+        """Claim the turn for this execution: the atomic queued/parked → running transition. A
+        resumed turn is enqueued while still parked, so this claim — co-located with the work, not a
+        separate pre-enqueue flip — is the single owner check; a crash before it leaves the turn
+        re-enqueueable, and a duplicate enqueue loses the claim here and no-ops."""
         async with workspace_tx() as connection:
             updated = await connection.execute(
                 sa.update(tables.turn)
                 .values(status="running", updated_at=sa.func.now())
                 .where(
                     tables.turn.c.id == self.turn.id,
-                    tables.turn.c.status.in_(("queued", "running")),
+                    tables.turn.c.status.in_(NON_TERMINAL_STATUSES),
                 )
             )
         return updated.rowcount == 1
@@ -220,10 +224,16 @@ class TurnEngine:
 
     async def _enforce_spend(self, usage_events: list[Usage]) -> None:
         """Before each model round, re-decide against the caps with this turn's in-flight spend
-        priced in (its tokens are not yet on the ledger — that lands at terminal), so a turn that
-        crosses a cap mid-run is held rather than left to run the workspace past its limit. Any
-        breach parks: the committed work is held and resumable, not discarded — reject is the
-        inbound gate, before any tokens are spent."""
+        priced in (this attempt's tokens land on the ledger at park/terminal, not yet), so a turn
+        that crosses a cap mid-run is held rather than left to run the workspace past its limit.
+
+        Any mid-run breach PARKS — the committed work is held and resumable, never discarded — even
+        under a reject cap: reject is the inbound gate, applied before any tokens are spent, and a
+        turn already running has real spend to preserve. A foreground subagent that parks under a
+        reject cap holds its awaiting parent until the cap is raised. The no-caps fast-path skips
+        the DB round-trip entirely once a recent decision confirmed no cap applies to this turn."""
+        if applicable_caps_absent(self.turn.workspace_id, self.member_id, self.turn.agent_id):
+            return
         pending = usage_priced_micro_usd(self.agent.model, _total_usage(usage_events))
         async with workspace_tx() as connection:
             decision = await SpendEvaluator(
@@ -343,7 +353,12 @@ class TurnEngine:
         usage = _total_usage(usage_events)
         async with workspace_tx() as connection:
             await record_turn_usage(
-                connection, self.turn.workspace_id, self.turn.id, self.agent.model, usage
+                connection,
+                self.turn.workspace_id,
+                self.turn.id,
+                self.agent.model,
+                usage,
+                self.attempt,
             )
             cost = await read_turn_cost(connection, self.turn.id)
             tokens, micro_usd, model = cost if cost is not None else (0, 0, "")
@@ -376,10 +391,14 @@ class TurnEngine:
                 frame = TerminalFrame.model_validate(row.terminal)
         return frame
 
-    async def _park(self, message: str) -> None:
-        """Hold the turn at a spend cap: commit the non-terminal parked state (durable, resumable)
-        and end the surface's stream with the reason. Consumed tokens are not billed here — the
-        resumed run bills its own terminal under the same ledger id, so park never double-bills."""
+    async def _park(self, message: str, usage_events: list[Usage]) -> None:
+        """Hold the turn at a spend cap: bill this attempt's consumed tokens, commit the
+        non-terminal parked state (durable, resumable), and end the surface's stream with the
+        reason — one transaction. Billing at park is what makes a tight cap CONVERGE: the ledger
+        reflects the real burn, so the resume sweep re-decides against actual spend and finds no
+        headroom until the cap is raised — never an unbilled runaway re-burning tokens the cap
+        can't see. Keyed by this attempt's workflow id, so the aborted partial and the eventual
+        full run both count."""
         async with workspace_tx() as connection:
             updated = await connection.execute(
                 sa.update(tables.turn)
@@ -389,6 +408,15 @@ class TurnEngine:
                     tables.turn.c.status.in_(NON_TERMINAL_STATUSES),
                 )
             )
+            if updated.rowcount == 1:
+                await record_turn_usage(
+                    connection,
+                    self.turn.workspace_id,
+                    self.turn.id,
+                    self.agent.model,
+                    _total_usage(usage_events),
+                    self.attempt,
+                )
         if updated.rowcount == 1:
             await self._publish(Parked(message=message))
             emit_metric("turn_parked_total")
@@ -411,7 +439,12 @@ class TurnEngine:
         try:
             async with workspace_tx() as connection:
                 await record_turn_usage(
-                    connection, self.turn.workspace_id, self.turn.id, self.agent.model, usage
+                    connection,
+                    self.turn.workspace_id,
+                    self.turn.id,
+                    self.agent.model,
+                    usage,
+                    self.attempt,
                 )
         except Exception as error:
             log(
@@ -420,13 +453,20 @@ class TurnEngine:
                 error_class=type(error).__name__,
             )
 
-    async def _publish_existing_terminal(self) -> TerminalFrame:
+    async def _resolve_unclaimed(self) -> TerminalFrame | None:
+        """This execution lost the running claim — the turn is owned by another live execution (a
+        duplicate resume enqueue) or already finished (a re-delivery). Republish its committed
+        terminal, or no-op (None) while it is still running so the live execution stays the sole
+        authority and this duplicate never clobbers it with a spurious terminal."""
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
                     sa.select(tables.turn.c.terminal).where(tables.turn.c.id == self.turn.id)
                 )
             ).one()
+        if row.terminal is None:
+            return None
+        await self._persist_inbound()
         frame = TerminalFrame.model_validate(row.terminal)
         await self._publish(Terminal(frame=frame))
         return frame

@@ -1,5 +1,6 @@
 """Token pricing, the one billing write per turn, and the spend caps decided against the ledger."""
 
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -26,6 +27,18 @@ REJECT: OnBreach = "reject"
 
 SpendOutcome = Literal["allow", "park", "reject"]
 ALLOW: SpendOutcome = "allow"
+
+CAP_PRESENCE_TTL_SECONDS = 5.0
+_no_applicable_caps: dict[tuple[UUID, UUID | None, UUID], float] = {}
+
+
+def applicable_caps_absent(workspace_id: UUID, member_id: UUID | None, agent_id: UUID) -> bool:
+    """Connectionless fast-path: True only when a recent decision found no cap applies to this
+    (workspace, member, agent), within a short TTL. The per-round enforcement then skips its DB
+    round-trip — the common no-caps deploy pays nothing per round. Keyed by the exact triple so a
+    cap on another member never suppresses this one; a newly-set cap takes effect within the TTL."""
+    expiry = _no_applicable_caps.get((workspace_id, member_id, agent_id))
+    return expiry is not None and expiry > time.monotonic()
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,9 +91,12 @@ async def record_turn_usage(
     turn_id: UUID,
     model: str,
     usage: Usage,
+    attempt: str = "",
 ) -> None:
-    """One billing write per turn; select-then-insert is replay-safe because DBOS
-    re-executes a turn sequentially, never concurrently with itself."""
+    """One billing write per turn per run attempt; select-then-insert is replay-safe because DBOS
+    re-executes a given attempt sequentially, never concurrently with itself. A turn parked mid-run
+    and resumed spends under a fresh attempt (workflow id), so each partial burn is billed once and
+    the ledger reflects the true total the provider charged — never a lost burn, never a double."""
     total = (
         usage.input_tokens
         + usage.output_tokens
@@ -89,7 +105,7 @@ async def record_turn_usage(
     )
     if total == 0:
         return
-    ledger_id = ledger_id_for(workspace_id, turn_id, "tokens")
+    ledger_id = ledger_id_for(workspace_id, turn_id, "tokens", attempt)
     billed = await connection.execute(
         sa.select(tables.ledger.c.id).where(tables.ledger.c.id == ledger_id)
     )
@@ -113,19 +129,23 @@ async def record_turn_usage(
 async def read_turn_cost(
     connection: AsyncConnection, turn_id: UUID
 ) -> tuple[int, int, str] | None:
-    """The billed tokens, micro-USD, and model for a turn; None when nothing was billed."""
+    """The billed tokens, micro-USD, and model for a turn, summed across its run attempts; None when
+    nothing was billed. A parked-then-resumed turn has one ledger row per attempt, so the terminal
+    cost is their total — the true provider charge."""
     row = (
         await connection.execute(
             sa.select(
-                tables.ledger.c.amount, tables.ledger.c.priced_micro_usd, tables.ledger.c.model
+                sa.func.sum(tables.ledger.c.amount),
+                sa.func.sum(tables.ledger.c.priced_micro_usd),
+                sa.func.max(tables.ledger.c.model),
             ).where(
                 (tables.ledger.c.turn_id == turn_id) & (tables.ledger.c.dimension == "tokens")
             )
         )
-    ).one_or_none()
-    if row is None:
+    ).one()
+    if row[0] is None:
         return None
-    return int(row.amount), int(row.priced_micro_usd), row.model
+    return int(row[0]), int(row[1]), row[2]
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,6 +182,11 @@ class SpendEvaluator:
 
     async def decide(self, connection: AsyncConnection, pending_micro_usd: int) -> SpendDecision:
         caps = await self._applicable_caps(connection)
+        key = (self.workspace_id, self.member_id, self.agent_id)
+        if not caps:
+            _no_applicable_caps[key] = time.monotonic() + CAP_PRESENCE_TTL_SECONDS
+            return SpendDecision(outcome=ALLOW, message="")
+        _no_applicable_caps.pop(key, None)
         breaches = [
             cap
             for cap in caps
