@@ -8,6 +8,7 @@ members = [
     "selfhost-ext-connectors",
     "selfhost-ext-sample",
     "selfhost-ext-self-improvement",
+    "selfhost-ext-web",
 ]
 
 [[package]]
@@ -1725,6 +1726,17 @@ requires-dist = [
     { name = "anthropic", specifier = ">=0.40" },
     { name = "selfhost", editable = "core" },
 ]
+
+[[package]]
+name = "selfhost-ext-web"
+version = "0.1.0"
+source = { editable = "extensions/web" }
+dependencies = [
+    { name = "selfhost" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "selfhost", editable = "core" }]
 
 [[package]]
 name = "shellingham"
