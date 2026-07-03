@@ -118,4 +118,5 @@ sdk-only imports in `extensions/` · no k8s imports anywhere · no vendor o11y S
 Redis only inside the hubs extension · engine/`begin()` only inside `db.py` · no proxy-rule
 registration API (derivation only) · tool-count budget (a new tool must prove no existing tool
 subsumes it) · **legibility (AST gate)**: a module-level single-return function with exactly one
-call site fails CI (`sdk/` re-exports exempt); no module named `utils`/`helpers`/`common`.
+call site fails CI (`sdk/` re-exports exempt); no module named `utils`/`helpers`/`common` ·
+`arbitrary_types_allowed` forbidden (a BaseModel needing it is a misclassified internal object).

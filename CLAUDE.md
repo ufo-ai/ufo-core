@@ -41,8 +41,13 @@ hard-to-vary decision; cut the words around it. Prefer a table to prose. One exa
   dataclass: deps in fields, one public method that *is* the workflow, private steps beneath it
   **in execution order** — the reader reaches the whole flow by reading downward once. Free
   module-level functions are for genuinely shared stateless primitives only, never a workflow's
-  steps. Pydantic at boundaries (wire/persisted); frozen dataclasses for internal workflow and
-  value objects.
+  steps.
+- **Two containers, two meanings** — `BaseModel` = data that crosses a boundary (wire, persisted,
+  config, untrusted): validated at construction, fully serializable, never
+  `arbitrary_types_allowed` (gated). `@dataclass(frozen=True)` = internal: workflows holding live
+  deps, value objects that never leave the process. The container IS the classification; a class
+  that seems to need both is misclassified. Never mirror one concept in both forms — a record
+  flows as its one type everywhere.
 - **Inline the trivial** — a function whose body is a single return earns a name only when that
   name is a reused domain concept (≥2 callers) or a Protocol implementation. One caller → inline;
   a private method survives only as a narrative step, recursion, or reuse. The test is "does the

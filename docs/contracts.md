@@ -4,9 +4,10 @@ The hard-to-vary interfaces U1–U10 implement, in Python-signature form, organi
 Once a unit lands, its code (with tests) is authoritative and the matching section here is
 **deleted** — this file's destiny is a module map plus the invariants code can't express.
 
-Container rules: Pydantic `BaseModel` for wire/persisted records; frozen dataclasses for internal
-value objects and workflows; `Protocol` for pluggable seams. All persisted records carry
-`workspace_id`, `created_at`, `updated_at` (omitted below).
+Container rules: Pydantic `BaseModel` for anything that crosses a boundary (wire, persisted,
+config, untrusted) — never `arbitrary_types_allowed`; frozen dataclasses for internal value
+objects and workflows; `Protocol` for pluggable seams; one concept, one container, never mirrored.
+All persisted records carry `workspace_id`, `created_at`, `updated_at` (omitted below).
 
 ## Module map
 
