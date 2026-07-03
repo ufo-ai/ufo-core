@@ -217,6 +217,7 @@ def _engine(
         spawn=_unavailable_spawn,
         memory=StubMemory(),
         member_id=None,
+        artifact_token_secret="",
     )
 
 

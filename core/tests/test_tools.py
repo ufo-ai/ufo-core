@@ -1,9 +1,11 @@
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
+from selfhost.artifact_token import verify_artifact_token
 from selfhost.blob import FilesystemBlobStore
 from selfhost.sandbox.session import ExecResult
 from selfhost.schema.records import Agent, Turn
@@ -12,6 +14,7 @@ from selfhost.tools.context import SpawnResult, ToolContext
 from selfhost.tools.registry import ToolRegistry
 
 REGISTRY = ToolRegistry(BUILTIN_TOOLS)
+ARTIFACT_SECRET = "tools-test-secret"
 
 
 @dataclass
@@ -58,7 +61,9 @@ class StubMemory:
         return None
 
 
-def make_context(sandbox: FakeSandbox, tmp_path: Path) -> ToolContext:
+def make_context(
+    sandbox: FakeSandbox, tmp_path: Path, artifact_secret: str = ARTIFACT_SECRET
+) -> ToolContext:
     workspace_id, conversation_id, agent_id = uuid4(), uuid4(), uuid4()
     turn = Turn(
         id=uuid4(),
@@ -77,6 +82,7 @@ def make_context(sandbox: FakeSandbox, tmp_path: Path) -> ToolContext:
         spawn=_unavailable_spawn,
         memory=StubMemory(),
         member_id=None,
+        artifact_token_secret=artifact_secret,
     )
 
 
@@ -107,6 +113,7 @@ def test_registry_schemas_cover_every_tool() -> None:
         "read",
         "write",
         "edit",
+        "share_file",
         "spawn_subagent",
         "memory_search",
         "memory_update",
@@ -182,3 +189,40 @@ async def test_edit_rejects_missing_string(tmp_path: Path) -> None:
     await run("read", ctx, path="code.py")
     with pytest.raises(ValueError, match="not found"):
         await run("edit", ctx, path="code.py", old_string="zzz", new_string="q")
+
+
+async def test_share_file_stores_bytes_and_returns_a_verifiable_url(tmp_path: Path) -> None:
+    sandbox = FakeSandbox(files={"report.txt": b"the produced report"})
+    ctx = make_context(sandbox, tmp_path)
+    result = await run("share_file", ctx, path="report.txt")
+    url = result.content[0].text
+    assert url.startswith("/web/artifacts/download?token=")
+    token = url.split("token=", 1)[1]
+    claims = verify_artifact_token(token, ARTIFACT_SECRET, datetime.now(UTC))
+    parts = claims.blob_key.split("/")
+    assert parts[0] == "artifacts" and len(parts) == 3 and parts[-1] == "report.txt"
+    assert await ctx.blob.get(claims.blob_key) == b"the produced report"
+
+
+async def test_share_file_confines_a_traversal_filename_to_the_artifact_namespace(
+    tmp_path: Path,
+) -> None:
+    sandbox = FakeSandbox(files={"report.txt": b"data"})
+    ctx = make_context(sandbox, tmp_path)
+    for hostile, expected in (("../../conversations/x", "x"), ("/etc/passwd", "passwd")):
+        result = await run("share_file", ctx, path="report.txt", filename=hostile)
+        token = result.content[0].text.split("token=", 1)[1]
+        claims = verify_artifact_token(token, ARTIFACT_SECRET, datetime.now(UTC))
+        parts = claims.blob_key.split("/")
+        assert parts[0] == "artifacts"
+        assert ".." not in parts
+        assert parts[-1] == expected
+        assert claims.filename == expected
+
+
+async def test_share_file_without_a_secret_fails_loud_and_writes_nothing(tmp_path: Path) -> None:
+    sandbox = FakeSandbox(files={"report.txt": b"data"})
+    ctx = make_context(sandbox, tmp_path, artifact_secret="")
+    with pytest.raises(RuntimeError, match="not configured"):
+        await run("share_file", ctx, path="report.txt")
+    assert not (tmp_path / "artifacts").exists()

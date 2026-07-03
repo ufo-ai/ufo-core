@@ -138,6 +138,7 @@ def dbos_runtime(
             manifests=(),
             credentials=None,
             memory=StubMemory(),
+            artifact_token_secret="",
         )
     )
     yield config, hub, blob

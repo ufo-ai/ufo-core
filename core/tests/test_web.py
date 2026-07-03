@@ -1,7 +1,5 @@
 import asyncio
-import base64
 import hashlib
-import hmac
 import json
 import secrets
 from collections.abc import AsyncIterator, Iterator
@@ -15,7 +13,11 @@ from dbos import DBOSClient
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from selfhost.artifact_token import ArtifactTokenError, verify_artifact_token
+from selfhost.artifact_token import (
+    ArtifactTokenError,
+    mint_artifact_token,
+    verify_artifact_token,
+)
 from selfhost.blob import FilesystemBlobStore
 from selfhost.config import Config
 from selfhost.db import workspace_tx
@@ -26,10 +28,12 @@ from selfhost.memory.service import SHARED_SUBJECT, member_subject, recall_subje
 from selfhost.models.interface import ModelEvent, ModelRequest, TextDelta
 from selfhost.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
 from selfhost.schema import tables
-from selfhost.schema.records import Usage
+from selfhost.schema.records import Agent, Turn, Usage
 from selfhost.surfaces.admission import Admission
 from selfhost.surfaces.web import SESSION_COOKIE, WebSurface
 from selfhost.surfaces.web import router as web_router
+from selfhost.tools.builtins import ShareFileInput, share_file_handler
+from selfhost.tools.context import ToolContext
 
 SECRET = "artifact-signing-secret"
 STREAM_TIMEOUT_SECONDS = 30
@@ -73,17 +77,6 @@ class StubDbos:
 
     async def enqueue_async(self, options: object, workflow_id: str) -> None:
         self.enqueued.append(workflow_id)
-
-
-def _mint(secret: str, key: str, filename: str, expires_at: int) -> str:
-    payload = {"key": key, "filename": filename, "expires_at": expires_at}
-    body = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
-    signature = (
-        base64.urlsafe_b64encode(hmac.new(secret.encode(), body.encode(), hashlib.sha256).digest())
-        .decode()
-        .rstrip("=")
-    )
-    return f"{body}.{signature}"
 
 
 def _future() -> int:
@@ -160,6 +153,7 @@ def dbos_runtime(
             manifests=(),
             credentials=None,
             memory=StubMemory(),
+            artifact_token_secret=SECRET,
         )
     )
     yield config, hub, blob
@@ -228,7 +222,7 @@ async def _consume(client: AsyncClient, token: str, turn_id: str) -> tuple[str, 
 def test_verify_artifact_token_accepts_valid_and_rejects_everything_else() -> None:
     now = datetime.now(UTC)
     key = "artifacts/abc123"
-    token = _mint(SECRET, key, "report.txt", int(now.timestamp()) + 100)
+    token = mint_artifact_token(SECRET, key, "report.txt", int(now.timestamp()) + 100)
     claims = verify_artifact_token(token, SECRET, now)
     assert claims.blob_key == key
     assert claims.filename == "report.txt"
@@ -237,16 +231,20 @@ def test_verify_artifact_token_accepts_valid_and_rejects_everything_else() -> No
     with pytest.raises(ArtifactTokenError):
         verify_artifact_token(token + "x", SECRET, now)
     with pytest.raises(ArtifactTokenError):
-        verify_artifact_token(_mint(SECRET, key, "", int(now.timestamp()) - 1), SECRET, now)
+        verify_artifact_token(
+            mint_artifact_token(SECRET, key, "", int(now.timestamp()) - 1), SECRET, now
+        )
     with pytest.raises(ArtifactTokenError):
         verify_artifact_token(
-            _mint(SECRET, "conversations/c/messages.json.lz4", "", int(now.timestamp()) + 100),
+            mint_artifact_token(
+                SECRET, "conversations/c/messages.json.lz4", "", int(now.timestamp()) + 100
+            ),
             SECRET,
             now,
         )
     with pytest.raises(ArtifactTokenError):
         verify_artifact_token(
-            _mint(
+            mint_artifact_token(
                 SECRET,
                 "artifacts/../conversations/c/messages.json.lz4",
                 "",
@@ -267,7 +265,7 @@ async def test_artifact_download_serves_bytes_for_a_valid_token(
     client, blob = artifact_client
     key = f"artifacts/{uuid4()}"
     await blob.put(key, b"the shared bytes")
-    token = _mint(SECRET, key, "report.txt", _future())
+    token = mint_artifact_token(SECRET, key, "report.txt", _future())
     response = await client.get("/web/artifacts/download", params={"token": token})
     assert response.status_code == 200
     assert response.content == b"the shared bytes"
@@ -282,20 +280,73 @@ async def test_artifact_download_rejects_missing_tampered_expired_and_out_of_nam
     await blob.put(key, b"x")
     missing = await client.get("/web/artifacts/download")
     tampered = await client.get(
-        "/web/artifacts/download", params={"token": _mint(SECRET, key, "", _future()) + "z"}
+        "/web/artifacts/download",
+        params={"token": mint_artifact_token(SECRET, key, "", _future()) + "z"},
     )
     expired = await client.get(
         "/web/artifacts/download",
-        params={"token": _mint(SECRET, key, "", int(datetime.now(UTC).timestamp()) - 10)},
+        params={
+            "token": mint_artifact_token(SECRET, key, "", int(datetime.now(UTC).timestamp()) - 10)
+        },
     )
     outside = await client.get(
         "/web/artifacts/download",
-        params={"token": _mint(SECRET, "conversations/c/x", "", _future())},
+        params={"token": mint_artifact_token(SECRET, "conversations/c/x", "", _future())},
     )
     assert missing.status_code == 401
     assert tampered.status_code == 403
     assert expired.status_code == 403
     assert outside.status_code == 403
+
+
+@dataclass(frozen=True)
+class _ProducedFile:
+    """A byte source standing in for the carrier-backed sandbox (which needs Docker): share_file
+    reads through it, and the test asserts on the bytes the real download endpoint returns."""
+
+    content: bytes
+
+    async def read_file(self, path: str) -> bytes:
+        return self.content
+
+
+async def _unused_spawn(profile: str, payload: dict[str, object], background: bool = False) -> None:
+    raise RuntimeError("spawn is not wired in this test")
+
+
+async def test_share_file_mints_a_token_the_download_endpoint_serves(
+    artifact_client: tuple[AsyncClient, FilesystemBlobStore],
+) -> None:
+    client, blob = artifact_client
+    context = ToolContext(
+        sandbox=_ProducedFile(b"produced report bytes"),
+        blob=blob,
+        turn=Turn(
+            id=uuid4(),
+            workspace_id=uuid4(),
+            conversation_id=uuid4(),
+            agent_id=uuid4(),
+            seq=1,
+            status="running",
+            inbound="make a report",
+        ),
+        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        spawn=_unused_spawn,
+        memory=StubMemory(),
+        member_id=None,
+        artifact_token_secret=SECRET,
+    )
+    result = await share_file_handler(context, ShareFileInput(path="report.txt"))
+    url = result.content[0].text
+    assert url.startswith("/web/artifacts/download?token=")
+    token = url.split("token=", 1)[1]
+    claims = verify_artifact_token(token, SECRET, datetime.now(UTC))
+    assert claims.blob_key.startswith("artifacts/")
+    assert claims.blob_key.endswith("/report.txt")
+    response = await client.get("/web/artifacts/download", params={"token": token})
+    assert response.status_code == 200
+    assert response.content == b"produced report bytes"
+    assert "report.txt" in response.headers["content-disposition"]
 
 
 async def test_web_turn_round_trip_admits_streams_and_links_identity(web: AsyncClient) -> None:
