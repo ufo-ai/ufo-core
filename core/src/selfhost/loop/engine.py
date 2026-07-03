@@ -22,6 +22,7 @@ from selfhost.ext.context import ExtensionContext
 from selfhost.grants import GrantStore
 from selfhost.hub import CostTick, Hub, LiveFrame, Parked, Terminal
 from selfhost.loop.compaction import Compaction
+from selfhost.loop.prompts.render import RenderedPrompt
 from selfhost.loop.transcript import Transcript
 from selfhost.memory.service import MemoryService, recall_subjects
 from selfhost.models.interface import (
@@ -91,6 +92,7 @@ def _total_usage(usage_events: list[Usage]) -> Usage:
 class TurnEngine:
     turn: Turn
     agent: Agent
+    system_prompt: RenderedPrompt
     model: ModelClient
     transcript: Transcript
     compaction: Compaction
@@ -109,7 +111,12 @@ class TurnEngine:
     async def run(self) -> TerminalFrame | None:
         with turn_span(self.turn.id, self.turn.conversation_id):
             emit_metric("turn_started_total")
-            log("turn.started", turn_id=str(self.turn.id), seq=self.turn.seq)
+            log(
+                "turn.started",
+                turn_id=str(self.turn.id),
+                seq=self.turn.seq,
+                prompt_digest=self.system_prompt.digest,
+            )
             usage_events: list[Usage] = []
             context = ToolContext(
                 sandbox=self.sandbox,
@@ -126,10 +133,9 @@ class TurnEngine:
                 if not await self._mark_running():
                     return await self._resolve_unclaimed()
                 recalled = await self._recalled_context()
+                prompt = self.system_prompt.content
                 system = (
-                    self.agent.prompt
-                    if not recalled
-                    else f"{self.agent.prompt}\n\n{RECALL_CONTEXT_PREFIX}{recalled}"
+                    prompt if not recalled else f"{prompt}\n\n{RECALL_CONTEXT_PREFIX}{recalled}"
                 )
                 final_messages, answer = await self._model_round(
                     context, await self._load_messages(), usage_events, system

@@ -23,6 +23,7 @@ from selfhost.sdk.manifest import (
     InjectionTarget,
     Manifest,
     OnboardingStep,
+    PromptSection,
     RouteSpec,
 )
 from selfhost.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
@@ -53,6 +54,12 @@ ROUTE_KEY = "route:hit"
 ONBOARDING_KEY = "onboarding:done"
 CONNECTOR_KEY = "connector:called"
 PROPOSAL_SUFFIX = "\nBe concise."
+SECTION_NAME = "sample_capability"
+SECTION_BODY = (
+    "<sample_capability>\n"
+    "The sample pack contributes this capability section to the agent's system prompt.\n"
+    "</sample_capability>"
+)
 
 
 class EchoInput(BaseModel):
@@ -151,6 +158,7 @@ def manifest() -> Manifest:
         jobs=(JobSpec(name=JOB_NAME, schedule=None, handler=_tick),),
         routes=(RouteSpec(method="POST", path=ROUTE_PATH, handler=_hook),),
         onboarding_steps=(OnboardingStep(name=ONBOARDING_NAME, handler=_setup),),
+        prompt_sections=(PromptSection(name=SECTION_NAME, body=SECTION_BODY),),
         credentials=(
             CredentialSlot(
                 name=API_SLOT,

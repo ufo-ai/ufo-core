@@ -19,5 +19,8 @@ from selfhost.ext.manifest import (
     OnboardingStep as OnboardingStep,
 )
 from selfhost.ext.manifest import (
+    PromptSection as PromptSection,
+)
+from selfhost.ext.manifest import (
     RouteSpec as RouteSpec,
 )
