@@ -76,9 +76,14 @@ class Compaction:
     async def _compact(
         self, messages: tuple[Message, ...]
     ) -> tuple[tuple[Message, ...], tuple[Usage, ...]]:
+        split = len(messages) - self.keep_messages
+        while split > 0 and messages[split].role != "assistant":
+            split -= 1
+        if split == 0:
+            return messages, ()
         index = await self._next_index()
-        head = messages[: -self.keep_messages]
-        tail = messages[-self.keep_messages :]
+        head = messages[:split]
+        tail = messages[split:]
         summary, usage = await self._summarize(head)
         after = (Message(role="user", content=f"{COMPACTED_CONTEXT_PREFIX}{summary}"), *tail)
         await self._write(index, "before", messages)

@@ -1,11 +1,20 @@
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 from uuid import uuid4
 
 from selfhost.blob import FilesystemBlobStore
 from selfhost.loop.compaction import COMPACTED_CONTEXT_PREFIX, Compaction
-from selfhost.models.interface import Message, ModelEvent, ModelRequest, TextDelta
+from selfhost.models.interface import (
+    Message,
+    ModelEvent,
+    ModelRequest,
+    TextBlock,
+    TextDelta,
+    ToolResultBlock,
+    ToolUseBlock,
+)
 from selfhost.schema.records import Usage
 
 HEAD_FACT = "the deploy key is rotated every 30 days HEADSECRET"
@@ -78,6 +87,50 @@ async def test_before_record_preserves_a_pre_compaction_fact_verbatim(tmp_path: 
     assert record.before == messages
     assert any(HEAD_FACT in str(message.content) for message in record.before)
     assert record.after == result
+
+
+async def test_compaction_boundary_never_orphans_a_tool_result_or_repeats_a_role(
+    tmp_path: Path,
+) -> None:
+    compaction = _compaction(tmp_path, trigger_tokens=1, keep_messages=2)
+    messages = (
+        Message(role="user", content="start " + "x" * 40),
+        Message(
+            role="assistant",
+            content=(TextBlock(text="run"), ToolUseBlock(id="t1", name="bash", input={"c": "ls"})),
+        ),
+        Message(role="user", content=(ToolResultBlock(tool_use_id="t1", content="a"),)),
+        Message(
+            role="assistant",
+            content=(
+                TextBlock(text="run2"),
+                ToolUseBlock(id="t2", name="bash", input={"c": "pwd"}),
+            ),
+        ),
+        Message(role="user", content=(ToolResultBlock(tool_use_id="t2", content="/tmp"),)),
+        Message(role="assistant", content="done"),
+    )
+    result, usage = await compaction.maybe_compact(messages)
+    assert len(usage) == 1
+    assert result[0].role == "user"
+    assert result[1].role == "assistant"
+    roles = [message.role for message in result]
+    assert all(earlier != later for earlier, later in pairwise(roles))
+    tool_uses = {
+        block.id
+        for message in result
+        if isinstance(message.content, tuple)
+        for block in message.content
+        if isinstance(block, ToolUseBlock)
+    }
+    tool_results = {
+        block.tool_use_id
+        for message in result
+        if isinstance(message.content, tuple)
+        for block in message.content
+        if isinstance(block, ToolResultBlock)
+    }
+    assert tool_results <= tool_uses
 
 
 async def test_compaction_index_is_monotonic(tmp_path: Path) -> None:
