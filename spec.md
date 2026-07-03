@@ -86,7 +86,9 @@ Every turn executes tools in a per-conversation sandbox: Docker container from a
 injection happens at the proxy; raw secrets never enter the sandbox). The working directory mounts
 from the blob store — a bind mount on the filesystem backend, the sandbox-fs design on S3 — and the
 invariant holds on every backend: the sandbox reaches only the conversation's `workspace/` subtree;
-transcripts and compaction records live above it, framework-only. Carrier interface:
+transcripts and compaction records live above it, framework-only. The workspace is the truth and
+the container is disposable cache — carriers create-or-attach, and a reaper reclaims idle
+containers. Carrier interface:
 `create / exec / mount / route / destroy` — Docker implements it in core; E2B implements it as an
 extension.
 
@@ -161,6 +163,30 @@ keys come from `credential` slots or deploy config.
 One declarative file, `metalcraft.toml`: Postgres URL, blob store (filesystem root or S3 endpoint),
 model keys (env refs), enabled extensions + versions, installed packs, surface config (Slack app,
 web host), sandbox carrier, stream hub, OTLP export target, extension-store toggle, spend defaults.
+
+## Scale-out
+
+Scale-out is a deployment mode, not a feature: the same bundle with more instances. Nothing in core
+is instance-aware except the boot guard; the only extension involved is the Redis hub.
+
+| Concern | Multi-instance behavior |
+|---|---|
+| Turns, queues, jobs | DBOS coordinates through Postgres: any instance pulls; a crashed instance's workflows recover on peers. |
+| Live deltas | Shared hub required (Redis hub extension); terminal frames stay durable in Postgres. |
+| Blobs | S3 backend required; the filesystem backend is single-instance-only. |
+| Sandboxes | Per-instance disposable cache over durable workspace state; any instance recreates the container on demand. |
+| Surfaces, webhooks | Stateless behind a load balancer; sessions and idempotency live in Postgres. |
+
+Two invariants make this safe, and they hold even single-instance:
+
+- **At most one running turn per conversation** — the DBOS queue serializes on the conversation
+  key; the transcript's monotonic seq depends on it.
+- **The workspace is the truth, the container is cache** — a sandbox may be destroyed and
+  recreated between turns from the blob store without a turn noticing beyond latency.
+
+Misconfiguration fails loud at boot: instances heartbeat a `runtime_instance` row; an instance that
+sees a live peer while configured with an in-process hub or a filesystem blob store refuses to
+start.
 `metalcraft bundle` produces a runnable artifact (OCI image + pinned config + lockfile) — the same
 bundle installs OSS, on-prem, or hosted.
 
