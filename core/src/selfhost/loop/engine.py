@@ -149,17 +149,31 @@ class TurnEngine:
                 raise
 
     async def _mark_running(self) -> bool:
-        """Claim the turn for this execution: the atomic queued/parked → running transition. A
-        resumed turn is enqueued while still parked, so this claim — co-located with the work, not a
-        separate pre-enqueue flip — is the single owner check; a crash before it leaves the turn
-        re-enqueueable, and a duplicate enqueue loses the claim here and no-ops."""
+        """Claim the turn as this execution's single owner, keyed by this run's workflow id. A
+        queued or parked turn transitions to running under this id; a turn already running is
+        re-claimed only by the same id — a DBOS crash-recovery replay of this very workflow, which
+        must resume its own turn. A different id (a redundant resume enqueue) matches nothing, loses
+        the claim, and is resolved as superseded, so single ownership is the DB claim itself, not
+        the per-conversation partition. Clearing the advisory resume stamp here is what tells the
+        resume sweep the turn is live; a crash before this leaves the turn re-enqueueable."""
         async with workspace_tx() as connection:
             updated = await connection.execute(
                 sa.update(tables.turn)
-                .values(status="running", updated_at=sa.func.now())
+                .values(
+                    status="running",
+                    running_attempt=self.attempt,
+                    resume_enqueued_at=None,
+                    updated_at=sa.func.now(),
+                )
                 .where(
                     tables.turn.c.id == self.turn.id,
-                    tables.turn.c.status.in_(NON_TERMINAL_STATUSES),
+                    sa.or_(
+                        tables.turn.c.status.in_(("queued", PARKED)),
+                        sa.and_(
+                            tables.turn.c.status == "running",
+                            tables.turn.c.running_attempt == self.attempt,
+                        ),
+                    ),
                 )
             )
         return updated.rowcount == 1

@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from selfhost.accounting import SpendEvaluator
 from selfhost.db import workspace_tx
-from selfhost.jobs import SpendResume
+from selfhost.jobs import RESUME_ENQUEUE_GRACE_SECONDS, SpendResume
 from selfhost.schema import tables
 from selfhost.schema.records import TerminalFrame
 from selfhost.surfaces.admission import Admission
@@ -343,6 +343,39 @@ async def test_resume_skips_turn_still_over_cap(db: None) -> None:
     await SpendResume(client=dbos).run()
     assert dbos.enqueued == []
     assert await _status(parked) == "parked"
+
+
+async def test_resume_skips_a_recently_enqueued_parked_turn(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, _, agent_id, conversation_id = await _seed(connection)
+        recent = await _insert_parked(connection, workspace_id, conversation_id, agent_id, seq=1)
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(resume_enqueued_at=sa.func.now())
+            .where(tables.turn.c.id == recent)
+        )
+    dbos = StubDbos()
+    await SpendResume(client=dbos).run()
+    assert dbos.enqueued == []
+    assert await _status(recent) == "parked"
+
+
+async def test_resume_reenqueues_a_parked_turn_past_the_grace_window(db: None) -> None:
+    stale = datetime.now(UTC) - timedelta(seconds=RESUME_ENQUEUE_GRACE_SECONDS + 60)
+    async with workspace_tx() as connection:
+        workspace_id, _, agent_id, conversation_id = await _seed(connection)
+        parked = await _insert_parked(connection, workspace_id, conversation_id, agent_id, seq=1)
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(resume_enqueued_at=stale)
+            .where(tables.turn.c.id == parked)
+        )
+    dbos = StubDbos()
+    await SpendResume(client=dbos).run()
+    assert dbos.enqueued == [str(parked)]
+    again = StubDbos()
+    await SpendResume(client=again).run()
+    assert again.enqueued == []
 
 
 async def test_resume_readmits_when_cap_raised(db: None) -> None:
