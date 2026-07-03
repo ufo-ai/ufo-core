@@ -164,3 +164,38 @@ ext_store = sa.Table(
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
 )
+
+source = sa.Table(
+    "source",
+    metadata,
+    sa.Column("id", sa.Uuid, primary_key=True),
+    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
+    sa.Column("backend", sa.Text, nullable=False),
+    sa.Column("config", sa.JSON, nullable=False),
+    sa.Column("cursor", sa.Text, nullable=True),
+    sa.Column("next_sync_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("claimed_by", sa.Text, nullable=True),
+    sa.Column("claim_expires_at", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint("backend in ('folder')", name="source_backend"),
+    sa.Index("source_due", "next_sync_at"),
+)
+
+page = sa.Table(
+    "page",
+    metadata,
+    sa.Column("id", sa.Uuid, primary_key=True),
+    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
+    sa.Column("source_id", sa.Uuid, sa.ForeignKey("source.id"), nullable=False),
+    sa.Column("digest", sa.Text, nullable=False),
+    sa.Column("body_ref", sa.Text, nullable=False),
+    sa.Column("subject", sa.Text, nullable=False),
+    sa.Column("embedding_digest", sa.Text, nullable=True),
+    sa.Column("tombstone", sa.Boolean, nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint("subject = 'shared' or subject like 'member:%'", name="page_subject"),
+    sa.Index("page_due", "embedding_digest"),
+    sa.Index("page_source", "source_id"),
+)
