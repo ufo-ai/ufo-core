@@ -10,3 +10,4 @@ implementation-details.md
 selfhost.toml
 blobs/
 *.db
+.coverage
