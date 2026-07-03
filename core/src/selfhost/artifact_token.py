@@ -12,6 +12,7 @@ import hmac
 import json
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import PurePosixPath
 
 ARTIFACT_KEY_PREFIX = "artifacts/"
 ARTIFACT_TOKEN_TTL_SECONDS = 3600
@@ -56,7 +57,9 @@ def verify_artifact_token(token: str, secret: str, now: datetime) -> ArtifactCla
         filename=str(payload.get("filename", "")),
         expires_at=int(payload.get("expires_at", 0)),
     )
-    if not claims.blob_key.startswith(ARTIFACT_KEY_PREFIX):
+    if not claims.blob_key.startswith(ARTIFACT_KEY_PREFIX) or ".." in PurePosixPath(
+        claims.blob_key
+    ).parts:
         raise ArtifactTokenError("artifact token key escapes the artifact namespace")
     if claims.expires_at <= int(now.timestamp()):
         raise ArtifactTokenError("artifact token is expired")

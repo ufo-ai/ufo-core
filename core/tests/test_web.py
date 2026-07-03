@@ -245,6 +245,17 @@ def test_verify_artifact_token_accepts_valid_and_rejects_everything_else() -> No
             now,
         )
     with pytest.raises(ArtifactTokenError):
+        verify_artifact_token(
+            _mint(
+                SECRET,
+                "artifacts/../conversations/c/messages.json.lz4",
+                "",
+                int(now.timestamp()) + 100,
+            ),
+            SECRET,
+            now,
+        )
+    with pytest.raises(ArtifactTokenError):
         verify_artifact_token("not-a-token", SECRET, now)
     with pytest.raises(ArtifactTokenError):
         verify_artifact_token(token, "", now)
