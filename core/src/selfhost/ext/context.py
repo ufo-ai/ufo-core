@@ -7,18 +7,25 @@ a core job (the `core` namespace, no slots) — so a core job rides the exact pa
 The `ExtensionContext` shape is open: later units add methods (memory writes, governed proposals,
 invoke) without reshaping what handlers already hold."""
 
+import json
 from dataclasses import dataclass
 from uuid import UUID
 
+import lz4.frame
 import sqlalchemy as sa
 
+from selfhost.blob import BlobNotFound, BlobStore
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
+from selfhost.governance import Governance, prompt_digest
 from selfhost.memory.service import MemoryService
+from selfhost.models.interface import Message
 from selfhost.schema import tables
-from selfhost.schema.records import MemoryWrite
+from selfhost.schema.records import AgentChange, MemoryWrite, ProposalRef
 
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
+
+TRANSCRIPT_KEY = "conversations/{conversation_id}/messages.json.lz4"
 
 
 class UndeclaredCredentialSlot(KeyError):
@@ -99,10 +106,24 @@ class CredentialAccess:
 
 
 @dataclass(frozen=True)
+class Trajectory:
+    """One conversation's durable transcript as the eval corpus reads it: the messages, plus the
+    agent that produced them and that agent's current prompt (the baseline a proposer rewrites and
+    the `from_digest` a governed change is pinned against)."""
+
+    conversation_id: UUID
+    agent_id: UUID
+    agent_prompt: str
+    agent_prompt_digest: str
+    messages: tuple[Message, ...]
+
+
+@dataclass(frozen=True)
 class ExtensionContext:
     store: ScopedStore
     credentials: CredentialAccess
     memory: MemoryService | None = None
+    blob: BlobStore | None = None
 
     async def memory_write(self, write: MemoryWrite) -> None:
         """Commit a memory item for this workspace. Fails loud when no memory service is wired,
@@ -111,6 +132,61 @@ class ExtensionContext:
             raise RuntimeError("memory_write requires a memory service; none is wired")
         await self.memory.commit(write)
 
+    async def propose_change(self, change: AgentChange) -> ProposalRef:
+        """Open a governed proposal against an agent's prompt, stamped with this extension as the
+        proposer — never a direct write to agent config; approval re-checks the digest and applies
+        the compare-and-swap."""
+        return await Governance(
+            workspace_id=self.store.workspace_id, extension=self.store.extension
+        ).propose_change(change)
+
+    async def trajectories(self) -> tuple[Trajectory, ...]:
+        """The workspace's conversation transcripts as the eval corpus: each conversation's stored
+        messages with the agent and current prompt that produced them. Fails loud when no blob
+        store is wired, rather than reporting an empty corpus."""
+        if self.blob is None:
+            raise RuntimeError("trajectories requires a blob store; none is wired")
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(
+                        tables.conversation.c.id,
+                        tables.turn.c.agent_id,
+                        tables.agent.c.prompt,
+                    )
+                    .select_from(
+                        tables.conversation.join(
+                            tables.turn,
+                            tables.turn.c.conversation_id == tables.conversation.c.id,
+                        ).join(tables.agent, tables.agent.c.id == tables.turn.c.agent_id)
+                    )
+                    .where(tables.conversation.c.workspace_id == self.store.workspace_id)
+                    .distinct()
+                    .order_by(tables.conversation.c.id)
+                )
+            ).all()
+        seen: set[UUID] = set()
+        trajectories: list[Trajectory] = []
+        for row in rows:
+            if row.id in seen:
+                continue
+            seen.add(row.id)
+            try:
+                body = await self.blob.get(TRANSCRIPT_KEY.format(conversation_id=row.id))
+            except BlobNotFound:
+                continue
+            messages = json.loads(lz4.frame.decompress(body))["messages"]
+            trajectories.append(
+                Trajectory(
+                    conversation_id=row.id,
+                    agent_id=row.agent_id,
+                    agent_prompt=row.prompt,
+                    agent_prompt_digest=prompt_digest(row.prompt),
+                    messages=tuple(Message.model_validate(message) for message in messages),
+                )
+            )
+        return tuple(trajectories)
+
 
 def context_for(
     workspace_id: UUID,
@@ -118,9 +194,10 @@ def context_for(
     declared: frozenset[str],
     credential_store: CredentialStore,
     memory: MemoryService | None = None,
+    blob: BlobStore | None = None,
 ) -> ExtensionContext:
     store = ScopedStore(workspace_id=workspace_id, extension=extension)
     credentials = CredentialAccess(
         workspace_id=workspace_id, declared=declared, store=credential_store
     )
-    return ExtensionContext(store=store, credentials=credentials, memory=memory)
+    return ExtensionContext(store=store, credentials=credentials, memory=memory, blob=blob)

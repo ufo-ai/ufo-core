@@ -9,7 +9,7 @@ the Manifest never declares — the probe that a handler asking for an undeclare
 
 from pydantic import BaseModel
 
-from selfhost.sdk.context import ExtensionContext
+from selfhost.sdk.context import AgentChange, ExtensionContext
 from selfhost.sdk.http import PlainTextResponse, Request, Response
 from selfhost.sdk.jobs import JobSpec
 from selfhost.sdk.manifest import (
@@ -35,8 +35,11 @@ INJECTION_SENTINEL = "Bearer sentinel-sample-key"
 INJECTION_DIMENSION = "requests"
 TOOL_KEY = "tool:echo"
 JOB_KEY = "job:ran"
+TRAJECTORY_KEY = "job:trajectories"
+PROPOSAL_KEY = "job:proposal"
 ROUTE_KEY = "route:hit"
 ONBOARDING_KEY = "onboarding:done"
+PROPOSAL_SUFFIX = "\nBe concise."
 
 
 class EchoInput(BaseModel):
@@ -52,6 +55,21 @@ async def _echo(ctx: ToolContext, args: EchoInput) -> ToolResult:
 
 async def _tick(ctx: ExtensionContext) -> None:
     await ctx.store.put(JOB_KEY, {"ran": True})
+    if ctx.blob is None:
+        return
+    trajectories = await ctx.trajectories()
+    await ctx.store.put(TRAJECTORY_KEY, {"count": len(trajectories)})
+    if not trajectories:
+        return
+    target = trajectories[0]
+    ref = await ctx.propose_change(
+        AgentChange(
+            agent_id=target.agent_id,
+            new_prompt=target.agent_prompt + PROPOSAL_SUFFIX,
+            from_digest=target.agent_prompt_digest,
+        )
+    )
+    await ctx.store.put(PROPOSAL_KEY, {"proposal_id": str(ref.proposal_id)})
 
 
 async def _hook(ctx: ExtensionContext, request: Request) -> Response:

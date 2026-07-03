@@ -24,7 +24,10 @@ from selfhost.db import workspace_tx
 from selfhost.ext.context import ScopedStore, UndeclaredCredentialSlot, context_for
 from selfhost.ext.loader import load_manifests, turn_tools
 from selfhost.ext.manifest import Manifest
+from selfhost.governance import prompt_digest
 from selfhost.jobs import JobRunner, bindings_from
+from selfhost.loop.transcript import Conversation, Transcript
+from selfhost.models.interface import Message
 from selfhost.onboarding import run_onboarding_steps
 from selfhost.sandbox.proxy.rules import InjectionRule, MeterRule, derive_credential_rules
 from selfhost.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
@@ -217,3 +220,102 @@ async def test_a_second_workspace_reaches_none_of_the_firsts_rows(db: None) -> N
     assert await ScopedStore(workspace_id=first, extension=sample.NAME).get(sample.JOB_KEY) == {
         "ran": True
     }
+
+
+SEED_PROMPT = "You are helpful."
+
+
+async def _seed_trajectory(workspace_id: UUID, blob: FilesystemBlobStore) -> UUID:
+    """A real agent, conversation, terminal turn, and durable transcript — the corpus the trajectory
+    read enumerates and the target the governed proposal is pinned against."""
+    agent_id, conversation_id, turn_id = uuid4(), uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="assistant",
+                prompt=SEED_PROMPT,
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                surface="cli",
+                queue_key=str(conversation_id),
+                member_id=None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="done",
+                inbound="hi",
+                terminal={"status": "done", "text": "hello", "model": "claude-opus-4-8"},
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    await Transcript(blob=blob, conversation_id=conversation_id).write(
+        Conversation(
+            seq=2,
+            messages=(
+                Message(role="user", content="hi"),
+                Message(role="assistant", content="hello"),
+            ),
+        )
+    )
+    return agent_id
+
+
+async def test_job_reads_trajectories_and_opens_a_governed_proposal(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    manifest = _sample_manifest()
+    blob = FilesystemBlobStore(root=tmp_path)
+    agent_id = await _seed_trajectory(workspace_id, blob)
+    await JobRunner(
+        workspace_id=workspace_id,
+        credential_store=_credential_store(),
+        bindings=bindings_from((manifest,), ()),
+        blob=blob,
+    ).fire(f"{manifest.name}:{sample.JOB_NAME}")
+
+    scoped = ScopedStore(workspace_id=workspace_id, extension=sample.NAME)
+    assert await scoped.get(sample.TRAJECTORY_KEY) == {"count": 1}
+    assert await scoped.get(sample.PROPOSAL_KEY) is not None
+
+    async with workspace_tx() as connection:
+        proposal = (
+            await connection.execute(
+                sa.select(
+                    tables.proposal.c.extension,
+                    tables.proposal.c.agent_id,
+                    tables.proposal.c.status,
+                    tables.proposal.c.from_digest,
+                    tables.proposal.c.body,
+                ).where(tables.proposal.c.workspace_id == workspace_id)
+            )
+        ).one()
+        prompt = (
+            await connection.execute(
+                sa.select(tables.agent.c.prompt).where(tables.agent.c.id == agent_id)
+            )
+        ).scalar_one()
+    assert proposal.extension == sample.NAME
+    assert proposal.agent_id == agent_id
+    assert proposal.status == "pending"
+    assert proposal.from_digest == prompt_digest(SEED_PROMPT)
+    assert proposal.body == {"prompt": SEED_PROMPT + sample.PROPOSAL_SUFFIX}
+    assert prompt == SEED_PROMPT
