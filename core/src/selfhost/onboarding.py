@@ -20,6 +20,7 @@ from selfhost.db import workspace_tx
 from selfhost.ext.context import context_for
 from selfhost.ext.manifest import Manifest
 from selfhost.models.interface import PROVIDER_ANTHROPIC, provider_for
+from selfhost.o11y import log
 from selfhost.schema import tables
 from selfhost.schema.records import DEFAULT_AGENT_NAME
 
@@ -42,16 +43,15 @@ async def run_onboarding_steps(
     manifests: tuple[Manifest, ...], workspace_id: UUID, credentials: CredentialStore | None
 ) -> None:
     """Fire each installed extension's onboarding steps for a freshly created workspace, every step
-    with that extension's scoped ExtensionContext (its declared credential slots). An extension that
-    contributes steps without a credential key set fails loud, since its context needs the store."""
+    with that extension's scoped ExtensionContext (its declared credential slots). These run AFTER
+    core access is established, and a step that raises is logged and skipped — one add-on's failure
+    can neither strand the core workspace nor block another extension's steps."""
     for manifest in manifests:
         if not manifest.onboarding_steps:
             continue
         if credentials is None:
-            raise RuntimeError(
-                f"extension {manifest.name!r} contributes onboarding steps "
-                "but no credential key is set"
-            )
+            log("onboarding.steps_skipped_no_credential_key", extension=manifest.name)
+            continue
         context = context_for(
             workspace_id,
             manifest.name,
@@ -59,7 +59,15 @@ async def run_onboarding_steps(
             credentials,
         )
         for step in manifest.onboarding_steps:
-            await step.handler(context)
+            try:
+                await step.handler(context)
+            except Exception as error:
+                log(
+                    "onboarding.step_failed",
+                    extension=manifest.name,
+                    step=step.name,
+                    error_class=type(error).__name__,
+                )
 
 
 @dataclass(frozen=True)
@@ -74,10 +82,30 @@ class Onboarding:
     manifests: tuple[Manifest, ...]
 
     async def run(self) -> Onboarded:
-        self._require_model_key()
-        onboarded = await self._create_workspace()
-        await run_onboarding_steps(self.manifests, onboarded.workspace_id, self.credentials)
+        onboarded = await self.create()
+        await self.run_steps(onboarded)
         return onboarded
+
+    async def create(self) -> Onboarded:
+        """Establish the durable core with no dependency on any extension — model key, then
+        workspace + owner + default agent in one transaction — so `selfhost init` can bind the CLI
+        token (core access) before running add-on onboarding steps that might fail."""
+        self._require_model_key()
+        self._require_credentials_for_steps()
+        return await self._create_workspace()
+
+    async def run_steps(self, onboarded: Onboarded) -> None:
+        await run_onboarding_steps(self.manifests, onboarded.workspace_id, self.credentials)
+
+    def _require_credentials_for_steps(self) -> None:
+        """Fail before the DB (like the model key) when installed extensions contribute onboarding
+        steps but no credential key is set — their scoped context needs the store, and failing here
+        leaves no half-created workspace behind."""
+        if self.credentials is None and any(m.onboarding_steps for m in self.manifests):
+            raise RuntimeError(
+                "installed extensions contribute onboarding steps that need "
+                f"{self.config.credentials.key_env} set before init can run"
+            )
 
     def _require_model_key(self) -> None:
         env_name = self._model_key_env()

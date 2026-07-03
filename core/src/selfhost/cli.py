@@ -59,8 +59,8 @@ def init(email: str, model: str) -> None:
     token = secrets.token_hex(32)
     try:
         asyncio.run(_onboard(config, email, model, token))
-    except AlreadyInitialized as already:
-        raise click.ClickException(str(already)) from already
+    except (AlreadyInitialized, ValueError, RuntimeError) as error:
+        raise click.ClickException(str(error)) from error
     SELFHOST_DIR.mkdir(mode=0o700, exist_ok=True)
     token_path = SELFHOST_DIR / "token"
     token_path.write_text(token)
@@ -70,20 +70,23 @@ def init(email: str, model: str) -> None:
 
 
 async def _onboard(config: Config, email: str, model: str, token: str) -> None:
-    """Open the db boundary once, run onboarding, then bind the CLI token to the new owner — the CLI
-    surface's own identity, issued here rather than in the surface-agnostic engine."""
+    """Open the db boundary once: create the core workspace, bind the CLI token to the new owner
+    (the CLI surface's own identity, issued here not in the surface-agnostic engine), THEN run the
+    extension onboarding steps — so core access lands before any add-on step that could fail."""
     init_db(config.database.url)
     try:
         key = os.environ.get(config.credentials.key_env)
         credentials = CredentialStore(fernet=Fernet(key.encode())) if key else None
-        onboarded = await Onboarding(
+        onboarding = Onboarding(
             config=config,
             email=email,
             model=model,
             credentials=credentials,
             manifests=load_manifests(),
-        ).run()
+        )
+        onboarded = await onboarding.create()
         await _bind_cli_token(onboarded, token)
+        await onboarding.run_steps(onboarded)
     finally:
         await dispose_db()
 

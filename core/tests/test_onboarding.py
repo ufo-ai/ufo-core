@@ -17,8 +17,9 @@ from selfhost import cli
 from selfhost.config import BlobConfig, Config, DatabaseConfig
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
-from selfhost.ext.context import ScopedStore
+from selfhost.ext.context import ExtensionContext, ScopedStore
 from selfhost.ext.loader import load_manifests
+from selfhost.ext.manifest import Manifest, OnboardingStep
 from selfhost.onboarding import DEFAULT_AGENT_PROMPT, AlreadyInitialized, Onboarding
 from selfhost.schema import tables
 from selfhost.schema.records import DEFAULT_AGENT_NAME
@@ -109,6 +110,35 @@ async def test_onboarding_runs_each_installed_extensions_steps(
     assert await scoped.get(sample.ONBOARDING_KEY) == {"onboarded": True}
 
 
+async def test_a_failing_onboarding_step_is_isolated_from_its_siblings(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-onboard")
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+
+    async def _boom(ctx: ExtensionContext) -> None:
+        raise RuntimeError("bad extension onboarding step")
+
+    async def _record(ctx: ExtensionContext) -> None:
+        await ctx.store.put("recorded", {"ran": True})
+
+    failing = Manifest(
+        name="failing_ext",
+        version="0.1.0",
+        onboarding_steps=(OnboardingStep(name="boom", handler=_boom),),
+    )
+    working = Manifest(
+        name="working_ext",
+        version="0.1.0",
+        onboarding_steps=(OnboardingStep(name="ok", handler=_record),),
+    )
+    onboarded = await _onboarding(
+        database_url, tmp_path, credentials=store, manifests=(failing, working)
+    ).run()
+    scoped = ScopedStore(workspace_id=onboarded.workspace_id, extension="working_ext")
+    assert await scoped.get("recorded") == {"ran": True}
+
+
 def test_cold_start_init_creates_durable_state_and_then_fails_loud(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -124,3 +154,24 @@ def test_cold_start_init_creates_durable_state_and_then_fails_loud(
         second = runner.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
         assert second.exit_code != 0
         assert "already initialized" in second.output
+
+
+def test_cold_start_without_credential_key_fails_cleanly_then_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """O1: on a clean machine, init without SELFHOST_CREDENTIAL_KEY (the installed sample adds an
+    onboarding step) must fail loud BEFORE creating anything, leaving no wedged half-onboarded
+    workspace — setting the key and re-running then succeeds, not hitting AlreadyInitialized."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-onboard")
+    monkeypatch.delenv("SELFHOST_CREDENTIAL_KEY", raising=False)
+    monkeypatch.setattr(cli, "SELFHOST_DIR", tmp_path / ".selfhost")
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        first = runner.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
+        assert first.exit_code != 0
+        assert "SELFHOST_CREDENTIAL_KEY" in first.output
+        assert not (tmp_path / ".selfhost" / "token").exists()
+        monkeypatch.setenv("SELFHOST_CREDENTIAL_KEY", Fernet.generate_key().decode())
+        recovered = runner.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
+        assert recovered.exit_code == 0, recovered.output
+        assert (tmp_path / ".selfhost" / "token").read_text()
