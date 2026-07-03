@@ -319,11 +319,14 @@ def _connect_flow(
     this deploy's external callback URL, the one value both legs of the handoff present."""
     if credentials is None:
         return None
-    providers: Mapping[str, OAuthProvider] = {
-        connector.oauth.provider: connector.oauth
-        for manifest in manifests
-        for connector in manifest.connectors
-    }
+    providers: dict[str, OAuthProvider] = {}
+    for manifest in manifests:
+        for connector in manifest.connectors:
+            if connector.oauth.provider in providers:
+                raise RuntimeError(
+                    f"two extensions register connector provider {connector.oauth.provider!r}"
+                )
+            providers[connector.oauth.provider] = connector.oauth
     return ConnectFlow(
         providers=providers,
         fernet=credentials.fernet,

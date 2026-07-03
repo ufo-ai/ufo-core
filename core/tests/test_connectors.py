@@ -67,6 +67,13 @@ def test_serve_builds_the_provider_registry_from_manifest_connectors() -> None:
     assert flow.redirect_uri == EXPECTED_REDIRECT_URI
 
 
+def test_two_connectors_claiming_the_same_provider_fail_loud() -> None:
+    with pytest.raises(RuntimeError, match=sample.CONNECTOR_PROVIDER):
+        _connect_flow(
+            _credentials(), _config(PUBLIC_BASE_URL), (sample.manifest(), sample.manifest())
+        )
+
+
 def test_no_credential_key_means_no_connect_flow() -> None:
     assert _connect_flow(None, _config(PUBLIC_BASE_URL), (sample.manifest(),)) is None
 

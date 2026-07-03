@@ -96,9 +96,11 @@ class ConnectorCallInput(BaseModel):
 
 
 async def _connector_call(ctx: ToolContext, args: ConnectorCallInput) -> ToolResult:
-    """The stub connector action: reach the provider host through the sandbox's egress proxy — the
-    grant's rule admits the host and swaps the account's real token onto the wire — recording the
-    call through the extension's scoped store so the seam is read back through a public surface."""
+    """The stub connector action: reach the provider host through the sandbox's egress proxy,
+    demonstrating the grant's ScopeRule admits the host (an ungranted host is refused at CONNECT),
+    and recording the call through the extension's scoped store so the seam is read back through a
+    public surface. It sends no Authorization header, so no token is swapped — emitting the grant's
+    per-account sentinel for the proxy to swap is the real connector unit's job, not the stub's."""
     if ctx.ext is None:
         raise RuntimeError("sample connector tool dispatched without its ExtensionContext")
     result = await ctx.sandbox.bash(
