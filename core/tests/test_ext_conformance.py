@@ -28,12 +28,13 @@ from selfhost.ext.context import (
     UndeclaredCredentialSlot,
     context_for,
 )
-from selfhost.ext.loader import load_manifests, turn_tools
+from selfhost.ext.loader import load_manifests, turn_subagents, turn_tools
 from selfhost.ext.manifest import Manifest
 from selfhost.governance import prompt_digest
 from selfhost.grants import GrantStore
 from selfhost.jobs import JobRunner, bindings_from
 from selfhost.loop.prompts.render import render_system_prompt
+from selfhost.loop.subagents import SubagentRegistry, subagent_system_prompt
 from selfhost.loop.transcript import Transcript
 from selfhost.models.interface import Message
 from selfhost.onboarding import run_onboarding_steps
@@ -170,6 +171,7 @@ async def test_sample_is_discovered_via_its_entry_point() -> None:
         tool.name for connector in manifest.connectors for tool in connector.tools
     } == {sample.CONNECTOR_TOOL_NAME}
     assert {section.name for section in manifest.prompt_sections} == {sample.SECTION_NAME}
+    assert {profile.name for profile in manifest.subagents} == {sample.SUBAGENT_NAME}
 
 
 def test_pack_prompt_section_reaches_the_rendered_system_prompt() -> None:
@@ -182,6 +184,14 @@ def test_pack_prompt_section_reaches_the_rendered_system_prompt() -> None:
     assert sample.SECTION_BODY in rendered.content
     assert "You are the workspace assistant." in rendered.content
     assert rendered.digest.startswith("sha256:")
+
+
+def test_sample_subagent_profile_flows_through_the_loader_into_the_registry() -> None:
+    manifest = _sample_manifest()
+    registry = SubagentRegistry(turn_subagents((manifest,)))
+    profile = registry.get(sample.SUBAGENT_NAME)
+    assert profile.tool_names == (sample.TOOL_NAME,)
+    assert "JSON" in subagent_system_prompt(profile)
 
 
 async def test_tool_dispatches_with_its_scoped_context(db: None, tmp_path: Path) -> None:

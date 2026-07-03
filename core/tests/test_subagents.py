@@ -1,8 +1,9 @@
 import pytest
 from pydantic import BaseModel
 
+from selfhost.ext.manifest import SubagentProfile
 from selfhost.loop.profiles import CORE_SUBAGENT_PROFILES, GENERAL_PURPOSE
-from selfhost.loop.subagents import SubagentProfile, SubagentRegistry, subagent_system_prompt
+from selfhost.loop.subagents import SubagentRegistry, subagent_system_prompt
 from selfhost.tools.builtins import BUILTIN_TOOLS
 
 

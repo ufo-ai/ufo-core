@@ -2,10 +2,11 @@
 
 It imports only `selfhost.sdk` — the surface a CI gate pins — and its entry point returns a Manifest
 declaring exactly the landed points: one tool, one job, one route, one credential slot carrying a
-wire-injection target, and one onboarding step. Each handler records the call it received through
-its own `ExtensionContext.store` (durable `ext_store` rows, never a mock log), so the tests read
-those rows back through the same public surfaces core writes them by. `UNDECLARED_SLOT` names a slot
-the Manifest never declares — the probe that a handler asking for an undeclared slot is refused."""
+wire-injection target, one onboarding step, and one typed subagent profile. Each handler records
+the call it received through its own `ExtensionContext.store` (durable `ext_store` rows, never a
+mock log), so the tests read those rows back through the same public surfaces core writes them by.
+`UNDECLARED_SLOT` names a slot the Manifest never declares — the probe that a handler asking for an
+undeclared slot is refused."""
 
 import shlex
 from dataclasses import dataclass
@@ -30,6 +31,7 @@ from selfhost.sdk.manifest import (
     PostToolUse,
     PromptSection,
     RouteSpec,
+    SubagentProfile,
 )
 from selfhost.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 
@@ -39,6 +41,7 @@ TOOL_NAME = "sample_echo"
 JOB_NAME = "sample_tick"
 ROUTE_PATH = "hook"
 ONBOARDING_NAME = "sample_setup"
+SUBAGENT_NAME = "sample_probe"
 API_SLOT = "sample_api"
 UNDECLARED_SLOT = "sample_unset"
 INJECTION_HOST = "api.sample.test"
@@ -71,6 +74,14 @@ SECTION_BODY = (
 
 class EchoInput(BaseModel):
     message: str
+
+
+class ProbeTask(BaseModel):
+    task: str
+
+
+class ProbeFinding(BaseModel):
+    finding: str
 
 
 async def _echo(ctx: ToolContext, args: EchoInput) -> ToolResult:
@@ -182,6 +193,15 @@ def manifest() -> Manifest:
         routes=(RouteSpec(method="POST", path=ROUTE_PATH, handler=_hook),),
         onboarding_steps=(OnboardingStep(name=ONBOARDING_NAME, handler=_setup),),
         prompt_sections=(PromptSection(name=SECTION_NAME, body=SECTION_BODY),),
+        subagents=(
+            SubagentProfile(
+                name=SUBAGENT_NAME,
+                prompt="Probe subagent: restate the task as a finding.",
+                tool_names=(TOOL_NAME,),
+                input_model=ProbeTask,
+                output_model=ProbeFinding,
+            ),
+        ),
         credentials=(
             CredentialSlot(
                 name=API_SLOT,

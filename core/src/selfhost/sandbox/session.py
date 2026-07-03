@@ -13,6 +13,8 @@ from pathlib import PurePosixPath
 from typing import Protocol
 from uuid import UUID
 
+from pydantic import JsonValue
+
 from selfhost.blob import BlobStore
 
 WORKSPACE_DIR = "/workspace"
@@ -20,6 +22,8 @@ DEFAULT_EXEC_TIMEOUT_SECONDS = 120
 SENTINEL_MODEL_KEY = "SELFHOST_SENTINEL_MODEL_KEY"
 SANDBOX_UID = 1000
 SANDBOX_GID = 1000
+BROWSER_HELPER = "selfhost-browser"
+BROWSER_EXEC_TIMEOUT_SECONDS = 180
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,6 +215,22 @@ class SandboxSession:
 
     async def export_file(self, path: str, blob: BlobStore, key: str) -> None:
         await self.carrier.export(self.handle, workspace_path(path), blob, key)
+
+    async def browser(self, command: str, params: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        """The sandbox's browser/computer-use surface: hand a command and its params to the
+        in-sandbox helper over the carrier's exec and parse its JSON reply. Browser tools reach the
+        browser only here — the same seam bash and file ops use — never a raw carrier or CDP
+        handle, so the mount and egress scoping hold on every action."""
+        request = json.dumps({"command": command, "params": params}).encode()
+        result = await self.carrier.exec(
+            self.handle, (BROWSER_HELPER,), stdin=request, timeout_s=BROWSER_EXEC_TIMEOUT_SECONDS
+        )
+        if result.exit_code != 0:
+            raise RuntimeError(result.stderr.strip() or f"browser command {command!r} failed")
+        reply = json.loads(result.stdout)
+        if not isinstance(reply, dict):
+            raise ValueError(f"browser command {command!r} did not return a JSON object")
+        return reply
 
 
 SandboxFactory = Callable[[UUID], Awaitable[SandboxSession]]

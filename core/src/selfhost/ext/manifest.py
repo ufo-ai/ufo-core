@@ -193,6 +193,20 @@ class HookSpec:
 
 
 @dataclass(frozen=True)
+class SubagentProfile:
+    """A typed subagent an extension registers. `prompt` is the child's own instructions and
+    `tool_names` the subset of the turn's tool set the child may call; a spawn validates its payload
+    against `input_model` and its final answer against `output_model`. The loader collects every
+    manifest's profiles into the SubagentRegistry `spawn_subagent` dispatches against."""
+
+    name: str
+    prompt: str
+    tool_names: tuple[str, ...]
+    input_model: type[BaseModel]
+    output_model: type[BaseModel]
+
+
+@dataclass(frozen=True)
 class Manifest:
     """What one extension declares, returned by its `selfhost.extension` entry point."""
 
@@ -207,3 +221,4 @@ class Manifest:
     onboarding_steps: tuple[OnboardingStep, ...] = ()
     hooks: tuple[HookSpec, ...] = ()
     prompt_sections: tuple[PromptSection, ...] = ()
+    subagents: tuple[SubagentProfile, ...] = ()

@@ -5,6 +5,7 @@ requires-python = ">=3.12"
 [manifest]
 members = [
     "selfhost",
+    "selfhost-ext-browser",
     "selfhost-ext-connectors",
     "selfhost-ext-sample",
     "selfhost-ext-scheduled-tasks",
@@ -1700,6 +1701,17 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=0.24" },
     { name = "ruff", specifier = ">=0.7" },
 ]
+
+[[package]]
+name = "selfhost-ext-browser"
+version = "0.1.0"
+source = { editable = "extensions/browser" }
+dependencies = [
+    { name = "selfhost" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "selfhost", editable = "core" }]
 
 [[package]]
 name = "selfhost-ext-connectors"

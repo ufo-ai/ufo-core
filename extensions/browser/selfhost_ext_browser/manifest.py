@@ -1,0 +1,21 @@
+"""What the browser pack declares: the browser/computer-use tools and the browser subagent profile.
+
+`serve` sources the tools into the turn's tool set and the profile into the SubagentRegistry, so an
+agent granted these tools can drive the sandbox browser and `spawn_subagent("browser", ...)` runs a
+web-automation child turn scoped to them."""
+
+from selfhost.sdk.manifest import Manifest
+from selfhost_ext_browser.subagent import BROWSER_PROFILE
+from selfhost_ext_browser.tools import BROWSER_TOOLS
+
+NAME = "browser"
+VERSION = "0.1.0"
+
+
+def manifest() -> Manifest:
+    return Manifest(
+        name=NAME,
+        version=VERSION,
+        tools=BROWSER_TOOLS,
+        subagents=(BROWSER_PROFILE,),
+    )
