@@ -41,10 +41,9 @@ from selfhost.sandbox.proxy.rules import (
     Rule,
     ScopeRule,
     derive_credential_rules,
-    derive_grant_rules,
     derive_model_rules,
 )
-from selfhost.sandbox.proxy.server import EgressProxy, generate_ca
+from selfhost.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
 from selfhost.sandbox.session import ProxyEndpoint
 from selfhost.schema import tables
 from selfhost.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION
@@ -93,7 +92,7 @@ def run() -> None:
             blob=blob,
             hub=hub,
             carrier=DockerCarrier(),
-            proxy=_egress_proxy(asyncio.run(_assemble_rules(config))),
+            proxy=_egress_proxy(asyncio.run(_resolver(config, credentials))),
             dbos=dbos_client,
             subagents=SubagentRegistry(()),
             manifests=manifests,
@@ -277,15 +276,16 @@ async def _writeback_lifespan(app: FastAPI) -> AsyncIterator[None]:
             task.cancel()
 
 
-def _egress_proxy(rules: tuple[Rule, ...]) -> ProxyEndpoint:
+def _egress_proxy(resolver: PerAgentRules) -> ProxyEndpoint:
     """The sandbox's sole route out runs on its own event loop: a standalone network service, not
-    part of the turn loop, that outlives every turn for the life of the process."""
+    part of the turn loop, that outlives every turn for the life of the process. The proxy resolves
+    each request's rules through `resolver`, which reads the turn's agent and grants per turn."""
     loop = asyncio.new_event_loop()
     threading.Thread(target=loop.run_forever, daemon=True).start()
 
     async def _boot() -> ProxyEndpoint:
         cert, key = await generate_ca()
-        return await EgressProxy(rules=rules, ca_cert=cert, ca_key=key).start()
+        return await EgressProxy(resolve=resolver.resolve, ca_cert=cert, ca_key=key).start()
 
     return asyncio.run_coroutine_threadsafe(_boot(), loop).result(PROXY_STARTUP_TIMEOUT_SECONDS)
 
@@ -301,14 +301,14 @@ def _connect_flow(credentials: CredentialStore | None) -> ConnectFlow | None:
     return ConnectFlow(providers={}, fernet=credentials.fernet, store=store)
 
 
-async def _assemble_rules(config: Config) -> tuple[Rule, ...]:
-    """The proxy's full rule set: the model providers the deploy holds keys for, every extension
-    credential slot whose secret is stored, and every OAuth grant this workspace holds — derived,
-    never registered."""
-    model = _model_rules(config)
-    credential = await _credential_rules(config)
-    grant = await _grant_rules(config)
-    return (*model, *credential, *grant)
+async def _resolver(config: Config, credentials: CredentialStore | None) -> PerAgentRules:
+    """The per-turn rule resolver the proxy consumes: a static workspace base (the model providers
+    the deploy holds keys for and every stored credential slot, fixed for the serve's life) plus the
+    grant store it derives each turn's agent's grants from. No credential key means no token can be
+    decrypted, so no grant store — the base alone. Grants layer on per turn, not assembled here."""
+    grants = GrantStore(fernet=credentials.fernet) if credentials is not None else None
+    base = (*_model_rules(config), *await _credential_rules(config))
+    return PerAgentRules(base=base, grants=grants)
 
 
 def _model_rules(config: Config) -> tuple[Rule, ...]:
@@ -351,17 +351,3 @@ async def _credential_rules(config: Config) -> tuple[Rule, ...]:
             await connection.execute(sa.select(tables.workspace.c.id))
         ).scalar_one()
     return await derive_credential_rules(manifests, workspace_id, store)
-
-
-async def _grant_rules(config: Config) -> tuple[Rule, ...]:
-    """Every OAuth grant this workspace holds becomes the egress rules that admit its provider host
-    and swap its token onto the wire; with no credential key no token can be decrypted, so none."""
-    key = os.environ.get(config.credentials.key_env)
-    if not key:
-        return ()
-    store = GrantStore(fernet=Fernet(key.encode()))
-    async with workspace_tx() as connection:
-        workspace_id = (
-            await connection.execute(sa.select(tables.workspace.c.id))
-        ).scalar_one()
-    return derive_grant_rules(await store.active_grants(workspace_id))
