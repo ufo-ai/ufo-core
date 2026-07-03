@@ -4,23 +4,24 @@ import json
 import secrets
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
-from decimal import Decimal
 from uuid import UUID, uuid4
 
-import psycopg
 import pytest
+import sqlalchemy as sa
+from conftest import reset_postgres_database
 from dbos import DBOS, DBOSClient
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import text
+from sqlalchemy.engine import make_url
 
 from selfhost.blob import FilesystemBlobStore
-from selfhost.config import BlobConfig, Config, PostgresConfig
+from selfhost.config import BlobConfig, Config, DatabaseConfig
 from selfhost.db import workspace_tx
 from selfhost.hub import InProcessHub
 from selfhost.loop import queue as loop_queue
 from selfhost.loop.transcript import Transcript
 from selfhost.models import ModelEvent, ModelRequest, TextDelta
+from selfhost.schema import tables
 from selfhost.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION, Usage
 from selfhost.surfaces.cli import router
 
@@ -44,16 +45,14 @@ class StandInModel:
 def dbos_runtime(
     database_url: str, tmp_path_factory: pytest.TempPathFactory
 ) -> Iterator[tuple[Config, InProcessHub, FilesystemBlobStore]]:
-    base, _, dbname = database_url.rpartition("/")
-    admin_dsn = f"{base}/selfhost".replace("postgresql+psycopg://", "postgresql://", 1)
-    with psycopg.connect(admin_dsn, autocommit=True) as connection:
-        connection.execute(f"drop database if exists {dbname}_dbos")
-        connection.execute(f"create database {dbname}_dbos")
     blob_root = tmp_path_factory.mktemp("blobs")
     config = Config(
-        postgres=PostgresConfig(url=database_url),
+        database=DatabaseConfig(url=database_url),
         blob=BlobConfig(backend="filesystem", root=blob_root),
     )
+    system_url = config.database.system_url
+    if system_url.startswith("postgresql"):
+        asyncio.run(reset_postgres_database(make_url(system_url).database))
     hub = InProcessHub()
     blob = FilesystemBlobStore(root=blob_root)
     loop_queue.init_runtime(loop_queue.Runtime(config=config, blob=blob, hub=hub))
@@ -61,14 +60,14 @@ def dbos_runtime(
         config={
             "name": DBOS_APP_NAME,
             "application_version": DBOS_APP_VERSION,
-            "application_database_url": database_url,
-            "system_database_url": config.postgres.system_url,
+            "system_database_url": system_url,
             "run_admin_server": False,
         }
     )
     DBOS.launch()
     yield config, hub, blob
     DBOS.destroy()
+    loop_queue._runtime = None
 
 
 @pytest.fixture
@@ -81,7 +80,7 @@ async def surface(
     monkeypatch.setattr(loop_queue, "_model_client", lambda model, config: StandInModel())
     app = FastAPI()
     app.state.hub = hub
-    app.state.dbos = DBOSClient(system_database_url=config.postgres.system_url)
+    app.state.dbos = DBOSClient(system_database_url=config.database.system_url)
     app.include_router(router)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://surface") as client:
         yield client
@@ -93,35 +92,39 @@ async def _bootstrap() -> dict[str, str]:
     workspace_id, member_id, agent_id = uuid4(), uuid4(), uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
-            text("insert into workspace (id, created_at, updated_at) values (:id, now(), now())"),
-            {"id": workspace_id},
+            sa.insert(tables.workspace).values(
+                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
         )
         await connection.execute(
-            text(
-                "insert into member (id, workspace_id, email, created_at, updated_at)"
-                " values (:id, :ws, 'owner@example.com', now(), now())"
-            ),
-            {"id": member_id, "ws": workspace_id},
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email=f"{token[:8]}@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
         )
         await connection.execute(
-            text(
-                "insert into agent (id, workspace_id, name, prompt, model, created_at,"
-                " updated_at) values (:id, :ws, 'assistant', 'be brief', 'claude-opus-4-8',"
-                " now(), now())"
-            ),
-            {"id": agent_id, "ws": workspace_id},
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="assistant",
+                prompt="be brief",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
         )
         await connection.execute(
-            text(
-                "insert into surface_identity"
-                " (workspace_id, member_id, surface, external_id, created_at, updated_at)"
-                " values (:ws, :member, 'cli', :external_id, now(), now())"
-            ),
-            {
-                "ws": workspace_id,
-                "member": member_id,
-                "external_id": hashlib.sha256(token.encode()).hexdigest(),
-            },
+            sa.insert(tables.surface_identity).values(
+                workspace_id=workspace_id,
+                member_id=member_id,
+                surface="cli",
+                external_id=hashlib.sha256(token.encode()).hexdigest(),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
         )
     return {"authorization": f"Bearer {token}", "x-selfhost-session": uuid4().hex}
 
@@ -149,8 +152,9 @@ async def _turn_row(turn_id: str) -> tuple[str, UUID]:
     async with workspace_tx() as connection:
         row = (
             await connection.execute(
-                text("select status, conversation_id from turn where id = :id"),
-                {"id": UUID(turn_id)},
+                sa.select(tables.turn.c.status, tables.turn.c.conversation_id).where(
+                    tables.turn.c.id == UUID(turn_id)
+                )
             )
         ).one()
     return row.status, row.conversation_id
@@ -165,18 +169,19 @@ async def test_turn_round_trip_bills_and_persists(surface: AsyncClient) -> None:
     assert streamed == "echo:1"
     assert terminal["status"] == "done"
     assert terminal["tokens"] == 10
-    assert Decimal(str(terminal["cost_usd"])) == Decimal("0.00011")
+    assert terminal["cost_micro_usd"] == 110
     assert terminal["model"] == "claude-opus-4-8"
     status, conversation_id = await _turn_row(turn_id)
     assert status == "done"
     async with workspace_tx() as connection:
-        ledger = (
+        billed = (
             await connection.execute(
-                text("select amount, priced_usd from ledger where turn_id = :id"),
-                {"id": UUID(turn_id)},
+                sa.select(tables.ledger.c.amount, tables.ledger.c.priced_micro_usd).where(
+                    tables.ledger.c.turn_id == UUID(turn_id)
+                )
             )
         ).one()
-    assert int(ledger.amount) == 10
+    assert (int(billed.amount), int(billed.priced_micro_usd)) == (10, 110)
     _, _, blob = _runtime_parts(surface)
     stored = await Transcript(blob=blob, conversation_id=conversation_id).read()
     assert stored is not None
@@ -225,7 +230,9 @@ async def test_failure_commits_terminal_and_bills_nothing(surface: AsyncClient) 
     async with workspace_tx() as connection:
         billed = (
             await connection.execute(
-                text("select count(*) from ledger where turn_id = :id"), {"id": UUID(turn_id)}
+                sa.select(sa.func.count())
+                .select_from(tables.ledger)
+                .where(tables.ledger.c.turn_id == UUID(turn_id))
             )
         ).scalar_one()
     assert billed == 0

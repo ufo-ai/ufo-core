@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from collections.abc import AsyncIterator
 from uuid import uuid4
 
@@ -84,4 +85,20 @@ async def test_late_subscriber_sees_only_later_frames():
     first = await _pending_first_frame(stream)
     await hub.publish(turn_id, TextDelta(text="late"))
     assert await first == TextDelta(text="late")
+    await stream.aclose()
+
+
+async def test_publish_from_another_loop_thread_delivers():
+    hub = InProcessHub()
+    turn_id = uuid4()
+    stream = hub.subscribe(turn_id)
+    first = await _pending_first_frame(stream)
+
+    def publish_from_foreign_loop() -> None:
+        asyncio.run(hub.publish(turn_id, TextDelta(text="cross-loop")))
+
+    thread = threading.Thread(target=publish_from_foreign_loop)
+    thread.start()
+    thread.join()
+    assert await asyncio.wait_for(first, timeout=2) == TextDelta(text="cross-loop")
     await stream.aclose()

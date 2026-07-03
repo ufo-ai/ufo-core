@@ -1,6 +1,5 @@
 """Boundary records and the queue contract shared by surfaces and workers."""
 
-from decimal import Decimal
 from typing import Literal
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -38,7 +37,7 @@ class TerminalFrame(BaseModel):
     text: str = ""
     error_class: str | None = None
     tokens: int = 0
-    cost_usd: Decimal = Decimal("0")
+    cost_micro_usd: int = 0
     model: str = ""
 
 

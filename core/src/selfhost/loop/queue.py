@@ -4,8 +4,8 @@ import os
 from dataclasses import dataclass
 from uuid import UUID
 
+import sqlalchemy as sa
 from dbos import DBOS, Queue
-from sqlalchemy import text
 
 from selfhost.blob import BlobStore
 from selfhost.config import Config
@@ -16,6 +16,7 @@ from selfhost.loop.transcript import Transcript
 from selfhost.models import ModelClient
 from selfhost.models.anthropic import AnthropicClient, anthropic_sdk_client
 from selfhost.models.openai import OpenAIClient, openai_sdk_client
+from selfhost.schema import tables
 from selfhost.schema.records import (
     TURN_QUEUE_NAME,
     TURN_WORKFLOW_NAME,
@@ -78,12 +79,20 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent]:
     async with workspace_tx() as connection:
         row = (
             await connection.execute(
-                text(
-                    "select t.id, t.workspace_id, t.conversation_id, t.agent_id, t.seq,"
-                    " t.status, t.inbound, t.terminal, a.prompt, a.model"
-                    " from turn t join agent a on a.id = t.agent_id where t.id = :id"
-                ),
-                {"id": turn_id},
+                sa.select(
+                    tables.turn.c.id,
+                    tables.turn.c.workspace_id,
+                    tables.turn.c.conversation_id,
+                    tables.turn.c.agent_id,
+                    tables.turn.c.seq,
+                    tables.turn.c.status,
+                    tables.turn.c.inbound,
+                    tables.turn.c.terminal,
+                    tables.agent.c.prompt,
+                    tables.agent.c.model,
+                )
+                .select_from(tables.turn.join(tables.agent))
+                .where(tables.turn.c.id == turn_id)
             )
         ).one()
     turn = Turn(

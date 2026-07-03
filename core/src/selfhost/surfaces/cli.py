@@ -6,13 +6,14 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
+import sqlalchemy as sa
 from dbos import DBOSClient, EnqueueOptions
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from sqlalchemy import text
 
 from selfhost.db import workspace_tx
 from selfhost.hub import Hub, LiveFrame, Terminal
+from selfhost.schema import tables
 from selfhost.schema.records import (
     DBOS_APP_VERSION,
     TURN_QUEUE_NAME,
@@ -42,11 +43,12 @@ async def _authenticate(authorization: str) -> CliIdentity:
     async with workspace_tx() as connection:
         row = (
             await connection.execute(
-                text(
-                    "select member_id, workspace_id from surface_identity"
-                    " where surface = 'cli' and external_id = :external_id"
-                ),
-                {"external_id": digest},
+                sa.select(
+                    tables.surface_identity.c.member_id, tables.surface_identity.c.workspace_id
+                ).where(
+                    tables.surface_identity.c.surface == "cli",
+                    tables.surface_identity.c.external_id == digest,
+                )
             )
         ).one_or_none()
     if row is None:
@@ -72,67 +74,74 @@ async def chat(
     async with workspace_tx() as connection:
         agent = (
             await connection.execute(
-                text("select id from agent where workspace_id = :ws and name = :name"),
-                {"ws": identity.workspace_id, "name": x_selfhost_agent},
+                sa.select(tables.agent.c.id).where(
+                    tables.agent.c.workspace_id == identity.workspace_id,
+                    tables.agent.c.name == x_selfhost_agent,
+                )
             )
         ).one_or_none()
         if agent is None:
             raise HTTPException(404, f"no agent named {x_selfhost_agent!r}")
-        await connection.execute(
-            text(
-                "insert into conversation"
-                " (id, workspace_id, surface, queue_key, member_id, created_at, updated_at)"
-                " values (:id, :ws, 'cli', :queue_key, :member, now(), now())"
-                " on conflict (surface, queue_key) do nothing"
-            ),
-            {
-                "id": uuid4(),
-                "ws": identity.workspace_id,
-                "queue_key": x_selfhost_session,
-                "member": identity.member_id,
-            },
+        conversation_filter = (
+            (tables.conversation.c.surface == "cli")
+            & (tables.conversation.c.queue_key == x_selfhost_session)
         )
         conversation = (
             await connection.execute(
-                text(
-                    "select id, member_id from conversation"
-                    " where surface = 'cli' and queue_key = :queue_key"
-                ),
-                {"queue_key": x_selfhost_session},
+                sa.select(tables.conversation.c.id, tables.conversation.c.member_id)
+                .where(conversation_filter)
+                .with_for_update()
             )
-        ).one()
+        ).one_or_none()
+        if conversation is None:
+            await connection.execute(
+                sa.insert(tables.conversation).values(
+                    id=uuid4(),
+                    workspace_id=identity.workspace_id,
+                    surface="cli",
+                    queue_key=x_selfhost_session,
+                    member_id=identity.member_id,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+            conversation = (
+                await connection.execute(
+                    sa.select(tables.conversation.c.id, tables.conversation.c.member_id)
+                    .where(conversation_filter)
+                    .with_for_update()
+                )
+            ).one()
         if conversation.member_id != identity.member_id:
             raise HTTPException(403, "conversation belongs to another member")
-        await connection.execute(
-            text("select pg_advisory_xact_lock(hashtextextended(:conversation, 0))"),
-            {"conversation": str(conversation.id)},
-        )
         seq = (
             await connection.execute(
-                text(
-                    "select coalesce(max(seq), 0) + 1 as seq from turn"
-                    " where conversation_id = :conversation"
-                ),
-                {"conversation": conversation.id},
+                sa.select(sa.func.coalesce(sa.func.max(tables.turn.c.seq), 0) + 1).where(
+                    tables.turn.c.conversation_id == conversation.id
+                )
             )
-        ).one()[0]
+        ).scalar_one()
         turn_id = turn_id_for(identity.workspace_id, conversation.id, seq)
-        await connection.execute(
-            text(
-                "insert into turn (id, workspace_id, conversation_id, agent_id, seq, status,"
-                " inbound, terminal, created_at, updated_at)"
-                " values (:id, :ws, :conversation, :agent, :seq, 'queued', :inbound, null,"
-                " now(), now()) on conflict (id) do nothing"
-            ),
-            {
-                "id": turn_id,
-                "ws": identity.workspace_id,
-                "conversation": conversation.id,
-                "agent": agent.id,
-                "seq": seq,
-                "inbound": inbound,
-            },
-        )
+        already_admitted = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(tables.turn.c.id == turn_id)
+            )
+        ).one_or_none()
+        if already_admitted is None:
+            await connection.execute(
+                sa.insert(tables.turn).values(
+                    id=turn_id,
+                    workspace_id=identity.workspace_id,
+                    conversation_id=conversation.id,
+                    agent_id=agent.id,
+                    seq=seq,
+                    status="queued",
+                    inbound=inbound,
+                    terminal=None,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
     options: EnqueueOptions = {
         "queue_name": TURN_QUEUE_NAME,
         "workflow_name": TURN_WORKFLOW_NAME,
@@ -164,11 +173,13 @@ async def cancel_turn(
     frame = TerminalFrame(status="cancelled")
     async with workspace_tx() as connection:
         updated = await connection.execute(
-            text(
-                "update turn set status = 'cancelled', terminal = cast(:terminal as jsonb),"
-                " updated_at = now() where id = :id and status in ('queued', 'running')"
-            ),
-            {"terminal": frame.model_dump_json(), "id": turn_id},
+            sa.update(tables.turn)
+            .values(
+                status="cancelled",
+                terminal=frame.model_dump(mode="json"),
+                updated_at=sa.func.now(),
+            )
+            .where(tables.turn.c.id == turn_id, tables.turn.c.status.in_(("queued", "running")))
         )
     if updated.rowcount == 1:
         hub: Hub = request.app.state.hub
@@ -186,11 +197,9 @@ async def _require_turn(turn_id: UUID, identity: CliIdentity) -> None:
     async with workspace_tx() as connection:
         row = (
             await connection.execute(
-                text(
-                    "select c.member_id from turn t"
-                    " join conversation c on c.id = t.conversation_id where t.id = :id"
-                ),
-                {"id": turn_id},
+                sa.select(tables.conversation.c.member_id)
+                .select_from(tables.turn.join(tables.conversation))
+                .where(tables.turn.c.id == turn_id)
             )
         ).one_or_none()
     if row is None:
@@ -236,7 +245,7 @@ async def _terminal_frame(turn_id: UUID) -> TerminalFrame | None:
     async with workspace_tx() as connection:
         row = (
             await connection.execute(
-                text("select terminal from turn where id = :id"), {"id": turn_id}
+                sa.select(tables.turn.c.terminal).where(tables.turn.c.id == turn_id)
             )
         ).one_or_none()
     if row is None or row.terminal is None:

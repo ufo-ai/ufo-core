@@ -7,3 +7,5 @@ dist/
 .pytest_cache/
 .ruff_cache/
 implementation-details.md
+selfhost.toml
+blobs/

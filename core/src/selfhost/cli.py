@@ -7,12 +7,14 @@ import secrets
 from pathlib import Path
 from uuid import uuid4
 
+import asyncpg
 import click
 import httpx
-import psycopg
+import sqlalchemy as sa
 
 from selfhost.config import Config, load_config
-from selfhost.db import apply_migrations
+from selfhost.db import apply_migrations, dispose_db, init_db, workspace_tx
+from selfhost.schema import tables
 from selfhost.serve import run as serve_run
 
 SELFHOST_DIR = Path.home() / ".selfhost"
@@ -20,6 +22,14 @@ DEFAULT_AGENT_MODEL = "claude-opus-4-8"
 DEFAULT_AGENT_PROMPT = "You are a helpful assistant."
 RECONNECT_SECONDS = 1.0
 TURN_REQUEST_TIMEOUT_SECONDS = 90.0
+DEFAULT_CONFIG = """\
+[database]
+url = "sqlite+aiosqlite:///selfhost.db"
+
+[blob]
+backend = "filesystem"
+root = "./blobs"
+"""
 
 
 @click.group()
@@ -31,43 +41,85 @@ def main() -> None:
 @click.option("--email", required=True)
 @click.option("--model", default=DEFAULT_AGENT_MODEL, show_default=True)
 def init(email: str, model: str) -> None:
-    """Create the databases, schema, workspace, owner, default agent, and CLI token."""
+    """Write selfhost.toml if absent, then create the schema, workspace, owner,
+    default agent, and CLI token."""
+    config_path = Path("selfhost.toml")
+    if not config_path.exists():
+        config_path.write_text(DEFAULT_CONFIG)
+        click.echo(f"wrote {config_path} (SQLite, filesystem blobs — zero services)")
     config = load_config()
-    _create_system_database(config)
-    apply_migrations(config.postgres.url)
+    if config.database.url.startswith("postgresql"):
+        asyncio.run(_create_postgres_system_database(config))
+    apply_migrations(config.database.url)
     token = secrets.token_hex(32)
-    with psycopg.connect(_plain_dsn(config)) as connection:
-        owner = connection.execute("select email from member").fetchone()
-        if owner is not None:
-            raise click.ClickException(f"already initialized (owner {owner[0]})")
-        workspace_id, member_id, agent_id = uuid4(), uuid4(), uuid4()
-        connection.execute(
-            "insert into workspace (id, created_at, updated_at) values (%s, now(), now())",
-            (workspace_id,),
-        )
-        connection.execute(
-            "insert into member (id, workspace_id, email, created_at, updated_at)"
-            " values (%s, %s, %s, now(), now())",
-            (member_id, workspace_id, email),
-        )
-        connection.execute(
-            "insert into agent (id, workspace_id, name, prompt, model, created_at, updated_at)"
-            " values (%s, %s, 'assistant', %s, %s, now(), now())",
-            (agent_id, workspace_id, DEFAULT_AGENT_PROMPT, model),
-        )
-        connection.execute(
-            "insert into surface_identity"
-            " (workspace_id, member_id, surface, external_id, created_at, updated_at)"
-            " values (%s, %s, 'cli', %s, now(), now())",
-            (workspace_id, member_id, hashlib.sha256(token.encode()).hexdigest()),
-        )
-        connection.commit()
+    asyncio.run(_bootstrap_workspace(config, email, model, token))
     SELFHOST_DIR.mkdir(mode=0o700, exist_ok=True)
     token_path = SELFHOST_DIR / "token"
     token_path.write_text(token)
     token_path.chmod(0o600)
     click.echo(f"workspace ready — owner {email}, agent 'assistant' ({model})")
     click.echo(f"cli token written to {token_path}")
+
+
+async def _bootstrap_workspace(config: Config, email: str, model: str, token: str) -> None:
+    init_db(config.database.url)
+    try:
+        async with workspace_tx() as connection:
+            owner = (await connection.execute(sa.select(tables.member.c.email))).first()
+            if owner is not None:
+                raise click.ClickException(f"already initialized (owner {owner.email})")
+            workspace_id, member_id, agent_id = uuid4(), uuid4(), uuid4()
+            await connection.execute(
+                sa.insert(tables.workspace).values(
+                    id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+                )
+            )
+            await connection.execute(
+                sa.insert(tables.member).values(
+                    id=member_id,
+                    workspace_id=workspace_id,
+                    email=email,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+            await connection.execute(
+                sa.insert(tables.agent).values(
+                    id=agent_id,
+                    workspace_id=workspace_id,
+                    name="assistant",
+                    prompt=DEFAULT_AGENT_PROMPT,
+                    model=model,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+            await connection.execute(
+                sa.insert(tables.surface_identity).values(
+                    workspace_id=workspace_id,
+                    member_id=member_id,
+                    surface="cli",
+                    external_id=hashlib.sha256(token.encode()).hexdigest(),
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+    finally:
+        await dispose_db()
+
+
+async def _create_postgres_system_database(config: Config) -> None:
+    app_dsn = config.database.url.replace("postgresql+asyncpg://", "postgresql://", 1)
+    _, _, system_name = config.database.system_url.rpartition("/")
+    connection = await asyncpg.connect(app_dsn)
+    try:
+        exists = await connection.fetchrow(
+            "select 1 from pg_database where datname = $1", system_name
+        )
+        if exists is None:
+            await connection.execute(f'create database "{system_name}"')
+    finally:
+        await connection.close()
 
 
 @main.command()
@@ -162,23 +214,10 @@ def _render_terminal(terminal: dict[str, object], streamed: bool) -> None:
             if not streamed:
                 click.echo(terminal["text"], nl=False)
             click.echo()
-            cost = f"{terminal['model']} · {terminal['tokens']} tok · ${terminal['cost_usd']}"
+            dollars = int(terminal["cost_micro_usd"]) / 1_000_000
+            cost = f"{terminal['model']} · {terminal['tokens']} tok · ${dollars:.6f}"
             click.echo(click.style(cost, dim=True))
         case "cancelled":
             click.echo("\n(cancelled)")
         case _:
             raise click.ClickException(f"turn failed: {terminal['error_class']}")
-
-
-def _plain_dsn(config: Config) -> str:
-    return config.postgres.url.replace("postgresql+psycopg://", "postgresql://", 1)
-
-
-def _create_system_database(config: Config) -> None:
-    _, _, system_name = config.postgres.system_url.rpartition("/")
-    with psycopg.connect(_plain_dsn(config), autocommit=True) as connection:
-        exists = connection.execute(
-            "select 1 from pg_database where datname = %s", (system_name,)
-        ).fetchone()
-        if exists is None:
-            connection.execute(f'create database "{system_name}"')

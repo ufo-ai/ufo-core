@@ -24,7 +24,7 @@ Working against the old repo:
 | `metalcraft_store/db.py`, `migrations/001_product_tables.sql` | `schema/` | U1 | reference only — new schema written fresh, workspace-scoped, no RLS |
 | `metalcraft_store/{json,env}.py` | `config.py` + shared prims | U1 | fold |
 | `metalcraft_o11y/{emit,logging,metrics,sdk,tracing}.py` | `o11y.py` | U1 | collapse to one module; OTel APIs only |
-| `metalcraft_store/price.py` | `accounting.py` prices | U1 | refresh model list; keep PRICE_DIGEST pattern |
+| `metalcraft_store/price.py` | `accounting.py` prices | U1 | refresh model list; fix lossy per-token ints (micro-USD/MTok); PRICE_DIGEST returns with U7 audit columns |
 | `metalcraft_cli/gateway_client.py`, `scripts/ufo`, `gateway/channels/ufo*.py` | `surfaces/cli.py` + `cli.py` (`selfhost chat`) | U1 | one CLI; sessions stay; drop signin bridge (member token instead) |
 | `metalcraft_agent/tools/base.py` | `tools/registry.py`, `tools/context.py` | U2 | ToolContext replaces env-threading |
 | `metalcraft_agent/tools/sandbox.py` | `tools/builtins/` (`bash read write edit`) | U2 | drop `website`, 3× serve, `glob`, `grep` (bash + ripgrep subsume); keep read-before-write + image/PDF read |

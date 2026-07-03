@@ -11,15 +11,18 @@ CONFIG_PATH_ENV = "SELFHOST_CONFIG"
 DEFAULT_CONFIG_PATH = Path("selfhost.toml")
 
 
-class PostgresConfig(BaseModel):
+class DatabaseConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     url: str
 
     @property
     def system_url(self) -> str:
-        """The DBOS system database: same instance, database name suffixed _dbos."""
-        base, _, database = self.url.rpartition("/")
-        return f"{base}/{database}_dbos"
+        """The DBOS system store: a _dbos sibling of the schema database, sync-driver url."""
+        base, _, name = self.url.rpartition("/")
+        if self.url.startswith("sqlite"):
+            stem, dot, suffix = name.partition(".")
+            return f"{base}/{stem}_dbos{dot}{suffix}".replace("sqlite+aiosqlite", "sqlite", 1)
+        return f"{base}/{name}_dbos".replace("postgresql+asyncpg", "postgresql+psycopg", 1)
 
 
 class BlobConfig(BaseModel):
@@ -58,7 +61,7 @@ class O11yConfig(BaseModel):
 
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    postgres: PostgresConfig
+    database: DatabaseConfig
     blob: BlobConfig
     models: ModelsConfig = ModelsConfig()
     serve: ServeConfig = ServeConfig()

@@ -10,11 +10,12 @@ for everything else (connectors, data sources, triggers, tools, subagents, onboa
 - `core/` — the axiomatic unit. `extensions/` — first-party extensions. `packs/` — skill packs.
 
 ```bash
-uv tool install selfhost
-docker compose up -d      # Postgres
-selfhost init             # selfhost.toml + workspace + owner + model key
-selfhost serve            # one host process; sandboxes = sibling Docker containers
-selfhost chat             # second terminal
+export ANTHROPIC_API_KEY=...
+uv run selfhost init --email you@example.com  # writes selfhost.toml; SQLite — zero services
+uv run selfhost serve                         # one process: surfaces + workers
+uv run selfhost chat                          # second terminal; sessions persist across runs
 ```
 
-Requires Postgres and Docker (for sandboxes — selfhost itself runs on the host).
+Dev is zero-services: SQLite + filesystem blobs + in-process hub. Postgres (the checked-in
+compose or an existing instance) is for deploys and the Postgres half of the test matrix; Docker
+enters for sandboxes (U2+).

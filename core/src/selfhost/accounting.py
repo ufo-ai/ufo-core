@@ -1,15 +1,14 @@
 """Token pricing and the one billing write per turn."""
 
 from dataclasses import dataclass
-from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import text
+import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from selfhost.schema import tables
 from selfhost.schema.records import Usage, ledger_id_for
 
-MICRO_USD_PER_USD = 1_000_000
 TOKENS_PER_MTOK = 1_000_000
 
 
@@ -47,8 +46,8 @@ def model_price(model: str) -> ModelPrice:
     return price
 
 
-def usage_priced_usd(model: str, usage: Usage) -> Decimal:
-    """Exact USD for a usage split: integer dot product, one Decimal division."""
+def usage_priced_micro_usd(model: str, usage: Usage) -> int:
+    """Micro-USD for a usage split: integer dot product, floored at micro-dollar precision."""
     price = model_price(model)
     micro_usd_mtok = (
         usage.input_tokens * price.input
@@ -56,7 +55,7 @@ def usage_priced_usd(model: str, usage: Usage) -> Decimal:
         + usage.cache_read_tokens * price.cache_read
         + usage.cache_write_tokens * price.cache_write
     )
-    return Decimal(micro_usd_mtok) / Decimal(MICRO_USD_PER_USD * TOKENS_PER_MTOK)
+    return micro_usd_mtok // TOKENS_PER_MTOK
 
 
 async def record_turn_usage(
@@ -66,7 +65,8 @@ async def record_turn_usage(
     model: str,
     usage: Usage,
 ) -> None:
-    """One billing write per turn, replay-idempotent; zero usage writes nothing."""
+    """One billing write per turn; select-then-insert is replay-safe because DBOS
+    re-executes a turn sequentially, never concurrently with itself."""
     total = (
         usage.input_tokens
         + usage.output_tokens
@@ -75,38 +75,40 @@ async def record_turn_usage(
     )
     if total == 0:
         return
+    ledger_id = ledger_id_for(workspace_id, turn_id, "tokens")
+    billed = await connection.execute(
+        sa.select(tables.ledger.c.id).where(tables.ledger.c.id == ledger_id)
+    )
+    if billed.one_or_none() is not None:
+        return
     await connection.execute(
-        text(
-            "insert into ledger"
-            " (id, workspace_id, turn_id, dimension, amount, priced_usd, model,"
-            " created_at, updated_at)"
-            " values (:id, :ws, :turn, 'tokens', :amount, :priced, :model, now(), now())"
-            " on conflict (id) do nothing"
-        ),
-        {
-            "id": ledger_id_for(workspace_id, turn_id, "tokens"),
-            "ws": workspace_id,
-            "turn": turn_id,
-            "amount": total,
-            "priced": usage_priced_usd(model, usage),
-            "model": model,
-        },
+        sa.insert(tables.ledger).values(
+            id=ledger_id,
+            workspace_id=workspace_id,
+            turn_id=turn_id,
+            dimension="tokens",
+            amount=total,
+            priced_micro_usd=usage_priced_micro_usd(model, usage),
+            model=model,
+            created_at=sa.func.now(),
+            updated_at=sa.func.now(),
+        )
     )
 
 
 async def read_turn_cost(
     connection: AsyncConnection, turn_id: UUID
-) -> tuple[int, Decimal, str] | None:
-    """The billed tokens, USD, and model for a turn; None when nothing was billed."""
+) -> tuple[int, int, str] | None:
+    """The billed tokens, micro-USD, and model for a turn; None when nothing was billed."""
     row = (
         await connection.execute(
-            text(
-                "select amount, priced_usd, model from ledger"
-                " where turn_id = :turn and dimension = 'tokens'"
-            ),
-            {"turn": turn_id},
+            sa.select(
+                tables.ledger.c.amount, tables.ledger.c.priced_micro_usd, tables.ledger.c.model
+            ).where(
+                (tables.ledger.c.turn_id == turn_id) & (tables.ledger.c.dimension == "tokens")
+            )
         )
     ).one_or_none()
     if row is None:
         return None
-    return int(row.amount), row.priced_usd, row.model
+    return int(row.amount), int(row.priced_micro_usd), row.model

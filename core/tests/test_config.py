@@ -6,8 +6,8 @@ from pydantic import ValidationError
 from selfhost.config import CONFIG_PATH_ENV, load_config
 
 VALID = """
-[postgres]
-url = "postgresql+psycopg://selfhost:selfhost@127.0.0.1:5541/selfhost"
+[database]
+url = "sqlite+aiosqlite:///selfhost.db"
 
 [blob]
 backend = "filesystem"
@@ -19,7 +19,7 @@ def test_load_config_with_defaults(tmp_path: Path) -> None:
     path = tmp_path / "selfhost.toml"
     path.write_text(VALID)
     config = load_config(path)
-    assert config.postgres.system_url.endswith("/selfhost_dbos")
+    assert config.database.system_url == "sqlite:///selfhost_dbos.db"
     assert config.blob.root == Path("./blobs")
     assert config.serve.port == 8710
     assert config.models.anthropic_api_key_env == "ANTHROPIC_API_KEY"
@@ -57,3 +57,14 @@ def test_config_path_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     path.write_text(VALID)
     monkeypatch.setenv(CONFIG_PATH_ENV, str(path))
     assert load_config().serve.host == "127.0.0.1"
+
+
+def test_postgres_system_url_uses_sync_driver(tmp_path: Path) -> None:
+    path = tmp_path / "selfhost.toml"
+    path.write_text(
+        VALID.replace(
+            'url = "sqlite+aiosqlite:///selfhost.db"',
+            'url = "postgresql+asyncpg://u:p@db:5432/selfhost"',
+        )
+    )
+    assert load_config(path).database.system_url == "postgresql+psycopg://u:p@db:5432/selfhost_dbos"

@@ -15,8 +15,7 @@ SDK_EXEMPT_PART = "sdk"
 COMPOSITION_ROOT = CORE_SRC / "serve.py"
 ROLE_PACKAGES = ("selfhost.surfaces", "selfhost.loop", "selfhost.jobs", "selfhost.sandbox.proxy")
 ENVELOPE_COLUMNS = {"workspace_id", "created_at", "updated_at"}
-SQL_MARKERS = ("select", "insert", "update")
-CONSTRAINT_STARTERS = ("unique", "primary", "check", "foreign", "constraint")
+SCHEMA_TABLES = CORE_SRC / "schema" / "tables.py"
 
 
 def _python_files() -> list[Path]:
@@ -92,66 +91,68 @@ def _boundary_failures(trees: dict[Path, ast.Module]) -> list[str]:
     return failures
 
 
-def _schema_columns() -> tuple[list[tuple[str, str]], set[str]]:
+def _schema_columns(trees: dict[Path, ast.Module]) -> tuple[list[tuple[str, str]], set[str]]:
+    tree = trees.get(SCHEMA_TABLES)
+    if tree is None:
+        return [], set()
     columns: list[tuple[str, str]] = []
     literals: set[str] = set()
-    for sql_file in sorted((ROOT / CORE_SRC / "schema").glob("*.sql")):
-        text = sql_file.read_text()
-        literals.update(re.findall(r"'([a-z_]+)'", text))
-        for table, body in re.findall(
-            r"create table if not exists (\w+) \(((?:[^()]|\([^)]*\))*)\)", text
-        ):
-            for line in body.splitlines():
-                word = line.strip().split(" ")[0].lower()
-                if word and word.isidentifier() and not word.startswith(CONSTRAINT_STARTERS):
-                    columns.append((table, word))
+    for node in ast.walk(tree):
+        match node:
+            case ast.Call(
+                func=ast.Attribute(attr="Table"),
+                args=[ast.Constant(value=str() as table), *rest],
+            ):
+                for arg in rest:
+                    match arg:
+                        case ast.Call(
+                            func=ast.Attribute(attr="Column"),
+                            args=[ast.Constant(value=str() as column), *_],
+                        ):
+                            columns.append((table, column))
+                        case ast.Call(
+                            func=ast.Attribute(attr="CheckConstraint"),
+                            args=[ast.Constant(value=str() as check), *_],
+                        ):
+                            literals.update(re.findall(r"'([a-z_]+)'", check))
     return columns, literals
 
 
-def _sql_strings(trees: dict[Path, ast.Module]) -> list[str]:
-    strings = []
+def _wiring_failures(trees: dict[Path, ast.Module]) -> list[str]:
+    columns, literals = _schema_columns(trees)
+    if not columns:
+        return []
+    write_columns: set[str] = set()
+    read_columns: set[str] = set()
+    produced: set[str] = set()
     for rel, tree in trees.items():
-        if not str(rel).startswith(str(CORE_SRC)):
+        if (
+            not str(rel).startswith(str(CORE_SRC))
+            or rel == SCHEMA_TABLES
+            or "migrations" in rel.parts
+        ):
             continue
         for node in ast.walk(tree):
             match node:
-                case ast.Constant(value=str() as value) if any(
-                    marker in value.lower() for marker in SQL_MARKERS
-                ):
-                    strings.append(" ".join(value.lower().split()))
-    return strings
-
-
-def _wiring_failures(trees: dict[Path, ast.Module]) -> list[str]:
-    columns, sql_literals = _schema_columns()
-    if not columns:
-        return []
-    statements = _sql_strings(trees)
+                case ast.Call(func=ast.Attribute(attr="values"), keywords=keywords):
+                    write_columns.update(keyword.arg for keyword in keywords if keyword.arg)
+                case ast.Attribute(attr=attr, value=ast.Attribute(attr="c")):
+                    read_columns.add(attr)
+                case ast.Constant(value=str() as value):
+                    produced.add(value)
     failures = []
     for table, column in columns:
         if column in ENVELOPE_COLUMNS:
             continue
-        pattern = re.compile(rf"\b{column}\b")
-        writes = [
-            s
-            for s in statements
-            if pattern.search(s) and (f"insert into {table}" in s or f"update {table}" in s)
-        ]
-        reads = [s for s in statements if pattern.search(s) and "select" in s]
-        if not writes:
+        if column not in write_columns:
             failures.append(f"schema: {table}.{column} has no write site")
-        if not reads:
+        if column not in read_columns:
             failures.append(f"schema: {table}.{column} has no read site")
-    produced = {
-        node.value
-        for rel, tree in trees.items()
-        if str(rel).startswith(str(CORE_SRC))
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Constant) and isinstance(node.value, str)
-    }
-    for literal in sorted(sql_literals):
-        if literal not in produced:
-            failures.append(f"schema: literal '{literal}' has no producer in core")
+    failures.extend(
+        f"schema: literal '{literal}' has no producer in core"
+        for literal in sorted(literals)
+        if literal not in produced
+    )
     return failures
 
 

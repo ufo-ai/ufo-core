@@ -3,9 +3,8 @@
 import asyncio
 import time
 from dataclasses import dataclass
-from decimal import Decimal
 
-from sqlalchemy import text
+import sqlalchemy as sa
 
 from selfhost.accounting import read_turn_cost, record_turn_usage
 from selfhost.db import workspace_tx
@@ -13,6 +12,7 @@ from selfhost.hub import Hub, Terminal
 from selfhost.loop.transcript import Conversation, Transcript
 from selfhost.models import Message, ModelClient, ModelRequest, TextDelta
 from selfhost.o11y import emit_metric, log, turn_span
+from selfhost.schema import tables
 from selfhost.schema.records import Agent, TerminalFrame, TerminalStatus, Turn, Usage
 
 MAX_OUTPUT_TOKENS = 16_000
@@ -51,11 +51,12 @@ class TurnEngine:
     async def _mark_running(self) -> bool:
         async with workspace_tx() as connection:
             updated = await connection.execute(
-                text(
-                    "update turn set status = 'running', updated_at = now()"
-                    " where id = :id and status in ('queued', 'running')"
-                ),
-                {"id": self.turn.id},
+                sa.update(tables.turn)
+                .values(status="running", updated_at=sa.func.now())
+                .where(
+                    tables.turn.c.id == self.turn.id,
+                    tables.turn.c.status.in_(("queued", "running")),
+                )
             )
         return updated.rowcount == 1
 
@@ -134,26 +135,31 @@ class TurnEngine:
                 connection, self.turn.workspace_id, self.turn.id, self.agent.model, usage
             )
             cost = await read_turn_cost(connection, self.turn.id)
-            tokens, usd, model = cost if cost is not None else (0, Decimal("0"), "")
+            tokens, micro_usd, model = cost if cost is not None else (0, 0, "")
             frame = TerminalFrame(
                 status=status,
                 text=answer,
                 error_class=error_class,
                 tokens=tokens,
-                cost_usd=usd,
+                cost_micro_usd=micro_usd,
                 model=model,
             )
             updated = await connection.execute(
-                text(
-                    "update turn set status = :status, terminal = cast(:terminal as jsonb),"
-                    " updated_at = now() where id = :id and status in ('queued', 'running')"
-                ),
-                {"status": status, "terminal": frame.model_dump_json(), "id": self.turn.id},
+                sa.update(tables.turn)
+                .values(
+                    status=status,
+                    terminal=frame.model_dump(mode="json"),
+                    updated_at=sa.func.now(),
+                )
+                .where(
+                    tables.turn.c.id == self.turn.id,
+                    tables.turn.c.status.in_(("queued", "running")),
+                )
             )
             if updated.rowcount == 0:
                 row = (
                     await connection.execute(
-                        text("select terminal from turn where id = :id"), {"id": self.turn.id}
+                        sa.select(tables.turn.c.terminal).where(tables.turn.c.id == self.turn.id)
                     )
                 ).one()
                 frame = TerminalFrame.model_validate(row.terminal)
@@ -166,7 +172,7 @@ class TurnEngine:
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
-                    text("select terminal from turn where id = :id"), {"id": self.turn.id}
+                    sa.select(tables.turn.c.terminal).where(tables.turn.c.id == self.turn.id)
                 )
             ).one()
         frame = TerminalFrame.model_validate(row.terminal)

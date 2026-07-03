@@ -31,94 +31,51 @@ core/src/selfhost/
 ## Records (`schema/`, Pydantic)
 
 ```python
-class Workspace(BaseModel):        id: UUID; name: str; config_digest: str
-class Member(BaseModel):           id: UUID; email: str; role: Literal["owner", "member"]
-class SurfaceIdentity(BaseModel):  member_id: UUID; surface: Surface; external_id: str   # slack user / cli token / web session
-class Agent(BaseModel):            id: UUID; name: str; prompt: str; model_policy: ModelPolicy
-                                   tool_names: tuple[str, ...]; pack_names: tuple[str, ...]
 class Grant(BaseModel):            id: UUID; agent_id: UUID; kind: Literal["connector", "credential", "tool_group"]
                                    ref: str; account_id: str | None
                                    granted_by: UUID; conversation_id: UUID | None          # the granting act, audited
 class Credential(BaseModel):       slot: str; ciphertext: bytes                            # encrypted at rest, values never logged
-class Conversation(BaseModel):     id: UUID; surface: Surface; queue_key: str
-                                   member_id: UUID | None                                  # None = shared (Slack channel)
-class Turn(BaseModel):             id: UUID; conversation_id: UUID; agent_id: UUID; parent_turn_id: UUID | None
-                                   status: Literal["queued", "running", "done", "failed", "cancelled", "parked"]
-                                   terminal: TerminalFrame | None
 class MemoryItem(BaseModel):       id: UUID; subject: str; body: str; item_class: Literal["fact", "episodic", "semantic"]
                                    embedding_digest: str; superseded_by: UUID | None
 class Page(BaseModel):             id: UUID; source_ref: str; digest: str; body_ref: BlobKey; meta: PageMeta
-class LedgerEntry(BaseModel):      turn_id: UUID | None; dimension: Dimension; amount: Decimal; priced_usd: Decimal
-                                   agent_id: UUID | None; member_id: UUID | None
 class SpendCap(BaseModel):         scope: Literal["workspace", "member", "agent"]; subject_id: UUID | None
                                    dimension: Dimension; cap: Decimal; window: Window
                                    on_breach: Literal["reject", "park"]
 Dimension = Literal["usd", "tokens", "tool_calls", "connector_calls", "sandbox_minutes"]
 ```
+Each unit's migration adds only what it wires: U2 grows turn status/queue state for tools, U5
+adds `parent_turn_id`, U6 relaxes `conversation.member_id` for shared surfaces, U7 adds ledger
+attribution + price-digest audit columns.
 
-## db.py — the tenancy boundary
-
-```python
-@asynccontextmanager
-async def workspace_tx() -> AsyncIterator[AsyncSession]: ...
-```
-The engine is module-private. `workspace_tx` is the only way to obtain a session; it is already
-scoped to the deploy's workspace. A CI gate forbids engine/`begin()` outside this module.
-
-## blob.py
+## blob.py (U2 remainder)
 
 ```python
-class BlobStore(Protocol):
-    async def put(self, key: BlobKey, data: bytes) -> None: ...
-    async def get(self, key: BlobKey) -> bytes: ...
-    async def exists(self, key: BlobKey) -> bool: ...
+class BlobStore(Protocol):        # put/get/exists landed U1
     def workspace_mount(self, conversation_id: UUID) -> MountSpec: ...   # reaches ONLY .../workspace/
 ```
-Key layout: `conversations/<cid>/messages.json.lz4`, `conversations/<cid>/compactions/<n>/{before,after}.json.lz4`,
-`conversations/<cid>/workspace/**`, `artifacts/<digest>`. Impls: `FilesystemBlobStore` (default,
-`MountSpec` = bind mount), `S3BlobStore` (deploys, `MountSpec` = sandbox-fs cred scoped to the
-`workspace/` prefix).
+Key layout still to land: `conversations/<cid>/compactions/<n>/{before,after}.json.lz4` (U5),
+`conversations/<cid>/workspace/**` (U2), `artifacts/<digest>` (U5). `MountSpec`: bind mount on
+filesystem, sandbox-fs cred scoped to the `workspace/` prefix on S3.
 
-## hub.py
+## hub.py (later-unit remainder)
 
-```python
-class Hub(Protocol):
-    async def publish(self, turn_id: UUID, frame: LiveFrame) -> None: ...
-    def subscribe(self, turn_id: UUID) -> AsyncIterator[LiveFrame]: ...
-LiveFrame = TextDelta | ToolNote | CostTick | Terminal
-```
-Lossy by contract; the durable terminal frame in Postgres is authoritative.
+`LiveFrame` grows `ToolNote` (U2) and `CostTick` (U7); lossy by contract — the durable terminal
+frame in Postgres stays authoritative.
 
-## models/
+## models/ (U2 remainder)
 
 ```python
-class ModelClient(Protocol):
-    def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]: ...
-class ModelRequest(BaseModel):  model: str; system: str; messages: tuple[Message, ...]
-                                tools: tuple[ToolSchema, ...]; max_tokens: int
-ModelEvent = TextDelta | ToolCallStart | ToolCallDelta | UsageReport | Stop
-class ModelPolicy(BaseModel):   mode: Literal["auto", "pinned"]; pinned: str | None
+class ModelRequest(BaseModel):  ...; tools: tuple[ToolSchema, ...]       # U2
+ModelEvent grows ToolCallStart | ToolCallDelta                           # U2
+class ModelPolicy(BaseModel):   mode: Literal["auto", "pinned"]; pinned: str | None   # auto routing, later
 ```
-Core registers `anthropic`, `openai`; extension `models` add providers. Provider image/content
-limits (Anthropic image-count trim) live in the provider client.
+Provider image/content limits (Anthropic image-count trim) live in the provider client (U2+).
 
-## loop/
+## loop/ (later-unit remainder)
 
-```python
-@dataclass(frozen=True)
-class TurnEngine:                       # ONE workflow; steps read top-to-bottom
-    turn: Turn; agent: AgentRuntime    # frozen per-turn config: prompt, tools, model, grants
-    model: ModelClient; tools: ToolRegistry; transcript: Transcript
-    memory: MemoryService; hub: Hub; spend: SpendEvaluator; sandbox: SandboxSession
-    async def run(self) -> TerminalFrame: ...
-    # _recall → _load_transcript → _maybe_compact → _model_rounds (tool calls, per-step spend) → _terminal
-```
-DBOS: `turn_workflow` durable, queue partitioned by `conversation_id` (max one running turn per
-conversation), subagent = child workflow, cancel = DBOS cancel + terminal commit. One `try`
-encloses `run`; the `except` commits the terminal frame — a client's wait always ends.
-
-`Transcript`: append `Message` with monotonic `seq` to `messages.json.lz4`; `compact()` writes
-`before/after` records and swaps the live window.
+`TurnEngine` grows fields as its deps land: `tools: ToolRegistry` + `sandbox: SandboxSession`
+(U2), `memory: MemoryService` with a `_recall` step (U4), `_maybe_compact` + multi-round tool
+dispatch (U2/U5), `spend: SpendEvaluator` per step (U7). Subagent = DBOS child workflow (U5):
 
 ```python
 @dataclass(frozen=True)
@@ -126,6 +83,8 @@ class SubagentProfile:
     name: str; prompt: str; tool_names: tuple[str, ...]
     input_model: type[BaseModel]; output_model: type[BaseModel]
 ```
+
+`Transcript.compact()` (U5) writes `before/after` records and swaps the live window.
 
 ## tools/
 
@@ -193,7 +152,7 @@ class SyncResult(BaseModel):  pages: tuple[Page, ...]; next_cursor: str | None
 Core ships `folder`; S3/GitHub/connector-API backends are extensions. The sync driver is a core
 job: claim → sync → commit pages + due-mark for derivation.
 
-## surfaces/
+## surfaces/ (U6 remainder)
 
 ```python
 class Surface(Protocol):
@@ -201,11 +160,11 @@ class Surface(Protocol):
     async def writeback(self, conversation: Conversation, terminal: TerminalFrame) -> None: ...
 class Inbound(BaseModel):  conversation_key: str; member_id: UUID | None; agent_name: str; body: str
 ```
-Slack: signature verify, `channel:thread_ts` key, member linking via `SurfaceIdentity`, Block Kit
-writeback. CLI/web: session key, token/session identity, hub-tailed streaming. Onboarding engine
-runs contributed `OnboardingStep`s; first run creates workspace + first `owner`.
+The protocol forms when the second surface lands (U6). Slack: signature verify,
+`channel:thread_ts` key, member linking via `SurfaceIdentity`, Block Kit writeback. Web: session
+identity, hub-tailed streaming. Onboarding engine runs contributed `OnboardingStep`s.
 
-## accounting.py
+## accounting.py (U7 remainder)
 
 ```python
 @dataclass(frozen=True)
@@ -213,8 +172,8 @@ class SpendEvaluator:
     caps: tuple[SpendCap, ...]; totals: Totals
     def decide(self, request: SpendRequest) -> SpendDecision: ...        # allow | reject | park
 ```
-Ledger writes commit with the step that incurred them. Prices: pinned per-model table. Evaluated
-at inbound and per step; wire metering in the sandbox proxy feeds the same ledger.
+Evaluated at inbound and per step; wire metering in the sandbox proxy feeds the same ledger;
+ledger rows gain attribution (agent/member) and price-digest audit columns with rollups.
 
 ## ext/ and sdk/
 
