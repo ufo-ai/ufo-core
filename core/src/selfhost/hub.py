@@ -26,7 +26,17 @@ class Parked(BaseModel):
     message: str
 
 
-LiveFrame = TextDelta | Terminal | Parked
+class CostTick(BaseModel):
+    """A running spend total pushed as a turn accrues cost — the priced micro-USD and tokens spent
+    so far this turn — so a surface shows a live cost meter before the terminal frame lands.
+    Non-terminal (the stream continues), and distinguished from a TextDelta (`text`), Terminal
+    (`frame`), and Parked (`message`) by its own `cost_micro_usd`."""
+
+    cost_micro_usd: int
+    tokens: int
+
+
+LiveFrame = TextDelta | Terminal | Parked | CostTick
 
 
 class Hub(Protocol):

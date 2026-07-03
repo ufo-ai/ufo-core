@@ -13,6 +13,7 @@ from dbos import DBOSClient
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from selfhost.accounting import record_egress_request, record_turn_usage
 from selfhost.artifact_token import (
     ArtifactTokenError,
     mint_artifact_token,
@@ -28,7 +29,7 @@ from selfhost.memory.service import SHARED_SUBJECT, member_subject, recall_subje
 from selfhost.models.interface import ModelEvent, ModelRequest, TextDelta
 from selfhost.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
 from selfhost.schema import tables
-from selfhost.schema.records import Agent, Turn, Usage
+from selfhost.schema.records import Agent, TerminalFrame, Turn, Usage
 from selfhost.surfaces.admission import Admission
 from selfhost.surfaces.web import SESSION_COOKIE, WebSurface
 from selfhost.surfaces.web import router as web_router
@@ -213,6 +214,8 @@ async def _consume(client: AsyncClient, token: str, turn_id: str) -> tuple[str, 
                     data = json.loads(line.split(":", 1)[1].strip())
                     if event == "terminal":
                         return "".join(deltas), data
+                    if event == "cost":
+                        continue
                     deltas.append(data["text"])
                 elif not line:
                     event = None
@@ -424,6 +427,54 @@ async def test_two_web_members_get_isolated_subjects_and_cannot_cross(web: Async
         f"/web/turns/{turn_a}/stream", headers={"cookie": f"{SESSION_COOKIE}={token_b}"}
     )
     assert crossed.status_code == 403
+
+
+async def test_web_spend_view_matches_ledger_sums(web: AsyncClient) -> None:
+    workspace_id = await _seed_workspace()
+    member_id, token = await _seed_member(workspace_id, "owner@example.com")
+    async with workspace_tx() as connection:
+        agent_id = (await connection.execute(sa.select(tables.agent.c.id))).scalar_one()
+        conversation_id, turn_id = uuid4(), uuid4()
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                surface="web",
+                queue_key=uuid4().hex,
+                member_id=member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="done",
+                inbound="x",
+                terminal=TerminalFrame(status="done").model_dump(mode="json"),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await record_turn_usage(
+            connection,
+            workspace_id,
+            turn_id,
+            "claude-opus-4-8",
+            Usage(input_tokens=1000, output_tokens=2000),
+        )
+        await record_egress_request(connection, workspace_id, turn_id)
+    page = await web.get("/web/spend", headers={"cookie": f"{SESSION_COOKIE}={token}"})
+    assert page.status_code == 200
+    body = page.text
+    assert "owner@example.com" in body
+    assert "assistant" in body
+    assert "egress" in body
+    assert "$0.055000" in body
 
 
 def test_chat_page_is_self_contained_and_binds_a_session_cookie() -> None:

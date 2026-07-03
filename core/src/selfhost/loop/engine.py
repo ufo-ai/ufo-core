@@ -19,7 +19,7 @@ from selfhost.accounting import (
 from selfhost.blob import BlobStore
 from selfhost.db import workspace_tx
 from selfhost.ext.context import ExtensionContext
-from selfhost.hub import Hub, LiveFrame, Parked, Terminal
+from selfhost.hub import CostTick, Hub, LiveFrame, Parked, Terminal
 from selfhost.loop.compaction import Compaction
 from selfhost.loop.transcript import Conversation, Transcript
 from selfhost.memory.service import MemoryService, recall_subjects
@@ -205,6 +205,7 @@ class TurnEngine:
             messages, compaction_usage = await self.compaction.maybe_compact(messages)
             usage_events.extend(compaction_usage)
             text, tool_calls = await self._stream_once(messages, usage_events, system)
+            await self._publish_cost(usage_events)
             if not tool_calls:
                 if text.strip():
                     return messages, text
@@ -297,6 +298,23 @@ class TurnEngine:
             for call_id in call_order
         )
         return "".join(parts), tool_calls
+
+    async def _publish_cost(self, usage_events: list[Usage]) -> None:
+        """After each model round, push the turn's spend so far as a live CostTick — the same priced
+        total record_turn_usage will bill at terminal, streamed early so a surface shows a live cost
+        meter. The live leg never fails the turn, so a publish failure is swallowed by _publish."""
+        usage = _total_usage(usage_events)
+        tokens = (
+            usage.input_tokens
+            + usage.output_tokens
+            + usage.cache_read_tokens
+            + usage.cache_write_tokens
+        )
+        await self._publish(
+            CostTick(
+                cost_micro_usd=usage_priced_micro_usd(self.agent.model, usage), tokens=tokens
+            )
+        )
 
     async def _dispatch(self, context: ToolContext, call: ToolUseBlock) -> ToolResultBlock:
         """Run one tool call in the sandbox; a bad name, bad arguments, or a raising handler

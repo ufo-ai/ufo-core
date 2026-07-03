@@ -6,7 +6,10 @@ admitted host carrying an InjectionRule is MITM'd — the proxy terminates TLS w
 the per-process CA (in the container's trust store), swaps the sentinel Authorization value the
 sandbox sees for the real credential, and re-originates upstream over its own verified TLS, so the
 raw key is never inside the sandbox. An admitted host with no InjectionRule is tunnelled opaquely.
-Each forwarded request is metered under its MeterRule."""
+Each forwarded request to a metered host emits an egress metric and, off the relay path, writes an
+`egress` request row to the ledger keyed to the turn (recovered from the run token in the
+`Proxy-Authorization` header) — except the model host, whose cost is the token bill the turn commits
+at terminal, so metering it here would double-count."""
 
 import asyncio
 import ssl
@@ -14,9 +17,11 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from selfhost.o11y import emit_metric
+from selfhost.accounting import TOKENS_DIMENSION, record_egress_request
+from selfhost.db import workspace_tx
+from selfhost.o11y import emit_metric, log
 from selfhost.sandbox.proxy.rules import InjectionRule, MeterRule, Rule, ScopeRule
-from selfhost.sandbox.session import ProxyEndpoint
+from selfhost.sandbox.session import ProxyEndpoint, RunToken
 
 PROXY_BIND_HOST = "0.0.0.0"
 RELAY_CHUNK_BYTES = 65536
@@ -57,6 +62,7 @@ class EgressProxy:
     _workdir: tempfile.TemporaryDirectory | None = field(default=None, init=False)
     _contexts: dict[str, ssl.SSLContext] = field(default_factory=dict, init=False)
     _mint_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _meter_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False)
 
     async def start(self, bind_host: str = PROXY_BIND_HOST) -> ProxyEndpoint:
         self._workdir = tempfile.TemporaryDirectory()
@@ -73,6 +79,8 @@ class EgressProxy:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
+        if self._meter_tasks:
+            await asyncio.gather(*self._meter_tasks, return_exceptions=True)
         if self._workdir is not None:
             self._workdir.cleanup()
             self._workdir = None
@@ -85,8 +93,11 @@ class EgressProxy:
                 await _respond(writer, 405, "only CONNECT is proxied")
                 return
             host, _, port_text = rest.split(" ", 1)[0].partition(":")
-            while (await reader.readline()) not in (b"\r\n", b""):
-                continue
+            proxy_auth = ""
+            while (line := await reader.readline()) not in (b"\r\n", b""):
+                name, _, value = line.decode(errors="replace").partition(":")
+                if name.strip().lower() == "proxy-authorization":
+                    proxy_auth = value.strip()
             if not any(isinstance(r, ScopeRule) and host in r.allowed_hosts for r in self.rules):
                 await _respond(writer, 403, f"egress to {host} is not permitted")
                 return
@@ -97,7 +108,7 @@ class EgressProxy:
             if injection is None:
                 await self._tunnel(reader, writer, host, port)
             else:
-                await self._mitm(reader, writer, host, port, injection)
+                await self._mitm(reader, writer, host, port, injection, proxy_auth)
         finally:
             writer.close()
 
@@ -123,6 +134,7 @@ class EgressProxy:
         host: str,
         port: int,
         injection: InjectionRule,
+        proxy_auth: str,
     ) -> None:
         """Terminate the sandbox's TLS with a minted leaf, swap the sentinel for the real key, and
         re-originate the request upstream over verified TLS — the response streams straight back."""
@@ -144,6 +156,7 @@ class EgressProxy:
         upstream_writer.write(b"\r\n")
         await upstream_writer.drain()
         self._meter(host)
+        self._meter_ledger(host, proxy_auth)
         await _relay(client_reader, client_writer, upstream_reader, upstream_writer)
 
     async def _leaf_context(self, host: str) -> ssl.SSLContext:
@@ -177,6 +190,28 @@ class EgressProxy:
         for rule in self.rules:
             if isinstance(rule, MeterRule) and rule.host == host:
                 emit_metric("sandbox_egress_total", host=host, dimension=rule.dimension)
+
+    def _meter_ledger(self, host: str, proxy_auth: str) -> None:
+        """Meter egress to the ledger off the relay path so a slow DB never stalls the sandbox's
+        egress. A metered host whose MeterRule dimension is not `tokens` writes one `egress` request
+        row keyed to the turn; the model host (dimension `tokens`) is skipped — its cost is the
+        token bill `record_turn_usage` commits at terminal, so metering here would double-count."""
+        if not any(
+            isinstance(rule, MeterRule) and rule.host == host and rule.dimension != TOKENS_DIMENSION
+            for rule in self.rules
+        ):
+            return
+        task = asyncio.ensure_future(self._write_egress(host, proxy_auth))
+        self._meter_tasks.add(task)
+        task.add_done_callback(self._meter_tasks.discard)
+
+    async def _write_egress(self, host: str, proxy_auth: str) -> None:
+        try:
+            run = RunToken.from_proxy_auth(proxy_auth)
+            async with workspace_tx() as connection:
+                await record_egress_request(connection, run.workspace_id, run.turn_id)
+        except Exception as error:
+            log("egress.meter_failed", host=host, error_class=type(error).__name__)
 
 
 async def _start_tls_server(

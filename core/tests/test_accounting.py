@@ -1,10 +1,13 @@
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from selfhost.accounting import (
+    SpendRollup,
     read_turn_cost,
+    record_egress_request,
     record_turn_usage,
     usage_priced_micro_usd,
 )
@@ -134,3 +137,73 @@ async def test_zero_usage_writes_nothing(db: None) -> None:
         workspace_id, turn_id = await _seed_turn(connection)
         await record_turn_usage(connection, workspace_id, turn_id, "claude-opus-4-8", Usage())
         assert await read_turn_cost(connection, turn_id) is None
+
+
+async def test_egress_request_accumulates_a_priced_zero_count(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await record_egress_request(connection, workspace_id, turn_id)
+        await record_egress_request(connection, workspace_id, turn_id)
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.ledger.c.dimension,
+                    tables.ledger.c.amount,
+                    tables.ledger.c.priced_micro_usd,
+                ).where(tables.ledger.c.turn_id == turn_id)
+            )
+        ).one()
+    assert (row.dimension, int(row.amount), int(row.priced_micro_usd)) == ("egress", 2, 0)
+
+
+async def test_egress_never_double_counts_the_token_cost(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await record_turn_usage(connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE)
+        await record_egress_request(connection, workspace_id, turn_id)
+        await record_egress_request(connection, workspace_id, turn_id)
+    async with workspace_tx() as connection:
+        cost = await read_turn_cost(connection, turn_id)
+    assert cost == (10_000, 81_500, "claude-opus-4-8")
+
+
+async def test_spend_rollup_matches_ledger_sums(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await record_turn_usage(connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE)
+        await record_egress_request(connection, workspace_id, turn_id)
+        await record_egress_request(connection, workspace_id, turn_id)
+    async with workspace_tx() as connection:
+        report = await SpendRollup(workspace_id).read(connection, 3600)
+    assert report.total_micro_usd == 81_500
+    assert {d.dimension: (d.amount, d.priced_micro_usd) for d in report.by_dimension} == {
+        "egress": (2, 0),
+        "tokens": (10_000, 81_500),
+    }
+    assert [(s.label, s.priced_micro_usd) for s in report.by_member] == [("a@b.c", 81_500)]
+    assert [(s.label, s.priced_micro_usd) for s in report.by_agent] == [("assistant", 81_500)]
+
+
+async def test_spend_rollup_excludes_ledger_outside_the_window(db: None) -> None:
+    old = datetime.now(UTC) - timedelta(hours=2)
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await connection.execute(
+            sa.insert(tables.ledger).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                turn_id=turn_id,
+                dimension="tokens",
+                amount=10,
+                priced_micro_usd=100,
+                model="claude-opus-4-8",
+                created_at=old,
+                updated_at=sa.func.now(),
+            )
+        )
+    async with workspace_tx() as connection:
+        report = await SpendRollup(workspace_id).read(connection, 3600)
+    assert report.total_micro_usd == 0
+    assert report.by_dimension == ()
+    assert report.by_member == ()

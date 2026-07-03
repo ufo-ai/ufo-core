@@ -3,9 +3,10 @@
 Create-or-attach keeps the container a disposable cache over the durable workspace — a killed
 container is recreated on the next turn from the same bind-mounted `workspace/` subtree, and the
 turn notices only latency. Every command runs through `docker exec`. The container's HTTP(S)_PROXY
-points at the egress proxy running on the host, reached at `host.docker.internal`; the proxy refuses
-any host its rules do not allow and swaps the sentinel key for the real one on the wire, so the raw
-credential never enters the sandbox."""
+points at the egress proxy running on the host, reached at `host.docker.internal`, and carries the
+turn's run token as its basic-auth username so the proxy attributes each metered request to the
+turn; the proxy refuses any host its rules do not allow and swaps the sentinel key for the real one
+on the wire, so the raw credential never enters the sandbox."""
 
 import asyncio
 from dataclasses import dataclass
@@ -51,7 +52,7 @@ class DockerCarrier:
         if running is not None:
             return SandboxHandle(conversation_id=spec.conversation_id, container_id=running)
         await self._ensure_network()
-        proxy_url = f"http://{HOST_GATEWAY_NAME}:{spec.proxy.port}"
+        proxy_url = f"http://{spec.run_token}:@{HOST_GATEWAY_NAME}:{spec.proxy.port}"
         argv = [
             "run",
             "-d",

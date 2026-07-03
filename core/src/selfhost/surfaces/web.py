@@ -10,6 +10,7 @@ delivery is token-gated, not member-gated: a share link opens for anyone holding
 the surface itself minted, and for no unsigned blob key."""
 
 import hashlib
+import html
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -19,10 +20,11 @@ import sqlalchemy as sa
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 
+from selfhost.accounting import MICRO_USD_PER_USD, SpendReport, SpendRollup, SubjectTotal
 from selfhost.artifact_token import ArtifactTokenError, verify_artifact_token
 from selfhost.blob import BlobNotFound, BlobStore
 from selfhost.db import workspace_tx
-from selfhost.hub import Hub, LiveFrame, Parked, Terminal
+from selfhost.hub import CostTick, Hub, LiveFrame, Parked, Terminal
 from selfhost.o11y import log
 from selfhost.schema import tables
 from selfhost.schema.records import DEFAULT_AGENT_NAME
@@ -33,6 +35,7 @@ SURFACE_WEB = "web"
 SURFACE_CLI = "cli"
 SESSION_COOKIE = "selfhost_session"
 MAX_INBOUND_CHARS = 200_000
+SPEND_WINDOW_DEFAULT_SECONDS = 86_400
 
 router = APIRouter(prefix="/web")
 
@@ -69,6 +72,14 @@ class WebSurface:
         identity = await self._authenticate(request)
         await self._require_turn(turn_id, identity)
         return StreamingResponse(self._events(turn_id), media_type="text/event-stream")
+
+    async def spend(self, request: Request, window_seconds: int) -> HTMLResponse:
+        """Render the workspace spend rollup over a window — the same sums `selfhost spend` prints,
+        for any authenticated member of the workspace."""
+        identity = await self._authenticate(request)
+        async with workspace_tx() as connection:
+            report = await SpendRollup(identity.workspace_id).read(connection, window_seconds)
+        return HTMLResponse(_spend_page(report))
 
     async def download(self, token: str) -> Response:
         if not token:
@@ -212,6 +223,8 @@ def _sse(frame: LiveFrame) -> bytes:
         return b"event: terminal\ndata: " + frame.frame.model_dump_json().encode() + b"\n\n"
     if isinstance(frame, Parked):
         return b"event: parked\ndata: " + frame.model_dump_json().encode() + b"\n\n"
+    if isinstance(frame, CostTick):
+        return b"event: cost\ndata: " + frame.model_dump_json().encode() + b"\n\n"
     return b"data: " + frame.model_dump_json().encode() + b"\n\n"
 
 
@@ -235,9 +248,51 @@ async def web_stream(turn_id: UUID, request: Request) -> StreamingResponse:
     return await request.app.state.web.stream(turn_id, request)
 
 
+@router.get("/spend")
+async def web_spend(
+    request: Request, window_seconds: int = SPEND_WINDOW_DEFAULT_SECONDS
+) -> HTMLResponse:
+    return await request.app.state.web.spend(request, window_seconds)
+
+
 @router.get("/artifacts/download")
 async def web_download(request: Request, token: str = "") -> Response:
     return await request.app.state.web.download(token)
+
+
+def _money(micro_usd: int) -> str:
+    return f"${micro_usd / MICRO_USD_PER_USD:,.6f}"
+
+
+def _subject_rows(subjects: tuple[SubjectTotal, ...]) -> str:
+    body = "".join(
+        f"<tr><td>{html.escape(s.label)}</td><td>{_money(s.priced_micro_usd)}</td></tr>"
+        for s in subjects
+    )
+    return body or "<tr><td colspan=2>none</td></tr>"
+
+
+def _spend_page(report: SpendReport) -> str:
+    dimensions = "".join(
+        f"<tr><td>{html.escape(d.dimension)}</td><td>{d.amount:,}</td>"
+        f"<td>{_money(d.priced_micro_usd)}</td></tr>"
+        for d in report.by_dimension
+    )
+    return (
+        "<!doctype html><meta charset=utf-8><title>selfhost spend</title>"
+        "<style>body{font:15px/1.5 system-ui,sans-serif;margin:24px;max-width:720px}"
+        "table{border-collapse:collapse;width:100%;margin:8px 0 24px}"
+        "th,td{text-align:left;padding:6px 10px;border-bottom:1px solid #8884}"
+        "td+td,th+th{text-align:right}h1{font-size:20px}h2{font-size:15px;opacity:.7}</style>"
+        f"<h1>Spend · last {report.window_seconds / 3600:g}h · "
+        f"{_money(report.total_micro_usd)}</h1>"
+        "<h2>by dimension</h2><table><tr><th>dimension</th><th>units</th><th>cost</th></tr>"
+        f"{dimensions or '<tr><td colspan=3>no spend in window</td></tr>'}</table>"
+        "<h2>by member</h2><table><tr><th>member</th><th>cost</th></tr>"
+        f"{_subject_rows(report.by_member)}</table>"
+        "<h2>by agent</h2><table><tr><th>agent</th><th>cost</th></tr>"
+        f"{_subject_rows(report.by_agent)}</table>"
+    )
 
 
 CHAT_PAGE = """\
@@ -315,10 +370,21 @@ form.addEventListener('submit', async (event) => {
   }
   const turnId = (await res.json()).turn_id;
   const source = new EventSource('/web/turns/' + turnId + '/stream');
+  let meter = null;
   source.onmessage = (event) => {
     reply.textContent += JSON.parse(event.data).text;
     log.scrollTop = log.scrollHeight;
   };
+  source.addEventListener('cost', (event) => {
+    const frame = JSON.parse(event.data);
+    if (!meter) {
+      meter = document.createElement('div');
+      meter.className = 'meta';
+      reply.appendChild(meter);
+    }
+    meter.textContent = frame.tokens + ' tok · $' + (frame.cost_micro_usd / 1e6).toFixed(6);
+    log.scrollTop = log.scrollHeight;
+  });
   source.addEventListener('terminal', (event) => {
     const frame = JSON.parse(event.data);
     if (frame.status === 'done') {

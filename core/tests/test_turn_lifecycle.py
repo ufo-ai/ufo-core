@@ -221,6 +221,8 @@ async def _consume(
                 payload = json.loads(line)
                 if "frame" in payload:
                     return "".join(deltas), payload["frame"]
+                if "cost_micro_usd" in payload:
+                    continue
                 deltas.append(payload["text"])
     raise AssertionError("stream ended without a terminal frame")
 
@@ -275,6 +277,29 @@ async def test_turn_round_trip_bills_and_persists(surface: AsyncClient) -> None:
     stored = await _read_transcript(blob, conversation_id, 1)
     assert stored.seq == 1
     assert [m.content for m in stored.messages] == ["ping", "echo:1"]
+
+
+async def test_cost_ticks_stream_as_a_turn_accrues_spend(surface: AsyncClient) -> None:
+    headers = await _bootstrap()
+    turn_id = (await surface.post("/v1/chat", content=b"ping", headers=headers)).json()[
+        "turn_id"
+    ]
+    costs: list[dict[str, object]] = []
+    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+        async with surface.stream(
+            "GET", f"/v1/turns/{turn_id}/stream", headers=headers
+        ) as stream:
+            assert stream.status_code == 200
+            async for line in stream.aiter_lines():
+                if not line:
+                    continue
+                payload = json.loads(line)
+                if "cost_micro_usd" in payload:
+                    costs.append(payload)
+                if "frame" in payload:
+                    break
+    assert costs
+    assert costs[-1] == {"cost_micro_usd": 110, "tokens": 10}
 
 
 async def test_second_turn_continues_the_conversation(surface: AsyncClient) -> None:
