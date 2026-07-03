@@ -124,7 +124,8 @@ async def edit_handler(ctx: ToolContext, args: EditInput) -> ToolResult:
 async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResult:
     """Store a workspace file as an artifact under `artifacts/<uuid>/<sanitized-name>` and mint a
     TTL download token. The returned URL is served only where a delivery surface (the web surface)
-    is mounted. Text-only: the sandbox read decodes as UTF-8, so binary files would be corrupted."""
+    is mounted. The sandbox read is raw bytes, so any file — text or binary — round-trips exactly;
+    a file over the read cap is refused rather than streamed into memory."""
     if not ctx.artifact_token_secret:
         raise RuntimeError("artifact sharing is not configured (no artifact token secret set)")
     data = await ctx.sandbox.read_file(args.path)
@@ -217,12 +218,12 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
     ToolDef(
         name="share_file",
         description=(
-            "Share a text workspace file the agent produced as a downloadable link: read its "
-            "bytes, store them as an artifact, and return a time-limited URL to hand back to the "
-            "user — the only way to deliver a produced file outside the sandbox. Text files only "
-            "(reports, code, csv, json, md); binary files such as images or PDFs are not yet "
-            "supported and would be corrupted. `filename` sets the download name; any directory "
-            "components in it are stripped."
+            "Share a workspace file the agent produced as a downloadable link: read its bytes, "
+            "store them as an artifact, and return a time-limited URL to hand back to the user — "
+            "the only way to deliver a produced file outside the sandbox. Any file type works "
+            "(reports, code, csv, json, images, PDFs); a file larger than the sandbox read cap is "
+            "refused. `filename` sets the download name; any directory components in it are "
+            "stripped."
         ),
         input_model=ShareFileInput,
         handler=share_file_handler,
