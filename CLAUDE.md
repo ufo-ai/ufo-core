@@ -85,8 +85,13 @@ hard-to-vary decision; cut the words around it. Prefer a table to prose. One exa
 ## Completing work
 
 - Land tear-outs whole; before claiming done, grep for the source shape by name.
-- Prove the chain end-to-end: realistic input → durable state → a user or agent can use it. Every
-  new primitive ships with a live reader or writer in the same change.
+- **Both ends or neither** — every declared surface (column, field, event, frame kind, enum
+  member, config knob, Manifest point) ships with its producer AND its consumer in the same
+  change, and the unit's proof exercises both. A producer without a consumer is dead weight; a
+  consumer without a producer is a lie to the reader. If one end can't be built yet, the
+  declaration doesn't land — this repo has no punch list and nothing declared "for later". A
+  migration adds only the columns its unit wires; later units bring their own migrations.
+- Prove the chain end-to-end: realistic input → durable state → a user or agent can use it.
 - Failed experiments are reverted in the same session, with the revert committed.
 - Docs (spec.md, README.md) update in the same commit as the architectural change they describe.
 

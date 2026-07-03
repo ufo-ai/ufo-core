@@ -119,4 +119,7 @@ Redis only inside the hubs extension · engine/`begin()` only inside `db.py` · 
 registration API (derivation only) · tool-count budget (a new tool must prove no existing tool
 subsumes it) · **legibility (AST gate)**: a module-level single-return function with exactly one
 call site fails CI (`sdk/` re-exports exempt); no module named `utils`/`helpers`/`common` ·
-`arbitrary_types_allowed` forbidden (a BaseModel needing it is a misclassified internal object).
+`arbitrary_types_allowed` forbidden (a BaseModel needing it is a misclassified internal object) ·
+**wiring gate (from U1)**: every schema column has ≥1 write site and ≥1 read site outside tests;
+every persisted enum/`Literal` member has a producer; every `LiveFrame` kind has an emitter —
+"both ends or neither".
