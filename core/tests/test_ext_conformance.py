@@ -26,7 +26,7 @@ from selfhost.ext.loader import load_manifests, turn_tools
 from selfhost.ext.manifest import Manifest
 from selfhost.jobs import JobRunner, bindings_from
 from selfhost.onboarding import run_onboarding_steps
-from selfhost.sandbox.proxy.rules import InjectionRule, derive_credential_rules
+from selfhost.sandbox.proxy.rules import InjectionRule, MeterRule, derive_credential_rules
 from selfhost.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from selfhost.schema import tables
 from selfhost.schema.records import Agent, Turn
@@ -131,7 +131,7 @@ async def test_tool_dispatches_with_its_scoped_context(db: None, tmp_path: Path)
     assert await scoped.get(sample.TOOL_KEY) == {"message": "conformance-echo"}
 
 
-async def test_credential_slot_derives_its_injection_rule(db: None) -> None:
+async def test_credential_slot_derives_its_injection_and_meter_rules(db: None) -> None:
     workspace_id = await _workspace()
     manifest = _sample_manifest()
     store = _credential_store()
@@ -144,6 +144,8 @@ async def test_credential_slot_derives_its_injection_rule(db: None) -> None:
         sentinel=sample.INJECTION_SENTINEL,
         real="sk-real-sample",
     )
+    meter = next(rule for rule in rules if isinstance(rule, MeterRule))
+    assert meter == MeterRule(host=sample.INJECTION_HOST, dimension=sample.INJECTION_DIMENSION)
 
 
 async def test_undeclared_credential_slot_is_refused(db: None) -> None:

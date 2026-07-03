@@ -32,6 +32,7 @@ UNDECLARED_SLOT = "sample_unset"
 INJECTION_HOST = "api.sample.test"
 INJECTION_HEADER = "authorization"
 INJECTION_SENTINEL = "Bearer sentinel-sample-key"
+INJECTION_DIMENSION = "requests"
 TOOL_KEY = "tool:echo"
 JOB_KEY = "job:ran"
 ROUTE_KEY = "route:hit"
@@ -86,6 +87,7 @@ def manifest() -> Manifest:
                     host=INJECTION_HOST,
                     header=INJECTION_HEADER,
                     sentinel=INJECTION_SENTINEL,
+                    dimension=INJECTION_DIMENSION,
                 ),
             ),
         ),
