@@ -6,7 +6,7 @@ consumes: tools enter the turn's registry, routes mount under the app, jobs regi
 scheduler, credential slots drive proxy injection."""
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import KW_ONLY, dataclass
 from typing import Literal
 
 from starlette.requests import Request
@@ -65,6 +65,7 @@ class Manifest:
 
     name: str
     version: str
+    _: KW_ONLY
     tools: tuple[ToolDef, ...] = ()
     jobs: tuple[JobSpec, ...] = ()
     routes: tuple[RouteSpec, ...] = ()
