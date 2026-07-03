@@ -4,13 +4,14 @@ from itertools import pairwise
 from pathlib import Path
 from uuid import UUID, uuid4
 
+import pytest
 import sqlalchemy as sa
 
 from selfhost.blob import FilesystemBlobStore
 from selfhost.db import workspace_tx
 from selfhost.hub import InProcessHub
 from selfhost.loop.compaction import COMPACTED_CONTEXT_PREFIX, Compaction
-from selfhost.loop.engine import RECALL_CONTEXT_PREFIX, TurnEngine
+from selfhost.loop.engine import RECALL_CONTEXT_PREFIX, TurnEngine, TurnParked
 from selfhost.loop.transcript import Conversation, Transcript
 from selfhost.memory.service import Recalled
 from selfhost.models.interface import (
@@ -423,3 +424,44 @@ async def test_recall_failure_degrades_to_no_context_and_never_fails_the_turn(
     frame = await engine.run()
     assert frame.status == "done"
     assert model.seen[0] == (Message(role="user", content="hi"),)
+
+
+async def test_per_step_cap_parks_a_running_turn(db: None, tmp_path: Path) -> None:
+    turn = await _seed_turn("queued", None)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.spend_cap).values(
+                id=uuid4(),
+                workspace_id=turn.workspace_id,
+                scope="workspace",
+                subject_id=None,
+                window_seconds=3600,
+                limit_micro_usd=1,
+                on_breach="park",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.ledger).values(
+                id=uuid4(),
+                workspace_id=turn.workspace_id,
+                turn_id=turn.id,
+                dimension="tokens",
+                amount=10,
+                priced_micro_usd=100,
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    engine = _engine(turn, EchoModel(), tmp_path)
+    with pytest.raises(TurnParked):
+        await engine.run()
+    async with workspace_tx() as connection:
+        status = (
+            await connection.execute(
+                sa.select(tables.turn.c.status).where(tables.turn.c.id == turn.id)
+            )
+        ).scalar_one()
+    assert status == "parked"

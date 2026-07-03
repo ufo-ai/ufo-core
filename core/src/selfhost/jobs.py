@@ -10,17 +10,28 @@ ExtensionContext, so a core job and an extension job run the identical path."""
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from dbos import DBOS, Queue, ScheduleInput
+import sqlalchemy as sa
+from dbos import DBOS, DBOSClient, EnqueueOptions, Queue, ScheduleInput
 
+from selfhost.accounting import ALLOW, SpendEvaluator
 from selfhost.credentials import CredentialStore
+from selfhost.db import workspace_tx
 from selfhost.ext.context import ExtensionContext, context_for
 from selfhost.ext.manifest import JobSpec, Manifest
 from selfhost.memory.indexer import MemoryIndexer, PageIndexer
 from selfhost.memory.service import MemoryService
 from selfhost.memory.sources import SOURCE_SYNC_JOB, SOURCE_SYNC_SCHEDULE, SyncDriver
 from selfhost.o11y import log
+from selfhost.schema import tables
+from selfhost.schema.records import (
+    DBOS_APP_VERSION,
+    PARKED,
+    TURN_QUEUE_NAME,
+    TURN_WORKFLOW_NAME,
+    TurnStatus,
+)
 
 JOB_QUEUE_NAME = "jobs"
 JOB_WORKFLOW_NAME = "job"
@@ -29,16 +40,98 @@ MEMORY_INDEX_JOB = "memory_index"
 MEMORY_INDEX_SCHEDULE = "0 * * * * *"
 PAGE_INDEX_JOB = "page_index"
 PAGE_INDEX_SCHEDULE = "0 * * * * *"
+SPEND_RESUME_JOB = "spend_resume"
+SPEND_RESUME_SCHEDULE = "0 * * * * *"
+RESUME_QUEUED: TurnStatus = "queued"
 JOB_QUEUE = Queue(JOB_QUEUE_NAME)
 
 
+@dataclass(frozen=True, slots=True)
+class _ParkedTurn:
+    id: UUID
+    workspace_id: UUID
+    conversation_id: UUID
+    agent_id: UUID
+    member_id: UUID | None
+
+
+@dataclass(frozen=True)
+class SpendResume:
+    """Re-admit parked turns whose caps now have headroom — the resume half of parking. A
+    batch-at-interval job, never fired by the spend_cap write it reacts to, so raising a cap frees
+    its parked turns on the next sweep. A freed turn re-runs under a fresh DBOS workflow id (its
+    original id was consumed by the run that parked it), while its transcript and ledger stay keyed
+    by the turn id, so the re-run is idempotent at the durable layer."""
+
+    client: DBOSClient
+
+    async def run(self) -> None:
+        for turn in await self._parked_turns():
+            async with workspace_tx() as connection:
+                decision = await SpendEvaluator(
+                    turn.workspace_id, turn.member_id, turn.agent_id
+                ).decide(connection, 0)
+                if decision.outcome != ALLOW:
+                    continue
+                updated = await connection.execute(
+                    sa.update(tables.turn)
+                    .values(status=RESUME_QUEUED, updated_at=sa.func.now())
+                    .where(tables.turn.c.id == turn.id, tables.turn.c.status == PARKED)
+                )
+            if updated.rowcount == 1:
+                await self._enqueue(turn)
+
+    async def _parked_turns(self) -> tuple[_ParkedTurn, ...]:
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(
+                        tables.turn.c.id,
+                        tables.turn.c.workspace_id,
+                        tables.turn.c.conversation_id,
+                        tables.turn.c.agent_id,
+                        tables.conversation.c.member_id,
+                    )
+                    .select_from(tables.turn.join(tables.conversation))
+                    .where(tables.turn.c.status == PARKED)
+                )
+            ).all()
+        return tuple(
+            _ParkedTurn(r.id, r.workspace_id, r.conversation_id, r.agent_id, r.member_id)
+            for r in rows
+        )
+
+    async def _enqueue(self, turn: _ParkedTurn) -> None:
+        options: EnqueueOptions = {
+            "queue_name": TURN_QUEUE_NAME,
+            "workflow_name": TURN_WORKFLOW_NAME,
+            "workflow_id": uuid4().hex,
+            "queue_partition_key": str(turn.conversation_id),
+            "app_version": DBOS_APP_VERSION,
+        }
+        try:
+            await self.client.enqueue_async(options, str(turn.id))
+        except Exception:
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.update(tables.turn)
+                    .values(status=PARKED, updated_at=sa.func.now())
+                    .where(tables.turn.c.id == turn.id, tables.turn.c.status == RESUME_QUEUED)
+                )
+            raise
+
+
 def core_jobs(
-    memory_indexer: MemoryIndexer, page_indexer: PageIndexer, sync_driver: SyncDriver
+    memory_indexer: MemoryIndexer,
+    page_indexer: PageIndexer,
+    sync_driver: SyncDriver,
+    spend_resume: SpendResume,
 ) -> tuple[JobSpec, ...]:
-    """The jobs a deploy always runs, before any extension's — all core because memory, sources, and
-    recall are core. The memory and page index derivations produce the chunks recall and source
-    search read, off the write path; the sync driver polls each source and lands its pages, due-
-    marked for the page index. None fires on its own writes."""
+    """The jobs a deploy always runs, before any extension's — all core because memory, sources,
+    recall, and spend enforcement are core. The memory and page index derivations produce the chunks
+    recall and source search read, off the write path; the sync driver polls each source and lands
+    its pages, due-marked for the page index; the spend-resume sweep re-admits parked turns their
+    caps now allow. None fires on its own writes."""
 
     async def _index_memory(context: ExtensionContext) -> None:
         await memory_indexer.run()
@@ -49,10 +142,14 @@ def core_jobs(
     async def _sync_sources(context: ExtensionContext) -> None:
         await sync_driver.run()
 
+    async def _resume_spend(context: ExtensionContext) -> None:
+        await spend_resume.run()
+
     return (
         JobSpec(name=MEMORY_INDEX_JOB, schedule=MEMORY_INDEX_SCHEDULE, handler=_index_memory),
         JobSpec(name=PAGE_INDEX_JOB, schedule=PAGE_INDEX_SCHEDULE, handler=_index_pages),
         JobSpec(name=SOURCE_SYNC_JOB, schedule=SOURCE_SYNC_SCHEDULE, handler=_sync_sources),
+        JobSpec(name=SPEND_RESUME_JOB, schedule=SPEND_RESUME_SCHEDULE, handler=_resume_spend),
     )
 
 

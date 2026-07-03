@@ -6,8 +6,10 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from pydantic import BaseModel, model_validator
 
-TurnStatus = Literal["queued", "running", "done", "failed", "cancelled"]
+TurnStatus = Literal["queued", "running", "parked", "done", "failed", "cancelled"]
 TerminalStatus = Literal["done", "failed", "cancelled"]
+NON_TERMINAL_STATUSES: tuple[TurnStatus, ...] = ("queued", "running", "parked")
+PARKED: TurnStatus = "parked"
 
 ProposalStatus = Literal["pending", "approved", "rejected"]
 PENDING: ProposalStatus = "pending"
@@ -71,7 +73,7 @@ class Turn(BaseModel):
 
     @model_validator(mode="after")
     def _terminal_matches_status(self) -> "Turn":
-        if (self.status in ("queued", "running")) != (self.terminal is None):
+        if (self.status in NON_TERMINAL_STATUSES) != (self.terminal is None):
             raise ValueError("terminal is present exactly when the turn is terminal")
         if self.terminal is not None and self.terminal.status != self.status:
             raise ValueError("terminal.status must equal turn.status")

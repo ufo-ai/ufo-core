@@ -1,9 +1,10 @@
 """The shared hub tail: a streaming surface's live view of one turn.
 
 A subscriber may attach after the publisher started — or after the turn already ended on a peer
-loop — so two sources race into one queue: the hub subscription and a poll of the durable terminal.
-Whichever delivers the Terminal first ends the stream. A frame lost to a full queue costs a redrawn
-token, never correctness — the durable terminal always arrives by the poll."""
+loop — so two sources race into one queue: the hub subscription and a poll of the durable turn.
+Whichever delivers a stream-ending frame first wins. A frame lost to a full queue costs a redrawn
+token, never correctness — the durable terminal-or-parked state always arrives by the poll. A
+parked turn is non-terminal, so the poll reads the turn's status, not only its terminal frame."""
 
 import asyncio
 from collections.abc import AsyncIterator
@@ -12,28 +13,30 @@ from uuid import UUID
 import sqlalchemy as sa
 
 from selfhost.db import workspace_tx
-from selfhost.hub import Hub, LiveFrame, Terminal
+from selfhost.hub import Hub, LiveFrame, Parked, Terminal
 from selfhost.schema import tables
-from selfhost.schema.records import TerminalFrame
+from selfhost.schema.records import PARKED, TerminalFrame
 
 TERMINAL_POLL_SECONDS = 1.0
+PARK_NOTICE = "This turn is parked: over a spend cap. It resumes when the cap is raised."
 
 
 async def tail_frames(hub: Hub, turn_id: UUID) -> AsyncIterator[LiveFrame]:
-    """Yield a turn's live frames until its Terminal, whether the turn is still running or already
-    committed when the caller attaches. The caller serializes each frame for its own transport."""
+    """Yield a turn's live frames until it ends — a Terminal, or a Parked hold — whether the turn is
+    still running or already committed when the caller attaches. The caller serializes each frame
+    for its own transport."""
     frames: asyncio.Queue[LiveFrame] = asyncio.Queue()
     pump = asyncio.ensure_future(_pump(hub, turn_id, frames))
-    poll = asyncio.ensure_future(_poll_terminal(turn_id, frames))
+    poll = asyncio.ensure_future(_poll_status(turn_id, frames))
     try:
-        stored = await terminal_frame(turn_id)
+        stored = await turn_status_frame(turn_id)
         if stored is not None:
-            yield Terminal(frame=stored)
+            yield stored
             return
         while True:
             frame = await frames.get()
             yield frame
-            if isinstance(frame, Terminal):
+            if isinstance(frame, Terminal | Parked):
                 return
     finally:
         pump.cancel()
@@ -45,13 +48,33 @@ async def _pump(hub: Hub, turn_id: UUID, frames: asyncio.Queue[LiveFrame]) -> No
         await frames.put(frame)
 
 
-async def _poll_terminal(turn_id: UUID, frames: asyncio.Queue[LiveFrame]) -> None:
+async def _poll_status(turn_id: UUID, frames: asyncio.Queue[LiveFrame]) -> None:
     while True:
         await asyncio.sleep(TERMINAL_POLL_SECONDS)
-        frame = await terminal_frame(turn_id)
+        frame = await turn_status_frame(turn_id)
         if frame is not None:
-            await frames.put(Terminal(frame=frame))
+            await frames.put(frame)
             return
+
+
+async def turn_status_frame(turn_id: UUID) -> LiveFrame | None:
+    """The frame that ends a turn's stream: its committed Terminal, or a Parked hold when the turn
+    is parked. None while it is still queued or running."""
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.turn.c.status, tables.turn.c.terminal).where(
+                    tables.turn.c.id == turn_id
+                )
+            )
+        ).one_or_none()
+    if row is None:
+        return None
+    if row.terminal is not None:
+        return Terminal(frame=TerminalFrame.model_validate(row.terminal))
+    if row.status == PARKED:
+        return Parked(message=PARK_NOTICE)
+    return None
 
 
 async def terminal_frame(turn_id: UUID) -> TerminalFrame | None:

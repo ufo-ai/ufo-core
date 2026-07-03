@@ -11,6 +11,7 @@ from selfhost.jobs import (
     CORE_EXTENSION,
     MEMORY_INDEX_JOB,
     MEMORY_INDEX_SCHEDULE,
+    SpendResume,
     bindings_from,
     core_jobs,
 )
@@ -133,6 +134,7 @@ def test_memory_index_registers_as_a_core_job(database_url: str, tmp_path: Path)
             blob=blob,
             postgres=database_url.startswith("postgresql"),
         ),
+        SpendResume(client=None),
     )
     assert specs[0].name == MEMORY_INDEX_JOB
     assert specs[0].schedule == MEMORY_INDEX_SCHEDULE

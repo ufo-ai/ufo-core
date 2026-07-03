@@ -12,6 +12,8 @@ from selfhost.jobs import (
     CORE_EXTENSION,
     MEMORY_INDEX_JOB,
     PAGE_INDEX_JOB,
+    SPEND_RESUME_JOB,
+    SpendResume,
     bindings_from,
     core_jobs,
 )
@@ -413,12 +415,18 @@ def test_sync_and_page_index_register_as_core_jobs(database_url: str, tmp_path: 
     memory_indexer = MemoryIndexer(
         index=service.index, embed=service.embed, chunker=TextChunker()
     )
-    specs = core_jobs(memory_indexer, page_indexer, driver)
-    assert [spec.name for spec in specs] == [MEMORY_INDEX_JOB, PAGE_INDEX_JOB, SOURCE_SYNC_JOB]
+    specs = core_jobs(memory_indexer, page_indexer, driver, SpendResume(client=None))
+    assert [spec.name for spec in specs] == [
+        MEMORY_INDEX_JOB,
+        PAGE_INDEX_JOB,
+        SOURCE_SYNC_JOB,
+        SPEND_RESUME_JOB,
+    ]
     assert all(spec.schedule is not None for spec in specs)
     keys = {binding.key for binding in bindings_from((), specs)}
     assert keys == {
         f"{CORE_EXTENSION}:{MEMORY_INDEX_JOB}",
         f"{CORE_EXTENSION}:{PAGE_INDEX_JOB}",
         f"{CORE_EXTENSION}:{SOURCE_SYNC_JOB}",
+        f"{CORE_EXTENSION}:{SPEND_RESUME_JOB}",
     }

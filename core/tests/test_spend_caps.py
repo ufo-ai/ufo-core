@@ -1,0 +1,363 @@
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from uuid import UUID, uuid4
+
+import sqlalchemy as sa
+from sqlalchemy.ext.asyncio import AsyncConnection
+
+from selfhost.accounting import SpendEvaluator
+from selfhost.db import workspace_tx
+from selfhost.jobs import SpendResume
+from selfhost.schema import tables
+from selfhost.schema.records import TerminalFrame
+from selfhost.surfaces.admission import Admission
+
+
+@dataclass
+class StubDbos:
+    """Records the workflow argument (the turn id) each enqueue carries, so a test reads back which
+    turns admission or the resume sweep placed on the queue — never asserting DBOS itself."""
+
+    enqueued: list[str] = field(default_factory=list)
+
+    async def enqueue_async(self, options: object, workflow_arg: str) -> None:
+        self.enqueued.append(workflow_arg)
+
+
+async def _seed(connection: AsyncConnection) -> tuple[UUID, UUID, UUID, UUID]:
+    workspace_id, member_id, agent_id, conversation_id = (uuid4() for _ in range(4))
+    await connection.execute(
+        sa.insert(tables.workspace).values(
+            id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+        )
+    )
+    await connection.execute(
+        sa.insert(tables.member).values(
+            id=member_id,
+            workspace_id=workspace_id,
+            email="a@b.c",
+            created_at=sa.func.now(),
+            updated_at=sa.func.now(),
+        )
+    )
+    await _agent(connection, workspace_id, agent_id, "assistant")
+    await connection.execute(
+        sa.insert(tables.conversation).values(
+            id=conversation_id,
+            workspace_id=workspace_id,
+            surface="cli",
+            queue_key=uuid4().hex,
+            member_id=member_id,
+            created_at=sa.func.now(),
+            updated_at=sa.func.now(),
+        )
+    )
+    return workspace_id, member_id, agent_id, conversation_id
+
+
+async def _agent(
+    connection: AsyncConnection, workspace_id: UUID, agent_id: UUID, name: str
+) -> None:
+    await connection.execute(
+        sa.insert(tables.agent).values(
+            id=agent_id,
+            workspace_id=workspace_id,
+            name=name,
+            prompt="p",
+            model="claude-opus-4-8",
+            created_at=sa.func.now(),
+            updated_at=sa.func.now(),
+        )
+    )
+
+
+async def _set_cap(
+    connection: AsyncConnection,
+    workspace_id: UUID,
+    scope: str,
+    subject_id: UUID | None,
+    window_seconds: int,
+    limit_micro_usd: int,
+    on_breach: str,
+) -> UUID:
+    cap_id = uuid4()
+    await connection.execute(
+        sa.insert(tables.spend_cap).values(
+            id=cap_id,
+            workspace_id=workspace_id,
+            scope=scope,
+            subject_id=subject_id,
+            window_seconds=window_seconds,
+            limit_micro_usd=limit_micro_usd,
+            on_breach=on_breach,
+            created_at=sa.func.now(),
+            updated_at=sa.func.now(),
+        )
+    )
+    return cap_id
+
+
+async def _bill(
+    connection: AsyncConnection,
+    workspace_id: UUID,
+    conversation_id: UUID,
+    agent_id: UUID,
+    priced_micro_usd: int,
+    seq: int,
+    created_at: datetime | None = None,
+) -> UUID:
+    """A prior terminal turn and its ledger row — the spend the caps decide against."""
+    turn_id = uuid4()
+    stamp = created_at if created_at is not None else sa.func.now()
+    await connection.execute(
+        sa.insert(tables.turn).values(
+            id=turn_id,
+            workspace_id=workspace_id,
+            conversation_id=conversation_id,
+            agent_id=agent_id,
+            seq=seq,
+            status="done",
+            inbound="x",
+            terminal=TerminalFrame(status="done").model_dump(mode="json"),
+            created_at=sa.func.now(),
+            updated_at=sa.func.now(),
+        )
+    )
+    await connection.execute(
+        sa.insert(tables.ledger).values(
+            id=uuid4(),
+            workspace_id=workspace_id,
+            turn_id=turn_id,
+            dimension="tokens",
+            amount=10,
+            priced_micro_usd=priced_micro_usd,
+            model="claude-opus-4-8",
+            created_at=stamp,
+            updated_at=sa.func.now(),
+        )
+    )
+    return turn_id
+
+
+async def _insert_parked(
+    connection: AsyncConnection,
+    workspace_id: UUID,
+    conversation_id: UUID,
+    agent_id: UUID,
+    seq: int,
+) -> UUID:
+    turn_id = uuid4()
+    await connection.execute(
+        sa.insert(tables.turn).values(
+            id=turn_id,
+            workspace_id=workspace_id,
+            conversation_id=conversation_id,
+            agent_id=agent_id,
+            seq=seq,
+            status="parked",
+            inbound="held",
+            terminal=None,
+            created_at=sa.func.now(),
+            updated_at=sa.func.now(),
+        )
+    )
+    return turn_id
+
+
+async def _status(turn_id: UUID) -> str:
+    async with workspace_tx() as connection:
+        return (
+            await connection.execute(
+                sa.select(tables.turn.c.status).where(tables.turn.c.id == turn_id)
+            )
+        ).scalar_one()
+
+
+async def test_no_caps_allow(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, member_id, agent_id, _ = await _seed(connection)
+        decision = await SpendEvaluator(workspace_id, member_id, agent_id).decide(connection, 0)
+    assert decision.outcome == "allow"
+    assert decision.message == ""
+
+
+async def test_member_cap_parks_when_over(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, member_id, agent_id, conversation_id = await _seed(connection)
+        await _bill(connection, workspace_id, conversation_id, agent_id, 100, seq=1)
+        await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "park")
+        decision = await SpendEvaluator(workspace_id, member_id, agent_id).decide(connection, 0)
+    assert decision.outcome == "park"
+    assert "parked" in decision.message
+
+
+async def test_member_cap_rejects_when_over(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, member_id, agent_id, conversation_id = await _seed(connection)
+        await _bill(connection, workspace_id, conversation_id, agent_id, 100, seq=1)
+        await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "reject")
+        decision = await SpendEvaluator(workspace_id, member_id, agent_id).decide(connection, 0)
+    assert decision.outcome == "reject"
+    assert "declined" in decision.message
+
+
+async def test_reject_wins_over_park(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, member_id, agent_id, conversation_id = await _seed(connection)
+        await _bill(connection, workspace_id, conversation_id, agent_id, 100, seq=1)
+        await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "park")
+        await _set_cap(connection, workspace_id, "workspace", None, 60, 50, "reject")
+        decision = await SpendEvaluator(workspace_id, member_id, agent_id).decide(connection, 0)
+    assert decision.outcome == "reject"
+
+
+async def test_under_cap_allows(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, member_id, agent_id, conversation_id = await _seed(connection)
+        await _bill(connection, workspace_id, conversation_id, agent_id, 40, seq=1)
+        await _set_cap(connection, workspace_id, "member", member_id, 3600, 100, "park")
+        decision = await SpendEvaluator(workspace_id, member_id, agent_id).decide(connection, 0)
+    assert decision.outcome == "allow"
+
+
+async def test_pending_in_flight_crosses_cap(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, member_id, agent_id, conversation_id = await _seed(connection)
+        await _bill(connection, workspace_id, conversation_id, agent_id, 40, seq=1)
+        await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "park")
+        evaluator = SpendEvaluator(workspace_id, member_id, agent_id)
+        assert (await evaluator.decide(connection, 0)).outcome == "allow"
+        assert (await evaluator.decide(connection, 20)).outcome == "park"
+
+
+async def test_spend_outside_window_not_counted(db: None) -> None:
+    old = datetime.now(UTC) - timedelta(hours=2)
+    async with workspace_tx() as connection:
+        workspace_id, member_id, agent_id, conversation_id = await _seed(connection)
+        await _bill(connection, workspace_id, conversation_id, agent_id, 100, seq=1, created_at=old)
+        await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "park")
+        decision = await SpendEvaluator(workspace_id, member_id, agent_id).decide(connection, 0)
+    assert decision.outcome == "allow"
+
+
+async def test_workspace_scope_sums_across_members(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, member_id, agent_id, conversation_id = await _seed(connection)
+        other_member, other_conversation = uuid4(), uuid4()
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=other_member,
+                workspace_id=workspace_id,
+                email="c@d.e",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=other_conversation,
+                workspace_id=workspace_id,
+                surface="cli",
+                queue_key=uuid4().hex,
+                member_id=other_member,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await _bill(connection, workspace_id, conversation_id, agent_id, 30, seq=1)
+        await _bill(connection, workspace_id, other_conversation, agent_id, 30, seq=1)
+        await _set_cap(connection, workspace_id, "workspace", None, 3600, 50, "park")
+        decision = await SpendEvaluator(workspace_id, member_id, agent_id).decide(connection, 0)
+    assert decision.outcome == "park"
+
+
+async def test_agent_scope_counts_only_its_agent(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, member_id, agent_id, conversation_id = await _seed(connection)
+        other_agent = uuid4()
+        await _agent(connection, workspace_id, other_agent, "second")
+        await _bill(connection, workspace_id, conversation_id, other_agent, 100, seq=1)
+        await _set_cap(connection, workspace_id, "agent", agent_id, 3600, 50, "park")
+        decision = await SpendEvaluator(workspace_id, member_id, agent_id).decide(connection, 0)
+    assert decision.outcome == "allow"
+
+
+async def test_cap_for_other_member_does_not_apply(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, member_id, agent_id, conversation_id = await _seed(connection)
+        await _bill(connection, workspace_id, conversation_id, agent_id, 100, seq=1)
+        await _set_cap(connection, workspace_id, "member", uuid4(), 3600, 50, "park")
+        decision = await SpendEvaluator(workspace_id, member_id, agent_id).decide(connection, 0)
+    assert decision.outcome == "allow"
+
+
+async def test_admission_parks_over_cap_member_without_enqueue(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, member_id, agent_id, conversation_id = await _seed(connection)
+        await _bill(connection, workspace_id, conversation_id, agent_id, 100, seq=1)
+        await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "park")
+    dbos = StubDbos()
+    turn_id = await Admission(dbos=dbos).admit(workspace_id, conversation_id, agent_id, "hi")
+    assert dbos.enqueued == []
+    assert await _status(turn_id) == "parked"
+
+
+async def test_admission_rejects_over_cap_member_with_reason(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, member_id, agent_id, conversation_id = await _seed(connection)
+        await _bill(connection, workspace_id, conversation_id, agent_id, 100, seq=1)
+        await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "reject")
+    dbos = StubDbos()
+    turn_id = await Admission(dbos=dbos).admit(workspace_id, conversation_id, agent_id, "hi")
+    assert dbos.enqueued == []
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.turn.c.status, tables.turn.c.terminal).where(
+                    tables.turn.c.id == turn_id
+                )
+            )
+        ).one()
+    assert row.status == "cancelled"
+    assert "declined" in TerminalFrame.model_validate(row.terminal).text
+
+
+async def test_admission_under_cap_enqueues(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, member_id, agent_id, conversation_id = await _seed(connection)
+        await _bill(connection, workspace_id, conversation_id, agent_id, 40, seq=1)
+        await _set_cap(connection, workspace_id, "member", member_id, 3600, 100, "park")
+    dbos = StubDbos()
+    turn_id = await Admission(dbos=dbos).admit(workspace_id, conversation_id, agent_id, "hi")
+    assert dbos.enqueued == [str(turn_id)]
+    assert await _status(turn_id) == "queued"
+
+
+async def test_resume_skips_turn_still_over_cap(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, member_id, agent_id, conversation_id = await _seed(connection)
+        await _bill(connection, workspace_id, conversation_id, agent_id, 100, seq=1)
+        await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "park")
+        parked = await _insert_parked(connection, workspace_id, conversation_id, agent_id, seq=2)
+    dbos = StubDbos()
+    await SpendResume(client=dbos).run()
+    assert dbos.enqueued == []
+    assert await _status(parked) == "parked"
+
+
+async def test_resume_readmits_when_cap_raised(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, member_id, agent_id, conversation_id = await _seed(connection)
+        await _bill(connection, workspace_id, conversation_id, agent_id, 100, seq=1)
+        cap_id = await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "park")
+        parked = await _insert_parked(connection, workspace_id, conversation_id, agent_id, seq=2)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.spend_cap)
+            .values(limit_micro_usd=10_000, updated_at=sa.func.now())
+            .where(tables.spend_cap.c.id == cap_id)
+        )
+    dbos = StubDbos()
+    await SpendResume(client=dbos).run()
+    assert dbos.enqueued == [str(parked)]
+    assert await _status(parked) == "queued"

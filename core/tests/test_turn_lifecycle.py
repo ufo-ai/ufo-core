@@ -17,6 +17,7 @@ from selfhost.blob import FilesystemBlobStore
 from selfhost.config import Config
 from selfhost.db import workspace_tx
 from selfhost.hub import InProcessHub
+from selfhost.jobs import SpendResume
 from selfhost.loop import queue as loop_queue
 from selfhost.loop.engine import EMPTY_RESPONSE_NUDGE
 from selfhost.loop.subagents import SubagentProfile, SubagentRegistry
@@ -375,6 +376,92 @@ def _runtime_parts(surface: AsyncClient) -> tuple[Config, InProcessHub, Filesyst
     assert runtime is not None
     assert isinstance(runtime.blob, FilesystemBlobStore)
     return runtime.config, runtime.hub, runtime.blob
+
+
+async def _consume_park(client: AsyncClient, headers: dict[str, str], turn_id: str) -> str:
+    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+        async with client.stream(
+            "GET", f"/v1/turns/{turn_id}/stream", headers=headers
+        ) as stream:
+            assert stream.status_code == 200
+            async for line in stream.aiter_lines():
+                if not line:
+                    continue
+                payload = json.loads(line)
+                if "message" in payload:
+                    return payload["message"]
+    raise AssertionError("stream ended without a park frame")
+
+
+async def _await_status(turn_id: str, target: str) -> None:
+    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+        while True:
+            status, _ = await _turn_row(turn_id)
+            if status == target:
+                return
+            await asyncio.sleep(0.05)
+
+
+async def test_member_cap_parks_a_turn_in_surface_then_resumes_when_raised(
+    surface: AsyncClient,
+) -> None:
+    headers = await _bootstrap()
+    first = (await surface.post("/v1/chat", content=b"ping", headers=headers)).json()["turn_id"]
+    _, first_terminal = await _consume(surface, headers, first)
+    assert first_terminal["status"] == "done"
+    async with workspace_tx() as connection:
+        workspace_id = (
+            await connection.execute(sa.select(tables.workspace.c.id))
+        ).scalar_one()
+        member_id = (await connection.execute(sa.select(tables.member.c.id))).scalar_one()
+        cap_id = uuid4()
+        await connection.execute(
+            sa.insert(tables.spend_cap).values(
+                id=cap_id,
+                workspace_id=workspace_id,
+                scope="member",
+                subject_id=member_id,
+                window_seconds=3600,
+                limit_micro_usd=1,
+                on_breach="park",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    second = (await surface.post("/v1/chat", content=b"again", headers=headers)).json()[
+        "turn_id"
+    ]
+    park_message = await _consume_park(surface, headers, second)
+    assert "parked" in park_message
+    status, _ = await _turn_row(second)
+    assert status == "parked"
+    async with workspace_tx() as connection:
+        billed_while_parked = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.ledger)
+                .where(tables.ledger.c.turn_id == UUID(second))
+            )
+        ).scalar_one()
+    assert billed_while_parked == 0
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.spend_cap)
+            .values(limit_micro_usd=10_000_000, updated_at=sa.func.now())
+            .where(tables.spend_cap.c.id == cap_id)
+        )
+    assert loop_queue._runtime is not None
+    await SpendResume(client=loop_queue._runtime.dbos).run()
+    await _await_status(second, "done")
+    async with workspace_tx() as connection:
+        billed = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.ledger)
+                .where(tables.ledger.c.turn_id == UUID(second))
+            )
+        ).scalar_one()
+    assert billed == 1
 
 
 async def test_failure_after_usage_bills_partial_usage(surface: AsyncClient) -> None:
