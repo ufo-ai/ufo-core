@@ -17,14 +17,12 @@ DEFAULT_EXEC_TIMEOUT_SECONDS = 120
 
 @dataclass(frozen=True)
 class MountSpec:
-    """How the conversation's `workspace/` subtree reaches the container. The filesystem backend
-    bind-mounts a host directory; the S3 backend hands a prefix-scoped credential to an in-container
-    sandbox-fs. Either way the container sees only `workspace/`, never the transcript above it."""
+    """How the conversation's `workspace/` subtree reaches the container: the carrier bind-mounts
+    the host directory at `host_path` into `/workspace`, so the container sees only `workspace/`,
+    never the transcript above it."""
 
     kind: str
     host_path: str | None = None
-    bucket: str | None = None
-    prefix: str | None = None
 
 
 @dataclass(frozen=True)
