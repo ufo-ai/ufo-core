@@ -21,6 +21,7 @@ POSTGRES_TEST_URL = os.environ.get(
 DELETE_ORDER = (
     tables.proposal,
     tables.ledger,
+    tables.writeback,
     tables.turn,
     tables.conversation,
     tables.surface_identity,

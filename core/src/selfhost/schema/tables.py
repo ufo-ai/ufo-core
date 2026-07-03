@@ -156,6 +156,23 @@ memory_item = sa.Table(
     sa.Index("memory_item_due", "embedding_digest"),
 )
 
+writeback = sa.Table(
+    "writeback",
+    metadata,
+    sa.Column("turn_id", sa.Uuid, sa.ForeignKey("turn.id"), primary_key=True),
+    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
+    sa.Column("status", sa.Text, nullable=False),
+    sa.Column("reply_ref", sa.Text, nullable=True),
+    sa.Column("claimed_by", sa.Text, nullable=True),
+    sa.Column("claim_expires_at", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("last_error", sa.Text, nullable=True),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint(
+        "status in ('pending', 'claimed', 'delivered', 'failed')", name="writeback_status"
+    ),
+)
+
 ext_store = sa.Table(
     "ext_store",
     metadata,

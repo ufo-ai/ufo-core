@@ -17,13 +17,18 @@ from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.memory.service import SHARED_SUBJECT, member_subject, recall_subjects
 from selfhost.schema import tables
+from selfhost.schema.records import TerminalFrame
 from selfhost.surfaces.admission import Admission
 from selfhost.surfaces.slack import (
     SLACK_BOT_TOKEN_SLOT,
+    SLACK_CHAT_POST_MESSAGE_URL,
     SLACK_SIGNING_SECRET_SLOT,
     SURFACE_SLACK,
+    WRITEBACK_DELIVERED,
+    WRITEBACK_PENDING,
     SlackSignatureError,
     SlackSurface,
+    WritebackPoller,
     slack_message_id,
     slack_thread_key,
     url_verification_challenge,
@@ -207,6 +212,115 @@ async def test_one_mention_fans_out_to_exactly_one_turn(db: None) -> None:
     assert dbos.enqueued == [str(turns[0].id)]
     conversation = await _conversation(workspace_id, "C1:100.5")
     assert conversation.member_id is None
+
+
+def _recording_post_transport(posted: list[httpx.Request]) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        posted.append(request)
+        return httpx.Response(200, json={"ok": True, "channel": "C5", "ts": "999.100"})
+
+    return httpx.MockTransport(handler)
+
+
+async def _seed_slack_turn(workspace_id: UUID, queue_key: str, status: str, text: str) -> UUID:
+    conversation_id, turn_id = uuid4(), uuid4()
+    terminal = TerminalFrame(status=status, text=text).model_dump(mode="json") if text else None
+    async with workspace_tx() as connection:
+        agent_id = (
+            await connection.execute(
+                sa.select(tables.agent.c.id).where(tables.agent.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                surface=SURFACE_SLACK,
+                queue_key=queue_key,
+                member_id=None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status=status,
+                inbound="ask",
+                terminal=terminal,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.writeback).values(
+                turn_id=turn_id,
+                workspace_id=workspace_id,
+                status=WRITEBACK_PENDING,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return turn_id
+
+
+async def _writeback(turn_id: UUID) -> sa.Row:
+    async with workspace_tx() as connection:
+        return (
+            await connection.execute(
+                sa.select(tables.writeback.c.status, tables.writeback.c.reply_ref).where(
+                    tables.writeback.c.turn_id == turn_id
+                )
+            )
+        ).one()
+
+
+async def test_writeback_poller_posts_block_kit_reply_to_thread(db: None) -> None:
+    workspace_id, _ = await _seed()
+    turn_id = await _seed_slack_turn(workspace_id, "C5:200.0", "done", "hi **there**")
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    await store.put(workspace_id, SLACK_BOT_TOKEN_SLOT, BOT_TOKEN)
+    posted: list[httpx.Request] = []
+    poller = WritebackPoller(
+        credentials=store,
+        http=AsyncClient(transport=_recording_post_transport(posted)),
+        workspace_id=workspace_id,
+        worker_id="worker-1",
+    )
+    async with poller.http:
+        await poller.drain()
+    assert len(posted) == 1
+    assert str(posted[0].url) == SLACK_CHAT_POST_MESSAGE_URL
+    assert posted[0].headers["Authorization"] == f"Bearer {BOT_TOKEN}"
+    body = json.loads(posted[0].content)
+    assert body["channel"] == "C5"
+    assert body["thread_ts"] == "200.0"
+    assert body["blocks"] == [{"type": "markdown", "text": "hi **there**"}]
+    delivered = await _writeback(turn_id)
+    assert delivered.status == WRITEBACK_DELIVERED
+    assert delivered.reply_ref == "999.100"
+
+
+async def test_writeback_poller_leaves_a_pending_turn_undelivered(db: None) -> None:
+    workspace_id, _ = await _seed()
+    turn_id = await _seed_slack_turn(workspace_id, "C6:1.0", "queued", "")
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    await store.put(workspace_id, SLACK_BOT_TOKEN_SLOT, BOT_TOKEN)
+    posted: list[httpx.Request] = []
+    poller = WritebackPoller(
+        credentials=store,
+        http=AsyncClient(transport=_recording_post_transport(posted)),
+        workspace_id=workspace_id,
+        worker_id="worker-1",
+    )
+    async with poller.http:
+        await poller.drain()
+    assert posted == []
+    assert (await _writeback(turn_id)).status == WRITEBACK_PENDING
 
 
 async def test_dm_links_member_while_channel_thread_is_shared(db: None) -> None:

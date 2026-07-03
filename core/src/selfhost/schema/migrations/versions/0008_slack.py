@@ -23,9 +23,28 @@ def upgrade() -> None:
     with op.batch_alter_table("surface_identity") as batch:
         batch.drop_constraint("surface_identity_surface", type_="check")
         batch.create_check_constraint("surface_identity_surface", "surface in ('cli', 'slack')")
+    op.create_table(
+        "writeback",
+        sa.Column("turn_id", sa.Uuid(), nullable=False),
+        sa.Column("workspace_id", sa.Uuid(), nullable=False),
+        sa.Column("status", sa.Text(), nullable=False),
+        sa.Column("reply_ref", sa.Text(), nullable=True),
+        sa.Column("claimed_by", sa.Text(), nullable=True),
+        sa.Column("claim_expires_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("last_error", sa.Text(), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.ForeignKeyConstraint(["turn_id"], ["turn.id"]),
+        sa.ForeignKeyConstraint(["workspace_id"], ["workspace.id"]),
+        sa.PrimaryKeyConstraint("turn_id"),
+        sa.CheckConstraint(
+            "status in ('pending', 'claimed', 'delivered', 'failed')", name="writeback_status"
+        ),
+    )
 
 
 def downgrade() -> None:
+    op.drop_table("writeback")
     with op.batch_alter_table("surface_identity") as batch:
         batch.drop_constraint("surface_identity_surface", type_="check")
         batch.create_check_constraint("surface_identity_surface", "surface in ('cli')")

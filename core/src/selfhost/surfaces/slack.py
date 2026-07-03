@@ -5,12 +5,14 @@ carry the same `channel:ts`; that pair is the admission idempotency key, so one 
 exactly one turn. A channel thread is shared by construction (`member_id` NULL); a DM resolves to
 the member whose Slack email matches, linking a `surface_identity` the first time they speak."""
 
+import asyncio
 import hashlib
 import hmac
 import json
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import httpx
@@ -24,16 +26,29 @@ from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.o11y import log
 from selfhost.schema import tables
-from selfhost.schema.records import DEFAULT_AGENT_NAME
+from selfhost.schema.records import DEFAULT_AGENT_NAME, TerminalFrame
 from selfhost.surfaces.admission import Admission
 
 SURFACE_SLACK = "slack"
 SLACK_BOT_TOKEN_SLOT = "slack_bot_token"
 SLACK_SIGNING_SECRET_SLOT = "slack_signing_secret"
 SLACK_USERS_INFO_URL = "https://slack.com/api/users.info"
+SLACK_CHAT_POST_MESSAGE_URL = "https://slack.com/api/chat.postMessage"
 SLACK_REPLAY_SECONDS = 300
 MAX_SLACK_EVENT_BYTES = 1_000_000
 MESSAGE_EVENT_TYPES = ("app_mention", "message")
+
+WRITEBACK_PENDING = "pending"
+WRITEBACK_CLAIMED = "claimed"
+WRITEBACK_DELIVERED = "delivered"
+WRITEBACK_FAILED = "failed"
+TURN_DONE = "done"
+SLACK_MARKDOWN_TEXT_LIMIT = 12_000
+MAX_SLACK_MESSAGE_BYTES = 40_000
+MAX_WRITEBACK_ERROR_CHARS = 2_048
+WRITEBACK_POLL_SECONDS = 1.0
+WRITEBACK_CLAIM_SECONDS = 300
+WRITEBACK_CLAIM_BATCH = 16
 
 router = APIRouter()
 
@@ -116,6 +131,26 @@ def _string_field(event: Mapping[str, object], field: str) -> str:
     return value
 
 
+def slack_reply_body(channel: str, thread_ts: str | None, text: str) -> bytes:
+    """The chat.postMessage body: one Block Kit `markdown` block so Slack renders the agent's own
+    markdown natively, degrading to a text-only body when the reply exceeds Slack's block-character
+    or payload-byte caps. `text` always carries the whole reply as the notification fallback."""
+    if not text:
+        raise ValueError("Slack reply text is required")
+    base: dict[str, object] = {"channel": channel, "text": text}
+    if thread_ts is not None:
+        base["thread_ts"] = thread_ts
+    if len(text) <= SLACK_MARKDOWN_TEXT_LIMIT:
+        with_blocks = {**base, "blocks": [{"type": "markdown", "text": text}]}
+        encoded = json.dumps(with_blocks, separators=(",", ":")).encode()
+        if len(encoded) <= MAX_SLACK_MESSAGE_BYTES:
+            return encoded
+    encoded = json.dumps(base, separators=(",", ":")).encode()
+    if len(encoded) > MAX_SLACK_MESSAGE_BYTES:
+        raise ValueError("Slack reply text is too large")
+    return encoded
+
+
 @dataclass(frozen=True)
 class SlackSurface:
     admission: Admission
@@ -141,14 +176,32 @@ class SlackSurface:
             return JSONResponse({"ok": True, "ignored": True})
         conversation_id = await self._conversation_for(inbound)
         agent_id = await self._default_agent()
-        await self.admission.admit(
+        turn_id = await self.admission.admit(
             self.workspace_id,
             conversation_id,
             agent_id,
             inbound.body,
             idempotency_key=inbound.message_id,
         )
+        await self._enqueue_writeback(turn_id)
         return JSONResponse({"ok": True})
+
+    async def _enqueue_writeback(self, turn_id: UUID) -> None:
+        """Register the turn for delivery. A redelivery deduped to the existing turn hits the
+        primary key; the poller already owns that writeback, so the collision is dropped."""
+        try:
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.insert(tables.writeback).values(
+                        turn_id=turn_id,
+                        workspace_id=self.workspace_id,
+                        status=WRITEBACK_PENDING,
+                        created_at=sa.func.now(),
+                        updated_at=sa.func.now(),
+                    )
+                )
+        except sa.exc.IntegrityError:
+            log("slack.writeback_exists", turn_id=str(turn_id))
 
     def _to_inbound(self, raw: bytes) -> Inbound | None:
         payload = json.loads(raw)
@@ -285,6 +338,151 @@ class SlackSurface:
         if agent is None:
             raise RuntimeError(f"no agent named {DEFAULT_AGENT_NAME!r} for the Slack surface")
         return agent.id
+
+
+@dataclass(frozen=True)
+class WritebackPoller:
+    """Durable delivery of Slack replies. The hub is lossy, so the reply is never posted from a live
+    Terminal frame: this poller claims writebacks whose turn is done, posts the Block Kit reply to
+    the thread with the bot token (in-process, not through the sandbox proxy), records the message
+    ts, then marks delivered. A claim (worker id + expiry) makes it safe under `serve`'s concurrent
+    instances — Postgres skips a peer's locked rows, SQLite's single writer serializes them — and a
+    compare-and-swap on the claim owner means only the worker still holding a claim finalizes it."""
+
+    credentials: CredentialStore
+    http: httpx.AsyncClient
+    workspace_id: UUID
+    worker_id: str
+
+    async def run(self) -> None:
+        while True:
+            try:
+                await self.drain()
+            except Exception as error:
+                log("slack.writeback_drain_failed", error_class=type(error).__name__)
+            await asyncio.sleep(WRITEBACK_POLL_SECONDS)
+
+    async def drain(self) -> None:
+        for row in await self._claim():
+            if row.last_error is not None:
+                log("slack.writeback_retry", turn_id=str(row.turn_id), last_error=row.last_error)
+            await self._deliver(row.turn_id, row.reply_ref)
+
+    async def _claim(self) -> Sequence[sa.Row]:
+        now = datetime.now(UTC)
+        claimable = (
+            sa.select(tables.writeback.c.turn_id)
+            .select_from(
+                tables.writeback.join(tables.turn, tables.turn.c.id == tables.writeback.c.turn_id)
+            )
+            .where(
+                tables.writeback.c.workspace_id == self.workspace_id,
+                tables.writeback.c.status.in_((WRITEBACK_PENDING, WRITEBACK_FAILED)),
+                tables.turn.c.status == TURN_DONE,
+                sa.or_(
+                    tables.writeback.c.claim_expires_at.is_(None),
+                    tables.writeback.c.claim_expires_at <= now,
+                ),
+            )
+            .order_by(tables.writeback.c.created_at)
+            .limit(WRITEBACK_CLAIM_BATCH)
+            .with_for_update(skip_locked=True, of=tables.writeback)
+            .cte("claimable")
+        )
+        async with workspace_tx() as connection:
+            return (
+                await connection.execute(
+                    sa.update(tables.writeback)
+                    .where(tables.writeback.c.turn_id == claimable.c.turn_id)
+                    .values(
+                        status=WRITEBACK_CLAIMED,
+                        claimed_by=self.worker_id,
+                        claim_expires_at=now + timedelta(seconds=WRITEBACK_CLAIM_SECONDS),
+                        updated_at=sa.func.now(),
+                    )
+                    .returning(
+                        tables.writeback.c.turn_id,
+                        tables.writeback.c.reply_ref,
+                        tables.writeback.c.last_error,
+                    )
+                )
+            ).all()
+
+    async def _deliver(self, turn_id: UUID, reply_ref: str | None) -> None:
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(tables.turn.c.terminal, tables.conversation.c.queue_key)
+                    .select_from(
+                        tables.turn.join(
+                            tables.conversation,
+                            tables.conversation.c.id == tables.turn.c.conversation_id,
+                        )
+                    )
+                    .where(tables.turn.c.id == turn_id)
+                )
+            ).one()
+        channel, separator, thread_ts = row.queue_key.partition(":")
+        text = TerminalFrame.model_validate(row.terminal).text
+        try:
+            if reply_ref is None:
+                reply_ref = await self._post(channel, thread_ts if separator else None, text)
+                await self._record_ref(turn_id, reply_ref)
+            await self._finalize(turn_id, WRITEBACK_DELIVERED, None)
+        except Exception as error:
+            log(
+                "slack.writeback_post_failed",
+                turn_id=str(turn_id),
+                error_class=type(error).__name__,
+            )
+            await self._finalize(turn_id, WRITEBACK_FAILED, str(error)[:MAX_WRITEBACK_ERROR_CHARS])
+
+    async def _post(self, channel: str, thread_ts: str | None, text: str) -> str:
+        token = await self.credentials.get(self.workspace_id, SLACK_BOT_TOKEN_SLOT)
+        response = await self.http.post(
+            SLACK_CHAT_POST_MESSAGE_URL,
+            content=slack_reply_body(channel, thread_ts, text),
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json; charset=utf-8",
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get("ok") is not True:
+            raise SlackApiError(str(payload.get("error")))
+        ts = payload.get("ts")
+        if not isinstance(ts, str) or not ts:
+            raise SlackApiError("Slack response missing ts")
+        return ts
+
+    async def _record_ref(self, turn_id: UUID, reply_ref: str) -> None:
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.writeback)
+                .where(
+                    tables.writeback.c.turn_id == turn_id,
+                    tables.writeback.c.claimed_by == self.worker_id,
+                )
+                .values(reply_ref=reply_ref, updated_at=sa.func.now())
+            )
+
+    async def _finalize(self, turn_id: UUID, status: str, last_error: str | None) -> None:
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.writeback)
+                .where(
+                    tables.writeback.c.turn_id == turn_id,
+                    tables.writeback.c.claimed_by == self.worker_id,
+                )
+                .values(
+                    status=status,
+                    last_error=last_error,
+                    claimed_by=None,
+                    claim_expires_at=None,
+                    updated_at=sa.func.now(),
+                )
+            )
 
 
 @router.post("/slack/events")
