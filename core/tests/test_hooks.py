@@ -40,6 +40,7 @@ from selfhost.ext.manifest import (
 from selfhost.hub import InProcessHub
 from selfhost.loop.compaction import Compaction
 from selfhost.loop.engine import TurnEngine
+from selfhost.loop.prompts.render import rendered_prompt
 from selfhost.loop.transcript import Transcript
 from selfhost.models.interface import (
     Message,
@@ -405,6 +406,7 @@ def _engine(
     return TurnEngine(
         turn=turn,
         agent=Agent(prompt="p", model="claude-opus-4-8"),
+        system_prompt=rendered_prompt("p"),
         model=model,
         transcript=Transcript(blob=blob, conversation_id=turn.conversation_id),
         compaction=Compaction(

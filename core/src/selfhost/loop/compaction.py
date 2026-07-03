@@ -14,6 +14,7 @@ import lz4.frame
 from pydantic import BaseModel
 
 from selfhost.blob import BlobNotFound, BlobStore
+from selfhost.loop.prompts.render import COMPACTION_SYSTEM_PROMPT
 from selfhost.models.interface import (
     Message,
     ModelClient,
@@ -30,11 +31,6 @@ COMPACTION_TRIGGER_TOKENS = 120_000
 COMPACTION_KEEP_MESSAGES = 8
 COMPACTION_SUMMARY_MAX_TOKENS = 8_192
 COMPACTED_CONTEXT_PREFIX = "Compacted context:\n"
-COMPACTION_SYSTEM_PROMPT = (
-    "Compress the conversation for continuation. Keep user requirements, decisions, tool results, "
-    "open tasks, and unresolved errors verbatim where they matter. Drop repetition and transient "
-    "wording. Return only the compacted context."
-)
 
 
 class CompactionWindow(BaseModel):

@@ -1,0 +1,1 @@
+Compress the conversation for continuation. Keep user requirements, decisions, tool results, open tasks, and unresolved errors verbatim where they matter. Drop repetition and transient wording. Return only the compacted context.

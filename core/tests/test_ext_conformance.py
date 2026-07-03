@@ -33,6 +33,7 @@ from selfhost.ext.manifest import Manifest
 from selfhost.governance import prompt_digest
 from selfhost.grants import GrantStore
 from selfhost.jobs import JobRunner, bindings_from
+from selfhost.loop.prompts.render import render_system_prompt
 from selfhost.loop.transcript import Transcript
 from selfhost.models.interface import Message
 from selfhost.onboarding import run_onboarding_steps
@@ -168,6 +169,19 @@ async def test_sample_is_discovered_via_its_entry_point() -> None:
     assert {
         tool.name for connector in manifest.connectors for tool in connector.tools
     } == {sample.CONNECTOR_TOOL_NAME}
+    assert {section.name for section in manifest.prompt_sections} == {sample.SECTION_NAME}
+
+
+def test_pack_prompt_section_reaches_the_rendered_system_prompt() -> None:
+    """The contribution seam end to end: the section the sample declares renders into the shell's
+    `{{sections}}` slot beside the agent's own prompt, and the render carries a digest — the same
+    tuple the loop builds from `manifest.prompt_sections` and hands the engine each turn."""
+    manifest = _sample_manifest()
+    sections = tuple((section.name, section.body) for section in manifest.prompt_sections)
+    rendered = render_system_prompt("You are the workspace assistant.", sections)
+    assert sample.SECTION_BODY in rendered.content
+    assert "You are the workspace assistant." in rendered.content
+    assert rendered.digest.startswith("sha256:")
 
 
 async def test_tool_dispatches_with_its_scoped_context(db: None, tmp_path: Path) -> None:

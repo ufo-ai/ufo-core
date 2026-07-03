@@ -18,6 +18,7 @@ from selfhost.grants import GrantStore
 from selfhost.hub import Hub, Terminal
 from selfhost.loop.compaction import Compaction
 from selfhost.loop.engine import TurnEngine, TurnParked
+from selfhost.loop.prompts.render import render_system_prompt, rendered_prompt
 from selfhost.loop.subagents import SubagentRegistry, Subagents, subagent_system_prompt
 from selfhost.loop.transcript import Transcript
 from selfhost.memory.service import MemoryService
@@ -102,14 +103,21 @@ async def _execute_turn(turn_id: str) -> str:
         hooks = turn_hooks(
             runtime.manifests, turn.workspace_id, runtime.credentials, runtime.memory
         )
+        sections = tuple(
+            (section.name, section.body)
+            for manifest in runtime.manifests
+            for section in manifest.prompt_sections
+        )
         if turn.subagent_profile is None:
             resolved, tools = agent, ToolRegistry(all_tools)
+            system_prompt = render_system_prompt(agent.prompt, sections)
         else:
             profile = runtime.subagents.get(turn.subagent_profile)
             resolved = Agent(prompt=subagent_system_prompt(profile), model=agent.model)
             tools = ToolRegistry(
                 tuple(tool for tool in all_tools if tool.name in profile.tool_names)
             )
+            system_prompt = rendered_prompt(resolved.prompt)
         model = _model_client(agent.model, runtime.config)
         handle = await runtime.carrier.create(
             SandboxSpec(
@@ -125,6 +133,7 @@ async def _execute_turn(turn_id: str) -> str:
         engine = TurnEngine(
             turn=turn,
             agent=resolved,
+            system_prompt=system_prompt,
             model=model,
             transcript=Transcript(blob=runtime.blob, conversation_id=turn.conversation_id),
             compaction=Compaction(

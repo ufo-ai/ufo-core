@@ -28,6 +28,7 @@ from selfhost.sdk.manifest import (
     Manifest,
     OnboardingStep,
     PostToolUse,
+    PromptSection,
     RouteSpec,
 )
 from selfhost.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
@@ -60,6 +61,12 @@ CONNECTOR_KEY = "connector:called"
 HOOK_POST_KEY = "hook:post"
 PROPOSAL_SUFFIX = "\nBe concise."
 HOOK_DENY_REASON = "the sample pre_tool_use hook refuses its sentinel tool"
+SECTION_NAME = "sample_capability"
+SECTION_BODY = (
+    "<sample_capability>\n"
+    "The sample pack contributes this capability section to the agent's system prompt.\n"
+    "</sample_capability>"
+)
 
 
 class EchoInput(BaseModel):
@@ -174,6 +181,7 @@ def manifest() -> Manifest:
         jobs=(JobSpec(name=JOB_NAME, schedule=None, handler=_tick),),
         routes=(RouteSpec(method="POST", path=ROUTE_PATH, handler=_hook),),
         onboarding_steps=(OnboardingStep(name=ONBOARDING_NAME, handler=_setup),),
+        prompt_sections=(PromptSection(name=SECTION_NAME, body=SECTION_BODY),),
         credentials=(
             CredentialSlot(
                 name=API_SLOT,

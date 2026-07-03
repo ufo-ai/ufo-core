@@ -77,6 +77,18 @@ class ConnectorProvider:
 
 
 @dataclass(frozen=True)
+class PromptSection:
+    """A capability section a pack contributes to the agent's system prompt. The loop renders every
+    active manifest's sections into the shell's `{{sections}}` slot, ordered by `name`, so a pack's
+    rules (web search, browsing, office docs, ...) reach the agent without core naming the
+    capability. `body` is the section's Markdown; `name` orders it and identifies it in the rendered
+    prompt's digest."""
+
+    name: str
+    body: str
+
+
+@dataclass(frozen=True)
 class OnboardingStep:
     """A first-run step an extension contributes to workspace onboarding. `handler` runs once, after
     the core steps, with the extension's scoped ExtensionContext — the same handle its jobs receive,
@@ -194,3 +206,4 @@ class Manifest:
     connectors: tuple[ConnectorProvider, ...] = ()
     onboarding_steps: tuple[OnboardingStep, ...] = ()
     hooks: tuple[HookSpec, ...] = ()
+    prompt_sections: tuple[PromptSection, ...] = ()

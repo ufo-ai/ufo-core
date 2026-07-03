@@ -55,5 +55,8 @@ from selfhost.ext.manifest import (
     PreToolUse as PreToolUse,
 )
 from selfhost.ext.manifest import (
+    PromptSection as PromptSection,
+)
+from selfhost.ext.manifest import (
     RouteSpec as RouteSpec,
 )

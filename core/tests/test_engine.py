@@ -16,6 +16,7 @@ from selfhost.grants import ConnectFlow, GrantStore, OAuthAccount, install_conne
 from selfhost.hub import InProcessHub
 from selfhost.loop.compaction import COMPACTED_CONTEXT_PREFIX, Compaction
 from selfhost.loop.engine import RECALL_CONTEXT_PREFIX, TurnEngine, TurnParked
+from selfhost.loop.prompts.render import rendered_prompt
 from selfhost.loop.transcript import Transcript
 from selfhost.memory.service import Recalled
 from selfhost.models.interface import (
@@ -295,6 +296,7 @@ def _engine(
     return TurnEngine(
         turn=turn,
         agent=Agent(prompt="p", model="claude-opus-4-8"),
+        system_prompt=rendered_prompt("p"),
         model=model,
         transcript=Transcript(blob=blob, conversation_id=turn.conversation_id),
         compaction=compaction
