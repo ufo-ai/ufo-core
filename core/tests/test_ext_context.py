@@ -1,3 +1,4 @@
+import inspect
 from uuid import UUID, uuid4
 
 import pytest
@@ -8,11 +9,16 @@ from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.ext.context import (
     CredentialAccess,
+    MemoryAccess,
+    OutOfScopeSubject,
     ScopedStore,
     UndeclaredCredentialSlot,
     context_for,
 )
+from selfhost.memory.index import index_backend_for
+from selfhost.memory.service import SHARED_SUBJECT, MemoryService, member_subject
 from selfhost.schema import tables
+from selfhost.schema.records import MemoryWrite
 
 
 async def _workspace() -> UUID:
@@ -71,11 +77,41 @@ async def test_credential_access_reads_declared_and_rejects_undeclared(db: None)
     store = _store()
     await store.put(workspace_id, "sample_api", "sk-real")
     access = CredentialAccess(
-        workspace_id=workspace_id, declared=frozenset({"sample_api"}), store=store
+        workspace_id=workspace_id, declared=frozenset({"sample_api"}), _store=store
     )
     assert await access.get("sample_api") == "sk-real"
     with pytest.raises(UndeclaredCredentialSlot, match="undeclared_slot"):
         await access.get("undeclared_slot")
+
+
+class _InertEmbed:
+    """A stand-in embed provider: commit never embeds, and this test asserts the persisted row, not
+    the embedding — so the provider is a dependency here, never the thing under test."""
+
+    async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+        return ()
+
+
+async def test_memory_access_commits_only_under_the_shared_subject(
+    db: None, database_url: str
+) -> None:
+    embed = _InertEmbed()
+    access = MemoryAccess(MemoryService(index=index_backend_for(database_url, embed), embed=embed))
+    await _workspace()
+    await access.commit(MemoryWrite(subject=SHARED_SUBJECT, body="a workspace fact"))
+    with pytest.raises(OutOfScopeSubject, match="member:"):
+        await access.commit(MemoryWrite(subject=member_subject(uuid4()), body="a private fact"))
+    async with workspace_tx() as connection:
+        subjects = (
+            (await connection.execute(sa.select(tables.memory_item.c.subject))).scalars().all()
+        )
+    assert list(subjects) == [SHARED_SUBJECT]
+
+
+def test_memory_access_recall_cannot_target_a_subject() -> None:
+    """recall derives the shared subject and takes no subject argument, so a member's private space
+    is unreachable through this handle — the confinement is structural, not a runtime check."""
+    assert set(inspect.signature(MemoryAccess.recall).parameters) == {"self", "query", "limit"}
 
 
 async def test_core_context_builds_and_is_usable(db: None) -> None:
