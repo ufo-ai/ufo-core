@@ -78,9 +78,10 @@ def _imported_modules(tree: ast.Module) -> list[str]:
 def _boundary_failures(trees: dict[Path, ast.Module]) -> list[str]:
     failures = []
     for rel, tree in trees.items():
-        if rel == COMPOSITION_ROOT:
+        module = _module_name(rel)
+        if not module or rel == COMPOSITION_ROOT:
             continue
-        role = _role_of(_module_name(rel))
+        role = _role_of(module)
         for imported in _imported_modules(tree):
             target = _role_of(imported)
             if target is not None and target != role:

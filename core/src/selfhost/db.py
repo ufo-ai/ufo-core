@@ -6,6 +6,7 @@ from pathlib import Path
 
 import psycopg
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
+from sqlalchemy.pool import NullPool
 
 SCHEMA_DIR = Path(__file__).parent / "schema"
 
@@ -13,10 +14,12 @@ _engine: AsyncEngine | None = None
 
 
 def init_db(url: str) -> None:
+    """NullPool: a pooled connection binds to one event loop, and surfaces and DBOS
+    workflows run on different loops in the same process."""
     global _engine
     if _engine is not None:
         raise RuntimeError("db already initialized")
-    _engine = create_async_engine(url)
+    _engine = create_async_engine(url, poolclass=NullPool)
 
 
 async def dispose_db() -> None:

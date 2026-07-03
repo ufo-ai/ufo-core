@@ -12,9 +12,9 @@ from openai.types.completion_usage import CompletionUsage, PromptTokensDetails
 
 from selfhost.models import Message, ModelEvent, ModelRequest, TextDelta
 from selfhost.models.anthropic import MAX_PROVIDER_RETRIES as ANTHROPIC_MAX_RETRIES
-from selfhost.models.anthropic import AnthropicClient
+from selfhost.models.anthropic import AnthropicClient, anthropic_sdk_client
 from selfhost.models.openai import MAX_PROVIDER_RETRIES as OPENAI_MAX_RETRIES
-from selfhost.models.openai import OpenAIClient
+from selfhost.models.openai import OpenAIClient, openai_sdk_client
 from selfhost.schema.records import Usage
 
 REQUEST = ModelRequest(
@@ -99,10 +99,6 @@ def anthropic_output(output_tokens: int) -> anthropic.types.RawMessageDeltaEvent
     )
 
 
-def anthropic_message_stop() -> anthropic.types.RawMessageStopEvent:
-    return anthropic.types.RawMessageStopEvent(type="message_stop")
-
-
 def openai_text(text: str | None) -> chat_completion_chunk.ChatCompletionChunk:
     return chat_completion_chunk.ChatCompletionChunk(
         id="chunk_test",
@@ -162,7 +158,7 @@ async def test_anthropic_maps_deltas_then_single_usage() -> None:
                 anthropic_text("Hel"),
                 anthropic_text("lo"),
                 anthropic_output(42),
-                anthropic_message_stop(),
+                anthropic.types.RawMessageStopEvent(type="message_stop"),
             ],
             None,
         )
@@ -298,3 +294,10 @@ async def test_no_retry_after_first_yield(harness: ProviderHarness) -> None:
             received.append(event)
     assert received == [TextDelta(text="partial")]
     assert create.calls == 1
+
+
+def test_sdk_client_factories_disable_sdk_retries() -> None:
+    anthropic_sdk = anthropic_sdk_client("key")
+    openai_sdk = openai_sdk_client("key")
+    assert anthropic_sdk.max_retries == 0
+    assert openai_sdk.max_retries == 0

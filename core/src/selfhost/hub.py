@@ -27,26 +27,37 @@ class Hub(Protocol):
     def subscribe(self, turn_id: UUID) -> AsyncIterator[LiveFrame]: ...
 
 
+def _offer(queue: asyncio.Queue[LiveFrame], frame: LiveFrame) -> None:
+    if queue.full():
+        queue.get_nowait()
+    queue.put_nowait(frame)
+
+
 @dataclass(frozen=True)
 class InProcessHub:
-    """Fan out frames per turn; a full subscriber loses its oldest frame, never the publisher."""
+    """Fan out frames per turn; a full subscriber loses its oldest frame, never the publisher.
 
-    queues: dict[UUID, list[asyncio.Queue[LiveFrame]]] = field(default_factory=dict)
+    Publishers and subscribers may live on different event loops (DBOS runs dequeued
+    workflows on its own loop thread), so delivery hops onto the subscriber's loop.
+    """
+
+    queues: dict[UUID, list[tuple[asyncio.Queue[LiveFrame], asyncio.AbstractEventLoop]]] = field(
+        default_factory=dict
+    )
 
     async def publish(self, turn_id: UUID, frame: LiveFrame) -> None:
-        for queue in self.queues.get(turn_id, []):
-            if queue.full():
-                queue.get_nowait()
-            queue.put_nowait(frame)
+        for queue, loop in list(self.queues.get(turn_id, [])):
+            loop.call_soon_threadsafe(_offer, queue, frame)
 
     async def subscribe(self, turn_id: UUID) -> AsyncIterator[LiveFrame]:
         queue: asyncio.Queue[LiveFrame] = asyncio.Queue(maxsize=SUBSCRIBER_QUEUE_FRAMES)
-        self.queues.setdefault(turn_id, []).append(queue)
+        entry = (queue, asyncio.get_running_loop())
+        self.queues.setdefault(turn_id, []).append(entry)
         try:
             while True:
                 yield await queue.get()
         finally:
             remaining = self.queues[turn_id]
-            remaining.remove(queue)
+            remaining.remove(entry)
             if not remaining:
                 del self.queues[turn_id]
