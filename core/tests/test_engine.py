@@ -1,5 +1,5 @@
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -10,9 +10,21 @@ from selfhost.db import workspace_tx
 from selfhost.hub import InProcessHub
 from selfhost.loop.engine import TurnEngine
 from selfhost.loop.transcript import Conversation, Transcript
-from selfhost.models.interface import Message, ModelEvent, ModelRequest, TextDelta
+from selfhost.models.interface import (
+    Message,
+    ModelEvent,
+    ModelRequest,
+    TextDelta,
+    ToolCallDelta,
+    ToolCallStart,
+    ToolResultBlock,
+    ToolUseBlock,
+)
+from selfhost.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from selfhost.schema import tables
 from selfhost.schema.records import Agent, TerminalFrame, Turn, Usage
+from selfhost.tools.builtins import BUILTIN_TOOLS
+from selfhost.tools.registry import ToolRegistry
 
 
 @dataclass(frozen=True)
@@ -45,6 +57,51 @@ class CancelRacingModel:
             )
         yield TextDelta(text="answer")
         yield Usage(input_tokens=7, output_tokens=3)
+
+
+@dataclass(frozen=True)
+class ToolCallingModel:
+    """Emits one bash tool call, then answers with text once the tool result comes back — so the
+    engine's multi-round dispatch loop runs end to end without a real model."""
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        answered = any(
+            isinstance(message.content, tuple)
+            and any(isinstance(block, ToolResultBlock) for block in message.content)
+            for message in request.messages
+        )
+        if answered:
+            yield TextDelta(text="done")
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        yield ToolCallStart(id="c1", name="bash")
+        yield ToolCallDelta(id="c1", partial_json='{"command": "echo hi"}')
+        yield Usage(input_tokens=2, output_tokens=2)
+
+
+@dataclass
+class RecordingCarrier:
+    """Stands in for the Docker carrier: records each exec argv and returns a canned result, so a
+    tool call is dispatched through the real SandboxSession without a container."""
+
+    result: ExecResult = field(
+        default_factory=lambda: ExecResult(stdout="", stderr="", exit_code=0)
+    )
+    calls: list[tuple[str, ...]] = field(default_factory=list)
+
+    async def create(self, spec: SandboxSpec) -> SandboxHandle:
+        return SandboxHandle(conversation_id=spec.conversation_id, container_id="test")
+
+    async def exec(
+        self, handle: SandboxHandle, argv: tuple[str, ...], stdin: bytes, timeout_s: int
+    ) -> ExecResult:
+        self.calls.append(argv)
+        return self.result
+
+    async def route(self, handle: SandboxHandle, port: int) -> str:
+        return "http://test"
+
+    async def destroy(self, handle: SandboxHandle) -> None: ...
 
 
 async def _seed_turn(status: str, terminal: TerminalFrame | None) -> Turn:
@@ -112,15 +169,21 @@ async def _seed_turn(status: str, terminal: TerminalFrame | None) -> Turn:
     )
 
 
-def _engine(turn: Turn, model: object, tmp_path: Path) -> TurnEngine:
+def _engine(
+    turn: Turn, model: object, tmp_path: Path, carrier: RecordingCarrier | None = None
+) -> TurnEngine:
+    carrier = carrier or RecordingCarrier()
+    blob = FilesystemBlobStore(root=tmp_path)
+    handle = SandboxHandle(conversation_id=turn.conversation_id, container_id="test")
     return TurnEngine(
         turn=turn,
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         model=model,
-        transcript=Transcript(
-            blob=FilesystemBlobStore(root=tmp_path), conversation_id=turn.conversation_id
-        ),
+        transcript=Transcript(blob=blob, conversation_id=turn.conversation_id),
         hub=InProcessHub(),
+        sandbox=SandboxSession(carrier=carrier, handle=handle),
+        tools=ToolRegistry(BUILTIN_TOOLS),
+        blob=blob,
     )
 
 
@@ -147,6 +210,27 @@ async def test_already_terminal_turn_republishes_without_clobbering_transcript(
         ).scalar_one()
     assert billed == 0
     assert await engine.transcript.read() == done_transcript
+
+
+async def test_tool_call_round_dispatches_in_sandbox_then_answers(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    carrier = RecordingCarrier(result=ExecResult(stdout="hi\n", stderr="", exit_code=0))
+    engine = _engine(turn, ToolCallingModel(), tmp_path, carrier=carrier)
+    frame = await engine.run()
+    assert frame.status == "done"
+    assert frame.text == "done"
+    assert any("echo hi" in " ".join(argv) for argv in carrier.calls)
+    stored = await engine.transcript.read()
+    assert stored is not None
+    tool_use = stored.messages[1].content
+    tool_result = stored.messages[2].content
+    assert isinstance(tool_use, tuple) and isinstance(tool_use[0], ToolUseBlock)
+    assert tool_use[0].name == "bash"
+    assert isinstance(tool_result, tuple) and isinstance(tool_result[0], ToolResultBlock)
+    assert "hi" in tool_result[0].content
+    assert stored.messages[-1] == Message(role="assistant", content="done")
 
 
 async def test_cancel_winning_mid_round_keeps_cancelled_terminal_bills_and_preserves_inbound(

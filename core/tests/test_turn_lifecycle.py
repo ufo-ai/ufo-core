@@ -22,6 +22,7 @@ from selfhost.loop import queue as loop_queue
 from selfhost.loop.engine import EMPTY_RESPONSE_NUDGE
 from selfhost.loop.transcript import Conversation, Transcript
 from selfhost.models.interface import ModelEvent, ModelRequest, TextDelta
+from selfhost.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
 from selfhost.schema import tables
 from selfhost.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION, Usage
 from selfhost.surfaces.cli import router
@@ -51,6 +52,25 @@ class StandInModel:
         yield Usage(input_tokens=7, output_tokens=3)
 
 
+@dataclass(frozen=True)
+class StandInCarrier:
+    """Stands in for the Docker carrier through the full queue path: create-or-attach returns a
+    handle, and exec is never reached because StandInModel makes no tool calls."""
+
+    async def create(self, spec: SandboxSpec) -> SandboxHandle:
+        return SandboxHandle(conversation_id=spec.conversation_id, container_id="test")
+
+    async def exec(
+        self, handle: SandboxHandle, argv: tuple[str, ...], stdin: bytes, timeout_s: int
+    ) -> ExecResult:
+        return ExecResult(stdout="", stderr="", exit_code=0)
+
+    async def route(self, handle: SandboxHandle, port: int) -> str:
+        return "http://test"
+
+    async def destroy(self, handle: SandboxHandle) -> None: ...
+
+
 @pytest.fixture(scope="session")
 def dbos_runtime(
     database_url: str, tmp_path_factory: pytest.TempPathFactory
@@ -65,7 +85,12 @@ def dbos_runtime(
         asyncio.run(reset_postgres_database(make_url(system_url).database))
     hub = InProcessHub()
     blob = FilesystemBlobStore(root=blob_root)
-    loop_queue.init_runtime(loop_queue.Runtime(config=config, blob=blob, hub=hub))
+    proxy = ProxyEndpoint(url="http://proxy.test", ca_cert="test-ca")
+    loop_queue.init_runtime(
+        loop_queue.Runtime(
+            config=config, blob=blob, hub=hub, carrier=StandInCarrier(), proxy=proxy
+        )
+    )
     DBOS(
         config={
             "name": DBOS_APP_NAME,

@@ -8,7 +8,7 @@ from uuid import UUID
 import sqlalchemy as sa
 from dbos import DBOS, Queue
 
-from selfhost.blob import BlobStore
+from selfhost.blob import BlobStore, FilesystemBlobStore
 from selfhost.config import Config
 from selfhost.db import workspace_tx
 from selfhost.hub import Hub, Terminal
@@ -18,6 +18,13 @@ from selfhost.models.anthropic import AnthropicClient, anthropic_sdk_client
 from selfhost.models.interface import ModelClient
 from selfhost.models.openai import OpenAIClient, openai_sdk_client
 from selfhost.o11y import log
+from selfhost.sandbox.session import (
+    Carrier,
+    MountSpec,
+    ProxyEndpoint,
+    SandboxSession,
+    SandboxSpec,
+)
 from selfhost.schema import tables
 from selfhost.schema.records import (
     TURN_QUEUE_NAME,
@@ -26,7 +33,11 @@ from selfhost.schema.records import (
     TerminalFrame,
     Turn,
 )
+from selfhost.tools.builtins import BUILTIN_TOOLS
+from selfhost.tools.registry import ToolRegistry
 
+SANDBOX_IMAGE_REF = "selfhost-sandbox:latest"
+BUILTIN_REGISTRY = ToolRegistry(BUILTIN_TOOLS)
 TURN_QUEUE_POLL_SECONDS = 0.1
 FAILED_TERMINAL_RETRY_SECONDS = 1.0
 FAILED_TERMINAL_RETRY_MAX_SECONDS = 30.0
@@ -45,6 +56,8 @@ class Runtime:
     config: Config
     blob: BlobStore
     hub: Hub
+    carrier: Carrier
+    proxy: ProxyEndpoint
 
 
 _runtime: Runtime | None = None
@@ -64,12 +77,23 @@ async def _execute_turn(turn_id: str) -> str:
         raise RuntimeError("runtime not initialized (init_runtime runs in serve)")
     try:
         turn, agent = await _load_turn(UUID(turn_id))
+        handle = await runtime.carrier.create(
+            SandboxSpec(
+                conversation_id=turn.conversation_id,
+                image_ref=SANDBOX_IMAGE_REF,
+                mount=await _workspace_mount(runtime.blob, turn.conversation_id),
+                proxy=runtime.proxy,
+            )
+        )
         engine = TurnEngine(
             turn=turn,
             agent=agent,
             model=_model_client(agent.model, runtime.config),
             transcript=Transcript(blob=runtime.blob, conversation_id=turn.conversation_id),
             hub=runtime.hub,
+            sandbox=SandboxSession(carrier=runtime.carrier, handle=handle),
+            tools=BUILTIN_REGISTRY,
+            blob=runtime.blob,
         )
         frame = await engine.run()
         return frame.status
@@ -147,6 +171,17 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent]:
         terminal=None if row.terminal is None else TerminalFrame.model_validate(row.terminal),
     )
     return turn, Agent(prompt=row.prompt, model=row.model)
+
+
+async def _workspace_mount(blob: BlobStore, conversation_id: UUID) -> MountSpec:
+    """The container bind-mounts only the conversation's `workspace/` subtree — a sibling of the
+    transcript under `conversations/<id>/`, never the transcript itself. The Docker carrier reaches
+    the workspace as a host path, so it requires the filesystem blob backend."""
+    if not isinstance(blob, FilesystemBlobStore):
+        raise RuntimeError("the docker sandbox requires a filesystem blob store for its workspace")
+    host_path = blob.root / "conversations" / str(conversation_id) / "workspace"
+    await asyncio.to_thread(host_path.mkdir, parents=True, exist_ok=True)
+    return MountSpec(kind="filesystem", host_path=str(host_path))
 
 
 def _model_client(model: str, config: Config) -> ModelClient:

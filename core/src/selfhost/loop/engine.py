@@ -1,21 +1,37 @@
 """One turn, top to bottom: mark running, load context, model round, terminal commit."""
 
 import asyncio
+import json
 import time
 from dataclasses import dataclass
 
 import sqlalchemy as sa
 
 from selfhost.accounting import read_turn_cost, record_turn_usage
+from selfhost.blob import BlobStore
 from selfhost.db import workspace_tx
 from selfhost.hub import Hub, Terminal
 from selfhost.loop.transcript import Conversation, Transcript
-from selfhost.models.interface import Message, ModelClient, ModelRequest, TextDelta
+from selfhost.models.interface import (
+    Message,
+    ModelClient,
+    ModelRequest,
+    TextBlock,
+    TextDelta,
+    ToolCallDelta,
+    ToolCallStart,
+    ToolResultBlock,
+    ToolUseBlock,
+)
 from selfhost.o11y import emit_metric, log, turn_span
+from selfhost.sandbox.session import SandboxSession
 from selfhost.schema import tables
 from selfhost.schema.records import Agent, TerminalFrame, TerminalStatus, Turn, Usage
+from selfhost.tools.context import ToolContext
+from selfhost.tools.registry import ToolRegistry
 
 MAX_OUTPUT_TOKENS = 16_000
+MAX_TOOL_ROUNDS = 50
 DELTA_FLUSH_BYTES = 2048
 DELTA_FLUSH_SECONDS = 0.2
 EMPTY_RESPONSE_NUDGE = "Previous model response was empty. Answer now."
@@ -23,6 +39,11 @@ TRANSCRIPT_WRITE_ATTEMPTS = 3
 TRANSCRIPT_WRITE_RETRY_SECONDS = 0.5
 COMMIT_RETRY_INITIAL_SECONDS = 1.0
 COMMIT_RETRY_MAX_SECONDS = 30.0
+
+
+def _parse_args(partials: list[str]) -> dict[str, object]:
+    joined = "".join(partials)
+    return json.loads(joined) if joined.strip() else {}
 
 
 def _total_usage(usage_events: list[Usage]) -> Usage:
@@ -41,18 +62,24 @@ class TurnEngine:
     model: ModelClient
     transcript: Transcript
     hub: Hub
+    sandbox: SandboxSession
+    tools: ToolRegistry
+    blob: BlobStore
 
     async def run(self) -> TerminalFrame:
         with turn_span(self.turn.id, self.turn.conversation_id):
             emit_metric("turn_started_total")
             log("turn.started", turn_id=str(self.turn.id), seq=self.turn.seq)
             usage_events: list[Usage] = []
+            context = ToolContext(
+                sandbox=self.sandbox, blob=self.blob, turn=self.turn, agent=self.agent
+            )
             try:
                 if not await self._mark_running():
                     await self._persist_inbound()
                     return await self._publish_existing_terminal()
                 final_messages, answer = await self._model_round(
-                    await self._load_messages(), usage_events
+                    context, await self._load_messages(), usage_events
                 )
                 frame = await self._commit("done", usage_events, answer=answer)
                 if frame.status == "done":
@@ -93,30 +120,47 @@ class TurnEngine:
         return stored.messages
 
     async def _model_round(
-        self, messages: tuple[Message, ...], usage_events: list[Usage]
+        self, context: ToolContext, messages: tuple[Message, ...], usage_events: list[Usage]
     ) -> tuple[tuple[Message, ...], str]:
-        answer = await self._stream_once(messages, usage_events)
-        if answer.strip():
-            return messages, answer
-        nudged = (*messages, Message(role="user", content=EMPTY_RESPONSE_NUDGE))
-        answer = await self._stream_once(nudged, usage_events)
-        if not answer.strip():
-            raise RuntimeError("model returned an empty response twice")
-        return nudged, answer
+        """Call the model until it answers with text and no tool calls; each tool-calling round
+        dispatches the calls in the sandbox and feeds the results back as the next user turn."""
+        nudged = False
+        for _round in range(MAX_TOOL_ROUNDS):
+            text, tool_calls = await self._stream_once(messages, usage_events)
+            if not tool_calls:
+                if text.strip():
+                    return messages, text
+                if nudged:
+                    raise RuntimeError("model returned an empty response twice")
+                nudged = True
+                messages = (*messages, Message(role="user", content=EMPTY_RESPONSE_NUDGE))
+                continue
+            assistant_blocks = (*((TextBlock(text=text),) if text else ()), *tool_calls)
+            results = tuple([await self._dispatch(context, call) for call in tool_calls])
+            messages = (
+                *messages,
+                Message(role="assistant", content=assistant_blocks),
+                Message(role="user", content=results),
+            )
+        raise RuntimeError(f"tool round limit exceeded ({MAX_TOOL_ROUNDS})")
 
     async def _stream_once(
         self, messages: tuple[Message, ...], usage_events: list[Usage]
-    ) -> str:
+    ) -> tuple[str, tuple[ToolUseBlock, ...]]:
         request = ModelRequest(
             model=self.agent.model,
             system=self.agent.prompt,
             messages=messages,
             max_tokens=MAX_OUTPUT_TOKENS,
+            tools=self.tools.schemas(),
         )
         parts: list[str] = []
         buffer: list[str] = []
         pending = 0
         last_flush = time.monotonic()
+        call_names: dict[str, str] = {}
+        call_json: dict[str, list[str]] = {}
+        call_order: list[str] = []
 
         async def flush() -> None:
             nonlocal pending, last_flush
@@ -137,12 +181,41 @@ class TurnEngine:
                         pending and time.monotonic() - last_flush >= DELTA_FLUSH_SECONDS
                     ):
                         await flush()
+                case ToolCallStart(id=call_id, name=name):
+                    call_names[call_id] = name
+                    call_json[call_id] = []
+                    call_order.append(call_id)
+                case ToolCallDelta(id=call_id, partial_json=partial):
+                    call_json[call_id].append(partial)
                 case Usage():
                     usage_events.append(event)
         await flush()
         if len(usage_events) == seen:
             raise RuntimeError("model stream produced no usage")
-        return "".join(parts)
+        tool_calls = tuple(
+            ToolUseBlock(
+                id=call_id, name=call_names[call_id], input=_parse_args(call_json[call_id])
+            )
+            for call_id in call_order
+        )
+        return "".join(parts), tool_calls
+
+    async def _dispatch(self, context: ToolContext, call: ToolUseBlock) -> ToolResultBlock:
+        """Run one tool call in the sandbox; a bad name, bad arguments, or a raising handler
+        become an is_error result the model can recover from, never a turn failure."""
+        try:
+            tool = self.tools.get(call.name)
+            args = tool.input_model.model_validate(call.input)
+            result = await tool.handler(context, args)
+        except Exception as error:
+            return ToolResultBlock(
+                tool_use_id=call.id, content=f"{type(error).__name__}: {error}", is_error=True
+            )
+        return ToolResultBlock(
+            tool_use_id=call.id,
+            content="".join(block.text for block in result.content),
+            is_error=result.is_error,
+        )
 
     async def _commit(
         self,
