@@ -144,6 +144,24 @@ async def test_production_backends_admit_a_second_instance_beside_a_live_peer(db
     assert await _row_present(guard.instance_id)
 
 
+async def test_two_instances_booting_at_once_admit_exactly_one(db: None) -> None:
+    workspace_id = await _workspace()
+    config = Config(
+        database=DatabaseConfig(url="postgresql+asyncpg://u:p@h:5432/db"),
+        blob=BlobConfig(backend="s3", bucket="b"),
+    )
+    first = BootGuard(config=config, workspace_id=workspace_id, instance_id=uuid4())
+    second = BootGuard(config=config, workspace_id=workspace_id, instance_id=uuid4())
+    results = await asyncio.gather(first.admit(), second.admit(), return_exceptions=True)
+    admitted = [
+        guard for guard, outcome in zip((first, second), results, strict=True) if outcome is None
+    ]
+    refused = [outcome for outcome in results if isinstance(outcome, RuntimeError)]
+    assert len(admitted) == 1
+    assert len(refused) == 1
+    assert await _row_present(admitted[0].instance_id)
+
+
 async def test_a_peer_in_another_workspace_never_blocks(db: None) -> None:
     workspace_id = await _workspace()
     other = await _workspace()

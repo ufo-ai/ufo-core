@@ -43,7 +43,9 @@ def uses_dev_default(config: Config) -> bool:
 @dataclass(frozen=True)
 class BootGuard:
     """Admit this instance or refuse it. `admit` is the whole flow: read live peers, refuse when a
-    dev default cannot be shared alongside them, else record this instance's row."""
+    dev default cannot be shared alongside them, else record this instance's row. Two instances
+    booting at once are serialized so the read-then-insert is atomic — a workspace-scoped advisory
+    lock on Postgres, `begin immediate` on SQLite — so a race cannot admit both."""
 
     config: Config
     workspace_id: UUID
@@ -53,6 +55,11 @@ class BootGuard:
         fingerprint = fingerprint_of(self.config)
         cutoff = datetime.now(UTC) - timedelta(seconds=STALE_AFTER_SECONDS)
         async with workspace_tx() as connection:
+            if connection.dialect.name == "postgresql":
+                await connection.execute(
+                    sa.text("select pg_advisory_xact_lock(hashtext(:ws))"),
+                    {"ws": str(self.workspace_id)},
+                )
             peers = (
                 await connection.execute(
                     sa.select(
