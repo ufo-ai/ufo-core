@@ -10,6 +10,13 @@ consult it before writing something the old repo already proved. `docs/plan.md` 
 **Core doctrine is the first review question:** if a capability can be an extension, it is not
 core. Every addition to `core/` must name why extensions cannot express it.
 
+**Every member action happens in chat.** Connecting an account, granting access, approving a
+change — a member expresses it in natural conversation and the agent drives it (a tool it calls,
+surfacing any link in its reply); never a slash-command, keyword, or bespoke end-user HTTP
+endpoint. The only endpoints are the chat transport itself and unavoidable third-party plumbing
+(e.g. an OAuth callback). The speaker gates the granting act; subsequent use is the wire's job.
+(`selfhost` CLI verbs are the operator surface — a different audience, not member actions.)
+
 ## One shape
 
 **The code is exactly what it does, nothing else.** Anything that creates a second answer to "what
@@ -79,6 +86,12 @@ hard-to-vary decision; cut the words around it. Prefer a table to prose. One exa
 
 ## Hot paths and failure domains
 
+- **Root-cause, never work around.** An internal fault — deadlock, race, wedged query — is
+  diagnosed to its root and fixed deterministically, never masked by a retry, sleep, timeout bump,
+  or CI rerun. This is a realtime system; injected latency and retry loops are unacceptable.
+  Retry/backoff/timeout is legitimate only against proven *external* uncertainty (a model, OAuth,
+  or network egress call), never for our own DB, DBOS, queue, or code — and a root fix deletes the
+  stopgap that preceded it.
 - A client's wait always ends: one try encloses the turn; the except commits the terminal state.
 - Derived state (embeddings, summaries, index rows) is produced by jobs, never inline on a write.
 - Bound every payload sent to an external API next to the call.
