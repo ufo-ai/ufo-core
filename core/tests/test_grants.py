@@ -23,7 +23,13 @@ from selfhost.grants import (
     grant_summaries,
     install_connect_flow,
 )
-from selfhost.sandbox.proxy.rules import InjectionRule, ScopeRule, derive_grant_rules
+from selfhost.sandbox.proxy.rules import (
+    GRANT_METER_DIMENSION,
+    InjectionRule,
+    MeterRule,
+    ScopeRule,
+    derive_grant_rules,
+)
 from selfhost.sandbox.proxy.server import EgressProxy, PerAgentRules, _inject, generate_ca
 from selfhost.sandbox.session import RunToken
 from selfhost.schema import tables
@@ -114,6 +120,8 @@ def test_derive_admits_the_granted_host_and_injects_its_token() -> None:
     assert injection.header == "authorization"
     assert injection.sentinel == "Bearer SELFHOST_SENTINEL_GRANT_stub_acct-42"
     assert injection.real == "Bearer tok-abc"
+    meter = next(r for r in rules if isinstance(r, MeterRule))
+    assert meter == MeterRule(host=GRANTED_HOST, dimension=GRANT_METER_DIMENSION)
 
 
 def test_no_grants_derive_no_rules() -> None:

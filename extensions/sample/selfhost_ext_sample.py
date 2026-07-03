@@ -7,12 +7,16 @@ its own `ExtensionContext.store` (durable `ext_store` rows, never a mock log), s
 those rows back through the same public surfaces core writes them by. `UNDECLARED_SLOT` names a slot
 the Manifest never declares — the probe that a handler asking for an undeclared slot is refused."""
 
+from dataclasses import dataclass
+
 from pydantic import BaseModel
 
+from selfhost.sdk.connectors import OAuthAccount
 from selfhost.sdk.context import ExtensionContext
 from selfhost.sdk.http import PlainTextResponse, Request, Response
 from selfhost.sdk.jobs import JobSpec
 from selfhost.sdk.manifest import (
+    ConnectorProvider,
     CredentialSlot,
     InjectionTarget,
     Manifest,
@@ -33,10 +37,17 @@ INJECTION_HOST = "api.sample.test"
 INJECTION_HEADER = "authorization"
 INJECTION_SENTINEL = "Bearer sentinel-sample-key"
 INJECTION_DIMENSION = "requests"
+CONNECTOR_PROVIDER = "sample_connector"
+CONNECTOR_HOST = "api.connector.sample.test"
+CONNECTOR_ACCOUNT = "sample-account-1"
+CONNECTOR_TOKEN = "sample-connector-token"
+CONNECTOR_AUTHORIZE_URL = "https://connect.sample.test/oauth"
+CONNECTOR_TOOL_NAME = "sample_connector_call"
 TOOL_KEY = "tool:echo"
 JOB_KEY = "job:ran"
 ROUTE_KEY = "route:hit"
 ONBOARDING_KEY = "onboarding:done"
+CONNECTOR_KEY = "connector:called"
 
 
 class EchoInput(BaseModel):
@@ -64,6 +75,41 @@ async def _setup(ctx: ExtensionContext) -> None:
     await ctx.store.put(ONBOARDING_KEY, {"onboarded": True})
 
 
+@dataclass(frozen=True)
+class _SampleConnectorOAuth:
+    """The stub connector's OAuth descriptor: a canned authorize URL and a canned account/token
+    exchange stand in for a real provider's handoff, so the connect seam runs end to end without a
+    live provider. `host` is the one the derived grant admits and meters at the egress proxy."""
+
+    provider: str = CONNECTOR_PROVIDER
+    host: str = CONNECTOR_HOST
+
+    def authorize_url(self, state: str, redirect_uri: str) -> str:
+        return f"{CONNECTOR_AUTHORIZE_URL}?state={state}&redirect_uri={redirect_uri}"
+
+    async def exchange(self, code: str, redirect_uri: str) -> OAuthAccount:
+        return OAuthAccount(account_id=CONNECTOR_ACCOUNT, token=CONNECTOR_TOKEN)
+
+
+class ConnectorCallInput(BaseModel):
+    path: str = "me"
+
+
+async def _connector_call(ctx: ToolContext, args: ConnectorCallInput) -> ToolResult:
+    """The stub connector action: reach the provider host through the sandbox's egress proxy — the
+    grant's rule admits the host and swaps the account's real token onto the wire — recording the
+    call through the extension's scoped store so the seam is read back through a public surface."""
+    if ctx.ext is None:
+        raise RuntimeError("sample connector tool dispatched without its ExtensionContext")
+    result = await ctx.sandbox.bash(
+        f"curl -sS -o /dev/null -w '%{{http_code}}' https://{CONNECTOR_HOST}/{args.path}"
+    )
+    await ctx.ext.store.put(CONNECTOR_KEY, {"host": CONNECTOR_HOST, "path": args.path})
+    return ToolResult(
+        content=(TextContent(text=result.stdout),), is_error=result.exit_code != 0
+    )
+
+
 def manifest() -> Manifest:
     return Manifest(
         name=NAME,
@@ -88,6 +134,19 @@ def manifest() -> Manifest:
                     header=INJECTION_HEADER,
                     sentinel=INJECTION_SENTINEL,
                     dimension=INJECTION_DIMENSION,
+                ),
+            ),
+        ),
+        connectors=(
+            ConnectorProvider(
+                oauth=_SampleConnectorOAuth(),
+                tools=(
+                    ToolDef(
+                        name=CONNECTOR_TOOL_NAME,
+                        description="Call the sample connector's provider host through the proxy.",
+                        input_model=ConnectorCallInput,
+                        handler=_connector_call,
+                    ),
                 ),
             ),
         ),
