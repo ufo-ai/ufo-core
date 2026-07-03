@@ -61,7 +61,11 @@ terminal frame. A client's wait always ends — the terminal state commits on th
 
 - **Tool calling** — typed registry; per-call metering; results bounded before hitting the model.
 - **Skill loading** — skills are folders of files (SKILL.md + assets), mounted into the sandbox on
-  `load_skill`; packs are collections of skills plus onboarding steps.
+  `load_skill`; packs are collections of skills plus onboarding steps. **A skill ships with the
+  thing it teaches**: core ships exactly three — `sandbox`, `memory`, `delegation` — teaching
+  core's own builtins; an extension's skills ride its manifest; domain skills are packs. Every-turn
+  content belongs in the system prompt, situational/long content in skills; skills carry
+  workflows, never restated tool docs (the tool's description is authoritative).
 - **Typed subagents** — a registry of profiles (name, prompt, tool subset, input/output schema);
   spawn = child turn with parent linkage; foreground awaits, background returns an id. Extensions
   register profiles.
