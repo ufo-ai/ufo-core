@@ -1,6 +1,7 @@
 """The Redis-hub extension's unit proof: the frame wire codec round-trips every LiveFrame kind, and
 the manifest's build wires the backend from `config.hub.url` (a missing URL fails loud). The live
-XADD/XREAD path needs a running Redis and is exercised in integration, not here."""
+XADD/XREAD path against a real Redis — every frame kind round-tripped, cursor resume, and MAXLEN
+trimming — is `core/tests/integration/test_redis_hub.py`, not here."""
 
 import pytest
 import selfhost_ext_redis_hub.manifest as ext
