@@ -10,17 +10,30 @@ import shutil
 import struct
 import subprocess
 import zlib
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 import sqlalchemy as sa
+from pydantic import BaseModel
 
 from selfhost.artifact_token import verify_artifact_token
 from selfhost.blob import FilesystemBlobStore
 from selfhost.db import workspace_tx
+from selfhost.ext.loader import HookChain
+from selfhost.hub import InProcessHub
+from selfhost.loop.compaction import Compaction
+from selfhost.loop.engine import (
+    MAX_TOOL_RESULT_CHARS,
+    TOOL_OUTPUT_DIR,
+    TOOL_RESULT_PREVIEW_CHARS,
+    TurnEngine,
+)
+from selfhost.loop.prompts.render import rendered_prompt
+from selfhost.loop.transcript import Transcript
+from selfhost.models.interface import ModelEvent, ModelRequest, ToolUseBlock
 from selfhost.sandbox import session as session_module
 from selfhost.sandbox.carrier import DockerCarrier
 from selfhost.sandbox.session import (
@@ -31,10 +44,16 @@ from selfhost.sandbox.session import (
     SandboxSession,
 )
 from selfhost.schema import tables
-from selfhost.schema.records import Agent, Turn
+from selfhost.schema.records import Agent, Turn, Usage
 from selfhost.tools.builtins import BUILTIN_TOOLS
-from selfhost.tools.context import ImageContent, SpawnResult, TextContent, ToolContext
-from selfhost.tools.registry import ToolRegistry
+from selfhost.tools.context import (
+    ImageContent,
+    SpawnResult,
+    TextContent,
+    ToolContext,
+    ToolResult,
+)
+from selfhost.tools.registry import ToolDef, ToolRegistry
 
 SANDBOX_TEST_IMAGE = "selfhost-sandbox:test"
 OVER_INMEMORY_BYTES = 25 * 1024 * 1024
@@ -402,3 +421,63 @@ async def test_share_file_confines_a_traversal_name(
     parts = claims.blob_key.split("/")
     assert parts[0] == "artifacts" and ".." not in parts and parts[-1] == "x"
     assert claims.filename == "x"
+
+
+class _NoArgs(BaseModel):
+    pass
+
+
+class _QuietModel:
+    """A model the engine never calls in these dispatch-only tests; it satisfies TurnEngine's
+    required fields without standing in for real completion."""
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        yield Usage(input_tokens=0, output_tokens=0)
+
+
+def _oversize_tool(name: str, content: str) -> ToolDef:
+    async def handler(ctx: ToolContext, args: BaseModel) -> ToolResult:
+        return ToolResult(content=(TextContent(text=content),))
+
+    return ToolDef(name=name, description="d", input_model=_NoArgs, handler=handler)
+
+
+async def test_engine_offloads_an_oversize_result_to_a_readable_workspace_file(
+    file_ctx: tuple[ToolContext, Path],
+) -> None:
+    ctx, workspace = file_ctx
+    full = "offloaded line\n" * (MAX_TOOL_RESULT_CHARS // 15 + 1)
+    assert len(full) > MAX_TOOL_RESULT_CHARS
+    engine = TurnEngine(
+        turn=ctx.turn,
+        agent=ctx.agent,
+        system_prompt=rendered_prompt("p"),
+        model=_QuietModel(),
+        transcript=Transcript(blob=ctx.blob, conversation_id=ctx.turn.conversation_id),
+        compaction=Compaction(
+            client=_QuietModel(),
+            model="claude-opus-4-8",
+            blob=ctx.blob,
+            conversation_id=ctx.turn.conversation_id,
+        ),
+        hub=InProcessHub(),
+        sandbox=ctx.sandbox,
+        tools=ToolRegistry((_oversize_tool("big", full),)),
+        tool_ext={},
+        hooks=HookChain(),
+        blob=ctx.blob,
+        spawn=ctx.spawn,
+        memory=ctx.memory,
+        member_id=ctx.member_id,
+        artifact_token_secret=ctx.artifact_token_secret,
+        grants=None,
+    )
+    block = await engine._dispatch(ctx, ToolUseBlock(id="call1", name="big", input={}))
+    path = f"{TOOL_OUTPUT_DIR}/call1.txt"
+    assert not block.is_error
+    assert isinstance(block.content, str)
+    assert path in block.content
+    assert len(block.content) <= TOOL_RESULT_PREVIEW_CHARS + 200
+    assert (workspace / ".tool-output" / "call1.txt").read_text() == full
+    result = await _run("read", ctx, file_path=".tool-output/call1.txt", offset=1, limit=1)
+    assert "offloaded line" in result.content[0].text

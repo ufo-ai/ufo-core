@@ -19,7 +19,10 @@ from selfhost.loop.compaction import COMPACTED_CONTEXT_PREFIX, Compaction
 from selfhost.loop.engine import (
     FORCE_FINAL_PROMPT,
     MAX_TOOL_RESULT_CHARS,
+    OFFLOAD_NOTICE,
     RECALL_CONTEXT_PREFIX,
+    TOOL_OUTPUT_DIR,
+    TOOL_RESULT_PREVIEW_CHARS,
     UNTRUSTED_RESULT_CLOSE,
     UNTRUSTED_RESULT_CLOSE_ESCAPE,
     UNTRUSTED_RESULT_NOTICE,
@@ -226,6 +229,21 @@ class NeverAnsweringModel:
         yield Usage(input_tokens=1, output_tokens=1)
 
 
+@dataclass
+class OverflowThenAnswerModel:
+    """Raises a provider context-overflow on its first call, then answers — so the engine's reactive
+    recovery (force-compact past the trigger, retry once) runs end to end."""
+
+    calls: int = 0
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("input is too long for the context window")
+        yield TextDelta(text="recovered")
+        yield Usage(input_tokens=1, output_tokens=1)
+
+
 STUB_AUTHORIZE_URL = "https://stub.test/oauth"
 
 
@@ -273,6 +291,7 @@ class RecordingCarrier:
         default_factory=lambda: ExecResult(stdout="", stderr="", exit_code=0)
     )
     calls: list[tuple[str, ...]] = field(default_factory=list)
+    stdins: list[bytes] = field(default_factory=list)
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         return SandboxHandle(conversation_id=spec.conversation_id, container_id="test")
@@ -281,6 +300,7 @@ class RecordingCarrier:
         self, handle: SandboxHandle, argv: tuple[str, ...], stdin: bytes, timeout_s: int
     ) -> ExecResult:
         self.calls.append(argv)
+        self.stdins.append(stdin)
         return self.result
 
     async def destroy(self, handle: SandboxHandle) -> None: ...
@@ -579,6 +599,42 @@ async def test_compaction_fires_mid_round_when_a_tool_loop_grows_the_window(
     assert await compaction.read_record(1) is not None
 
 
+async def test_context_overflow_forces_a_compaction_then_completes(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None, seq=2)
+    blob = FilesystemBlobStore(root=tmp_path)
+    transcript = Transcript(blob=blob, conversation_id=turn.conversation_id)
+    await transcript.write(
+        Conversation(
+            seq=1,
+            messages=tuple(
+                Message(
+                    role="user" if index % 2 == 0 else "assistant",
+                    content=f"history {index}",
+                )
+                for index in range(6)
+            ),
+        )
+    )
+    compaction = Compaction(
+        client=EchoModel(),
+        model="claude-opus-4-8",
+        blob=blob,
+        conversation_id=turn.conversation_id,
+        trigger_tokens=1_000_000,
+        keep_messages=2,
+    )
+    model = OverflowThenAnswerModel()
+    engine = _engine(turn, model, tmp_path, compaction=compaction)
+    frame = await engine.run()
+    assert frame.status == "done"
+    assert frame.text == "recovered"
+    assert model.calls == 2
+    assert await compaction.read_record(1) is not None
+    assert await compaction.read_record(2) is None
+
+
 async def test_cancel_winning_mid_round_keeps_cancelled_terminal_bills_and_preserves_inbound(
     db: None, tmp_path: Path
 ) -> None:
@@ -731,11 +787,19 @@ class _NoArgs(BaseModel):
     pass
 
 
-def _fixed_result_tool(name: str, content: str, is_error: bool = False) -> ToolDef:
+def _fixed_result_tool(
+    name: str, content: str, is_error: bool = False, untrusted: bool = False
+) -> ToolDef:
     async def handler(context: ToolContext, args: BaseModel) -> ToolResult:
         return ToolResult(content=(TextContent(text=content),), is_error=is_error)
 
-    return ToolDef(name=name, description="d", input_model=_NoArgs, handler=handler)
+    return ToolDef(
+        name=name,
+        description="d",
+        input_model=_NoArgs,
+        handler=handler,
+        untrusted=untrusted,
+    )
 
 
 def test_bounded_truncates_over_cap_with_marker_and_leaves_within_cap_untouched() -> None:
@@ -747,7 +811,7 @@ def test_bounded_truncates_over_cap_with_marker_and_leaves_within_cap_untouched(
     assert bounded == "z" * MAX_TOOL_RESULT_CHARS + f"\n…[truncated 500 of {total} chars]"
 
 
-async def test_dispatch_bounds_over_cap_result_and_leaves_within_cap_untouched(
+async def test_dispatch_bounds_an_oversize_error_result_and_leaves_within_cap_untouched(
     db: None, tmp_path: Path
 ) -> None:
     turn = await _seed_turn("queued", None)
@@ -756,7 +820,6 @@ async def test_dispatch_bounds_over_cap_result_and_leaves_within_cap_untouched(
         _engine(turn, EchoModel(), tmp_path),
         tools=ToolRegistry(
             (
-                _fixed_result_tool("big", "a" * total),
                 _fixed_result_tool("big_error", "b" * total, is_error=True),
                 _fixed_result_tool("small", "c" * (MAX_TOOL_RESULT_CHARS - 1)),
             )
@@ -774,19 +837,87 @@ async def test_dispatch_bounds_over_cap_result_and_leaves_within_cap_untouched(
         grants=engine.grants,
     )
 
-    big = await engine._dispatch(context, ToolUseBlock(id="c1", name="big", input={}))
-    assert not big.is_error
-    assert len(big.content) == MAX_TOOL_RESULT_CHARS + len(f"\n…[truncated 500 of {total} chars]")
-    assert big.content.startswith("a" * MAX_TOOL_RESULT_CHARS)
-    assert big.content.endswith(f"\n…[truncated 500 of {total} chars]")
-
     big_error = await engine._dispatch(context, ToolUseBlock(id="c2", name="big_error", input={}))
     assert big_error.is_error
+    assert isinstance(big_error.content, str)
     assert big_error.content.startswith("b" * MAX_TOOL_RESULT_CHARS)
     assert big_error.content.endswith(f"\n…[truncated 500 of {total} chars]")
 
     small = await engine._dispatch(context, ToolUseBlock(id="c3", name="small", input={}))
     assert small.content == "c" * (MAX_TOOL_RESULT_CHARS - 1)
+
+
+async def test_dispatch_offloads_an_oversize_nonerror_result_and_keeps_a_preview(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    total = MAX_TOOL_RESULT_CHARS + 500
+    full = "a" * total
+    carrier = RecordingCarrier()
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path, carrier=carrier),
+        tools=ToolRegistry((_fixed_result_tool("big", full),)),
+    )
+    context = ToolContext(
+        sandbox=engine.sandbox,
+        blob=engine.blob,
+        turn=engine.turn,
+        agent=engine.agent,
+        spawn=engine.spawn,
+        memory=engine.memory,
+        member_id=engine.member_id,
+        artifact_token_secret=engine.artifact_token_secret,
+        grants=engine.grants,
+    )
+    block = await engine._dispatch(context, ToolUseBlock(id="c1", name="big", input={}))
+    assert not block.is_error
+    path = f"{TOOL_OUTPUT_DIR}/c1.txt"
+    assert block.content == full[:TOOL_RESULT_PREVIEW_CHARS] + OFFLOAD_NOTICE.format(
+        total=total, path=path
+    )
+    assert full not in block.content
+    writes = [
+        (argv, stdin)
+        for argv, stdin in zip(carrier.calls, carrier.stdins, strict=True)
+        if len(argv) >= 3 and "cat >" in argv[2]
+    ]
+    assert len(writes) == 1
+    write_argv, write_stdin = writes[0]
+    assert write_argv[-1] == path
+    assert write_stdin == full.encode()
+
+
+async def test_dispatch_offload_preview_is_walled_for_an_untrusted_tool(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    total = MAX_TOOL_RESULT_CHARS + 500
+    full = "u" * total
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        tools=ToolRegistry((_fixed_result_tool("big_untrusted", full, untrusted=True),)),
+    )
+    context = ToolContext(
+        sandbox=engine.sandbox,
+        blob=engine.blob,
+        turn=engine.turn,
+        agent=engine.agent,
+        spawn=engine.spawn,
+        memory=engine.memory,
+        member_id=engine.member_id,
+        artifact_token_secret=engine.artifact_token_secret,
+        grants=engine.grants,
+    )
+    block = await engine._dispatch(context, ToolUseBlock(id="c1", name="big_untrusted", input={}))
+    assert not block.is_error
+    path = f"{TOOL_OUTPUT_DIR}/c1.txt"
+    preview = full[:TOOL_RESULT_PREVIEW_CHARS] + OFFLOAD_NOTICE.format(total=total, path=path)
+    assert block.content == (
+        UNTRUSTED_RESULT_NOTICE.format(source="big_untrusted")
+        + UNTRUSTED_RESULT_OPEN.format(source="big_untrusted")
+        + preview
+        + UNTRUSTED_RESULT_CLOSE
+    )
 
 
 def _image_result_tool(name: str) -> ToolDef:

@@ -63,11 +63,15 @@ class Compaction:
     keep_messages: int = COMPACTION_KEEP_MESSAGES
 
     async def maybe_compact(
-        self, messages: tuple[Message, ...]
+        self, messages: tuple[Message, ...], force: bool = False
     ) -> tuple[tuple[Message, ...], tuple[Usage, ...]]:
+        """Compact when the window crosses the trigger, or unconditionally when `force` — the
+        reactive path after a provider context-overflow. Either way the compactibility guards hold:
+        a window at or under `keep_messages`, or one with no assistant boundary to split on, has
+        nothing to summarize and is returned unchanged, so a forced call still no-ops safely."""
         if len(messages) <= self.keep_messages:
             return messages, ()
-        if self._tokens(messages) <= self.trigger_tokens:
+        if not force and self._tokens(messages) <= self.trigger_tokens:
             return messages, ()
         return await self._compact(messages)
 

@@ -23,6 +23,7 @@ METRICS = (
     "turn_terminal_total",
     "turn_parked_total",
     "turn_round_budget_exhausted_total",
+    "turn_context_overflow_recovered_total",
     "sandbox_egress_total",
 )
 SENSITIVE_FIELD_KEYS = frozenset(

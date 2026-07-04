@@ -64,6 +64,37 @@ async def test_history_under_the_window_is_left_untouched(tmp_path: Path) -> Non
     assert await compaction.read_record(1) is None
 
 
+async def test_force_compacts_below_the_trigger(tmp_path: Path) -> None:
+    compaction = _compaction(tmp_path, trigger_tokens=1_000_000, keep_messages=2)
+    messages = _history()
+    result, usage = await compaction.maybe_compact(messages, force=True)
+    assert len(usage) == 1
+    assert len(result) == 3
+    assert isinstance(result[0].content, str)
+    assert result[0].content.startswith(COMPACTED_CONTEXT_PREFIX)
+    assert result[-1].content == messages[-1].content
+
+
+async def test_force_noops_when_the_window_is_within_keep_messages(tmp_path: Path) -> None:
+    compaction = _compaction(tmp_path, trigger_tokens=1_000_000, keep_messages=2)
+    messages = (Message(role="user", content="only one message"),)
+    result, usage = await compaction.maybe_compact(messages, force=True)
+    assert result is messages
+    assert usage == ()
+
+
+async def test_force_noops_when_no_assistant_boundary_exists(tmp_path: Path) -> None:
+    compaction = _compaction(tmp_path, trigger_tokens=1_000_000, keep_messages=2)
+    messages = (
+        Message(role="user", content="a"),
+        Message(role="user", content="b"),
+        Message(role="user", content="c"),
+    )
+    result, usage = await compaction.maybe_compact(messages, force=True)
+    assert result is messages
+    assert usage == ()
+
+
 async def test_history_over_the_window_compacts_and_keeps_the_tail_verbatim(
     tmp_path: Path,
 ) -> None:
