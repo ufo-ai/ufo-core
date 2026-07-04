@@ -115,6 +115,11 @@ def test_manifest_declares_the_browser_tools_and_profile() -> None:
     assert {profile.name for profile in manifest.subagents} == {BROWSER_SUBAGENT_NAME}
 
 
+def test_page_reading_tools_are_marked_untrusted() -> None:
+    untrusted = {tool.name for tool in BROWSER_TOOLS if tool.untrusted}
+    assert untrusted == {"read_page", "get_page_text", "find"}
+
+
 def test_tool_descriptions_are_the_ported_verbatim_strings() -> None:
     described = {tool.name: tool.description for tool in BROWSER_TOOLS}
     assert described["navigate"] == "Navigate to a URL, or go forward/back in browser history."

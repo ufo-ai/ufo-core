@@ -136,12 +136,14 @@ def manifest() -> Manifest:
                 description=SEARCH_WEB_DESCRIPTION,
                 input_model=SearchWebInput,
                 handler=_search_web,
+                untrusted=True,
             ),
             ToolDef(
                 name=FETCH_URL_TOOL,
                 description=FETCH_URL_DESCRIPTION,
                 input_model=FetchUrlInput,
                 handler=_fetch_url,
+                untrusted=True,
             ),
         ),
         credentials=(

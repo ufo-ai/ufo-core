@@ -1,8 +1,11 @@
 """Named tool definitions, their wire schemas, and lookup.
 
 A `ToolDef` binds a name and its input model to the handler that runs it; `schema()` renders the
-pair the model client puts on the wire. `ToolRegistry` is the frozen set the engine dispatches
-against — it rejects a duplicate name at construction and fails loud on an unknown lookup."""
+pair the model client puts on the wire. `untrusted` marks a tool whose result carries
+attacker-controllable content (a fetched page, a search snippet, a connector API response) — the
+engine walls such a result in a data-only span so the model never reads it as instructions.
+`ToolRegistry` is the frozen set the engine dispatches against — it rejects a duplicate name at
+construction and fails loud on an unknown lookup."""
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -19,6 +22,7 @@ class ToolDef:
     description: str
     input_model: type[BaseModel]
     handler: Callable[[ToolContext, BaseModel], Awaitable[ToolResult]]
+    untrusted: bool = False
 
     def schema(self) -> ToolSchema:
         return ToolSchema(

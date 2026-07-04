@@ -195,5 +195,6 @@ CONNECTOR_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=CallExternalToolInput,
         handler=call_external_tool,
+        untrusted=True,
     ),
 )
