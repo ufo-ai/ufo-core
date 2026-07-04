@@ -6,16 +6,20 @@ the credential slot the direct backend reads its key from; the manifest wraps ea
 `ConnectorBackend` and registers it as a source the sync driver drives."""
 
 from selfhost.sdk.sources import Connector
+from selfhost_ext_sources.activecampaign import ActiveCampaignConnector
 from selfhost_ext_sources.airtable import AirtableConnector
 from selfhost_ext_sources.asana import AsanaConnector
 from selfhost_ext_sources.ashby import AshbyConnector
 from selfhost_ext_sources.attio import AttioConnector
+from selfhost_ext_sources.bamboohr import BambooHRConnector
 from selfhost_ext_sources.brex import BrexConnector
 from selfhost_ext_sources.calendly import CalendlyConnector
+from selfhost_ext_sources.chargebee import ChargebeeConnector
 from selfhost_ext_sources.clickup import ClickUpConnector
 from selfhost_ext_sources.confluence import ConfluenceConnector
 from selfhost_ext_sources.deel import DeelConnector
 from selfhost_ext_sources.facebook_ads import FacebookAdsConnector
+from selfhost_ext_sources.freshdesk import FreshdeskConnector
 from selfhost_ext_sources.github import GitHubConnector
 from selfhost_ext_sources.gmail import GmailConnector
 from selfhost_ext_sources.google_ads import GoogleAdsConnector
@@ -30,6 +34,7 @@ from selfhost_ext_sources.intercom import IntercomConnector
 from selfhost_ext_sources.jira import JiraConnector
 from selfhost_ext_sources.klaviyo import KlaviyoConnector
 from selfhost_ext_sources.linear import LinearConnector
+from selfhost_ext_sources.mailchimp import MailchimpConnector
 from selfhost_ext_sources.microsoft_teams import MicrosoftTeamsConnector
 from selfhost_ext_sources.monday import MondayConnector
 from selfhost_ext_sources.notion import NotionConnector
@@ -50,16 +55,20 @@ from selfhost_ext_sources.xero import XeroConnector
 from selfhost_ext_sources.zendesk import ZendeskConnector
 
 CONNECTORS: dict[str, type[Connector]] = {
+    ActiveCampaignConnector.name: ActiveCampaignConnector,
     AirtableConnector.name: AirtableConnector,
     AsanaConnector.name: AsanaConnector,
     AshbyConnector.name: AshbyConnector,
     AttioConnector.name: AttioConnector,
+    BambooHRConnector.name: BambooHRConnector,
     BrexConnector.name: BrexConnector,
     CalendlyConnector.name: CalendlyConnector,
+    ChargebeeConnector.name: ChargebeeConnector,
     ClickUpConnector.name: ClickUpConnector,
     ConfluenceConnector.name: ConfluenceConnector,
     DeelConnector.name: DeelConnector,
     FacebookAdsConnector.name: FacebookAdsConnector,
+    FreshdeskConnector.name: FreshdeskConnector,
     GitHubConnector.name: GitHubConnector,
     GmailConnector.name: GmailConnector,
     GoogleAdsConnector.name: GoogleAdsConnector,
@@ -74,6 +83,7 @@ CONNECTORS: dict[str, type[Connector]] = {
     JiraConnector.name: JiraConnector,
     KlaviyoConnector.name: KlaviyoConnector,
     LinearConnector.name: LinearConnector,
+    MailchimpConnector.name: MailchimpConnector,
     MicrosoftTeamsConnector.name: MicrosoftTeamsConnector,
     MondayConnector.name: MondayConnector,
     NotionConnector.name: NotionConnector,

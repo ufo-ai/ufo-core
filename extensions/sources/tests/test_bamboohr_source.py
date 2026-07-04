@@ -1,0 +1,64 @@
+"""The BambooHR connector over a mock transport: the single-shot directory (list under `employees`)
+hitting the per-tenant gateway host, the HTTP Basic auth built from a direct key (password `"x"`),
+and a refusal surfacing as `StreamSkipped`. The class base URL is empty (per-tenant), so the tenant
+host is bound through `ConnectorSourceConfig.base_url`. Offline — a canned transport, no token."""
+
+import base64
+from collections.abc import Callable
+from uuid import UUID, uuid4
+
+import httpx
+import pytest
+from selfhost_ext_sources.bamboohr import BambooHRConnector
+
+from selfhost.connectors import Credential
+from selfhost.sdk.sources import ConnectorBackend, ConnectorSourceConfig
+from selfhost.sources.sync import SourceAuth, StreamSkipped, SyncResult
+
+ACCOUNT = "acct-1"
+BASE_URL = "https://api.bamboohr.com/api/gateway.php/acme"
+
+
+class _MockProxy:
+    def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
+        self._handler = handler
+
+    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
+        return Credential(transport=httpx.MockTransport(self._handler))
+
+
+async def _fetch(stream: str, handler: Callable[[httpx.Request], httpx.Response]) -> SyncResult:
+    auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler))
+    return await ConnectorBackend(connector=BambooHRConnector()).fetch(
+        ConnectorSourceConfig(account=ACCOUNT, stream=stream, base_url=BASE_URL), None, auth
+    )
+
+
+def _refs(result: SyncResult) -> set[str]:
+    return {page.source_ref for page in result.pages}
+
+
+async def test_directory_single_shot_hits_the_tenant_gateway_host() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "api.bamboohr.com"
+        assert request.url.path == "/api/gateway.php/acme/v1/employees/directory"
+        return httpx.Response(200, json={"employees": [{"id": 42, "displayName": "Ada"}]})
+
+    result = await _fetch("employees_directory", handle)
+    assert _refs(result) == {"employees_directory/42"}
+    assert result.snapshot is False
+
+
+async def test_basic_auth_built_from_a_direct_key() -> None:
+    client = BambooHRConnector()._make_client(BASE_URL, Credential(bearer="key-123"))
+    authed = next(client.auth.auth_flow(httpx.Request("GET", BASE_URL)))
+    expected = "Basic " + base64.b64encode(b"key-123:x").decode()
+    assert authed.headers["Authorization"] == expected
+
+
+async def test_stream_skipped_on_refusal() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": "unauthorized"})
+
+    with pytest.raises(StreamSkipped):
+        await _fetch("employees_directory", handle)

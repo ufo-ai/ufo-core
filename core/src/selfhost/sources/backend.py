@@ -30,10 +30,15 @@ class ConnectorSourceConfig(BaseModel):
     """Which account + stream one connector source row syncs. `account` is the handle the auth proxy
     resolves the credential for (a broker connected-account id under Composio, a label under the
     direct backend, whose key is keyed by the provider name); `stream` is the connector stream this
-    row pulls. The backend never reads a raw token — it asks the proxy for a `Credential`."""
+    row pulls. `base_url` overrides the connector's host for a per-tenant provider (Freshdesk's
+    `https://<account>.freshdesk.com`, Zendesk's `<subdomain>.zendesk.com`), whose connector class
+    leaves `base_url` empty; it is part of the config the `source_row_id` hashes, so two tenants of
+    the same provider settle on distinct rows. The backend never reads a raw token — it asks the
+    proxy for a `Credential`."""
 
     account: str
     stream: str
+    base_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -55,12 +60,20 @@ class ConnectorBackend:
             auth.workspace_id, self.connector.name, config.account
         )
         stream = self._stream(config.stream)
+        base_url = config.base_url or self.connector.base_url
+        if not base_url:
+            raise RuntimeError(
+                f"connector source {self.connector.name!r} resolved no base_url: it is a "
+                "per-tenant provider (its connector class leaves base_url empty) and the source "
+                "row set no base_url — a misconfigured source fails its run rather than dial an "
+                "empty host"
+            )
         pages: list[Page] = []
         deletes: list[str] = []
         watermark = cursor
         page_cursor: str | None = None
         async for page in self.connector.fetch_page(
-            stream, cursor=cursor, credential=credential, base_url=self.connector.base_url
+            stream, cursor=cursor, credential=credential, base_url=base_url
         ):
             records = page.records if isinstance(page, StreamPage) else page
             for record in records:

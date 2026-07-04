@@ -1,7 +1,9 @@
 """The Zendesk connector over a mock transport: the incremental cursor export (with the sideloaded
 `users` lifting `requester_email` onto each ticket), the `next_page`-linked default list, the
 `ticket_events` feed transformed into comment rows stamped with `ticket_id`, and a refusal surfacing
-as `StreamSkipped`. Offline — a canned transport, no DB, no token."""
+as `StreamSkipped`. The class base URL is empty (per-subdomain), so the tenant host is bound through
+`ConnectorSourceConfig.base_url` — the real per-tenant path. Offline — a canned transport, no
+token."""
 
 from collections.abc import Callable
 from uuid import UUID, uuid4
@@ -15,6 +17,7 @@ from selfhost.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 from selfhost.sources.sync import SourceAuth, StreamSkipped, SyncResult
 
 ACCOUNT = "acct-1"
+BASE_URL = "https://acme.zendesk.com"
 
 
 class _MockProxy:
@@ -30,7 +33,7 @@ async def _fetch(
 ) -> SyncResult:
     auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler))
     return await ConnectorBackend(connector=ZendeskConnector()).fetch(
-        ConnectorSourceConfig(account=ACCOUNT, stream=stream), cursor, auth
+        ConnectorSourceConfig(account=ACCOUNT, stream=stream, base_url=BASE_URL), cursor, auth
     )
 
 
@@ -40,6 +43,7 @@ def _refs(result: SyncResult) -> set[str]:
 
 async def test_tickets_incremental_cursor_with_sideload_email() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "acme.zendesk.com"
         assert request.url.path == "/api/v2/incremental/tickets/cursor.json"
         assert request.url.params.get("include") == "users"
         return httpx.Response(

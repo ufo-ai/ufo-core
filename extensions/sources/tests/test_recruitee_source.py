@@ -1,7 +1,7 @@
 """The Recruitee connector over a mock transport: the page-number loop, the stream-named envelope
 (`{"candidates": [...]}`), and a refusal surfacing as `StreamSkipped`. The class base URL is empty
-(per-tenant), so the test binds a tenant URL through a subclass. Offline — a canned transport,
-no token."""
+(per-tenant), so the test binds the tenant URL through `ConnectorSourceConfig.base_url` — the real
+per-tenant path. Offline — a canned transport, no token."""
 
 from collections.abc import Callable
 from uuid import UUID, uuid4
@@ -15,10 +15,7 @@ from selfhost.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 from selfhost.sources.sync import SourceAuth, StreamSkipped, SyncResult
 
 ACCOUNT = "acct-1"
-
-
-class _Recruitee(RecruiteeConnector):
-    base_url = "https://api.recruitee.com/c/acme"
+BASE_URL = "https://api.recruitee.com/c/acme"
 
 
 class _MockProxy:
@@ -31,8 +28,8 @@ class _MockProxy:
 
 async def _fetch(stream: str, handler: Callable[[httpx.Request], httpx.Response]) -> SyncResult:
     auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler))
-    return await ConnectorBackend(connector=_Recruitee()).fetch(
-        ConnectorSourceConfig(account=ACCOUNT, stream=stream), None, auth
+    return await ConnectorBackend(connector=RecruiteeConnector()).fetch(
+        ConnectorSourceConfig(account=ACCOUNT, stream=stream, base_url=BASE_URL), None, auth
     )
 
 
@@ -42,6 +39,7 @@ def _refs(result: SyncResult) -> set[str]:
 
 async def test_candidates_unwrap_the_named_envelope() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "api.recruitee.com"
         assert request.url.path == "/c/acme/candidates"
         assert request.url.params.get("page") == "1"
         return httpx.Response(200, json={"candidates": [{"id": 1, "name": "Ada"}]})

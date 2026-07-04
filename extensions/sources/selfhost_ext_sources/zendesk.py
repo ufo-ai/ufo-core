@@ -7,9 +7,10 @@ Three read shapes share one `paginate` dispatch. High-volume objects (`tickets`,
 `end_of_stream`; `tickets` also sideloads `users` and lifts requester/assignee emails onto each
 record. The rest page through `next_page` links. `ticket_comments` derives from the
 `incremental/ticket_events.json` feed — each `Comment` child event is lifted to a row stamped with
-its `ticket_id`; `users_identities` fans out per user. The base URL is per-tenant
-(`https://<subdomain>.zendesk.com`). A refusal (401/403) raises `StreamSkipped`. The credential is
-resolved through the auth proxy the runner threads; this connector holds no token. The write path is
+its `ticket_id`; `users_identities` fans out per user. The base URL is per-subdomain
+(`https://<subdomain>.zendesk.com`), so the class default is empty and a run without a resolved
+tenant URL fails loud. A refusal (401/403) raises `StreamSkipped`. The credential is resolved
+through the auth proxy the runner threads; this connector holds no token. The write path is
 intentionally absent — the source seam only reads."""
 
 from collections.abc import AsyncIterator
@@ -159,7 +160,7 @@ def _apply_sideload(
 
 class ZendeskConnector(RestConnector):
     name = "zendesk"
-    base_url = "https://example.zendesk.com"
+    base_url = ""
     streams_list = ZENDESK_STREAMS
 
     @staticmethod

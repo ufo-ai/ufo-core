@@ -1,8 +1,9 @@
 """The Salesforce connector over a mock transport: the SObject describe feeding the SOQL `SELECT`,
 the `nextRecordsUrl` walk, the `attributes` envelope dropped by `flatten`, the `/deleted/` window
 producing delete tombstones with the window-end cursor, and a refusal surfacing as `StreamSkipped`.
-The class base URL is empty (per-instance), so the test binds an instance URL through a subclass.
-Offline — a canned transport, no DB, no token."""
+The class base URL is empty (per-instance), so the test binds the instance URL through
+`ConnectorSourceConfig.base_url` — the real per-tenant path. Offline — a canned transport, no DB,
+no token."""
 
 from collections.abc import Callable
 from uuid import UUID, uuid4
@@ -16,10 +17,7 @@ from selfhost.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 from selfhost.sources.sync import SourceAuth, StreamSkipped, SyncResult
 
 ACCOUNT = "acct-1"
-
-
-class _Salesforce(SalesforceConnector):
-    base_url = "https://acme.my.salesforce.com"
+BASE_URL = "https://acme.my.salesforce.com"
 
 
 class _MockProxy:
@@ -34,8 +32,8 @@ async def _fetch(
     stream: str, handler: Callable[[httpx.Request], httpx.Response], *, cursor: str | None = None
 ) -> SyncResult:
     auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler))
-    return await ConnectorBackend(connector=_Salesforce()).fetch(
-        ConnectorSourceConfig(account=ACCOUNT, stream=stream), cursor, auth
+    return await ConnectorBackend(connector=SalesforceConnector()).fetch(
+        ConnectorSourceConfig(account=ACCOUNT, stream=stream, base_url=BASE_URL), cursor, auth
     )
 
 
@@ -45,6 +43,7 @@ def _refs(result: SyncResult) -> set[str]:
 
 def _handler(seen: list[str]) -> Callable[[httpx.Request], httpx.Response]:
     def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "acme.my.salesforce.com"
         path = request.url.path
         if path.endswith("/sobjects/Account/describe"):
             return httpx.Response(

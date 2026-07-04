@@ -338,6 +338,49 @@ async def test_connector_backend_fails_loud_without_an_auth_proxy() -> None:
         )
 
 
+# --- per-tenant base_url carried by the source config --------------------------------------------
+
+
+class _PerTenantConnector(RestConnector):
+    """A per-tenant connector whose class `base_url` is empty (like Freshdesk/Zendesk): the host
+    must come from the source row's `ConnectorSourceConfig.base_url`, not a class default."""
+
+    name = "pertenant"
+    base_url = ""
+
+    def streams(self) -> list[StreamSpec]:
+        return [
+            StreamSpec(
+                name="rows",
+                source_object="rows",
+                pagination=Pagination(strategy=PaginationStrategy.next_link, path="/rows"),
+            )
+        ]
+
+
+async def test_per_tenant_fetch_dials_the_config_base_url() -> None:
+    seen: list[str | None] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.host)
+        return httpx.Response(200, json=[{"id": 1}])
+
+    result = await ConnectorBackend(connector=_PerTenantConnector()).fetch(
+        ConnectorSourceConfig(account=ACCOUNT, stream="rows", base_url="https://acme.tenant.test"),
+        None,
+        _auth(handle),
+    )
+    assert {page.source_ref for page in result.pages} == {"rows/1"}
+    assert seen == ["acme.tenant.test"]
+
+
+async def test_per_tenant_fetch_without_a_base_url_fails_loud() -> None:
+    """A per-tenant connector (class `base_url=""`) whose source row set no `base_url` fails its run
+    naming the connector, rather than dialing an empty host."""
+    with pytest.raises(RuntimeError, match=r"pertenant.*resolved no base_url"):
+        await _fetch(_PerTenantConnector(), "rows", _ok)
+
+
 # --- GitHub: fan-out + Link pagination + ?since --------------------------------------------------
 
 
