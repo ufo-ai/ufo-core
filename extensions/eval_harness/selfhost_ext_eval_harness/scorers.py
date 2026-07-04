@@ -1,6 +1,8 @@
 """Graders over a CapabilityOutput. The answer graders (exact/numeric/predicate) read the final
 text; the trajectory graders (required_tools/restraint/local_fs/skill/lane) read the agent's real
-tool choices, not its prose — no LLM, no variance. Every grader FAILS on bad output."""
+tool choices, not its prose — no LLM, no variance. `combine` ANDs several graders together for a
+case that must satisfy more than one dimension (e.g. a correct answer AND a required trajectory).
+Every grader FAILS on bad output."""
 
 from __future__ import annotations
 
@@ -170,5 +172,19 @@ def lane_scorer(acceptable: frozenset[str]) -> Grader:
         if chosen in acceptable:
             return CapabilityVerdict(True, f"spawned {chosen!r}")
         return CapabilityVerdict(False, f"spawned {chosen!r}, expected one of {sorted(acceptable)}")
+
+    return grade
+
+
+def combine(*graders: Grader) -> Grader:
+    """Pass iff every grader passes; the reason concatenates each grader's reason so a failure names
+    which dimension (answer, trajectory, ...) fell short."""
+
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        verdicts = [await grader(output) for grader in graders]
+        return CapabilityVerdict(
+            all(verdict.passed for verdict in verdicts),
+            "; ".join(verdict.reason for verdict in verdicts),
+        )
 
     return grade
