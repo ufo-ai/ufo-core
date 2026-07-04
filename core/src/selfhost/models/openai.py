@@ -152,6 +152,8 @@ class OpenAIClient:
                 "stream": True,
                 "stream_options": {"include_usage": True},
             }
+            if request.reasoning != "off":
+                create_kwargs["reasoning_effort"] = request.reasoning
             if request.tools:
                 create_kwargs["tools"] = [
                     {

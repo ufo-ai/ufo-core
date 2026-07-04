@@ -98,6 +98,24 @@ async def test_complete_streams_text_then_usage_with_the_reasoning_budget() -> N
     assert kwargs["stream_options"] == {"include_usage": True}
 
 
+async def test_reasoning_effort_rides_from_the_request() -> None:
+    create = ScriptedCreate(
+        [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))]
+    )
+    async for _ in _client(create).complete(REQUEST.model_copy(update={"reasoning": "low"})):
+        pass
+    assert create.calls[0]["extra_body"] == {"reasoning": {"effort": "low"}}
+
+
+async def test_reasoning_off_omits_the_reasoning_budget() -> None:
+    create = ScriptedCreate(
+        [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))]
+    )
+    async for _ in _client(create).complete(REQUEST.model_copy(update={"reasoning": "off"})):
+        pass
+    assert create.calls[0]["extra_body"] == {}
+
+
 async def test_dead_provider_completion_reroutes_excluding_that_provider() -> None:
     dead = [_chunk(finish="stop", provider="deadco"), _chunk(usage=_usage(1, 0))]
     good = [_chunk(content="recovered"), _chunk(finish="stop"), _chunk(usage=_usage(2, 3))]

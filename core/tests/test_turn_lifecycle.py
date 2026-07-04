@@ -161,6 +161,7 @@ STANDIN_REGISTRY = ModelRegistry(
         ),
     ),
     pricing=CORE_PRICING,
+    auto_model="claude-opus-4-8",
 )
 
 
@@ -229,7 +230,7 @@ async def surface(
     app.state.dbos.destroy()
 
 
-async def _bootstrap() -> dict[str, str]:
+async def _bootstrap(model: str = "claude-opus-4-8") -> dict[str, str]:
     token = secrets.token_hex(16)
     workspace_id, member_id, agent_id = uuid4(), uuid4(), uuid4()
     async with workspace_tx() as connection:
@@ -253,7 +254,7 @@ async def _bootstrap() -> dict[str, str]:
                 workspace_id=workspace_id,
                 name="assistant",
                 prompt="be brief",
-                model="claude-opus-4-8",
+                model=model,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -355,6 +356,18 @@ async def test_turn_round_trip_bills_and_persists(surface: AsyncClient) -> None:
     stored = await _read_transcript(blob, conversation_id, 1)
     assert stored.seq == 1
     assert [m.content for m in stored.messages] == ["ping", "echo:1"]
+
+
+async def test_auto_model_resolves_to_the_configured_default(surface: AsyncClient) -> None:
+    """An agent authored model-agnostic (`model = "auto"`) resolves at turn time to the deploy's
+    configured default, so the run selects a backend, bills, and reports under the concrete model —
+    never the sentinel, which no provider serves."""
+    headers = await _bootstrap(model="auto")
+    admitted = await surface.post("/v1/chat", content=b"ping", headers=headers)
+    assert admitted.status_code == 200
+    _, terminal = await _consume(surface, headers, admitted.json()["turn_id"])
+    assert terminal["status"] == "done"
+    assert terminal["model"] == "claude-opus-4-8"
 
 
 async def test_cost_ticks_stream_as_a_turn_accrues_spend(surface: AsyncClient) -> None:

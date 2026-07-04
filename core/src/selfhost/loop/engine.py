@@ -29,11 +29,13 @@ from selfhost.loop.compaction import Compaction
 from selfhost.loop.prompts.render import RenderedPrompt
 from selfhost.loop.transcript import Transcript
 from selfhost.models.interface import (
+    DEFAULT_REASONING_EFFORT,
     ImageBlock,
     ImageSource,
     Message,
     ModelClient,
     ModelRequest,
+    ReasoningEffort,
     TextBlock,
     TextDelta,
     ToolCallDelta,
@@ -58,7 +60,7 @@ from selfhost.tools.context import ImageContent, Spawn, SubagentControl, TextCon
 from selfhost.tools.registry import ToolRegistry
 from selfhost.transcript import Conversation
 
-MAX_OUTPUT_TOKENS = 16_000
+MAX_OUTPUT_TOKENS = 16_384
 FIND_MAX_TOKENS = 2_000
 MAIN_ROUND_LIMIT = 200
 DELTA_FLUSH_BYTES = 2048
@@ -148,6 +150,7 @@ class TurnEngine:
     artifact_token_secret: str
     grants: GrantStore | None
     pricing: Pricing = CORE_PRICING
+    reasoning: ReasoningEffort = DEFAULT_REASONING_EFFORT
     subagents: SubagentControl | None = None
     attempt: str = ""
     max_rounds: int = MAIN_ROUND_LIMIT
@@ -172,6 +175,7 @@ class TurnEngine:
                     system=system,
                     messages=(Message(role="user", content=user),),
                     max_tokens=FIND_MAX_TOKENS,
+                    reasoning="off",
                 )
                 parts: list[str] = []
                 async for event in self.model.complete(request):
@@ -398,6 +402,7 @@ class TurnEngine:
             messages=messages,
             max_tokens=MAX_OUTPUT_TOKENS,
             tools=self.tools.schemas() if offer_tools else (),
+            reasoning=self.reasoning,
         )
         parts: list[str] = []
         buffer: list[str] = []

@@ -16,6 +16,7 @@ from selfhost.ext.manifest import Manifest, ModelProviderSpec
 from selfhost.models.anthropic import AnthropicClient, anthropic_sdk_client
 from selfhost.models.interface import (
     ANTHROPIC_MODEL_PREFIXES,
+    AUTO_MODEL,
     OPENAI_MODEL_PREFIXES,
     PROVIDER_ANTHROPIC,
     PROVIDER_OPENAI,
@@ -41,6 +42,13 @@ class ModelRegistry:
 
     providers: tuple[ModelProviderSpec, ...]
     pricing: Pricing
+    auto_model: str
+
+    def resolve(self, model: str) -> str:
+        """Map the model-agnostic `auto` sentinel to the deploy's configured concrete model; a
+        pinned id passes through. An agent projection keeps its declared value — resolution is a
+        runtime concern the turn applies before selecting a client and pricing the run."""
+        return self.auto_model if model == AUTO_MODEL else model
 
     def client_for(self, model: str) -> ModelClient:
         return self._provider_for(model).client(model)
@@ -85,4 +93,8 @@ def model_registry(config: Config, manifests: tuple[Manifest, ...]) -> ModelRegi
     )
     providers = (*core, *(spec for manifest in manifests for spec in manifest.models))
     contributed = {model: price for spec in providers for model, price in spec.prices}
-    return ModelRegistry(providers=providers, pricing=pricing_with(contributed))
+    return ModelRegistry(
+        providers=providers,
+        pricing=pricing_with(contributed),
+        auto_model=config.models.auto_model,
+    )

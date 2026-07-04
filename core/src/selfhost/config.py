@@ -7,10 +7,13 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from selfhost.models.interface import AUTO_MODEL, DEFAULT_REASONING_EFFORT, ReasoningEffort
+
 CONFIG_PATH_ENV = "SELFHOST_CONFIG"
 DEFAULT_CONFIG_PATH = Path("selfhost.toml")
 IN_PROCESS_BACKEND = "in_process"
 BUA_BROWSER_BACKEND = "bua"
+DEFAULT_AUTO_MODEL = "claude-opus-4-8"
 
 
 class DatabaseConfig(BaseModel):
@@ -45,9 +48,21 @@ class BlobConfig(BaseModel):
 
 
 class ModelsConfig(BaseModel):
+    """`reasoning_effort` is the extended-thinking depth every agent turn requests (`off` disables
+    it); `auto_model` is the concrete model an agent authored with `model = "auto"` resolves to at
+    turn time, so an agent stays model-agnostic and the deploy pins the backend."""
+
     model_config = ConfigDict(extra="forbid")
     anthropic_api_key_env: str = "ANTHROPIC_API_KEY"
     openai_api_key_env: str = "OPENAI_API_KEY"
+    reasoning_effort: ReasoningEffort = DEFAULT_REASONING_EFFORT
+    auto_model: str = DEFAULT_AUTO_MODEL
+
+    @model_validator(mode="after")
+    def _auto_model_concrete(self) -> "ModelsConfig":
+        if not self.auto_model or self.auto_model == AUTO_MODEL:
+            raise ValueError("models.auto_model must be a concrete model id, not empty or 'auto'")
+        return self
 
 
 class CredentialsConfig(BaseModel):

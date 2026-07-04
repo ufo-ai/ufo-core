@@ -37,7 +37,6 @@ VERSION = "0.1.0"
 PROVIDER_NAME = "openrouter"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
-DEFAULT_REASONING_EFFORT = "high"
 OPENAI_MODEL_PREFIXES = ("gpt-", "o1", "o3", "o4", "chatgpt-")
 
 MAX_PROVIDER_RETRIES = 6
@@ -93,10 +92,10 @@ class OpenRouterModelClient:
     event yields; finish_reason=length raises ModelResponseTruncated. A normal completion that
     returned no text and no tool calls is a dead upstream — the client re-issues excluding that
     provider up to MAX_EMPTY_PROVIDER_RETRIES, then degrades to the empty result for the turn loop's
-    nudge. `reasoning` on extra_body sets the thinking budget OpenRouter derives from max_tokens."""
+    nudge. The request's `reasoning` effort rides `extra_body` as the thinking budget OpenRouter
+    derives from max_tokens; `off` omits it."""
 
     client: openai.AsyncOpenAI
-    reasoning_effort: str = DEFAULT_REASONING_EFFORT
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         delay = INITIAL_RETRY_DELAY_SECONDS
@@ -171,7 +170,9 @@ class OpenRouterModelClient:
     def _create_kwargs(
         self, request: ModelRequest, ignore_providers: frozenset[str]
     ) -> dict[str, object]:
-        extra_body: dict[str, object] = {"reasoning": {"effort": self.reasoning_effort}}
+        extra_body: dict[str, object] = {}
+        if request.reasoning != "off":
+            extra_body["reasoning"] = {"effort": request.reasoning}
         if ignore_providers:
             extra_body["provider"] = {"ignore": sorted(ignore_providers)}
         kwargs: dict[str, object] = {

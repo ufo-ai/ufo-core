@@ -99,6 +99,7 @@ class Compaction:
             system=COMPACTION_SYSTEM_PROMPT,
             messages=(Message(role="user", content=rendered),),
             max_tokens=COMPACTION_SUMMARY_MAX_TOKENS,
+            reasoning="off",
         )
         parts: list[str] = []
         usage: Usage | None = None

@@ -130,6 +130,7 @@ async def _execute_turn(turn_id: str) -> str:
             )
             system_prompt = rendered_prompt(resolved.prompt)
             max_rounds = profile.max_rounds
+        resolved = resolved.model_copy(update={"model": runtime.registry.resolve(resolved.model)})
         model = runtime.registry.client_for(resolved.model)
         handle = await runtime.carrier.create(
             SandboxSpec(
@@ -171,6 +172,7 @@ async def _execute_turn(turn_id: str) -> str:
                 else None
             ),
             pricing=runtime.registry.pricing,
+            reasoning=runtime.config.models.reasoning_effort,
             attempt=DBOS.workflow_id or turn_id,
             max_rounds=max_rounds,
             skills=runtime.skills,

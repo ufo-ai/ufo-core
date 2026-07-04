@@ -116,6 +116,9 @@ class AnthropicClient:
                 "max_tokens": request.max_tokens,
                 "stream": True,
             }
+            if request.reasoning != "off":
+                create_kwargs["thinking"] = {"type": "adaptive"}
+                create_kwargs["output_config"] = {"effort": request.reasoning}
             if request.tools:
                 create_kwargs["tools"] = [
                     {"name": t.name, "description": t.description, "input_schema": t.input_schema}

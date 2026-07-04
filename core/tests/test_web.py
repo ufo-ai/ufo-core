@@ -78,6 +78,7 @@ STANDIN_REGISTRY = ModelRegistry(
         ),
     ),
     pricing=CORE_PRICING,
+    auto_model="claude-opus-4-8",
 )
 
 

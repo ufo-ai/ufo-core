@@ -66,12 +66,22 @@ class ToolSchema(BaseModel):
     input_schema: dict[str, Any]
 
 
+ReasoningEffort = Literal["off", "low", "medium", "high"]
+DEFAULT_REASONING_EFFORT: ReasoningEffort = "high"
+
+
 class ModelRequest(BaseModel):
+    """`reasoning` is the extended-thinking depth each client renders in its provider's shape — the
+    Anthropic `thinking` block plus `output_config.effort`, the OpenAI/OpenRouter `reasoning`/effort
+    param. `max_tokens` is reasoning-inclusive: thinking draws from it, so the visible answer gets
+    what thinking leaves. `off` omits the thinking parameters entirely."""
+
     model: str
     system: str
     messages: tuple[Message, ...]
     max_tokens: int
     tools: tuple[ToolSchema, ...] = ()
+    reasoning: ReasoningEffort = DEFAULT_REASONING_EFFORT
 
 
 class TextDelta(BaseModel):
@@ -105,6 +115,7 @@ PROVIDER_ANTHROPIC = "anthropic"
 PROVIDER_OPENAI = "openai"
 ANTHROPIC_MODEL_PREFIXES = ("claude-",)
 OPENAI_MODEL_PREFIXES = ("gpt-", "o1", "o3", "o4", "chatgpt-")
+AUTO_MODEL = "auto"
 
 
 def trim_images(messages: tuple[Message, ...]) -> tuple[Message, ...]:

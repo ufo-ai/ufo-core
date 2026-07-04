@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 
 import anthropic
@@ -10,6 +11,7 @@ from anthropic.types.raw_message_delta_event import Delta
 from openai.types.chat import chat_completion_chunk
 from openai.types.completion_usage import CompletionUsage, PromptTokensDetails
 
+from selfhost.config import BlobConfig, Config, DatabaseConfig, ModelsConfig
 from selfhost.models.anthropic import MAX_EMPTY_PROVIDER_RETRIES as ANTHROPIC_MAX_EMPTY_RETRIES
 from selfhost.models.anthropic import MAX_PROVIDER_RETRIES as ANTHROPIC_MAX_RETRIES
 from selfhost.models.anthropic import AnthropicClient, anthropic_sdk_client
@@ -30,6 +32,7 @@ from selfhost.models.interface import (
 from selfhost.models.openai import MAX_EMPTY_PROVIDER_RETRIES as OPENAI_MAX_EMPTY_RETRIES
 from selfhost.models.openai import MAX_PROVIDER_RETRIES as OPENAI_MAX_RETRIES
 from selfhost.models.openai import OpenAIClient, openai_sdk_client
+from selfhost.models.registry import model_registry
 from selfhost.schema.records import Usage
 
 REQUEST = ModelRequest(
@@ -534,3 +537,66 @@ def test_sdk_client_factories_disable_sdk_retries() -> None:
     openai_sdk = openai_sdk_client("key")
     assert anthropic_sdk.max_retries == 0
     assert openai_sdk.max_retries == 0
+
+
+async def test_anthropic_default_request_enables_adaptive_thinking_at_high_effort() -> None:
+    create = CapturingCreate(
+        ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
+    )
+    async for _ in AnthropicClient(client=anthropic_sdk(create)).complete(REQUEST):
+        pass
+    assert create.kwargs["thinking"] == {"type": "adaptive"}
+    assert create.kwargs["output_config"] == {"effort": "high"}
+
+
+async def test_anthropic_reasoning_off_omits_the_thinking_block() -> None:
+    create = CapturingCreate(
+        ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
+    )
+    async for _ in AnthropicClient(client=anthropic_sdk(create)).complete(
+        REQUEST.model_copy(update={"reasoning": "off"})
+    ):
+        pass
+    assert "thinking" not in create.kwargs
+    assert "output_config" not in create.kwargs
+
+
+async def test_openai_default_request_carries_reasoning_effort() -> None:
+    create = CapturingCreate(([openai_text("ok"), openai_usage(prompt=1, completion=1)], None))
+    async for _ in OpenAIClient(client=openai_sdk(create)).complete(REQUEST):
+        pass
+    assert create.kwargs["reasoning_effort"] == "high"
+
+
+async def test_openai_reasoning_off_omits_reasoning_effort() -> None:
+    create = CapturingCreate(([openai_text("ok"), openai_usage(prompt=1, completion=1)], None))
+    async for _ in OpenAIClient(client=openai_sdk(create)).complete(
+        REQUEST.model_copy(update={"reasoning": "medium"})
+    ):
+        pass
+    assert create.kwargs["reasoning_effort"] == "medium"
+    off = CapturingCreate(([openai_text("ok"), openai_usage(prompt=1, completion=1)], None))
+    async for _ in OpenAIClient(client=openai_sdk(off)).complete(
+        REQUEST.model_copy(update={"reasoning": "off"})
+    ):
+        pass
+    assert "reasoning_effort" not in off.kwargs
+
+
+def _config(tmp_path: Path, models: ModelsConfig | None = None) -> Config:
+    return Config(
+        database=DatabaseConfig(url="sqlite+aiosqlite:///:memory:"),
+        blob=BlobConfig(backend="filesystem", root=tmp_path),
+        models=models or ModelsConfig(),
+    )
+
+
+def test_registry_resolves_auto_to_the_configured_default(tmp_path: Path) -> None:
+    registry = model_registry(_config(tmp_path), ())
+    assert registry.resolve("auto") == "claude-opus-4-8"
+    assert registry.resolve("claude-sonnet-5") == "claude-sonnet-5"
+
+
+def test_registry_resolves_auto_to_an_overridden_default(tmp_path: Path) -> None:
+    registry = model_registry(_config(tmp_path, ModelsConfig(auto_model="claude-sonnet-5")), ())
+    assert registry.resolve("auto") == "claude-sonnet-5"
