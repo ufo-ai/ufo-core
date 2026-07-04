@@ -1,4 +1,5 @@
-"""The persistent-REPL pack: js_repl runs Node, xlsx_repl runs Python with openpyxl.
+"""The persistent-REPL pack: js_repl runs Node, xlsx_repl runs Python with openpyxl, plus the data
+skills the agent loads on demand for exploration, SQL, statistics, validation, and visualization.
 
 Each REPL keeps its state in a workspace file the pack accumulates across calls — a reset (or the
 first call) writes the code fresh, otherwise the new code appends to what ran before, so variables,
@@ -9,16 +10,25 @@ the combined stdout/stderr and exit code come back."""
 
 import json
 import shlex
+from pathlib import Path
 
 from pydantic import BaseModel
 
-from selfhost.sdk.manifest import Manifest
+from selfhost.sdk.manifest import Manifest, SkillSpec
 from selfhost.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 
 NAME = "repl"
 VERSION = "0.1.0"
 JS_REPL_TOOL = "js_repl"
 XLSX_REPL_TOOL = "xlsx_repl"
+SKILLS_ROOT = Path(__file__).parent / "skills"
+SKILL_NAMES = (
+    "data-exploration",
+    "data-sql-queries",
+    "data-statistical-analysis",
+    "data-validation",
+    "data-visualization",
+)
 
 WORKSPACE_DIR = "/workspace"
 REPL_STATE_DIR = f"{WORKSPACE_DIR}/.repl"
@@ -115,4 +125,5 @@ def manifest() -> Manifest:
                 handler=xlsx_repl,
             ),
         ),
+        skills=tuple(SkillSpec(path=SKILLS_ROOT / name) for name in SKILL_NAMES),
     )

@@ -4,10 +4,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
-import selfhost_ext_repl as repl
-from selfhost_ext_repl import JsReplInput, XlsxReplInput
+import selfhost_ext_repl.manifest as repl
+from selfhost_ext_repl.manifest import JsReplInput, XlsxReplInput
 
 from selfhost.blob import FilesystemBlobStore
+from selfhost.ext.loader import skill_registry
 from selfhost.sandbox.session import ExecResult
 from selfhost.schema.records import Agent, Turn
 from selfhost.tools.context import SpawnResult, ToolContext
@@ -89,6 +90,18 @@ def test_manifest_declares_both_repls_with_verbatim_descriptions() -> None:
     assert tools["js_repl"].description.startswith("Persistent Node.js REPL for Playwright")
     assert "openpyxl" in tools["xlsx_repl"].description
     assert "code" in tools["js_repl"].input_model.model_json_schema()["properties"]
+
+
+def test_data_skills_parse_and_index() -> None:
+    index = dict(skill_registry((repl.manifest(),)).index())
+    for name in (
+        "data-exploration",
+        "data-sql-queries",
+        "data-statistical-analysis",
+        "data-validation",
+        "data-visualization",
+    ):
+        assert name in index
 
 
 async def test_js_repl_first_call_writes_fresh_and_runs_node(tmp_path: Path) -> None:
