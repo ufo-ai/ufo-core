@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
+from pydantic import BaseModel
 
 from selfhost.blob import FilesystemBlobStore
 from selfhost.db import workspace_tx
@@ -15,7 +16,13 @@ from selfhost.ext.loader import HookChain
 from selfhost.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
 from selfhost.hub import InProcessHub
 from selfhost.loop.compaction import COMPACTED_CONTEXT_PREFIX, Compaction
-from selfhost.loop.engine import RECALL_CONTEXT_PREFIX, TurnEngine, TurnParked
+from selfhost.loop.engine import (
+    MAX_TOOL_RESULT_CHARS,
+    RECALL_CONTEXT_PREFIX,
+    TurnEngine,
+    TurnParked,
+    _bounded,
+)
 from selfhost.loop.prompts.render import rendered_prompt
 from selfhost.loop.transcript import Transcript
 from selfhost.memory.service import Recalled
@@ -33,8 +40,8 @@ from selfhost.sandbox.session import ExecResult, SandboxHandle, SandboxSession, 
 from selfhost.schema import tables
 from selfhost.schema.records import Agent, TerminalFrame, Turn, Usage
 from selfhost.tools.builtins import BUILTIN_TOOLS
-from selfhost.tools.context import SpawnResult
-from selfhost.tools.registry import ToolRegistry
+from selfhost.tools.context import SpawnResult, TextContent, ToolContext, ToolResult
+from selfhost.tools.registry import ToolDef, ToolRegistry
 from selfhost.transcript import Conversation
 
 
@@ -618,3 +625,65 @@ async def test_per_step_park_then_resume_persists_full_transcript(db: None, tmp_
     stored = await transcript.read()
     assert stored is not None and stored.seq == turn.seq
     assert [m.content for m in stored.messages] == ["hi", "answer"]
+
+
+class _NoArgs(BaseModel):
+    pass
+
+
+def _fixed_result_tool(name: str, content: str, is_error: bool = False) -> ToolDef:
+    async def handler(context: ToolContext, args: BaseModel) -> ToolResult:
+        return ToolResult(content=(TextContent(text=content),), is_error=is_error)
+
+    return ToolDef(name=name, description="d", input_model=_NoArgs, handler=handler)
+
+
+def test_bounded_truncates_over_cap_with_marker_and_leaves_within_cap_untouched() -> None:
+    assert _bounded("x" * (MAX_TOOL_RESULT_CHARS - 1)) == "x" * (MAX_TOOL_RESULT_CHARS - 1)
+    at_cap = "y" * MAX_TOOL_RESULT_CHARS
+    assert _bounded(at_cap) == at_cap
+    total = MAX_TOOL_RESULT_CHARS + 500
+    bounded = _bounded("z" * total)
+    assert bounded == "z" * MAX_TOOL_RESULT_CHARS + f"\n…[truncated 500 of {total} chars]"
+
+
+async def test_dispatch_bounds_over_cap_result_and_leaves_within_cap_untouched(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    total = MAX_TOOL_RESULT_CHARS + 500
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        tools=ToolRegistry(
+            (
+                _fixed_result_tool("big", "a" * total),
+                _fixed_result_tool("big_error", "b" * total, is_error=True),
+                _fixed_result_tool("small", "c" * (MAX_TOOL_RESULT_CHARS - 1)),
+            )
+        ),
+    )
+    context = ToolContext(
+        sandbox=engine.sandbox,
+        blob=engine.blob,
+        turn=engine.turn,
+        agent=engine.agent,
+        spawn=engine.spawn,
+        memory=engine.memory,
+        member_id=engine.member_id,
+        artifact_token_secret=engine.artifact_token_secret,
+        grants=engine.grants,
+    )
+
+    big = await engine._dispatch(context, ToolUseBlock(id="c1", name="big", input={}))
+    assert not big.is_error
+    assert len(big.content) == MAX_TOOL_RESULT_CHARS + len(f"\n…[truncated 500 of {total} chars]")
+    assert big.content.startswith("a" * MAX_TOOL_RESULT_CHARS)
+    assert big.content.endswith(f"\n…[truncated 500 of {total} chars]")
+
+    big_error = await engine._dispatch(context, ToolUseBlock(id="c2", name="big_error", input={}))
+    assert big_error.is_error
+    assert big_error.content.startswith("b" * MAX_TOOL_RESULT_CHARS)
+    assert big_error.content.endswith(f"\n…[truncated 500 of {total} chars]")
+
+    small = await engine._dispatch(context, ToolUseBlock(id="c3", name="small", input={}))
+    assert small.content == "c" * (MAX_TOOL_RESULT_CHARS - 1)
