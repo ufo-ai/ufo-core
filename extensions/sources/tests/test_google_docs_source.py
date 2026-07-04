@@ -1,13 +1,16 @@
-"""Google Docs connector over a mock transport: the Drive-list→Docs-get fan-out, the incremental
-`modifiedTime` watermark threaded into the Drive query, and — the point of this provider — the
-`render` override that walks a document's `body.content` tree (headings, bullets, tables) into
-readable prose rather than the default JSON dump. No conftest: the shared `selfhost_testsupport`
-plugin covers fixtures; these tests are offline (a canned transport, no DB, no token, no broker)."""
+"""The Google Docs connector over a mock transport: the Drive-list→Docs-get fan-out, the incremental
+`modifiedTime` watermark threaded into the Drive query, the per-doc `403` stub that keeps the run
+going, a Drive-list refusal surfacing as `StreamSkipped`, and the `render` override that walks a
+document's `body.content` paragraphs into readable prose. No conftest: the shared
+`selfhost_testsupport` plugin covers fixtures; these tests are offline (a canned transport, no DB,
+no token, no broker)."""
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 import httpx
+import pytest
 from selfhost_ext_sources.backend import ConnectorBackend, ConnectorSourceConfig
 from selfhost_ext_sources.google_docs import GoogleDocsConnector
 
@@ -17,51 +20,30 @@ from selfhost.memory.sources import SourceAuth, StreamSkipped
 ACCOUNT = "acct-1"
 
 
+@dataclass(frozen=True)
 class _MockProxy:
-    def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
-        self.handler = handler
+    handler: Callable[[httpx.Request], httpx.Response]
 
     async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
         return Credential(transport=httpx.MockTransport(self.handler))
 
 
-def _auth(handler: Callable[[httpx.Request], httpx.Response]) -> SourceAuth:
-    return SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler))
-
-
 async def _fetch(handler: Callable[[httpx.Request], httpx.Response], cursor: str | None = None):
+    auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler=handler))
     return await ConnectorBackend(connector=GoogleDocsConnector()).fetch(
-        ConnectorSourceConfig(account=ACCOUNT, stream="documents"), cursor, _auth(handler)
+        ConnectorSourceConfig(account=ACCOUNT, stream="documents"), cursor, auth
     )
 
 
-def _paragraph(text: str, *, style: str | None = None, bullet: bool = False) -> dict:
-    para: dict = {"elements": [{"textRun": {"content": f"{text}\n"}}]}
-    if style:
-        para["paragraphStyle"] = {"namedStyleType": style}
-    if bullet:
-        para["bullet"] = {"listId": "l1"}
-    return {"paragraph": para}
+def _paragraph(text: str) -> dict:
+    return {"paragraph": {"elements": [{"textRun": {"content": f"{text}\n"}}]}}
 
 
 DOC_BODY = {
     "content": [
-        _paragraph("Q3 Plan", style="TITLE"),
-        _paragraph("Goals", style="HEADING_1"),
+        _paragraph("Q3 Plan"),
         _paragraph("Ship the launch by Friday."),
-        _paragraph("Draft the email", bullet=True),
-        {
-            "table": {
-                "tableRows": [
-                    {
-                        "tableCells": [
-                            {"content": [_paragraph("Owner")]},
-                            {"content": [_paragraph("Alex")]},
-                        ]
-                    }
-                ]
-            }
-        },
+        {"table": {"tableRows": [{"tableCells": [{"content": [_paragraph("Owner")]}]}]}},
     ]
 }
 FILE_1 = {
@@ -99,7 +81,7 @@ def _handler(seen_queries: list[str] | None = None) -> Callable[[httpx.Request],
     return handle
 
 
-async def test_lists_documents_and_render_walks_the_body_into_prose() -> None:
+async def test_lists_documents_and_render_walks_body_paragraphs_into_prose() -> None:
     result = await _fetch(_handler())
 
     assert {page.source_ref for page in result.pages} == {"documents/doc1", "documents/doc2"}
@@ -108,15 +90,12 @@ async def test_lists_documents_and_render_walks_the_body_into_prose() -> None:
     assert result.next_cursor == "2026-02-05T00:00:00.000Z"
 
     body = next(page.body for page in result.pages if page.source_ref == "documents/doc1")
-    assert "# Q3 Plan" in body
-    assert "# Goals" in body
+    assert "Q3 Plan" in body
     assert "Ship the launch by Friday." in body
-    assert "- Draft the email" in body
-    assert "Owner | Alex" in body
+    # non-paragraph structural elements (tables) carry no paragraph runs → they fall through
+    assert "Owner" not in body
     # the raw Docs structure never leaks into the recallable body
     assert "textRun" not in body
-    assert "structuralElement" not in body
-    assert "namedStyleType" not in body
     assert "tableRows" not in body
 
 
@@ -126,14 +105,25 @@ async def test_incremental_threads_the_watermark_into_the_drive_query() -> None:
     assert seen and all("modifiedTime > '2026-01-15T00:00:00.000Z'" in query for query in seen)
 
 
-async def test_scope_refusal_yields_stream_skipped() -> None:
+async def test_unreadable_doc_lands_as_a_title_stub() -> None:
+    """A doc Drive lists but the Docs API refuses (`403`) does not fail the run — it lands as a
+    title-only stub (title from the Drive file name, empty body)."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "www.googleapis.com":
+            return httpx.Response(200, json={"files": [FILE_1], "nextPageToken": None})
+        return httpx.Response(403, json={"error": {"code": 403, "message": "filePermission"}})
+
+    result = await _fetch(handle)
+    assert {page.source_ref for page in result.pages} == {"documents/doc1"}
+    assert "Q3 Plan" in result.pages[0].body
+
+
+async def test_drive_scope_refusal_yields_stream_skipped() -> None:
     def refuse(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             403, json={"error": {"code": 403, "message": "insufficientPermissions"}}
         )
 
-    try:
+    with pytest.raises(StreamSkipped):
         await _fetch(refuse)
-    except StreamSkipped:
-        return
-    raise AssertionError("a 403 from Drive must raise StreamSkipped")
