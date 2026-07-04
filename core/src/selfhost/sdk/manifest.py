@@ -28,6 +28,9 @@ from selfhost.ext.manifest import (
     HookSpec as HookSpec,
 )
 from selfhost.ext.manifest import (
+    IndexBackendSpec as IndexBackendSpec,
+)
+from selfhost.ext.manifest import (
     InjectContext as InjectContext,
 )
 from selfhost.ext.manifest import (

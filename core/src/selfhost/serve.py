@@ -21,7 +21,12 @@ from selfhost.config import Config, load_config
 from selfhost.credentials import CredentialStore
 from selfhost.db import init_db, workspace_tx
 from selfhost.ext.context import context_for
-from selfhost.ext.loader import load_manifests, turn_subagents, validate_ext_tools
+from selfhost.ext.loader import (
+    index_backend,
+    load_manifests,
+    turn_subagents,
+    validate_ext_tools,
+)
 from selfhost.ext.manifest import Manifest
 from selfhost.ext.surface import SurfaceContext, SurfaceSpec, WritebackPoller
 from selfhost.grants import ConnectFlow, GrantStore, OAuthProvider, install_connect_flow
@@ -32,7 +37,6 @@ from selfhost.loop.queue import Runtime, init_runtime
 from selfhost.loop.subagents import SubagentRegistry
 from selfhost.memory.chunk import TextChunker
 from selfhost.memory.embed import OpenAIEmbedClient
-from selfhost.memory.index import index_backend_for
 from selfhost.memory.indexer import MemoryIndexer, PageIndexer
 from selfhost.memory.service import MemoryService
 from selfhost.memory.sources import (
@@ -80,7 +84,14 @@ def run() -> None:
     embed = OpenAIEmbedClient(
         client=openai_sdk_client(os.environ.get(config.models.openai_api_key_env, ""))
     )
-    index = index_backend_for(config.database.url, embed)
+    index = index_backend(
+        manifests,
+        config.memory.index_backend,
+        config.database.url,
+        embed,
+        workspace_id,
+        credentials,
+    )
     chunker = TextChunker()
     blob = blob_store_for(config.blob)
     artifact_secret = os.environ.get(config.artifacts.token_secret_env, "")

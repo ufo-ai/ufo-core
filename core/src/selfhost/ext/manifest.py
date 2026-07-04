@@ -15,9 +15,11 @@ from pydantic import BaseModel
 from starlette.requests import Request
 from starlette.responses import Response
 
-from selfhost.ext.context import ExtensionContext
+from selfhost.ext.context import CredentialAccess, ExtensionContext
 from selfhost.ext.surface import SurfaceSpec
 from selfhost.grants import OAuthProvider
+from selfhost.memory.embed import EmbedClient
+from selfhost.memory.index import IndexBackend
 from selfhost.memory.sources import SourceBackend
 from selfhost.schema.records import Agent, Turn
 from selfhost.tools.registry import ToolDef
@@ -101,6 +103,19 @@ class SourceProvider:
 
     backend: str
     source: SourceBackend
+
+
+@dataclass(frozen=True)
+class IndexBackendSpec:
+    """One vector-index backend an extension registers: the `name` a deploy selects it by (config
+    `memory.index_backend`) and the `factory` core calls at boot to build the `IndexBackend`, given
+    the deploy embed client and a credential reader scoped to this manifest's declared slots. The
+    index runs in the jobs/serve role, never in the sandbox, so a BYOK backend reads its key from
+    the slot in-process rather than through the egress proxy. `serve` layers the named backend over
+    the dialect-native default (SQLite FTS5 + local cosine, Postgres tsvector + pgvector)."""
+
+    name: str
+    factory: Callable[[EmbedClient, CredentialAccess], IndexBackend]
 
 
 @dataclass(frozen=True)
@@ -245,6 +260,7 @@ class Manifest:
     connectors: tuple[ConnectorProvider, ...] = ()
     sources: tuple[SourceProvider, ...] = ()
     onboarding_steps: tuple[OnboardingStep, ...] = ()
+    indexes: tuple[IndexBackendSpec, ...] = ()
     hooks: tuple[HookSpec, ...] = ()
     prompt_sections: tuple[PromptSection, ...] = ()
     subagents: tuple[SubagentProfile, ...] = ()

@@ -29,7 +29,7 @@ from selfhost.ext.context import (
     UndeclaredCredentialSlot,
     context_for,
 )
-from selfhost.ext.loader import load_manifests, turn_subagents, turn_tools
+from selfhost.ext.loader import index_backend, load_manifests, turn_subagents, turn_tools
 from selfhost.ext.manifest import Manifest
 from selfhost.ext.surface import WRITEBACK_DELIVERED, WRITEBACK_PENDING, workspace_key
 from selfhost.governance import prompt_digest
@@ -38,11 +38,11 @@ from selfhost.jobs import JobRunner, bindings_from
 from selfhost.loop.prompts.render import render_system_prompt
 from selfhost.loop.subagents import SubagentRegistry, subagent_system_prompt
 from selfhost.loop.transcript import Transcript
-from selfhost.memory.chunk import TextChunker
+from selfhost.memory.chunk import Chunk, TextChunker
 from selfhost.memory.embed import EMBED_DIM
-from selfhost.memory.index import index_backend_for
+from selfhost.memory.index import PgvectorIndex, SqliteFtsIndex, index_backend_for
 from selfhost.memory.indexer import PageIndexer
-from selfhost.memory.service import SHARED_SUBJECT, MemoryService
+from selfhost.memory.service import OWNER_KIND_MEMORY_ITEM, SHARED_SUBJECT, MemoryService
 from selfhost.memory.sources import SyncDriver
 from selfhost.models.interface import Message
 from selfhost.onboarding import run_onboarding_steps
@@ -165,6 +165,7 @@ async def test_sample_is_discovered_via_its_entry_point() -> None:
     assert {profile.name for profile in manifest.subagents} == {sample.SUBAGENT_NAME}
     assert {surface.name for surface in manifest.surfaces} == {sample.SURFACE_NAME}
     assert {source.backend for source in manifest.sources} == {sample.SOURCE_BACKEND}
+    assert {spec.name for spec in manifest.indexes} == {sample.INDEX_BACKEND}
 
 
 def test_pack_prompt_section_reaches_the_rendered_system_prompt() -> None:
@@ -728,3 +729,32 @@ async def test_sample_source_syncs_a_page_recallable_through_memory(
         "migrating orbital widget fleet", frozenset({SHARED_SUBJECT}), 5
     )
     assert matches and "orbital widget" in matches[0].text
+
+
+async def test_core_selects_a_manifest_index_backend_by_name(db: None, database_url: str) -> None:
+    """The `indexes` seam end to end through the probe: with `memory.index_backend` naming the
+    sample's backend, core builds the manifest-contributed IndexBackend (not the dialect default)
+    and it is driven through the protocol — upsert then retrieve. Unset falls back to the dialect
+    default; an unknown name and a missing credential key each fail loud."""
+    workspace_id = await _workspace()
+    manifest = _sample_manifest()
+    embed = _StubEmbed(_vec((0, 1.0)))
+    store = _credential_store()
+
+    selected = index_backend(
+        (manifest,), sample.INDEX_BACKEND, database_url, embed, workspace_id, store
+    )
+    assert isinstance(selected, sample.SampleIndex)
+    await selected.upsert(
+        (Chunk("d1", OWNER_KIND_MEMORY_ITEM, "m1", SHARED_SUBJECT, 0, "orbital", _vec((0, 1.0))),)
+    )
+    hits = await selected.lexical("orbital", frozenset({SHARED_SUBJECT}), OWNER_KIND_MEMORY_ITEM, 5)
+    assert [hit.chunk_digest for hit in hits] == ["d1"]
+
+    default = index_backend((manifest,), None, database_url, embed, workspace_id, store)
+    assert isinstance(default, (PgvectorIndex, SqliteFtsIndex))
+
+    with pytest.raises(RuntimeError, match="no extension registers"):
+        index_backend((manifest,), "nonesuch", database_url, embed, workspace_id, store)
+    with pytest.raises(RuntimeError, match="needs a credential key"):
+        index_backend((manifest,), sample.INDEX_BACKEND, database_url, embed, workspace_id, None)

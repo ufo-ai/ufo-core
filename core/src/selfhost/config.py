@@ -69,6 +69,15 @@ class ConnectConfig(BaseModel):
     public_base_url: str | None = None
 
 
+class MemoryConfig(BaseModel):
+    """Memory retrieval settings. `index_backend` names a vector-index backend an extension
+    contributes through its `indexes` Manifest point (e.g. turbopuffer); unset uses the deploy's
+    dialect-native default — SQLite FTS5 + local cosine, Postgres tsvector + pgvector."""
+
+    model_config = ConfigDict(extra="forbid")
+    index_backend: str | None = None
+
+
 class O11yConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     otlp_endpoint: str | None = None
@@ -126,6 +135,7 @@ class Config(BaseModel):
     credentials: CredentialsConfig = CredentialsConfig()
     serve: ServeConfig = ServeConfig()
     connect: ConnectConfig = ConnectConfig()
+    memory: MemoryConfig = MemoryConfig()
     o11y: O11yConfig = O11yConfig()
     ext: ExtConfig = ExtConfig()
     sources: tuple[SourceEntry, ...] = ()

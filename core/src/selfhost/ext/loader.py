@@ -41,6 +41,8 @@ from selfhost.ext.manifest import (
     PreToolUse,
     SubagentProfile,
 )
+from selfhost.memory.embed import EmbedClient
+from selfhost.memory.index import IndexBackend, index_backend_for
 from selfhost.memory.service import MemoryService
 from selfhost.o11y import log
 from selfhost.schema.records import Agent, Turn
@@ -192,6 +194,35 @@ def turn_subagents(manifests: tuple[Manifest, ...]) -> tuple[SubagentProfile, ..
     the SubagentRegistry from. A duplicate name across extensions is rejected by the registry at
     construction, so boot fails loud rather than shadowing one profile with another."""
     return tuple(profile for manifest in manifests for profile in manifest.subagents)
+
+
+def index_backend(
+    manifests: tuple[Manifest, ...],
+    configured: str | None,
+    database_url: str,
+    embed: EmbedClient,
+    workspace_id: UUID,
+    credential_store: CredentialStore | None,
+) -> IndexBackend:
+    """The workspace's index backend: the deploy's dialect-native default (config
+    `memory.index_backend` unset) or the named backend an extension contributes through its
+    `indexes` Manifest point, layered over that default. A configured name no extension registers
+    fails loud; a named backend with no credential key set fails loud, since its factory reads a
+    credential reader scoped to the declaring extension's slots for its BYOK key."""
+    if configured is None:
+        return index_backend_for(database_url, embed)
+    for manifest in manifests:
+        for spec in manifest.indexes:
+            if spec.name != configured:
+                continue
+            if credential_store is None:
+                raise RuntimeError(
+                    f"index backend {configured!r} needs a credential key but none is set"
+                )
+            declared = frozenset(slot.name for slot in manifest.credentials)
+            context = context_for(workspace_id, manifest.name, declared, credential_store)
+            return spec.factory(embed, context.credentials)
+    raise RuntimeError(f"config selects index backend {configured!r} but no extension registers it")
 
 
 def validate_ext_tools(
