@@ -20,6 +20,7 @@ from selfhost_ext_research.subagent import (
 )
 from selfhost_ext_research.tools import RESEARCH_TOOLS
 
+from selfhost.ext.loader import skill_registry
 from selfhost.loop.prompts.render import render_system_prompt
 from selfhost.loop.subagents import subagent_system_prompt
 from selfhost.schema.records import Agent, Turn
@@ -271,3 +272,9 @@ def test_research_profile_prompt_wraps_with_citation_and_fills_the_skill_index()
     assert "<available_skills>" in prompt
     assert "<citation_instructions>" in prompt
     assert "search_vertical" in prompt
+
+
+def test_research_skills_parse_and_index() -> None:
+    index = dict(skill_registry((research_manifest.manifest(),)).index())
+    for name in ("research-assistant", "research-report"):
+        assert name in index
