@@ -100,6 +100,7 @@ ledger = sa.Table(
     sa.Column("amount", sa.BigInteger, nullable=False),
     sa.Column("priced_micro_usd", sa.BigInteger, nullable=False),
     sa.Column("model", sa.Text, nullable=False),
+    sa.Column("price_digest", sa.Text, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.CheckConstraint("dimension in ('tokens', 'egress')", name="ledger_dimension"),

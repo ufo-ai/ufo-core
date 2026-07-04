@@ -425,8 +425,9 @@ SPEND_WINDOW_DEFAULT_SECONDS = 86_400
 @main.command()
 @click.option("--window-seconds", type=int, default=SPEND_WINDOW_DEFAULT_SECONDS, show_default=True)
 def spend(window_seconds: int) -> None:
-    """Sum the ledger over a window: the workspace total, then a per-dimension, per-member, and
-    per-agent breakdown — the rollups that match the ledger."""
+    """Sum the ledger over a window: the workspace total, then a per-dimension, per-member,
+    per-agent, and per-price-digest breakdown — the rollups that match the ledger, the last
+    attributing each burn to the rate version that priced it."""
     config = load_config()
     report = asyncio.run(_read_spend(config, window_seconds))
     total = report.total_micro_usd / MICRO_USD_PER_USD
@@ -440,6 +441,10 @@ def spend(window_seconds: int) -> None:
     click.echo("by agent:")
     for agent in report.by_agent:
         click.echo(f"  {agent.label:<32}${agent.priced_micro_usd / MICRO_USD_PER_USD:,.6f}")
+    click.echo("by price digest:")
+    for entry in report.by_price_digest:
+        priced = entry.priced_micro_usd / MICRO_USD_PER_USD
+        click.echo(f"  {entry.price_digest}  ${priced:,.6f}")
 
 
 async def _read_spend(config: Config, window_seconds: int) -> SpendReport:

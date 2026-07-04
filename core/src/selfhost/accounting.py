@@ -1,5 +1,7 @@
 """Token pricing, the one billing write per turn, and the spend caps decided against the ledger."""
 
+import hashlib
+import json
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -84,6 +86,30 @@ MODEL_TOKEN_PRICE: dict[str, ModelPrice] = {
 }
 
 
+def price_digest() -> str:
+    """A deterministic version stamp of the price table: sha256 over the sorted per-model rates.
+    Stamped on every priced ledger row so a burn stays attributable to the rate that priced it —
+    after a MODEL_TOKEN_PRICE edit historical rows keep their original digest and reprice/audit
+    reconciliation over a window that spans the change stays exact."""
+    payload = json.dumps(
+        {
+            model: {
+                "input": price.input,
+                "output": price.output,
+                "cache_read": price.cache_read,
+                "cache_write": price.cache_write,
+            }
+            for model, price in sorted(MODEL_TOKEN_PRICE.items())
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return "sha256:" + hashlib.sha256(payload.encode()).hexdigest()
+
+
+PRICE_DIGEST = price_digest()
+
+
 def usage_priced_micro_usd(model: str, usage: Usage) -> int:
     """Micro-USD for a usage split: integer dot product, floored at micro-dollar precision.
 
@@ -138,6 +164,7 @@ async def record_turn_usage(
             amount=total,
             priced_micro_usd=usage_priced_micro_usd(model, usage),
             model=model,
+            price_digest=PRICE_DIGEST,
             created_at=sa.func.now(),
             updated_at=sa.func.now(),
         )
@@ -333,24 +360,35 @@ class SubjectTotal:
 
 
 @dataclass(frozen=True, slots=True)
+class PriceDigestTotal:
+    price_digest: str
+    priced_micro_usd: int
+
+
+@dataclass(frozen=True, slots=True)
 class SpendReport:
-    """A window's ledger, summed three ways: the workspace total, per member, and per agent, plus
-    the per-dimension split so a reader sees priced tokens beside the egress request count."""
+    """A window's ledger, summed four ways: the workspace total, per member, and per agent, plus
+    the per-dimension split so a reader sees priced tokens beside the egress request count, and the
+    per-price-digest split so an audit attributes each burn to the rate version that priced it —
+    the reconciliation seam over a window that spans a MODEL_TOKEN_PRICE change."""
 
     window_seconds: int
     total_micro_usd: int
     by_dimension: tuple[DimensionTotal, ...]
     by_member: tuple[SubjectTotal, ...]
     by_agent: tuple[SubjectTotal, ...]
+    by_price_digest: tuple[PriceDigestTotal, ...]
 
 
 @dataclass(frozen=True)
 class SpendRollup:
     """Sum the workspace's ledger over a rolling window for the `selfhost spend` CLI and the web
-    view. `read` is the whole workflow: the window total, then the per-dimension, per-member, and
-    per-agent breakdowns — each a grouped sum the caller renders. Member and agent rows join through
-    the turn, so a turn with no member (a subagent conversation) drops out of the member breakdown
-    while still counting in the workspace total."""
+    view. `read` is the whole workflow: the window total, then the per-dimension, per-member,
+    per-agent, and per-price-digest breakdowns — each a grouped sum the caller renders. Member and
+    agent rows join through the turn, so a turn with no member (a subagent conversation) drops out
+    of the member breakdown while still counting in the workspace total. The price-digest breakdown
+    covers only priced rows (egress rows carry no digest), so it attributes token spend to each rate
+    version present in the window."""
 
     workspace_id: UUID
 
@@ -413,4 +451,18 @@ class SpendRollup:
                 .order_by(tables.agent.c.name)
             )
         )
-        return SpendReport(window_seconds, total, by_dimension, by_member, by_agent)
+        by_price_digest = tuple(
+            PriceDigestTotal(row.price_digest, int(row.priced))
+            for row in await connection.execute(
+                sa.select(
+                    tables.ledger.c.price_digest,
+                    sa.func.sum(tables.ledger.c.priced_micro_usd).label("priced"),
+                )
+                .where(window & tables.ledger.c.price_digest.isnot(None))
+                .group_by(tables.ledger.c.price_digest)
+                .order_by(tables.ledger.c.price_digest)
+            )
+        )
+        return SpendReport(
+            window_seconds, total, by_dimension, by_member, by_agent, by_price_digest
+        )

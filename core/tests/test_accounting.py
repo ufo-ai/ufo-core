@@ -2,6 +2,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
+import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -45,13 +46,38 @@ def test_unknown_model_prices_zero_never_raises() -> None:
     assert usage_priced_micro_usd("gpt-4o", FULL_USAGE) == 0
 
 
+def test_price_digest_is_stable_sha256() -> None:
+    assert accounting.PRICE_DIGEST.startswith("sha256:")
+    assert len(accounting.PRICE_DIGEST) == len("sha256:") + 64
+    assert accounting.price_digest() == accounting.PRICE_DIGEST
+
+
+def test_price_digest_changes_when_price_table_changes(monkeypatch: pytest.MonkeyPatch) -> None:
+    baseline = accounting.price_digest()
+    monkeypatch.setitem(
+        accounting.MODEL_TOKEN_PRICE,
+        "claude-opus-4-8",
+        accounting.ModelPrice(1, 1, 1, 1),
+    )
+    assert accounting.price_digest() != baseline
+
+
 async def test_unknown_model_records_tokens_at_zero_price(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
         await record_turn_usage(connection, workspace_id, turn_id, "gpt-4o", FULL_USAGE)
     async with workspace_tx() as connection:
         cost = await read_turn_cost(connection, turn_id)
+        stamped = (
+            await connection.execute(
+                sa.select(tables.ledger.c.price_digest).where(
+                    tables.ledger.c.turn_id == turn_id,
+                    tables.ledger.c.dimension == "tokens",
+                )
+            )
+        ).scalar_one()
     assert cost == (10_000, 0, "gpt-4o")
+    assert stamped == accounting.PRICE_DIGEST
 
 
 def test_absent_caps_cache_evicts_expired_entries_when_full() -> None:
@@ -130,6 +156,32 @@ async def test_record_then_read_back(db: None) -> None:
     assert cost == (10_000, 81_500, "claude-opus-4-8")
 
 
+async def test_ledger_insert_stamps_current_price_digest(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await record_turn_usage(connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE)
+    async with workspace_tx() as connection:
+        stamped = (
+            await connection.execute(
+                sa.select(tables.ledger.c.price_digest).where(tables.ledger.c.turn_id == turn_id)
+            )
+        ).scalar_one()
+    assert stamped == accounting.PRICE_DIGEST
+
+
+async def test_egress_row_carries_no_price_digest(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await record_egress_request(connection, workspace_id, turn_id)
+    async with workspace_tx() as connection:
+        stamped = (
+            await connection.execute(
+                sa.select(tables.ledger.c.price_digest).where(tables.ledger.c.turn_id == turn_id)
+            )
+        ).scalar_one()
+    assert stamped is None
+
+
 async def test_replay_leaves_one_row(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
@@ -197,6 +249,9 @@ async def test_spend_rollup_matches_ledger_sums(db: None) -> None:
     }
     assert [(s.label, s.priced_micro_usd) for s in report.by_member] == [("a@b.c", 81_500)]
     assert [(s.label, s.priced_micro_usd) for s in report.by_agent] == [("assistant", 81_500)]
+    assert [(p.price_digest, p.priced_micro_usd) for p in report.by_price_digest] == [
+        (accounting.PRICE_DIGEST, 81_500)
+    ]
 
 
 async def test_spend_rollup_excludes_ledger_outside_the_window(db: None) -> None:
