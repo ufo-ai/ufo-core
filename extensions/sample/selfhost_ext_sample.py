@@ -31,6 +31,7 @@ from selfhost.sdk.manifest import (
     ConnectorProvider,
     CredentialSlot,
     Deny,
+    EmbedBackendSpec,
     HookContext,
     HookOutcome,
     HookSpec,
@@ -103,6 +104,8 @@ SOURCE_BACKEND = "sample_source"
 SOURCE_REF = "sample/handbook"
 SOURCE_TOPIC = "the sample source syncs a page about migrating the orbital widget fleet"
 INDEX_BACKEND = "sample_index"
+EMBED_BACKEND = "sample_embed"
+SAMPLE_EMBED_VECTOR = (1.0, 0.0, 0.0)
 MODEL_PROVIDER_NAME = "sample_models"
 SAMPLE_MODEL = "sample-model-x1"
 SAMPLE_MODEL_REPLY = "sample model backend reply"
@@ -279,6 +282,16 @@ class SampleIndex:
             for chunk in self.chunks.values()
             if chunk.owner_kind == owner_kind and chunk.subject in subjects
         ]
+
+
+@dataclass(frozen=True)
+class SampleEmbed:
+    """A canned EmbedClient the probe registers through the `embeds` Manifest point: `embed` returns
+    one fixed vector per text. A real client consumed through the protocol, so a test drives core's
+    embed selection exactly as core does; the OpenAI backend keeps its own proof."""
+
+    async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+        return tuple(SAMPLE_EMBED_VECTOR for _ in texts)
 
 
 def _in_scope(chunk: Chunk, scope: IndexScope) -> bool:
@@ -568,9 +581,10 @@ def manifest() -> Manifest:
         sources=(SourceProvider(backend=SOURCE_BACKEND, source=SampleSource()),),
         indexes=(
             IndexBackendSpec(
-                name=INDEX_BACKEND, factory=lambda embed, credentials: SampleIndex(embed=embed)
+                name=INDEX_BACKEND, factory=lambda embed, ctx: SampleIndex(embed=embed)
             ),
         ),
+        embeds=(EmbedBackendSpec(name=EMBED_BACKEND, factory=lambda ctx: SampleEmbed()),),
         models=(
             ModelProviderSpec(
                 name=MODEL_PROVIDER_NAME,

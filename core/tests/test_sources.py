@@ -5,10 +5,13 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
+from selfhost_ext_embed_openai import EMBED_DIM
+from selfhost_ext_index_default import DefaultIndex
 
 from selfhost.blob import FilesystemBlobStore
 from selfhost.config import SourceConfig, SourceEntry
 from selfhost.db import workspace_tx
+from selfhost.indexing import Chunk, TextChunker
 from selfhost.jobs import (
     CORE_EXTENSION,
     MEMORY_INDEX_JOB,
@@ -18,9 +21,6 @@ from selfhost.jobs import (
     bindings_from,
     core_jobs,
 )
-from selfhost.memory.chunk import Chunk, TextChunker
-from selfhost.memory.embed import EMBED_DIM
-from selfhost.memory.index import index_backend_for
 from selfhost.memory.indexer import MemoryIndexer, PageIndexer
 from selfhost.memory.service import (
     OWNER_KIND_PAGE,
@@ -98,7 +98,7 @@ def _wire(
     database_url: str, vector: tuple[float, ...], blob_root: Path
 ) -> tuple[SyncDriver, PageIndexer, MemoryService]:
     embed = StubEmbed(vector)
-    index = index_backend_for(database_url, embed)
+    index = DefaultIndex(embed=embed, transaction=workspace_tx)
     blob = FilesystemBlobStore(root=blob_root)
     driver = SyncDriver(
         backends={FOLDER_BACKEND: FolderSource()},

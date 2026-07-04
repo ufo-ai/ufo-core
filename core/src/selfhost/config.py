@@ -73,11 +73,14 @@ class ConnectConfig(BaseModel):
 
 class MemoryConfig(BaseModel):
     """Memory retrieval settings. `index_backend` names a vector-index backend an extension
-    contributes through its `indexes` Manifest point (e.g. turbopuffer); unset uses the deploy's
-    dialect-native default — SQLite FTS5 + local cosine, Postgres tsvector + pgvector."""
+    contributes through its `indexes` Manifest point (e.g. turbopuffer); `embed_backend` names an
+    embedding backend an extension contributes through its `embeds` point. Either unset resolves the
+    base-pinned `"default"` backend — the `index-default` extension (SQLite FTS5 + local cosine,
+    Postgres tsvector + pgvector) and the `embed-openai` extension."""
 
     model_config = ConfigDict(extra="forbid")
     index_backend: str | None = None
+    embed_backend: str | None = None
 
 
 class O11yConfig(BaseModel):

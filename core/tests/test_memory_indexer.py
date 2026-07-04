@@ -5,9 +5,12 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
+from selfhost_ext_embed_openai import EMBED_DIM
+from selfhost_ext_index_default import DefaultIndex
 
 from selfhost.blob import FilesystemBlobStore
 from selfhost.db import workspace_tx
+from selfhost.indexing import TextChunker
 from selfhost.jobs import (
     CORE_EXTENSION,
     MEMORY_INDEX_JOB,
@@ -16,9 +19,6 @@ from selfhost.jobs import (
     bindings_from,
     core_jobs,
 )
-from selfhost.memory.chunk import TextChunker
-from selfhost.memory.embed import EMBED_DIM
-from selfhost.memory.index import index_backend_for
 from selfhost.memory.indexer import MemoryIndexer, PageIndexer
 from selfhost.memory.service import MemoryService, member_subject, recall_subjects
 from selfhost.memory.sources import FOLDER_BACKEND, FolderSource, SyncDriver
@@ -79,7 +79,7 @@ async def _workspace() -> UUID:
 
 def _wire(database_url: str, vector: tuple[float, ...]) -> tuple[MemoryService, MemoryIndexer]:
     embed = StubEmbed(vector)
-    index = index_backend_for(database_url, embed)
+    index = DefaultIndex(embed=embed, transaction=workspace_tx)
     service = MemoryService(index=index, embed=embed)
     indexer = MemoryIndexer(
         index=index,
@@ -117,7 +117,7 @@ async def test_index_job_derives_chunks_and_stamps_digest(clean: None, database_
 async def test_overlapping_index_runs_embed_each_row_once(clean: None, database_url: str) -> None:
     await _workspace()
     embed = CountingEmbed(vec((0, 1.0)))
-    index = index_backend_for(database_url, embed)
+    index = DefaultIndex(embed=embed, transaction=workspace_tx)
     service = MemoryService(index=index, embed=embed)
     postgres = database_url.startswith("postgresql")
     bodies = tuple(f"fact number {n} worth remembering" for n in range(6))
@@ -171,7 +171,7 @@ async def test_member_memory_is_invisible_to_another_member(clean: None, databas
 
 def test_memory_index_registers_as_a_core_job(database_url: str, tmp_path: Path) -> None:
     embed = StubEmbed(())
-    index = index_backend_for(database_url, embed)
+    index = DefaultIndex(embed=embed, transaction=workspace_tx)
     blob = FilesystemBlobStore(root=tmp_path)
     postgres = database_url.startswith("postgresql")
     specs = core_jobs(

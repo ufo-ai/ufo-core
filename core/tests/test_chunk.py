@@ -1,4 +1,4 @@
-from selfhost.memory.chunk import TextChunker
+from selfhost.indexing import TextChunker
 
 
 def test_short_text_is_one_chunk() -> None:

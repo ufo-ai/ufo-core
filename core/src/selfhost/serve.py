@@ -24,6 +24,7 @@ from selfhost.credentials import CredentialStore
 from selfhost.db import init_db, workspace_tx
 from selfhost.ext.context import context_for
 from selfhost.ext.loader import (
+    embed_backend,
     index_backend,
     load_manifests,
     skill_registry,
@@ -34,12 +35,11 @@ from selfhost.ext.manifest import Manifest
 from selfhost.ext.surface import SurfaceContext, SurfaceSpec, WritebackPoller
 from selfhost.grants import ConnectFlow, GrantStore, OAuthProvider, install_connect_flow
 from selfhost.hub import Hub, InProcessHub
+from selfhost.indexing import TextChunker
 from selfhost.jobs import JobRunner, SpendResume, bindings_from, core_jobs
 from selfhost.loop.profiles import CORE_SUBAGENT_PROFILES
 from selfhost.loop.queue import Runtime, init_runtime
 from selfhost.loop.subagents import SubagentRegistry
-from selfhost.memory.chunk import TextChunker
-from selfhost.memory.embed import OpenAIEmbedClient
 from selfhost.memory.indexer import MemoryIndexer, PageIndexer
 from selfhost.memory.service import MemoryService
 from selfhost.memory.sources import (
@@ -49,7 +49,6 @@ from selfhost.memory.sources import (
     SyncDriver,
     register_sources,
 )
-from selfhost.models.openai import openai_sdk_client
 from selfhost.models.registry import model_registry
 from selfhost.o11y import init_o11y, log
 from selfhost.runtime_instance import BootGuard, Heartbeat
@@ -85,16 +84,9 @@ def run() -> None:
     key = os.environ.get(config.credentials.key_env)
     credentials = CredentialStore(fernet=Fernet(key.encode())) if key else None
     validate_ext_tools(manifests, workspace_id, credentials)
-    embed = OpenAIEmbedClient(
-        client=openai_sdk_client(os.environ.get(config.models.openai_api_key_env, ""))
-    )
+    embed = embed_backend(manifests, config.memory.embed_backend, workspace_id, credentials)
     index = index_backend(
-        manifests,
-        config.memory.index_backend,
-        config.database.url,
-        embed,
-        workspace_id,
-        credentials,
+        manifests, config.memory.index_backend, embed, workspace_id, credentials
     )
     chunker = TextChunker()
     blob = blob_store_for(config.blob)

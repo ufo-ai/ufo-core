@@ -18,14 +18,14 @@ import selfhost_ext_connectors.composio_proxy as composio_proxy
 import selfhost_ext_connectors.sources as sources
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
+from selfhost_ext_embed_openai import EMBED_DIM
+from selfhost_ext_index_default import DefaultIndex
 
 from selfhost.blob import FilesystemBlobStore
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.ext.context import context_for
-from selfhost.memory.chunk import TextChunker
-from selfhost.memory.embed import EMBED_DIM
-from selfhost.memory.index import index_backend_for
+from selfhost.indexing import TextChunker
 from selfhost.memory.indexer import PageIndexer
 from selfhost.memory.service import SHARED_SUBJECT, MemoryService
 from selfhost.memory.sources import SourceAuth, SyncDriver
@@ -183,7 +183,7 @@ async def test_asana_source_syncs_through_the_driver_into_recallable_memory(
     )
 
     embed = _StubEmbed(_vec((6, 1.0)))
-    index = index_backend_for(database_url, embed)
+    index = DefaultIndex(embed=embed, transaction=workspace_tx)
     blob = FilesystemBlobStore(root=tmp_path)
     postgres = database_url.startswith("postgresql")
     driver = SyncDriver(

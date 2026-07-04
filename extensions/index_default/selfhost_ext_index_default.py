@@ -1,37 +1,32 @@
-"""The index backend seam: dialect-native lexical + vector retrieval over the `chunk` table.
+"""The base-pinned default index backend: dialect-native lexical + vector retrieval over `chunk`.
 
-Two impls, selected by database dialect: Postgres tsvector/GIN + pgvector halfvec/HNSW, SQLite
-FTS5 + brute-force cosine. The service (later unit) owns query embedding and lexical/vector
-fusion; a backend does storage, ANN/FTS, and the subject filter in the query. Dialect-only types
-(halfvec, tsvector, FTS5) never leave these classes — `Chunk`/`Hit` are dialect-neutral.
+Every deploy needs an index, so this extension is base-pinned and registers `IndexBackendSpec`
+name `"default"` — the backend core resolves when `memory.index_backend` is unset. One
+`DefaultIndex` selects its SQL by the connection dialect: Postgres tsvector/GIN + pgvector
+halfvec/HNSW, SQLite FTS5 + brute-force cosine. Dialect-only types (halfvec, tsvector, FTS5) never
+leave this module — `Chunk`/`Hit`/`IndexScope` stay dialect-neutral. It owns the `chunk`/`chunk_fts`
+tables (its migration), reached through the workspace-scoped `transaction()` core hands the factory,
+and re-embeds a scope through the deploy `EmbedClient` on reindex.
 """
 
 import math
 import struct
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
-from typing import Protocol
 
 import sqlalchemy as sa
+from sqlalchemy.ext.asyncio import AsyncConnection
 
-from selfhost.db import workspace_tx
-from selfhost.memory.chunk import Chunk, Hit, IndexScope
-from selfhost.memory.embed import EmbedClient
+from selfhost.sdk.index import Chunk, EmbedClient, Hit, IndexScope
+from selfhost.sdk.manifest import IndexBackendSpec, Manifest
 
+NAME = "index-default"
+VERSION = "0.1.0"
+INDEX_BACKEND = "default"
+EMBED_DIM = 3072
 
-class IndexBackend(Protocol):
-    async def upsert(self, chunks: tuple[Chunk, ...]) -> None: ...
-
-    async def delete(self, scope: IndexScope) -> None: ...
-
-    async def lexical(
-        self, query: str, subjects: frozenset[str], owner_kind: str, limit: int
-    ) -> tuple[Hit, ...]: ...
-
-    async def vector(
-        self, embedding: tuple[float, ...], subjects: frozenset[str], owner_kind: str, limit: int
-    ) -> tuple[Hit, ...]: ...
-
-    async def reindex(self, scope: IndexScope) -> None: ...
+Transaction = Callable[[], AbstractAsyncContextManager[AsyncConnection]]
 
 
 def pgvector_literal(vector: tuple[float, ...]) -> str:
@@ -47,6 +42,14 @@ def cosine(left: tuple[float, ...], right: tuple[float, ...]) -> float:
     if denom == 0:
         return 0.0
     return sum(a * b for a, b in zip(left, right, strict=True)) / denom
+
+
+def pack_embedding(vector: tuple[float, ...]) -> bytes:
+    return struct.pack(f"<{len(vector)}f", *vector)
+
+
+def unpack_embedding(blob: bytes) -> tuple[float, ...]:
+    return struct.unpack(f"<{len(blob) // 4}f", blob)
 
 
 def _hit(row: sa.RowMapping, score: float) -> Hit:
@@ -101,99 +104,6 @@ REEMBED_PG = sa.text(
     "update chunk set embedding = cast(:embedding as halfvec) where chunk_digest = :chunk_digest"
 )
 
-
-@dataclass(frozen=True)
-class PgvectorIndex:
-    embed: EmbedClient
-
-    async def upsert(self, chunks: tuple[Chunk, ...]) -> None:
-        if not chunks:
-            return
-        async with workspace_tx() as connection:
-            for chunk in chunks:
-                await connection.execute(
-                    UPSERT_PG,
-                    {
-                        "chunk_digest": chunk.chunk_digest,
-                        "owner_kind": chunk.owner_kind,
-                        "owner_id": chunk.owner_id,
-                        "subject": chunk.subject,
-                        "ordinal": chunk.ordinal,
-                        "text": chunk.text,
-                        "embedding": pgvector_literal(chunk.embedding) if chunk.embedding else None,
-                    },
-                )
-
-    async def delete(self, scope: IndexScope) -> None:
-        async with workspace_tx() as connection:
-            await connection.execute(
-                DELETE_PG, {"owner_kind": scope.owner_kind, "owner_id": scope.owner_id}
-            )
-
-    async def lexical(
-        self, query: str, subjects: frozenset[str], owner_kind: str, limit: int
-    ) -> tuple[Hit, ...]:
-        if not query.strip() or not subjects:
-            return ()
-        async with workspace_tx() as connection:
-            rows = (
-                await connection.execute(
-                    LEXICAL_PG,
-                    {
-                        "query": query,
-                        "subjects": list(subjects),
-                        "owner_kind": owner_kind,
-                        "limit": limit,
-                    },
-                )
-            ).mappings()
-            return tuple(_hit(row, row["score"]) for row in rows)
-
-    async def vector(
-        self, embedding: tuple[float, ...], subjects: frozenset[str], owner_kind: str, limit: int
-    ) -> tuple[Hit, ...]:
-        if not embedding or not subjects:
-            return ()
-        async with workspace_tx() as connection:
-            rows = (
-                await connection.execute(
-                    VECTOR_PG,
-                    {
-                        "query": pgvector_literal(embedding),
-                        "subjects": list(subjects),
-                        "owner_kind": owner_kind,
-                        "limit": limit,
-                    },
-                )
-            ).mappings()
-            return tuple(_hit(row, row["score"]) for row in rows)
-
-    async def reindex(self, scope: IndexScope) -> None:
-        async with workspace_tx() as connection:
-            rows = (
-                await connection.execute(
-                    SCOPE_TEXT_PG, {"owner_kind": scope.owner_kind, "owner_id": scope.owner_id}
-                )
-            ).mappings().all()
-        if not rows:
-            return
-        vectors = await self.embed.embed(tuple(row["text"] for row in rows))
-        async with workspace_tx() as connection:
-            for row, vector in zip(rows, vectors, strict=True):
-                await connection.execute(
-                    REEMBED_PG,
-                    {"embedding": pgvector_literal(vector), "chunk_digest": row["chunk_digest"]},
-                )
-
-
-def pack_embedding(vector: tuple[float, ...]) -> bytes:
-    return struct.pack(f"<{len(vector)}f", *vector)
-
-
-def unpack_embedding(blob: bytes) -> tuple[float, ...]:
-    return struct.unpack(f"<{len(blob) // 4}f", blob)
-
-
 UPSERT_SQLITE = sa.text(
     """
     insert into chunk (chunk_digest, owner_kind, owner_id, subject, ordinal, text, embedding)
@@ -243,14 +153,36 @@ REEMBED_SQLITE = sa.text(
 
 
 @dataclass(frozen=True)
-class SqliteFtsIndex:
+class DefaultIndex:
+    """The dialect-native `IndexBackend`. Holds the deploy embed client (for reindex re-embedding)
+    and the workspace-scoped `transaction()` opener core hands the factory; each operation opens one
+    transaction and selects Postgres or SQLite SQL by the connection dialect."""
+
     embed: EmbedClient
+    transaction: Transaction
 
     async def upsert(self, chunks: tuple[Chunk, ...]) -> None:
         if not chunks:
             return
-        async with workspace_tx() as connection:
+        async with self.transaction() as connection:
+            postgres = connection.dialect.name == "postgresql"
             for chunk in chunks:
+                if postgres:
+                    await connection.execute(
+                        UPSERT_PG,
+                        {
+                            "chunk_digest": chunk.chunk_digest,
+                            "owner_kind": chunk.owner_kind,
+                            "owner_id": chunk.owner_id,
+                            "subject": chunk.subject,
+                            "ordinal": chunk.ordinal,
+                            "text": chunk.text,
+                            "embedding": (
+                                pgvector_literal(chunk.embedding) if chunk.embedding else None
+                            ),
+                        },
+                    )
+                    continue
                 await connection.execute(
                     UPSERT_SQLITE,
                     {
@@ -269,21 +201,38 @@ class SqliteFtsIndex:
                 )
 
     async def delete(self, scope: IndexScope) -> None:
-        async with workspace_tx() as connection:
-            await connection.execute(
-                DELETE_FTS_SCOPE, {"owner_kind": scope.owner_kind, "owner_id": scope.owner_id}
-            )
-            await connection.execute(
-                DELETE_SQLITE, {"owner_kind": scope.owner_kind, "owner_id": scope.owner_id}
-            )
+        params = {"owner_kind": scope.owner_kind, "owner_id": scope.owner_id}
+        async with self.transaction() as connection:
+            if connection.dialect.name == "postgresql":
+                await connection.execute(DELETE_PG, params)
+                return
+            await connection.execute(DELETE_FTS_SCOPE, params)
+            await connection.execute(DELETE_SQLITE, params)
 
     async def lexical(
         self, query: str, subjects: frozenset[str], owner_kind: str, limit: int
     ) -> tuple[Hit, ...]:
-        match = " ".join(f'"{term}"' for term in query.split() if term)
-        if not match or not subjects:
+        if not subjects:
             return ()
-        async with workspace_tx() as connection:
+        async with self.transaction() as connection:
+            if connection.dialect.name == "postgresql":
+                if not query.strip():
+                    return ()
+                rows = (
+                    await connection.execute(
+                        LEXICAL_PG,
+                        {
+                            "query": query,
+                            "subjects": list(subjects),
+                            "owner_kind": owner_kind,
+                            "limit": limit,
+                        },
+                    )
+                ).mappings()
+                return tuple(_hit(row, row["score"]) for row in rows)
+            match = " ".join(f'"{term}"' for term in query.split() if term)
+            if not match:
+                return ()
             rows = (
                 await connection.execute(
                     LEXICAL_SQLITE,
@@ -302,7 +251,20 @@ class SqliteFtsIndex:
     ) -> tuple[Hit, ...]:
         if not embedding or not subjects:
             return ()
-        async with workspace_tx() as connection:
+        async with self.transaction() as connection:
+            if connection.dialect.name == "postgresql":
+                rows = (
+                    await connection.execute(
+                        VECTOR_PG,
+                        {
+                            "query": pgvector_literal(embedding),
+                            "subjects": list(subjects),
+                            "owner_kind": owner_kind,
+                            "limit": limit,
+                        },
+                    )
+                ).mappings()
+                return tuple(_hit(row, row["score"]) for row in rows)
             rows = (
                 await connection.execute(
                     VECTOR_ROWS_SQLITE, {"subjects": list(subjects), "owner_kind": owner_kind}
@@ -316,27 +278,37 @@ class SqliteFtsIndex:
         return tuple(_hit(row, score) for row, score in scored[:limit])
 
     async def reindex(self, scope: IndexScope) -> None:
-        async with workspace_tx() as connection:
+        params = {"owner_kind": scope.owner_kind, "owner_id": scope.owner_id}
+        async with self.transaction() as connection:
+            postgres = connection.dialect.name == "postgresql"
             rows = (
-                await connection.execute(
-                    SCOPE_TEXT_SQLITE, {"owner_kind": scope.owner_kind, "owner_id": scope.owner_id}
-                )
+                await connection.execute(SCOPE_TEXT_PG if postgres else SCOPE_TEXT_SQLITE, params)
             ).mappings().all()
         if not rows:
             return
         vectors = await self.embed.embed(tuple(row["text"] for row in rows))
-        async with workspace_tx() as connection:
+        async with self.transaction() as connection:
+            postgres = connection.dialect.name == "postgresql"
             for row, vector in zip(rows, vectors, strict=True):
                 await connection.execute(
-                    REEMBED_SQLITE,
-                    {"embedding": pack_embedding(vector), "chunk_digest": row["chunk_digest"]},
+                    REEMBED_PG if postgres else REEMBED_SQLITE,
+                    {
+                        "embedding": (
+                            pgvector_literal(vector) if postgres else pack_embedding(vector)
+                        ),
+                        "chunk_digest": row["chunk_digest"],
+                    },
                 )
 
 
-def index_backend_for(database_url: str, embed: EmbedClient) -> IndexBackend:
-    """Dialect selection by url scheme; fail loud on anything but sqlite/postgresql."""
-    if database_url.startswith("sqlite"):
-        return SqliteFtsIndex(embed=embed)
-    if database_url.startswith("postgresql"):
-        return PgvectorIndex(embed=embed)
-    raise RuntimeError(f"no index backend for database url {database_url!r}")
+def manifest() -> Manifest:
+    return Manifest(
+        name=NAME,
+        version=VERSION,
+        indexes=(
+            IndexBackendSpec(
+                name=INDEX_BACKEND,
+                factory=lambda embed, ctx: DefaultIndex(embed=embed, transaction=ctx.transaction),
+            ),
+        ),
+    )

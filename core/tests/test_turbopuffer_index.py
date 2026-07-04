@@ -20,7 +20,7 @@ from cryptography.fernet import Fernet
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.ext.context import CredentialAccess, context_for
-from selfhost.memory.chunk import Chunk, IndexScope
+from selfhost.indexing import Chunk, IndexScope
 from selfhost.schema import tables
 
 SHARED = "shared"

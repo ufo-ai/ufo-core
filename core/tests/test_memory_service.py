@@ -4,11 +4,11 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
+from selfhost_ext_embed_openai import EMBED_DIM
+from selfhost_ext_index_default import DefaultIndex
 
 from selfhost.db import workspace_tx
-from selfhost.memory.chunk import Chunk
-from selfhost.memory.embed import EMBED_DIM
-from selfhost.memory.index import index_backend_for
+from selfhost.indexing import Chunk
 from selfhost.memory.service import (
     OWNER_KIND_MEMORY_ITEM,
     OWNER_KIND_PAGE,
@@ -90,7 +90,7 @@ async def _seed_item(
                 updated_at=sa.func.now(),
             )
         )
-    backend = index_backend_for(database_url, StubEmbed(vector))
+    backend = DefaultIndex(embed=StubEmbed(vector), transaction=workspace_tx)
     await backend.upsert(
         (Chunk("d-" + item_id.hex, OWNER_KIND_MEMORY_ITEM, str(item_id), subject, 0, body, vector),)
     )
@@ -143,7 +143,7 @@ async def _seed_page(
                 updated_at=sa.func.now(),
             )
         )
-    backend = index_backend_for(database_url, StubEmbed(vector))
+    backend = DefaultIndex(embed=StubEmbed(vector), transaction=workspace_tx)
     await backend.upsert(
         (Chunk("p-" + page_id.hex, OWNER_KIND_PAGE, str(page_id), subject, 0, body, vector),)
     )
@@ -154,7 +154,7 @@ def _service(
     database_url: str, vector: tuple[float, ...], embed: object | None = None
 ) -> MemoryService:
     client = embed if embed is not None else StubEmbed(vector)
-    return MemoryService(index=index_backend_for(database_url, client), embed=client)
+    return MemoryService(index=DefaultIndex(embed=client, transaction=workspace_tx), embed=client)
 
 
 async def test_commit_persists_item_and_derives_no_chunk(clean: None, database_url: str) -> None:

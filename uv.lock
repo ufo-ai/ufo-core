@@ -17,8 +17,10 @@ members = [
     "selfhost-ext-docker",
     "selfhost-ext-documents",
     "selfhost-ext-e2b",
+    "selfhost-ext-embed-openai",
     "selfhost-ext-eval-harness",
     "selfhost-ext-exa",
+    "selfhost-ext-index-default",
     "selfhost-ext-mcp",
     "selfhost-ext-openrouter",
     "selfhost-ext-redis-hub",
@@ -2582,6 +2584,21 @@ requires-dist = [
 ]
 
 [[package]]
+name = "selfhost-ext-embed-openai"
+version = "0.1.0"
+source = { editable = "extensions/embed_openai" }
+dependencies = [
+    { name = "openai" },
+    { name = "selfhost" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "openai", specifier = ">=1.0" },
+    { name = "selfhost", editable = "core" },
+]
+
+[[package]]
 name = "selfhost-ext-eval-harness"
 version = "0.1.0"
 source = { editable = "extensions/eval_harness" }
@@ -2606,6 +2623,21 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "selfhost", editable = "core" }]
+
+[[package]]
+name = "selfhost-ext-index-default"
+version = "0.1.0"
+source = { editable = "extensions/index_default" }
+dependencies = [
+    { name = "selfhost" },
+    { name = "sqlalchemy" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "selfhost", editable = "core" },
+    { name = "sqlalchemy", specifier = ">=2" },
+]
 
 [[package]]
 name = "selfhost-ext-mcp"

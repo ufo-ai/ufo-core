@@ -13,11 +13,14 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
+import selfhost_ext_index_default as index_default
 import selfhost_ext_sample as sample
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from selfhost_ext_embed_openai import EMBED_DIM
+from selfhost_ext_index_default import DefaultIndex
 
 from selfhost.blob import FilesystemBlobStore
 from selfhost.browser.backend import BuaBackend
@@ -40,6 +43,7 @@ from selfhost.ext.context import (
     context_for,
 )
 from selfhost.ext.loader import (
+    embed_backend,
     index_backend,
     load_manifests,
     skill_registry,
@@ -51,15 +55,13 @@ from selfhost.ext.surface import WRITEBACK_DELIVERED, WRITEBACK_PENDING, workspa
 from selfhost.governance import prompt_digest
 from selfhost.grants import GrantStore
 from selfhost.hub import InProcessHub
+from selfhost.indexing import OWNER_KIND_MEMORY_ITEM, Chunk, TextChunker
 from selfhost.jobs import JobRunner, bindings_from
 from selfhost.loop.prompts.render import render_system_prompt
 from selfhost.loop.subagents import SubagentRegistry, subagent_system_prompt
 from selfhost.loop.transcript import Transcript
-from selfhost.memory.chunk import Chunk, TextChunker
-from selfhost.memory.embed import EMBED_DIM
-from selfhost.memory.index import PgvectorIndex, SqliteFtsIndex, index_backend_for
 from selfhost.memory.indexer import PageIndexer
-from selfhost.memory.service import OWNER_KIND_MEMORY_ITEM, SHARED_SUBJECT, MemoryService
+from selfhost.memory.service import MemoryService
 from selfhost.memory.sources import SyncDriver
 from selfhost.models.interface import Message, ModelRequest, TextDelta
 from selfhost.models.registry import model_registry
@@ -77,6 +79,7 @@ from selfhost.serve import (
     _select_hub,
 )
 from selfhost.skills.runtime import mount_skill
+from selfhost.subjects import SHARED_SUBJECT
 from selfhost.tools.context import SpawnResult, ToolContext
 from selfhost.transcript import Conversation, transcript_key
 
@@ -941,7 +944,7 @@ async def test_sample_source_syncs_a_page_recallable_through_memory(
     await run_onboarding_steps((manifest,), workspace_id, _credential_store())
 
     embed = _StubEmbed(_vec((3, 1.0)))
-    index = index_backend_for(database_url, embed)
+    index = DefaultIndex(embed=embed, transaction=workspace_tx)
     blob = FilesystemBlobStore(root=tmp_path)
     postgres = database_url.startswith("postgresql")
     driver = SyncDriver(
@@ -975,17 +978,16 @@ async def test_sample_source_syncs_a_page_recallable_through_memory(
 
 async def test_core_selects_a_manifest_index_backend_by_name(db: None, database_url: str) -> None:
     """The `indexes` seam end to end through the probe: with `memory.index_backend` naming the
-    sample's backend, core builds the manifest-contributed IndexBackend (not the dialect default)
-    and it is driven through the protocol — upsert then retrieve. Unset falls back to the dialect
-    default; an unknown name and a missing credential key each fail loud."""
+    sample's backend, core builds the manifest-contributed IndexBackend (not the base-pinned
+    default) and it is driven through the protocol — upsert then retrieve. Unset resolves the
+    base-pinned `index-default` extension's `"default"` backend; an unknown name and a missing
+    credential key each fail loud."""
     workspace_id = await _workspace()
     manifest = _sample_manifest()
     embed = _StubEmbed(_vec((0, 1.0)))
     store = _credential_store()
 
-    selected = index_backend(
-        (manifest,), sample.INDEX_BACKEND, database_url, embed, workspace_id, store
-    )
+    selected = index_backend((manifest,), sample.INDEX_BACKEND, embed, workspace_id, store)
     assert isinstance(selected, sample.SampleIndex)
     await selected.upsert(
         (Chunk("d1", OWNER_KIND_MEMORY_ITEM, "m1", SHARED_SUBJECT, 0, "orbital", _vec((0, 1.0))),)
@@ -993,10 +995,30 @@ async def test_core_selects_a_manifest_index_backend_by_name(db: None, database_
     hits = await selected.lexical("orbital", frozenset({SHARED_SUBJECT}), OWNER_KIND_MEMORY_ITEM, 5)
     assert [hit.chunk_digest for hit in hits] == ["d1"]
 
-    default = index_backend((manifest,), None, database_url, embed, workspace_id, store)
-    assert isinstance(default, (PgvectorIndex, SqliteFtsIndex))
+    default = index_backend(
+        (manifest, index_default.manifest()), None, embed, workspace_id, store
+    )
+    assert isinstance(default, DefaultIndex)
 
     with pytest.raises(RuntimeError, match="no extension registers"):
-        index_backend((manifest,), "nonesuch", database_url, embed, workspace_id, store)
+        index_backend((manifest,), "nonesuch", embed, workspace_id, store)
     with pytest.raises(RuntimeError, match="needs a credential key"):
-        index_backend((manifest,), sample.INDEX_BACKEND, database_url, embed, workspace_id, None)
+        index_backend((manifest,), sample.INDEX_BACKEND, embed, workspace_id, None)
+
+
+async def test_core_selects_a_manifest_embed_backend_by_name(db: None, database_url: str) -> None:
+    """The `embeds` seam end to end through the probe: with `memory.embed_backend` naming the
+    sample's backend, core builds the manifest-contributed EmbedClient and it is driven through the
+    protocol. Unset resolves the base-pinned `embed-openai` extension's `"default"` backend; an
+    unknown name fails loud."""
+    workspace_id = await _workspace()
+    manifest = _sample_manifest()
+    store = _credential_store()
+
+    selected = embed_backend((manifest,), sample.EMBED_BACKEND, workspace_id, store)
+    assert isinstance(selected, sample.SampleEmbed)
+    vectors = await selected.embed(("one", "two"))
+    assert vectors == (sample.SAMPLE_EMBED_VECTOR, sample.SAMPLE_EMBED_VECTOR)
+
+    with pytest.raises(RuntimeError, match="no extension registers"):
+        embed_backend((manifest,), "nonesuch", workspace_id, store)

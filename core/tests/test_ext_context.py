@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
+from selfhost_ext_index_default import DefaultIndex
 
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
@@ -15,7 +16,6 @@ from selfhost.ext.context import (
     UndeclaredCredentialSlot,
     context_for,
 )
-from selfhost.memory.index import index_backend_for
 from selfhost.memory.service import SHARED_SUBJECT, MemoryService, member_subject
 from selfhost.schema import tables
 from selfhost.schema.records import MemoryWrite
@@ -96,7 +96,8 @@ async def test_memory_access_commits_only_under_the_shared_subject(
     db: None, database_url: str
 ) -> None:
     embed = _InertEmbed()
-    access = MemoryAccess(MemoryService(index=index_backend_for(database_url, embed), embed=embed))
+    index = DefaultIndex(embed=embed, transaction=workspace_tx)
+    access = MemoryAccess(MemoryService(index=index, embed=embed))
     await _workspace()
     await access.commit(MemoryWrite(subject=SHARED_SUBJECT, body="a workspace fact"))
     with pytest.raises(OutOfScopeSubject, match="member:"):

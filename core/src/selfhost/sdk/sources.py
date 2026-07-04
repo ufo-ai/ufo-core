@@ -12,9 +12,6 @@ mention. A backend raises `CursorExpired` when a stored incremental cursor is re
 clears it so the next run refetches fresh. The concrete shapes live in `selfhost.memory.sources`,
 reached only here."""
 
-from selfhost.memory.service import (
-    SHARED_SUBJECT as SHARED_SUBJECT,
-)
 from selfhost.memory.sources import (
     CursorExpired as CursorExpired,
 )
@@ -29,4 +26,7 @@ from selfhost.memory.sources import (
 )
 from selfhost.memory.sources import (
     SyncResult as SyncResult,
+)
+from selfhost.subjects import (
+    SHARED_SUBJECT as SHARED_SUBJECT,
 )

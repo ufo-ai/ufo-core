@@ -1,4 +1,4 @@
-from selfhost.memory.embed import (
+from selfhost_ext_embed_openai import (
     EMBED_BATCH_MAX_CHARS,
     EMBED_BATCH_MAX_ITEMS,
     EMBED_MAX_ITEM_CHARS,

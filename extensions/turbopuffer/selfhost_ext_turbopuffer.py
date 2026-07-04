@@ -257,8 +257,8 @@ def manifest() -> Manifest:
         indexes=(
             IndexBackendSpec(
                 name=INDEX_BACKEND,
-                factory=lambda embed, credentials: TurbopufferIndex(
-                    embed=embed, credentials=credentials
+                factory=lambda embed, ctx: TurbopufferIndex(
+                    embed=embed, credentials=ctx.credentials
                 ),
             ),
         ),

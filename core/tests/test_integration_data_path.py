@@ -3,23 +3,23 @@ enforcement chain, exercised end to end against the REAL database and the REAL i
 sync driver / spend evaluator. The only stand-in is the embedding provider — a deterministic
 `EmbedClient` double for the external, paid OpenAI embedding API — and it is never the thing
 asserted: every assertion reads real rows, real recall results, and real spend decisions back from
-the real backend. On the sqlite param this runs against the real SqliteFtsIndex; on the postgres
-param against real Postgres + pgvector."""
+the real backend. On the sqlite param this runs against the real DefaultIndex over SQLite FTS5; on
+the postgres param against real Postgres + pgvector."""
 
 from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
+from selfhost_ext_embed_openai import EMBED_DIM
+from selfhost_ext_index_default import DefaultIndex
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from selfhost.accounting import SpendEvaluator, record_sandbox_tokens
 from selfhost.blob import FilesystemBlobStore
 from selfhost.config import SourceConfig, SourceEntry
 from selfhost.db import workspace_tx
-from selfhost.memory.chunk import TextChunker
-from selfhost.memory.embed import EMBED_DIM
-from selfhost.memory.index import index_backend_for
+from selfhost.indexing import TextChunker
 from selfhost.memory.indexer import MemoryIndexer, PageIndexer
 from selfhost.memory.service import (
     SHARED_SUBJECT,
@@ -176,7 +176,7 @@ async def test_folder_source_syncs_indexes_and_is_recalled(
     root.mkdir()
     (root / "runbook.md").write_text("the incident escalation contact is the on-call captain")
     embed = StubEmbed(axis=1)
-    index = index_backend_for(database_url, embed)
+    index = DefaultIndex(embed=embed, transaction=workspace_tx)
     blob = FilesystemBlobStore(root=tmp_path / "blobs")
     postgres = database_url.startswith("postgresql")
     driver = SyncDriver(backends={FOLDER_BACKEND: FolderSource()}, blob=blob, postgres=postgres)
@@ -215,7 +215,7 @@ async def test_member_fact_recall_is_isolated_from_other_members(
     await _workspace()
     alice, bob = uuid4(), uuid4()
     embed = StubEmbed(axis=2)
-    index = index_backend_for(database_url, embed)
+    index = DefaultIndex(embed=embed, transaction=workspace_tx)
     service = MemoryService(index=index, embed=embed)
     indexer = MemoryIndexer(
         index=index,

@@ -22,8 +22,7 @@ from selfhost.ext.context import CredentialAccess, ExtensionContext
 from selfhost.ext.surface import SurfaceSpec
 from selfhost.grants import OAuthProvider
 from selfhost.hub import Hub
-from selfhost.memory.embed import EmbedClient
-from selfhost.memory.index import IndexBackend
+from selfhost.indexing import EmbedClient, IndexBackend
 from selfhost.memory.sources import SourceBackend
 from selfhost.models.interface import ModelClient
 from selfhost.sandbox.session import Carrier
@@ -126,14 +125,30 @@ class SourceProvider:
 @dataclass(frozen=True)
 class IndexBackendSpec:
     """One vector-index backend an extension registers: the `name` a deploy selects it by (config
-    `memory.index_backend`) and the `factory` core calls at boot to build the `IndexBackend`, given
-    the deploy embed client and a credential reader scoped to this manifest's declared slots. The
-    index runs in the jobs/serve role, never in the sandbox, so a BYOK backend reads its key from
-    the slot in-process rather than through the egress proxy. `serve` layers the named backend over
-    the dialect-native default (SQLite FTS5 + local cosine, Postgres tsvector + pgvector)."""
+    `memory.index_backend`, default `"default"`) and the `factory` core calls at boot to build the
+    `IndexBackend`, given the deploy embed client and the extension's workspace-scoped
+    `ExtensionContext` — from which it opens transactions for a table-owning backend or reads a BYOK
+    key through `context.credentials`. The index runs in the jobs/serve role, never in the sandbox,
+    so a BYOK backend reads its key in-process rather than through the egress proxy. Every deploy
+    ships the base-pinned `index-default` extension registering name `"default"` (SQLite FTS5 +
+    local cosine, Postgres tsvector + pgvector), which core resolves when the knob is unset."""
 
     name: str
-    factory: Callable[[EmbedClient, CredentialAccess], IndexBackend]
+    factory: Callable[[EmbedClient, ExtensionContext], IndexBackend]
+
+
+@dataclass(frozen=True)
+class EmbedBackendSpec:
+    """One embedding backend an extension registers, mirroring `IndexBackendSpec`: the `name` a
+    deploy selects it by (config `memory.embed_backend`, default `"default"`) and the `factory` core
+    calls once at boot to build the `EmbedClient`, given the extension's workspace-scoped
+    `ExtensionContext` (from which it reads its provider key through `context.credentials`). The
+    embed client runs in the jobs/serve role on the deploy key, never through the sandbox proxy.
+    Every deploy ships the base-pinned `embed-openai` extension registering name `"default"`, which
+    core resolves when the config knob is unset."""
+
+    name: str
+    factory: Callable[[ExtensionContext], EmbedClient]
 
 
 @dataclass(frozen=True)
@@ -332,6 +347,7 @@ class Manifest:
     sources: tuple[SourceProvider, ...] = ()
     onboarding_steps: tuple[OnboardingStep, ...] = ()
     indexes: tuple[IndexBackendSpec, ...] = ()
+    embeds: tuple[EmbedBackendSpec, ...] = ()
     hooks: tuple[HookSpec, ...] = ()
     prompt_sections: tuple[PromptSection, ...] = ()
     subagents: tuple[SubagentProfile, ...] = ()

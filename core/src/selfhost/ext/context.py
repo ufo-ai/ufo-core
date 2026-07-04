@@ -23,13 +23,14 @@ from selfhost.blob import BlobNotFound, BlobStore
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.governance import Governance, prompt_digest
-from selfhost.memory.service import SHARED_SUBJECT, MemoryService, Recalled
+from selfhost.memory.service import MemoryService, Recalled
 from selfhost.memory.sources import source_row_id
 from selfhost.models.interface import Message
 from selfhost.o11y import log
 from selfhost.scheduling import ScheduleStore
 from selfhost.schema import tables
 from selfhost.schema.records import AgentChange, MemoryWrite, ProposalRef
+from selfhost.subjects import SHARED_SUBJECT
 from selfhost.transcript import TranscriptDecodeError, decode, transcript_key
 
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
@@ -110,11 +111,13 @@ class CredentialAccess:
 
     workspace_id: UUID
     declared: frozenset[str]
-    _store: CredentialStore
+    _store: CredentialStore | None
 
     async def get(self, slot: str) -> str:
         if slot not in self.declared:
             raise UndeclaredCredentialSlot(slot)
+        if self._store is None:
+            raise RuntimeError(f"credential slot {slot!r} declared but no credential key is set")
         return await self._store.get(self.workspace_id, slot)
 
 
@@ -310,7 +313,7 @@ def context_for(
     workspace_id: UUID,
     extension: str,
     declared: frozenset[str],
-    credential_store: CredentialStore,
+    credential_store: CredentialStore | None,
     memory: MemoryService | None = None,
     blob: BlobStore | None = None,
     invoker: TurnInvoker | None = None,

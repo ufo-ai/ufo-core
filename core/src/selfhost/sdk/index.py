@@ -4,21 +4,22 @@ An extension implements `IndexBackend` — lexical + vector retrieval and reinde
 returning `Hit`s under a subject + owner-kind filter, deleting by `IndexScope` — pairs it with a
 backend name in an `IndexBackendSpec` (`selfhost.sdk.manifest`), and a deploy selects it by that
 name through the `memory.index_backend` config knob. Core builds it at boot with the deploy
-`EmbedClient` and a credential reader scoped to the extension's declared slots. The concrete shapes
-live in `selfhost.memory.{index,chunk,embed}`, reached only here."""
+`EmbedClient` and the extension's workspace-scoped context. `EmbedClient` is the embedding seam an
+extension implements to contribute a batched embed backend selected by `memory.embed_backend`. The
+concrete shapes live in `selfhost.indexing`, reached only here."""
 
-from selfhost.memory.chunk import (
+from selfhost.indexing import (
     Chunk as Chunk,
 )
-from selfhost.memory.chunk import (
-    Hit as Hit,
-)
-from selfhost.memory.chunk import (
-    IndexScope as IndexScope,
-)
-from selfhost.memory.embed import (
+from selfhost.indexing import (
     EmbedClient as EmbedClient,
 )
-from selfhost.memory.index import (
+from selfhost.indexing import (
+    Hit as Hit,
+)
+from selfhost.indexing import (
     IndexBackend as IndexBackend,
+)
+from selfhost.indexing import (
+    IndexScope as IndexScope,
 )

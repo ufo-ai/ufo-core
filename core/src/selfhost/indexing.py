@@ -1,16 +1,20 @@
-"""Chunking and the index value objects: internal, backend-owned, never ORM rows.
+"""The index seam and its value objects: the retrieval contract, chunking, and the derivation step.
 
-`Chunk` carries the columns the index stores; the embedding is filled by the derivation job
-(via EmbedClient) before upsert. `TextChunker.chunk` is the workflow — recursive-delimiter split
-to ~target-word pieces with sentence-aware overlap, char-capped — its `_`-methods its steps in
-execution order.
+`IndexBackend` and `EmbedClient` are the two Protocols an extension implements to contribute
+retrieval and embedding; `Chunk`/`Hit`/`IndexScope` are the dialect-neutral value objects that cross
+that seam. `TextChunker.chunk` is the workflow — recursive-delimiter split to ~target-word pieces
+with sentence-aware overlap, char-capped. `chunk_embed_upsert` is the derivation step a memory or
+page indexer shares: chunk one body, embed each chunk, upsert them under the owner. None of these
+touch the database or a dialect — a backend does storage, ANN/FTS, and the subject filter; these
+stay in-process value objects reached by both core and the extensions that implement the seam.
 """
 
 import hashlib
 import itertools
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from typing import Protocol
 
 CHUNK_TARGET_WORDS = 300
 CHUNK_OVERLAP_WORDS = 50
@@ -26,6 +30,9 @@ DELIMITER_LEVELS: tuple[tuple[str, ...], ...] = (
     ("; ", ": ", ", ", "；", "：", "，", "、"),  # noqa: RUF001
     (),
 )
+
+OWNER_KIND_MEMORY_ITEM = "memory_item"
+OWNER_KIND_PAGE = "page"
 
 
 @dataclass(frozen=True)
@@ -54,6 +61,50 @@ class Hit:
 class IndexScope:
     owner_kind: str
     owner_id: str
+
+
+class IndexBackend(Protocol):
+    async def upsert(self, chunks: tuple[Chunk, ...]) -> None: ...
+
+    async def delete(self, scope: IndexScope) -> None: ...
+
+    async def lexical(
+        self, query: str, subjects: frozenset[str], owner_kind: str, limit: int
+    ) -> tuple[Hit, ...]: ...
+
+    async def vector(
+        self, embedding: tuple[float, ...], subjects: frozenset[str], owner_kind: str, limit: int
+    ) -> tuple[Hit, ...]: ...
+
+    async def reindex(self, scope: IndexScope) -> None: ...
+
+
+class EmbedClient(Protocol):
+    async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]: ...
+
+
+async def chunk_embed_upsert(
+    index: IndexBackend,
+    embed: EmbedClient,
+    chunker: "TextChunker",
+    owner_kind: str,
+    owner_id: str,
+    subject: str,
+    body: str,
+) -> None:
+    """Chunk one body, embed each chunk, and upsert them under the owner — the derivation step both
+    indexers share. Upsert is idempotent on chunk_digest, so a re-run over unchanged content
+    rewrites the same rows rather than duplicating them."""
+    chunks = chunker.chunk(body, owner_kind, owner_id, subject)
+    if not chunks:
+        return
+    vectors = await embed.embed(tuple(chunk.text for chunk in chunks))
+    await index.upsert(
+        tuple(
+            replace(chunk, embedding=vector)
+            for chunk, vector in zip(chunks, vectors, strict=True)
+        )
+    )
 
 
 @dataclass(frozen=True)

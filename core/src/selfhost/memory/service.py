@@ -17,22 +17,19 @@ from uuid import UUID, uuid4
 import sqlalchemy as sa
 
 from selfhost.db import workspace_tx
-from selfhost.memory.chunk import Hit
-from selfhost.memory.embed import EmbedClient
-from selfhost.memory.index import IndexBackend
+from selfhost.indexing import (
+    OWNER_KIND_MEMORY_ITEM,
+    OWNER_KIND_PAGE,
+    EmbedClient,
+    Hit,
+    IndexBackend,
+)
 from selfhost.o11y import log
 from selfhost.schema import tables
 from selfhost.schema.records import MemoryWrite
+from selfhost.subjects import SHARED_SUBJECT, member_subject
 
 RRF_K = 60
-SHARED_SUBJECT = "shared"
-MEMBER_SUBJECT_PREFIX = "member:"
-OWNER_KIND_MEMORY_ITEM = "memory_item"
-OWNER_KIND_PAGE = "page"
-
-
-def member_subject(member_id: UUID) -> str:
-    return f"{MEMBER_SUBJECT_PREFIX}{member_id}"
 
 
 def recall_subjects(member_id: UUID | None) -> frozenset[str]:

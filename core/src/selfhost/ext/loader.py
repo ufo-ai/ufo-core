@@ -42,8 +42,7 @@ from selfhost.ext.manifest import (
     PreToolUse,
     SubagentProfile,
 )
-from selfhost.memory.embed import EmbedClient
-from selfhost.memory.index import IndexBackend, index_backend_for
+from selfhost.indexing import EmbedClient, IndexBackend
 from selfhost.memory.service import MemoryService
 from selfhost.o11y import log
 from selfhost.schema.records import Agent, Turn
@@ -245,33 +244,60 @@ def turn_subagents(manifests: tuple[Manifest, ...]) -> tuple[SubagentProfile, ..
     return tuple(profile for manifest in manifests for profile in manifest.subagents)
 
 
+DEFAULT_BACKEND = "default"
+
+
 def index_backend(
     manifests: tuple[Manifest, ...],
     configured: str | None,
-    database_url: str,
     embed: EmbedClient,
     workspace_id: UUID,
     credential_store: CredentialStore | None,
 ) -> IndexBackend:
-    """The workspace's index backend: the deploy's dialect-native default (config
-    `memory.index_backend` unset) or the named backend an extension contributes through its
-    `indexes` Manifest point, layered over that default. A configured name no extension registers
-    fails loud; a named backend with no credential key set fails loud, since its factory reads a
-    credential reader scoped to the declaring extension's slots for its BYOK key."""
-    if configured is None:
-        return index_backend_for(database_url, embed)
+    """The workspace's index backend: the named backend an extension contributes through its
+    `indexes` Manifest point, or — the config knob unset — the base-pinned `index-default`
+    extension registering name `"default"` (SQLite FTS5 + local cosine, Postgres tsvector +
+    pgvector). No extension registering the selected name fails loud; a backend declaring credential
+    slots with no credential key set fails loud, since its factory reads its BYOK key in-process."""
+    name = configured or DEFAULT_BACKEND
     for manifest in manifests:
         for spec in manifest.indexes:
-            if spec.name != configured:
+            if spec.name != name:
                 continue
-            if credential_store is None:
-                raise RuntimeError(
-                    f"index backend {configured!r} needs a credential key but none is set"
-                )
             declared = frozenset(slot.name for slot in manifest.credentials)
+            if declared and credential_store is None:
+                raise RuntimeError(
+                    f"index backend {name!r} needs a credential key but none is set"
+                )
             context = context_for(workspace_id, manifest.name, declared, credential_store)
-            return spec.factory(embed, context.credentials)
-    raise RuntimeError(f"config selects index backend {configured!r} but no extension registers it")
+            return spec.factory(embed, context)
+    raise RuntimeError(f"config selects index backend {name!r} but no extension registers it")
+
+
+def embed_backend(
+    manifests: tuple[Manifest, ...],
+    configured: str | None,
+    workspace_id: UUID,
+    credential_store: CredentialStore | None,
+) -> EmbedClient:
+    """The deploy's embed client: the named backend an extension contributes through its `embeds`
+    Manifest point, or — the config knob unset — the base-pinned `embed-openai` extension
+    registering name `"default"`. Resolved once at boot and threaded onto the contexts the index,
+    the memory tools, and the derivation jobs receive. No extension registering the selected name
+    fails loud; a backend declaring credential slots with no credential key set fails loud."""
+    name = configured or DEFAULT_BACKEND
+    for manifest in manifests:
+        for spec in manifest.embeds:
+            if spec.name != name:
+                continue
+            declared = frozenset(slot.name for slot in manifest.credentials)
+            if declared and credential_store is None:
+                raise RuntimeError(
+                    f"embed backend {name!r} needs a credential key but none is set"
+                )
+            context = context_for(workspace_id, manifest.name, declared, credential_store)
+            return spec.factory(context)
+    raise RuntimeError(f"config selects embed backend {name!r} but no extension registers it")
 
 
 def validate_ext_tools(

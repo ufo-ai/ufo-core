@@ -6,12 +6,12 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
+from selfhost_ext_embed_openai import EMBED_DIM
+from selfhost_ext_index_default import DefaultIndex
 
 from selfhost.blob import FilesystemBlobStore
 from selfhost.db import workspace_tx
-from selfhost.memory.chunk import TextChunker
-from selfhost.memory.embed import EMBED_DIM
-from selfhost.memory.index import index_backend_for
+from selfhost.indexing import TextChunker
 from selfhost.memory.indexer import MemoryIndexer
 from selfhost.memory.service import MemoryService, member_subject
 from selfhost.models.interface import Message, TextBlock, ToolUseBlock
@@ -76,7 +76,7 @@ async def _workspace() -> UUID:
 
 def _wire(database_url: str, vector: tuple[float, ...]) -> tuple[MemoryService, MemoryIndexer]:
     embed = StubEmbed(vector)
-    index = index_backend_for(database_url, embed)
+    index = DefaultIndex(embed=embed, transaction=workspace_tx)
     service = MemoryService(index=index, embed=embed)
     indexer = MemoryIndexer(
         index=index,
@@ -91,7 +91,7 @@ def _wire_lexical(database_url: str) -> tuple[MemoryService, MemoryIndexer]:
     """Index chunks with a working embed but recall through a broken one, so each query matches
     only its lexical terms — the setup the multi-query merge and bound assertions rely on."""
     working = StubEmbed(vec((0, 1.0)))
-    index = index_backend_for(database_url, working)
+    index = DefaultIndex(embed=working, transaction=workspace_tx)
     service = MemoryService(index=index, embed=BrokenEmbed())
     indexer = MemoryIndexer(
         index=index,

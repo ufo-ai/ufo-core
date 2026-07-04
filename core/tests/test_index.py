@@ -2,11 +2,11 @@ from collections.abc import AsyncIterator
 
 import pytest
 import sqlalchemy as sa
+from selfhost_ext_embed_openai import EMBED_DIM
+from selfhost_ext_index_default import DefaultIndex, pack_embedding, unpack_embedding
 
 from selfhost.db import workspace_tx
-from selfhost.memory.chunk import Chunk, IndexScope
-from selfhost.memory.embed import EMBED_DIM
-from selfhost.memory.index import index_backend_for, pack_embedding, unpack_embedding
+from selfhost.indexing import Chunk, IndexScope
 
 SUBJECT = "member:me"
 FOREIGN = "member:other"
@@ -42,7 +42,7 @@ async def clean_chunk(db: None, database_url: str) -> AsyncIterator[None]:
 async def test_upsert_lexical_and_vector_return_ordered_hits(
     clean_chunk: None, database_url: str
 ) -> None:
-    backend = index_backend_for(database_url, StubEmbed(vec((0, 1.0))))
+    backend = DefaultIndex(embed=StubEmbed(vec((0, 1.0))), transaction=workspace_tx)
     e0 = vec((0, 1.0))
     e01 = vec((0, 1.0), (1, 1.0))
     await backend.upsert(
@@ -64,7 +64,7 @@ async def test_upsert_lexical_and_vector_return_ordered_hits(
 
 
 async def test_foreign_subject_is_excluded(clean_chunk: None, database_url: str) -> None:
-    backend = index_backend_for(database_url, StubEmbed(vec((0, 1.0))))
+    backend = DefaultIndex(embed=StubEmbed(vec((0, 1.0))), transaction=workspace_tx)
     await backend.upsert(
         (
             Chunk("mine", "memory_item", "m1", SUBJECT, 0, "shared secret token", vec((0, 1.0))),
@@ -78,7 +78,7 @@ async def test_foreign_subject_is_excluded(clean_chunk: None, database_url: str)
 
 
 async def test_delete_removes_only_its_scope(clean_chunk: None, database_url: str) -> None:
-    backend = index_backend_for(database_url, StubEmbed(vec((0, 1.0))))
+    backend = DefaultIndex(embed=StubEmbed(vec((0, 1.0))), transaction=workspace_tx)
     await backend.upsert(
         (
             Chunk("keep", "memory_item", "keep-owner", SUBJECT, 0, "apple", vec((0, 1.0))),
@@ -93,7 +93,7 @@ async def test_delete_removes_only_its_scope(clean_chunk: None, database_url: st
 
 
 async def test_reindex_reembeds_scope_through_client(clean_chunk: None, database_url: str) -> None:
-    backend = index_backend_for(database_url, StubEmbed(vec((5, 1.0))))
+    backend = DefaultIndex(embed=StubEmbed(vec((5, 1.0))), transaction=workspace_tx)
     await backend.upsert((Chunk("c", "memory_item", "o", SUBJECT, 0, "apple", vec((0, 1.0))),))
     probe = vec((5, 1.0))
     before = await backend.vector(probe, frozenset({SUBJECT}), "memory_item", 10)
@@ -101,11 +101,6 @@ async def test_reindex_reembeds_scope_through_client(clean_chunk: None, database
     await backend.reindex(IndexScope("memory_item", "o"))
     after = await backend.vector(probe, frozenset({SUBJECT}), "memory_item", 10)
     assert after[0].score == pytest.approx(1.0, abs=1e-2)
-
-
-def test_index_backend_for_rejects_unknown_dialect() -> None:
-    with pytest.raises(RuntimeError):
-        index_backend_for("mysql://host/db", StubEmbed(vec((0, 1.0))))
 
 
 def test_pack_unpack_embedding_roundtrips() -> None:

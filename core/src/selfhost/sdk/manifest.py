@@ -16,6 +16,9 @@ from selfhost.ext.manifest import (
     Deny as Deny,
 )
 from selfhost.ext.manifest import (
+    EmbedBackendSpec as EmbedBackendSpec,
+)
+from selfhost.ext.manifest import (
     HookContext as HookContext,
 )
 from selfhost.ext.manifest import (

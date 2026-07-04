@@ -13,7 +13,7 @@ document stops being recalled.
 """
 
 import hashlib
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -21,39 +21,20 @@ import sqlalchemy as sa
 
 from selfhost.blob import BlobStore
 from selfhost.db import workspace_tx
-from selfhost.memory.chunk import IndexScope, TextChunker
-from selfhost.memory.embed import EmbedClient
-from selfhost.memory.index import IndexBackend
-from selfhost.memory.service import OWNER_KIND_MEMORY_ITEM, OWNER_KIND_PAGE
+from selfhost.indexing import (
+    OWNER_KIND_MEMORY_ITEM,
+    OWNER_KIND_PAGE,
+    EmbedClient,
+    IndexBackend,
+    IndexScope,
+    TextChunker,
+    chunk_embed_upsert,
+)
 from selfhost.schema import tables
 from selfhost.schema.records import MemoryItem
 
 DUE_BATCH_MAX_ITEMS = 200
 EMBED_CLAIM_LEASE_SECONDS = 300
-
-
-async def chunk_embed_upsert(
-    index: IndexBackend,
-    embed: EmbedClient,
-    chunker: TextChunker,
-    owner_kind: str,
-    owner_id: str,
-    subject: str,
-    body: str,
-) -> None:
-    """Chunk one body, embed each chunk, and upsert them under the owner — the derivation step both
-    indexers share. Upsert is idempotent on chunk_digest, so a re-run over unchanged content
-    rewrites the same rows rather than duplicating them."""
-    chunks = chunker.chunk(body, owner_kind, owner_id, subject)
-    if not chunks:
-        return
-    vectors = await embed.embed(tuple(chunk.text for chunk in chunks))
-    await index.upsert(
-        tuple(
-            replace(chunk, embedding=vector)
-            for chunk, vector in zip(chunks, vectors, strict=True)
-        )
-    )
 
 
 @dataclass(frozen=True)

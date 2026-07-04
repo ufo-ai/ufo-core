@@ -134,7 +134,8 @@ Manifest registers (each optional):
 | `models` | Model providers behind `ModelClient` (OpenRouter, local runtimes). |
 | `carriers` | Sandbox carriers — Docker, E2B, remote runners; core's default is a local temp-dir carrier. |
 | `memory` | Derivation pipeline stages (condensers, graph updaters) — see Agent loop / Memory. |
-| `indexes` | Index backends for memory/source retrieval (turbopuffer); pgvector is the core default. |
+| `indexes` | Index backends for memory/source retrieval (turbopuffer); the dialect-native default (SQLite FTS5 + local cosine, Postgres tsvector + pgvector) ships as the base-pinned `index-default` extension registering name `"default"`, which core resolves when `memory.index_backend` is unset. |
+| `embeds` | Embedding backends behind `EmbedClient`, selected by `memory.embed_backend`; OpenAI text-embedding-3-large ships as the base-pinned `embed-openai` extension registering name `"default"`. |
 | `hubs` | Stream hubs for multi-instance deploys (Redis). |
 | `browsers` | Browser-automation backends at the tool-surface seam; the BUA engine driving Chrome over a CDP endpoint is the core default (browserbase swaps the endpoint provider, browser-use the whole surface). |
 

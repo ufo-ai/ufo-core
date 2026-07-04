@@ -30,9 +30,9 @@ from pydantic import BaseModel
 from selfhost.blob import BlobStore
 from selfhost.config import SourceConfig, SourceEntry
 from selfhost.db import workspace_tx
-from selfhost.memory.service import SHARED_SUBJECT
 from selfhost.o11y import log
 from selfhost.schema import tables
+from selfhost.subjects import SHARED_SUBJECT
 
 FOLDER_BACKEND = "folder"
 SOURCE_SYNC_JOB = "source_sync"
