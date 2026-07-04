@@ -14,7 +14,7 @@ path (CRUD, field discovery) is deliberately absent — the source seam only rea
 
 import asyncio
 import re
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import Any, ClassVar
 
 import httpx
@@ -145,10 +145,22 @@ class RestConnector(Connector):
         self, client: httpx.AsyncClient, path: str, *, params: dict[str, Any] | None = None
     ) -> httpx.Response:
         """A GET returning the raw response for header-driven pagers, retried on transient/5xx."""
+        return await self._send(lambda: client.get(path, params=params))
+
+    async def _post(
+        self, client: httpx.AsyncClient, path: str, *, json: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """A POST for a read endpoint a provider exposes only over POST (Notion's `/search`),
+        retried on transient/5xx like the GET path — still a read, the write path stays absent."""
+        return _json_or_empty(await self._send(lambda: client.post(path, json=json)))
+
+    async def _send(self, request: Callable[[], Awaitable[httpx.Response]]) -> httpx.Response:
+        """The shared retry envelope behind `_get_raw`/`_post`: run one request coroutine with
+        exponential backoff on transient/5xx responses."""
         delay = RETRY_INITIAL_DELAY_SECONDS
         for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
-                response = await client.get(path, params=params)
+                response = await request()
                 _raise_for_status(response)
                 return response
             except (httpx.TransportError, httpx.HTTPStatusError) as error:
