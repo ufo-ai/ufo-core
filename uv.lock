@@ -7,6 +7,7 @@ members = [
     "selfhost",
     "selfhost-ext-browser",
     "selfhost-ext-connectors",
+    "selfhost-ext-mcp",
     "selfhost-ext-sample",
     "selfhost-ext-scheduled-tasks",
     "selfhost-ext-self-improvement",
@@ -1718,6 +1719,21 @@ requires-dist = [{ name = "selfhost", editable = "core" }]
 name = "selfhost-ext-connectors"
 version = "0.1.0"
 source = { editable = "extensions/connectors" }
+dependencies = [
+    { name = "httpx" },
+    { name = "selfhost" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "selfhost", editable = "core" },
+]
+
+[[package]]
+name = "selfhost-ext-mcp"
+version = "0.1.0"
+source = { editable = "extensions/mcp" }
 dependencies = [
     { name = "httpx" },
     { name = "selfhost" },
