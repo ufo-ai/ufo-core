@@ -118,13 +118,15 @@ async def _execute_turn(turn_id: str) -> str:
             max_rounds = MAIN_ROUND_LIMIT
         else:
             profile = runtime.subagents.get(turn.subagent_profile)
-            resolved = Agent(prompt=subagent_system_prompt(profile), model=agent.model)
+            resolved = Agent(
+                prompt=subagent_system_prompt(profile), model=profile.model or agent.model
+            )
             tools = ToolRegistry(
                 tuple(tool for tool in all_tools if tool.name in profile.tool_names)
             )
             system_prompt = rendered_prompt(resolved.prompt)
             max_rounds = profile.max_rounds
-        model = _model_client(agent.model, runtime.config)
+        model = _model_client(resolved.model, runtime.config)
         handle = await runtime.carrier.create(
             SandboxSpec(
                 conversation_id=turn.conversation_id,
@@ -144,7 +146,7 @@ async def _execute_turn(turn_id: str) -> str:
             transcript=Transcript(blob=runtime.blob, conversation_id=turn.conversation_id),
             compaction=Compaction(
                 client=model,
-                model=agent.model,
+                model=resolved.model,
                 blob=runtime.blob,
                 conversation_id=turn.conversation_id,
             ),

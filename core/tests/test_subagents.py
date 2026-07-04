@@ -94,3 +94,27 @@ def test_general_purpose_prompt_lists_the_loadable_skills_and_binds_its_output()
     for skill in ("sandbox", "memory", "delegation"):
         assert skill in prompt
     assert "result" in prompt and "JSON" in prompt
+
+
+def test_profile_model_defaults_to_none_meaning_inherit_the_parent() -> None:
+    assert _profile("a").model is None
+
+
+def test_general_purpose_inherits_the_parent_model() -> None:
+    assert SubagentRegistry(CORE_SUBAGENT_PROFILES).get(GENERAL_PURPOSE).model is None
+
+
+def test_a_profile_can_pin_a_distinct_model() -> None:
+    """The queue resolves `profile.model or agent.model`, so a set model overrides the parent's and
+    None falls back — proven end-to-end by the billing test; here the field carries the choice."""
+    pinned = SubagentProfile(
+        name="pinned",
+        prompt="p",
+        tool_names=(),
+        input_model=_Task,
+        output_model=_Finding,
+        model="gpt-5.4",
+    )
+    assert pinned.model == "gpt-5.4"
+    assert (pinned.model or "claude-opus-4-8") == "gpt-5.4"
+    assert (_profile("a").model or "claude-opus-4-8") == "claude-opus-4-8"

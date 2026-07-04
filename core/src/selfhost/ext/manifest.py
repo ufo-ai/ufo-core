@@ -218,7 +218,9 @@ class SubagentProfile:
     manifest's profiles into the SubagentRegistry `spawn_subagent` dispatches against. `max_rounds`
     caps the child's agentic tool-use rounds; on exhaustion it produces a best-effort final answer
     rather than failing, so a runaway child never detonates its parent. A deep profile lifts it to
-    the main ceiling; the default suits an ordinary focused subagent."""
+    the main ceiling; the default suits an ordinary focused subagent. `model` runs the child under
+    a model distinct from its parent — possibly a different provider — while `None` inherits the
+    parent's; a spawn resolves and bills the child under whichever model answers it."""
 
     name: str
     prompt: str
@@ -226,6 +228,7 @@ class SubagentProfile:
     input_model: type[BaseModel]
     output_model: type[BaseModel]
     max_rounds: int = SUBAGENT_ROUND_LIMIT
+    model: str | None = None
 
 
 @dataclass(frozen=True)

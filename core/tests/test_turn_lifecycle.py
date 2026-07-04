@@ -79,6 +79,17 @@ EXHAUST_PROFILE = SubagentProfile(
 )
 
 
+PINNED_MODEL = "gpt-5.4"
+PINNED_PROFILE = SubagentProfile(
+    name="pinned",
+    prompt="ROUNDTRIP: echo the value back on a pinned, cross-provider model.",
+    tool_names=(),
+    input_model=RoundTripInput,
+    output_model=RoundTripOutput,
+    model=PINNED_MODEL,
+)
+
+
 @dataclass(frozen=True)
 class StandInModel:
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
@@ -111,6 +122,13 @@ class StandInModel:
             yield ToolCallStart(id="s2", name="spawn_subagent")
             yield ToolCallDelta(
                 id="s2", partial_json='{"profile": "exhaust", "payload": {"value": 99}}'
+            )
+            yield Usage(input_tokens=4, output_tokens=4)
+            return
+        if isinstance(inbound, str) and "spawn-pinned" in inbound:
+            yield ToolCallStart(id="s3", name="spawn_subagent")
+            yield ToolCallDelta(
+                id="s3", partial_json='{"profile": "pinned", "payload": {"value": 7}}'
             )
             yield Usage(input_tokens=4, output_tokens=4)
             return
@@ -164,7 +182,7 @@ def dbos_runtime(
             carrier=StandInCarrier(),
             proxy=proxy,
             dbos=dbos_client,
-            subagents=SubagentRegistry((ROUNDTRIP_PROFILE, EXHAUST_PROFILE)),
+            subagents=SubagentRegistry((ROUNDTRIP_PROFILE, EXHAUST_PROFILE, PINNED_PROFILE)),
             manifests=(),
             credentials=None,
             memory=StubMemory(),
@@ -657,3 +675,46 @@ async def test_subagent_exhausting_its_round_budget_does_not_detonate_its_parent
     assert child.status == "done"
     child_output = TerminalFrame.model_validate(child.terminal).text
     assert RoundTripOutput.model_validate_json(child_output).echoed == 99
+
+
+async def test_subagent_bills_under_its_profile_model_not_the_parents(
+    surface: AsyncClient,
+) -> None:
+    headers = await _bootstrap()
+    parent = (
+        await surface.post("/v1/chat", content=b"spawn-pinned", headers=headers)
+    ).json()["turn_id"]
+    _, terminal = await _consume(surface, headers, parent)
+    assert terminal["status"] == "done"
+    assert terminal["model"] == "claude-opus-4-8"
+    async with workspace_tx() as connection:
+        child = (
+            await connection.execute(
+                sa.select(
+                    tables.turn.c.id,
+                    tables.turn.c.subagent_profile,
+                    tables.turn.c.status,
+                    tables.turn.c.terminal,
+                ).where(tables.turn.c.parent_turn_id == UUID(parent))
+            )
+        ).one()
+    assert child.subagent_profile == "pinned"
+    assert child.status == "done"
+    assert RoundTripOutput.model_validate_json(
+        TerminalFrame.model_validate(child.terminal).text
+    ).echoed == 7
+    async with workspace_tx() as connection:
+        child_model = (
+            await connection.execute(
+                sa.select(tables.ledger.c.model).where(tables.ledger.c.turn_id == child.id)
+            )
+        ).scalar_one()
+        parent_model = (
+            await connection.execute(
+                sa.select(tables.ledger.c.model).where(
+                    tables.ledger.c.turn_id == UUID(parent)
+                )
+            )
+        ).scalar_one()
+    assert child_model == PINNED_MODEL
+    assert parent_model == "claude-opus-4-8"
