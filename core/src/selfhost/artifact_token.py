@@ -17,6 +17,7 @@ from pathlib import PurePosixPath
 
 ARTIFACT_KEY_PREFIX = "artifacts/"
 ARTIFACT_TOKEN_TTL_SECONDS = 3600
+ARTIFACT_DOWNLOAD_PATH = "/web/artifacts/download"
 
 
 class ArtifactTokenError(ValueError):

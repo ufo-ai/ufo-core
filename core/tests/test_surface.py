@@ -109,6 +109,8 @@ def _context(workspace_id: UUID, dbos: StubDbos, blob: FilesystemBlobStore) -> S
         blob=blob,
         _invoker=AdmissionInvoker(workspace_id=workspace_id, admission=Admission(dbos=dbos)),
         _credentials=store,
+        _artifact_token_secret="artifact-token-secret",
+        _public_base_url="https://selfhost.example.test",
     )
 
 

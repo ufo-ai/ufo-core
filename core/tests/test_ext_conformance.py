@@ -587,7 +587,9 @@ async def test_sample_surface_admits_links_streams_and_delivers(db: None, tmp_pa
     blob = FilesystemBlobStore(root=tmp_path)
     dbos = _StubDbos()
     app = FastAPI()
-    _mount_surfaces(app, (manifest,), workspace_id, _credential_store(), blob, dbos)
+    _mount_surfaces(
+        app, (manifest,), workspace_id, _credential_store(), blob, dbos, "", None
+    )
     body = json.dumps(
         {"external_id": "ext-1", "email": email, "message": "hello", "inbound_text": "note!"}
     )

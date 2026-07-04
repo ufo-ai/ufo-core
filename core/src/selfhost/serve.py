@@ -132,7 +132,16 @@ def run() -> None:
     app.state.writeback_poller = None
     app.include_router(router)
     _mount_ext_routes(app, manifests, workspace_id, credentials, memory)
-    _mount_surfaces(app, manifests, workspace_id, credentials, blob, dbos_client)
+    _mount_surfaces(
+        app,
+        manifests,
+        workspace_id,
+        credentials,
+        blob,
+        dbos_client,
+        artifact_secret,
+        config.connect.public_base_url,
+    )
     _mount_web_surface(app, config, blob, hub, dbos_client, artifact_secret)
     log("serve.started", host=config.serve.host, port=config.serve.port)
     try:
@@ -247,6 +256,8 @@ def _mount_surfaces(
     credentials: CredentialStore | None,
     blob: BlobStore,
     dbos_client: DBOSClient,
+    artifact_secret: str,
+    public_base_url: str | None,
 ) -> None:
     """Mount every installed surface's ingest at `/surface/<name>`, each request bound to that
     surface's privileged SurfaceContext, and run one writeback poller over them all. A surface reads
@@ -266,6 +277,8 @@ def _mount_surfaces(
                 blob=blob,
                 _invoker=invoker,
                 _credentials=credentials,
+                _artifact_token_secret=artifact_secret,
+                _public_base_url=public_base_url,
             )
             registered[spec.name] = (spec, context)
 

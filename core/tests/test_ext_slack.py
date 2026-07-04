@@ -8,8 +8,10 @@ requests the handlers emitted."""
 import hashlib
 import hmac
 import json
+import re
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import httpx
@@ -21,6 +23,8 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from selfhost_ext_slack.manifest import manifest as slack_manifest
 
+from selfhost.artifact_token import verify_artifact_token
+from selfhost.blob import BlobNotFound, FilesystemBlobStore
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.ext.surface import WRITEBACK_DELIVERED, WRITEBACK_PENDING, workspace_key
@@ -33,6 +37,8 @@ BOT_USER_ID = "UBOT00000"
 SIGNING_SECRET = "signing-secret"
 BOT_TOKEN = "xoxb-test"
 UPLOAD_URL = "https://files.slack.com/upload/session-1"
+ARTIFACT_SECRET = "artifact-token-secret"
+PUBLIC_BASE_URL = "https://selfhost.example.test"
 
 
 @dataclass
@@ -130,6 +136,27 @@ def _event_body(**event: object) -> bytes:
     return json.dumps({"team_id": TEAM_ID, "event": event}).encode()
 
 
+async def _mount_transport(
+    monkeypatch: pytest.MonkeyPatch, workspace_id: UUID, tmp_path, transport: httpx.MockTransport
+):
+    _patch_httpx(monkeypatch, transport)
+    store = await _store(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    app = FastAPI()
+    _mount_surfaces(
+        app,
+        (slack_manifest(),),
+        workspace_id,
+        store,
+        blob,
+        StubDbos(),
+        ARTIFACT_SECRET,
+        PUBLIC_BASE_URL,
+    )
+    client = AsyncClient(transport=ASGITransport(app=app), base_url="http://slack")
+    return app, client, blob
+
+
 async def _mount(
     monkeypatch: pytest.MonkeyPatch,
     workspace_id: UUID,
@@ -137,15 +164,9 @@ async def _mount(
     recorder: list[httpx.Request],
     users: dict[str, str] | None = None,
 ):
-    from selfhost.blob import FilesystemBlobStore
-
-    _patch_httpx(monkeypatch, _mock_transport(recorder, users or {}))
-    store = await _store(workspace_id)
-    blob = FilesystemBlobStore(root=tmp_path)
-    app = FastAPI()
-    _mount_surfaces(app, (slack_manifest(),), workspace_id, store, blob, StubDbos())
-    client = AsyncClient(transport=ASGITransport(app=app), base_url="http://slack")
-    return app, client, blob
+    return await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, _mock_transport(recorder, users or {})
+    )
 
 
 def test_signature_verify_accepts_valid_and_rejects_tampered() -> None:
@@ -291,7 +312,16 @@ async def test_inbound_file_streams_into_the_workspace(db: None, tmp_path, monke
 
 
 async def _seed_done_turn(
-    workspace_id: UUID, queue_key: str, text: str, blob, artifact: bool
+    workspace_id: UUID,
+    queue_key: str,
+    text: str,
+    blob,
+    artifact: bool,
+    *,
+    artifact_name: str = "report.pdf",
+    artifact_key: str = "artifacts/a/report.pdf",
+    artifact_size: int = 11,
+    artifact_media_type: str = "application/pdf",
 ) -> UUID:
     conversation_id, turn_id = uuid4(), uuid4()
     async with workspace_tx() as connection:
@@ -338,12 +368,12 @@ async def _seed_done_turn(
             await connection.execute(
                 sa.insert(tables.shared_artifact).values(
                     turn_id=turn_id,
-                    blob_key="artifacts/a/report.pdf",
+                    blob_key=artifact_key,
                     workspace_id=workspace_id,
-                    filename="report.pdf",
+                    filename=artifact_name,
                     subject=None,
-                    media_type="application/pdf",
-                    size_bytes=11,
+                    media_type=artifact_media_type,
+                    size_bytes=artifact_size,
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
@@ -388,3 +418,164 @@ async def test_writeback_posts_block_kit_reply_and_streams_the_attachment(
         ).one()
     assert row.status == WRITEBACK_DELIVERED
     assert row.reply_ref == "C5:999.100"
+
+
+async def test_oversize_artifact_is_delivered_as_a_download_link(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    await blob.put("artifacts/big/huge.bin", b"OVERSIZE")
+    turn_id = await _seed_done_turn(
+        workspace_id,
+        "C5:200.0",
+        "here you go",
+        blob,
+        artifact=True,
+        artifact_name="huge.bin",
+        artifact_key="artifacts/big/huge.bin",
+        artifact_size=slack.SLACK_UPLOAD_MAX_BYTES + 1,
+        artifact_media_type="application/octet-stream",
+    )
+
+    await app.state.writeback_poller.drain()
+
+    posts = [r for r in recorder if str(r.url) == slack.SLACK_CHAT_POST_MESSAGE_URL]
+    assert len(posts) == 1
+    reply = json.loads(posts[0].content)
+    assert slack.SLACK_OVERSIZE_HEADING in reply["text"]
+    match = re.search(r"\[huge\.bin\]\((https://[^)]+)\)", reply["text"])
+    assert match is not None
+    url = match.group(1)
+    assert url.startswith(f"{PUBLIC_BASE_URL}/web/artifacts/download?token=")
+    token = url.split("token=", 1)[1]
+    claims = verify_artifact_token(token, ARTIFACT_SECRET, datetime.now(UTC))
+    assert claims.blob_key == "artifacts/big/huge.bin"
+    assert claims.filename == "huge.bin"
+
+    assert [r for r in recorder if str(r.url) == slack.SLACK_FILES_GET_UPLOAD_URL] == []
+
+    async with workspace_tx() as connection:
+        status = (
+            await connection.execute(
+                sa.select(tables.writeback.c.status).where(
+                    tables.writeback.c.turn_id == turn_id
+                )
+            )
+        ).scalar_one()
+    assert status == WRITEBACK_DELIVERED
+
+
+async def test_invalid_blocks_reposts_once_as_plain_text(db: None, tmp_path, monkeypatch) -> None:
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        recorder.append(request)
+        if str(request.url).split("?")[0] != slack.SLACK_CHAT_POST_MESSAGE_URL:
+            return httpx.Response(404, json={"ok": False, "error": "not_mocked"})
+        prior = [
+            r
+            for r in recorder
+            if str(r.url).split("?")[0] == slack.SLACK_CHAT_POST_MESSAGE_URL
+        ]
+        if len(prior) == 1:
+            return httpx.Response(200, json={"ok": False, "error": "invalid_blocks"})
+        return httpx.Response(200, json={"ok": True, "channel": "C5", "ts": "999.200"})
+
+    app, _, blob = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, httpx.MockTransport(handler)
+    )
+    turn_id = await _seed_done_turn(workspace_id, "C5:200.0", "hi **there**", blob, artifact=False)
+
+    await app.state.writeback_poller.drain()
+
+    posts = [r for r in recorder if str(r.url).split("?")[0] == slack.SLACK_CHAT_POST_MESSAGE_URL]
+    assert len(posts) == 2
+    first = json.loads(posts[0].content)
+    second = json.loads(posts[1].content)
+    assert first["blocks"] == [{"type": "markdown", "text": "hi **there**"}]
+    assert "blocks" not in second
+    assert second["text"] == "hi **there**"
+
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.writeback.c.status, tables.writeback.c.reply_ref).where(
+                    tables.writeback.c.turn_id == turn_id
+                )
+            )
+        ).one()
+    assert row.status == WRITEBACK_DELIVERED
+    assert row.reply_ref == "C5:999.200"
+
+
+async def test_inbound_oversize_file_is_skipped_and_reported(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, _ = await _seed()
+    monkeypatch.setattr(slack, "SLACK_INBOUND_FILE_MAX_BYTES", 8)
+    recorder: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        recorder.append(request)
+        url = str(request.url).split("?")[0]
+        if url.endswith("/small.txt"):
+            return httpx.Response(200, content=b"small")
+        if url.endswith("/big.bin"):
+            return httpx.Response(200, content=b"BIG-CONTENT-OVER-THE-CAP")
+        return httpx.Response(404, json={"ok": False, "error": "not_mocked"})
+
+    _, client, blob = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, httpx.MockTransport(handler)
+    )
+    files = [
+        {
+            "id": "F1",
+            "name": "small.txt",
+            "url_private_download": "https://files.slack.com/files-pri/T-F1/small.txt",
+            "mimetype": "text/plain",
+        },
+        {
+            "id": "F2",
+            "name": "big.bin",
+            "url_private_download": "https://files.slack.com/files-pri/T-F2/big.bin",
+            "mimetype": "application/octet-stream",
+        },
+    ]
+    body = _event_body(
+        type="app_mention", user="U1", channel="C1", ts="6.0", text="<@UBOT00000> files",
+        files=files,
+    )
+    async with client:
+        response = await client.post(
+            "/surface/slack", content=body, headers=_sign(body, int(time.time()))
+        )
+    assert response.status_code == 200
+
+    async with workspace_tx() as connection:
+        conversation_id = (
+            await connection.execute(
+                sa.select(tables.conversation.c.id).where(
+                    tables.conversation.c.queue_key == "C1:6.0"
+                )
+            )
+        ).scalar_one()
+        inbound = (
+            await connection.execute(
+                sa.select(tables.turn.c.inbound).where(
+                    tables.turn.c.conversation_id == conversation_id
+                )
+            )
+        ).scalar_one()
+
+    assert (
+        await blob.get(workspace_key(conversation_id, f"{slack.SLACK_INBOX_DIR}/small.txt"))
+        == b"small"
+    )
+    with pytest.raises(BlobNotFound):
+        await blob.get(workspace_key(conversation_id, f"{slack.SLACK_INBOX_DIR}/big.bin"))
+    assert f"{slack.SLACK_INBOX_DIR}/small.txt" in inbound
+    assert "Skipped files" in inbound
+    assert "big.bin" in inbound

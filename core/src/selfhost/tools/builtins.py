@@ -33,6 +33,7 @@ import sqlalchemy as sa
 from pydantic import BaseModel, Field
 
 from selfhost.artifact_token import (
+    ARTIFACT_DOWNLOAD_PATH,
     ARTIFACT_KEY_PREFIX,
     ARTIFACT_TOKEN_TTL_SECONDS,
     mint_artifact_token,
@@ -59,7 +60,6 @@ from selfhost.transcript import TranscriptDecodeError, decode, transcript_key
 MEMORY_SEARCH_LIMIT = 8
 MAX_MEMORY_QUERIES = 3
 MAX_LOAD_SESSIONS = 25
-ARTIFACT_DOWNLOAD_PATH = "/web/artifacts/download"
 ARTIFACT_FALLBACK_NAME = "download"
 SHARE_PREFLIGHT_TIMEOUT_SECONDS = 300
 

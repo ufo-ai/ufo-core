@@ -42,6 +42,9 @@ MAX_SLACK_EVENT_BYTES = 1_000_000
 MESSAGE_EVENT_TYPES = ("app_mention", "message")
 SLACK_MARKDOWN_TEXT_LIMIT = 12_000
 MAX_SLACK_MESSAGE_BYTES = 40_000
+SLACK_UPLOAD_MAX_BYTES = 25 * 1024 * 1024
+SLACK_INVALID_BLOCKS_ERROR = "invalid_blocks"
+SLACK_OVERSIZE_HEADING = "**Attachments (too large to upload):**"
 
 SLACK_API_TIMEOUT_SECONDS = 20
 SLACK_UPLOAD_READ_TIMEOUT_SECONDS = 60
@@ -52,6 +55,7 @@ SLACK_FILE_HOST_SUFFIX = ".slack.com"
 SLACK_INBOX_DIR = "slack-inbox"
 MAX_INBOUND_FILES = 10
 DOWNLOAD_CHUNK_BYTES = 1024 * 1024
+SLACK_INBOUND_FILE_MAX_BYTES = 25 * 1024 * 1024
 
 SLACK_TURN_FAILED_TEXT = "⚠️ Something went wrong handling your message."
 SLACK_TURN_CANCELLED_TEXT = "\U0001f6d1 That request was cancelled."
@@ -66,6 +70,11 @@ class SlackSignatureError(Exception):
 
 class SlackApiError(RuntimeError):
     """A Slack API call returned `ok: false` or a malformed response."""
+
+
+class SlackDownloadTooLarge(RuntimeError):
+    """An inbound file whose streamed bytes exceed SLACK_INBOUND_FILE_MAX_BYTES — the caller skips
+    the file rather than writing a partial download into the workspace."""
 
 
 @dataclass(frozen=True)
@@ -132,16 +141,19 @@ def slack_message_gated(event: Mapping[str, object], bot_user_id: str, is_dm: bo
     return f"<@{bot_user_id}>" in str(event.get("text") or "")
 
 
-def slack_reply_body(channel: str, thread_ts: str | None, text: str) -> bytes:
+def slack_reply_body(
+    channel: str, thread_ts: str | None, text: str, blocks: bool = True
+) -> bytes:
     """The chat.postMessage body: one Block Kit `markdown` block so Slack renders the agent's own
     markdown natively, degrading to a text-only body when the reply exceeds Slack's block-character
-    or payload-byte caps. `text` always carries the whole reply as the notification fallback."""
+    or payload-byte caps, or when `blocks=False` forces plain text after Slack rejects the blocks as
+    `invalid_blocks`. `text` always carries the whole reply as the notification fallback."""
     if not text:
         raise ValueError("Slack reply text is required")
     base: dict[str, object] = {"channel": channel, "text": text}
     if thread_ts is not None:
         base["thread_ts"] = thread_ts
-    if len(text) <= SLACK_MARKDOWN_TEXT_LIMIT:
+    if blocks and len(text) <= SLACK_MARKDOWN_TEXT_LIMIT:
         with_blocks = {**base, "blocks": [{"type": "markdown", "text": text}]}
         encoded = json.dumps(with_blocks, separators=(",", ":")).encode()
         if len(encoded) <= MAX_SLACK_MESSAGE_BYTES:
@@ -194,8 +206,8 @@ async def ingest(ctx: SurfaceContext, request: Request) -> Response:
     conversation_id = await ctx.conversation_for(inbound.queue_key, member_id)
     body = inbound.body
     if inbound.files:
-        delivered = await _download_files(ctx, conversation_id, bot_token, inbound.files)
-        body = f"{inbound.body}{_files_note(delivered)}"
+        downloaded = await _download_files(ctx, conversation_id, bot_token, inbound.files)
+        body = f"{inbound.body}{_files_note(downloaded)}"
     agent_id = await ctx.default_agent()
     await ctx.admit(conversation_id, agent_id, body, idempotency_key=inbound.message_id)
     return JSONResponse({"ok": True})
@@ -271,31 +283,51 @@ def _slack_download_host_ok(url: str) -> bool:
 
 async def _stream_download(bot_token: str, url: str) -> AsyncIterator[bytes]:
     """Stream a Slack `url_private` download in bounded chunks, refusing to attach the bot token to
-    a non-Slack host (httpx also strips it on any cross-host redirect). The bytes never buffer
-    whole — the caller writes each chunk straight into the workspace."""
+    a non-Slack host (httpx also strips it on any cross-host redirect) and capping the total at
+    SLACK_INBOUND_FILE_MAX_BYTES — an over-cap file raises SlackDownloadTooLarge mid-stream, so the
+    blob store discards the partial write. The bytes never buffer whole — the caller writes each
+    chunk straight into the workspace."""
     if not _slack_download_host_ok(url):
         raise ValueError("refusing to send the Slack bot token to a non-Slack host")
+    total = 0
     async with httpx.AsyncClient(timeout=SLACK_DOWNLOAD_TIMEOUT_SECONDS) as client:
         async with client.stream(
             "GET", url, headers={"Authorization": f"Bearer {bot_token}"}, follow_redirects=True
         ) as response:
             response.raise_for_status()
             async for chunk in response.aiter_bytes(DOWNLOAD_CHUNK_BYTES):
+                total += len(chunk)
+                if total > SLACK_INBOUND_FILE_MAX_BYTES:
+                    raise SlackDownloadTooLarge(url)
                 yield chunk
+
+
+@dataclass(frozen=True)
+class DownloadedFiles:
+    """What the inbound download produced: the workspace names of files that landed, and the Slack
+    names of files skipped as over-cap — the note reports both so the model knows what it has."""
+
+    delivered: tuple[str, ...]
+    skipped: tuple[str, ...]
 
 
 async def _download_files(
     ctx: SurfaceContext, conversation_id: UUID, bot_token: str, files: tuple[InboundFile, ...]
-) -> tuple[str, ...]:
+) -> DownloadedFiles:
     used: set[str] = set()
     delivered: list[str] = []
+    skipped: list[str] = []
     for file in files:
         name = _inbox_name(file.name, used)
-        await ctx.write_workspace_file(
-            conversation_id, f"{SLACK_INBOX_DIR}/{name}", _stream_download(bot_token, file.url)
-        )
+        try:
+            await ctx.write_workspace_file(
+                conversation_id, f"{SLACK_INBOX_DIR}/{name}", _stream_download(bot_token, file.url)
+            )
+        except SlackDownloadTooLarge:
+            skipped.append(file.name)
+            continue
         delivered.append(name)
-    return tuple(delivered)
+    return DownloadedFiles(tuple(delivered), tuple(skipped))
 
 
 def _inbox_name(raw: str, used: set[str]) -> str:
@@ -311,11 +343,18 @@ def _inbox_name(raw: str, used: set[str]) -> str:
     return name
 
 
-def _files_note(delivered: tuple[str, ...]) -> str:
-    if not delivered:
+def _files_note(downloaded: DownloadedFiles) -> str:
+    clauses: list[str] = []
+    if downloaded.delivered:
+        listed = ", ".join(f"{SLACK_INBOX_DIR}/{name}" for name in downloaded.delivered)
+        clauses.append(f"Attached files, saved in the workspace: {listed}")
+    if downloaded.skipped:
+        listed = ", ".join(downloaded.skipped)
+        limit_mb = SLACK_INBOUND_FILE_MAX_BYTES // (1024 * 1024)
+        clauses.append(f"Skipped files, too large to download (over {limit_mb} MB): {listed}")
+    if not clauses:
         return ""
-    listed = ", ".join(f"{SLACK_INBOX_DIR}/{name}" for name in delivered)
-    return f"\n\n[Attached files, saved in the workspace: {listed}]"
+    return "\n\n" + "".join(f"[{clause}]" for clause in clauses)
 
 
 def _reply_text(writeback: Writeback) -> str:
@@ -328,23 +367,38 @@ def _reply_text(writeback: Writeback) -> str:
     return writeback.text or SLACK_EMPTY_REPLY_TEXT
 
 
+def _reply_with_oversize_links(ctx: SurfaceContext, writeback: Writeback) -> str:
+    """The reply text, plus a link block for any shared file too large to upload inline — a TTL
+    download link so an over-cap artifact is delivered rather than silently dropped."""
+    text = _reply_text(writeback)
+    oversized = tuple(a for a in writeback.artifacts if a.size_bytes > SLACK_UPLOAD_MAX_BYTES)
+    if not oversized:
+        return text
+    lines = "\n".join(_oversize_link_line(ctx, artifact) for artifact in oversized)
+    return f"{text}\n\n{SLACK_OVERSIZE_HEADING}\n{lines}"
+
+
+def _oversize_link_line(ctx: SurfaceContext, artifact: SharedArtifact) -> str:
+    url = ctx.artifact_link(artifact)
+    name = f"[{artifact.filename}]({url})" if url else artifact.filename
+    return f"- {name} ({artifact.size_bytes} bytes)"
+
+
 async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
     """Post the reply to the thread and return its message ref (`channel:ts`) — the ref both records
-    the delivery and, as the posted reply's own thread ts, roots any attached files under it."""
+    the delivery and, as the posted reply's own thread ts, roots any attached files under it. An
+    `invalid_blocks` rejection is deterministic, so the reply re-posts once as plain text rather
+    than the poller retrying the identical Block Kit body until it ages out."""
     channel, separator, thread_ts = writeback.queue_key.partition(":")
+    thread = thread_ts if separator else None
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
-    body = slack_reply_body(channel, thread_ts if separator else None, _reply_text(writeback))
+    text = _reply_with_oversize_links(ctx, writeback)
     async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
-        response = await client.post(
-            SLACK_CHAT_POST_MESSAGE_URL,
-            content=body,
-            headers={
-                "Authorization": f"Bearer {bot_token}",
-                "Content-Type": "application/json; charset=utf-8",
-            },
-        )
-    response.raise_for_status()
-    payload = response.json()
+        payload = await _chat_post(client, bot_token, slack_reply_body(channel, thread, text))
+        if payload.get("error") == SLACK_INVALID_BLOCKS_ERROR:
+            payload = await _chat_post(
+                client, bot_token, slack_reply_body(channel, thread, text, blocks=False)
+            )
     if payload.get("ok") is not True:
         raise SlackApiError(str(payload.get("error")))
     ts = payload.get("ts")
@@ -353,22 +407,41 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
     return f"{channel}:{ts}"
 
 
+async def _chat_post(
+    client: httpx.AsyncClient, bot_token: str, body: bytes
+) -> Mapping[str, object]:
+    """POST one chat.postMessage body and return its parsed payload without asserting `ok`, so the
+    caller can branch on a recoverable `error` (an `invalid_blocks` retry) before failing."""
+    response = await client.post(
+        SLACK_CHAT_POST_MESSAGE_URL,
+        content=body,
+        headers={
+            "Authorization": f"Bearer {bot_token}",
+            "Content-Type": "application/json; charset=utf-8",
+        },
+    )
+    response.raise_for_status()
+    return response.json()
+
+
 async def attach(ctx: SurfaceContext, writeback: Writeback, reply_ref: str) -> None:
-    """Stream each shared file into the posted reply's thread, all at once on the event loop. Best
-    effort: a rejected file is logged and the rest still deliver, so an upload never re-posts the
-    reply or blocks its siblings."""
-    if not writeback.artifacts:
+    """Stream each shared file that fits the upload cap into the posted reply's thread, all at once
+    on the event loop; an over-cap file is delivered as a link in `post`, not here. Best effort: a
+    rejected file is logged and the rest still deliver, so an upload never re-posts the reply or
+    blocks its siblings."""
+    inline = tuple(a for a in writeback.artifacts if a.size_bytes <= SLACK_UPLOAD_MAX_BYTES)
+    if not inline:
         return
     channel, _, reply_ts = reply_ref.partition(":")
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
     results = await asyncio.gather(
         *(
             _upload_artifact(ctx, bot_token, channel, reply_ts, artifact)
-            for artifact in writeback.artifacts
+            for artifact in inline
         ),
         return_exceptions=True,
     )
-    for artifact, result in zip(writeback.artifacts, results, strict=True):
+    for artifact, result in zip(inline, results, strict=True):
         if isinstance(result, BaseException):
             _LOG.warning("slack attachment upload failed for %s: %s", artifact.filename, result)
 

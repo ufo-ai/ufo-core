@@ -23,6 +23,11 @@ import sqlalchemy as sa
 from starlette.requests import Request
 from starlette.responses import Response
 
+from selfhost.artifact_token import (
+    ARTIFACT_DOWNLOAD_PATH,
+    ARTIFACT_TOKEN_TTL_SECONDS,
+    mint_artifact_token,
+)
 from selfhost.blob import BlobStore
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
@@ -110,9 +115,24 @@ class SurfaceContext:
     blob: BlobStore
     _invoker: TurnInvoker
     _credentials: CredentialStore
+    _artifact_token_secret: str
+    _public_base_url: str | None
 
     async def credential(self, slot: str) -> str:
         return await self._credentials.get(self.workspace_id, slot)
+
+    def artifact_link(self, artifact: SharedArtifact) -> str | None:
+        """A TTL download link for a shared file the surface cannot upload inline, or None when
+        artifact delivery is unconfigured (no token secret or no public base URL) — the surface then
+        names the file without a link. Mints the same signed token the web download route verifies,
+        so the link opens for anyone holding it until it expires."""
+        if not self._artifact_token_secret or not self._public_base_url:
+            return None
+        expires_at = int(datetime.now(UTC).timestamp()) + ARTIFACT_TOKEN_TTL_SECONDS
+        token = mint_artifact_token(
+            self._artifact_token_secret, artifact.blob_key, artifact.filename, expires_at
+        )
+        return f"{self._public_base_url.rstrip('/')}{ARTIFACT_DOWNLOAD_PATH}?token={token}"
 
     async def default_agent(self) -> UUID:
         async with workspace_tx() as connection:
