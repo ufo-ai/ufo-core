@@ -12,6 +12,7 @@ members = [
     "selfhost-ext-scheduled-tasks",
     "selfhost-ext-self-improvement",
     "selfhost-ext-slack",
+    "selfhost-ext-turbopuffer",
     "selfhost-ext-web",
 ]
 
@@ -1790,6 +1791,21 @@ requires-dist = [
 name = "selfhost-ext-slack"
 version = "0.1.0"
 source = { editable = "extensions/slack" }
+dependencies = [
+    { name = "httpx" },
+    { name = "selfhost" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "selfhost", editable = "core" },
+]
+
+[[package]]
+name = "selfhost-ext-turbopuffer"
+version = "0.1.0"
+source = { editable = "extensions/turbopuffer" }
 dependencies = [
     { name = "httpx" },
     { name = "selfhost" },
