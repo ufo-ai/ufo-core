@@ -120,10 +120,12 @@ services: SQLite + filesystem blobs + in-process hub.
 
 ## U10 — packs + scheduled tasks
 
-- Assistant pack (deep/wide research, browser subagent via BUA port, office docs skills);
-  scheduled-tasks extension (JobSpec cron → `invoke`); pack onboarding steps.
-- **Proof**: pack onboarding installs skills and they load; a cron fires a real turn on schedule;
-  `wide_browse`-style fan-out runs as subagent spawns.
+- Packs seam (`selfhost.pack` entry point → `Pack` bundling installed extensions + pack-level
+  skills/onboarding; `[pack] name` activates one, narrowing the active manifest set); assistant pack
+  bundling memory + browser + connectors + exa; scheduled-tasks extension (JobSpec cron → `invoke`).
+- **Proof**: activating a pack makes exactly its bundled extensions' manifests active and its
+  pack-level skill loads; a cron fires a real turn on schedule; `wide_browse`-style fan-out runs as
+  subagent spawns.
 
 ## Post-U10 backlog (extensions, in likely order)
 

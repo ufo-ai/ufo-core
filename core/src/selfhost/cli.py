@@ -64,7 +64,7 @@ def init(email: str, model: str) -> None:
     config = load_config()
     if config.database.url.startswith("postgresql"):
         asyncio.run(_create_postgres_system_database(config))
-    apply_migrations(config.database.url)
+    apply_migrations(config.database.url, config.pack.name)
     token = secrets.token_hex(32)
     try:
         asyncio.run(_onboard(config, email, model, token))
@@ -91,7 +91,7 @@ async def _onboard(config: Config, email: str, model: str, token: str) -> None:
             email=email,
             model=model,
             credentials=credentials,
-            manifests=load_manifests(),
+            manifests=load_manifests(config.pack.name),
         )
         onboarded = await onboarding.create()
         await _bind_cli_token(onboarded, token)

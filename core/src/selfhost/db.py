@@ -80,18 +80,19 @@ async def workspace_tx() -> AsyncIterator[AsyncConnection]:
         yield connection
 
 
-def apply_migrations(url: str) -> None:
+def apply_migrations(url: str, pack: str | None = None) -> None:
     """Alembic owns the schema; runs off the loop (CLI startup, test fixtures). Core's version
     location and every active extension's are layered into one run, so `upgrade heads` brings the
     deploy to core's head plus each pinned extension's — one head per owner, each extension ordered
-    after core by the `depends_on` its base declares. The loader import is local to break the
-    db↔loader↔context cycle (the loader reaches core through the same context that binds to this
+    after core by the `depends_on` its base declares. With `pack` set the active set narrows to that
+    pack's bundle, so only its extensions' tables are created. The loader import is local to break
+    the db↔loader↔context cycle (the loader reaches core through the same context that binds to this
     module)."""
     from selfhost.ext.loader import migration_locations
 
     config = AlembicConfig()
     config.set_main_option("script_location", str(MIGRATIONS_DIR))
-    locations = (str(MIGRATIONS_DIR / "versions"), *migration_locations())
+    locations = (str(MIGRATIONS_DIR / "versions"), *migration_locations(pack))
     config.set_main_option("version_locations", os.pathsep.join(locations))
     config.set_main_option("path_separator", "os")
     config.set_main_option("sqlalchemy.url", url.replace("%", "%%"))

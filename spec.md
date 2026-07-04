@@ -61,11 +61,10 @@ terminal frame. A client's wait always ends — the terminal state commits on th
 
 - **Tool calling** — typed registry; per-call metering; results bounded before hitting the model.
 - **Skill loading** — skills are folders of files (SKILL.md + assets), mounted into the sandbox on
-  `load_skill`; packs are collections of skills plus onboarding steps. **A skill ships with the
-  thing it teaches**: core ships exactly two — `sandbox`, `delegation` — teaching core's own
-  builtins; an extension's skills ride its manifest (the `memory` skill ships with the memory
-  extension); domain skills are packs. Every-turn
-  content belongs in the system prompt, situational/long content in skills; skills carry
+  `load_skill`. **A skill ships with the thing it teaches**: core ships exactly two — `sandbox`,
+  `delegation` — teaching core's own builtins; an extension's skills ride its manifest (the `memory`
+  skill ships with the memory extension); a pack may add pack-level skills of its own (see Packs).
+  Every-turn content belongs in the system prompt, situational/long content in skills; skills carry
   workflows, never restated tool docs (the tool's description is authoritative).
 - **Typed subagents** — a registry of profiles (name, prompt, tool subset, input/output schema);
   spawn = child turn with parent linkage; foreground awaits, background returns an id. Extensions
@@ -135,7 +134,6 @@ Manifest registers (each optional):
 | `surfaces` | A chat surface on the privileged surface seam: an ingest mounted at `/surface/<name>` plus two-phase writeback delivery (`post` then `attach`). Slack is one. |
 | `credentials` | Named BYOK slots the workspace must fill (drives onboarding). |
 | `onboarding` | Steps contributed to the workspace/pack onboarding flow. |
-| `packs` | Bundled skill packs. |
 | `models` | Model providers behind `ModelClient` (OpenRouter, local runtimes). |
 | `carriers` | Sandbox carriers — Docker, E2B, remote runners; core's default is a local temp-dir carrier. |
 | `indexes` | Index backends for memory/source retrieval (turbopuffer); the dialect-native default (SQLite FTS5 + local cosine, Postgres tsvector + pgvector) ships as the base-pinned `index-default` extension registering name `"default"`, which core resolves when `memory.index_backend` is unset. |
@@ -160,6 +158,23 @@ Extensions are Python packages. A deploy may enable the extension store — a re
 the CLI (and, when granted, an agent in chat) searches and installs from: `selfhost ext search /
 install / remove`. Installs pin version + digest and are recorded in the bundle lockfile; with the
 store disabled, a deploy runs only what its bundle ships.
+
+### Packs
+
+A **pack** is the deploy's product configuration as one activation. It is a workspace member under
+`packs/<name>/` whose `selfhost.pack` entry point returns a `Pack` — the set of installed extensions
+it bundles (by manifest name) plus any pack-level skills and onboarding steps of its own. A deploy
+names the active pack in config (`[pack] name`, one active pack); activating it narrows the active
+manifest set to exactly the bundled extensions' manifests plus one manifest carrying the pack's own
+contributions, so the pack fully determines what comes up — a coherent config online together. Packs
+are discovered through their entry-point group exactly as extensions are, import only `selfhost.sdk`
+(the same CI gate), name only installed extensions (an uninstalled one fails loud at boot), and own
+no tables — a pack's pack-level skills and onboarding ride the same manifest-consuming paths an
+extension's do. The lockfile is the installed+verified universe; a pack selects the active subset,
+so pack integrity derives from the pinned extensions it names. Absent config, the deploy runs the
+unnarrowed set (the lockfile's pins, or every discovered extension in dev). The flagship is
+**assistant** — memory (with its index and embed backends), the sandbox browser over the default BUA
+backend, Composio connectors, and Exa research.
 
 ## Surfaces
 
@@ -206,8 +221,9 @@ keys come from `credential` slots or deploy config.
 ## Deploy config bundling
 
 One declarative file, `selfhost.toml`: Postgres URL, blob store (filesystem root or S3 endpoint),
-model keys (env refs), enabled extensions + versions, installed packs, surface config (Slack app,
-web host), sandbox carrier, stream hub, OTLP export target, extension-store toggle, spend defaults.
+model keys (env refs), enabled extensions + versions, the active pack (`[pack] name`), surface
+config (Slack app, web host), sandbox carrier, stream hub, OTLP export target, extension-store
+toggle, spend defaults.
 
 ## Running it
 
@@ -281,19 +297,20 @@ bundle installs OSS, on-prem, or hosted.
 | Redis stream hub | hubs |
 | turbopuffer index | indexes |
 | GitHub / S3 source backends | sources |
-| Agent-guided education / onboarding | onboarding, tools, packs |
+| Agent-guided education / onboarding | onboarding, tools |
 | Scheduled tasks (cron / one-time) | jobs, invoke, tools |
 | GH code review on PR + auto-merge | routes (webhook), credentials, invoke, tools |
 | Service self-improvement / bug-fixing from o11y | sources (o11y), jobs, trajectories.read, invoke (evals), agents.propose_change |
-| Security review | tools, subagents, packs |
+| Security review | tools, subagents |
 | gbrain-style memory (source → condense to markdown + graph) | memory, sources, triggers |
-| CRM / ATS | connectors, sources, triggers, tools, packs |
+| CRM / ATS | connectors, sources, triggers, tools |
 | Websites | tools (sandbox serving), routes |
 
-Skill packs (content, not code): **assistant** (deep research, wide research/browse, browser
-subagent, office docs), **startup** (onboarding, YC document questions, bookface search, deals,
-fundraising docs, marketing/ad loops), **support bot** (onboarding: connect knowledgebase + keys;
-intercom-style website plugin via the websites extension).
+Packs (activation bundles, not code — see Packs): **assistant** bundles memory, the sandbox browser
+over the default BUA backend, Composio connectors, and Exa research (the flagship); **startup** and
+**support bot** name the extensions plus pack-level onboarding a product needs (YC/fundraising docs
+and search; knowledgebase + keys onboarding with the websites plugin). Each activates one coherent
+config, no code of its own beyond what it references.
 
 ## Non-goals (core, now)
 

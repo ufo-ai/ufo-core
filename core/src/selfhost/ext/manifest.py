@@ -1,10 +1,12 @@
-"""What an extension declares: the Manifest and its value objects.
+"""What an extension declares (the Manifest) and what a pack declares (the Pack): the frozen value
+objects the loader reads and derives from, never registration APIs it calls.
 
-An extension's entry point returns a Manifest — a frozen bundle of declared points the loader reads
-and derives from, never a registration API it calls. Each point is a value object a core subsystem
+An extension's entry point returns a Manifest — a bundle of declared points a core subsystem
 consumes: tools enter the turn's registry, routes mount under the app, jobs register on the
 scheduler, credential slots drive proxy injection, hooks fire on turn-lifecycle events as a runtime
-policy filter over the tools grants already admit."""
+policy filter over the tools grants already admit. A pack's entry point returns a Pack — the set of
+installed extensions it bundles plus any pack-level skills and onboarding steps of its own — so
+activating one named pack brings a coherent product config up together."""
 
 from collections.abc import Awaitable, Callable
 from dataclasses import KW_ONLY, dataclass
@@ -357,3 +359,21 @@ class Manifest:
     skills: tuple[SkillSpec, ...] = ()
     browsers: tuple[BrowserBackendSpec, ...] = ()
     carriers: tuple[CarrierSpec, ...] = ()
+
+
+@dataclass(frozen=True)
+class Pack:
+    """What one pack declares, returned by its `selfhost.pack` entry point. A pack is a workspace
+    member under `packs/<name>/` that names the installed extensions it bundles and, through the
+    same fields an extension manifest carries, any pack-level skills and onboarding steps of its
+    own. A deploy names the active pack in `[pack] name`; activating it narrows the deploy to
+    exactly the bundled extensions' manifests plus one manifest of the pack's own contributions, so
+    the pack fully determines a coherent product config. `extensions` are manifest names resolved
+    against the installed set — one naming an uninstalled extension fails loud at boot."""
+
+    name: str
+    version: str
+    _: KW_ONLY
+    extensions: tuple[str, ...] = ()
+    skills: tuple[SkillSpec, ...] = ()
+    onboarding_steps: tuple[OnboardingStep, ...] = ()

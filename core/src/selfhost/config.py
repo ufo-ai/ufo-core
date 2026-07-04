@@ -164,6 +164,16 @@ class BrowserConfig(BaseModel):
     backend: str = BUA_BROWSER_BACKEND
 
 
+class PackConfig(BaseModel):
+    """The active pack. `name` selects one pack a workspace member under `packs/<name>/` registers
+    through the `selfhost.pack` entry point; activating it narrows the deploy to exactly the
+    extensions that pack bundles plus its own pack-level skills and onboarding steps. Unset runs the
+    unnarrowed extension set — the lockfile's pins, or every discovered extension in dev."""
+
+    model_config = ConfigDict(extra="forbid")
+    name: str | None = None
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
     database: DatabaseConfig
@@ -181,6 +191,7 @@ class Config(BaseModel):
     artifacts: ArtifactsConfig = ArtifactsConfig()
     hub: HubConfig = HubConfig()
     browser: BrowserConfig = BrowserConfig()
+    pack: PackConfig = PackConfig()
 
 
 def config_path() -> Path:

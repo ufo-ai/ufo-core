@@ -15,6 +15,7 @@ from uuid import UUID, uuid4
 import pytest
 import selfhost_ext_index_default as index_default
 import selfhost_ext_sample as sample
+import selfhost_pack_sample as sample_pack
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
@@ -43,6 +44,7 @@ from selfhost.ext.context import (
     context_for,
 )
 from selfhost.ext.loader import (
+    discovered_packs,
     embed_backend,
     index_backend,
     load_manifests,
@@ -1010,3 +1012,45 @@ async def test_core_selects_a_manifest_embed_backend_by_name(db: None, database_
 
     with pytest.raises(RuntimeError, match="no extension registers"):
         embed_backend((manifest,), "nonesuch", workspace_id, store)
+
+
+def test_sample_pack_activates_its_bundled_extension_and_own_contributions() -> None:
+    """The packs seam end to end through the probe: the sample pack is discovered through its
+    `selfhost.pack` entry point, and activating it by name narrows the active set to exactly the
+    sample extension's real manifest (its tools present) plus a manifest carrying the pack's own
+    pack-level skill and onboarding step — the shape `load_manifests` returns for a serve or init
+    that names the pack."""
+    packs = discovered_packs()
+    assert sample_pack.NAME in packs
+    assert packs[sample_pack.NAME].extensions == (sample_pack.BUNDLED_EXTENSION,)
+
+    manifests = load_manifests(sample_pack.NAME)
+    assert [manifest.name for manifest in manifests] == [sample.NAME, sample_pack.NAME]
+
+    bundled = next(manifest for manifest in manifests if manifest.name == sample.NAME)
+    assert {tool.name for tool in bundled.tools} == {sample.TOOL_NAME, sample.NOTE_TOOL_NAME}
+
+    pack_manifest = next(manifest for manifest in manifests if manifest.name == sample_pack.NAME)
+    assert {spec.path.name for spec in pack_manifest.skills} == {sample_pack.SKILL_NAME}
+    assert {step.name for step in pack_manifest.onboarding_steps} == {sample_pack.ONBOARDING_NAME}
+
+
+def test_sample_pack_skill_reaches_the_skill_registry() -> None:
+    """The pack-level `skills` contribution end to end: the skill the sample pack ships folds into
+    the same registry the loader aggregates an extension's into, and renders in the loadable-skill
+    index beside core's own — a pack contributes a skill through the identical path an extension
+    does."""
+    registry = skill_registry(load_manifests(sample_pack.NAME))
+    assert sample_pack.SKILL_NAME in dict(registry.index())
+
+
+async def test_sample_pack_onboarding_step_runs_through_its_scoped_context(db: None) -> None:
+    """The pack-level `onboarding` contribution end to end: activating the pack fires its
+    onboarding step with a context scoped to the pack's name, which records through its scoped store
+    — read back here through the same public surface, proving the step ran scoped to the pack."""
+    workspace_id = await _workspace()
+    await run_onboarding_steps(
+        load_manifests(sample_pack.NAME), workspace_id, _credential_store()
+    )
+    scoped = ScopedStore(workspace_id=workspace_id, extension=sample_pack.NAME)
+    assert await scoped.get(sample_pack.ONBOARDING_KEY) == {"pack_onboarded": True}

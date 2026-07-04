@@ -64,6 +64,9 @@ from selfhost.ext.manifest import (
     OnInbound as OnInbound,
 )
 from selfhost.ext.manifest import (
+    Pack as Pack,
+)
+from selfhost.ext.manifest import (
     PostToolUse as PostToolUse,
 )
 from selfhost.ext.manifest import (

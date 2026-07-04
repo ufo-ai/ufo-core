@@ -55,8 +55,8 @@ Working against the old repo:
 | Old | Becomes | Notes |
 |---|---|---|
 | `metalcraft_connectors/{base,composio,composio_proxy,errors,integration_descriptors,mcp,registry}.py` + 48 provider dirs | `extensions/connectors` | U8; port framework + registry wholesale; closed leaf stays closed |
-| `metalcraft_agent/bua/` (18 files), `browser.py`, `browser_cdp.py`, `tools/browser.py`, `sandbox/browser_runtime.py` | assistant pack browser subagent | U10 |
-| `metalcraft_agent/tools/web.py` | `extensions/exa` (Exa search/fetch) | U10; `search_web`, `fetch_url`, `search_vertical` each a distinct tool |
+| `metalcraft_agent/bua/` (18 files), `browser.py`, `browser_cdp.py`, `tools/browser.py`, `sandbox/browser_runtime.py` | `extensions/browser` (bundled by the assistant pack) | U10 |
+| `metalcraft_agent/tools/web.py` | `extensions/exa` (Exa search/fetch; bundled by the assistant pack) | U10; `search_web`, `fetch_url`, `search_vertical` each a distinct tool |
 | `metalcraft_agent/tools/todos.py` | `extensions/todos` | `update_todo_list`/`update_todo_status` over the pack's scoped store, keyed by conversation; `<todo_list>` prompt section |
 | `metalcraft_agent/tools/repl.py` | `extensions/repl` | `js_repl` (Node) + `xlsx_repl` (Python/openpyxl), persistent accumulate-and-run over the sandbox |
 | `metalcraft_agent/tools/sandbox.py` (serve tools) | `extensions/sites` | `website`/`start_server`/`deploy_website`/`publish_website` + the `website_building` subagent; the served URL is sandbox-internal (the browser tools and js_repl reach it) — no public reverse-proxy seam yet, so exposure is via `share_file` |

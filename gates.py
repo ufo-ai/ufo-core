@@ -18,6 +18,7 @@ ROLE_PACKAGES = ("selfhost.surfaces", "selfhost.loop", "selfhost.jobs", "selfhos
 ENVELOPE_COLUMNS = {"workspace_id", "created_at", "updated_at"}
 SCHEMA_TABLES = CORE_SRC / "schema" / "tables.py"
 EXTENSIONS_ROOT = "extensions"
+PACKS_ROOT = "packs"
 SDK_PUBLIC_PREFIX = "selfhost.sdk"
 MANIFEST_MODULE = CORE_SRC / "ext" / "manifest.py"
 SAMPLE_MODULE = Path(EXTENSIONS_ROOT) / "sample" / "selfhost_ext_sample.py"
@@ -119,18 +120,19 @@ def _boundary_failures(trees: dict[Path, ast.Module]) -> list[str]:
 
 
 def _sdk_import_failures(trees: dict[Path, ast.Module]) -> list[str]:
-    """Every file under `extensions/` reaches core only through the public `selfhost.sdk` surface;
-    any other `selfhost.<internal>` import is a break of the seam the SDK exists to pin."""
+    """Every file under `extensions/` and `packs/` reaches core only through the public
+    `selfhost.sdk` surface; any other `selfhost.<internal>` import is a break of the seam the SDK
+    exists to pin."""
     failures = []
     for rel, tree in trees.items():
-        if rel.parts[0] != EXTENSIONS_ROOT:
+        if rel.parts[0] not in (EXTENSIONS_ROOT, PACKS_ROOT):
             continue
         for imported in _imported_modules(tree):
             in_sdk = imported == SDK_PUBLIC_PREFIX or imported.startswith(SDK_PUBLIC_PREFIX + ".")
             in_core = imported == "selfhost" or imported.startswith("selfhost.")
             if in_core and not in_sdk:
                 failures.append(
-                    f"{rel}: extensions import selfhost only via {SDK_PUBLIC_PREFIX} "
+                    f"{rel}: extensions and packs import selfhost only via {SDK_PUBLIC_PREFIX} "
                     f"(found {imported!r})"
                 )
     return failures

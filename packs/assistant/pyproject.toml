@@ -1,0 +1,19 @@
+[project]
+name = "selfhost-pack-assistant"
+version = "0.1.0"
+description = "Assistant pack: memory, the sandbox browser over core's default BUA backend, Composio connectors, and Exa research — a coherent assistant config that comes up together"
+requires-python = ">=3.12"
+dependencies = ["selfhost"]
+
+[project.entry-points."selfhost.pack"]
+assistant = "selfhost_pack_assistant:pack"
+
+[tool.uv.sources]
+selfhost = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+only-include = ["selfhost_pack_assistant.py"]

@@ -65,6 +65,18 @@ def test_ext_defaults_to_off(tmp_path: Path) -> None:
     assert load_config(path).ext.store is None
 
 
+def test_pack_defaults_to_none(tmp_path: Path) -> None:
+    path = tmp_path / "selfhost.toml"
+    path.write_text(VALID)
+    assert load_config(path).pack.name is None
+
+
+def test_pack_name_selects_the_active_pack(tmp_path: Path) -> None:
+    path = tmp_path / "selfhost.toml"
+    path.write_text(VALID + '\n[pack]\nname = "assistant"\n')
+    assert load_config(path).pack.name == "assistant"
+
+
 def test_ext_store_parses(tmp_path: Path) -> None:
     path = tmp_path / "selfhost.toml"
     path.write_text(VALID + '\n[ext]\nstore = "extensions.catalog.toml"\n')

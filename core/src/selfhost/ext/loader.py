@@ -38,6 +38,7 @@ from selfhost.ext.manifest import (
     Manifest,
     ModifyInput,
     ModifyOutput,
+    Pack,
     PostToolUse,
     PreToolUse,
     SubagentProfile,
@@ -50,6 +51,7 @@ from selfhost.tools.builtins import BUILTIN_TOOLS
 from selfhost.tools.registry import ToolDef, ToolRegistry
 
 EXTENSION_ENTRY_POINT_GROUP = "selfhost.extension"
+PACK_ENTRY_POINT_GROUP = "selfhost.pack"
 LOCKFILE_PATH_ENV = "SELFHOST_LOCKFILE"
 DEFAULT_LOCKFILE_PATH = Path("selfhost.lock")
 DIGEST_PREFIX = "sha256:"
@@ -108,6 +110,20 @@ def discovered() -> dict[str, tuple[Manifest, EntryPoint]]:
     return found
 
 
+def discovered_packs() -> dict[str, Pack]:
+    """Every pack installed in this environment, keyed by pack name — discovered through the
+    `selfhost.pack` entry-point group exactly as extensions are through `selfhost.extension`, each a
+    zero-arg callable returning a Pack. Duplicate pack names are rejected here so no reader
+    downstream has to."""
+    found: dict[str, Pack] = {}
+    for entry in entry_points(group=PACK_ENTRY_POINT_GROUP):
+        pack = entry.load()()
+        if pack.name in found:
+            raise ValueError(f"duplicate pack name: {pack.name}")
+        found[pack.name] = pack
+    return found
+
+
 def _entry_spec(entry: EntryPoint) -> ModuleSpec:
     top = entry.module.split(".", 1)[0]
     spec = importlib.util.find_spec(top)
@@ -147,41 +163,86 @@ def extension_digest(entry: EntryPoint) -> str:
     return DIGEST_PREFIX + digest.hexdigest()
 
 
-def migration_locations() -> tuple[str, ...]:
+def migration_locations(pack: str | None = None) -> tuple[str, ...]:
     """The `migrations/` directory of each active extension — the alembic version locations
     `apply_migrations` layers over core's own. Each is a self-contained branch of revision files
     that attaches to core through the `depends_on` its base declares, so `upgrade heads` brings the
-    deploy to core's head plus each pinned extension's — one head per owner. Only the pinned set
-    contributes (via `load_manifests`), so an installed-but-unpinned extension adds no tables."""
+    deploy to core's head plus each pinned extension's — one head per owner. Only the active set
+    contributes (via `load_manifests`, narrowed to `pack` when one is active), so an
+    installed-but-inactive extension adds no tables; a pack's own manifest has no entry point and
+    owns no tables, so it contributes no location."""
     installed = discovered()
     locations: list[str] = []
-    for manifest in load_manifests():
-        migrations = _package_dir(_entry_spec(installed[manifest.name][1])) / MIGRATIONS_DIRNAME
+    for manifest in load_manifests(pack):
+        found = installed.get(manifest.name)
+        if found is None:
+            continue
+        migrations = _package_dir(_entry_spec(found[1])) / MIGRATIONS_DIRNAME
         if migrations.is_dir():
             locations.append(str(migrations))
     return tuple(locations)
 
 
-def load_manifests() -> tuple[Manifest, ...]:
+def load_manifests(pack: str | None = None) -> tuple[Manifest, ...]:
     """The active extension set. With a lockfile present it is exactly the pinned extensions, each
     verified against its pinned digest (a missing or drifted extension fails loud); with none, every
-    discovered extension is active."""
+    discovered extension is active. When `pack` names an installed pack the set narrows to exactly
+    the extensions that pack bundles plus the pack's own manifest, so activating one pack brings a
+    coherent config up together."""
     installed = discovered()
     path = lockfile_path()
     if not path.exists():
-        return tuple(manifest for manifest, _ in installed.values())
+        active = {manifest.name: manifest for manifest, _ in installed.values()}
+    else:
+        active = {}
+        for pin in read_lockfile(path).extensions:
+            found = installed.get(pin.name)
+            if found is None:
+                raise RuntimeError(f"lockfile pins extension {pin.name!r} but it is not installed")
+            manifest, entry = found
+            actual = extension_digest(entry)
+            if actual != pin.digest:
+                raise RuntimeError(
+                    f"extension {pin.name!r} digest {actual} does not match pinned {pin.digest}"
+                )
+            active[manifest.name] = manifest
+    if pack is None:
+        return tuple(active.values())
+    return _pack_manifests(pack, active)
+
+
+def _pack_manifests(pack: str, active: dict[str, Manifest]) -> tuple[Manifest, ...]:
+    """Narrow the active set to the named pack: the manifests of exactly the extensions it bundles
+    (each must be installed and active, else boot fails loud) followed by one manifest carrying the
+    pack's own skills and onboarding steps. A pack's pack-level contributions ride the same
+    manifest-consuming paths an extension's do; a pack name colliding with a bundled extension's
+    fails loud."""
+    declared = discovered_packs()
+    found = declared.get(pack)
+    if found is None:
+        raise RuntimeError(
+            f"config selects pack {pack!r} but no pack registers it (have {sorted(declared)})"
+        )
     manifests: list[Manifest] = []
-    for pin in read_lockfile(path).extensions:
-        found = installed.get(pin.name)
-        if found is None:
-            raise RuntimeError(f"lockfile pins extension {pin.name!r} but it is not installed")
-        manifest, entry = found
-        actual = extension_digest(entry)
-        if actual != pin.digest:
+    for name in found.extensions:
+        manifest = active.get(name)
+        if manifest is None:
             raise RuntimeError(
-                f"extension {pin.name!r} digest {actual} does not match pinned {pin.digest}"
+                f"pack {pack!r} bundles extension {name!r} but it is not installed and active"
             )
         manifests.append(manifest)
+    if found.name in {manifest.name for manifest in manifests}:
+        raise RuntimeError(
+            f"pack {found.name!r} collides with a bundled extension of the same name"
+        )
+    manifests.append(
+        Manifest(
+            name=found.name,
+            version=found.version,
+            skills=found.skills,
+            onboarding_steps=found.onboarding_steps,
+        )
+    )
     return tuple(manifests)
 
 

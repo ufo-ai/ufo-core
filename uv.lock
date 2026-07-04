@@ -33,6 +33,8 @@ members = [
     "selfhost-ext-slack",
     "selfhost-ext-todos",
     "selfhost-ext-turbopuffer",
+    "selfhost-pack-assistant",
+    "selfhost-pack-sample",
 ]
 
 [[package]]
@@ -2805,6 +2807,28 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "selfhost", editable = "core" },
 ]
+
+[[package]]
+name = "selfhost-pack-assistant"
+version = "0.1.0"
+source = { editable = "packs/assistant" }
+dependencies = [
+    { name = "selfhost" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "selfhost", editable = "core" }]
+
+[[package]]
+name = "selfhost-pack-sample"
+version = "0.1.0"
+source = { editable = "packs/sample_pack" }
+dependencies = [
+    { name = "selfhost" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "selfhost", editable = "core" }]
 
 [[package]]
 name = "shellingham"

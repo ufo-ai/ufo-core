@@ -75,7 +75,7 @@ def run() -> None:
     init_o11y(config.o11y.otlp_endpoint)
     init_db(config.database.url)
     asyncio.run(_require_bootstrap())
-    manifests = load_manifests()
+    manifests = load_manifests(config.pack.name)
     workspace_id = asyncio.run(_sole_workspace_id())
     instance_id = uuid4()
     guard = BootGuard(config=config, workspace_id=workspace_id, instance_id=instance_id)
@@ -181,7 +181,7 @@ def _launch_jobs(
     startup); a handler may read a declared credential or the deploy index/embed backends or the
     page feed, so once any job is registered the credential key must be set."""
     bindings = bindings_from(
-        load_manifests(),
+        load_manifests(config.pack.name),
         core_jobs(sync_driver, SpendResume(client=dbos_client)),
     )
     if not bindings:
@@ -539,7 +539,7 @@ def _model_rules(config: Config) -> tuple[Rule, ...]:
 async def _credential_rules(config: Config) -> tuple[Rule, ...]:
     """Every installed extension's injected credential slots become egress rules for this single
     workspace; fail loud if a slot needs injection but the deploy set no credential key."""
-    manifests = load_manifests()
+    manifests = load_manifests(config.pack.name)
     if not any(slot.injection for manifest in manifests for slot in manifest.credentials):
         return ()
     key = os.environ.get(config.credentials.key_env)
