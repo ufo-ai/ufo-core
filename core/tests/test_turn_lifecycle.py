@@ -223,7 +223,7 @@ async def _consume(
                 payload = json.loads(line)
                 if "frame" in payload:
                     return "".join(deltas), payload["frame"]
-                if "cost_micro_usd" in payload:
+                if "text" not in payload:
                     continue
                 deltas.append(payload["text"])
     raise AssertionError("stream ended without a terminal frame")
