@@ -2,21 +2,22 @@
 
 Slack's Web API cursor-paginates: a list response carries the next page token at
 `response_metadata.next_cursor`, and reports failure as HTTP 200 with `ok=false` (a missing OAuth
-scope is `error="missing_scope"`). `users` and `conversations` enumerate the whole current
+scope is `error="missing_scope"`). `users.list` and `conversations.list` enumerate the whole current
 collection each run, so they are `delete_missing` snapshots — a member or channel that vanished from
 the grant's view is tombstoned, which is how deletes are detected on an API with no delete signal.
 The three message-derived streams (`messages`, `conversation_threads`, `message_participants`) come
-from one `conversations.history` walk per channel and are incremental: each channel keeps its own
-monotonic `ts`, so the stream cursor is a JSON map `{channel_id: last_ts}` rather than one global
-watermark, and a busy channel advancing never skips a quiet one. A grant that can't enumerate at all
-(`users.list`/`conversations.list` refused for a missing scope, `ok=false` or a 403) can read no
-stream, so the walk raises `StreamSkipped` and the run records a skip, not a failure; a per-channel
-refusal deeper in the history walk skips that channel and the others still sync. The write path is
-intentionally absent — the source seam only reads."""
+from one `conversations.history` walk per channel (a POST, matching Slack's own read shape) and are
+incremental: each channel keeps its own monotonic `ts`, so the stream cursor is a JSON map
+`{channel_id: last_ts}` rather than one global watermark, and a busy channel advancing never skips a
+quiet one. A grant that can't enumerate at all (`users.list`/`conversations.list` refused for a
+missing scope, `ok=false` or a 403) can read no stream, so the walk raises `StreamSkipped` and the
+run records a skip, not a failure; a per-channel refusal deeper in the history walk skips that
+channel and the others still sync. The write path is intentionally absent — the source seam only
+reads."""
 
 import json
 from collections.abc import AsyncIterator, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -66,17 +67,17 @@ class SlackApiError(RuntimeError):
         self.needed = needed
 
 
-@dataclass(frozen=True)
+@dataclass
 class SlackMessagePage:
     """One channel's `conversations.history` page fanned into the three derived record shapes, plus
     the highest `ts` seen (the channel's advancing watermark) and the ids of deleted messages."""
 
     channel_id: str
-    threads: list[dict[str, Any]] = field(default_factory=list)
-    messages: list[dict[str, Any]] = field(default_factory=list)
-    participants: list[dict[str, Any]] = field(default_factory=list)
-    deleted_message_ids: list[str] = field(default_factory=list)
-    latest_ts: str | None = None
+    threads: list[dict[str, Any]]
+    messages: list[dict[str, Any]]
+    participants: list[dict[str, Any]]
+    deleted_message_ids: list[str]
+    latest_ts: str | None
 
 
 class SlackConnector(RestConnector):
@@ -88,21 +89,21 @@ class SlackConnector(RestConnector):
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         if stream.name == "users":
-            async for page in self._iter_users(client):
+            async for page in self.iter_users(client):
                 yield page
             return
         if stream.name == "conversations":
-            async for page in self._iter_conversations(client):
+            async for page in self.iter_conversations(client):
                 yield page
             return
         if stream.name in _MESSAGE_STREAMS:
-            users = await self._user_index(client)
+            users = await self.user_index(client)
             conversations: list[dict[str, Any]] = []
-            async for conversation_page in self._iter_conversations(client):
+            async for conversation_page in self.iter_conversations(client):
                 conversations.extend(conversation_page)
             channel_cursors = _decode_channel_cursors(cursor)
             merged = dict(channel_cursors)
-            async for message_page in self._iter_message_pages(
+            async for message_page in self.iter_message_pages(
                 client, conversations=conversations, channel_cursors=channel_cursors, users=users
             ):
                 if message_page.latest_ts:
@@ -119,9 +120,9 @@ class SlackConnector(RestConnector):
                 else:
                     yield StreamPage(records=message_page.participants, next_cursor=next_cursor)
             return
-        raise NotImplementedError(f"slack: stream {stream.name!r} has no paginate dispatch")
+        raise StreamSkipped(f"slack: stream {stream.name!r} is not implemented")
 
-    async def _iter_users(self, client: httpx.AsyncClient) -> AsyncIterator[list[dict[str, Any]]]:
+    async def iter_users(self, client: httpx.AsyncClient) -> AsyncIterator[list[dict[str, Any]]]:
         cursor: str | None = None
         while True:
             params: dict[str, Any] = {"limit": USER_PAGE_SIZE}
@@ -139,7 +140,7 @@ class SlackConnector(RestConnector):
             if not cursor:
                 return
 
-    async def _iter_conversations(
+    async def iter_conversations(
         self, client: httpx.AsyncClient
     ) -> AsyncIterator[list[dict[str, Any]]]:
         cursor: str | None = None
@@ -181,16 +182,16 @@ class SlackConnector(RestConnector):
             if not cursor:
                 return
 
-    async def _user_index(self, client: httpx.AsyncClient) -> dict[str, dict[str, Any]]:
+    async def user_index(self, client: httpx.AsyncClient) -> dict[str, dict[str, Any]]:
         users: dict[str, dict[str, Any]] = {}
-        async for page in self._iter_users(client):
+        async for page in self.iter_users(client):
             for user in page:
                 user_id = user.get("id")
                 if isinstance(user_id, str):
                     users[user_id] = user
         return users
 
-    async def _iter_message_pages(
+    async def iter_message_pages(
         self,
         client: httpx.AsyncClient,
         *,
@@ -213,18 +214,55 @@ class SlackConnector(RestConnector):
                     params["oldest"] = oldest
                     params["inclusive"] = "false"
                 try:
-                    data = await self._slack_get(
-                        client, "/api/conversations.history", params=params
-                    )
+                    data = await self._slack_post(client, "/api/conversations.history", json=params)
                 except SlackApiError as error:
                     if error.error in _CHANNEL_SKIP_ERRORS:
                         break
                     raise
-                page, latest_ts = _fan_out_history(
-                    data, conversation=conversation, users=users, latest_ts=latest_ts
-                )
-                if page is not None:
-                    yield page
+                raw_messages = [
+                    raw
+                    for raw in data.get("messages") or []
+                    if isinstance(raw, dict) and isinstance(raw.get("ts"), str)
+                ]
+                if raw_messages:
+                    threads_by_id: dict[str, dict[str, Any]] = {}
+                    messages: list[dict[str, Any]] = []
+                    participants: list[dict[str, Any]] = []
+                    deleted_message_ids: list[str] = []
+                    for raw in raw_messages:
+                        ts = raw["ts"]
+                        if latest_ts is None or ts > latest_ts:
+                            latest_ts = ts
+                        if raw.get("subtype") == "message_deleted":
+                            deleted_ts = raw.get("deleted_ts")
+                            if isinstance(deleted_ts, str) and deleted_ts:
+                                deleted_message_ids.append(f"{channel_id}:{deleted_ts}")
+                            continue
+                        row = _flatten_message(raw, conversation=conversation, users=users)
+                        if row is None:
+                            continue
+                        thread = _conversation_thread_from_message(
+                            row, raw=raw, conversation=conversation
+                        )
+                        if thread is not None:
+                            existing = threads_by_id.get(thread["id"])
+                            if existing is None or str(existing.get("updated_at") or "") < str(
+                                thread.get("updated_at") or ""
+                            ):
+                                threads_by_id[thread["id"]] = thread
+                        messages.append(row)
+                        participant = _participant_for_message(row, users=users)
+                        if participant is not None:
+                            participants.append(participant)
+                    if threads_by_id or messages or participants or deleted_message_ids:
+                        yield SlackMessagePage(
+                            channel_id=channel_id,
+                            threads=list(threads_by_id.values()),
+                            messages=messages,
+                            participants=participants,
+                            deleted_message_ids=deleted_message_ids,
+                            latest_ts=latest_ts,
+                        )
                 cursor = _next_cursor(data)
                 if not cursor:
                     break
@@ -254,70 +292,20 @@ class SlackConnector(RestConnector):
     async def _slack_get(
         self, client: httpx.AsyncClient, path: str, *, params: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        data = await self._get(client, path, params=params)
-        if data.get("ok") is False:
-            error = str(data.get("error") or "unknown_error")
-            needed = data.get("needed")
-            raise SlackApiError(error, needed=needed if isinstance(needed, str) else None)
-        return data
+        return _ok_or_raise(await self._get(client, path, params=params))
+
+    async def _slack_post(
+        self, client: httpx.AsyncClient, path: str, *, json: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        return _ok_or_raise(await self._post(client, path, json=json))
 
 
-def _fan_out_history(
-    data: dict[str, Any],
-    *,
-    conversation: dict[str, Any],
-    users: dict[str, dict[str, Any]],
-    latest_ts: str | None,
-) -> tuple[SlackMessagePage | None, str | None]:
-    """Fan one `conversations.history` response into the messages/threads/participants a page
-    carries and advance the channel's `latest_ts`. Returns `(None, latest_ts)` when the response
-    held no rows worth landing."""
-    channel_id = conversation["id"]
-    raw_messages = [
-        raw
-        for raw in data.get("messages") or []
-        if isinstance(raw, dict) and isinstance(raw.get("ts"), str)
-    ]
-    threads_by_id: dict[str, dict[str, Any]] = {}
-    messages: list[dict[str, Any]] = []
-    participants: list[dict[str, Any]] = []
-    deleted_message_ids: list[str] = []
-    for raw in raw_messages:
-        ts = raw["ts"]
-        if latest_ts is None or ts > latest_ts:
-            latest_ts = ts
-        if raw.get("subtype") == "message_deleted":
-            deleted_ts = raw.get("deleted_ts")
-            if isinstance(deleted_ts, str) and deleted_ts:
-                deleted_message_ids.append(f"{channel_id}:{deleted_ts}")
-            continue
-        row = _flatten_message(raw, conversation=conversation, users=users)
-        if row is None:
-            continue
-        thread = _thread_from_message(row, raw=raw, conversation=conversation)
-        if thread is not None:
-            existing = threads_by_id.get(thread["id"])
-            if existing is None or str(existing.get("updated_at") or "") < str(
-                thread.get("updated_at") or ""
-            ):
-                threads_by_id[thread["id"]] = thread
-        messages.append(row)
-        participant = _participant_for_message(row, users=users)
-        if participant is not None:
-            participants.append(participant)
-    if not (threads_by_id or messages or participants or deleted_message_ids):
-        return None, latest_ts
-    return (
-        SlackMessagePage(
-            channel_id=channel_id,
-            threads=list(threads_by_id.values()),
-            messages=messages,
-            participants=participants,
-            deleted_message_ids=deleted_message_ids,
-            latest_ts=latest_ts,
-        ),
-        latest_ts,
-    )
+def _ok_or_raise(data: dict[str, Any]) -> dict[str, Any]:
+    if data.get("ok") is False:
+        error = str(data.get("error") or "unknown_error")
+        needed = data.get("needed")
+        raise SlackApiError(error, needed=needed if isinstance(needed, str) else None)
+    return data
 
 
 def _next_cursor(data: dict[str, Any]) -> str | None:
@@ -427,7 +415,7 @@ def _flatten_message(
     }
 
 
-def _thread_from_message(
+def _conversation_thread_from_message(
     message: dict[str, Any], *, raw: dict[str, Any], conversation: dict[str, Any]
 ) -> dict[str, Any] | None:
     thread_id = message.get("thread_id")

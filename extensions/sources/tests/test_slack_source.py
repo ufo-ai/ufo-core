@@ -4,9 +4,10 @@ Slack authenticates through the `AuthProxy` seam, so these drive the connector w
 whose `Credential` carries an `httpx.MockTransport` bound to `slack.com` — no live API, no token.
 Covered: the `users`/`conversations` full-collection snapshots (cursor-paginated, tombstoning
 whatever a run no longer holds), the message streams fanned from one `conversations.history` walk
-per channel with a per-channel JSON watermark, a deleted message tombstoned through `deletes`, the
-incoming per-channel cursor sent as `oldest`, and a scope-refusal (`ok=false missing_scope`, or a
-403) surfacing as `StreamSkipped` so the run records a skip, not a failure."""
+per channel (a POST, matching Slack's read shape) with a per-channel JSON watermark, a deleted
+message tombstoned through `deletes`, the incoming per-channel cursor sent as `oldest` in the POST
+body, and a scope-refusal (`ok=false missing_scope`, or a 403) surfacing as `StreamSkipped` so the
+run records a skip, not a failure."""
 
 import json
 from collections.abc import Callable
@@ -84,12 +85,10 @@ async def test_conversations_returns_a_snapshot() -> None:
 
 
 def _message_handler(
-    seen: list[tuple[str, dict[str, str]]],
+    seen: list[tuple[str, dict[str, object]]],
 ) -> Callable[[httpx.Request], httpx.Response]:
     def handle(request: httpx.Request) -> httpx.Response:
         path = request.url.path
-        params = {key: value for key, value in request.url.params.items()}
-        seen.append((path, params))
         if path == "/api/users.list":
             return _ok(
                 {"members": [{"id": "U1", "name": "alice", "profile": {"email": "a@x.com"}}]}
@@ -97,6 +96,9 @@ def _message_handler(
         if path == "/api/conversations.list":
             return _ok({"channels": [{"id": "C1", "name": "general", "is_channel": True}]})
         if path == "/api/conversations.history":
+            assert request.method == "POST"
+            body = json.loads(request.content) if request.content else {}
+            seen.append((path, body))
             return _ok(
                 {
                     "messages": [
@@ -124,10 +126,10 @@ async def test_messages_are_incremental_with_a_per_channel_watermark_and_tombsto
 
 
 async def test_messages_send_the_stored_channel_cursor_as_oldest_and_advance_it() -> None:
-    seen: list[tuple[str, dict[str, str]]] = []
+    seen: list[tuple[str, dict[str, object]]] = []
     stored = json.dumps({"C1": "1700000000.000000"})
     result = await _fetch("messages", _message_handler(seen), cursor=stored)
-    history = [params for path, params in seen if path == "/api/conversations.history"]
+    history = [body for path, body in seen if path == "/api/conversations.history"]
     assert history and history[0].get("oldest") == "1700000000.000000"
     assert history[0].get("inclusive") == "false"
     assert result.next_cursor == json.dumps({"C1": "1700000003.000200"}, sort_keys=True)
@@ -147,6 +149,7 @@ async def test_conversation_threads_derive_a_thread_root() -> None:
         if path == "/api/conversations.list":
             return _ok({"channels": [{"id": "C1", "name": "general", "is_channel": True}]})
         if path == "/api/conversations.history":
+            assert request.method == "POST"
             return _ok(
                 {
                     "messages": [
