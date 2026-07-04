@@ -1,7 +1,7 @@
 import pytest
 from pydantic import BaseModel
 
-from selfhost.ext.manifest import SubagentProfile
+from selfhost.ext.manifest import SUBAGENT_ROUND_LIMIT, SubagentProfile
 from selfhost.loop.profiles import CORE_SUBAGENT_PROFILES, GENERAL_PURPOSE
 from selfhost.loop.subagents import SubagentRegistry, subagent_system_prompt
 from selfhost.tools.builtins import BUILTIN_TOOLS
@@ -54,6 +54,23 @@ def test_core_ships_a_general_purpose_profile_the_registry_resolves() -> None:
     assert profile.name == GENERAL_PURPOSE
     assert profile.input_model.model_validate({"task": "look into X"}).task == "look into X"
     assert profile.output_model.model_validate({"result": "done"}).result == "done"
+
+
+def test_general_purpose_carries_the_subagent_round_budget() -> None:
+    profile = SubagentRegistry(CORE_SUBAGENT_PROFILES).get(GENERAL_PURPOSE)
+    assert profile.max_rounds == SUBAGENT_ROUND_LIMIT == 50
+
+
+def test_a_deep_profile_lifts_its_round_budget_above_the_subagent_default() -> None:
+    deep = SubagentProfile(
+        name="deep",
+        prompt="p",
+        tool_names=(),
+        input_model=_Task,
+        output_model=_Finding,
+        max_rounds=200,
+    )
+    assert deep.max_rounds == 200 > SUBAGENT_ROUND_LIMIT
 
 
 def test_general_purpose_tool_subset_excludes_the_tools_a_subagent_must_not_hold() -> None:

@@ -207,18 +207,25 @@ class HookSpec:
     tools: tuple[str, ...] = ()
 
 
+SUBAGENT_ROUND_LIMIT = 50
+
+
 @dataclass(frozen=True)
 class SubagentProfile:
     """A typed subagent an extension registers. `prompt` is the child's own instructions and
     `tool_names` the subset of the turn's tool set the child may call; a spawn validates its payload
     against `input_model` and its final answer against `output_model`. The loader collects every
-    manifest's profiles into the SubagentRegistry `spawn_subagent` dispatches against."""
+    manifest's profiles into the SubagentRegistry `spawn_subagent` dispatches against. `max_rounds`
+    caps the child's agentic tool-use rounds; on exhaustion it produces a best-effort final answer
+    rather than failing, so a runaway child never detonates its parent. A deep profile lifts it to
+    the main ceiling; the default suits an ordinary focused subagent."""
 
     name: str
     prompt: str
     tool_names: tuple[str, ...]
     input_model: type[BaseModel]
     output_model: type[BaseModel]
+    max_rounds: int = SUBAGENT_ROUND_LIMIT
 
 
 @dataclass(frozen=True)

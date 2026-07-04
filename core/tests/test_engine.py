@@ -17,6 +17,7 @@ from selfhost.grants import ConnectFlow, GrantStore, OAuthAccount, install_conne
 from selfhost.hub import InProcessHub, LiveFrame, SkillLoad, ToolCall
 from selfhost.loop.compaction import COMPACTED_CONTEXT_PREFIX, Compaction
 from selfhost.loop.engine import (
+    FORCE_FINAL_PROMPT,
     MAX_TOOL_RESULT_CHARS,
     RECALL_CONTEXT_PREFIX,
     UNTRUSTED_RESULT_CLOSE,
@@ -196,6 +197,25 @@ class RecordingHub:
 
     def subscribe(self, turn_id: UUID) -> AsyncIterator[LiveFrame]:
         raise NotImplementedError
+
+
+@dataclass
+class NeverAnsweringModel:
+    """Calls a tool every round and never answers on its own — so the engine spends its whole round
+    budget. When the force-final prompt arrives it records the tools it was offered (none) and gives
+    its closing text, so a test can prove exhaustion yields an answer, not a failed turn."""
+
+    forced_tools: tuple[object, ...] | None = None
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        if request.messages[-1].content == FORCE_FINAL_PROMPT:
+            self.forced_tools = request.tools
+            yield TextDelta(text="best effort")
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        yield ToolCallStart(id="c1", name="bash")
+        yield ToolCallDelta(id="c1", partial_json='{"command": "true"}')
+        yield Usage(input_tokens=1, output_tokens=1)
 
 
 STUB_AUTHORIZE_URL = "https://stub.test/oauth"
@@ -448,6 +468,22 @@ async def test_multi_tool_round_publishes_skill_then_tool_activity_frames_in_ord
         SkillLoad(skill="demo"),
         ToolCall(tool="bash", preview='{"command":"echo hi"}'),
     ]
+
+
+async def test_round_budget_exhaustion_forces_a_final_answer_instead_of_failing(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    model = NeverAnsweringModel()
+    engine = replace(_engine(turn, model, tmp_path), max_rounds=2)
+    frame = await engine.run()
+    assert frame.status == "done"
+    assert frame.text == "best effort"
+    assert model.forced_tools == ()
+    stored = await engine.transcript.read()
+    assert stored is not None
+    assert Message(role="user", content=FORCE_FINAL_PROMPT) in stored.messages
+    assert stored.messages[-1] == Message(role="assistant", content="best effort")
 
 
 async def test_connect_account_tool_call_in_a_turn_yields_the_authorize_url(

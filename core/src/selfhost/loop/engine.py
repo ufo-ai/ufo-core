@@ -55,10 +55,14 @@ from selfhost.tools.registry import ToolRegistry
 from selfhost.transcript import Conversation
 
 MAX_OUTPUT_TOKENS = 16_000
-MAX_TOOL_ROUNDS = 50
+MAIN_ROUND_LIMIT = 200
 DELTA_FLUSH_BYTES = 2048
 DELTA_FLUSH_SECONDS = 0.2
 EMPTY_RESPONSE_NUDGE = "Previous model response was empty. Answer now."
+FORCE_FINAL_PROMPT = (
+    "You have reached the maximum number of tool-use rounds. Do not call any more tools. "
+    "Give your best final answer now using everything gathered so far."
+)
 TRANSCRIPT_WRITE_ATTEMPTS = 3
 TRANSCRIPT_WRITE_RETRY_SECONDS = 0.5
 COMMIT_RETRY_INITIAL_SECONDS = 1.0
@@ -130,6 +134,7 @@ class TurnEngine:
     artifact_token_secret: str
     grants: GrantStore | None
     attempt: str = ""
+    max_rounds: int = MAIN_ROUND_LIMIT
 
     async def run(self) -> TerminalFrame | None:
         with turn_span(self.turn.id, self.turn.conversation_id):
@@ -260,7 +265,7 @@ class TurnEngine:
         """Call the model until it answers with text and no tool calls; each tool-calling round
         dispatches the calls in the sandbox and feeds the results back as the next user turn."""
         nudged = False
-        for _round in range(MAX_TOOL_ROUNDS):
+        for _round in range(self.max_rounds):
             await self._enforce_spend(usage_events)
             messages, compaction_usage = await self.compaction.maybe_compact(messages)
             usage_events.extend(compaction_usage)
@@ -281,7 +286,30 @@ class TurnEngine:
                 Message(role="assistant", content=assistant_blocks),
                 Message(role="user", content=results),
             )
-        raise RuntimeError(f"tool round limit exceeded ({MAX_TOOL_ROUNDS})")
+        return await self._force_final(messages, usage_events, system)
+
+    async def _force_final(
+        self,
+        messages: tuple[Message, ...],
+        usage_events: list[Usage],
+        system: str,
+    ) -> tuple[tuple[Message, ...], str]:
+        """The round budget is spent: rather than fail the turn, force one closing answer. Append
+        the force-final prompt and run a single model turn with no tools offered — the model can no
+        longer call a tool, so it answers with what it gathered instead of the turn erroring out. A
+        subagent that exhausts its smaller budget ends `done` with this best-effort text, so it
+        never detonates the parent awaiting it. Exhaustion is a distinct terminal shape — a metric
+        and log fire so an operator can spot an agent chronically hitting its ceiling (a prompt or
+        tool-loop bug) that a plain `done` would hide."""
+        emit_metric("turn_round_budget_exhausted_total")
+        log("turn.force_final", turn_id=str(self.turn.id), rounds=self.max_rounds)
+        await self._enforce_spend(usage_events)
+        messages, compaction_usage = await self.compaction.maybe_compact(messages)
+        usage_events.extend(compaction_usage)
+        messages = (*messages, Message(role="user", content=FORCE_FINAL_PROMPT))
+        text, _ = await self._stream_once(messages, usage_events, system, offer_tools=False)
+        await self._publish_cost(usage_events)
+        return messages, text
 
     async def _enforce_spend(self, usage_events: list[Usage]) -> None:
         """Before each model round, re-decide against the caps with this turn's in-flight spend
@@ -304,14 +332,18 @@ class TurnEngine:
             raise TurnParked(decision.message)
 
     async def _stream_once(
-        self, messages: tuple[Message, ...], usage_events: list[Usage], system: str
+        self,
+        messages: tuple[Message, ...],
+        usage_events: list[Usage],
+        system: str,
+        offer_tools: bool = True,
     ) -> tuple[str, tuple[ToolUseBlock, ...]]:
         request = ModelRequest(
             model=self.agent.model,
             system=system,
             messages=messages,
             max_tokens=MAX_OUTPUT_TOKENS,
-            tools=self.tools.schemas(),
+            tools=self.tools.schemas() if offer_tools else (),
         )
         parts: list[str] = []
         buffer: list[str] = []

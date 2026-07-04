@@ -20,7 +20,7 @@ from selfhost.db import workspace_tx
 from selfhost.hub import InProcessHub
 from selfhost.jobs import SpendResume
 from selfhost.loop import queue as loop_queue
-from selfhost.loop.engine import EMPTY_RESPONSE_NUDGE
+from selfhost.loop.engine import EMPTY_RESPONSE_NUDGE, FORCE_FINAL_PROMPT
 from selfhost.loop.subagents import SubagentProfile, SubagentRegistry
 from selfhost.loop.transcript import Transcript
 from selfhost.models.interface import (
@@ -69,6 +69,16 @@ ROUNDTRIP_PROFILE = SubagentProfile(
 )
 
 
+EXHAUST_PROFILE = SubagentProfile(
+    name="exhaust",
+    prompt="EXHAUST: burn a round, then echo the value back.",
+    tool_names=("bash",),
+    input_model=RoundTripInput,
+    output_model=RoundTripOutput,
+    max_rounds=1,
+)
+
+
 @dataclass(frozen=True)
 class StandInModel:
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
@@ -77,6 +87,16 @@ class StandInModel:
             yield TextDelta(text=json.dumps({"echoed": payload["value"]}))
             yield Usage(input_tokens=5, output_tokens=5)
             return
+        if "EXHAUST" in request.system:
+            if request.messages[-1].content == FORCE_FINAL_PROMPT:
+                payload = json.loads(request.messages[0].content)
+                yield TextDelta(text=json.dumps({"echoed": payload["value"]}))
+                yield Usage(input_tokens=5, output_tokens=5)
+                return
+            yield ToolCallStart(id="e1", name="bash")
+            yield ToolCallDelta(id="e1", partial_json='{"command": "true"}')
+            yield Usage(input_tokens=2, output_tokens=2)
+            return
         contents = [m.content for m in request.messages]
         nudged = contents[-1] == EMPTY_RESPONSE_NUDGE
         inbound = contents[-2] if nudged else contents[-1]
@@ -84,6 +104,13 @@ class StandInModel:
             yield ToolCallStart(id="s1", name="spawn_subagent")
             yield ToolCallDelta(
                 id="s1", partial_json='{"profile": "roundtrip", "payload": {"value": 21}}'
+            )
+            yield Usage(input_tokens=4, output_tokens=4)
+            return
+        if isinstance(inbound, str) and "spawn-exhaust" in inbound:
+            yield ToolCallStart(id="s2", name="spawn_subagent")
+            yield ToolCallDelta(
+                id="s2", partial_json='{"profile": "exhaust", "payload": {"value": 99}}'
             )
             yield Usage(input_tokens=4, output_tokens=4)
             return
@@ -137,7 +164,7 @@ def dbos_runtime(
             carrier=StandInCarrier(),
             proxy=proxy,
             dbos=dbos_client,
-            subagents=SubagentRegistry((ROUNDTRIP_PROFILE,)),
+            subagents=SubagentRegistry((ROUNDTRIP_PROFILE, EXHAUST_PROFILE)),
             manifests=(),
             credentials=None,
             memory=StubMemory(),
@@ -608,3 +635,25 @@ async def test_typed_subagent_round_trips_schema(surface: AsyncClient) -> None:
     )
     assert RoundTripOutput.model_validate_json(tool_result.content).echoed == 21
     assert tool_result.is_error is False
+
+
+async def test_subagent_exhausting_its_round_budget_does_not_detonate_its_parent(
+    surface: AsyncClient,
+) -> None:
+    headers = await _bootstrap()
+    parent = (
+        await surface.post("/v1/chat", content=b"spawn-exhaust", headers=headers)
+    ).json()["turn_id"]
+    _, terminal = await _consume(surface, headers, parent)
+    assert terminal["status"] == "done"
+    async with workspace_tx() as connection:
+        child = (
+            await connection.execute(
+                sa.select(tables.turn.c.status, tables.turn.c.terminal).where(
+                    tables.turn.c.parent_turn_id == UUID(parent)
+                )
+            )
+        ).one()
+    assert child.status == "done"
+    child_output = TerminalFrame.model_validate(child.terminal).text
+    assert RoundTripOutput.model_validate_json(child_output).echoed == 99

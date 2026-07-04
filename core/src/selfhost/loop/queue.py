@@ -17,7 +17,7 @@ from selfhost.ext.manifest import Manifest
 from selfhost.grants import GrantStore
 from selfhost.hub import Hub, Terminal
 from selfhost.loop.compaction import Compaction
-from selfhost.loop.engine import TurnEngine, TurnParked
+from selfhost.loop.engine import MAIN_ROUND_LIMIT, TurnEngine, TurnParked
 from selfhost.loop.prompts.render import render_system_prompt, rendered_prompt
 from selfhost.loop.subagents import SubagentRegistry, Subagents, subagent_system_prompt
 from selfhost.loop.transcript import Transcript
@@ -115,6 +115,7 @@ async def _execute_turn(turn_id: str) -> str:
         if turn.subagent_profile is None:
             resolved, tools = agent, ToolRegistry(all_tools)
             system_prompt = render_system_prompt(agent.prompt, sections, skills=CORE_SKILL_INDEX)
+            max_rounds = MAIN_ROUND_LIMIT
         else:
             profile = runtime.subagents.get(turn.subagent_profile)
             resolved = Agent(prompt=subagent_system_prompt(profile), model=agent.model)
@@ -122,6 +123,7 @@ async def _execute_turn(turn_id: str) -> str:
                 tuple(tool for tool in all_tools if tool.name in profile.tool_names)
             )
             system_prompt = rendered_prompt(resolved.prompt)
+            max_rounds = profile.max_rounds
         model = _model_client(agent.model, runtime.config)
         handle = await runtime.carrier.create(
             SandboxSpec(
@@ -162,6 +164,7 @@ async def _execute_turn(turn_id: str) -> str:
                 else None
             ),
             attempt=DBOS.workflow_id or turn_id,
+            max_rounds=max_rounds,
         )
         frame = await engine.run()
         return "superseded" if frame is None else frame.status
