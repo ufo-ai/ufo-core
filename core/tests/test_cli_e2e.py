@@ -23,8 +23,8 @@ import pytest
 import sqlalchemy as sa
 import uvicorn
 from click.testing import CliRunner
-from conftest import DELETE_ORDER
 from cryptography.fernet import Fernet
+from db_reset import DELETE_ORDER
 from dbos import DBOSClient
 from fastapi import FastAPI
 from selfhost_ext_index_default import DefaultIndex

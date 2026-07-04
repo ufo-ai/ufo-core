@@ -6,37 +6,17 @@ from collections.abc import AsyncIterator, Iterator
 import asyncpg
 import pytest
 import sqlalchemy as sa
+from db_reset import DELETE_ORDER
 from dbos import DBOS
 from sqlalchemy.engine import make_url
 
 from selfhost.config import BlobConfig, Config, DatabaseConfig
 from selfhost.db import apply_migrations, dispose_db, init_db, workspace_tx
-from selfhost.schema import tables
 from selfhost.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION
 
 POSTGRES_TEST_URL = os.environ.get(
     "SELFHOST_TEST_POSTGRES_URL",
     "postgresql+asyncpg://selfhost:selfhost@127.0.0.1:5541/selfhost_test",
-)
-DELETE_ORDER = (
-    tables.scheduled_task,
-    tables.runtime_instance,
-    tables.grant,
-    tables.proposal,
-    tables.spend_cap,
-    tables.ledger,
-    tables.writeback,
-    tables.shared_artifact,
-    tables.turn,
-    tables.conversation,
-    tables.surface_identity,
-    tables.agent,
-    tables.ext_store,
-    tables.credential,
-    tables.page,
-    tables.source,
-    tables.member,
-    tables.workspace,
 )
 
 
