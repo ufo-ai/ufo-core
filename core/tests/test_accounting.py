@@ -11,6 +11,7 @@ from selfhost.accounting import (
     SpendRollup,
     read_turn_cost,
     record_egress_request,
+    record_sandbox_tokens,
     record_turn_usage,
     usage_priced_micro_usd,
 )
@@ -232,6 +233,87 @@ async def test_egress_never_double_counts_the_token_cost(db: None) -> None:
     async with workspace_tx() as connection:
         cost = await read_turn_cost(connection, turn_id)
     assert cost == (10_000, 81_500, "claude-opus-4-8")
+
+
+async def test_sandbox_tokens_row_is_disjoint_from_the_host_token_row(db: None) -> None:
+    """An in-sandbox model call metered under `sandbox_tokens` and the host loop's terminal `tokens`
+    bill for one turn are two rows with distinct ids; read_turn_cost bills only `tokens`, so the
+    sandbox meter is additive, never a double-count of the host burn."""
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await record_turn_usage(connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE)
+        await record_sandbox_tokens(
+            connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE
+        )
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(
+                    tables.ledger.c.id,
+                    tables.ledger.c.dimension,
+                    tables.ledger.c.amount,
+                    tables.ledger.c.priced_micro_usd,
+                    tables.ledger.c.price_digest,
+                )
+                .where(tables.ledger.c.turn_id == turn_id)
+                .order_by(tables.ledger.c.dimension)
+            )
+        ).all()
+        cost = await read_turn_cost(connection, turn_id)
+    assert {
+        row.dimension: (int(row.amount), int(row.priced_micro_usd), row.price_digest)
+        for row in rows
+    } == {
+        "sandbox_tokens": (10_000, 81_500, accounting.PRICE_DIGEST),
+        "tokens": (10_000, 81_500, accounting.PRICE_DIGEST),
+    }
+    assert len({row.id for row in rows}) == 2
+    assert cost == (10_000, 81_500, "claude-opus-4-8")
+
+
+async def test_sandbox_tokens_accumulate_into_one_row(db: None) -> None:
+    usage = Usage(input_tokens=1000, output_tokens=2000)
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await record_sandbox_tokens(connection, workspace_id, turn_id, "claude-opus-4-8", usage)
+        await record_sandbox_tokens(connection, workspace_id, turn_id, "claude-opus-4-8", usage)
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.ledger.c.dimension,
+                    tables.ledger.c.amount,
+                    tables.ledger.c.priced_micro_usd,
+                ).where(tables.ledger.c.turn_id == turn_id)
+            )
+        ).one()
+    assert (row.dimension, int(row.amount), int(row.priced_micro_usd)) == (
+        "sandbox_tokens",
+        6000,
+        110_000,
+    )
+
+
+async def test_spend_rollup_surfaces_sandbox_tokens(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await record_turn_usage(connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE)
+        await record_sandbox_tokens(
+            connection,
+            workspace_id,
+            turn_id,
+            "claude-opus-4-8",
+            Usage(input_tokens=1000, output_tokens=2000),
+        )
+        await record_egress_request(connection, workspace_id, turn_id)
+    async with workspace_tx() as connection:
+        report = await SpendRollup(workspace_id).read(connection, 3600)
+    assert {d.dimension: (d.amount, d.priced_micro_usd) for d in report.by_dimension} == {
+        "egress": (1, 0),
+        "sandbox_tokens": (3000, 55_000),
+        "tokens": (10_000, 81_500),
+    }
+    assert report.total_micro_usd == 81_500 + 55_000
 
 
 async def test_spend_rollup_matches_ledger_sums(db: None) -> None:

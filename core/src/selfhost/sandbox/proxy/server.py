@@ -14,10 +14,12 @@ sentinel, so two accounts on one host each draw only their own token and a forei
 passed upstream untouched), and re-originates over its own verified TLS, so the raw key is never
 inside the sandbox. An admitted host with no InjectionRule is tunnelled opaquely. Each forwarded
 request to a metered host emits an egress metric and, off the relay path, writes an `egress` request
-row to the ledger keyed to the turn — except the model host, whose cost is the token bill the turn
-commits at terminal, so metering it here would double-count."""
+row to the ledger keyed to the turn — except the model host, whose teed SSE response is parsed for
+its token usage and metered under `sandbox_tokens`, disjoint from the host turn loop's terminal
+`tokens` bill (which runs the model host-side and never touches the proxy)."""
 
 import asyncio
+import json
 import ssl
 import tempfile
 from collections.abc import Awaitable, Callable
@@ -27,11 +29,13 @@ from uuid import UUID
 
 import sqlalchemy as sa
 
-from selfhost.accounting import TOKENS_DIMENSION, record_egress_request
+from selfhost.accounting import TOKENS_DIMENSION, record_egress_request, record_sandbox_tokens
 from selfhost.db import workspace_tx
 from selfhost.grants import GrantStore
 from selfhost.o11y import emit_metric, log
 from selfhost.sandbox.proxy.rules import (
+    ANTHROPIC_HOST,
+    OPENAI_HOST,
     InjectionRule,
     MeterRule,
     Rule,
@@ -40,6 +44,7 @@ from selfhost.sandbox.proxy.rules import (
 )
 from selfhost.sandbox.session import ProxyEndpoint, RunToken
 from selfhost.schema import tables
+from selfhost.schema.records import Usage
 
 PROXY_BIND_HOST = "0.0.0.0"
 RELAY_CHUNK_BYTES = 65536
@@ -48,6 +53,7 @@ CONNECT_UPSTREAM_TIMEOUT_SECONDS = 30
 DEFAULT_HTTPS_PORT = 443
 CERT_VALID_DAYS = "1"
 RULE_CACHE_MAX = 4096
+MAX_SSE_BUFFER_BYTES = 1_048_576
 
 RuleResolver = Callable[["RunToken | None"], Awaitable[tuple[Rule, ...]]]
 
@@ -237,7 +243,18 @@ class EgressProxy:
         await upstream_writer.drain()
         self._meter(host, rules)
         self._meter_ledger(host, proxy_auth, rules)
-        await _relay(client_reader, client_writer, upstream_reader, upstream_writer)
+        tokens_metered = any(
+            isinstance(rule, MeterRule) and rule.host == host and rule.dimension == TOKENS_DIMENSION
+            for rule in rules
+        )
+        if not tokens_metered:
+            await _relay(client_reader, client_writer, upstream_reader, upstream_writer)
+            return
+        accumulator = SseTokenUsage(host)
+        await _relay(
+            client_reader, client_writer, upstream_reader, upstream_writer, accumulator.feed
+        )
+        self._meter_tokens(proxy_auth, accumulator)
 
     async def _leaf_context(self, host: str) -> ssl.SSLContext:
         cached = self._contexts.get(host)
@@ -274,8 +291,8 @@ class EgressProxy:
     def _meter_ledger(self, host: str, proxy_auth: str, rules: tuple[Rule, ...]) -> None:
         """Meter egress to the ledger off the relay path so a slow DB never stalls the sandbox's
         egress. A metered host whose MeterRule dimension is not `tokens` writes one `egress` request
-        row keyed to the turn; the model host (dimension `tokens`) is skipped — its cost is the
-        token bill `record_turn_usage` commits at terminal, so metering here would double-count."""
+        row keyed to the turn; the model host (dimension `tokens`) writes no egress count — its cost
+        is the token bill parsed from its teed response and written under `sandbox_tokens`."""
         if not any(
             isinstance(rule, MeterRule) and rule.host == host and rule.dimension != TOKENS_DIMENSION
             for rule in rules
@@ -292,6 +309,27 @@ class EgressProxy:
                 await record_egress_request(connection, run.workspace_id, run.turn_id)
         except Exception as error:
             log("egress.meter_failed", host=host, error_class=type(error).__name__)
+
+    def _meter_tokens(self, proxy_auth: str, accumulator: "SseTokenUsage") -> None:
+        """Meter the model host's teed response under `sandbox_tokens`, off the relay path. A stream
+        that reported no usage (a call that omitted OpenAI's `stream_options.include_usage`, or a
+        body the parser could not read) is logged and skipped, never a failed relay."""
+        parsed = accumulator.usage()
+        if parsed is None:
+            log("egress.tokens_usage_absent", host=accumulator.host)
+            return
+        model, usage = parsed
+        task = asyncio.ensure_future(self._write_sandbox_tokens(proxy_auth, model, usage))
+        self._meter_tasks.add(task)
+        task.add_done_callback(self._meter_tasks.discard)
+
+    async def _write_sandbox_tokens(self, proxy_auth: str, model: str, usage: Usage) -> None:
+        try:
+            run = RunToken.from_proxy_auth(proxy_auth)
+            async with workspace_tx() as connection:
+                await record_sandbox_tokens(connection, run.workspace_id, run.turn_id, model, usage)
+        except Exception as error:
+            log("egress.tokens_meter_failed", error_class=type(error).__name__)
 
 
 async def _start_tls_server(
@@ -378,10 +416,13 @@ async def _relay(
     client_writer: asyncio.StreamWriter,
     upstream_reader: asyncio.StreamReader,
     upstream_writer: asyncio.StreamWriter,
+    on_downstream: Callable[[bytes], None] | None = None,
 ) -> None:
     """Pump both directions until either closes; the response (upstream→client) reaching EOF ends
-    the exchange, so a streamed response relays chunk by chunk and stops when the upstream shuts."""
-    down = asyncio.create_task(_pump(upstream_reader, client_writer))
+    the exchange, so a streamed response relays chunk by chunk and stops when the upstream shuts.
+    `on_downstream`, when given, tees each response chunk after it is forwarded — the token meter
+    reads the stream without ever holding the client's bytes back."""
+    down = asyncio.create_task(_pump(upstream_reader, client_writer, on_downstream))
     up = asyncio.create_task(_pump(client_reader, upstream_writer))
     await asyncio.wait({down, up}, return_when=asyncio.FIRST_COMPLETED)
     for task in (down, up):
@@ -389,13 +430,120 @@ async def _relay(
     upstream_writer.close()
 
 
-async def _pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+async def _pump(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    on_chunk: Callable[[bytes], None] | None = None,
+) -> None:
     try:
         while chunk := await reader.read(RELAY_CHUNK_BYTES):
             writer.write(chunk)
             await writer.drain()
+            if on_chunk is not None:
+                on_chunk(chunk)
     except (OSError, asyncio.CancelledError):
         pass
+
+
+def _int_field(usage: dict[str, object], name: str) -> int:
+    value = usage.get(name)
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+@dataclass
+class SseTokenUsage:
+    """Recover a model host's token usage from its teed SSE response without buffering the whole
+    stream: forwarded chunks are fed here line by line, so only one partial line is ever held
+    (bounded by MAX_SSE_BUFFER_BYTES; a line past the bound stops parsing, never the relay).
+    Anthropic reports input/cache on `message_start` and the final `output_tokens` on
+    `message_delta`; OpenAI (with `stream_options.include_usage`) reports both on a terminal usage
+    chunk. A stream that carried no usage yields None, so the relay is metered only when the model
+    actually reported it."""
+
+    host: str
+    _buffer: bytearray = field(default_factory=bytearray, init=False)
+    _overflowed: bool = field(default=False, init=False)
+    _seen: bool = field(default=False, init=False)
+    _model: str = field(default="", init=False)
+    _input: int = field(default=0, init=False)
+    _output: int = field(default=0, init=False)
+    _cache_read: int = field(default=0, init=False)
+    _cache_write: int = field(default=0, init=False)
+
+    def feed(self, chunk: bytes) -> None:
+        if self._overflowed:
+            return
+        self._buffer += chunk
+        while (newline := self._buffer.find(b"\n")) != -1:
+            line = bytes(self._buffer[:newline])
+            del self._buffer[: newline + 1]
+            self._consume(line)
+        if len(self._buffer) > MAX_SSE_BUFFER_BYTES:
+            self._overflowed = True
+            self._buffer.clear()
+
+    def usage(self) -> tuple[str, Usage] | None:
+        if not self._seen:
+            return None
+        return self._model, Usage(
+            input_tokens=self._input,
+            output_tokens=self._output,
+            cache_read_tokens=self._cache_read,
+            cache_write_tokens=self._cache_write,
+        )
+
+    def _consume(self, line: bytes) -> None:
+        payload = line.strip()
+        if not payload.startswith(b"data:"):
+            return
+        payload = payload[len(b"data:") :].strip()
+        if not payload.startswith(b"{"):
+            return
+        try:
+            event = json.loads(payload)
+        except (ValueError, UnicodeDecodeError):
+            return
+        if not isinstance(event, dict):
+            return
+        if self.host == ANTHROPIC_HOST:
+            self._anthropic(event)
+        elif self.host == OPENAI_HOST:
+            self._openai(event)
+
+    def _anthropic(self, event: dict[str, object]) -> None:
+        match event.get("type"):
+            case "message_start":
+                message = event.get("message")
+                if isinstance(message, dict):
+                    model = message.get("model")
+                    if isinstance(model, str):
+                        self._model = model
+                    self._absorb_anthropic(message.get("usage"), initial=True)
+            case "message_delta":
+                self._absorb_anthropic(event.get("usage"), initial=False)
+
+    def _absorb_anthropic(self, usage: object, initial: bool) -> None:
+        if not isinstance(usage, dict):
+            return
+        if initial:
+            self._input = _int_field(usage, "input_tokens")
+            self._cache_read = _int_field(usage, "cache_read_input_tokens")
+            self._cache_write = _int_field(usage, "cache_creation_input_tokens")
+        output = usage.get("output_tokens")
+        if isinstance(output, int) and not isinstance(output, bool):
+            self._output = output
+        self._seen = True
+
+    def _openai(self, event: dict[str, object]) -> None:
+        model = event.get("model")
+        if isinstance(model, str):
+            self._model = model
+        usage = event.get("usage")
+        if not isinstance(usage, dict):
+            return
+        self._input = _int_field(usage, "prompt_tokens")
+        self._output = _int_field(usage, "completion_tokens")
+        self._seen = True
 
 
 async def _respond(writer: asyncio.StreamWriter, status: int, message: str) -> None:

@@ -5,11 +5,11 @@ from uuid import UUID, uuid4
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from selfhost.accounting import SpendEvaluator
+from selfhost.accounting import SpendEvaluator, record_sandbox_tokens
 from selfhost.db import workspace_tx
 from selfhost.jobs import RESUME_ENQUEUE_GRACE_SECONDS, SpendResume
 from selfhost.schema import tables
-from selfhost.schema.records import TerminalFrame
+from selfhost.schema.records import TerminalFrame, Usage
 from selfhost.surfaces.admission import Admission
 
 
@@ -218,6 +218,39 @@ async def test_under_cap_allows(db: None) -> None:
         await _set_cap(connection, workspace_id, "member", member_id, 3600, 100, "park")
         decision = await SpendEvaluator(workspace_id, member_id, agent_id).decide(connection, 0)
     assert decision.outcome == "allow"
+
+
+async def test_sandbox_tokens_count_toward_a_cap(db: None) -> None:
+    """A priced `sandbox_tokens` row (an in-sandbox model call) sums into the cap alongside host
+    token spend — _used_micro_usd sums priced rows across dimensions, so caps enforce it once
+    priced."""
+    async with workspace_tx() as connection:
+        workspace_id, member_id, agent_id, conversation_id = await _seed(connection)
+        turn_id = uuid4()
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="done",
+                inbound="x",
+                terminal=TerminalFrame(status="done").model_dump(mode="json"),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await record_sandbox_tokens(
+            connection,
+            workspace_id,
+            turn_id,
+            "claude-opus-4-8",
+            Usage(input_tokens=1000, output_tokens=2000),
+        )
+        await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "park")
+        decision = await SpendEvaluator(workspace_id, member_id, agent_id).decide(connection, 0)
+    assert decision.outcome == "park"
 
 
 async def test_pending_in_flight_crosses_cap(db: None) -> None:

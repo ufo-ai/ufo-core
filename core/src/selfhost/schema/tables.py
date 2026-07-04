@@ -103,7 +103,9 @@ ledger = sa.Table(
     sa.Column("price_digest", sa.Text, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-    sa.CheckConstraint("dimension in ('tokens', 'egress')", name="ledger_dimension"),
+    sa.CheckConstraint(
+        "dimension in ('tokens', 'egress', 'sandbox_tokens')", name="ledger_dimension"
+    ),
     sa.CheckConstraint("amount > 0", name="ledger_amount"),
     sa.CheckConstraint("priced_micro_usd >= 0", name="ledger_priced"),
     sa.Index("ledger_turn", "turn_id"),

@@ -1,18 +1,52 @@
 import asyncio
 import base64
+import socket
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from selfhost.db import workspace_tx
-from selfhost.sandbox.proxy.rules import InjectionRule, MeterRule, ScopeRule
-from selfhost.sandbox.proxy.server import EgressProxy, PerAgentRules, _inject, generate_ca
+from selfhost.sandbox.proxy.rules import OPENAI_HOST, InjectionRule, MeterRule, ScopeRule
+from selfhost.sandbox.proxy.server import (
+    EgressProxy,
+    PerAgentRules,
+    SseTokenUsage,
+    _inject,
+    _relay,
+    generate_ca,
+)
 from selfhost.sandbox.session import RunToken
 from selfhost.schema import tables
+from selfhost.schema.records import Usage
 
 SEARCH_HOST = "api.search.test"
 MODEL_HOST = "api.anthropic.com"
+
+FULL_TOKEN_USAGE = Usage(
+    input_tokens=1000, output_tokens=2000, cache_read_tokens=3000, cache_write_tokens=4000
+)
+ANTHROPIC_SSE = (
+    b"event: message_start\r\n"
+    b'data: {"type":"message_start","message":{"id":"m","model":"claude-opus-4-8",'
+    b'"usage":{"input_tokens":1000,"cache_read_input_tokens":3000,'
+    b'"cache_creation_input_tokens":4000,"output_tokens":1}}}\r\n\r\n'
+    b"event: content_block_delta\r\n"
+    b'data: {"type":"content_block_delta","index":0,'
+    b'"delta":{"type":"text_delta","text":"hi"}}\r\n\r\n'
+    b"event: message_delta\r\n"
+    b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},'
+    b'"usage":{"output_tokens":2000}}\r\n\r\n'
+    b"event: message_stop\r\n"
+    b'data: {"type":"message_stop"}\r\n\r\n'
+)
+OPENAI_SSE = (
+    b'data: {"id":"c","object":"chat.completion.chunk","model":"gpt-5.4",'
+    b'"choices":[{"delta":{"content":"hi"}}],"usage":null}\n\n'
+    b'data: {"id":"c","object":"chat.completion.chunk","model":"gpt-5.4","choices":[],'
+    b'"usage":{"prompt_tokens":1000000,"completion_tokens":1000000,"total_tokens":2000000}}\n\n'
+    b"data: [DONE]\n\n"
+)
 
 
 def _fixed(rules: tuple = ()) -> PerAgentRules:
@@ -215,3 +249,112 @@ def test_inject_passes_a_foreign_sentinel_upstream_untouched() -> None:
     out = _inject([b"authorization: Bearer FOREIGN\r\n"], _candidates())
     assert b"authorization: Bearer FOREIGN\r\n" in out
     assert b"R1" not in out and b"R2" not in out
+
+
+def test_sse_usage_parses_an_anthropic_stream() -> None:
+    accumulator = SseTokenUsage(MODEL_HOST)
+    accumulator.feed(ANTHROPIC_SSE)
+    assert accumulator.usage() == ("claude-opus-4-8", FULL_TOKEN_USAGE)
+
+
+def test_sse_usage_reassembles_across_chunk_boundaries() -> None:
+    accumulator = SseTokenUsage(MODEL_HOST)
+    for start in range(0, len(ANTHROPIC_SSE), 7):
+        accumulator.feed(ANTHROPIC_SSE[start : start + 7])
+    assert accumulator.usage() == ("claude-opus-4-8", FULL_TOKEN_USAGE)
+
+
+def test_sse_usage_parses_an_openai_stream() -> None:
+    accumulator = SseTokenUsage(OPENAI_HOST)
+    accumulator.feed(OPENAI_SSE)
+    assert accumulator.usage() == (
+        "gpt-5.4",
+        Usage(input_tokens=1_000_000, output_tokens=1_000_000),
+    )
+
+
+def test_sse_usage_without_a_usage_event_is_none() -> None:
+    accumulator = SseTokenUsage(MODEL_HOST)
+    accumulator.feed(
+        b'event: content_block_delta\r\ndata: {"type":"content_block_delta",'
+        b'"delta":{"text":"hi"}}\r\n\r\n'
+    )
+    assert accumulator.usage() is None
+
+
+async def _stream_pair() -> tuple[
+    tuple[asyncio.StreamReader, asyncio.StreamWriter],
+    tuple[asyncio.StreamReader, asyncio.StreamWriter],
+]:
+    left, right = socket.socketpair()
+    left.setblocking(False)
+    right.setblocking(False)
+    return await asyncio.open_connection(sock=left), await asyncio.open_connection(sock=right)
+
+
+async def test_relay_tees_the_full_body_to_the_client_while_metering_usage() -> None:
+    """The model host's response streams to the client byte-for-byte unchanged AND is teed to the
+    accumulator — the meter reads the stream without holding the client's bytes back."""
+    (proxy_client_r, proxy_client_w), (peer_client_r, peer_client_w) = await _stream_pair()
+    (proxy_up_r, proxy_up_w), (_peer_up_r, peer_up_w) = await _stream_pair()
+    accumulator = SseTokenUsage(MODEL_HOST)
+    relay = asyncio.create_task(
+        _relay(proxy_client_r, proxy_client_w, proxy_up_r, proxy_up_w, accumulator.feed)
+    )
+    peer_up_w.write(ANTHROPIC_SSE)
+    await peer_up_w.drain()
+    peer_up_w.close()
+    received = await peer_client_r.readexactly(len(ANTHROPIC_SSE))
+    await relay
+    assert received == ANTHROPIC_SSE
+    assert accumulator.usage() == ("claude-opus-4-8", FULL_TOKEN_USAGE)
+    proxy_client_w.close()
+    peer_client_w.close()
+
+
+async def test_model_host_relay_meters_sandbox_tokens_to_the_turn(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+    proxy = EgressProxy(resolve=_fixed().resolve, ca_cert="x", ca_key="x")
+    accumulator = SseTokenUsage(MODEL_HOST)
+    accumulator.feed(ANTHROPIC_SSE)
+    proxy._meter_tokens(_basic(RunToken(workspace_id, turn_id).encode()), accumulator)
+    assert len(proxy._meter_tasks) == 1
+    await proxy.stop()
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.ledger.c.dimension,
+                    tables.ledger.c.amount,
+                    tables.ledger.c.priced_micro_usd,
+                    tables.ledger.c.model,
+                ).where(tables.ledger.c.turn_id == turn_id)
+            )
+        ).one()
+    assert (row.dimension, int(row.amount), int(row.priced_micro_usd), row.model) == (
+        "sandbox_tokens",
+        10_000,
+        81_500,
+        "claude-opus-4-8",
+    )
+
+
+async def test_model_host_relay_skips_when_no_usage_is_reported(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+    proxy = EgressProxy(resolve=_fixed().resolve, ca_cert="x", ca_key="x")
+    accumulator = SseTokenUsage(MODEL_HOST)
+    accumulator.feed(b'data: {"type":"content_block_delta","delta":{"text":"hi"}}\n\n')
+    proxy._meter_tokens(_basic(RunToken(workspace_id, turn_id).encode()), accumulator)
+    assert proxy._meter_tasks == set()
+    await proxy.stop()
+    async with workspace_tx() as connection:
+        count = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.ledger)
+                .where(tables.ledger.c.turn_id == turn_id)
+            )
+        ).scalar_one()
+    assert count == 0
