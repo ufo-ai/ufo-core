@@ -403,7 +403,7 @@ async def test_asana_follows_offset_pagination_to_the_end() -> None:
     }
     result = await _fetch(AsanaConnector(), "workspaces", _asana_handler(paged))
     assert {page.source_ref for page in result.pages} == {"workspaces/1", "workspaces/2"}
-    assert result.snapshot is True
+    assert result.snapshot is False
 
 
 # --- direct BYOK backend -------------------------------------------------------------------------
