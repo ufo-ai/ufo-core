@@ -6,6 +6,7 @@ threads onto the context. The embed client and the DefaultIndex are real depende
 asserted thing: every assertion reads the Recalled/SourceMatch values back."""
 
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -17,6 +18,9 @@ from selfhost_ext_memory.store import (
     FACT,
     MemoryStore,
     MemoryWrite,
+    Recalled,
+    decay_factor,
+    enforce_type_diversity,
     mem_page,
     memory_item,
     recall_subjects,
@@ -213,6 +217,51 @@ async def test_pages_and_facts_do_not_crowd_each_others_candidate_window(clean: 
     assert {item.memory_id for item in facts} == {fact_a, fact_b}
     assert len(pages) == 2
     assert all("quarterly report" in page.text for page in pages)
+
+
+def test_decay_factor_weights_recency_kind_and_confidence() -> None:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    fresh = Recalled(
+        uuid4(), "shared", "fact", "b", None, 1.0,
+        memory_kind="fact", confidence=10, created_at=now,
+    )
+    assert decay_factor(fresh, now) == 1.0
+    old = replace(fresh, created_at=datetime(2020, 1, 1, tzinfo=UTC))
+    assert 0.0 < decay_factor(old, now) < decay_factor(fresh, now)
+    aged = replace(fresh, created_at=datetime(2025, 10, 1, tzinfo=UTC))
+    assert decay_factor(replace(aged, memory_kind="task"), now) < decay_factor(aged, now)
+    assert decay_factor(replace(fresh, item_class="episodic"), now) == 1.0
+    assert decay_factor(replace(fresh, item_class="semantic"), now) == 1.0
+
+
+def test_enforce_type_diversity_caps_a_class_and_backfills() -> None:
+    facts = tuple(
+        Recalled(uuid4(), "shared", "fact", f"f{i}", None, float(10 - i)) for i in range(5)
+    )
+    episodic = Recalled(uuid4(), "shared", "episodic", "e", None, 0.5)
+    kept = enforce_type_diversity((*facts, episodic), 4)
+    assert len(kept) == 4
+    assert sum(1 for row in kept if row.item_class == "episodic") == 1
+    assert sum(1 for row in kept if row.item_class == "fact") == 3
+
+
+async def test_recall_reorders_by_recency_decay(clean: None) -> None:
+    """Two equally-matching facts on the same subject rank by recency decay: the newer one first,
+    the older one demoted — the fact half-life reordering, end to end over the real index."""
+    workspace_id = await _workspace()
+    probe = vec((8, 1.0))
+    old = await _seed_item(
+        workspace_id, SHARED_SUBJECT, "budget review meeting", probe,
+        created_at=datetime(2020, 1, 1, tzinfo=UTC),
+    )
+    new = await _seed_item(
+        workspace_id, SHARED_SUBJECT, "budget review meeting", probe,
+        created_at=datetime(2025, 6, 1, tzinfo=UTC),
+    )
+    recalled = await _store(StubEmbed(probe), workspace_id).recall(
+        "budget review", frozenset({SHARED_SUBJECT}), 10
+    )
+    assert [item.memory_id for item in recalled] == [new, old]
 
 
 async def test_recall_filters_to_the_created_at_window(clean: None) -> None:

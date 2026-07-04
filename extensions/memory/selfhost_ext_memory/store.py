@@ -16,13 +16,13 @@ import hashlib
 import logging
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from selfhost.sdk.context import ExtensionContext, ScopedStore
@@ -44,12 +44,26 @@ EMBED_CLAIM_LEASE_SECONDS = 300
 PAGE_INDEX_BATCH = 50
 PAGE_CURSOR_KEY = "page_index_cursor"
 
+TYPE_DIVERSITY_RATIO = 0.6
+MAX_CONFIDENCE = 10
+DEFAULT_CONFIDENCE = 5
+HALFLIFE_DAYS: dict[str, float] = {
+    "fact": 365.0,
+    "preference": 180.0,
+    "decision": 120.0,
+    "event": 30.0,
+    "task": 14.0,
+}
+
 logger = logging.getLogger(__name__)
 
 ItemClass = Literal["fact", "episodic", "semantic"]
 FACT: ItemClass = "fact"
 EPISODIC: ItemClass = "episodic"
 SEMANTIC: ItemClass = "semantic"
+
+MemoryKind = Literal["fact", "preference", "decision", "event", "task"]
+KIND_FACT: MemoryKind = "fact"
 
 Transaction = Callable[[], AbstractAsyncContextManager[AsyncConnection]]
 
@@ -62,6 +76,8 @@ memory_item = sa.Table(
     sa.Column("subject", sa.Text, nullable=False),
     sa.Column("body", sa.Text, nullable=False),
     sa.Column("item_class", sa.Text, nullable=False),
+    sa.Column("memory_kind", sa.Text, nullable=False),
+    sa.Column("confidence", sa.Integer, nullable=False),
     sa.Column("source_ref", sa.Text, nullable=True),
     sa.Column("embedding_digest", sa.Text, nullable=True),
     sa.Column("embedding_claimed_at", sa.DateTime(timezone=True), nullable=True),
@@ -88,12 +104,15 @@ def recall_subjects(member_id: UUID | None) -> frozenset[str]:
 
 
 class MemoryWrite(BaseModel):
-    """What a commit records: the subject scoping visibility, the body, its class, and the ref back
-    to what produced it."""
+    """What a commit records: the subject scoping visibility, the body, its class, the ref back to
+    what produced it, and the recall-decay inputs — `memory_kind` selects the recency half-life
+    (fact/preference/decision/event/task) and `confidence` (1..10) scales a fact's decayed rank."""
 
     subject: str
     body: str
     item_class: ItemClass = FACT
+    memory_kind: MemoryKind = KIND_FACT
+    confidence: int = Field(default=DEFAULT_CONFIDENCE, ge=1, le=MAX_CONFIDENCE)
     source_ref: str | None = None
 
 
@@ -105,6 +124,8 @@ class MemoryItem(BaseModel):
     subject: str
     body: str
     item_class: ItemClass
+    memory_kind: MemoryKind = KIND_FACT
+    confidence: int = DEFAULT_CONFIDENCE
     source_ref: str | None = None
     embedding_digest: str | None = None
     superseded_by: UUID | None = None
@@ -147,6 +168,58 @@ class Recalled:
     body: str
     source_ref: str | None
     score: float
+    memory_kind: str = KIND_FACT
+    confidence: int = DEFAULT_CONFIDENCE
+    created_at: datetime | None = None
+    recall_mode: str | None = None
+
+
+def decay_factor(item: Recalled, now: datetime) -> float:
+    """Recency decay applies to fact items only (per-`memory_kind` half-lives: fact/preference/
+    decision/event/task); episodic/semantic carry no half-life and rank on relevance alone. A
+    fact's factor is `(confidence / 10) * 0.5 ** (age_days / halflife)` — gbrain
+    `effectiveConfidence`."""
+    if item.item_class != FACT or item.created_at is None:
+        return 1.0
+    base = item.confidence / MAX_CONFIDENCE
+    halflife = HALFLIFE_DAYS.get(item.memory_kind, HALFLIFE_DAYS[KIND_FACT])
+    created = item.created_at if item.created_at.tzinfo else item.created_at.replace(tzinfo=UTC)
+    age_days = max(0.0, (now - created).total_seconds() / 86400.0)
+    return base * (0.5 ** (age_days / halflife))
+
+
+def enforce_type_diversity(rows: tuple[Recalled, ...], limit: int) -> tuple[Recalled, ...]:
+    """gbrain `enforceTypeDiversity`: take rows in rank order, admitting at most
+    TYPE_DIVERSITY_RATIO of `limit` per item class, then backfill from the deferred remainder only
+    if needed to reach `limit`, so no single class crowds out the rest."""
+    if limit <= 0:
+        return ()
+    cap = max(1, int(limit * TYPE_DIVERSITY_RATIO))
+    counts: dict[str, int] = {}
+    kept: list[Recalled] = []
+    overflow: list[Recalled] = []
+    for row in rows:
+        if counts.get(row.item_class, 0) < cap:
+            counts[row.item_class] = counts.get(row.item_class, 0) + 1
+            kept.append(row)
+        else:
+            overflow.append(row)
+    if len(kept) < limit:
+        kept.extend(overflow[: limit - len(kept)])
+    return tuple(kept[:limit])
+
+
+def as_topic_pointer(item: Recalled, index: int) -> Recalled:
+    """An episodic hit is rewritten to a topic pointer excluded from auto-injection (recall_mode
+    `topic`): episodic memory is a breadcrumb to browse, never verbatim context — gbrain
+    `episodicPointer`."""
+    if item.item_class != EPISODIC:
+        return item
+    return replace(
+        item,
+        body=f"Memory topic {index + 1} (item {item.memory_id})",
+        recall_mode="topic",
+    )
 
 
 @dataclass(frozen=True)
@@ -179,6 +252,8 @@ class MemoryStore:
                     subject=write.subject,
                     body=write.body,
                     item_class=write.item_class,
+                    memory_kind=write.memory_kind,
+                    confidence=write.confidence,
                     source_ref=write.source_ref,
                     superseded_by=None,
                     created_at=sa.func.now(),
@@ -194,11 +269,24 @@ class MemoryStore:
         start: datetime | None = None,
         end: datetime | None = None,
     ) -> tuple[Recalled, ...]:
-        """Fuse the index legs, then read the surviving items back. An optional half-open
-        `[start, end)` bound on `created_at` restricts recall to a window; the index never sees the
-        bound, so the filter lands in the row read-back alongside the superseded drop."""
-        fused = fuse_hits(*await self._legs(query, subjects, OWNER_KIND_MEMORY_ITEM, limit), limit)
-        return await self._enrich(fused, start, end)
+        """Fuse the index legs, read the surviving items back, then rank by recency decay (fact
+        half-lives), cap per-class diversity, and rewrite episodic hits to topic pointers. An
+        optional half-open `[start, end)` bound on `created_at` restricts recall to a window; the
+        index never sees the bound, so the filter lands in the row read-back alongside the
+        superseded drop."""
+        enriched = await self._enrich(fuse_hits(
+            *await self._legs(query, subjects, OWNER_KIND_MEMORY_ITEM, limit), limit
+        ), start, end)
+        now = datetime.now(UTC)
+        ranked = tuple(
+            sorted(
+                (replace(item, score=item.score * decay_factor(item, now)) for item in enriched),
+                key=lambda item: item.score,
+                reverse=True,
+            )
+        )
+        diversified = enforce_type_diversity(ranked, limit)
+        return tuple(as_topic_pointer(item, index) for index, item in enumerate(diversified))
 
     async def search_sources(
         self,
@@ -283,8 +371,11 @@ class MemoryStore:
                         memory_item.c.id,
                         memory_item.c.subject,
                         memory_item.c.item_class,
+                        memory_item.c.memory_kind,
+                        memory_item.c.confidence,
                         memory_item.c.body,
                         memory_item.c.source_ref,
+                        memory_item.c.created_at,
                     ).where(*conditions)
                 )
             ).mappings().all()
@@ -297,6 +388,9 @@ class MemoryStore:
                 body=by_id[UUID(hit.owner_id)]["body"],
                 source_ref=by_id[UUID(hit.owner_id)]["source_ref"],
                 score=hit.score,
+                memory_kind=by_id[UUID(hit.owner_id)]["memory_kind"],
+                confidence=by_id[UUID(hit.owner_id)]["confidence"],
+                created_at=by_id[UUID(hit.owner_id)]["created_at"],
             )
             for hit in fused
             if UUID(hit.owner_id) in by_id

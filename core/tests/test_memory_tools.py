@@ -201,6 +201,47 @@ async def test_on_inbound_hook_injects_a_recalled_fact(clean: None) -> None:
     assert "the vault code is 4821" in outcome.text
 
 
+async def test_recall_hook_excludes_episodic_topic_pointers(clean: None, tmp_path: Path) -> None:
+    """An episodic hit is rewritten to a topic pointer and dropped from the auto-injected context;
+    a durable fact is injected verbatim — the episodic→topic exclusion, end to end through the
+    on_inbound hook."""
+    workspace_id = await _workspace()
+    member = uuid4()
+    embed = StubEmbed(vec((9, 1.0)))
+    ext = _ext(DefaultIndex(embed=embed, transaction=workspace_tx), embed, workspace_id)
+    await _run(
+        "memory_update", _tool_ctx(ext, member, tmp_path), body="the api key rotates monthly"
+    )
+    await _run(
+        "memory_update",
+        _tool_ctx(ext, member, tmp_path),
+        body="browsed the pricing page once",
+        item_class="episodic",
+    )
+    await _indexer(embed).run()
+
+    outcome = await memory.recall_hook(
+        HookContext(
+            ext=ext,
+            turn=Turn(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                conversation_id=uuid4(),
+                agent_id=uuid4(),
+                seq=1,
+                status="running",
+                inbound="api key pricing",
+            ),
+            agent=Agent(prompt="p", model="claude-opus-4-8"),
+            member_id=member,
+            payload=OnInbound(text="api key pricing"),
+        )
+    )
+    assert isinstance(outcome, InjectContext)
+    assert "the api key rotates monthly" in outcome.text
+    assert "browsed the pricing page once" not in outcome.text
+
+
 async def test_recall_hook_ignores_a_non_inbound_payload(clean: None) -> None:
     workspace_id = await _workspace()
     embed = StubEmbed(vec((0, 1.0)))

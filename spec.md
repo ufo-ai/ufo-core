@@ -74,14 +74,16 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   `compactions/<cid>/{before,after}` records in the blob store (port of the shipped design);
   history compacts as it approaches the model window so a long turn never exceeds it.
 - **Memory** — an extension, not core: it owns the `memory_item` table, the `memory_search`/
-  `memory_update` tools, and recall (lexical + vector fusion, subject ∈ {member, shared}),
-  auto-injected each turn through an `on_inbound` hook — no core memory seam. It rides two core
-  selection seams: the **index backend** behind one lexical/vector/reindex interface and the
-  **embed backend** behind one batched-embed interface. The dialect-native index (SQLite FTS5 +
-  local cosine, Postgres tsvector + pgvector) ships as the base-pinned `index-default` extension
-  and OpenAI embedding as the base-pinned `embed-openai` extension; turbopuffer is a drop-in index
-  alternative. The gbrain-style condenser (source pages/events → condense → memory items) is the
-  memory extension's own derivation job.
+  `memory_update` tools, and recall (lexical + vector RRF fusion, subject ∈ {member, shared}),
+  auto-injected each turn through an `on_inbound` hook — no core memory seam. Recall carries the
+  gbrain richness: per-kind recency decay (fact/preference/decision/event/task half-lives, fact
+  items only), a type-diversity cap so no class dominates, supersession suppression, and an
+  episodic→topic pointer excluded from auto-injection. It rides two core selection seams: the
+  **index backend** behind one lexical/vector/reindex interface and the **embed backend** behind
+  one batched-embed interface. The dialect-native index (SQLite FTS5 + local cosine, Postgres
+  tsvector + pgvector) ships as the base-pinned `index-default` extension and OpenAI embedding as
+  the base-pinned `embed-openai` extension; turbopuffer is a drop-in index alternative. Source
+  pages reach recall through the memory extension's own page-index job over the core `PageFeed`.
 - **Minimal built-in tools** — `bash`, `read`, `write`, `edit`,
   `ask_user`, `spawn_subagent`, `load_skill`, `share_file`. Everything else arrives via extensions.
   Two tools where one would do is a defect. `share_file` ports the shipped design: byte custody in

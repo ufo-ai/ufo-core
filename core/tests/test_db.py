@@ -30,7 +30,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
     )
     config.set_main_option("path_separator", "os")
     heads = set(ScriptDirectory.from_config(config).get_heads())
-    assert {"index_default_0001", "memory_0002", "sample_ext_note_0001"} <= heads
+    assert {"index_default_0001", "memory_0003", "sample_ext_note_0001"} <= heads
     assert len(heads) == 4
 
 

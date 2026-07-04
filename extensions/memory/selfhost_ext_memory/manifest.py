@@ -30,9 +30,13 @@ from selfhost.sdk.manifest import (
 from selfhost.sdk.sources import SHARED_SUBJECT, member_subject
 from selfhost.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from selfhost_ext_memory.store import (
+    DEFAULT_CONFIDENCE,
     FACT,
+    KIND_FACT,
+    MAX_CONFIDENCE,
     ItemClass,
     MemoryIndexer,
+    MemoryKind,
     MemoryWrite,
     PageIndexer,
     Recalled,
@@ -66,6 +70,8 @@ class MemorySearchInput(BaseModel):
 class MemoryUpdateInput(BaseModel):
     body: str
     item_class: ItemClass = FACT
+    memory_kind: MemoryKind = KIND_FACT
+    confidence: int = Field(default=DEFAULT_CONFIDENCE, ge=1, le=MAX_CONFIDENCE)
     shared: bool = False
     source_ref: str | None = None
 
@@ -138,7 +144,12 @@ async def memory_update_handler(ctx: ToolContext, args: MemoryUpdateInput) -> To
     )
     await store_for(ctx.ext).commit(
         MemoryWrite(
-            subject=subject, body=args.body, item_class=args.item_class, source_ref=args.source_ref
+            subject=subject,
+            body=args.body,
+            item_class=args.item_class,
+            memory_kind=args.memory_kind,
+            confidence=args.confidence,
+            source_ref=args.source_ref,
         )
     )
     return ToolResult(content=(TextContent(text=f"Remembered ({subject})."),))
@@ -158,7 +169,7 @@ async def recall_hook(ctx: HookContext) -> HookOutcome:
     except Exception:
         logger.warning("memory.recall_hook.degraded", exc_info=True)
         return None
-    lines = [f"- {item.body}" for item in recalled]
+    lines = [f"- {item.body}" for item in recalled if item.recall_mode != "topic"]
     return InjectContext(RECALL_CONTEXT_PREFIX + "\n".join(lines)) if lines else None
 
 
@@ -209,8 +220,10 @@ def manifest() -> Manifest:
                     "Writes to the current member's memory by default, or shared memory when "
                     "`shared` is true. Use proactively when learning persistent facts — name, "
                     "role, company, team, colleagues, preferences, projects, tools, key people, "
-                    "communication style. Do NOT store ephemeral instructions (e.g. 'make it "
-                    "shorter'); only store persistent information."
+                    "communication style. Set `memory_kind` (fact/preference/decision/event/task) "
+                    "so recency decay matches how fast the fact goes stale, and `confidence` "
+                    "(1-10) for how sure you are. Do NOT store ephemeral instructions (e.g. 'make "
+                    "it shorter'); only store persistent information."
                 ),
                 input_model=MemoryUpdateInput,
                 handler=memory_update_handler,
