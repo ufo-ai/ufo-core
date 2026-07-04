@@ -18,6 +18,7 @@ from cryptography.fernet import Fernet
 
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
+from selfhost.loop.prompts.render import render_system_prompt
 from selfhost.sandbox.proxy.rules import (
     InjectionRule,
     MeterRule,
@@ -123,6 +124,18 @@ def test_manifest_declares_search_and_fetch_with_verbatim_descriptions() -> None
         "force_fetch",
         "user_description",
     }
+
+
+def test_manifest_contributes_the_web_prompt_section_into_the_rendered_shell() -> None:
+    """Both ends of the contribution seam: the web pack declares a prompt section, and the same
+    tuple the loop builds from `manifest.prompt_sections` renders into the shell's `{{sections}}`
+    slot — so the search rules reach the agent's system prompt without core naming it."""
+    (section,) = web.manifest().prompt_sections
+    assert section.name == "web"
+    rendered = render_system_prompt("You are the assistant.", ((section.name, section.body),))
+    assert "search_web" in rendered.content
+    assert 'never say "scrape" or "crawl"' in rendered.content
+    assert "{{" not in rendered.content
 
 
 def test_manifest_declares_the_exa_injection_slot() -> None:
