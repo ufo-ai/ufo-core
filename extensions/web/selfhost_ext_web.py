@@ -15,7 +15,13 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from selfhost.sdk.manifest import CredentialSlot, InjectionTarget, Manifest, PromptSection
+from selfhost.sdk.manifest import (
+    CredentialSlot,
+    InjectionTarget,
+    Manifest,
+    PromptSection,
+    SubagentProfile,
+)
 from selfhost.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 
 type Json = str | int | float | bool | None | list["Json"] | dict[str, "Json"]
@@ -24,6 +30,7 @@ NAME = "web"
 VERSION = "0.1.0"
 SEARCH_WEB_TOOL = "search_web"
 FETCH_URL_TOOL = "fetch_url"
+SEARCH_VERTICAL_TOOL = "search_vertical"
 EXA_SLOT = "exa_api"
 EXA_HOST = "api.exa.ai"
 EXA_API_KEY_HEADER = "x-api-key"
@@ -34,8 +41,10 @@ CONTENTS_PATH = "/contents"
 MAX_SEARCH_QUERIES = 5
 DEFAULT_SEARCH_RESULTS = 5
 SEARCH_TEXT_CHARS = 1000
+VERTICAL_TEXT_CHARS = 500
 MAX_FETCH_CHARS = 20_000
 RECENCY_DAYS = {"day": 1, "week": 7, "month": 30}
+VERTICAL_CATEGORY = {"academic": "research paper", "people": "linkedin profile"}
 
 SEARCH_WEB_DESCRIPTION = (
     "Searches the web for current and factual information. Returns results with titles, "
@@ -47,6 +56,10 @@ FETCH_URL_DESCRIPTION = (
     "Fetches content from an HTTP/HTTPS URL. Optionally extracts specific information via LLM "
     "prompt. Use to read web pages, documentation, articles, or any publicly accessible URL. "
     "Results are cached — use force_fetch=true if content appears stale."
+)
+SEARCH_VERTICAL_DESCRIPTION = (
+    "Search specialized content verticals. Use instead of search_web when you need a specific "
+    "content type: images, professional profiles, academic papers, videos, or product listings."
 )
 
 SECTION_NAME = "web"
@@ -64,6 +77,12 @@ class FetchUrlInput(BaseModel):
     prompt: str | None = None
     max_length: int | None = None
     force_fetch: bool | None = None
+    user_description: str
+
+
+class SearchVerticalInput(BaseModel):
+    vertical: Literal["image", "people", "academic", "video", "shopping"]
+    query: str
     user_description: str
 
 
@@ -112,6 +131,22 @@ async def _fetch_url(ctx: ToolContext, args: FetchUrlInput) -> ToolResult:
     )
 
 
+async def _search_vertical(ctx: ToolContext, args: SearchVerticalInput) -> ToolResult:
+    body: dict[str, Json] = {
+        "query": args.query,
+        "numResults": DEFAULT_SEARCH_RESULTS,
+        "contents": {"text": {"maxCharacters": VERTICAL_TEXT_CHARS}},
+    }
+    category = VERTICAL_CATEGORY.get(args.vertical)
+    if category is not None:
+        body["category"] = category
+    result = await _exa_post(ctx, SEARCH_PATH, body)
+    return ToolResult(
+        content=(TextContent(text=result.stdout or result.stderr),),
+        is_error=result.exit_code != 0,
+    )
+
+
 async def _exa_post(ctx: ToolContext, path: str, body: dict[str, Json]):
     """POST the Exa request body to `path` through the sandbox egress proxy, carrying the sentinel
     `x-api-key` the proxy swaps for the workspace's BYOK Exa key. The request originates inside the
@@ -124,6 +159,63 @@ async def _exa_post(ctx: ToolContext, path: str, body: dict[str, Json]):
         f"curl -sS --fail-with-body -X POST -H {api_key} -H {content_type} --data {data} {url}"
     )
     return await ctx.sandbox.bash(command)
+
+
+RESEARCH_PROFILE_NAME = "research"
+DEEP_RESEARCH_PROFILE_NAME = "deep_research"
+DEEP_RESEARCH_ROUND_LIMIT = 200
+RESEARCH_TOOL_NAMES = (
+    SEARCH_WEB_TOOL,
+    FETCH_URL_TOOL,
+    SEARCH_VERTICAL_TOOL,
+    "navigate",
+    "read_page",
+    "get_page_text",
+    "find",
+    "tabs_context",
+    "tabs_create",
+    "tabs_close",
+    "list_external_tools",
+    "describe_external_tools",
+    "call_external_tool",
+    "bash",
+    "read",
+    "write",
+    "edit",
+    "glob",
+    "grep",
+    "load_skill",
+    "list_skills",
+    "share_file",
+    "memory_search",
+)
+RESEARCH_PROMPT = (Path(__file__).parent / "subagent_research.md").read_text()
+DEEP_RESEARCH_PROMPT = (Path(__file__).parent / "subagent_deep_research.md").read_text()
+
+
+class ResearchInput(BaseModel):
+    objective: str
+
+
+class ResearchOutput(BaseModel):
+    result: str
+
+
+RESEARCH_PROFILE = SubagentProfile(
+    name=RESEARCH_PROFILE_NAME,
+    prompt=RESEARCH_PROMPT,
+    tool_names=RESEARCH_TOOL_NAMES,
+    input_model=ResearchInput,
+    output_model=ResearchOutput,
+)
+DEEP_RESEARCH_PROFILE = SubagentProfile(
+    name=DEEP_RESEARCH_PROFILE_NAME,
+    prompt=DEEP_RESEARCH_PROMPT,
+    tool_names=RESEARCH_TOOL_NAMES,
+    input_model=ResearchInput,
+    output_model=ResearchOutput,
+    max_rounds=DEEP_RESEARCH_ROUND_LIMIT,
+)
 
 
 def manifest() -> Manifest:
@@ -145,6 +237,13 @@ def manifest() -> Manifest:
                 handler=_fetch_url,
                 untrusted=True,
             ),
+            ToolDef(
+                name=SEARCH_VERTICAL_TOOL,
+                description=SEARCH_VERTICAL_DESCRIPTION,
+                input_model=SearchVerticalInput,
+                handler=_search_vertical,
+                untrusted=True,
+            ),
         ),
         credentials=(
             CredentialSlot(
@@ -160,4 +259,5 @@ def manifest() -> Manifest:
             ),
         ),
         prompt_sections=(PromptSection(name=SECTION_NAME, body=SECTION_BODY),),
+        subagents=(RESEARCH_PROFILE, DEEP_RESEARCH_PROFILE),
     )

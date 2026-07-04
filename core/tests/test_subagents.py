@@ -2,7 +2,7 @@ import pytest
 from pydantic import BaseModel
 
 from selfhost.ext.manifest import SUBAGENT_ROUND_LIMIT, SubagentProfile
-from selfhost.loop.profiles import CORE_SUBAGENT_PROFILES, GENERAL_PURPOSE
+from selfhost.loop.profiles import CODING, CORE_SUBAGENT_PROFILES, GENERAL_PURPOSE
 from selfhost.loop.subagents import SubagentRegistry, subagent_system_prompt
 from selfhost.tools.builtins import BUILTIN_TOOLS
 
@@ -94,6 +94,49 @@ def test_general_purpose_prompt_lists_the_loadable_skills_and_binds_its_output()
     for skill in ("sandbox", "memory", "delegation"):
         assert skill in prompt
     assert "result" in prompt and "JSON" in prompt
+
+
+def test_core_ships_a_coding_profile_whose_tools_all_resolve_to_builtins() -> None:
+    profile = SubagentRegistry(CORE_SUBAGENT_PROFILES).get(CODING)
+    assert profile.name == CODING
+    assert profile.input_model.model_validate({"objective": "fix it"}).objective == "fix it"
+    assert profile.output_model.model_validate({"result": "fixed"}).result == "fixed"
+    builtin_names = {tool.name for tool in BUILTIN_TOOLS}
+    assert set(profile.tool_names) <= builtin_names
+    assert {"ask_user", "spawn_subagent", "wait_for_subagents", "cancel_subagent"}.isdisjoint(
+        profile.tool_names
+    )
+
+
+def test_subagent_prompt_wraps_the_profile_with_the_shared_citation_discipline() -> None:
+    prompt = subagent_system_prompt(_profile("research"))
+    assert "research instructions" in prompt
+    assert "<citation_instructions>" in prompt
+
+
+def test_subagent_prompt_fills_the_skill_index_slot() -> None:
+    profile = SubagentProfile(
+        name="slotted",
+        prompt="do the task\n\n{{skill_index}}",
+        tool_names=(),
+        input_model=_Task,
+        output_model=_Finding,
+    )
+    prompt = subagent_system_prompt(profile)
+    assert "{{skill_index}}" not in prompt
+    assert "<available_skills>" in prompt
+
+
+def test_subagent_prompt_fails_loud_on_an_unfilled_slot() -> None:
+    profile = SubagentProfile(
+        name="stray",
+        prompt="do it {{mystery}}",
+        tool_names=(),
+        input_model=_Task,
+        output_model=_Finding,
+    )
+    with pytest.raises(ValueError, match="unresolved slots: mystery"):
+        subagent_system_prompt(profile)
 
 
 def test_profile_model_defaults_to_none_meaning_inherit_the_parent() -> None:

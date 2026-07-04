@@ -8,7 +8,15 @@ sources the tools + providers into its registry and the turn's tool set, and the
 into the sync driver's backend map (so a registered account syncs offline into memory): the
 hand-written Asana source plus one framework backend per registered connector (`github`)."""
 
-from selfhost.sdk.manifest import ConnectorProvider, Manifest, RouteSpec, SourceProvider
+from pathlib import Path
+
+from selfhost.sdk.manifest import (
+    ConnectorProvider,
+    Manifest,
+    PromptSection,
+    RouteSpec,
+    SourceProvider,
+)
 from selfhost_ext_connectors.backend import ConnectorBackend
 from selfhost_ext_connectors.composio import CONNECTORS
 from selfhost_ext_connectors.provider import (
@@ -22,6 +30,9 @@ from selfhost_ext_connectors.tools import CONNECTOR_TOOLS
 
 NAME = "connectors"
 VERSION = "0.1.0"
+
+SECTION_NAME = "external_tools"
+SECTION_BODY = (Path(__file__).parent / "connectors_section.md").read_text().strip()
 
 
 def manifest() -> Manifest:
@@ -46,4 +57,5 @@ def manifest() -> Manifest:
         ),
         routes=(RouteSpec(method="GET", path=OAUTH_ROUTE_PATH, handler=oauth_route),),
         sources=sources,
+        prompt_sections=(PromptSection(name=SECTION_NAME, body=SECTION_BODY),),
     )

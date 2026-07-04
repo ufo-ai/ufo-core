@@ -59,6 +59,17 @@ class SpawnResult:
     output: BaseModel | None
 
 
+@dataclass(frozen=True)
+class SubagentStatus:
+    """The terminal state of one already-spawned child turn as the lifecycle tools report it: its
+    turn id, terminal status, and its final answer text (the profile's JSON output when it ended
+    `done`, otherwise the terminal message)."""
+
+    turn_id: UUID
+    status: str
+    text: str
+
+
 class Spawn(Protocol):
     """Delegate a subtask to a named subagent profile: validate the payload against the profile's
     input schema, run a child turn, and (foreground) return its schema-validated output."""
@@ -66,6 +77,16 @@ class Spawn(Protocol):
     async def __call__(
         self, profile: str, payload: dict[str, Any], background: bool = False
     ) -> SpawnResult: ...
+
+
+class SubagentControl(Protocol):
+    """Lifecycle operations on already-spawned background subagents, keyed by the child turn id a
+    background `spawn` returns: await their terminals, or cancel a running one. Threaded onto the
+    ToolContext from the same Subagents workflow that backs `spawn`."""
+
+    async def wait(self, turn_ids: tuple[UUID, ...]) -> tuple[SubagentStatus, ...]: ...
+
+    async def cancel(self, turn_id: UUID) -> SubagentStatus: ...
 
 
 @dataclass(frozen=True)
@@ -79,6 +100,7 @@ class ToolContext:
     member_id: UUID | None
     artifact_token_secret: str
     grants: GrantStore | None = None
+    subagents: SubagentControl | None = None
     read_paths: set[str] = field(default_factory=set)
     skills: SkillRegistry = CORE_SKILL_REGISTRY
     ext: ExtensionContext | None = None

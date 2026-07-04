@@ -1,5 +1,6 @@
-"""The builtin tool set: bash, read, write, edit, share_file, spawn_subagent, memory_search,
-memory_update, load_sessions, ask_user, load_skill.
+"""The builtin tool set: bash, read, write, edit, glob, grep, share_file, spawn_subagent,
+memory_search, memory_update, load_sessions, ask_user, load_skill, connect_account, pause_and_wait,
+list_skills, wait_for_subagents, cancel_subagent.
 
 Each file/shell handler reaches the workspace only through `ctx.sandbox`, so the carrier's scoping
 and egress rules apply whether a byte arrives via a shell command or a file op. `read`, `edit`, and
@@ -7,7 +8,9 @@ and egress rules apply whether a byte arrives via a shell command or a file op. 
 container and only a bounded JSON result crosses back — the host never pulls a whole file over to
 loop on it. `read` records every path it returns so `edit`/`write` can refuse to touch a file the
 turn has not read — the guard that keeps a blind string-replace from clobbering content the model
-never saw. `share_file` streams a produced workspace file straight out of the mount into the blob
+never saw. `glob` and `grep` run the in-sandbox `sbxfs` matcher and ripgrep, so file discovery and
+content search happen in the container and a bounded result crosses back. `share_file` streams a
+produced workspace file straight out of the mount into the blob
 store under `artifacts/<uuid>/` and returns a TTL-token URL the web surface serves — the only path
 that hands a file back outside the sandbox, with no read cap and no whole-file buffer.
 `spawn_subagent` delegates a typed subtask to a child turn through `ctx.spawn`. `memory_search`
@@ -18,7 +21,12 @@ specific past conversation transcripts back from the blob store, scoped to the s
 own conversations. `ask_user` is chat-native: it
 structures a question or confirmation the agent poses in its reply, whose answer rides the member's
 next message — no out-of-band prompt. `load_skill` mounts a skill's `SKILL.md` and assets into the
-workspace and returns its workflow instructions."""
+workspace and returns its workflow instructions. `list_skills` reports the loadable skills so the
+agent can discover a workflow before starting. `pause_and_wait` is chat-native like `ask_user`: it
+structures a wait the agent poses in its reply and ends the turn, resuming on the next inbound.
+`wait_for_subagents` and `cancel_subagent` reach `ctx.subagents`, the same Subagents workflow that
+backs `spawn`, to await a background child's terminal or cancel a running one — scoped to the
+children this turn spawned."""
 
 import asyncio
 import json
@@ -26,11 +34,11 @@ import mimetypes
 import shlex
 from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, JsonValue
 
 from selfhost.artifact_token import (
     ARTIFACT_DOWNLOAD_PATH,
@@ -49,7 +57,7 @@ from selfhost.memory.service import (
     recall_subjects,
 )
 from selfhost.models.interface import TextBlock
-from selfhost.sandbox.session import workspace_path
+from selfhost.sandbox.session import WORKSPACE_DIR, workspace_path
 from selfhost.schema import tables
 from selfhost.schema.records import FACT, ItemClass, MemoryWrite
 from selfhost.skills.runtime import mount_skill
@@ -59,6 +67,7 @@ from selfhost.transcript import TranscriptDecodeError, decode, transcript_key
 
 MEMORY_SEARCH_LIMIT = 8
 MAX_MEMORY_QUERIES = 3
+GREP_HEAD_LIMIT = 100
 MAX_LOAD_SESSIONS = 25
 ARTIFACT_FALLBACK_NAME = "download"
 SHARE_PREFLIGHT_TIMEOUT_SECONDS = 300
@@ -107,6 +116,20 @@ class FileEdit(BaseModel):
 class EditInput(BaseModel):
     file_path: str
     edits: tuple[FileEdit, ...] = Field(min_length=1)
+
+
+class GlobInput(BaseModel):
+    pattern: str
+    path: str | None = None
+
+
+class GrepInput(BaseModel):
+    pattern: str
+    glob: str | None = None
+    context: int | None = None
+    ignore_case: bool | None = None
+    output_mode: Literal["content", "files_with_matches", "count"] | None = None
+    head_limit: int | None = None
 
 
 class ShareFileInput(BaseModel):
@@ -166,6 +189,28 @@ class LoadSkillInput(BaseModel):
 
 class ConnectAccountInput(BaseModel):
     provider: str
+
+
+class PauseAndWaitInput(BaseModel):
+    ai_response: str
+    wait_minutes: int
+    next_steps: str
+    reason: str
+    metadata: dict[str, JsonValue] | None = None
+
+
+class ListSkillsInput(BaseModel):
+    pass
+
+
+class WaitForSubagentsInput(BaseModel):
+    subagent_ids: tuple[str, ...] = Field(min_length=1)
+    user_description: str
+
+
+class CancelSubagentInput(BaseModel):
+    subagent_id: str
+    user_description: str
 
 
 async def bash_handler(ctx: ToolContext, args: BashInput) -> ToolResult:
@@ -299,6 +344,36 @@ async def edit_handler(ctx: ToolContext, args: EditInput) -> ToolResult:
         for e in args.edits
     ]
     result = await ctx.sandbox.run_sbxfs("edit", {"path": args.file_path, "edits": edits})
+    return ToolResult(content=(TextContent(text=json.dumps(result)),))
+
+
+async def glob_handler(ctx: ToolContext, args: GlobInput) -> ToolResult:
+    """Match files by glob pattern inside the container through the `sbxfs` CLI, so the traversal
+    runs in the sandbox and only the matching paths cross back. Defaults to the workspace root."""
+    result = await ctx.sandbox.run_sbxfs(
+        "glob", {"pattern": args.pattern, "path": args.path or WORKSPACE_DIR}
+    )
+    return ToolResult(content=(TextContent(text=json.dumps(result)),))
+
+
+async def grep_handler(ctx: ToolContext, args: GrepInput) -> ToolResult:
+    """Search file contents for a regex across the workspace through the in-sandbox `sbxfs` ripgrep,
+    so the scan runs in the container and a bounded result crosses back. `head_limit` caps the
+    matches returned."""
+    params: dict[str, object] = {
+        "pattern": args.pattern,
+        "path": WORKSPACE_DIR,
+        "head_limit": args.head_limit if args.head_limit is not None else GREP_HEAD_LIMIT,
+    }
+    if args.glob is not None:
+        params["glob"] = args.glob
+    if args.context is not None:
+        params["context"] = args.context
+    if args.output_mode is not None:
+        params["output_mode"] = args.output_mode
+    if args.ignore_case:
+        params["ignore_case"] = True
+    result = await ctx.sandbox.run_sbxfs("grep", params)
     return ToolResult(content=(TextContent(text=json.dumps(result)),))
 
 
@@ -544,6 +619,62 @@ async def connect_account_handler(ctx: ToolContext, args: ConnectAccountInput) -
     return ToolResult(content=(TextContent(text=url),))
 
 
+PAUSE_DIRECTIVE = (
+    "Pause here and end your turn — you resume when the awaited event arrives or the wait elapses."
+)
+
+
+async def pause_and_wait_handler(ctx: ToolContext, args: PauseAndWaitInput) -> ToolResult:
+    """Chat-native pause: structure the wait the agent poses in its reply, then end the turn. Like
+    ask_user, the resume rides the next inbound message (a member reply or a scheduled tick), never
+    an out-of-band timer the loop holds — the payload's `wait_minutes` is advisory."""
+    payload = {
+        "awaiting": "timer",
+        "ai_response": args.ai_response,
+        "wait_minutes": args.wait_minutes,
+        "next_steps": args.next_steps,
+        "reason": args.reason,
+    }
+    return ToolResult(content=(TextContent(text=f"{PAUSE_DIRECTIVE}\n{json.dumps(payload)}"),))
+
+
+async def list_skills_handler(ctx: ToolContext, args: ListSkillsInput) -> ToolResult:
+    """List the loadable skills, each with its one-line description, so the agent can discover a
+    workflow to load_skill before starting a domain task."""
+    skills = [
+        {"name": name, "description": description} for name, description in ctx.skills.index()
+    ]
+    return ToolResult(content=(TextContent(text=json.dumps({"skills": skills})),))
+
+
+async def wait_for_subagents_handler(ctx: ToolContext, args: WaitForSubagentsInput) -> ToolResult:
+    """Await each background subagent's terminal and report its status and final answer. A malformed
+    id raises a recoverable tool error; a control surface that is not wired fails loud."""
+    if ctx.subagents is None:
+        raise RuntimeError("subagent control is not available in this context")
+    statuses = await ctx.subagents.wait(tuple(UUID(raw) for raw in args.subagent_ids))
+    done = [
+        {"subagent_id": str(status.turn_id), "status": status.status, "output": status.text}
+        for status in statuses
+    ]
+    return ToolResult(content=(TextContent(text=json.dumps({"subagents": done})),))
+
+
+async def cancel_subagent_handler(ctx: ToolContext, args: CancelSubagentInput) -> ToolResult:
+    """Cancel a running subagent and report its current status; a subagent that already finished is
+    a no-op whose committed terminal stands. Refuses a turn id this turn did not spawn."""
+    if ctx.subagents is None:
+        raise RuntimeError("subagent control is not available in this context")
+    status = await ctx.subagents.cancel(UUID(args.subagent_id))
+    return ToolResult(
+        content=(
+            TextContent(
+                text=json.dumps({"subagent_id": str(status.turn_id), "status": status.status})
+            ),
+        )
+    )
+
+
 BUILTIN_TOOLS: tuple[ToolDef, ...] = (
     ToolDef(
         name="bash",
@@ -581,6 +712,26 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=EditInput,
         handler=edit_handler,
+    ),
+    ToolDef(
+        name="glob",
+        description=(
+            "Fast file pattern matching using glob patterns. Returns matching file paths. Use "
+            "instead of bash `find` or `ls`."
+        ),
+        input_model=GlobInput,
+        handler=glob_handler,
+    ),
+    ToolDef(
+        name="grep",
+        description=(
+            "Search for a regex pattern in file contents across the workspace. Use instead of bash "
+            "`grep` or `rg`. Pattern is a regex, not a literal string — escape metacharacters such "
+            "as ( ) . * + ? [ ] { } | when searching for a literal name, e.g. a function call "
+            "site: `foo\\(`."
+        ),
+        input_model=GrepInput,
+        handler=grep_handler,
     ),
     ToolDef(
         name="share_file",
@@ -680,5 +831,40 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=ConnectAccountInput,
         handler=connect_account_handler,
+    ),
+    ToolDef(
+        name="pause_and_wait",
+        description=(
+            "Pause a workflow until an external event occurs or a timer expires. Use for waiting "
+            "on verification emails, manual approvals, or API cooldowns. NOT for user-requested "
+            "reminders or delayed actions — use a scheduled task for those."
+        ),
+        input_model=PauseAndWaitInput,
+        handler=pause_and_wait_handler,
+    ),
+    ToolDef(
+        name="list_skills",
+        description="List the Skills this turn can load.",
+        input_model=ListSkillsInput,
+        handler=list_skills_handler,
+    ),
+    ToolDef(
+        name="wait_for_subagents",
+        description=(
+            "End your turn and wait for background subagent results. Call this after spawning "
+            "subagents when you have no other independent work to do. You are automatically woken "
+            "when all awaited subagents complete or when the user sends a message."
+        ),
+        input_model=WaitForSubagentsInput,
+        handler=wait_for_subagents_handler,
+    ),
+    ToolDef(
+        name="cancel_subagent",
+        description=(
+            "Cancel a running subagent. Sets its status to 'cancelled'. If the subagent has "
+            "already finished, this is a no-op and returns its current status."
+        ),
+        input_model=CancelSubagentInput,
+        handler=cancel_subagent_handler,
     ),
 )

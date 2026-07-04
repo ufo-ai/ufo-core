@@ -110,7 +110,10 @@ async def _run(name: str, ctx: ToolContext, **args: object) -> object:
 
 def test_manifest_declares_the_browser_tools_and_profile() -> None:
     manifest = browser_manifest.manifest()
-    assert {tool.name for tool in manifest.tools} == set(BROWSER_TOOL_NAMES)
+    assert {tool.name for tool in manifest.tools} == set(BROWSER_TOOL_NAMES) | {
+        "browser_task",
+        "wide_browse",
+    }
     assert len(BROWSER_TOOL_NAMES) == 11
     assert {profile.name for profile in manifest.subagents} == {BROWSER_SUBAGENT_NAME}
 

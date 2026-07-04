@@ -158,6 +158,7 @@ async def _execute_turn(turn_id: str) -> str:
             hooks=hooks,
             blob=runtime.blob,
             spawn=subagents.spawn,
+            subagents=subagents,
             memory=runtime.memory,
             member_id=member_id,
             artifact_token_secret=runtime.artifact_token_secret,

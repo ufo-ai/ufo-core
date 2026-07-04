@@ -9,6 +9,7 @@ returns its schema-validated output; background returns the child turn id at onc
 import asyncio
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -17,6 +18,13 @@ from dbos import DBOSClient, EnqueueOptions
 
 from selfhost.db import workspace_tx
 from selfhost.ext.manifest import SubagentProfile
+from selfhost.loop.prompts.render import (
+    CITATION_BLOCK,
+    CITATION_SLOT,
+    PROMPT_VAR_RE,
+    SKILL_INDEX_SLOT,
+    render_skill_index,
+)
 from selfhost.schema import tables
 from selfhost.schema.records import (
     DBOS_APP_VERSION,
@@ -26,10 +34,21 @@ from selfhost.schema.records import (
     Turn,
     turn_id_for,
 )
-from selfhost.tools.context import SpawnResult
+from selfhost.skills.runtime import CORE_SKILLS
+from selfhost.tools.context import SpawnResult, SubagentStatus
 
 SUBAGENT_SURFACE = "subagent"
 SUBAGENT_POLL_SECONDS = 0.1
+
+SUBAGENT_OUTPUT_DISCIPLINE = (
+    (Path(__file__).parent / "prompts" / "subagent_shell.md")
+    .read_text()
+    .strip()
+    .replace(CITATION_SLOT, CITATION_BLOCK)
+)
+SUBAGENT_SKILL_INDEX = render_skill_index(
+    tuple((skill.name, skill.description) for skill in CORE_SKILLS)
+)
 
 
 @dataclass(frozen=True)
@@ -54,13 +73,19 @@ class SubagentRegistry:
 
 
 def subagent_system_prompt(profile: SubagentProfile) -> str:
-    """The child's system prompt: the profile's own instructions plus the output contract, so the
-    child's final answer is a single JSON object the parent can validate against the schema."""
+    """The child's system prompt: the profile's own instructions with its `{{skill_index}}` slot
+    filled from the loadable-skill index, then the shared output discipline (citation and formatting
+    rules, wrapped around every profile so a subagent inherits the same citation contract the main
+    agent renders), then the output contract — so the child's final answer is a single JSON object
+    the parent can validate against the schema. A slot the profile leaves unfilled fails loud rather
+    than reaching the model as a literal brace."""
+    body = profile.prompt.replace(SKILL_INDEX_SLOT, SUBAGENT_SKILL_INDEX)
+    wrapped = f"{body}\n\n{SUBAGENT_OUTPUT_DISCIPLINE}"
+    if unresolved := frozenset(PROMPT_VAR_RE.findall(wrapped)):
+        raise ValueError(f"subagent prompt has unresolved slots: {', '.join(sorted(unresolved))}")
     schema = json.dumps(profile.output_model.model_json_schema(), sort_keys=True)
-    return (
-        f"{profile.prompt}\n\n"
-        f"Respond with a single JSON object matching this schema and nothing else:\n{schema}"
-    )
+    contract = f"Respond with a single JSON object matching this schema and nothing else:\n{schema}"
+    return f"{wrapped}\n\n{contract}"
 
 
 @dataclass(frozen=True)
@@ -88,6 +113,44 @@ class Subagents:
             raise RuntimeError(f"subagent {profile!r} turn ended {terminal.status}")
         output = resolved.output_model.model_validate_json(terminal.text)
         return SpawnResult(turn_id=turn_id, output=output)
+
+    async def wait(self, turn_ids: tuple[UUID, ...]) -> tuple[SubagentStatus, ...]:
+        """Await each background child's terminal and report its status and final text — the parent
+        ends its own turn and calls this when it has no other independent work, completing the
+        background-spawn loop. Each id is polled through the same terminal read a foreground spawn
+        awaits, so a child that has already finished returns at once."""
+        return tuple(
+            SubagentStatus(turn_id=turn_id, status=terminal.status, text=terminal.text)
+            for turn_id in turn_ids
+            for terminal in (await self._await_terminal(turn_id),)
+        )
+
+    async def cancel(self, turn_id: UUID) -> SubagentStatus:
+        """Cancel a running child by cancelling its durable workflow, then report the turn's current
+        status. A child that has already finished is a no-op — the cancel is idempotent and the
+        committed terminal stands. Refuses a turn id that is not a child of this parent."""
+        await self._require_child(turn_id)
+        await self.client.cancel_workflow_async(str(turn_id))
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(tables.turn.c.status, tables.turn.c.terminal).where(
+                        tables.turn.c.id == turn_id
+                    )
+                )
+            ).one()
+        text = "" if row.terminal is None else TerminalFrame.model_validate(row.terminal).text
+        return SubagentStatus(turn_id=turn_id, status=row.status, text=text)
+
+    async def _require_child(self, turn_id: UUID) -> None:
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(tables.turn.c.parent_turn_id).where(tables.turn.c.id == turn_id)
+                )
+            ).one_or_none()
+        if row is None or row.parent_turn_id != self.parent.id:
+            raise ValueError(f"{turn_id} is not a subagent this turn spawned")
 
     async def _admit(
         self, conversation_id: UUID, turn_id: UUID, profile: str, inbound: str

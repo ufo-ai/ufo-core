@@ -8,6 +8,7 @@ for the browser instead of search."""
 from pathlib import Path
 
 from selfhost.sdk.manifest import Manifest, PromptSection
+from selfhost_ext_browser.delegation import DELEGATION_TOOLS
 from selfhost_ext_browser.subagent import BROWSER_PROFILE
 from selfhost_ext_browser.tools import BROWSER_TOOLS
 
@@ -22,7 +23,7 @@ def manifest() -> Manifest:
     return Manifest(
         name=NAME,
         version=VERSION,
-        tools=BROWSER_TOOLS,
+        tools=(*BROWSER_TOOLS, *DELEGATION_TOOLS),
         subagents=(BROWSER_PROFILE,),
         prompt_sections=(PromptSection(name=SECTION_NAME, body=SECTION_BODY),),
     )

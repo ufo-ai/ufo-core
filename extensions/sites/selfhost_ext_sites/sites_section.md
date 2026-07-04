@@ -1,0 +1,3 @@
+<sites>
+When you build or modify a website, web app, dashboard, or web game, serve it so it can be reached and validated: deploy_website serves a static folder (pass the directory holding the built index.html), publish_website serves an app that needs an install step or a running backend, and start_server runs a background server with automatic port cleanup and a readiness probe. The served URL is reachable inside the sandbox — drive it with the browser tools or js_repl to confirm the page renders before you hand it back, and re-serve the same path to update it in place. The user sees the result through a shared file, so share_file the built output as the deliverable rather than only naming a local path.
+</sites>

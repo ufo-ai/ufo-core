@@ -18,10 +18,13 @@ members = [
     "selfhost-ext-mcp",
     "selfhost-ext-openrouter",
     "selfhost-ext-redis-hub",
+    "selfhost-ext-repl",
     "selfhost-ext-sample",
     "selfhost-ext-scheduled-tasks",
     "selfhost-ext-self-improvement",
+    "selfhost-ext-sites",
     "selfhost-ext-slack",
+    "selfhost-ext-todos",
     "selfhost-ext-turbopuffer",
     "selfhost-ext-web",
 ]
@@ -2453,6 +2456,17 @@ requires-dist = [
 ]
 
 [[package]]
+name = "selfhost-ext-repl"
+version = "0.1.0"
+source = { editable = "extensions/repl" }
+dependencies = [
+    { name = "selfhost" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "selfhost", editable = "core" }]
+
+[[package]]
 name = "selfhost-ext-sample"
 version = "0.1.0"
 source = { editable = "extensions/sample" }
@@ -2494,6 +2508,17 @@ requires-dist = [
 ]
 
 [[package]]
+name = "selfhost-ext-sites"
+version = "0.1.0"
+source = { editable = "extensions/sites" }
+dependencies = [
+    { name = "selfhost" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "selfhost", editable = "core" }]
+
+[[package]]
 name = "selfhost-ext-slack"
 version = "0.1.0"
 source = { editable = "extensions/slack" }
@@ -2507,6 +2532,17 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "selfhost", editable = "core" },
 ]
+
+[[package]]
+name = "selfhost-ext-todos"
+version = "0.1.0"
+source = { editable = "extensions/todos" }
+dependencies = [
+    { name = "selfhost" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "selfhost", editable = "core" }]
 
 [[package]]
 name = "selfhost-ext-turbopuffer"

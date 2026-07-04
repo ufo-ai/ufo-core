@@ -345,6 +345,31 @@ async def test_edit_applies_multiple_edits_sequentially_with_snippet(
     assert (workspace / "code.py").read_text() == "alpha = 9\nbeta = 8\n"
 
 
+async def test_glob_matches_files_in_the_workspace(
+    file_ctx: tuple[ToolContext, Path],
+) -> None:
+    ctx, _ = file_ctx
+    await ctx.sandbox.write_file("src/one.py", b"a = 1\n")
+    await ctx.sandbox.write_file("src/two.py", b"b = 2\n")
+    await ctx.sandbox.write_file("notes.txt", b"hi\n")
+    result = await _run("glob", ctx, pattern="**/*.py")
+    text = result.content[0].text
+    assert "one.py" in text and "two.py" in text
+    assert "notes.txt" not in text
+
+
+async def test_grep_finds_a_pattern_across_the_workspace(
+    file_ctx: tuple[ToolContext, Path],
+) -> None:
+    ctx, _ = file_ctx
+    await ctx.sandbox.write_file("app.py", b"def handler():\n    return TARGET\n")
+    await ctx.sandbox.write_file("other.py", b"x = 1\n")
+    result = await _run("grep", ctx, pattern="TARGET")
+    text = result.content[0].text
+    assert "app.py" in text
+    assert "other.py" not in text
+
+
 async def test_edit_replace_all(file_ctx: tuple[ToolContext, Path]) -> None:
     ctx, workspace = file_ctx
     await ctx.sandbox.write_file("dup.py", b"x\nx\nx\n")

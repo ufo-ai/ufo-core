@@ -54,7 +54,7 @@ from selfhost.schema.records import (
     Usage,
 )
 from selfhost.skills.runtime import CORE_SKILL_REGISTRY, SkillRegistry
-from selfhost.tools.context import ImageContent, Spawn, TextContent, ToolContext
+from selfhost.tools.context import ImageContent, Spawn, SubagentControl, TextContent, ToolContext
 from selfhost.tools.registry import ToolRegistry
 from selfhost.transcript import Conversation
 
@@ -149,6 +149,7 @@ class TurnEngine:
     artifact_token_secret: str
     grants: GrantStore | None
     pricing: Pricing = CORE_PRICING
+    subagents: SubagentControl | None = None
     attempt: str = ""
     max_rounds: int = MAIN_ROUND_LIMIT
     skills: SkillRegistry = CORE_SKILL_REGISTRY
@@ -169,6 +170,7 @@ class TurnEngine:
                 turn=self.turn,
                 agent=self.agent,
                 spawn=self.spawn,
+                subagents=self.subagents,
                 memory=self.memory,
                 member_id=self.member_id,
                 artifact_token_secret=self.artifact_token_secret,

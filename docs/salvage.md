@@ -27,7 +27,7 @@ Working against the old repo:
 | `metalcraft_store/price.py` | `accounting.py` prices | U1 | refresh model list; fix lossy per-token ints (micro-USD/MTok); PRICE_DIGEST returns with U7 audit columns |
 | `metalcraft_cli/gateway_client.py`, `scripts/ufo`, `gateway/channels/ufo*.py` | `surfaces/cli.py` + `cli.py` (`selfhost chat`) | U1 | one CLI; sessions stay; drop signin bridge (member token instead) |
 | `metalcraft_agent/tools/base.py` | `tools/registry.py`, `tools/context.py` | U2 | ToolContext replaces env-threading |
-| `metalcraft_agent/tools/sandbox.py` | `tools/builtins/` (`bash read write edit`) | U2 | drop `website`, 3× serve, `glob`, `grep` (bash + ripgrep subsume); keep read-before-write + image/PDF read |
+| `metalcraft_agent/tools/sandbox.py` | `tools/builtins/` (`bash read write edit`) + `extensions/sites` (the serve tools) | U2 | drop `glob`, `grep`, `echo` (bash + ripgrep subsume); keep read-before-write + image/PDF read; `website` and the 3 serve tools move to the sites extension |
 | `metalcraft_servers/sandbox_proxy/{proxy,server}.py` (minus kubectl mint), `metalcraft_servers/egress_proxy/server.py`, `metalcraft_store/egress.py` | `sandbox/proxy/` | U2 | MERGE into one proxy: sentinel swap, host/account scoping, wire metering; rules derived, no register API |
 | `metalcraft_agent/sandbox/workspace.py`, `executor/sandbox_fs_mount.py`, `metalcraft_store/sandbox_fs_creds.py` | `sandbox/` mount (S3 backend) | U2 | filesystem backend = plain bind mount (new); keep `mountpoint -q` health check |
 | `metalcraft_agent/sandbox/{sbx,sbxfs}` (in-sandbox toolchain), image recipe | `sandbox/image/` | U2 | rebuild Dockerfile fresh; two traps learned on e2b: build-time env vars don't reach runtime (set ENV in the Dockerfile), and per-step USER matters (apt fails non-root) |
@@ -56,7 +56,10 @@ Working against the old repo:
 |---|---|---|
 | `metalcraft_connectors/{base,composio,composio_proxy,errors,integration_descriptors,mcp,registry}.py` + 48 provider dirs | `extensions/connectors` | U8; port framework + registry wholesale; closed leaf stays closed |
 | `metalcraft_agent/bua/` (18 files), `browser.py`, `browser_cdp.py`, `tools/browser.py`, `sandbox/browser_runtime.py` | assistant pack browser subagent | U10 |
-| `metalcraft_agent/tools/web.py` | assistant pack (Exa search/fetch) | U10; `search_vertical` folds into `search_web` |
+| `metalcraft_agent/tools/web.py` | `extensions/web` (Exa search/fetch) | U10; `search_web`, `fetch_url`, `search_vertical` each a distinct tool |
+| `metalcraft_agent/tools/todos.py` | `extensions/todos` | `update_todo_list`/`update_todo_status` over the pack's scoped store, keyed by conversation; `<todo_list>` prompt section |
+| `metalcraft_agent/tools/repl.py` | `extensions/repl` | `js_repl` (Node) + `xlsx_repl` (Python/openpyxl), persistent accumulate-and-run over the sandbox |
+| `metalcraft_agent/tools/sandbox.py` (serve tools) | `extensions/sites` | `website`/`start_server`/`deploy_website`/`publish_website` + the `website_building` subagent; the served URL is sandbox-internal (the browser tools and js_repl reach it) — no public reverse-proxy seam yet, so exposure is via `share_file` |
 | `metalcraft_agent/platform_control_tools.py`, `metalcraft_contracts/scheduling.py` | scheduled-tasks extension | U10; CronJob → JobSpec |
 | `executor/sandbox_e2b.py` | e2b carrier extension | post-U10; include the dead-pooled-connection-as-dropped-stream handling (393d832c) |
 | `metalcraft_store/stream_hub.py` | redis hubs extension | post-U10 |
@@ -73,7 +76,7 @@ Working against the old repo:
 | sandbox_proxy kubectl mint (apiserver rewrite, token mint), `metalcraft-agent-writer` RBAC | returns as the enterprise rewriter module |
 | `metalcraft_store/{payload,payloads}.py` (`trajectory_event` + `payload/`) | second trajectory representation; transcript store is the one representation |
 | `metalcraft_agent/{agent_projection,platform_tools,in_memory,env,tool_runtime}.py` | CRD projection/catalog plumbing; frozen-per-turn-config concept survives in `AgentRuntime` |
-| `metalcraft_agent/tools/{todos,diagnostics,repl,platform,broker,egress,mcp,composio,connector_tools}.py` | todos/diagnostics/repl: cut (bash + o11y subsume); the connector invocation set re-enters via `extensions/connectors` |
+| `metalcraft_agent/tools/{diagnostics,platform,broker,egress,mcp,composio,connector_tools}.py` | diagnostics: cut (o11y subsumes); the connector invocation set re-enters via `extensions/connectors` |
 | `metalcraft_cloud/`, `deploy/`, `charts/`, Terraform | signup is hosted-side; `selfhost bundle` replaces install packaging |
 | `metalcraft_store/{catalog_registry,catalog_registry_writes,server,migrate}.py`, `jobrunner/improve_*` | registry/catalog + improve runtime ride k8s-era machinery; superseded by packs + extension store |
 | Refinement CRD machinery (`contracts/kinds/refinement.py`, `k8s/kinds/refinement.py`, gateway promotions) | self-improvement returns as an extension, not a kind |
