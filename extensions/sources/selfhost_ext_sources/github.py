@@ -1,18 +1,19 @@
-"""The GitHub connector — the first provider on the connector framework.
+"""The GitHub connector — repositories, issues, comments, users, and their siblings synced into
+recallable pages.
 
 GitHub paginates uniformly: every list endpoint returns records as a bare JSON array and ships an
-RFC 5988 `Link: rel=next` header until the last page (`?per_page=100`). Auth is the two required
-GitHub headers (the v3 media type and the API version) layered on whichever client the base built
-from the resolved `Credential`. Most streams hit a per-repo path; the repo catalog is derived from
-the organizations the grant exposes (`/user/orgs` → `/orgs/{org}/repos`), so a fresh issue lands on
-the next sync with no manual repo config. `issues` and `comments` fetch incrementally with `?since`
-and advance a watermark cursor (snapshot=False); every other stream re-enumerates its full
-collection each run and returns as a `delete_missing` snapshot, so a record that vanished from the
-grant's view is tombstoned — GitHub surfaces no delete signal, so snapshot reconciliation is the
-delete detection. A grant that can't enumerate orgs at all (`/user/orgs` refused) can read no
-stream, so the walk raises `StreamSkipped` and the run records a skip, not a failure. The write path
-is
-intentionally absent — the source seam only reads."""
+RFC 5988 `Link: rel=next` header until the last page (`?per_page=100`). Records arrive flat, so
+`flatten` stays the identity passthrough. Auth is the two required GitHub headers (the v3 media type
+and the API version) layered on whichever client the base built from the resolved `Credential`.
+
+Most streams hit a per-repo path, but the repo catalog is derived from the organizations the grant
+exposes: the connector walks `/user/orgs`, then `/orgs/{org}/repos`, and fans repo-scoped streams
+out over that org-owned repo set, so a fresh issue lands on the next sync with no manual repo
+config. `issues` and `comments` fetch incrementally with `?since`; every stream advances a watermark
+over its `cursor_field` where it has one (GitHub surfaces no delete signal, so the sync runner's
+row-level cursor skips already-seen rows). A grant that can't enumerate orgs at all (`/user/orgs`
+refused with a 403) can read no stream, so the walk raises `StreamSkipped` and the run records a
+skip, not a failure. The write path is intentionally absent — the source seam only reads."""
 
 import asyncio
 from collections.abc import AsyncIterator
@@ -40,28 +41,24 @@ _ORG_SCOPE_GATE_STATUS = frozenset({403})
 def _stream(
     name: str,
     *,
+    source_object: str | None = None,
     primary_key: str = "id",
     cursor_field: str | None = None,
     canonical: bool = False,
 ) -> StreamSpec:
-    """A GitHub stream. Every stream but the two `?since` incremental ones (`issues`, `comments`)
-    re-enumerates its complete collection each run, so it is a `delete_missing` snapshot — a record
-    absent from a run is tombstoned, which is how deletes are detected on an API with no delete
-    signal."""
     return StreamSpec(
         name=name,
-        source_object=name,
+        source_object=source_object or name,
         primary_key=primary_key,
         cursor_field=cursor_field,
-        delete_missing=name not in _SINCE_STREAMS,
         canonical=canonical,
     )
 
 
-# Stream list mirrors Airbyte's source-github configured catalog. Cursor fields follow Airbyte's
-# default_cursor_field: `updated_at` for mutable collections, `created_at` for append-only feeds,
-# None for full-refresh-only streams. `issues` and `comments` are the two GitHub reads with a
-# server-side `?since` filter; the rest re-enumerate and advance a watermark where they have one.
+# Stream list mirrors Airbyte's source-github configured catalog: name, primary key, cursor field.
+# Cursor fields follow Airbyte's `default_cursor_field` — `updated_at` for mutable collections,
+# `created_at` for append-only feeds, None for full-refresh-only streams. `issues` and `comments`
+# are the two GitHub reads with a server-side `?since` filter.
 ALL_STREAMS: list[StreamSpec] = [
     _stream("repositories", cursor_field="updated_at", canonical=True),
     _stream("issues", cursor_field="updated_at", canonical=True),
@@ -105,7 +102,7 @@ ALL_STREAMS: list[StreamSpec] = [
 
 
 # Per-stream API paths. `{owner}`/`{repo}`/`{org}` are resolved at fetch time from the granted-org
-# repo catalog. Only streams with a wired path are runnable; the sub-streams that need a bespoke
+# repo catalog. Only streams with a wired path are runnable; sub-streams that need a bespoke
 # parent-id walk (reactions, project cards/columns, PR commits/stats/reviews, workflow_jobs,
 # team_members/team_memberships, issue_timeline_events) are catalogued for parity, not yet driven.
 _PATHS: dict[str, str] = {
@@ -172,7 +169,7 @@ class GitHubConnector(RestConnector):
             return
 
         if "{owner}" in path and "{repo}" in path:
-            issue_cursor: str | None = cursor
+            issue_cursor: str | None = None
             async for owner, repo in self._iter_user_repos(client):
                 scoped = path.format(owner=owner, repo=repo)
                 try:

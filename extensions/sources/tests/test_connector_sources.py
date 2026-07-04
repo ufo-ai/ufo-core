@@ -340,10 +340,12 @@ def _github_handler(
     return handle
 
 
-async def test_github_repositories_snapshot_fans_out_over_granted_orgs() -> None:
-    """The org→repo fan-out for a full-refresh stream returns an authoritative snapshot."""
+async def test_github_repositories_fan_out_over_granted_orgs() -> None:
+    """The org→repo fan-out lands the granted-org repos. GitHub surfaces no delete signal, so every
+    stream is incremental (never an authoritative snapshot); the sync runner's row-level cursor
+    handles re-reads."""
     result = await _fetch(GitHubConnector(), "repositories", _github_handler([]))
-    assert result.snapshot is True
+    assert result.snapshot is False
     assert {page.source_ref for page in result.pages} == {"repositories/7"}
     assert "acme/widgets" in result.pages[0].body
 
