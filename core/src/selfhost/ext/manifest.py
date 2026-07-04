@@ -26,6 +26,7 @@ from selfhost.memory.embed import EmbedClient
 from selfhost.memory.index import IndexBackend
 from selfhost.memory.sources import SourceBackend
 from selfhost.models.interface import ModelClient
+from selfhost.sandbox.session import Carrier
 from selfhost.schema.records import Agent, Turn
 from selfhost.tools.registry import ToolDef
 
@@ -95,6 +96,18 @@ class PromptSection:
 
     name: str
     body: str
+
+
+@dataclass(frozen=True)
+class CarrierSpec:
+    """One sandbox backend an extension registers: the `name` the `[sandbox] backend` config selects
+    and the `factory` `serve` calls once to build the Carrier. Core ships `docker` and `e2b`; an
+    extension contributes another (a remote executor, a pooled or bring-your-own backend) without
+    core naming it, and a name that collides with a built-in or another extension's fails loud at
+    boot. The selected carrier is held for the process's life as `Runtime.carrier`."""
+
+    name: str
+    factory: Callable[[], Carrier]
 
 
 @dataclass(frozen=True)
@@ -327,3 +340,4 @@ class Manifest:
     hubs: tuple[HubSpec, ...] = ()
     skills: tuple[SkillSpec, ...] = ()
     browsers: tuple[BrowserBackendSpec, ...] = ()
+    carriers: tuple[CarrierSpec, ...] = ()

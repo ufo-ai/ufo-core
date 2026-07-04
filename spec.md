@@ -30,7 +30,7 @@ test for the extension API — every entry must be expressible without touching 
 | Durable execution | DBOS on the same database as the schema (SQLite dev / Postgres deploys): a turn is a durable workflow, a subagent a child workflow; queues, async cancel, crash recovery. DBOS-on-SQLite is verified in U1 — fail loud, never silently fall back to requiring Postgres. Dequeue poll interval and system-DB retention are configured from day one. |
 | Streaming | Durable terminal frames in Postgres; live token deltas through a hub interface — in-process in the single-process default, a Redis hub extension for multi-instance deploys. A lost delta costs a redrawn token, never correctness. |
 | Topology | `selfhost serve` is one process on one event loop: surfaces + DBOS workers + jobs. Everything is async-native — a blocking call stalls the whole deploy, so blocking-in-async fails lint. Scale-out = more instances plus a shared hub. |
-| Sandbox | Docker is the default carrier, built into core; carriers are an extension point (E2B is an extension). No unsandboxed mode. |
+| Sandbox | A local temp-dir carrier is the core default: no kernel isolation (a raw shell reaches the host FS — only tool arguments are workspace-guarded), and egress is proxy-scoped/metered only for clients that honor the proxy env, not kernel-enforced (model keys still stay fail-closed via the sentinel). It is the development / trusted-input default; use Docker or E2B (carrier extensions on the `carriers` point) for untrusted input, isolation, or multi-tenant deploys. |
 | Models | Model providers are an extension point; core ships Anthropic + OpenAI direct clients behind one `ModelClient` interface. OpenRouter (or any router) is an extension, never core. |
 | Observability | OpenTelemetry APIs only in product code; the OTLP export target (Datadog, …) is deploy config. No vendor SDK in core. |
 | Kubernetes | Absent from core by construction. The enterprise offering later wraps core with k8s (principle 3); nothing in core may assume or import it. |
@@ -105,8 +105,8 @@ invariant holds on every backend: the sandbox reaches only the conversation's `w
 transcripts and compaction records live above it, framework-only. The workspace is the truth and
 the container is disposable cache — carriers create-or-attach, and a reaper reclaims idle
 containers. Carrier interface:
-`create / exec / mount / route / destroy` — Docker implements it in core; E2B implements it as an
-extension.
+`create / exec / mount / route / destroy` — a local temp-dir carrier is core's default; Docker and
+E2B implement it as extensions on the `carriers` point.
 
 ## Extension system
 
@@ -132,7 +132,7 @@ Manifest registers (each optional):
 | `onboarding` | Steps contributed to the workspace/pack onboarding flow. |
 | `packs` | Bundled skill packs. |
 | `models` | Model providers behind `ModelClient` (OpenRouter, local runtimes). |
-| `carriers` | Sandbox carriers (E2B, remote runners). |
+| `carriers` | Sandbox carriers — Docker, E2B, remote runners; core's default is a local temp-dir carrier. |
 | `memory` | Derivation pipeline stages (condensers, graph updaters) — see Agent loop / Memory. |
 | `indexes` | Index backends for memory/source retrieval (turbopuffer); pgvector is the core default. |
 | `hubs` | Stream hubs for multi-instance deploys (Redis). |
@@ -270,7 +270,7 @@ bundle installs OSS, on-prem, or hosted.
 | OpenRouter (any model router) | models |
 | Slack surface (ingest + writeback + attachments) | surfaces, credentials |
 | Composio connectors | connectors, credentials, routes (OAuth) |
-| E2B | carriers |
+| Docker, E2B | carriers |
 | Redis stream hub | hubs |
 | turbopuffer index | indexes |
 | GitHub / S3 source backends | sources |

@@ -85,6 +85,17 @@ class O11yConfig(BaseModel):
     otlp_endpoint: str | None = None
 
 
+class SandboxConfig(BaseModel):
+    """Which carrier runs the per-conversation sandbox. `backend` names a registered carrier — the
+    zero-dependency `local` carrier ships with core, an extension registers more (`docker`, `e2b`, a
+    remote runner) through its `carriers` Manifest point — and `serve` fails loud on a name no
+    carrier registers. Each carrier sources its own parameters (template, keys); core config knows
+    only the selected name."""
+
+    model_config = ConfigDict(extra="forbid")
+    backend: str = "local"
+
+
 class ExtConfig(BaseModel):
     """The extension store toggle. `store` names a catalog file the `selfhost ext` commands search
     and install from; omit it and the store is off — the deploy runs only what its bundle pinned."""
@@ -160,6 +171,7 @@ class Config(BaseModel):
     connect: ConnectConfig = ConnectConfig()
     memory: MemoryConfig = MemoryConfig()
     o11y: O11yConfig = O11yConfig()
+    sandbox: SandboxConfig = SandboxConfig()
     ext: ExtConfig = ExtConfig()
     sources: tuple[SourceEntry, ...] = ()
     surfaces: SurfacesConfig = SurfacesConfig()

@@ -1,26 +1,30 @@
-"""The Docker carrier: a per-conversation container reached only through the egress proxy.
+"""The Docker carrier extension: a per-conversation container reached only through the egress proxy.
 
-Create-or-attach keeps the container a disposable cache over the durable workspace — a killed
-container is recreated on the next turn from the same bind-mounted `workspace/` subtree, and the
-turn notices only latency. Every command runs through `docker exec`. The container's HTTP(S)_PROXY
-points at the egress proxy running on the host, reached at `host.docker.internal`, and carries the
-turn's run token as its basic-auth username so the proxy attributes each metered request to the
-turn; the proxy refuses any host its rules do not allow and swaps the sentinel key for the real one
-on the wire, so the raw credential never enters the sandbox."""
+Core's default is the local carrier; a deploy that sets `[sandbox] backend = "docker"` runs its
+sandboxes as sibling containers. Create-or-attach keeps the container a disposable cache over
+the durable workspace — a killed container is recreated on the next turn from the same bind-mounted
+`workspace/` subtree, and the turn notices only latency. Every command runs through `docker exec`.
+The container's HTTP(S)_PROXY points at the egress proxy running on the host, reached at
+`host.docker.internal`, and carries the turn's run token as its basic-auth username so the proxy
+attributes each metered request to the turn; the proxy refuses any host its rules do not allow and
+swaps the sentinel for the real key on the wire, so the raw credential never enters the sandbox."""
 
 import asyncio
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from selfhost.blob import BlobStore
-from selfhost.sandbox.session import (
+from selfhost.sdk.manifest import Manifest
+from selfhost.sdk.sandbox import (
     SENTINEL_MODEL_KEY,
     WORKSPACE_DIR,
+    BlobStore,
+    CarrierSpec,
     ExecResult,
     SandboxHandle,
     SandboxSpec,
 )
 
+CARRIER_NAME = "docker"
 CONTAINER_NAME_PREFIX = "selfhost-sbx-"
 CREATE_TIMEOUT_SECONDS = 120
 DEFAULT_NETWORK = "selfhost-sandbox"
@@ -147,3 +151,11 @@ class DockerCarrier:
         )
         if write[0] != 0:
             raise RuntimeError(f"CA install failed: {write[2].decode().strip()}")
+
+
+def manifest() -> Manifest:
+    return Manifest(
+        name=CARRIER_NAME,
+        version="0.1.0",
+        carriers=(CarrierSpec(name=CARRIER_NAME, factory=DockerCarrier),),
+    )

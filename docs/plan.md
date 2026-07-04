@@ -29,8 +29,9 @@ services: SQLite + filesystem blobs + in-process hub.
 
 ## U2 — sandbox + proxy + file tools
 
-- `sandbox/carrier.py` (Docker create-or-attach, async waits), `sandbox/image/` (Dockerfile: python,
-  node, ripgrep, sbx toolchain), reaper job, `jobs.py` runner.
+- `sandbox/local.py` (core default carrier: temp-dir workspace + subprocess), `extensions/{docker,e2b}`
+  (carrier extensions, create-or-attach, async waits), `sandbox/image/` (Dockerfile: python, node,
+  ripgrep, sbx toolchain), reaper job, `jobs.py` runner.
 - `sandbox/proxy/`: sole egress route (container network default-deny), sentinel swap, ScopeRule /
   InjectionRule derivation (grants only — manifests arrive U3), MeterRule stub.
 - `tools/registry.py`, `tools/context.py`, builtins `bash read write edit`.

@@ -263,18 +263,19 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, UUID | None]:
 
 
 async def _workspace_mount(blob: BlobStore, conversation_id: UUID) -> MountSpec:
-    """The container bind-mounts only the conversation's `workspace/` subtree — a sibling of the
-    transcript under `conversations/<id>/`, never the transcript itself. The Docker carrier reaches
-    the workspace as a host path, so it requires the filesystem blob backend, and the source is
-    absolute: Docker reads a relative `-v` source as a named volume, not a host directory, and a
-    relative blob root (the default config's `./blobs`) would otherwise fail at container create.
+    """The workspace is only the conversation's `workspace/` subtree — a sibling of the transcript
+    under `conversations/<id>/`, never the transcript itself. A host-path carrier (the core `local`
+    carrier's cwd, the Docker carrier's bind mount) reaches it as a host path, so it requires the
+    filesystem blob backend, and the source is absolute: Docker reads a relative `-v` source as a
+    named volume, not a host directory, and a relative blob root (the default config's `./blobs`)
+    would otherwise fail at container create.
 
-    The container runs as the non-root `sandbox` user, so the mount must be owned by it or the file
+    A container runs as the non-root `sandbox` user, so the mount must be owned by it or the file
     tools cannot write. serve creates the dir under its own uid; when serve runs as root (the bundle
     default) it holds CAP_CHOWN and hands the dir to the sandbox user. Off root — dev, where the
     mount is not uid-enforced — the chown is skipped."""
     if not isinstance(blob, FilesystemBlobStore):
-        raise RuntimeError("the docker sandbox requires a filesystem blob store for its workspace")
+        raise RuntimeError("the sandbox workspace requires a filesystem blob store")
     host_path = (blob.root / "conversations" / str(conversation_id) / "workspace").resolve()
     await asyncio.to_thread(host_path.mkdir, parents=True, exist_ok=True)
     if os.geteuid() == 0:

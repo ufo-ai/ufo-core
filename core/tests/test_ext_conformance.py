@@ -21,7 +21,14 @@ from httpx import ASGITransport, AsyncClient
 
 from selfhost.blob import FilesystemBlobStore
 from selfhost.browser.backend import BuaBackend
-from selfhost.config import BlobConfig, BrowserConfig, Config, DatabaseConfig, HubConfig
+from selfhost.config import (
+    BlobConfig,
+    BrowserConfig,
+    Config,
+    DatabaseConfig,
+    HubConfig,
+    SandboxConfig,
+)
 from selfhost.credentials import CredentialSlotUnset, CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.ext.context import (
@@ -39,7 +46,7 @@ from selfhost.ext.loader import (
     turn_subagents,
     turn_tools,
 )
-from selfhost.ext.manifest import Manifest
+from selfhost.ext.manifest import CarrierSpec, Manifest
 from selfhost.ext.surface import WRITEBACK_DELIVERED, WRITEBACK_PENDING, workspace_key
 from selfhost.governance import prompt_digest
 from selfhost.grants import GrantStore
@@ -57,11 +64,18 @@ from selfhost.memory.sources import SyncDriver
 from selfhost.models.interface import Message, ModelRequest, TextDelta
 from selfhost.models.registry import model_registry
 from selfhost.onboarding import run_onboarding_steps
+from selfhost.sandbox.local import LocalCarrier
 from selfhost.sandbox.proxy.rules import InjectionRule, MeterRule, derive_credential_rules
 from selfhost.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from selfhost.schema import tables
 from selfhost.schema.records import Agent, Turn, Usage
-from selfhost.serve import _mount_ext_routes, _mount_surfaces, _select_browser, _select_hub
+from selfhost.serve import (
+    _mount_ext_routes,
+    _mount_surfaces,
+    _select_browser,
+    _select_carrier,
+    _select_hub,
+)
 from selfhost.skills.runtime import mount_skill
 from selfhost.tools.context import SpawnResult, ToolContext
 from selfhost.transcript import Conversation, transcript_key
@@ -206,6 +220,7 @@ async def test_sample_is_discovered_via_its_entry_point() -> None:
     assert {spec.backend for spec in manifest.hubs} == {sample.HUB_BACKEND}
     assert {spec.path.name for spec in manifest.skills} == {sample.SKILL_NAME}
     assert {spec.backend for spec in manifest.browsers} == {sample.BROWSER_BACKEND}
+    assert {carrier.name for carrier in manifest.carriers} == {sample.CARRIER_NAME}
 
 
 def test_core_selects_a_manifest_contributed_hub() -> None:
@@ -268,6 +283,42 @@ async def test_sample_browser_backend_yields_a_drivable_surface() -> None:
         "args": {"url": "https://x.test"},
     }
     await surface.aclose()
+
+
+def _carrier_config(backend: str) -> Config:
+    return Config(
+        database=DatabaseConfig(url="sqlite+aiosqlite:///carrier.db"),
+        blob=BlobConfig(backend="filesystem", root=Path("blobs")),
+        sandbox=SandboxConfig(backend=backend),
+    )
+
+
+def test_config_backend_defaults_to_the_built_in_local_carrier() -> None:
+    assert isinstance(_select_carrier(_carrier_config("local"), ()), LocalCarrier)
+
+
+def test_config_backend_selects_a_manifest_contributed_carrier() -> None:
+    """The carriers seam end to end: the sample registers a carrier through its Manifest, and with
+    `[sandbox] backend` naming it `serve` builds exactly that carrier — a deploy swaps the sandbox
+    backend to an extension's without core naming it."""
+    manifest = _sample_manifest()
+    carrier = _select_carrier(_carrier_config(sample.CARRIER_NAME), (manifest,))
+    assert isinstance(carrier, sample.SampleCarrier)
+
+
+def test_an_unregistered_backend_fails_loud() -> None:
+    with pytest.raises(RuntimeError, match="not a registered carrier"):
+        _select_carrier(_carrier_config("nope"), ())
+
+
+def test_a_carrier_colliding_with_a_built_in_fails_loud() -> None:
+    collide = Manifest(
+        name="collide",
+        version="0",
+        carriers=(CarrierSpec(name="local", factory=sample.SampleCarrier),),
+    )
+    with pytest.raises(RuntimeError, match="two carriers register backend"):
+        _select_carrier(_carrier_config("local"), (collide,))
 
 
 def test_pack_prompt_section_reaches_the_rendered_system_prompt() -> None:

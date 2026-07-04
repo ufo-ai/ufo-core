@@ -18,6 +18,7 @@ from uuid import uuid4
 import pytest
 import sqlalchemy as sa
 from pydantic import BaseModel
+from selfhost_ext_docker import DockerCarrier
 
 from selfhost.artifact_token import verify_artifact_token
 from selfhost.blob import FilesystemBlobStore
@@ -37,7 +38,6 @@ from selfhost.loop.prompts.render import rendered_prompt
 from selfhost.loop.transcript import Transcript
 from selfhost.models.interface import ModelEvent, ModelRequest, ToolUseBlock
 from selfhost.sandbox import session as session_module
-from selfhost.sandbox.carrier import DockerCarrier
 from selfhost.sandbox.session import (
     SANDBOX_GID,
     SANDBOX_UID,

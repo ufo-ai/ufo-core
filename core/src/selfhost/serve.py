@@ -53,7 +53,7 @@ from selfhost.models.openai import openai_sdk_client
 from selfhost.models.registry import model_registry
 from selfhost.o11y import init_o11y, log
 from selfhost.runtime_instance import BootGuard, Heartbeat
-from selfhost.sandbox.carrier import DockerCarrier
+from selfhost.sandbox.local import LocalCarrier
 from selfhost.sandbox.proxy.rules import (
     Rule,
     ScopeRule,
@@ -61,7 +61,7 @@ from selfhost.sandbox.proxy.rules import (
     derive_model_rules,
 )
 from selfhost.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
-from selfhost.sandbox.session import ProxyEndpoint
+from selfhost.sandbox.session import Carrier, ProxyEndpoint
 from selfhost.schema import tables
 from selfhost.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION
 from selfhost.surfaces.admission import Admission, AdmissionInvoker
@@ -118,7 +118,7 @@ def run() -> None:
             config=config,
             blob=blob,
             hub=hub,
-            carrier=DockerCarrier(),
+            carrier=_select_carrier(config, manifests),
             browser=_select_browser(config, manifests, workspace_id, credentials),
             proxy=_egress_proxy(asyncio.run(_resolver(config, credentials))),
             dbos=dbos_client,
@@ -217,6 +217,27 @@ def _launch_jobs(
 async def _sole_workspace_id() -> UUID:
     async with workspace_tx() as connection:
         return (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
+
+
+def _select_carrier(config: Config, manifests: tuple[Manifest, ...]) -> Carrier:
+    """The one sandbox backend this process runs, chosen by `[sandbox] backend`: core's default
+    `local` carrier plus every carrier an extension contributes via its `carriers` Manifest point
+    (`docker`, `e2b`, a remote runner). An extension name that collides with the built-in or another
+    extension fails loud, and a backend name no carrier registers fails loud — so the selected name
+    resolves to exactly one factory, built once here and held as `Runtime.carrier`."""
+    factories: dict[str, Callable[[], Carrier]] = {"local": LocalCarrier}
+    for manifest in manifests:
+        for spec in manifest.carriers:
+            if spec.name in factories:
+                raise RuntimeError(f"two carriers register backend {spec.name!r}")
+            factories[spec.name] = spec.factory
+    factory = factories.get(config.sandbox.backend)
+    if factory is None:
+        raise RuntimeError(
+            f"sandbox backend {config.sandbox.backend!r} is not a registered carrier "
+            f"(have {sorted(factories)})"
+        )
+    return factory()
 
 
 def _source_backends(manifests: tuple[Manifest, ...]) -> dict[str, SourceBackend]:

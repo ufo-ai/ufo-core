@@ -31,7 +31,7 @@ Working against the old repo:
 | `metalcraft_servers/sandbox_proxy/{proxy,server}.py` (minus kubectl mint), `metalcraft_servers/egress_proxy/server.py`, `metalcraft_store/egress.py` | `sandbox/proxy/` | U2 | MERGE into one proxy: sentinel swap, host/account scoping, wire metering; rules derived, no register API |
 | `metalcraft_agent/sandbox/workspace.py`, `executor/sandbox_fs_mount.py`, `metalcraft_store/sandbox_fs_creds.py` | `sandbox/` mount (S3 backend) | U2 | filesystem backend = plain bind mount (new); keep `mountpoint -q` health check |
 | `metalcraft_agent/sandbox/{sbx,sbxfs}` (in-sandbox toolchain), image recipe | `sandbox/image/` | U2 | rebuild Dockerfile fresh; two traps learned on e2b: build-time env vars don't reach runtime (set ENV in the Dockerfile), and per-step USER matters (apt fails non-root) |
-| `metalcraft_agent/sandbox/local.py`, `executor/executor_sandbox.py` | `sandbox/carrier.py` (Docker) | U2 | replace the sync `time.sleep` poll (old event-loop blocker) with async wait |
+| `metalcraft_agent/sandbox/local.py`, `executor/executor_sandbox.py` | `sandbox/local.py` (core default), `extensions/docker/`, `extensions/e2b/` | U2 | local carrier is the zero-dependency core default; Docker/E2B are carrier extensions; async wait replaces the sync `time.sleep` poll |
 | `metalcraft_store/secrets.py` | `credentials.py` | U3 | k8s Secrets → encrypted PG rows; slot-scoped access |
 | `metalcraft_brain/{chunk,embed,fusion,index}.py` | `memory/{embed,index}.py` | U4 | IndexBackend seam ports intact; pgvector impl stays |
 | `metalcraft_brain/{store_service,store_writes,store_work,store_reindex,store_distill}.py` | `memory/service.py` + jobs | U4 | Store CRD → plain workspace memory; `{subject, shared}` recall filter stays |

@@ -48,6 +48,13 @@ from selfhost.sdk.manifest import (
     SubagentProfile,
 )
 from selfhost.sdk.models import ModelEvent, ModelPrice, ModelRequest, TextDelta, Usage
+from selfhost.sdk.sandbox import (
+    BlobStore,
+    CarrierSpec,
+    ExecResult,
+    SandboxHandle,
+    SandboxSpec,
+)
 from selfhost.sdk.sources import SHARED_SUBJECT, Page, SourceAuth, SyncResult
 from selfhost.sdk.surfaces import SurfaceContext, SurfaceSpec, Writeback
 from selfhost.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
@@ -105,6 +112,8 @@ SKILL_SCRIPT = "probe.py"
 SKILL_SCRIPT_MARKER = "sample-skill-probe-ok"
 SKILL_DIR = Path(__file__).parent / "skills" / SKILL_NAME
 BROWSER_BACKEND = "sample_browser"
+CARRIER_NAME = "sample_carrier"
+CARRIER_CONTAINER = "sample-container"
 
 
 NOTE_TABLE = sa.Table(
@@ -465,6 +474,29 @@ def _browser_reply(action: str, args: dict[str, JsonValue]) -> dict[str, JsonVal
     return {"action": action, "backend": BROWSER_BACKEND, "args": args}
 
 
+class SampleCarrier:
+    """A trivial in-process carrier the probe registers so `serve`'s backend selection has a
+    manifest-contributed carrier to choose. It implements the whole Carrier protocol without a real
+    container: `exec` echoes the argv it received (so a selection test can prove the carrier it got
+    is this one), `export` copies the requested path into the blob store, and create/destroy are
+    inert. It proves the `carriers` seam — that core selects an extension's carrier — never a real
+    sandbox; the Docker and e2b carriers keep that proof."""
+
+    async def create(self, spec: SandboxSpec) -> SandboxHandle:
+        return SandboxHandle(conversation_id=spec.conversation_id, container_id=CARRIER_CONTAINER)
+
+    async def exec(
+        self, handle: SandboxHandle, argv: tuple[str, ...], stdin: bytes, timeout_s: int
+    ) -> ExecResult:
+        return ExecResult(stdout=" ".join(argv), stderr="", exit_code=0)
+
+    async def export(self, handle: SandboxHandle, path: str, blob: BlobStore, key: str) -> None:
+        await blob.put(key, path.encode())
+
+    async def destroy(self, handle: SandboxHandle) -> None:
+        return None
+
+
 def manifest() -> Manifest:
     return Manifest(
         name=NAME,
@@ -554,4 +586,5 @@ def manifest() -> Manifest:
                 backend=BROWSER_BACKEND, build=lambda credentials: SampleBrowserBackend()
             ),
         ),
+        carriers=(CarrierSpec(name=CARRIER_NAME, factory=SampleCarrier),),
     )
