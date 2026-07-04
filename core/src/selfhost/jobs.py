@@ -149,9 +149,31 @@ class SandboxReaper:
 
     async def run(self) -> None:
         for conversation_id in await self._idle_conversations():
+            if await self._now_active(conversation_id):
+                continue
             await self.carrier.destroy(
                 SandboxHandle(conversation_id=conversation_id, container_id="")
             )
+
+    async def _now_active(self, conversation_id: UUID) -> bool:
+        """A fresh point check immediately before destroy: has the conversation admitted an
+        in-flight turn since the idle snapshot? The snapshot and the out-of-band carrier `destroy`
+        don't share a transaction, so a turn admitted between them would otherwise have its
+        just-created sandbox reaped mid-run, degrading that turn's tool calls. This re-check shrinks
+        the window to the check-to-destroy gap; the negligible residual self-heals — the next turn's
+        create-or-attach rebuilds the container from the durable workspace."""
+        async with workspace_tx() as connection:
+            found = (
+                await connection.execute(
+                    sa.select(tables.turn.c.id)
+                    .where(
+                        tables.turn.c.conversation_id == conversation_id,
+                        tables.turn.c.status.in_(NON_TERMINAL_STATUSES),
+                    )
+                    .limit(1)
+                )
+            ).first()
+        return found is not None
 
     async def _idle_conversations(self) -> tuple[UUID, ...]:
         cutoff = datetime.now(UTC) - timedelta(seconds=SANDBOX_IDLE_TTL_SECONDS)

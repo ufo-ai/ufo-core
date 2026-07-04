@@ -115,6 +115,46 @@ async def test_reaper_skips_a_conversation_with_an_in_flight_turn(db: None) -> N
     assert carrier.destroyed == [idle]
 
 
+async def test_reaper_rechecks_and_skips_a_conversation_that_went_active_after_the_snapshot(
+    db: None,
+) -> None:
+    """The idle snapshot and the out-of-band carrier destroy don't share a transaction, so a
+    conversation that admits a turn between them must not have its just-created sandbox reaped. The
+    per-destroy re-check catches it — here a racing carrier admits an in-flight turn on the other
+    idle conversation during the first destroy, and the reaper skips it (order-independent)."""
+    workspace_id, agent_id = await _workspace_agent()
+    a = await _conversation(workspace_id, agent_id, "done", IDLE_AGE_SECONDS)
+    b = await _conversation(workspace_id, agent_id, "done", IDLE_AGE_SECONDS)
+
+    async def _go_active(conversation_id: UUID) -> None:
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.turn).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    conversation_id=conversation_id,
+                    agent_id=agent_id,
+                    seq=2,
+                    status="running",
+                    inbound="y",
+                    terminal=None,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+
+    class _RacingCarrier(RecordingCarrier):
+        async def destroy(self, handle: SandboxHandle) -> None:
+            first = not self.destroyed
+            await super().destroy(handle)
+            if first:
+                await _go_active(b if handle.conversation_id == a else a)
+
+    carrier = _RacingCarrier()
+    await SandboxReaper(carrier=carrier).run()
+    assert len(carrier.destroyed) == 1
+
+
 async def test_reaper_destroy_on_a_never_created_sandbox_is_a_no_op(db: None) -> None:
     """The real local carrier holds nothing for a conversation whose turn never ran, so reaping it
     is a harmless cleanup that never raises — idempotency proven against the real carrier."""
