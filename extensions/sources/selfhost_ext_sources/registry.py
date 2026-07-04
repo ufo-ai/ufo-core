@@ -9,7 +9,11 @@ from selfhost_ext_sources.asana import AsanaConnector
 from selfhost_ext_sources.confluence import ConfluenceConnector
 from selfhost_ext_sources.connector import Connector
 from selfhost_ext_sources.github import GitHubConnector
+from selfhost_ext_sources.gmail import GmailConnector
+from selfhost_ext_sources.google_calendar import GoogleCalendarConnector
 from selfhost_ext_sources.google_docs import GoogleDocsConnector
+from selfhost_ext_sources.google_drive import GoogleDriveConnector
+from selfhost_ext_sources.google_sheets import GoogleSheetsConnector
 from selfhost_ext_sources.jira import JiraConnector
 from selfhost_ext_sources.linear import LinearConnector
 from selfhost_ext_sources.notion import NotionConnector
@@ -24,4 +28,8 @@ CONNECTORS: dict[str, type[Connector]] = {
     JiraConnector.name: JiraConnector,
     ConfluenceConnector.name: ConfluenceConnector,
     GoogleDocsConnector.name: GoogleDocsConnector,
+    GmailConnector.name: GmailConnector,
+    GoogleDriveConnector.name: GoogleDriveConnector,
+    GoogleSheetsConnector.name: GoogleSheetsConnector,
+    GoogleCalendarConnector.name: GoogleCalendarConnector,
 }
