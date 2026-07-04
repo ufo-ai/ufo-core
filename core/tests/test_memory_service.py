@@ -200,7 +200,17 @@ def test_fuse_recall_blends_cosine_to_break_a_rrf_tie() -> None:
         Hit("a", OWNER_KIND_MEMORY_ITEM, "A", SHARED_SUBJECT, 0, "alpha", 0.4),
     )
     assert [fused.owner_id for fused in fuse_hits(lexical, vector, 10)] == ["A", "B"]
-    assert [fused.owner_id for fused in fuse_recall(lexical, vector, 10)] == ["B", "A"]
+    assert [fused.owner_id for fused in fuse_recall(lexical, vector, (), 10)] == ["B", "A"]
+
+
+def test_fuse_recall_folds_in_the_un_embedded_tail_leg() -> None:
+    """The un-embedded tail is a third, lexical-only leg: a row present only in the tail fuses into
+    the ranking (no index hit needed), while an indexed row keeps its index-hit ranking."""
+    lexical = (Hit("a", OWNER_KIND_MEMORY_ITEM, "A", SHARED_SUBJECT, 0, "alpha", 4.0),)
+    vector = (Hit("a", OWNER_KIND_MEMORY_ITEM, "A", SHARED_SUBJECT, 0, "alpha", 0.9),)
+    tail = (Hit("tail:T", OWNER_KIND_MEMORY_ITEM, "T", SHARED_SUBJECT, 0, "fresh", 2.0),)
+    owners = [fused.owner_id for fused in fuse_recall(lexical, vector, tail, 10)]
+    assert set(owners) == {"A", "T"}
 
 
 async def test_recall_blend_promotes_the_semantically_closer_fact(clean: None) -> None:
@@ -220,6 +230,42 @@ async def test_recall_blend_promotes_the_semantically_closer_fact(clean: None) -
         "budget review notes", frozenset({SHARED_SUBJECT}), 10
     )
     assert [item.memory_id for item in recalled] == [close, far]
+
+
+async def test_fresh_fact_recalls_before_indexing_then_via_the_index(clean: None) -> None:
+    """Immediacy: a just-committed fact is recallable before the index job derives its chunks — the
+    un-embedded tail's lexical leg surfaces it. After the indexer stamps its digest, the index path
+    serves it and the tail (embedding_digest IS NULL) no longer holds it, so it counts once."""
+    workspace_id = await _workspace()
+    probe = vec((7, 1.0))
+    embed = StubEmbed(probe)
+    store = _store(embed, workspace_id)
+    await store.commit(MemoryWrite(subject=SHARED_SUBJECT, body="the safe combination is 1234"))
+
+    before = await store.recall("safe combination", frozenset({SHARED_SUBJECT}), 10)
+    assert len(before) == 1
+    assert "1234" in before[0].body
+
+    await MemoryIndexer(
+        index=store.index, embed=embed, transaction=workspace_tx, chunker=TextChunker()
+    ).run()
+    after = await store.recall("safe combination", frozenset({SHARED_SUBJECT}), 10)
+    assert len(after) == 1
+    assert "1234" in after[0].body
+
+
+async def test_untail_leg_respects_subject_scoping(clean: None) -> None:
+    """The tail leg is workspace + subject scoped like the index legs: an un-embedded fact in one
+    member's subject is invisible to another member's recall, and never leaks cross-member."""
+    workspace_id = await _workspace()
+    alice, bob = uuid4(), uuid4()
+    store = _store(StubEmbed(vec((0, 1.0))), workspace_id)
+    await store.commit(
+        MemoryWrite(subject=member_subject(alice), body="alices locker code is 77")
+    )
+    assert await store.recall("locker code", recall_subjects(bob), 10) == ()
+    mine = await store.recall("locker code", recall_subjects(alice), 10)
+    assert len(mine) == 1 and "77" in mine[0].body
 
 
 async def test_recall_returns_items_scoped_to_subject(clean: None) -> None:

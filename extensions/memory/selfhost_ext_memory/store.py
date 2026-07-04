@@ -14,10 +14,12 @@ internal.
 
 import hashlib
 import logging
+import re
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from itertools import chain
 from typing import Literal
 from uuid import UUID, uuid5
 
@@ -43,6 +45,7 @@ from selfhost.sdk.sources import SHARED_SUBJECT, PageChange, PageFeed, member_su
 RRF_K = 60
 RRF_WEIGHT = 0.7
 COSINE_WEIGHT = 0.3
+TAIL_SCAN_MAX = 200
 MEMORY_ITEM_NAMESPACE = UUID("32492d08-3cb7-59ac-8962-b2e384f024fc")
 DUE_BATCH_MAX_ITEMS = 200
 EMBED_CLAIM_LEASE_SECONDS = 300
@@ -144,22 +147,22 @@ class Fused:
 
 
 def _fuse(
-    lexical: tuple[Hit, ...], vector: tuple[Hit, ...]
+    legs: tuple[tuple[Hit, ...], ...], cosine_leg: tuple[Hit, ...]
 ) -> dict[str, tuple[float, float, str]]:
     """Per owning row: its reciprocal-rank-fusion score (K=60) with the matched snippet, and its raw
-    vector-leg cosine. Each leg ranks its chunk hits, a chunk's RRF sums 1/(K+rank) across the legs
-    it placed in, and a row takes its best-scoring chunk (that chunk's text rides along); the cosine
-    is the row's largest raw vector-leg score — the continuous semantic-closeness signal recall
-    blends into its rank."""
+    vector-leg cosine. Each leg ranks its own chunk hits, a chunk's RRF sums 1/(K+rank) across the
+    legs it placed in, and a row takes its best-scoring chunk (that chunk's text rides along); the
+    cosine is the row's largest score in `cosine_leg` — the continuous semantic-closeness signal
+    recall blends into its rank."""
     ranks = tuple(
         {hit.chunk_digest: rank for rank, hit in enumerate(leg, start=1) if hit.score > 0}
-        for leg in (lexical, vector)
+        for leg in legs
     )
     cosine: dict[str, float] = {}
-    for hit in vector:
+    for hit in cosine_leg:
         cosine[hit.owner_id] = max(cosine.get(hit.owner_id, 0.0), hit.score)
     best: dict[str, tuple[float, str]] = {}
-    for hit in (*lexical, *vector):
+    for hit in chain.from_iterable(legs):
         rrf = sum(
             1.0 / (RRF_K + leg[hit.chunk_digest]) for leg in ranks if hit.chunk_digest in leg
         )
@@ -177,20 +180,22 @@ def fuse_hits(
 ) -> tuple[Fused, ...]:
     """Pure reciprocal-rank fusion collapsed to one score per owning row — source-page search's
     ranking, where the fused rank across the lexical and vector legs is the whole signal."""
-    fused = _fuse(lexical, vector)
+    fused = _fuse((lexical, vector), vector)
     ranked = sorted(fused.items(), key=lambda item: item[1][0], reverse=True)[:limit]
     return tuple(Fused(owner_id, rrf, text) for owner_id, (rrf, _cosine, text) in ranked)
 
 
 def fuse_recall(
-    lexical: tuple[Hit, ...], vector: tuple[Hit, ...], limit: int
+    lexical: tuple[Hit, ...], vector: tuple[Hit, ...], tail: tuple[Hit, ...], limit: int
 ) -> tuple[Fused, ...]:
     """gbrain cosine re-score blend: `RRF_WEIGHT·(normalized RRF) + COSINE_WEIGHT·(raw query-chunk
     cosine)`, so a semantically closer row is promoted by a continuous signal, not only its fused
     rank — the score recall ranks by before recency decay. The RRF is normalized by the top fused
     score across rows; the cosine is the row's best vector-leg score (0 when the query never
-    embedded, degrading the blend to normalized RRF alone)."""
-    fused = _fuse(lexical, vector)
+    embedded, degrading the blend to normalized RRF alone). `tail` is a third, lexical-only leg over
+    the un-embedded rows the index has not chunked yet — it carries no cosine, so a just-committed
+    fact ranks on normalized RRF alone until the index job serves it."""
+    fused = _fuse((lexical, vector, tail), vector)
     top_rrf = max((rrf for rrf, _cosine, _text in fused.values()), default=0.0) or 1.0
     scored = [
         (owner_id, RRF_WEIGHT * (rrf / top_rrf) + COSINE_WEIGHT * cosine, text)
@@ -327,14 +332,15 @@ class MemoryStore:
         start: datetime | None = None,
         end: datetime | None = None,
     ) -> tuple[Recalled, ...]:
-        """Fuse the index legs with the cosine re-score blend, read the surviving items back, then
-        rank by recency decay (fact half-lives), cap per-class diversity, and rewrite episodic hits
-        to topic pointers. An optional half-open `[start, end)` bound on `created_at` restricts
-        recall to a window; the index never sees the bound, so the filter lands in the row read-back
-        alongside the superseded drop."""
-        enriched = await self._enrich(fuse_recall(
-            *await self._legs(query, subjects, OWNER_KIND_MEMORY_ITEM, limit), limit
-        ), start, end)
+        """Fuse the index legs with the cosine re-score blend and a lexical leg over the un-embedded
+        tail, read the surviving items back, then rank by recency decay (fact half-lives), cap
+        per-class diversity, and rewrite episodic hits to topic pointers. The tail leg makes a
+        just-committed fact recallable before the index job derives its chunks. An optional
+        half-open `[start, end)` bound on `created_at` restricts recall to a window; the index never
+        sees the bound, so the filter lands in the row read-back alongside the superseded drop."""
+        lexical, vector = await self._legs(query, subjects, OWNER_KIND_MEMORY_ITEM, limit)
+        tail = await self._untail_leg(query, subjects, limit)
+        enriched = await self._enrich(fuse_recall(lexical, vector, tail, limit), start, end)
         now = datetime.now(UTC)
         ranked = tuple(
             sorted(
@@ -395,6 +401,47 @@ class MemoryStore:
             await self.index.vector(embedding, subjects, owner_kind, limit) if embedding else ()
         )
         return lexical, vector
+
+    async def _untail_leg(
+        self, query: str, subjects: frozenset[str], limit: int
+    ) -> tuple[Hit, ...]:
+        """A lexical leg over the un-embedded tail — memory_item rows the index job has not chunked
+        yet (`embedding_digest` NULL) — so a just-committed fact is recallable within the indexer's
+        tick rather than only after it. Scored in-process by query-term count over the body (gbrain
+        `lexical_score`); the scan is bounded to the newest TAIL_SCAN_MAX rows so a backlogged
+        indexer cannot unbound it. Once a row is indexed it leaves this set and the index legs serve
+        it, so the tail never double-counts an indexed row."""
+        terms = [term for term in re.split(r"\W+", query.lower()) if term]
+        if not terms or not subjects:
+            return ()
+        async with self.transaction() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(memory_item.c.id, memory_item.c.subject, memory_item.c.body)
+                    .where(
+                        memory_item.c.workspace_id == self.workspace_id,
+                        memory_item.c.subject.in_(subjects),
+                        memory_item.c.embedding_digest.is_(None),
+                        memory_item.c.superseded_by.is_(None),
+                    )
+                    .order_by(memory_item.c.created_at.desc())
+                    .limit(TAIL_SCAN_MAX)
+                )
+            ).mappings().all()
+        scored = tuple(
+            Hit(
+                chunk_digest=f"tail:{row['id']}",
+                owner_kind=OWNER_KIND_MEMORY_ITEM,
+                owner_id=str(row["id"]),
+                subject=row["subject"],
+                ordinal=0,
+                text=row["body"],
+                score=float(matches),
+            )
+            for row in rows
+            if (matches := sum(row["body"].lower().count(term) for term in terms)) > 0
+        )
+        return tuple(sorted(scored, key=lambda hit: hit.score, reverse=True)[:limit])
 
     async def _embed_query(self, query: str) -> tuple[float, ...]:
         if not query.strip():
