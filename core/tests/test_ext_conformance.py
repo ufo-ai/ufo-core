@@ -20,7 +20,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from selfhost.blob import FilesystemBlobStore
-from selfhost.config import BlobConfig, Config, DatabaseConfig
+from selfhost.config import BlobConfig, Config, DatabaseConfig, HubConfig
 from selfhost.credentials import CredentialSlotUnset, CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.ext.context import (
@@ -35,6 +35,7 @@ from selfhost.ext.manifest import Manifest
 from selfhost.ext.surface import WRITEBACK_DELIVERED, WRITEBACK_PENDING, workspace_key
 from selfhost.governance import prompt_digest
 from selfhost.grants import GrantStore
+from selfhost.hub import InProcessHub
 from selfhost.jobs import JobRunner, bindings_from
 from selfhost.loop.prompts.render import render_system_prompt
 from selfhost.loop.subagents import SubagentRegistry, subagent_system_prompt
@@ -52,7 +53,7 @@ from selfhost.sandbox.proxy.rules import InjectionRule, MeterRule, derive_creden
 from selfhost.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from selfhost.schema import tables
 from selfhost.schema.records import Agent, Turn, Usage
-from selfhost.serve import _mount_ext_routes, _mount_surfaces
+from selfhost.serve import _mount_ext_routes, _mount_surfaces, _select_hub
 from selfhost.tools.context import SpawnResult, ToolContext
 from selfhost.transcript import Conversation, transcript_key
 
@@ -168,6 +169,28 @@ async def test_sample_is_discovered_via_its_entry_point() -> None:
     assert {surface.name for surface in manifest.surfaces} == {sample.SURFACE_NAME}
     assert {source.backend for source in manifest.sources} == {sample.SOURCE_BACKEND}
     assert {spec.name for spec in manifest.indexes} == {sample.INDEX_BACKEND}
+    assert {spec.backend for spec in manifest.hubs} == {sample.HUB_BACKEND}
+
+
+def test_core_selects_a_manifest_contributed_hub() -> None:
+    """The `hubs` seam end to end: core's boot-time selection knows only the in-process default, so
+    resolving the sample's backend name proves the Manifest `hubs` point flowed into selection.
+    Selecting a name no manifest registers, and two manifests claiming one name, both fail loud."""
+    manifest = _sample_manifest()
+
+    def _config(backend: str) -> Config:
+        return Config(
+            database=DatabaseConfig(url="sqlite+aiosqlite:///dev.db"),
+            blob=BlobConfig(backend="filesystem", root=Path()),
+            hub=HubConfig(backend=backend),
+        )
+
+    assert isinstance(_select_hub(_config("in_process"), ()), InProcessHub)
+    assert isinstance(_select_hub(_config(sample.HUB_BACKEND), (manifest,)), InProcessHub)
+    with pytest.raises(RuntimeError, match="no extension registers it"):
+        _select_hub(_config(sample.HUB_BACKEND), ())
+    with pytest.raises(RuntimeError, match="two extensions register hub backend"):
+        _select_hub(_config(sample.HUB_BACKEND), (manifest, manifest))
 
 
 def test_pack_prompt_section_reaches_the_rendered_system_prompt() -> None:

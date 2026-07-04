@@ -3,7 +3,7 @@
 import asyncio
 import os
 import threading
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
@@ -17,7 +17,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from selfhost.blob import BlobStore, blob_store_for
-from selfhost.config import Config, load_config
+from selfhost.config import IN_PROCESS_BACKEND, Config, load_config
 from selfhost.credentials import CredentialStore
 from selfhost.db import init_db, workspace_tx
 from selfhost.ext.context import context_for
@@ -108,7 +108,7 @@ def run() -> None:
         postgres=postgres,
     )
     asyncio.run(register_sources(config.sources))
-    hub = InProcessHub()
+    hub = _select_hub(config, manifests)
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
     init_runtime(
         Runtime(
@@ -227,6 +227,27 @@ def _source_backends(manifests: tuple[Manifest, ...]) -> dict[str, SourceBackend
                 )
             backends[provider.backend] = provider.source
     return backends
+
+
+def _select_hub(config: Config, manifests: tuple[Manifest, ...]) -> Hub:
+    """The process-wide live-frame hub the deploy selects: core's in-process default, or a backend
+    an extension registers through its Manifest `hubs` point built from `config.hub.url`. Two
+    extensions claiming one backend name fail loud, as does selecting a name no extension registers,
+    so the running hub resolves to exactly one implementation."""
+    builders: dict[str, Callable[[str | None], Hub]] = {
+        IN_PROCESS_BACKEND: lambda _url: InProcessHub()
+    }
+    for manifest in manifests:
+        for spec in manifest.hubs:
+            if spec.backend in builders:
+                raise RuntimeError(f"two extensions register hub backend {spec.backend!r}")
+            builders[spec.backend] = spec.build
+    build = builders.get(config.hub.backend)
+    if build is None:
+        raise RuntimeError(
+            f"config selects hub backend {config.hub.backend!r} but no extension registers it"
+        )
+    return build(config.hub.url)
 
 
 def _mount_ext_routes(

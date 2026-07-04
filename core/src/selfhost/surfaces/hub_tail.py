@@ -21,21 +21,27 @@ TERMINAL_POLL_SECONDS = 1.0
 PARK_NOTICE = "This turn is parked: over a spend cap. It resumes when the cap is raised."
 
 
-async def tail_frames(hub: Hub, turn_id: UUID) -> AsyncIterator[LiveFrame]:
-    """Yield a turn's live frames until it ends — a Terminal, or a Parked hold — whether the turn is
-    still running or already committed when the caller attaches. The caller serializes each frame
-    for its own transport."""
-    frames: asyncio.Queue[LiveFrame] = asyncio.Queue()
-    pump = asyncio.ensure_future(_pump(hub, turn_id, frames))
+async def tail_frames(
+    hub: Hub, turn_id: UUID, since: str = ""
+) -> AsyncIterator[tuple[str, LiveFrame]]:
+    """Yield a turn's live frames, each with its cursor, until it ends — a Terminal, or a Parked
+    hold — whether the turn is still running or already committed when the caller attaches. A
+    reconnecting caller passes the last cursor it saw as `since`: the hub resumes gaplessly from
+    there when it still covers that cursor, else the tail redraws from the start of the retained
+    ring. Frames sourced from the durable poll carry no cursor (the stream ends on them). The caller
+    serializes each frame for its own transport."""
+    frames: asyncio.Queue[tuple[str, LiveFrame]] = asyncio.Queue()
+    start = since if since and await hub.covers(turn_id, since) else ""
+    pump = asyncio.ensure_future(_pump(hub, turn_id, start, frames))
     poll = asyncio.ensure_future(_poll_status(turn_id, frames))
     try:
         stored = await turn_status_frame(turn_id)
         if stored is not None:
-            yield stored
+            yield "", stored
             return
         while True:
-            frame = await frames.get()
-            yield frame
+            cursor, frame = await frames.get()
+            yield cursor, frame
             if isinstance(frame, Terminal | Parked):
                 return
     finally:
@@ -43,17 +49,19 @@ async def tail_frames(hub: Hub, turn_id: UUID) -> AsyncIterator[LiveFrame]:
         poll.cancel()
 
 
-async def _pump(hub: Hub, turn_id: UUID, frames: asyncio.Queue[LiveFrame]) -> None:
-    async for frame in hub.subscribe(turn_id):
-        await frames.put(frame)
+async def _pump(
+    hub: Hub, turn_id: UUID, since: str, frames: asyncio.Queue[tuple[str, LiveFrame]]
+) -> None:
+    async for item in hub.subscribe(turn_id, since):
+        await frames.put(item)
 
 
-async def _poll_status(turn_id: UUID, frames: asyncio.Queue[LiveFrame]) -> None:
+async def _poll_status(turn_id: UUID, frames: asyncio.Queue[tuple[str, LiveFrame]]) -> None:
     while True:
         await asyncio.sleep(TERMINAL_POLL_SECONDS)
         frame = await turn_status_frame(turn_id)
         if frame is not None:
-            await frames.put(frame)
+            await frames.put(("", frame))
             return
 
 

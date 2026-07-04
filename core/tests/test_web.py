@@ -43,13 +43,13 @@ STREAM_TIMEOUT_SECONDS = 30
 
 
 def test_sse_tags_tool_and_skill_activity_frames() -> None:
-    tool = _sse(ToolCall(tool="bash", preview='{"command":"ls"}'))
-    assert tool.startswith(b"event: tool\ndata: ")
+    tool = _sse("7", ToolCall(tool="bash", preview='{"command":"ls"}'))
+    assert tool.startswith(b"id: 7\nevent: tool\ndata: ")
     assert json.loads(tool.split(b"data: ", 1)[1]) == {
         "tool": "bash",
         "preview": '{"command":"ls"}',
     }
-    skill = _sse(SkillLoad(skill="demo"))
+    skill = _sse("", SkillLoad(skill="demo"))
     assert skill.startswith(b"event: skill\ndata: ")
     assert json.loads(skill.split(b"data: ", 1)[1]) == {"skill": "demo"}
 

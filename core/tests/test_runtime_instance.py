@@ -7,7 +7,7 @@ import pytest
 import sqlalchemy as sa
 
 from selfhost import runtime_instance
-from selfhost.config import BlobConfig, Config, DatabaseConfig
+from selfhost.config import BlobConfig, Config, DatabaseConfig, HubConfig
 from selfhost.db import workspace_tx
 from selfhost.runtime_instance import (
     STALE_AFTER_SECONDS,
@@ -89,9 +89,18 @@ async def _row_live(instance_id: UUID) -> bool:
     return row is not None
 
 
+def _shared_hub_config() -> Config:
+    return Config(
+        database=DatabaseConfig(url="postgresql+asyncpg://u:p@h:5432/db"),
+        blob=BlobConfig(backend="s3", bucket="b"),
+        hub=HubConfig(backend="redis", url="redis://cache:6379/0"),
+    )
+
+
 def test_fingerprint_names_the_backend_selection() -> None:
     assert fingerprint_of(_production_config()) == PRODUCTION_FINGERPRINT
     assert fingerprint_of(_dev_config()) == "db=sqlite;blob=filesystem;hub=in_process"
+    assert fingerprint_of(_shared_hub_config()) == "db=postgres;blob=s3;hub=redis"
 
 
 async def test_first_instance_admits_and_records_its_row(db: None) -> None:
@@ -105,7 +114,7 @@ async def test_dev_default_instance_refuses_when_a_peer_is_live(db: None) -> Non
     workspace_id = await _workspace()
     await _insert_instance(workspace_id, heartbeat_age_seconds=0)
     guard = BootGuard(config=_dev_config(), workspace_id=workspace_id, instance_id=uuid4())
-    with pytest.raises(RuntimeError, match="dev default"):
+    with pytest.raises(RuntimeError, match="in-process hub"):
         await guard.admit()
     assert not await _row_present(guard.instance_id)
 
@@ -123,6 +132,30 @@ async def test_a_second_live_instance_is_refused_even_with_production_backends(d
     await _insert_instance(workspace_id, heartbeat_age_seconds=0)
     guard = BootGuard(config=_production_config(), workspace_id=workspace_id, instance_id=uuid4())
     with pytest.raises(RuntimeError, match="in-process hub"):
+        await guard.admit()
+    assert not await _row_present(guard.instance_id)
+
+
+async def test_a_shared_hub_lifts_the_single_instance_refusal(db: None) -> None:
+    workspace_id = await _workspace()
+    await _insert_instance(workspace_id, heartbeat_age_seconds=0)
+    guard = BootGuard(
+        config=_shared_hub_config(), workspace_id=workspace_id, instance_id=uuid4()
+    )
+    await guard.admit()
+    assert await _row_present(guard.instance_id)
+
+
+async def test_a_shared_hub_with_a_dev_default_db_or_blob_still_refuses(db: None) -> None:
+    workspace_id = await _workspace()
+    await _insert_instance(workspace_id, heartbeat_age_seconds=0)
+    config = Config(
+        database=DatabaseConfig(url="sqlite+aiosqlite:///dev.db"),
+        blob=BlobConfig(backend="filesystem", root=Path()),
+        hub=HubConfig(backend="redis", url="redis://cache:6379/0"),
+    )
+    guard = BootGuard(config=config, workspace_id=workspace_id, instance_id=uuid4())
+    with pytest.raises(RuntimeError, match="sqlite database"):
         await guard.admit()
     assert not await _row_present(guard.instance_id)
 

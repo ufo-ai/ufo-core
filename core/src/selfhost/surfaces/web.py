@@ -72,7 +72,8 @@ class WebSurface:
     async def stream(self, turn_id: UUID, request: Request) -> StreamingResponse:
         identity = await self._authenticate(request)
         await self._require_turn(turn_id, identity)
-        return StreamingResponse(self._events(turn_id), media_type="text/event-stream")
+        since = request.headers.get("last-event-id", "")
+        return StreamingResponse(self._events(turn_id, since), media_type="text/event-stream")
 
     async def spend(self, request: Request, window_seconds: int) -> HTMLResponse:
         """Render the workspace spend rollup over a window — the same sums `selfhost spend` prints,
@@ -217,23 +218,26 @@ class WebSurface:
             raise HTTPException(404, f"no agent named {DEFAULT_AGENT_NAME!r}")
         return agent.id
 
-    async def _events(self, turn_id: UUID) -> AsyncIterator[bytes]:
-        async for frame in tail_frames(self.hub, turn_id):
-            yield _sse(frame)
+    async def _events(self, turn_id: UUID, since: str = "") -> AsyncIterator[bytes]:
+        async for cursor, frame in tail_frames(self.hub, turn_id, since):
+            yield _sse(cursor, frame)
 
 
-def _sse(frame: LiveFrame) -> bytes:
+def _sse(cursor: str, frame: LiveFrame) -> bytes:
+    """One SSE event. A non-empty cursor is emitted as the event `id:`, which the browser echoes as
+    `Last-Event-ID` on reconnect, so a dropped stream resumes from the last frame it rendered."""
+    head = f"id: {cursor}\n".encode() if cursor else b""
     if isinstance(frame, Terminal):
-        return b"event: terminal\ndata: " + frame.frame.model_dump_json().encode() + b"\n\n"
+        return head + b"event: terminal\ndata: " + frame.frame.model_dump_json().encode() + b"\n\n"
     if isinstance(frame, Parked):
-        return b"event: parked\ndata: " + frame.model_dump_json().encode() + b"\n\n"
+        return head + b"event: parked\ndata: " + frame.model_dump_json().encode() + b"\n\n"
     if isinstance(frame, CostTick):
-        return b"event: cost\ndata: " + frame.model_dump_json().encode() + b"\n\n"
+        return head + b"event: cost\ndata: " + frame.model_dump_json().encode() + b"\n\n"
     if isinstance(frame, ToolCall):
-        return b"event: tool\ndata: " + frame.model_dump_json().encode() + b"\n\n"
+        return head + b"event: tool\ndata: " + frame.model_dump_json().encode() + b"\n\n"
     if isinstance(frame, SkillLoad):
-        return b"event: skill\ndata: " + frame.model_dump_json().encode() + b"\n\n"
-    return b"data: " + frame.model_dump_json().encode() + b"\n\n"
+        return head + b"event: skill\ndata: " + frame.model_dump_json().encode() + b"\n\n"
+    return head + b"data: " + frame.model_dump_json().encode() + b"\n\n"
 
 
 @router.get("")

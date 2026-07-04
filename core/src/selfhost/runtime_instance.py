@@ -2,10 +2,11 @@
 
 Every live serve process holds a `runtime_instance` row it heartbeats. At boot the guard reads the
 live peers (a stale row, past its heartbeat window, does not count) and refuses to start when any
-peer is live: core ships only the in-process hub, which has no cross-process fan-out, so a second
-instance can never share it. Multi-instance deploys wait on a shared-hub extension; until one lands
-core runs a single instance per workspace. The heartbeat is a per-process loop, not a shared job, so
-each instance keeps only its own row fresh."""
+peer is live AND this instance runs the in-process hub, which has no cross-process fan-out, so a
+second instance could never share its live stream. A shared-hub backend an extension registers
+(`config.hub.backend` other than the in-process default) fans frames out across processes and so
+lifts the refusal — multiple instances then run per workspace. The heartbeat is a per-process loop,
+not a shared job, so each instance keeps only its own row fresh."""
 
 import asyncio
 from dataclasses import dataclass
@@ -14,7 +15,7 @@ from uuid import UUID
 
 import sqlalchemy as sa
 
-from selfhost.config import Config
+from selfhost.config import IN_PROCESS_BACKEND, Config
 from selfhost.db import workspace_tx
 from selfhost.o11y import log
 from selfhost.schema import tables
@@ -25,20 +26,22 @@ STALE_AFTER_SECONDS = 30
 
 def fingerprint_of(config: Config) -> str:
     """The backend selection a peer can read off the row: which database and blob store this
-    instance runs, and its hub — always the in-process hub in core — so a divergent second instance
-    is legible in the guard's refusal."""
+    instance runs, and which hub backend — so a divergent second instance is legible in the guard's
+    refusal, and a shared-hub instance is recognizable as one that may coexist."""
     dialect = "sqlite" if config.database.url.startswith("sqlite") else "postgres"
-    return f"db={dialect};blob={config.blob.backend};hub=in_process"
+    return f"db={dialect};blob={config.blob.backend};hub={config.hub.backend}"
 
 
 @dataclass(frozen=True)
 class BootGuard:
-    """Admit this instance or refuse it. `admit` is the whole flow: read live peers, refuse when any
-    live peer exists — core ships only the in-process hub (no cross-process fan-out), so a workspace
-    runs a single instance; the dev-default backends that can't be shared are named in the refusal's
-    fingerprint — else record this instance's row. Two instances booting at once are serialized so
-    the read-then-insert is atomic — a workspace-scoped advisory lock on Postgres, `begin immediate`
-    on SQLite — so a race cannot admit both."""
+    """Admit this instance or refuse it. `admit` is the whole flow: read live peers, refuse when a
+    live peer exists and this instance carries a single-instance backend that cannot be shared
+    across processes — the in-process hub (no cross-process fan-out), a filesystem blob store, or a
+    SQLite database — naming the offenders; a deploy with all three shared (a shared hub, S3, and
+    Postgres) coexists with peers, so scale-out lands with the shared-hub extension. Else record
+    this instance's row. Two instances booting at once are serialized so the read-then-insert is
+    atomic — a workspace-scoped advisory lock on Postgres, `begin immediate` on SQLite — so a race
+    cannot admit both."""
 
     config: Config
     workspace_id: UUID
@@ -46,6 +49,7 @@ class BootGuard:
 
     async def admit(self) -> None:
         fingerprint = fingerprint_of(self.config)
+        single_instance = self._single_instance_backends()
         cutoff = datetime.now(UTC) - timedelta(seconds=STALE_AFTER_SECONDS)
         async with workspace_tx() as connection:
             if connection.dialect.name == "postgresql":
@@ -65,15 +69,15 @@ class BootGuard:
                     )
                 )
             ).all()
-            if peers:
+            if peers and single_instance:
                 listed = ", ".join(
                     f"{p.id} started {p.started_at} ({p.fingerprint})" for p in peers
                 )
                 raise RuntimeError(
                     f"a live instance is already running [{listed}]; this instance ({fingerprint}) "
-                    f"carries a dev default that cannot be shared across processes — core's "
-                    f"in-process hub has no cross-process fan-out, so it runs a single instance "
-                    "per workspace"
+                    f"carries single-instance backends ({', '.join(single_instance)}) that cannot "
+                    "be shared across processes — select shared backends (a shared hub, S3, "
+                    "Postgres) to scale out"
                 )
             await connection.execute(
                 sa.insert(tables.runtime_instance).values(
@@ -87,6 +91,15 @@ class BootGuard:
                 )
             )
         log("instance.admitted", instance=str(self.instance_id), fingerprint=fingerprint)
+
+    def _single_instance_backends(self) -> tuple[str, ...]:
+        """The configured backends that have no cross-process story, named for the refusal. Empty
+        means every backend is shareable and peers may coexist."""
+        return (
+            *(("in-process hub",) if self.config.hub.backend == IN_PROCESS_BACKEND else ()),
+            *(("filesystem blob store",) if self.config.blob.backend == "filesystem" else ()),
+            *(("sqlite database",) if self.config.database.url.startswith("sqlite") else ()),
+        )
 
 
 @dataclass(frozen=True)

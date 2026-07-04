@@ -1,6 +1,10 @@
-"""In-process live-frame fan-out: lossy by contract, publish never blocks."""
+"""In-process live-frame fan-out with cursor replay: lossy on a full subscriber, publish never
+blocks, and a bounded per-turn ring backs replay so a reconnecting subscriber resumes from a
+cursor rather than redrawing from scratch."""
 
 import asyncio
+import threading
+from collections import deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -12,6 +16,7 @@ from selfhost.models.interface import TextDelta
 from selfhost.schema.records import TerminalFrame
 
 SUBSCRIBER_QUEUE_FRAMES = 256
+REPLAY_BUFFER_FRAMES = 10_000
 
 
 class Terminal(BaseModel):
@@ -57,42 +62,108 @@ LiveFrame = TextDelta | Terminal | Parked | CostTick | ToolCall | SkillLoad
 
 
 class Hub(Protocol):
-    async def publish(self, turn_id: UUID, frame: LiveFrame) -> None: ...
+    """The per-turn live-frame stream a surface tails. Cursor-replayable: `publish` returns the
+    opaque cursor of the frame it appended, `subscribe(cursor)` replays the frames after that cursor
+    before streaming live ones, and `covers` reports whether the hub still holds a cursor so a
+    reconnecting surface knows to resume gaplessly or redraw. Core ships the in-process backend; a
+    shared backend an extension registers through its Manifest `hubs` point fans out across
+    processes, which is what lifts the single-instance boot guard."""
 
-    def subscribe(self, turn_id: UUID) -> AsyncIterator[LiveFrame]: ...
+    async def publish(self, turn_id: UUID, frame: LiveFrame) -> str: ...
+
+    def subscribe(
+        self, turn_id: UUID, cursor: str = ""
+    ) -> AsyncIterator[tuple[str, LiveFrame]]: ...
+
+    async def covers(self, turn_id: UUID, cursor: str) -> bool: ...
 
 
-def _offer(queue: asyncio.Queue[LiveFrame], frame: LiveFrame) -> None:
+def _offer(queue: asyncio.Queue[tuple[str, LiveFrame]], item: tuple[str, LiveFrame]) -> None:
     if queue.full():
         queue.get_nowait()
-    queue.put_nowait(frame)
+    queue.put_nowait(item)
+
+
+@dataclass
+class _TurnStream:
+    """One turn's live state: the replay ring, the live subscribers, and the monotonic cursor
+    sequence. Mutated only under the hub's lock."""
+
+    buffer: deque[tuple[str, LiveFrame]]
+    subscribers: list[tuple[asyncio.Queue[tuple[str, LiveFrame]], asyncio.AbstractEventLoop]]
+    seq: int = 0
 
 
 @dataclass(frozen=True)
 class InProcessHub:
-    """Fan out frames per turn; a full subscriber loses its oldest frame, never the publisher.
+    """Fan out frames per turn and retain a bounded ring for replay; a full subscriber loses its
+    oldest frame, never the publisher.
 
-    Publishers and subscribers may live on different event loops (DBOS runs dequeued
-    workflows on its own loop thread), so delivery hops onto the subscriber's loop.
+    Publishers and subscribers may live on different event loops (DBOS runs dequeued workflows on
+    its own loop thread), so a lock guards the shared per-turn state and delivery hops onto the
+    subscriber's loop. Cursors are a per-turn monotonic sequence. The ring is dropped when a turn's
+    stream ends (a Terminal or Parked) with no subscriber attached, and when the last subscriber
+    leaves, so retained memory is bounded to in-flight turns; a subscriber attaching after the ring
+    is gone replays nothing and relies on the durable poll for the terminal state.
     """
 
-    queues: dict[UUID, list[tuple[asyncio.Queue[LiveFrame], asyncio.AbstractEventLoop]]] = field(
-        default_factory=dict
-    )
+    _turns: dict[UUID, _TurnStream] = field(default_factory=dict)
+    _lock: threading.Lock = field(default_factory=threading.Lock)
 
-    async def publish(self, turn_id: UUID, frame: LiveFrame) -> None:
-        for queue, loop in list(self.queues.get(turn_id, [])):
-            loop.call_soon_threadsafe(_offer, queue, frame)
+    async def publish(self, turn_id: UUID, frame: LiveFrame) -> str:
+        with self._lock:
+            stream = self._turns.get(turn_id)
+            if stream is None:
+                stream = _TurnStream(buffer=deque(maxlen=REPLAY_BUFFER_FRAMES), subscribers=[])
+                self._turns[turn_id] = stream
+            stream.seq += 1
+            cursor = str(stream.seq)
+            stream.buffer.append((cursor, frame))
+            targets = list(stream.subscribers)
+            if isinstance(frame, Terminal | Parked) and not targets:
+                del self._turns[turn_id]
+        for queue, loop in targets:
+            loop.call_soon_threadsafe(_offer, queue, (cursor, frame))
+        return cursor
 
-    async def subscribe(self, turn_id: UUID) -> AsyncIterator[LiveFrame]:
-        queue: asyncio.Queue[LiveFrame] = asyncio.Queue(maxsize=SUBSCRIBER_QUEUE_FRAMES)
+    async def subscribe(
+        self, turn_id: UUID, cursor: str = ""
+    ) -> AsyncIterator[tuple[str, LiveFrame]]:
+        """Replay the buffered frames after `cursor`, then stream live ones. Registering the live
+        queue and snapshotting the buffer happen under one lock, and publish appends then snapshots
+        subscribers under the same lock, so every frame reaches this subscriber exactly once: a
+        frame the snapshot missed was published after registration and so was fanned to the
+        just-registered queue, and a frame in the snapshot was published before registration and so
+        was not fanned. Live frames therefore always follow the replay, never overlap it."""
+        queue: asyncio.Queue[tuple[str, LiveFrame]] = asyncio.Queue(maxsize=SUBSCRIBER_QUEUE_FRAMES)
         entry = (queue, asyncio.get_running_loop())
-        self.queues.setdefault(turn_id, []).append(entry)
+        after = int(cursor) if cursor else 0
+        with self._lock:
+            stream = self._turns.get(turn_id)
+            if stream is None:
+                stream = _TurnStream(buffer=deque(maxlen=REPLAY_BUFFER_FRAMES), subscribers=[])
+                self._turns[turn_id] = stream
+            stream.subscribers.append(entry)
+            replay = [item for item in stream.buffer if int(item[0]) > after]
         try:
+            for item in replay:
+                yield item
             while True:
                 yield await queue.get()
         finally:
-            remaining = self.queues[turn_id]
-            remaining.remove(entry)
-            if not remaining:
-                del self.queues[turn_id]
+            with self._lock:
+                stream = self._turns.get(turn_id)
+                if stream is not None and entry in stream.subscribers:
+                    stream.subscribers.remove(entry)
+                    if not stream.subscribers:
+                        del self._turns[turn_id]
+
+    async def covers(self, turn_id: UUID, cursor: str) -> bool:
+        if not cursor:
+            return False
+        with self._lock:
+            stream = self._turns.get(turn_id)
+            if stream is None or not stream.buffer:
+                return False
+            earliest = stream.buffer[0][0]
+        return int(earliest) <= int(cursor)

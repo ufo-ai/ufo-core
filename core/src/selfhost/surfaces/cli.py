@@ -225,5 +225,5 @@ async def _require_turn(turn_id: UUID, identity: CliIdentity) -> None:
 
 
 async def _frame_lines(hub: Hub, turn_id: UUID) -> AsyncIterator[bytes]:
-    async for frame in tail_frames(hub, turn_id):
+    async for _cursor, frame in tail_frames(hub, turn_id):
         yield frame.model_dump_json().encode() + b"\n"

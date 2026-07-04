@@ -2,9 +2,10 @@
 
 It imports only `selfhost.sdk` — the surface a CI gate pins — and its entry point returns a Manifest
 declaring exactly the landed points: one tool, one job, one route, one credential slot carrying a
-wire-injection target, one onboarding step, and one typed subagent profile. Each handler records
-the call it received through its own `ExtensionContext.store` (durable `ext_store` rows, never a
-mock log), so the tests read those rows back through the same public surfaces core writes them by.
+wire-injection target, one onboarding step, one typed subagent profile, and one hub backend. Each
+handler records the call it received through its own `ExtensionContext.store` (durable `ext_store`
+rows, never a mock log), so the tests read those rows back through the same public surfaces core
+writes them by.
 `UNDECLARED_SLOT` names a slot the Manifest never declares — the probe that a handler asking for an
 undeclared slot is refused."""
 
@@ -19,6 +20,7 @@ from pydantic import BaseModel
 from selfhost.sdk.connectors import OAuthAccount
 from selfhost.sdk.context import AgentChange, ExtensionContext
 from selfhost.sdk.http import JSONResponse, PlainTextResponse, Request, Response
+from selfhost.sdk.hub import InProcessHub
 from selfhost.sdk.index import Chunk, EmbedClient, Hit, IndexScope
 from selfhost.sdk.jobs import JobSpec
 from selfhost.sdk.manifest import (
@@ -28,6 +30,7 @@ from selfhost.sdk.manifest import (
     HookContext,
     HookOutcome,
     HookSpec,
+    HubSpec,
     IndexBackendSpec,
     InjectionTarget,
     Manifest,
@@ -62,6 +65,7 @@ CONNECTOR_HOST = "api.connector.sample.test"
 CONNECTOR_ACCOUNT = "sample-account-1"
 CONNECTOR_AUTHORIZE_URL = "https://connect.sample.test/oauth"
 CONNECTOR_EXECUTE_TOOL_NAME = "sample_connector_execute"
+HUB_BACKEND = "sample_hub"
 TOOL_KEY = "tool:echo"
 JOB_KEY = "job:ran"
 TRAJECTORY_KEY = "job:trajectories"
@@ -431,4 +435,5 @@ def manifest() -> Manifest:
                 prices=((SAMPLE_MODEL, SAMPLE_MODEL_PRICE),),
             ),
         ),
+        hubs=(HubSpec(backend=HUB_BACKEND, build=lambda _url: InProcessHub()),),
     )

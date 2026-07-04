@@ -19,6 +19,7 @@ from selfhost.accounting import ModelPrice
 from selfhost.ext.context import CredentialAccess, ExtensionContext
 from selfhost.ext.surface import SurfaceSpec
 from selfhost.grants import OAuthProvider
+from selfhost.hub import Hub
 from selfhost.memory.embed import EmbedClient
 from selfhost.memory.index import IndexBackend
 from selfhost.memory.sources import SourceBackend
@@ -134,6 +135,17 @@ class ModelProviderSpec:
     matches: Callable[[str], bool]
     client: Callable[[str], ModelClient]
     prices: tuple[tuple[str, ModelPrice], ...] = ()
+
+
+@dataclass(frozen=True)
+class HubSpec:
+    """A live-frame hub backend an extension registers. `backend` is the name `config.hub.backend`
+    selects it by; `build` constructs the process-wide Hub from `config.hub.url`, called once at
+    boot and only when this backend is selected. A shared (cross-process) backend lifts core's
+    single-instance boot guard, so scale-out is an extension, not a core change."""
+
+    backend: str
+    build: Callable[[str | None], Hub]
 
 
 @dataclass(frozen=True)
@@ -284,3 +296,4 @@ class Manifest:
     subagents: tuple[SubagentProfile, ...] = ()
     surfaces: tuple[SurfaceSpec, ...] = ()
     models: tuple[ModelProviderSpec, ...] = ()
+    hubs: tuple[HubSpec, ...] = ()

@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 
 CONFIG_PATH_ENV = "SELFHOST_CONFIG"
 DEFAULT_CONFIG_PATH = Path("selfhost.toml")
+IN_PROCESS_BACKEND = "in_process"
 
 
 class DatabaseConfig(BaseModel):
@@ -127,6 +128,17 @@ class ArtifactsConfig(BaseModel):
     token_secret_env: str = "SELFHOST_ARTIFACT_TOKEN_SECRET"
 
 
+class HubConfig(BaseModel):
+    """The live-frame hub backend. `backend` selects among the in-process default and any backend
+    an extension registers through its Manifest `hubs` point; `url` is the selected backend's
+    connection string (e.g. `redis://…`), carried in config like `database.url`. A cross-process
+    backend fans frames out across instances, which is what lifts the single-instance boot guard."""
+
+    model_config = ConfigDict(extra="forbid")
+    backend: str = IN_PROCESS_BACKEND
+    url: str | None = None
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
     database: DatabaseConfig
@@ -141,6 +153,7 @@ class Config(BaseModel):
     sources: tuple[SourceEntry, ...] = ()
     surfaces: SurfacesConfig = SurfacesConfig()
     artifacts: ArtifactsConfig = ArtifactsConfig()
+    hub: HubConfig = HubConfig()
 
 
 def config_path() -> Path:

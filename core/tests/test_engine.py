@@ -203,10 +203,16 @@ class RecordingHub:
 
     frames: list[LiveFrame] = field(default_factory=list)
 
-    async def publish(self, turn_id: UUID, frame: LiveFrame) -> None:
+    async def publish(self, turn_id: UUID, frame: LiveFrame) -> str:
         self.frames.append(frame)
+        return str(len(self.frames))
 
-    def subscribe(self, turn_id: UUID) -> AsyncIterator[LiveFrame]:
+    def subscribe(
+        self, turn_id: UUID, cursor: str = ""
+    ) -> AsyncIterator[tuple[str, LiveFrame]]:
+        raise NotImplementedError
+
+    async def covers(self, turn_id: UUID, cursor: str) -> bool:
         raise NotImplementedError
 
 

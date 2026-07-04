@@ -71,7 +71,23 @@ def test_ext_store_parses(tmp_path: Path) -> None:
     assert load_config(path).ext.store == Path("extensions.catalog.toml")
 
 
-def test_hub_section_is_rejected(tmp_path: Path) -> None:
+def test_hub_defaults_to_the_in_process_backend(tmp_path: Path) -> None:
+    path = tmp_path / "selfhost.toml"
+    path.write_text(VALID)
+    config = load_config(path)
+    assert config.hub.backend == "in_process"
+    assert config.hub.url is None
+
+
+def test_hub_backend_and_url_parse(tmp_path: Path) -> None:
+    path = tmp_path / "selfhost.toml"
+    path.write_text(VALID + '\n[hub]\nbackend = "redis"\nurl = "redis://cache:6379/0"\n')
+    config = load_config(path)
+    assert config.hub.backend == "redis"
+    assert config.hub.url == "redis://cache:6379/0"
+
+
+def test_unknown_hub_key_rejected(tmp_path: Path) -> None:
     path = tmp_path / "selfhost.toml"
     path.write_text(VALID + "\n[hub]\nshared = true\n")
     with pytest.raises(ValidationError):
