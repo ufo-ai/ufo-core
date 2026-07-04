@@ -29,7 +29,9 @@ jobs:
           python-version: "3.12"
       - run: uv sync
       - run: uv run ruff check
+      - run: uv run ruff format --check .
       - run: uv run python gates.py
+      - run: uv run mypy core/src/selfhost extensions gates.py
       # Rot-guard: the gated integration suite must always import + collect, even where its live
       # dependencies (a model key, extra services) are absent, so it can't silently bit-rot.
       - run: uv run pytest core/tests/integration --collect-only -m integration -q
