@@ -1,13 +1,14 @@
 """The Linear connector over a mock transport: the GraphQL `POST /graphql` shape — one query per
 page, `pageInfo.endCursor` threaded into the next request's `after`, `hasNextPage` ending the walk —
-the incremental `filter: { updatedAt: { gte } }` gate, a full-refresh stream returning as a
-snapshot, the `render` override that lifts an issue/project into readable prose rather than the
-default GraphQL-node JSON dump, and a refusal (an auth `errors` code, or a 403) surfacing as
-`StreamSkipped`. No conftest: the shared `selfhost_testsupport` plugin covers fixtures, and these
-tests are offline (a canned transport, no DB, no token, no broker)."""
+the incremental `filter: { updatedAt: { gte } }` gate, a full-refresh stream (no `updatedAt` filter)
+threading no variables, the `render` override that lifts an issue/project into readable prose, a 403
+surfacing as `StreamSkipped`, and a GraphQL `errors` array failing loud. No conftest: the shared
+`selfhost_testsupport` plugin covers fixtures, and these tests are offline (a canned transport, no
+DB, no token, no broker)."""
 
 import json
 from collections.abc import Callable
+from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 import httpx
@@ -21,12 +22,12 @@ from selfhost.memory.sources import SourceAuth, StreamSkipped, SyncResult
 ACCOUNT = "acct-1"
 
 
+@dataclass(frozen=True)
 class _MockProxy:
-    def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
-        self._handler = handler
+    handler: Callable[[httpx.Request], httpx.Response]
 
     async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
-        return Credential(transport=httpx.MockTransport(self._handler))
+        return Credential(transport=httpx.MockTransport(self.handler))
 
 
 async def _fetch(
@@ -35,7 +36,7 @@ async def _fetch(
     *,
     cursor: str | None = None,
 ) -> SyncResult:
-    auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler))
+    auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler=handler))
     return await ConnectorBackend(connector=LinearConnector()).fetch(
         ConnectorSourceConfig(account=ACCOUNT, stream=stream), cursor, auth
     )
@@ -122,10 +123,9 @@ async def test_issues_incremental_sends_the_updatedat_filter_and_orderby() -> No
     assert variables["filter"] == {"updatedAt": {"gte": "2026-01-01T00:00:00.000Z"}}
 
 
-async def test_full_refresh_stream_returns_a_snapshot() -> None:
-    """A collection with no `updatedAt` filter (issue_relations) re-enumerates whole each run and
-    returns `snapshot=True` with no cursor — the driver tombstones prior pages this run no longer
-    holds. It threads no `filter`/`orderBy` variables on the first page."""
+async def test_full_refresh_stream_upserts_without_a_snapshot() -> None:
+    """A collection with no `updatedAt` filter (issue_relations) full-refreshes each run:
+    snapshot=False, no cursor advanced, and no `filter`/`orderBy` variables threaded."""
     bodies: list[dict[str, object]] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -150,7 +150,7 @@ async def test_full_refresh_stream_returns_a_snapshot() -> None:
         )
 
     result = await _fetch("issue_relations", handle)
-    assert result.snapshot is True
+    assert result.snapshot is False
     assert result.next_cursor is None
     assert result.deletes == ()
     assert _refs(result) == {"issue_relations/r1"}
@@ -190,27 +190,6 @@ async def test_project_render_is_readable() -> None:
     assert "nodes" not in body
 
 
-async def test_graphql_auth_error_raises_stream_skipped() -> None:
-    """Linear reports a permission refusal as a 200 with an `errors` array carrying an auth code;
-    it surfaces as `StreamSkipped` so the run records a skip, not a failure."""
-
-    def handle(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "errors": [
-                    {
-                        "message": "Authentication required",
-                        "extensions": {"code": "AUTHENTICATION_ERROR"},
-                    }
-                ]
-            },
-        )
-
-    with pytest.raises(StreamSkipped, match="refused"):
-        await _fetch("issues", handle)
-
-
 async def test_forbidden_status_raises_stream_skipped() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         return httpx.Response(403, json={"errors": [{"message": "forbidden"}]})
@@ -219,9 +198,9 @@ async def test_forbidden_status_raises_stream_skipped() -> None:
         await _fetch("issues", handle)
 
 
-async def test_graphql_query_error_fails_loud() -> None:
-    """A genuine query fault (no auth/permission code) is not a skip — it raises so the run fails
-    loud rather than commit a partial page."""
+async def test_graphql_errors_fail_loud() -> None:
+    """A GraphQL `errors` array (a 200 the query engine rejected) fails loud rather than commit a
+    partial page — the run surfaces the fault instead of silently syncing nothing."""
 
     def handle(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
