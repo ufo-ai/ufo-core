@@ -36,7 +36,24 @@ class CostTick(BaseModel):
     tokens: int
 
 
-LiveFrame = TextDelta | Terminal | Parked | CostTick
+class ToolCall(BaseModel):
+    """A tool call entering dispatch, pushed so a surface shows live activity — 'running bash' — on
+    a long multi-tool turn instead of an idle bubble carrying only a cost meter. Non-terminal, and
+    distinguished from the other frames by its `tool` name and bounded args `preview`."""
+
+    tool: str
+    preview: str
+
+
+class SkillLoad(BaseModel):
+    """A skill mounting into the workspace as `load_skill` dispatches, pushed so a surface shows the
+    workflow the agent is pulling in. Non-terminal, and distinguished from a ToolCall by carrying
+    the `skill` name it loads rather than a tool name."""
+
+    skill: str
+
+
+LiveFrame = TextDelta | Terminal | Parked | CostTick | ToolCall | SkillLoad
 
 
 class Hub(Protocol):

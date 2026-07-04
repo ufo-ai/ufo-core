@@ -14,7 +14,7 @@ from selfhost.blob import FilesystemBlobStore
 from selfhost.db import workspace_tx
 from selfhost.ext.loader import HookChain
 from selfhost.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
-from selfhost.hub import InProcessHub
+from selfhost.hub import InProcessHub, LiveFrame, SkillLoad, ToolCall
 from selfhost.loop.compaction import COMPACTED_CONTEXT_PREFIX, Compaction
 from selfhost.loop.engine import (
     MAX_TOOL_RESULT_CHARS,
@@ -160,6 +160,42 @@ class ToolCallingModel:
         yield ToolCallStart(id="c1", name="bash")
         yield ToolCallDelta(id="c1", partial_json='{"command": "echo hi"}')
         yield Usage(input_tokens=2, output_tokens=2)
+
+
+@dataclass(frozen=True)
+class SkillThenToolModel:
+    """Round one calls load_skill then bash; round two (seeing the results) answers — so a test
+    reads back the activity frames the engine publishes as it dispatches a multi-tool round."""
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        answered = any(
+            isinstance(message.content, tuple)
+            and any(isinstance(block, ToolResultBlock) for block in message.content)
+            for message in request.messages
+        )
+        if answered:
+            yield TextDelta(text="done")
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        yield ToolCallStart(id="s1", name="load_skill")
+        yield ToolCallDelta(id="s1", partial_json=json.dumps({"name": "demo"}))
+        yield ToolCallStart(id="c1", name="bash")
+        yield ToolCallDelta(id="c1", partial_json=json.dumps({"command": "echo hi"}))
+        yield Usage(input_tokens=2, output_tokens=2)
+
+
+@dataclass
+class RecordingHub:
+    """Captures every frame the engine publishes — the Hub dependency stands in so a test reads
+    back the live frames the turn produced, mirroring how CapturingModel records requests."""
+
+    frames: list[LiveFrame] = field(default_factory=list)
+
+    async def publish(self, turn_id: UUID, frame: LiveFrame) -> None:
+        self.frames.append(frame)
+
+    def subscribe(self, turn_id: UUID) -> AsyncIterator[LiveFrame]:
+        raise NotImplementedError
 
 
 STUB_AUTHORIZE_URL = "https://stub.test/oauth"
@@ -396,6 +432,22 @@ async def test_tool_call_round_dispatches_in_sandbox_then_answers(
     assert isinstance(tool_result, tuple) and isinstance(tool_result[0], ToolResultBlock)
     assert "hi" in tool_result[0].content
     assert stored.messages[-1] == Message(role="assistant", content="done")
+
+
+async def test_multi_tool_round_publishes_skill_then_tool_activity_frames_in_order(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    carrier = RecordingCarrier(result=ExecResult(stdout="hi\n", stderr="", exit_code=0))
+    hub = RecordingHub()
+    engine = replace(_engine(turn, SkillThenToolModel(), tmp_path, carrier=carrier), hub=hub)
+    frame = await engine.run()
+    assert frame.status == "done"
+    activity = [frame for frame in hub.frames if isinstance(frame, SkillLoad | ToolCall)]
+    assert activity == [
+        SkillLoad(skill="demo"),
+        ToolCall(tool="bash", preview='{"command":"echo hi"}'),
+    ]
 
 
 async def test_connect_account_tool_call_in_a_turn_yields_the_authorize_url(

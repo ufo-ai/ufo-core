@@ -106,6 +106,23 @@ def test_meter_is_suppressed_when_streams_diverge() -> None:
     ]
 
 
+def test_activity_note_streams_on_its_own_line_without_corrupting_text_or_meter() -> None:
+    buffer = io.StringIO()
+    display = tty_display(buffer)
+    display.text("Working. ")
+    display.tick(500, 2500)
+    display.activity('running bash: {"command":"echo hi"}')
+    display.text("Answer")
+    display.terminal(DONE_FRAME)
+    assert screen(buffer.getvalue()) == [
+        "Working. ",
+        'running bash: {"command":"echo hi"}',
+        "Answer",
+        "claude-opus-4-8 · 1834 tok · $0.009430",
+        "",
+    ]
+
+
 def test_cancelled_erases_pending_meter() -> None:
     buffer = io.StringIO()
     display = tty_display(buffer)

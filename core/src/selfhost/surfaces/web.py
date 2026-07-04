@@ -25,7 +25,7 @@ from selfhost.accounting import MICRO_USD_PER_USD, SpendReport, SpendRollup, Sub
 from selfhost.artifact_token import ArtifactTokenError, verify_artifact_token
 from selfhost.blob import BlobNotFound, BlobStore
 from selfhost.db import workspace_tx
-from selfhost.hub import CostTick, Hub, LiveFrame, Parked, Terminal
+from selfhost.hub import CostTick, Hub, LiveFrame, Parked, SkillLoad, Terminal, ToolCall
 from selfhost.o11y import log
 from selfhost.schema import tables
 from selfhost.schema.records import DEFAULT_AGENT_NAME
@@ -229,6 +229,10 @@ def _sse(frame: LiveFrame) -> bytes:
         return b"event: parked\ndata: " + frame.model_dump_json().encode() + b"\n\n"
     if isinstance(frame, CostTick):
         return b"event: cost\ndata: " + frame.model_dump_json().encode() + b"\n\n"
+    if isinstance(frame, ToolCall):
+        return b"event: tool\ndata: " + frame.model_dump_json().encode() + b"\n\n"
+    if isinstance(frame, SkillLoad):
+        return b"event: skill\ndata: " + frame.model_dump_json().encode() + b"\n\n"
     return b"data: " + frame.model_dump_json().encode() + b"\n\n"
 
 
@@ -375,10 +379,27 @@ form.addEventListener('submit', async (event) => {
   const turnId = (await res.json()).turn_id;
   const source = new EventSource('/web/turns/' + turnId + '/stream');
   let meter = null;
+  let activity = null;
+  function note(text) {
+    if (!activity) {
+      activity = document.createElement('div');
+      activity.className = 'meta';
+      reply.appendChild(activity);
+    }
+    activity.textContent = text;
+    log.scrollTop = log.scrollHeight;
+  }
   source.onmessage = (event) => {
     reply.textContent += JSON.parse(event.data).text;
     log.scrollTop = log.scrollHeight;
   };
+  source.addEventListener('tool', (event) => {
+    const frame = JSON.parse(event.data);
+    note('running ' + frame.tool + (frame.preview ? ': ' + frame.preview : ''));
+  });
+  source.addEventListener('skill', (event) => {
+    note('loading skill: ' + JSON.parse(event.data).skill);
+  });
   source.addEventListener('cost', (event) => {
     const frame = JSON.parse(event.data);
     if (!meter) {

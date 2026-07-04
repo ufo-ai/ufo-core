@@ -24,7 +24,7 @@ from selfhost.artifact_token import (
 from selfhost.blob import FilesystemBlobStore
 from selfhost.config import Config
 from selfhost.db import workspace_tx
-from selfhost.hub import InProcessHub
+from selfhost.hub import InProcessHub, SkillLoad, ToolCall
 from selfhost.loop import queue as loop_queue
 from selfhost.loop.subagents import SubagentRegistry
 from selfhost.memory.service import SHARED_SUBJECT, member_subject, recall_subjects
@@ -33,11 +33,23 @@ from selfhost.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, S
 from selfhost.schema import tables
 from selfhost.schema.records import TerminalFrame, Usage
 from selfhost.surfaces.admission import Admission
-from selfhost.surfaces.web import SESSION_COOKIE, WebSurface
+from selfhost.surfaces.web import SESSION_COOKIE, WebSurface, _sse
 from selfhost.surfaces.web import router as web_router
 
 SECRET = "artifact-signing-secret"
 STREAM_TIMEOUT_SECONDS = 30
+
+
+def test_sse_tags_tool_and_skill_activity_frames() -> None:
+    tool = _sse(ToolCall(tool="bash", preview='{"command":"ls"}'))
+    assert tool.startswith(b"event: tool\ndata: ")
+    assert json.loads(tool.split(b"data: ", 1)[1]) == {
+        "tool": "bash",
+        "preview": '{"command":"ls"}',
+    }
+    skill = _sse(SkillLoad(skill="demo"))
+    assert skill.startswith(b"event: skill\ndata: ")
+    assert json.loads(skill.split(b"data: ", 1)[1]) == {"skill": "demo"}
 
 
 @dataclass(frozen=True)

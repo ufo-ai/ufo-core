@@ -211,6 +211,15 @@ async def _stream_turn(
                         if "cost_micro_usd" in frame:
                             display.tick(frame["tokens"], frame["cost_micro_usd"])
                             continue
+                        if "skill" in frame:
+                            display.activity(f"loading skill: {frame['skill']}")
+                            continue
+                        if "tool" in frame:
+                            preview = frame["preview"]
+                            display.activity(
+                                f"running {frame['tool']}" + (f": {preview}" if preview else "")
+                            )
+                            continue
                         display.text(frame["text"])
             except httpx.TransportError:
                 await asyncio.sleep(RECONNECT_SECONDS)
@@ -255,6 +264,12 @@ class _TurnDisplay:
         self.meter = True
 
     def message(self, note: str) -> None:
+        self._close_line()
+        click.echo(click.style(note, dim=True), file=self.out)
+
+    def activity(self, note: str) -> None:
+        """A mid-turn activity note (a tool call, a skill load) on its own dim line — the meter is
+        erased first so streamed text is never corrupted, and the stream continues after it."""
         self._close_line()
         click.echo(click.style(note, dim=True), file=self.out)
 
