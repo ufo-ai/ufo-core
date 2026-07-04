@@ -275,7 +275,9 @@ async def test_proxy_admits_the_granted_host_and_blocks_the_ungranted() -> None:
     grant = Grant(provider="stub", account_id="acct-42", host=GRANTED_HOST)
     resolver = PerAgentRules(base=derive_grant_rules((grant,)), grants=None)
     cert, key = await generate_ca()
-    proxy = EgressProxy(resolve=resolver.resolve, ca_cert=cert, ca_key=key)
+    proxy = EgressProxy(
+        resolve=resolver.resolve, authorize=resolver.turn_live, ca_cert=cert, ca_key=key
+    )
     endpoint = await proxy.start(bind_host="127.0.0.1")
     try:
         assert await _connect_status(endpoint.port, UNGRANTED_HOST) == 403
@@ -315,7 +317,9 @@ async def test_agent_a_reaches_only_its_own_granted_host(db: None) -> None:
     )
     resolver = PerAgentRules(base=(), grants=store)
     cert, key = await generate_ca()
-    proxy = EgressProxy(resolve=resolver.resolve, ca_cert=cert, ca_key=key)
+    proxy = EgressProxy(
+        resolve=resolver.resolve, authorize=resolver.turn_live, ca_cert=cert, ca_key=key
+    )
     endpoint = await proxy.start(bind_host="127.0.0.1")
     try:
         run_a = RunToken(workspace_id, turn_a).encode()
@@ -337,7 +341,9 @@ async def test_a_grant_recorded_after_start_is_live_for_the_next_turn(db: None) 
     store = GrantStore()
     resolver = PerAgentRules(base=(), grants=store)
     cert, key = await generate_ca()
-    proxy = EgressProxy(resolve=resolver.resolve, ca_cert=cert, ca_key=key)
+    proxy = EgressProxy(
+        resolve=resolver.resolve, authorize=resolver.turn_live, ca_cert=cert, ca_key=key
+    )
     endpoint = await proxy.start(bind_host="127.0.0.1")
     try:
         assert (

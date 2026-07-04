@@ -9,6 +9,7 @@ from pydantic import BaseModel, model_validator
 TurnStatus = Literal["queued", "running", "parked", "done", "failed", "cancelled"]
 TerminalStatus = Literal["done", "failed", "cancelled"]
 NON_TERMINAL_STATUSES: tuple[TurnStatus, ...] = ("queued", "running", "parked")
+RUNNING: TurnStatus = "running"
 PARKED: TurnStatus = "parked"
 
 ProposalStatus = Literal["pending", "approved", "rejected"]

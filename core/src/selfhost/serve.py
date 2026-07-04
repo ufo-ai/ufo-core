@@ -436,13 +436,17 @@ async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]:
 def _egress_proxy(resolver: PerAgentRules) -> ProxyEndpoint:
     """The sandbox's sole route out runs on its own event loop: a standalone network service, not
     part of the turn loop, that outlives every turn for the life of the process. The proxy resolves
-    each request's rules through `resolver`, which reads the turn's agent and grants per turn."""
+    each request's rules through `resolver`, which reads the turn's agent and grants per turn, and
+    authorizes each keyed-host CONNECT through `resolver.turn_live`, which reads the turn's status
+    fresh so a real key is injected only while the turn is running."""
     loop = asyncio.new_event_loop()
     threading.Thread(target=loop.run_forever, daemon=True).start()
 
     async def _boot() -> ProxyEndpoint:
         cert, key = await generate_ca()
-        return await EgressProxy(resolve=resolver.resolve, ca_cert=cert, ca_key=key).start()
+        return await EgressProxy(
+            resolve=resolver.resolve, authorize=resolver.turn_live, ca_cert=cert, ca_key=key
+        ).start()
 
     return asyncio.run_coroutine_threadsafe(_boot(), loop).result(PROXY_STARTUP_TIMEOUT_SECONDS)
 

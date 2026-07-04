@@ -49,6 +49,7 @@ from selfhost.schema import tables
 from selfhost.schema.records import (
     NON_TERMINAL_STATUSES,
     PARKED,
+    RUNNING,
     Agent,
     TerminalFrame,
     TerminalStatus,
@@ -252,7 +253,7 @@ class TurnEngine:
             updated = await connection.execute(
                 sa.update(tables.turn)
                 .values(
-                    status="running",
+                    status=RUNNING,
                     running_attempt=self.attempt,
                     resume_enqueued_at=None,
                     updated_at=sa.func.now(),
@@ -262,7 +263,7 @@ class TurnEngine:
                     sa.or_(
                         tables.turn.c.status.in_(("queued", PARKED)),
                         sa.and_(
-                            tables.turn.c.status == "running",
+                            tables.turn.c.status == RUNNING,
                             tables.turn.c.running_attempt == self.attempt,
                         ),
                     ),

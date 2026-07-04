@@ -1,9 +1,12 @@
 import asyncio
 import base64
 import socket
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
+from cryptography import x509
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from selfhost.db import workspace_tx
@@ -55,15 +58,39 @@ def _fixed(rules: tuple = ()) -> PerAgentRules:
     return PerAgentRules(base=rules, grants=None)
 
 
+def _egress(resolver: PerAgentRules, ca_cert: str = "x", ca_key: str = "x") -> EgressProxy:
+    """Wire the proxy from a real resolver: its `resolve` for rules and its `turn_live` for the
+    keyed-host liveness gate — both genuine `PerAgentRules` methods, never a fake."""
+    return EgressProxy(
+        resolve=resolver.resolve, authorize=resolver.turn_live, ca_cert=ca_cert, ca_key=ca_key
+    )
+
+
 async def _proxy() -> EgressProxy:
     cert, key = await generate_ca()
-    proxy = EgressProxy(resolve=_fixed().resolve, ca_cert=cert, ca_key=key)
+    proxy = _egress(_fixed(), ca_cert=cert, ca_key=key)
     await proxy.start(bind_host="127.0.0.1")
     return proxy
 
 
 def _basic(run_token: str) -> str:
     return "Basic " + base64.b64encode(f"{run_token}:".encode()).decode()
+
+
+async def _connect(port: int, host: str, run_token: str = "", target_port: int = 443) -> int:
+    """Drive one CONNECT through the proxy over its bound socket and return the status code,
+    draining to EOF so any off-relay metering the exchange schedules is queued before the caller
+    stops the proxy."""
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    head = f"CONNECT {host}:{target_port} HTTP/1.1\r\nHost: {host}\r\n"
+    if run_token:
+        head += f"Proxy-Authorization: {_basic(run_token)}\r\n"
+    writer.write((head + "\r\n").encode())
+    await writer.drain()
+    status_line = await reader.readline()
+    await reader.read()
+    writer.close()
+    return int(status_line.split()[1])
 
 
 async def test_a_resolution_error_fails_closed_to_base_and_is_not_cached() -> None:
@@ -85,13 +112,13 @@ async def test_a_resolution_error_fails_closed_to_base_and_is_not_cached() -> No
             raise RuntimeError("transient db blip")
         return granted
 
-    proxy = EgressProxy(resolve=flaky, ca_cert="", ca_key="")
+    proxy = EgressProxy(resolve=flaky, authorize=_fixed().turn_live, ca_cert="", ca_key="")
     run = RunToken(uuid4(), uuid4())
     assert await proxy._rules_for(run) == base
     assert await proxy._rules_for(run) == granted
 
 
-async def _seed_turn(connection: AsyncConnection) -> tuple[UUID, UUID]:
+async def _seed_turn(connection: AsyncConnection, status: str = "running") -> tuple[UUID, UUID]:
     workspace_id, member_id, agent_id, conversation_id, turn_id = (uuid4() for _ in range(5))
     await connection.execute(
         sa.insert(tables.workspace).values(
@@ -129,6 +156,7 @@ async def _seed_turn(connection: AsyncConnection) -> tuple[UUID, UUID]:
             updated_at=sa.func.now(),
         )
     )
+    terminal = None if status in ("queued", "running", "parked") else {"status": status}
     await connection.execute(
         sa.insert(tables.turn).values(
             id=turn_id,
@@ -136,9 +164,9 @@ async def _seed_turn(connection: AsyncConnection) -> tuple[UUID, UUID]:
             conversation_id=conversation_id,
             agent_id=agent_id,
             seq=1,
-            status="running",
+            status=status,
             inbound="hi",
-            terminal=None,
+            terminal=terminal,
             created_at=sa.func.now(),
             updated_at=sa.func.now(),
         )
@@ -173,10 +201,33 @@ async def test_distinct_hosts_get_distinct_contexts() -> None:
         await proxy.stop()
 
 
+async def test_the_ca_and_leaf_outlive_a_long_running_process() -> None:
+    """The proxy outlives every turn for the life of the process, so its boot-minted CA and every
+    cached per-host leaf must stay valid far beyond a day — a deploy running past 24h with a 1-day
+    cert would serve an expired chain and break in-sandbox TLS. The CA outlives the leaf it signs,
+    so no leaf is left valid past its issuer."""
+    now = datetime.now(UTC)
+    cert_pem, _ = await generate_ca()
+    assert x509.load_pem_x509_certificate(cert_pem.encode()).not_valid_after_utc > now + timedelta(
+        days=300
+    )
+
+    proxy = await _proxy()
+    try:
+        await proxy._leaf_context(MODEL_HOST)
+        root = Path(proxy._workdir.name)
+        ca = x509.load_pem_x509_certificate((root / "ca.crt").read_bytes())
+        leaf = x509.load_pem_x509_certificate((root / f"leaf-{MODEL_HOST}.crt").read_bytes())
+    finally:
+        await proxy.stop()
+    assert leaf.not_valid_after_utc > now + timedelta(days=300)
+    assert leaf.not_valid_after_utc <= ca.not_valid_after_utc
+
+
 async def test_egress_write_attributes_a_row_to_the_turn(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
-    proxy = EgressProxy(resolve=_fixed().resolve, ca_cert="x", ca_key="x")
+    proxy = _egress(_fixed())
     await proxy._write_egress(SEARCH_HOST, _basic(RunToken(workspace_id, turn_id).encode()))
     async with workspace_tx() as connection:
         row = (
@@ -196,7 +247,7 @@ async def test_meter_ledger_meters_credential_host_and_skips_model_host(db: None
         MeterRule(host=SEARCH_HOST, dimension="search"),
         MeterRule(host=MODEL_HOST, dimension="tokens"),
     )
-    proxy = EgressProxy(resolve=_fixed(rules).resolve, ca_cert="x", ca_key="x")
+    proxy = _egress(_fixed(rules))
     header = _basic(RunToken(workspace_id, turn_id).encode())
     proxy._meter_ledger(MODEL_HOST, header, rules)
     assert proxy._meter_tasks == set()
@@ -221,13 +272,80 @@ async def test_meter_ledger_meters_credential_host_and_skips_model_host(db: None
 async def test_egress_write_without_attribution_writes_nothing(db: None) -> None:
     async with workspace_tx() as connection:
         await _seed_turn(connection)
-    proxy = EgressProxy(resolve=_fixed().resolve, ca_cert="x", ca_key="x")
+    proxy = _egress(_fixed())
     await proxy._write_egress(SEARCH_HOST, "")
     async with workspace_tx() as connection:
         count = (
             await connection.execute(sa.select(sa.func.count()).select_from(tables.ledger))
         ).scalar_one()
     assert count == 0
+
+
+async def test_keyed_host_connect_denied_without_a_live_turn(db: None) -> None:
+    """The turn-liveness gate: a keyed host (one carrying an InjectionRule) is MITM'd — hence its
+    real key injected — only while the run token names a running turn. A tokenless CONNECT, a token
+    for a turn that has ended, and a token for a turn that never existed are each refused at 403 and
+    never reach `_mitm`, so the real key never leaves the proxy."""
+    async with workspace_tx() as connection:
+        workspace_id, running_turn = await _seed_turn(connection)
+        _, ended_turn = await _seed_turn(connection, status="done")
+    base = (
+        ScopeRule(allowed_hosts=frozenset({MODEL_HOST})),
+        InjectionRule(host=MODEL_HOST, header="x-api-key", sentinel="s", real="REAL-KEY"),
+        MeterRule(host=MODEL_HOST, dimension="tokens"),
+    )
+    cert, key = await generate_ca()
+    proxy = _egress(_fixed(base), ca_cert=cert, ca_key=key)
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    try:
+        assert await _connect(endpoint.port, MODEL_HOST) == 403
+        ended = RunToken(workspace_id, ended_turn).encode()
+        assert await _connect(endpoint.port, MODEL_HOST, ended) == 403
+        unknown = RunToken(workspace_id, uuid4()).encode()
+        assert await _connect(endpoint.port, MODEL_HOST, unknown) == 403
+        assert await proxy.authorize(RunToken(workspace_id, running_turn)) is True
+        assert await proxy.authorize(RunToken(workspace_id, ended_turn)) is False
+    finally:
+        await proxy.stop()
+
+
+async def test_tunnel_meters_a_granted_host(db: None) -> None:
+    """A granted host injects nothing (its token is held server-side), so it is tunnelled opaquely —
+    yet reaching it must still be metered. A real CONNECT to a MeterRule host writes one `egress`
+    ledger row keyed to the turn, metered at CONNECT granularity since the opaque tunnel hides the
+    individual requests inside it."""
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+
+    async def upstream(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writer.close()
+
+    stub = await asyncio.start_server(upstream, "127.0.0.1", 0)
+    granted_host = "127.0.0.1"
+    stub_port = stub.sockets[0].getsockname()[1]
+    rules = (
+        ScopeRule(allowed_hosts=frozenset({granted_host})),
+        MeterRule(host=granted_host, dimension="requests"),
+    )
+    cert, key = await generate_ca()
+    proxy = _egress(_fixed(rules), ca_cert=cert, ca_key=key)
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    run_token = RunToken(workspace_id, turn_id).encode()
+    try:
+        assert await _connect(endpoint.port, granted_host, run_token, stub_port) == 200
+    finally:
+        await proxy.stop()
+        stub.close()
+        await stub.wait_closed()
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.ledger.c.dimension, tables.ledger.c.amount).where(
+                    tables.ledger.c.turn_id == turn_id
+                )
+            )
+        ).one()
+    assert (row.dimension, int(row.amount)) == ("egress", 1)
 
 
 def _candidates() -> list[InjectionRule]:
@@ -315,7 +433,7 @@ async def test_relay_tees_the_full_body_to_the_client_while_metering_usage() -> 
 async def test_model_host_relay_meters_sandbox_tokens_to_the_turn(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
-    proxy = EgressProxy(resolve=_fixed().resolve, ca_cert="x", ca_key="x")
+    proxy = _egress(_fixed())
     accumulator = SseTokenUsage(MODEL_HOST)
     accumulator.feed(ANTHROPIC_SSE)
     proxy._meter_tokens(_basic(RunToken(workspace_id, turn_id).encode()), accumulator)
@@ -343,7 +461,7 @@ async def test_model_host_relay_meters_sandbox_tokens_to_the_turn(db: None) -> N
 async def test_model_host_relay_skips_when_no_usage_is_reported(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
-    proxy = EgressProxy(resolve=_fixed().resolve, ca_cert="x", ca_key="x")
+    proxy = _egress(_fixed())
     accumulator = SseTokenUsage(MODEL_HOST)
     accumulator.feed(b'data: {"type":"content_block_delta","delta":{"text":"hi"}}\n\n')
     proxy._meter_tokens(_basic(RunToken(workspace_id, turn_id).encode()), accumulator)

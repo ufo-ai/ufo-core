@@ -7,16 +7,21 @@ rules plus that agent's OAuth grants, derived fresh (never registered) and cache
 with no or unknown token resolves to the model and credential base alone — never a broad allow.
 
 Default-deny is a CONNECT the proxy refuses: a host no resolved ScopeRule admits gets a 403 and
-never leaves the machine. An admitted host carrying an InjectionRule is MITM'd — the proxy
-terminates TLS with a leaf minted from the per-process CA (in the container's trust store), swaps
-the sentinel Authorization value the sandbox sees for the real credential (selecting by the exact
-sentinel, so two accounts on one host each draw only their own token and a foreign sentinel is
-passed upstream untouched), and re-originates over its own verified TLS, so the raw key is never
-inside the sandbox. An admitted host with no InjectionRule is tunnelled opaquely. Each forwarded
-request to a metered host emits an egress metric and, off the relay path, writes an `egress` request
-row to the ledger keyed to the turn — except the model host, whose teed SSE response is parsed for
-its token usage and metered under `sandbox_tokens`, disjoint from the host turn loop's terminal
-`tokens` bill (which runs the model host-side and never touches the proxy)."""
+never leaves the machine. An admitted host carrying an InjectionRule is MITM'd — but only for a
+turn the DB still reports running: the injection swaps in the real model or credential key, so a
+tokenless, unknown-turn, or terminal-turn CONNECT to a keyed host is refused (403) and the key
+never reaches the wire (the gate the local carrier leans on — a host process can reach the proxy
+directly). Authorized, the proxy terminates TLS with a leaf minted from the per-process CA (in the
+container's trust store), swaps the sentinel Authorization value the sandbox sees for the real
+credential (selecting by the exact sentinel, so two accounts on one host each draw only their own
+token and a foreign sentinel is passed upstream untouched), and re-originates over its own verified
+TLS, so the raw key is never inside the sandbox. An admitted host with no InjectionRule is tunnelled
+opaquely — a grant injects nothing, so its host is reached opaquely yet still counted. Each metered
+host emits an egress metric and, off the relay path, writes an `egress` request row to the ledger
+keyed to the turn — per CONNECT for a tunnelled host, per MITM'd request otherwise — except the
+model host, whose teed SSE response is parsed for its token usage and metered under
+`sandbox_tokens`, disjoint from the host turn loop's terminal `tokens` bill (which runs the model
+host-side and never touches the proxy)."""
 
 import asyncio
 import json
@@ -44,29 +49,34 @@ from selfhost.sandbox.proxy.rules import (
 )
 from selfhost.sandbox.session import ProxyEndpoint, RunToken
 from selfhost.schema import tables
-from selfhost.schema.records import Usage
+from selfhost.schema.records import RUNNING, Usage
 
 PROXY_BIND_HOST = "0.0.0.0"
 RELAY_CHUNK_BYTES = 65536
 MAX_HEADER_BYTES = 65536
 CONNECT_UPSTREAM_TIMEOUT_SECONDS = 30
 DEFAULT_HTTPS_PORT = 443
-CERT_VALID_DAYS = "1"
+CA_VALID_DAYS = "3650"
+LEAF_VALID_DAYS = "365"
 RULE_CACHE_MAX = 4096
 MAX_SSE_BUFFER_BYTES = 1_048_576
 
 RuleResolver = Callable[["RunToken | None"], Awaitable[tuple[Rule, ...]]]
+TurnAuthorizer = Callable[["RunToken"], Awaitable[bool]]
 
 
 async def generate_ca() -> tuple[str, str]:
-    """A self-signed CA (cert, key) minted via the openssl CLI — no crypto library dependency."""
+    """A self-signed CA (cert, key) minted via the openssl CLI — no crypto library dependency. It is
+    minted once at boot and signs every per-host leaf for the life of the process (which outlives
+    every turn), so it is valid well beyond any leaf's lifetime — a process running for months keeps
+    serving certs the sandbox's trust store still validates, never an expired chain."""
     with tempfile.TemporaryDirectory() as work:
         key_path = Path(work) / "ca.key"
         cert_path = Path(work) / "ca.crt"
         await _openssl(
             "req", "-x509", "-newkey", "rsa:2048", "-nodes",
             "-keyout", str(key_path), "-out", str(cert_path),
-            "-days", CERT_VALID_DAYS, "-subj", "/CN=selfhost-sandbox-proxy",
+            "-days", CA_VALID_DAYS, "-subj", "/CN=selfhost-sandbox-proxy",
         )
         return cert_path.read_text(), key_path.read_text()
 
@@ -114,10 +124,29 @@ class PerAgentRules:
                 )
             ).scalar_one_or_none()
 
+    async def turn_live(self, run: RunToken) -> bool:
+        """The egress-authorization gate: True only while the run token names a turn the DB still
+        reports running. A keyed host's real-key injection is applied only for a live turn, so a
+        token for a turn that has ended, a turn that never existed, or (checked before this) no
+        token at all is denied at CONNECT and the key never reaches the wire. Read fresh per request
+        — never the per-turn rule cache — so a turn that ends between requests can no longer draw
+        the key, and it costs one indexed lookup on the turn's primary key."""
+        async with workspace_tx() as connection:
+            status = (
+                await connection.execute(
+                    sa.select(tables.turn.c.status).where(
+                        tables.turn.c.id == run.turn_id,
+                        tables.turn.c.workspace_id == run.workspace_id,
+                    )
+                )
+            ).scalar_one_or_none()
+        return status == RUNNING
+
 
 @dataclass
 class EgressProxy:
     resolve: RuleResolver
+    authorize: TurnAuthorizer
     ca_cert: str
     ca_key: str
     _server: asyncio.Server | None = field(default=None, init=False)
@@ -161,14 +190,17 @@ class EgressProxy:
                 name, _, value = line.decode(errors="replace").partition(":")
                 if name.strip().lower() == "proxy-authorization":
                     proxy_auth = value.strip()
-            rules = await self._rules_for(_run_token(proxy_auth))
+            run = _run_token(proxy_auth)
+            rules = await self._rules_for(run)
             if not any(isinstance(r, ScopeRule) and host in r.allowed_hosts for r in rules):
                 await _respond(writer, 403, f"egress to {host} is not permitted")
                 return
             port = int(port_text or DEFAULT_HTTPS_PORT)
             injections = [r for r in rules if isinstance(r, InjectionRule) and r.host == host]
             if not injections:
-                await self._tunnel(reader, writer, host, port)
+                await self._tunnel(reader, writer, host, port, proxy_auth, rules)
+            elif run is None or not await self.authorize(run):
+                await _respond(writer, 403, f"egress to {host} requires a live turn")
             else:
                 await self._mitm(reader, writer, host, port, injections, proxy_auth, rules)
         finally:
@@ -197,9 +229,19 @@ class EgressProxy:
         return rules
 
     async def _tunnel(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, host: str, port: int
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        host: str,
+        port: int,
+        proxy_auth: str,
+        rules: tuple[Rule, ...],
     ) -> None:
-        """An admitted host with no key to inject: relay bytes opaquely, never terminating TLS."""
+        """An admitted host with no key to inject (a grant holds its token server-side): relay bytes
+        opaquely, never terminating TLS. A MeterRule host is counted once the tunnel is
+        established — the proxy cannot see individual requests inside the opaque TLS, so egress to a
+        granted host is metered at CONNECT granularity, the metric and the `egress` ledger row keyed
+        to the turn off the relay path. A connection that never opens (502) is not counted."""
         try:
             upstream_reader, upstream_writer = await asyncio.wait_for(
                 asyncio.open_connection(host, port), timeout=CONNECT_UPSTREAM_TIMEOUT_SECONDS
@@ -209,6 +251,8 @@ class EgressProxy:
             return
         writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
         await writer.drain()
+        self._meter(host, rules)
+        self._meter_ledger(host, proxy_auth, rules)
         await _relay(reader, writer, upstream_reader, upstream_writer)
 
     async def _mitm(
@@ -275,7 +319,7 @@ class EgressProxy:
             await _openssl(
                 "x509", "-req", "-in", str(root / f"leaf-{host}.csr"),
                 "-CA", str(root / "ca.crt"), "-CAkey", str(root / "ca.key"), "-CAcreateserial",
-                "-days", CERT_VALID_DAYS, "-extfile", str(ext_path), "-out", str(cert_path),
+                "-days", LEAF_VALID_DAYS, "-extfile", str(ext_path), "-out", str(cert_path),
             )
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             context.load_cert_chain(certfile=str(cert_path), keyfile=str(root / "leaf.key"))

@@ -17,6 +17,7 @@ through the proxy is a separately-tracked (deferred) proof. Marked `serial`: it 
 patches the process-global upstream dial."""
 
 import asyncio
+import base64
 import datetime as dt
 import ssl
 from pathlib import Path
@@ -66,7 +67,7 @@ SSE_RESPONSE = (
 )
 
 
-async def _seed_turn(connection: AsyncConnection) -> tuple[UUID, UUID]:
+async def _seed_turn(connection: AsyncConnection, status: str = "running") -> tuple[UUID, UUID]:
     workspace_id, member_id, agent_id, conversation_id, turn_id = (uuid4() for _ in range(5))
     await connection.execute(
         sa.insert(tables.workspace).values(
@@ -104,6 +105,7 @@ async def _seed_turn(connection: AsyncConnection) -> tuple[UUID, UUID]:
             updated_at=sa.func.now(),
         )
     )
+    terminal = None if status in ("queued", "running", "parked") else {"status": status}
     await connection.execute(
         sa.insert(tables.turn).values(
             id=turn_id,
@@ -111,9 +113,9 @@ async def _seed_turn(connection: AsyncConnection) -> tuple[UUID, UUID]:
             conversation_id=conversation_id,
             agent_id=agent_id,
             seq=1,
-            status="running",
+            status=status,
             inbound="hi",
-            terminal=None,
+            terminal=terminal,
             created_at=sa.func.now(),
             updated_at=sa.func.now(),
         )
@@ -210,8 +212,12 @@ async def test_sandbox_egress_injects_the_real_key_and_meters_sandbox_tokens(
         MeterRule(host=MODEL_HOST, dimension="tokens"),
     )
     ca_cert, ca_key = await generate_ca()
+    resolver = PerAgentRules(base=rules, grants=None)
     proxy = EgressProxy(
-        resolve=PerAgentRules(base=rules, grants=None).resolve, ca_cert=ca_cert, ca_key=ca_key
+        resolve=resolver.resolve,
+        authorize=resolver.turn_live,
+        ca_cert=ca_cert,
+        ca_key=ca_key,
     )
     endpoint = await proxy.start(bind_host="127.0.0.1")
     ca_path = tmp_path / "proxy_ca.crt"
@@ -261,3 +267,66 @@ async def test_sandbox_egress_injects_the_real_key_and_meters_sandbox_tokens(
     assert int(row.priced_micro_usd) == 81_500
     assert row.model == "claude-opus-4-8"
     assert row.price_digest is not None and row.price_digest.startswith("sha256:")
+
+
+async def test_a_terminal_turn_is_denied_before_any_upstream_dial(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The turn-liveness gate at the network boundary: a CONNECT to the paid model host carrying a
+    token for a turn that has ended is refused at 403 before `_mitm` runs, so the proxy never opens
+    its upstream TLS dial to the real host — the real key never reaches the wire — and no ledger row
+    is written. The live leg (injection + metering) is proven by the sibling test; this proves the
+    key is withheld the moment the turn is not running."""
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection, status="done")
+
+    dialed: list[str] = []
+    real_open = asyncio.open_connection
+
+    async def recording_open(host=None, port=None, *args, **kwargs):
+        if kwargs.get("ssl"):
+            dialed.append(str(host))
+        return await real_open(host, port, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "open_connection", recording_open)
+
+    rules = (
+        ScopeRule(allowed_hosts=frozenset({MODEL_HOST})),
+        InjectionRule(host=MODEL_HOST, header="x-api-key", sentinel=SENTINEL_KEY, real=REAL_KEY),
+        MeterRule(host=MODEL_HOST, dimension="tokens"),
+    )
+    ca_cert, ca_key = await generate_ca()
+    resolver = PerAgentRules(base=rules, grants=None)
+    proxy = EgressProxy(
+        resolve=resolver.resolve,
+        authorize=resolver.turn_live,
+        ca_cert=ca_cert,
+        ca_key=ca_key,
+    )
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    run_token = RunToken(workspace_id, turn_id).encode()
+    auth = base64.b64encode(f"{run_token}:".encode()).decode()
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", endpoint.port)
+        writer.write(
+            f"CONNECT {MODEL_HOST}:443 HTTP/1.1\r\nHost: {MODEL_HOST}\r\n"
+            f"Proxy-Authorization: Basic {auth}\r\n\r\n".encode()
+        )
+        await writer.drain()
+        status_line = await reader.readline()
+        await reader.read()
+        writer.close()
+    finally:
+        await proxy.stop()
+
+    assert int(status_line.split()[1]) == 403
+    assert dialed == []
+    async with workspace_tx() as connection:
+        count = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.ledger)
+                .where(tables.ledger.c.turn_id == turn_id)
+            )
+        ).scalar_one()
+    assert count == 0

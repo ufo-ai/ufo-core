@@ -141,7 +141,9 @@ async def test_connect_binds_a_grant_and_the_proxy_admits_and_meters_the_host(
 
     resolver = PerAgentRules(base=(), grants=flow.store)
     cert, key = await generate_ca()
-    proxy = EgressProxy(resolve=resolver.resolve, ca_cert=cert, ca_key=key)
+    proxy = EgressProxy(
+        resolve=resolver.resolve, authorize=resolver.turn_live, ca_cert=cert, ca_key=key
+    )
     endpoint = await proxy.start(bind_host="127.0.0.1")
     try:
         run = RunToken(workspace_id, turn_id).encode()
