@@ -17,9 +17,11 @@ def test_migrations_are_idempotent(database_url: str) -> None:
 
 
 def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None:
-    """The migration seam's schema invariant: the sample extension's version location layers over
-    core's — `apply_migrations` ran clean in the fixture — and the graph has exactly one head per
-    owner (core's chain and the sample branch), so `upgrade heads` is deterministic, core-first."""
+    """The migration seam's schema invariant: each table-owning extension's version location layers
+    over core's — `apply_migrations` ran clean in the fixture — and the graph has exactly one head
+    per owner (core's chain plus each extension branch), so `upgrade heads` is deterministic,
+    core-first. The base-pinned index-default and memory extensions own their chunk and memory_item
+    tables, and the sample probe owns its note table."""
     config = Config()
     config.set_main_option("script_location", str(MIGRATIONS_DIR))
     config.set_main_option(
@@ -28,8 +30,8 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
     )
     config.set_main_option("path_separator", "os")
     heads = set(ScriptDirectory.from_config(config).get_heads())
-    assert "sample_ext_note_0001" in heads
-    assert len(heads) == 2
+    assert {"index_default_0001", "memory_0001", "sample_ext_note_0001"} <= heads
+    assert len(heads) == 4
 
 
 async def test_workspace_tx_round_trip(db: None) -> None:

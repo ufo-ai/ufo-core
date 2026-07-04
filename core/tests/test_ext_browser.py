@@ -153,7 +153,6 @@ def _context(
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_no_spawn,
-        memory=StubMemory(),
         member_id=None,
         artifact_token_secret="",
         browser=surface,

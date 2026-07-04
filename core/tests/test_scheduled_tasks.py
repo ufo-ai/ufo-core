@@ -115,7 +115,6 @@ def _tool_ctx(workspace_id: UUID, conversation_id: UUID, agent_id: UUID) -> Tool
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
-        memory=None,
         member_id=None,
         artifact_token_secret="",
         ext=context_for(workspace_id, NAME, frozenset(), _credentials()),

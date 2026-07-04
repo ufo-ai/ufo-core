@@ -11,10 +11,6 @@ depends_on: str | None = None
 
 def upgrade() -> None:
     op.add_column(
-        "memory_item",
-        sa.Column("embedding_claimed_at", sa.DateTime(timezone=True), nullable=True),
-    )
-    op.add_column(
         "page",
         sa.Column("embedding_claimed_at", sa.DateTime(timezone=True), nullable=True),
     )
@@ -22,4 +18,3 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_column("page", "embedding_claimed_at")
-    op.drop_column("memory_item", "embedding_claimed_at")

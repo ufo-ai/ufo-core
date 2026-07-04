@@ -49,7 +49,7 @@ Tables (all keyed by `workspace_id`, `created_at`, `updated_at`):
 | `credential` | BYOK secrets, encrypted at rest. Slots are declared by extensions; values are workspace-scoped. |
 | `conversation` | Surface context ↔ queue key (Slack thread, CLI session, web session). Private to its creating member unless the surface is shared (a Slack channel is shared by construction). |
 | `turn`, `turn_step`, `transcript` | The loop's durable log: lifecycle, steps, full-conversation transcript + compaction records. |
-| `memory_item`, `memory_summary` | Memory: subject = member or `shared`. |
+| `memory_item` (memory extension) | Memory: subject = member or `shared`. The memory extension owns this table via its own migration; the index backend owns `chunk`. |
 | `ledger` | Metered usage: every model and tool call, priced. |
 | `spend_cap` | Caps by scope (`workspace` \| `member` \| `agent`), dimension, window; `reject` or `park` on breach. |
 | `job` | Recurring/one-time background work (source sync, triggers, extension jobs). |
@@ -62,8 +62,9 @@ terminal frame. A client's wait always ends — the terminal state commits on th
 - **Tool calling** — typed registry; per-call metering; results bounded before hitting the model.
 - **Skill loading** — skills are folders of files (SKILL.md + assets), mounted into the sandbox on
   `load_skill`; packs are collections of skills plus onboarding steps. **A skill ships with the
-  thing it teaches**: core ships exactly three — `sandbox`, `memory`, `delegation` — teaching
-  core's own builtins; an extension's skills ride its manifest; domain skills are packs. Every-turn
+  thing it teaches**: core ships exactly two — `sandbox`, `delegation` — teaching core's own
+  builtins; an extension's skills ride its manifest (the `memory` skill ships with the memory
+  extension); domain skills are packs. Every-turn
   content belongs in the system prompt, situational/long content in skills; skills carry
   workflows, never restated tool docs (the tool's description is authoritative).
 - **Typed subagents** — a registry of profiles (name, prompt, tool subset, input/output schema);
@@ -72,14 +73,16 @@ terminal frame. A client's wait always ends — the terminal state commits on th
 - **Compaction** — full-conversation `messages.json.lz4` transcript with monotonic seq +
   `compactions/<cid>/{before,after}` records in the blob store (port of the shipped design);
   history compacts as it approaches the model window so a long turn never exceeds it.
-- **Memory** — the store and recall (lexical + vector fusion, subject ∈ {member, shared},
-  auto-injected at turn load; `memory_update` writes) are core. Two pluggable seams: the **index
-  backend** behind one lexical/vector/reindex interface (dialect-native defaults: SQLite FTS5 +
-  local cosine, Postgres tsvector + pgvector; turbopuffer as an extension), and the **derivation
-  mechanics** — extensions register pipeline stages (source
-  pages/events → condense — e.g. to markdown — → memory items + graph updates). Core ships a
-  default condenser; a gbrain-style pipeline replaces or extends it.
-- **Minimal built-in tools** — `bash`, `read`, `write`, `edit`, `memory_search`, `memory_update`,
+- **Memory** — an extension, not core: it owns the `memory_item` table, the `memory_search`/
+  `memory_update` tools, and recall (lexical + vector fusion, subject ∈ {member, shared}),
+  auto-injected each turn through an `on_inbound` hook — no core memory seam. It rides two core
+  selection seams: the **index backend** behind one lexical/vector/reindex interface and the
+  **embed backend** behind one batched-embed interface. The dialect-native index (SQLite FTS5 +
+  local cosine, Postgres tsvector + pgvector) ships as the base-pinned `index-default` extension
+  and OpenAI embedding as the base-pinned `embed-openai` extension; turbopuffer is a drop-in index
+  alternative. The gbrain-style condenser (source pages/events → condense → memory items) is the
+  memory extension's own derivation job.
+- **Minimal built-in tools** — `bash`, `read`, `write`, `edit`,
   `ask_user`, `spawn_subagent`, `load_skill`, `share_file`. Everything else arrives via extensions.
   Two tools where one would do is a defect. `share_file` ports the shipped design: byte custody in
   the blob store, a TTL-bound token URL served by the web surface — no token, no bytes.
@@ -133,14 +136,14 @@ Manifest registers (each optional):
 | `packs` | Bundled skill packs. |
 | `models` | Model providers behind `ModelClient` (OpenRouter, local runtimes). |
 | `carriers` | Sandbox carriers — Docker, E2B, remote runners; core's default is a local temp-dir carrier. |
-| `memory` | Derivation pipeline stages (condensers, graph updaters) — see Agent loop / Memory. |
 | `indexes` | Index backends for memory/source retrieval (turbopuffer); the dialect-native default (SQLite FTS5 + local cosine, Postgres tsvector + pgvector) ships as the base-pinned `index-default` extension registering name `"default"`, which core resolves when `memory.index_backend` is unset. |
 | `embeds` | Embedding backends behind `EmbedClient`, selected by `memory.embed_backend`; OpenAI text-embedding-3-large ships as the base-pinned `embed-openai` extension registering name `"default"`. |
 | `hubs` | Stream hubs for multi-instance deploys (Redis). |
 | `browsers` | Browser-automation backends at the tool-surface seam; the BUA engine driving Chrome over a CDP endpoint is the core default (browserbase swaps the endpoint provider, browser-use the whole surface). |
 
 `ExtensionContext` (capability-scoped, handed to every handler): workspace-scoped store access,
-`credentials.get(slot)`, `memory.write(...)`, `invoke(agent, input, conversation=...)`,
+`credentials.get(slot)`, the selected `index`/`embed` backends, `transaction()` over the
+extension's own tables, `invoke(agent, input, conversation=...)`,
 `schedule(job)`, `trajectories.read(...)` (transcript/turn evidence), and
 `agents.propose_change(...)` — the governed promotion path: an extension never edits agent config
 directly; it opens a proposal (prompt, skills, tool grants) that applies through the same

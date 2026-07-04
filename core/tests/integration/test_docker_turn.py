@@ -16,6 +16,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
+from selfhost_ext_docker import DockerCarrier
 
 from selfhost.blob import FilesystemBlobStore
 from selfhost.browser.backend import BuaBackend
@@ -37,7 +38,6 @@ from selfhost.models.interface import (
     Usage,
 )
 from selfhost.sandbox import session as session_module
-from selfhost.sandbox.carrier import DockerCarrier
 from selfhost.sandbox.session import (
     SANDBOX_GID,
     SANDBOX_UID,
@@ -207,7 +207,6 @@ async def test_turn_execs_bash_in_a_live_container(
         hooks=HookChain(),
         blob=blob,
         spawn=_unavailable_spawn,
-        memory=_StubMemory(),
         member_id=None,
         artifact_token_secret="",
         grants=None,

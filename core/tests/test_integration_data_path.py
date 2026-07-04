@@ -13,6 +13,12 @@ import pytest
 import sqlalchemy as sa
 from selfhost_ext_embed_openai import EMBED_DIM
 from selfhost_ext_index_default import DefaultIndex
+from selfhost_ext_memory.store import (
+    MemoryIndexer,
+    MemoryStore,
+    MemoryWrite,
+    recall_subjects,
+)
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from selfhost.accounting import SpendEvaluator, record_sandbox_tokens
@@ -20,16 +26,11 @@ from selfhost.blob import FilesystemBlobStore
 from selfhost.config import SourceConfig, SourceEntry
 from selfhost.db import workspace_tx
 from selfhost.indexing import TextChunker
-from selfhost.memory.indexer import MemoryIndexer, PageIndexer
-from selfhost.memory.service import (
-    SHARED_SUBJECT,
-    MemoryService,
-    member_subject,
-    recall_subjects,
-)
+from selfhost.memory.indexer import PageIndexer
 from selfhost.memory.sources import FOLDER_BACKEND, FolderSource, SyncDriver, register_sources
 from selfhost.schema import tables
-from selfhost.schema.records import MemoryWrite, Usage
+from selfhost.schema.records import Usage
+from selfhost.subjects import SHARED_SUBJECT, member_subject
 
 pytestmark = pytest.mark.integration
 
@@ -183,7 +184,9 @@ async def test_folder_source_syncs_indexes_and_is_recalled(
     page_indexer = PageIndexer(
         index=index, embed=embed, chunker=TextChunker(), blob=blob, postgres=postgres
     )
-    service = MemoryService(index=index, embed=embed)
+    service = MemoryStore(
+        index=index, embed=embed, transaction=workspace_tx, workspace_id=uuid4()
+    )
     await register_sources(
         (SourceEntry(backend=FOLDER_BACKEND, config=SourceConfig(root=str(root))),)
     )
@@ -212,16 +215,15 @@ async def test_member_fact_recall_is_isolated_from_other_members(
     """A committed member fact recalls for its owner after indexing but is invisible to another
     member — the {member, shared} isolation enforced in the real index query, end to end."""
     await _clear_chunks(database_url)
-    await _workspace()
+    workspace_id = await _workspace()
     alice, bob = uuid4(), uuid4()
     embed = StubEmbed(axis=2)
     index = DefaultIndex(embed=embed, transaction=workspace_tx)
-    service = MemoryService(index=index, embed=embed)
+    service = MemoryStore(
+        index=index, embed=embed, transaction=workspace_tx, workspace_id=workspace_id
+    )
     indexer = MemoryIndexer(
-        index=index,
-        embed=embed,
-        chunker=TextChunker(),
-        postgres=database_url.startswith("postgresql"),
+        index=index, embed=embed, transaction=workspace_tx, chunker=TextChunker()
     )
     await service.commit(
         MemoryWrite(subject=member_subject(alice), body="alice keeps the vault combination")

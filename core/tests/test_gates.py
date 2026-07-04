@@ -64,8 +64,8 @@ def test_skills_gate_flags_a_skill_outside_the_fixed_set() -> None:
 
 
 def test_skills_gate_flags_a_missing_core_skill() -> None:
-    failures = gates._rogue_skill_failures(gates.CORE_SKILL_NAMES - {"memory"})
-    assert any("memory" in failure for failure in failures)
+    failures = gates._rogue_skill_failures(gates.CORE_SKILL_NAMES - {"sandbox"})
+    assert any("sandbox" in failure for failure in failures)
 
 
 def test_skill_boundary_gate_flags_a_script_importing_selfhost() -> None:

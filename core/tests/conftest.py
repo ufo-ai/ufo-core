@@ -35,7 +35,6 @@ DELETE_ORDER = (
     tables.credential,
     tables.page,
     tables.source,
-    tables.memory_item,
     tables.member,
     tables.workspace,
 )

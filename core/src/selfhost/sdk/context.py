@@ -25,8 +25,5 @@ from selfhost.schema.records import (
     AgentChange as AgentChange,
 )
 from selfhost.schema.records import (
-    MemoryWrite as MemoryWrite,
-)
-from selfhost.schema.records import (
     ProposalRef as ProposalRef,
 )

@@ -66,7 +66,6 @@ def _context(sandbox: FilesSandbox, spawn: RecordingSpawn, tmp_path: Path) -> To
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=spawn,
-        memory=None,
         member_id=None,
         artifact_token_secret="",
     )

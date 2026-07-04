@@ -1,6 +1,6 @@
 """The builtin tool set: bash, read, write, edit, glob, grep, share_file, spawn_subagent,
-memory_search, memory_update, load_sessions, ask_user, load_skill, connect_account, pause_and_wait,
-list_skills, wait_for_subagents, cancel_subagent.
+load_sessions, ask_user, load_skill, connect_account, pause_and_wait, list_skills,
+wait_for_subagents, cancel_subagent.
 
 Each file/shell handler reaches the workspace only through `ctx.sandbox`, so the carrier's scoping
 and egress rules apply whether a byte arrives via a shell command or a file op. `read`, `edit`, and
@@ -13,12 +13,9 @@ content search happen in the container and a bounded result crosses back. `share
 produced workspace file straight out of the mount into the blob
 store under `artifacts/<uuid>/` and returns a TTL-token URL the web surface serves — the only path
 that hands a file back outside the sandbox, with no read cap and no whole-file buffer.
-`spawn_subagent` delegates a typed subtask to a child turn through `ctx.spawn`. `memory_search`
-recalls facts and searches synced source pages through `ctx.memory`, fanning up to three queries
-out concurrently and merging them under an optional `created_at` window, and `memory_update`
-commits — both scoped to the conversation's subject (`{member, shared}`). `load_sessions` reads
-specific past conversation transcripts back from the blob store, scoped to the speaking member's
-own conversations. `ask_user` is chat-native: it
+`spawn_subagent` delegates a typed subtask to a child turn through `ctx.spawn`. `load_sessions`
+reads specific past conversation transcripts back from the blob store, scoped to the speaking
+member's own conversations. `ask_user` is chat-native: it
 structures a question or confirmation the agent poses in its reply, whose answer rides the member's
 next message — no out-of-band prompt. `load_skill` mounts a skill's `SKILL.md` and assets into the
 workspace and returns its workflow instructions. `list_skills` reports the loadable skills so the
@@ -28,11 +25,10 @@ structures a wait the agent poses in its reply and ends the turn, resuming on th
 backs `spawn`, to await a background child's terminal or cancel a running one — scoped to the
 children this turn spawned."""
 
-import asyncio
 import json
 import mimetypes
 import shlex
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import Any, Literal
 from uuid import UUID, uuid4
@@ -49,24 +45,14 @@ from selfhost.artifact_token import (
 from selfhost.blob import BlobNotFound
 from selfhost.db import workspace_tx
 from selfhost.grants import installed_connect_flow
-from selfhost.memory.service import (
-    SHARED_SUBJECT,
-    Recalled,
-    SourceMatch,
-    member_subject,
-    recall_subjects,
-)
 from selfhost.models.interface import TextBlock
 from selfhost.sandbox.session import WORKSPACE_DIR, workspace_path
 from selfhost.schema import tables
-from selfhost.schema.records import FACT, ItemClass, MemoryWrite
 from selfhost.skills.runtime import mount_skill
 from selfhost.tools.context import ImageContent, TextContent, ToolContext, ToolResult
 from selfhost.tools.registry import ToolDef
 from selfhost.transcript import TranscriptDecodeError, decode, transcript_key
 
-MEMORY_SEARCH_LIMIT = 8
-MAX_MEMORY_QUERIES = 3
 GREP_HEAD_LIMIT = 100
 MAX_LOAD_SESSIONS = 25
 ARTIFACT_FALLBACK_NAME = "download"
@@ -142,19 +128,6 @@ class SpawnSubagentInput(BaseModel):
     profile: str
     payload: dict[str, Any] = Field(default_factory=dict)
     background: bool = False
-
-
-class MemorySearchInput(BaseModel):
-    queries: tuple[str, ...] = Field(min_length=1, max_length=MAX_MEMORY_QUERIES)
-    start_date: str | None = None
-    end_date: str | None = None
-
-
-class MemoryUpdateInput(BaseModel):
-    body: str
-    item_class: ItemClass = FACT
-    shared: bool = False
-    source_ref: str | None = None
 
 
 class LoadSessionsInput(BaseModel):
@@ -443,75 +416,6 @@ async def spawn_subagent_handler(ctx: ToolContext, args: SpawnSubagentInput) -> 
     return ToolResult(content=(TextContent(text=text),))
 
 
-def _date_bound(value: str | None, *, end: bool) -> datetime | None:
-    """Parse an ISO-8601 date or datetime to a UTC bound. A bare `end` date covers its whole day —
-    the exclusive next midnight — so `[start_date, end_date]` reads inclusively; a malformed value
-    raises and surfaces to the model as a recoverable tool error."""
-    if value is None:
-        return None
-    parsed = datetime.fromisoformat(value)
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    if end and "T" not in value and " " not in value:
-        parsed += timedelta(days=1)
-    return parsed
-
-
-async def memory_search_handler(ctx: ToolContext, args: MemorySearchInput) -> ToolResult:
-    """Fan the queries out concurrently over recall and source search, then merge each kind by
-    keeping every item's best score across the queries that surfaced it and bounding the merged set
-    to MEMORY_SEARCH_LIMIT — so up to MAX_MEMORY_QUERIES queries can never blow the turn's context.
-    start_date/end_date, when given, restrict both kinds to a `created_at` window."""
-    subjects = recall_subjects(ctx.member_id)
-    start = _date_bound(args.start_date, end=False)
-    end = _date_bound(args.end_date, end=True)
-    recalled_legs, source_legs = await asyncio.gather(
-        asyncio.gather(
-            *(
-                ctx.memory.recall(query, subjects, MEMORY_SEARCH_LIMIT, start, end)
-                for query in args.queries
-            )
-        ),
-        asyncio.gather(
-            *(
-                ctx.memory.search_sources(query, subjects, MEMORY_SEARCH_LIMIT, start, end)
-                for query in args.queries
-            )
-        ),
-    )
-    recalled: dict[UUID, Recalled] = {}
-    for recall_leg in recalled_legs:
-        for item in recall_leg:
-            if item.memory_id not in recalled or item.score > recalled[item.memory_id].score:
-                recalled[item.memory_id] = item
-    sources: dict[UUID, SourceMatch] = {}
-    for source_leg in source_legs:
-        for match in source_leg:
-            if match.page_id not in sources or match.score > sources[match.page_id].score:
-                sources[match.page_id] = match
-    if not recalled and not sources:
-        return ToolResult(content=(TextContent(text="No matching memory."),))
-    top_recalled = sorted(recalled.values(), key=lambda item: item.score, reverse=True)
-    top_sources = sorted(sources.values(), key=lambda match: match.score, reverse=True)
-    lines = [f"- [{item.item_class}] {item.body}" for item in top_recalled[:MEMORY_SEARCH_LIMIT]]
-    lines.extend(f"- [source] {match.text}" for match in top_sources[:MEMORY_SEARCH_LIMIT])
-    return ToolResult(content=(TextContent(text="\n".join(lines)),))
-
-
-async def memory_update_handler(ctx: ToolContext, args: MemoryUpdateInput) -> ToolResult:
-    subject = (
-        SHARED_SUBJECT
-        if args.shared or ctx.member_id is None
-        else member_subject(ctx.member_id)
-    )
-    await ctx.memory.commit(
-        MemoryWrite(
-            subject=subject, body=args.body, item_class=args.item_class, source_ref=args.source_ref
-        )
-    )
-    return ToolResult(content=(TextContent(text=f"Remembered ({subject})."),))
-
-
 async def load_sessions_handler(ctx: ToolContext, args: LoadSessionsInput) -> ToolResult:
     """Load specific past conversation transcripts by id, scoped to the speaking member's own
     conversations in this workspace. Each id resolves to its durable transcript, rendered as the
@@ -756,32 +660,6 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=SpawnSubagentInput,
         handler=spawn_subagent_handler,
-    ),
-    ToolDef(
-        name="memory_search",
-        description=(
-            "Search memory for facts, notes, and synced source documents, over the current "
-            "member's memory and shared memory. Pass up to "
-            f"{MAX_MEMORY_QUERIES} distinct queries — they run in parallel and their results are "
-            "merged and deduplicated. Optionally restrict to items written in a window with "
-            "start_date/end_date (ISO-8601, e.g. 2026-01-31). Returns the best-matching items and "
-            "document snippets; use it to recall context before answering."
-        ),
-        input_model=MemorySearchInput,
-        handler=memory_search_handler,
-    ),
-    ToolDef(
-        name="memory_update",
-        description=(
-            "Record a durable memory item so later turns and conversations can recall it. Writes "
-            "to the current member's memory by default, or shared memory when `shared` is true. "
-            "Use proactively when learning persistent facts — name, role, company, team, "
-            "colleagues, preferences, projects, tools, key people, communication style. Do NOT "
-            "store ephemeral instructions (e.g. 'make it shorter'); only store persistent "
-            "information."
-        ),
-        input_model=MemoryUpdateInput,
-        handler=memory_update_handler,
     ),
     ToolDef(
         name="load_sessions",

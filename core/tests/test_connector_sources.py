@@ -20,6 +20,7 @@ import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from selfhost_ext_embed_openai import EMBED_DIM
 from selfhost_ext_index_default import DefaultIndex
+from selfhost_ext_memory.store import MemoryStore
 
 from selfhost.blob import FilesystemBlobStore
 from selfhost.credentials import CredentialStore
@@ -27,9 +28,9 @@ from selfhost.db import workspace_tx
 from selfhost.ext.context import context_for
 from selfhost.indexing import TextChunker
 from selfhost.memory.indexer import PageIndexer
-from selfhost.memory.service import SHARED_SUBJECT, MemoryService
 from selfhost.memory.sources import SourceAuth, SyncDriver
 from selfhost.schema import tables
+from selfhost.subjects import SHARED_SUBJECT
 
 COMPOSIO_ACCOUNT = "ca_asana_1"
 
@@ -194,7 +195,9 @@ async def test_asana_source_syncs_through_the_driver_into_recallable_memory(
     page_indexer = PageIndexer(
         index=index, embed=embed, chunker=TextChunker(), blob=blob, postgres=postgres
     )
-    service = MemoryService(index=index, embed=embed)
+    service = MemoryStore(
+        index=index, embed=embed, transaction=workspace_tx, workspace_id=workspace_id
+    )
 
     await driver.run()
     async with workspace_tx() as connection:

@@ -28,7 +28,6 @@ from selfhost.hub import CostTick, Hub, LiveFrame, Parked, SkillLoad, Terminal, 
 from selfhost.loop.compaction import Compaction
 from selfhost.loop.prompts.render import RenderedPrompt
 from selfhost.loop.transcript import Transcript
-from selfhost.memory.service import MemoryService, recall_subjects
 from selfhost.models.interface import (
     ImageBlock,
     ImageSource,
@@ -73,8 +72,6 @@ TRANSCRIPT_WRITE_ATTEMPTS = 3
 TRANSCRIPT_WRITE_RETRY_SECONDS = 0.5
 COMMIT_RETRY_INITIAL_SECONDS = 1.0
 COMMIT_RETRY_MAX_SECONDS = 30.0
-RECALL_LIMIT = 8
-RECALL_CONTEXT_PREFIX = "Relevant memory:\n"
 SKILL_LOAD_TOOL = "load_skill"
 TOOL_CALL_PREVIEW_CHARS = 200
 MAX_TOOL_RESULT_CHARS = 1_048_576
@@ -147,7 +144,6 @@ class TurnEngine:
     hooks: HookChain
     blob: BlobStore
     spawn: Spawn
-    memory: MemoryService
     member_id: UUID | None
     artifact_token_secret: str
     grants: GrantStore | None
@@ -194,7 +190,6 @@ class TurnEngine:
                 agent=self.agent,
                 spawn=self.spawn,
                 subagents=self.subagents,
-                memory=self.memory,
                 member_id=self.member_id,
                 artifact_token_secret=self.artifact_token_secret,
                 grants=self.grants,
@@ -204,11 +199,7 @@ class TurnEngine:
             try:
                 if not await self._mark_running():
                     return await self._resolve_unclaimed()
-                recalled = await self._recalled_context()
-                prompt = self.system_prompt.content
-                system = (
-                    prompt if not recalled else f"{prompt}\n\n{RECALL_CONTEXT_PREFIX}{recalled}"
-                )
+                system = self.system_prompt.content
                 inbound = await self.hooks.fire(
                     "on_inbound",
                     OnInbound(text=self.turn.inbound),
@@ -285,21 +276,6 @@ class TurnEngine:
         if stored is None or stored.seq >= self.turn.seq:
             return ()
         return stored.messages
-
-    async def _recalled_context(self) -> str:
-        """Memory relevant to the inbound, rendered for the turn's system prompt — recomputed each
-        turn and never written into the transcript, scoped to the turn's member and shared subjects.
-        It rides the system (not a leading user message) so it neither breaks role alternation nor
-        pollutes the durable conversation. Best-effort: a recall failure yields no context and never
-        fails the turn — the live leg never fails the turn."""
-        try:
-            recalled = await self.memory.recall(
-                self.turn.inbound, recall_subjects(self.member_id), RECALL_LIMIT
-            )
-        except Exception as error:
-            log("recall.failed", turn_id=str(self.turn.id), error_class=type(error).__name__)
-            return ""
-        return "\n".join(f"- {item.body}" for item in recalled)
 
     async def _model_round(
         self,

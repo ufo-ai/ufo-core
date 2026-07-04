@@ -30,3 +30,6 @@ from selfhost.memory.sources import (
 from selfhost.subjects import (
     SHARED_SUBJECT as SHARED_SUBJECT,
 )
+from selfhost.subjects import (
+    member_subject as member_subject,
+)

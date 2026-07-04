@@ -21,6 +21,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from selfhost_ext_embed_openai import EMBED_DIM
 from selfhost_ext_index_default import DefaultIndex
+from selfhost_ext_memory.store import MemoryStore
 
 from selfhost.blob import FilesystemBlobStore
 from selfhost.browser.backend import BuaBackend
@@ -36,7 +37,6 @@ from selfhost.credentials import CredentialSlotUnset, CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.ext.context import (
     ExtensionContext,
-    MemoryAccess,
     ScopedStore,
     TrajectoryCorpus,
     UndeclaredCredentialSlot,
@@ -61,7 +61,6 @@ from selfhost.loop.prompts.render import render_system_prompt
 from selfhost.loop.subagents import SubagentRegistry, subagent_system_prompt
 from selfhost.loop.transcript import Transcript
 from selfhost.memory.indexer import PageIndexer
-from selfhost.memory.service import MemoryService
 from selfhost.memory.sources import SyncDriver
 from selfhost.models.interface import Message, ModelRequest, TextDelta
 from selfhost.models.registry import model_registry
@@ -84,18 +83,6 @@ from selfhost.tools.context import SpawnResult, ToolContext
 from selfhost.transcript import Conversation, transcript_key
 
 SANDBOX_UNTOUCHED = "the sample tool records through its store and must not reach the sandbox"
-
-
-@dataclass(frozen=True)
-class StubMemory:
-    """Stand-in memory service for the conformance context: the sample tool records through its own
-    store and never touches memory, so recall/commit are inert here."""
-
-    async def recall(self, query: str, subjects: frozenset[str], limit: int) -> tuple:
-        return ()
-
-    async def commit(self, write: object) -> None:
-        return None
 
 
 def _sample_manifest() -> Manifest:
@@ -195,7 +182,6 @@ def _tool_context(workspace_id: UUID, ext: ExtensionContext, tmp_path: Path) -> 
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
-        memory=StubMemory(),
         member_id=None,
         artifact_token_secret="",
         ext=ext,
@@ -418,7 +404,6 @@ async def test_tool_dispatches_with_its_scoped_context(db: None, tmp_path: Path)
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
-        memory=StubMemory(),
         member_id=None,
         artifact_token_secret="",
         ext=ext_by_tool[tool.name],
@@ -505,7 +490,6 @@ async def test_connector_execute_tool_resolves_the_bound_account_without_the_san
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
-        memory=StubMemory(),
         member_id=member_id,
         artifact_token_secret="",
         grants=grants,
@@ -549,17 +533,16 @@ async def test_undeclared_credential_slot_is_refused(db: None) -> None:
         await context.credentials.get(sample.UNDECLARED_SLOT)
 
 
-async def test_context_confines_the_credential_and_memory_handles(db: None) -> None:
-    """The credential and memory handles a context carries expose only their gated methods: no raw
-    CredentialStore field to read an undeclared slot, no raw MemoryService to recall or commit under
-    another member's subject. The same confinement holds whether the context is built for a
-    job/route (`context_for`) or a tool (`turn_tools`)."""
+async def test_context_confines_the_credential_handle(db: None) -> None:
+    """The credential handle a context carries exposes only its gated methods: no raw
+    CredentialStore field to read an undeclared slot. The same confinement holds whether the context
+    is built for a job/route (`context_for`) or a tool (`turn_tools`)."""
     workspace_id = await _workspace()
     manifest = _sample_manifest()
     declared = frozenset(slot.name for slot in manifest.credentials)
-    _, ext_by_tool = turn_tools((manifest,), workspace_id, _credential_store(), StubMemory())
+    _, ext_by_tool = turn_tools((manifest,), workspace_id, _credential_store())
     for context in (
-        context_for(workspace_id, manifest.name, declared, _credential_store(), StubMemory()),
+        context_for(workspace_id, manifest.name, declared, _credential_store()),
         ext_by_tool[sample.TOOL_NAME],
     ):
         assert {name for name in dir(context.credentials) if not name.startswith("_")} == {
@@ -569,17 +552,12 @@ async def test_context_confines_the_credential_and_memory_handles(db: None) -> N
         }
         with pytest.raises(UndeclaredCredentialSlot, match=sample.UNDECLARED_SLOT):
             await context.credentials.get(sample.UNDECLARED_SLOT)
-        assert isinstance(context.memory, MemoryAccess)
-        assert {name for name in dir(context.memory) if not name.startswith("_")} == {
-            "recall",
-            "commit",
-        }
 
 
 def test_a_route_without_a_credential_key_fails_loud() -> None:
     manifest = _sample_manifest()
     with pytest.raises(RuntimeError, match="serves routes but no credential key"):
-        _mount_ext_routes(FastAPI(), (manifest,), uuid4(), None, StubMemory())
+        _mount_ext_routes(FastAPI(), (manifest,), uuid4(), None, None, None)
 
 
 async def test_job_fires_through_its_scoped_context(db: None) -> None:
@@ -607,7 +585,7 @@ async def test_route_reaches_its_scoped_context(db: None) -> None:
     workspace_id = await _workspace()
     manifest = _sample_manifest()
     app = FastAPI()
-    _mount_ext_routes(app, (manifest,), workspace_id, _credential_store(), StubMemory())
+    _mount_ext_routes(app, (manifest,), workspace_id, _credential_store(), None, None)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://serve") as client:
         response = await client.post(f"/ext/{sample.NAME}/{sample.ROUTE_PATH}", content="ping")
     assert response.status_code == 200
@@ -755,7 +733,7 @@ async def test_job_context_confines_blob_to_a_workspace_scoped_trajectory_read(
     await _seed_trajectory(second, blob)
     await blob.put("artifacts/leak/report.txt", b"private")
 
-    context = context_for(first, sample.NAME, frozenset(), _credential_store(), None, blob)
+    context = context_for(first, sample.NAME, frozenset(), _credential_store(), blob=blob)
 
     assert "blob" not in {field.name for field in fields(context)}
     assert isinstance(context.corpus, TrajectoryCorpus)
@@ -777,7 +755,7 @@ async def test_a_corrupt_transcript_is_skipped_not_aborting_the_corpus(
     good_agent = await _seed_trajectory(workspace_id, blob)
     await _seed_trajectory(workspace_id, blob, corrupt=True)
 
-    context = context_for(workspace_id, sample.NAME, frozenset(), _credential_store(), None, blob)
+    context = context_for(workspace_id, sample.NAME, frozenset(), _credential_store(), blob=blob)
     trajectories = await context.trajectories()
     assert len(trajectories) == 1
     assert trajectories[0].agent_id == good_agent
@@ -955,7 +933,9 @@ async def test_sample_source_syncs_a_page_recallable_through_memory(
     page_indexer = PageIndexer(
         index=index, embed=embed, chunker=TextChunker(), blob=blob, postgres=postgres
     )
-    service = MemoryService(index=index, embed=embed)
+    service = MemoryStore(
+        index=index, embed=embed, transaction=workspace_tx, workspace_id=workspace_id
+    )
 
     await driver.run()
     async with workspace_tx() as connection:

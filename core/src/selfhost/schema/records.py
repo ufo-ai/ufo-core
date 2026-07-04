@@ -16,11 +16,6 @@ PENDING: ProposalStatus = "pending"
 APPROVED: ProposalStatus = "approved"
 REJECTED: ProposalStatus = "rejected"
 
-ItemClass = Literal["fact", "episodic", "semantic"]
-FACT: ItemClass = "fact"
-EPISODIC: ItemClass = "episodic"
-SEMANTIC: ItemClass = "semantic"
-
 DEFAULT_AGENT_NAME = "assistant"
 TURN_QUEUE_NAME = "turns"
 TURN_WORKFLOW_NAME = "turn"
@@ -97,26 +92,3 @@ class ProposalRef:
     proposal_id: UUID
 
 
-class MemoryWrite(BaseModel):
-    """What a commit records: the subject scoping visibility, the body, its class, and the ref back
-    to what produced it. Crosses the extension→core boundary (an extension's `memory_write`), so it
-    validates at construction and never carries a live handle."""
-
-    subject: str
-    body: str
-    item_class: ItemClass = FACT
-    source_ref: str | None = None
-
-
-class MemoryItem(BaseModel):
-    """A stored memory row as the derivation job loads it. `embedding_digest` is the content digest
-    the index carries once derived — NULL means the item is due for indexing; `superseded_by` points
-    at the item that replaced it."""
-
-    id: UUID
-    subject: str
-    body: str
-    item_class: ItemClass
-    source_ref: str | None = None
-    embedding_digest: str | None = None
-    superseded_by: UUID | None = None

@@ -9,6 +9,12 @@ extension implements to contribute a batched embed backend selected by `memory.e
 concrete shapes live in `selfhost.indexing`, reached only here."""
 
 from selfhost.indexing import (
+    OWNER_KIND_MEMORY_ITEM as OWNER_KIND_MEMORY_ITEM,
+)
+from selfhost.indexing import (
+    OWNER_KIND_PAGE as OWNER_KIND_PAGE,
+)
+from selfhost.indexing import (
     Chunk as Chunk,
 )
 from selfhost.indexing import (
@@ -22,4 +28,10 @@ from selfhost.indexing import (
 )
 from selfhost.indexing import (
     IndexScope as IndexScope,
+)
+from selfhost.indexing import (
+    TextChunker as TextChunker,
+)
+from selfhost.indexing import (
+    chunk_embed_upsert as chunk_embed_upsert,
 )

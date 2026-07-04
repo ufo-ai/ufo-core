@@ -22,6 +22,7 @@ members = [
     "selfhost-ext-exa",
     "selfhost-ext-index-default",
     "selfhost-ext-mcp",
+    "selfhost-ext-memory",
     "selfhost-ext-openrouter",
     "selfhost-ext-redis-hub",
     "selfhost-ext-repl",
@@ -2652,6 +2653,23 @@ dependencies = [
 requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "selfhost", editable = "core" },
+]
+
+[[package]]
+name = "selfhost-ext-memory"
+version = "0.1.0"
+source = { editable = "extensions/memory" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "selfhost" },
+    { name = "sqlalchemy" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pydantic", specifier = ">=2" },
+    { name = "selfhost", editable = "core" },
+    { name = "sqlalchemy", specifier = ">=2" },
 ]
 
 [[package]]

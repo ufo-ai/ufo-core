@@ -22,7 +22,7 @@ SDK_PUBLIC_PREFIX = "selfhost.sdk"
 MANIFEST_MODULE = CORE_SRC / "ext" / "manifest.py"
 SAMPLE_MODULE = Path(EXTENSIONS_ROOT) / "sample" / "selfhost_ext_sample.py"
 CORE_SKILLS_DIR = CORE_SRC / "skills"
-CORE_SKILL_NAMES = frozenset({"sandbox", "memory", "delegation"})
+CORE_SKILL_NAMES = frozenset({"sandbox", "delegation"})
 SKILL_MANIFEST = "SKILL.md"
 MIGRATION_DIR_PART = "migrations"
 CORE_OWNER = "core"
@@ -332,10 +332,10 @@ def _rogue_skill_failures(present: frozenset[str]) -> list[str]:
 
 def _skill_failures() -> list[str]:
     """A skill ships with the thing it teaches, and core teaches only its own builtins, so core
-    ships exactly three skills — sandbox, memory, delegation. This gate is scoped to `core/skills`
-    alone: a fourth SKILL.md folder there is an extension or a pack living in the wrong tree, a
-    missing one is a broken floor. Packs contribute any number of their own skills elsewhere, held
-    only to the skill boundary gate."""
+    ships exactly two skills — sandbox, delegation (memory ships with the memory extension). This
+    gate is scoped to `core/skills` alone: a third SKILL.md folder there is an extension or a pack
+    living in the wrong tree, a missing one is a broken floor. Packs contribute any number of their
+    own skills elsewhere, held only to the skill boundary gate."""
     root = ROOT / CORE_SKILLS_DIR
     if not root.is_dir():
         return [f"skills: core skills directory missing at {CORE_SKILLS_DIR}"]

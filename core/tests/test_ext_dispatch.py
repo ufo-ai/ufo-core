@@ -221,7 +221,6 @@ def _engine(
         hooks=HookChain(),
         blob=blob,
         spawn=_unavailable_spawn,
-        memory=StubMemory(),
         member_id=None,
         artifact_token_secret="",
         grants=None,

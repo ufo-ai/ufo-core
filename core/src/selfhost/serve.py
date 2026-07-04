@@ -35,13 +35,12 @@ from selfhost.ext.manifest import Manifest
 from selfhost.ext.surface import SurfaceContext, SurfaceSpec, WritebackPoller
 from selfhost.grants import ConnectFlow, GrantStore, OAuthProvider, install_connect_flow
 from selfhost.hub import Hub, InProcessHub
-from selfhost.indexing import TextChunker
+from selfhost.indexing import EmbedClient, IndexBackend, TextChunker
 from selfhost.jobs import JobRunner, SpendResume, bindings_from, core_jobs
 from selfhost.loop.profiles import CORE_SUBAGENT_PROFILES
 from selfhost.loop.queue import Runtime, init_runtime
 from selfhost.loop.subagents import SubagentRegistry
-from selfhost.memory.indexer import MemoryIndexer, PageIndexer
-from selfhost.memory.service import MemoryService
+from selfhost.memory.indexer import PageIndexer
 from selfhost.memory.sources import (
     FOLDER_BACKEND,
     FolderSource,
@@ -91,9 +90,7 @@ def run() -> None:
     chunker = TextChunker()
     blob = blob_store_for(config.blob)
     artifact_secret = os.environ.get(config.artifacts.token_secret_env, "")
-    memory = MemoryService(index=index, embed=embed)
     postgres = config.database.url.startswith("postgresql")
-    indexer = MemoryIndexer(index=index, embed=embed, chunker=chunker, postgres=postgres)
     page_indexer = PageIndexer(
         index=index, embed=embed, chunker=chunker, blob=blob, postgres=postgres
     )
@@ -119,7 +116,8 @@ def run() -> None:
             registry=model_registry(config, manifests),
             skills=skill_registry(manifests),
             credentials=credentials,
-            memory=memory,
+            index=index,
+            embed=embed,
             artifact_token_secret=artifact_secret,
         )
     )
@@ -133,7 +131,7 @@ def run() -> None:
         }
     )
     DBOS.launch()
-    _launch_jobs(config, indexer, page_indexer, sync_driver, memory, dbos_client, blob)
+    _launch_jobs(config, page_indexer, sync_driver, index, embed, dbos_client, blob)
     app = FastAPI(lifespan=_serve_lifespan)
     app.state.hub = hub
     app.state.dbos = dbos_client
@@ -141,7 +139,7 @@ def run() -> None:
     app.state.workspace_id = workspace_id
     app.state.writeback_poller = None
     app.include_router(router)
-    _mount_ext_routes(app, manifests, workspace_id, credentials, memory)
+    _mount_ext_routes(app, manifests, workspace_id, credentials, index, embed)
     _mount_surfaces(
         app,
         manifests,
@@ -172,21 +170,22 @@ async def _require_bootstrap() -> None:
 
 def _launch_jobs(
     config: Config,
-    indexer: MemoryIndexer,
     page_indexer: PageIndexer,
     sync_driver: SyncDriver,
-    memory: MemoryService,
+    index: IndexBackend,
+    embed: EmbedClient,
     dbos_client: DBOSClient,
     blob: BlobStore,
 ) -> None:
-    """Register this workspace's jobs — core's own (the memory + page index derivations, the source
-    sync driver, and the spend-resume sweep that re-admits parked turns) plus every installed
-    extension's — as DBOS schedules and one-shot enqueues, after launch so the system store is live.
-    Registration is the synchronous DBOS API (off the loop, at startup); a handler may read a
-    declared credential, so once any job is registered the credential key must be set."""
+    """Register this workspace's jobs — core's own (the page index derivation, the source sync
+    driver, and the spend-resume sweep that re-admits parked turns) plus every installed
+    extension's (the memory extension's memory-index job among them) — as DBOS schedules and
+    one-shot enqueues, after launch so the system store is live. Registration is the synchronous
+    DBOS API (off the loop, at startup); a handler may read a declared credential or the deploy
+    index/embed backends, so once any job is registered the credential key must be set."""
     bindings = bindings_from(
         load_manifests(),
-        core_jobs(indexer, page_indexer, sync_driver, SpendResume(client=dbos_client)),
+        core_jobs(page_indexer, sync_driver, SpendResume(client=dbos_client)),
     )
     if not bindings:
         return
@@ -200,7 +199,8 @@ def _launch_jobs(
         workspace_id=workspace_id,
         credential_store=CredentialStore(fernet=Fernet(key.encode())),
         bindings=bindings,
-        memory=memory,
+        index=index,
+        embed=embed,
         blob=blob,
         invoker=AdmissionInvoker(admission=Admission(dbos=dbos_client), workspace_id=workspace_id),
     ).launch()
@@ -315,7 +315,8 @@ def _mount_ext_routes(
     manifests: tuple[Manifest, ...],
     workspace_id: UUID,
     credentials: CredentialStore | None,
-    memory: MemoryService,
+    index: IndexBackend,
+    embed: EmbedClient,
 ) -> None:
     """Mount each extension's declared routes at `/ext/<name>/<path>`, every request bound to that
     extension's workspace-scoped ExtensionContext. An extension serving routes without a credential
@@ -328,7 +329,7 @@ def _mount_ext_routes(
                 f"extension {manifest.name!r} serves routes but no credential key is set"
             )
         declared = frozenset(slot.name for slot in manifest.credentials)
-        context = context_for(workspace_id, manifest.name, declared, credentials, memory)
+        context = context_for(workspace_id, manifest.name, declared, credentials, index, embed)
         for spec in manifest.routes:
 
             async def endpoint(

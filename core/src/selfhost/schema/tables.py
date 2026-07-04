@@ -182,29 +182,6 @@ proposal = sa.Table(
     sa.CheckConstraint("status in ('pending', 'approved', 'rejected')", name="proposal_status"),
 )
 
-memory_item = sa.Table(
-    "memory_item",
-    metadata,
-    sa.Column("id", sa.Uuid, primary_key=True),
-    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
-    sa.Column("subject", sa.Text, nullable=False),
-    sa.Column("body", sa.Text, nullable=False),
-    sa.Column("item_class", sa.Text, nullable=False),
-    sa.Column("source_ref", sa.Text, nullable=True),
-    sa.Column("embedding_digest", sa.Text, nullable=True),
-    sa.Column("embedding_claimed_at", sa.DateTime(timezone=True), nullable=True),
-    sa.Column("superseded_by", sa.Uuid, nullable=True),
-    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-    sa.CheckConstraint(
-        "item_class in ('fact', 'episodic', 'semantic')", name="memory_item_class"
-    ),
-    sa.CheckConstraint(
-        "subject = 'shared' or subject like 'member:%'", name="memory_item_subject"
-    ),
-    sa.Index("memory_item_due", "embedding_digest"),
-)
-
 writeback = sa.Table(
     "writeback",
     metadata,

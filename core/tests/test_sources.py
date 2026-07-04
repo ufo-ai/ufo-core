@@ -4,31 +4,26 @@ from typing import ClassVar
 from uuid import UUID, uuid4
 
 import pytest
+import selfhost_ext_memory.manifest as memory_manifest
 import sqlalchemy as sa
 from selfhost_ext_embed_openai import EMBED_DIM
 from selfhost_ext_index_default import DefaultIndex
+from selfhost_ext_memory.store import MemoryStore, recall_subjects
 
 from selfhost.blob import FilesystemBlobStore
 from selfhost.config import SourceConfig, SourceEntry
 from selfhost.db import workspace_tx
-from selfhost.indexing import Chunk, TextChunker
+from selfhost.ext.context import context_for
+from selfhost.indexing import OWNER_KIND_PAGE, Chunk, TextChunker
 from selfhost.jobs import (
     CORE_EXTENSION,
-    MEMORY_INDEX_JOB,
     PAGE_INDEX_JOB,
     SPEND_RESUME_JOB,
     SpendResume,
     bindings_from,
     core_jobs,
 )
-from selfhost.memory.indexer import MemoryIndexer, PageIndexer
-from selfhost.memory.service import (
-    OWNER_KIND_PAGE,
-    SHARED_SUBJECT,
-    MemoryService,
-    member_subject,
-    recall_subjects,
-)
+from selfhost.memory.indexer import PageIndexer
 from selfhost.memory.sources import (
     FOLDER_BACKEND,
     SOURCE_SYNC_JOB,
@@ -43,11 +38,10 @@ from selfhost.memory.sources import (
 )
 from selfhost.schema import tables
 from selfhost.schema.records import Agent, Turn
-from selfhost.tools.builtins import BUILTIN_TOOLS
+from selfhost.subjects import SHARED_SUBJECT, member_subject
 from selfhost.tools.context import SpawnResult, ToolContext, ToolResult
-from selfhost.tools.registry import ToolRegistry
 
-REGISTRY = ToolRegistry(BUILTIN_TOOLS)
+MEMORY_TOOLS = {tool.name: tool for tool in memory_manifest.manifest().tools}
 
 
 def vec(*axes: tuple[int, float]) -> tuple[float, ...]:
@@ -96,7 +90,7 @@ async def _workspace() -> UUID:
 
 def _wire(
     database_url: str, vector: tuple[float, ...], blob_root: Path
-) -> tuple[SyncDriver, PageIndexer, MemoryService]:
+) -> tuple[SyncDriver, PageIndexer, MemoryStore]:
     embed = StubEmbed(vector)
     index = DefaultIndex(embed=embed, transaction=workspace_tx)
     blob = FilesystemBlobStore(root=blob_root)
@@ -112,7 +106,9 @@ def _wire(
         blob=blob,
         postgres=database_url.startswith("postgresql"),
     )
-    service = MemoryService(index=index, embed=embed)
+    service = MemoryStore(
+        index=index, embed=embed, transaction=workspace_tx, workspace_id=uuid4()
+    )
     return driver, page_indexer, service
 
 
@@ -150,7 +146,11 @@ async def _make_due() -> None:
         await connection.execute(sa.update(tables.source).values(next_sync_at=sa.func.now()))
 
 
-def _context(memory: MemoryService, member_id: UUID | None, blob_root: Path) -> ToolContext:
+def _context(memory: MemoryStore, member_id: UUID | None, blob_root: Path) -> ToolContext:
+    ext = context_for(
+        memory.workspace_id, "memory", frozenset(), None,
+        index=memory.index, embed=memory.embed,
+    )
     return ToolContext(
         sandbox=None,
         blob=FilesystemBlobStore(root=blob_root),
@@ -165,16 +165,16 @@ def _context(memory: MemoryService, member_id: UUID | None, blob_root: Path) -> 
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
-        memory=memory,
         member_id=member_id,
         artifact_token_secret="",
+        ext=ext,
     )
 
 
 async def _search(
-    memory: MemoryService, member_id: UUID | None, blob_root: Path, query: str
+    memory: MemoryStore, member_id: UUID | None, blob_root: Path, query: str
 ) -> str:
-    tool = REGISTRY.get("memory_search")
+    tool = MEMORY_TOOLS["memory_search"]
     result: ToolResult = await tool.handler(
         _context(memory, member_id, blob_root),
         tool.input_model.model_validate({"queries": [query]}),
@@ -656,16 +656,9 @@ async def test_snapshot_fetch_tombstones_prior_pages_absent_from_the_fetch(
 
 
 def test_sync_and_page_index_register_as_core_jobs(database_url: str, tmp_path: Path) -> None:
-    driver, page_indexer, service = _wire(database_url, (), tmp_path / "blobs")
-    memory_indexer = MemoryIndexer(
-        index=service.index,
-        embed=service.embed,
-        chunker=TextChunker(),
-        postgres=database_url.startswith("postgresql"),
-    )
-    specs = core_jobs(memory_indexer, page_indexer, driver, SpendResume(client=None))
+    driver, page_indexer, _ = _wire(database_url, (), tmp_path / "blobs")
+    specs = core_jobs(page_indexer, driver, SpendResume(client=None))
     assert [spec.name for spec in specs] == [
-        MEMORY_INDEX_JOB,
         PAGE_INDEX_JOB,
         SOURCE_SYNC_JOB,
         SPEND_RESUME_JOB,
@@ -673,7 +666,6 @@ def test_sync_and_page_index_register_as_core_jobs(database_url: str, tmp_path: 
     assert all(spec.schedule is not None for spec in specs)
     keys = {binding.key for binding in bindings_from((), specs)}
     assert keys == {
-        f"{CORE_EXTENSION}:{MEMORY_INDEX_JOB}",
         f"{CORE_EXTENSION}:{PAGE_INDEX_JOB}",
         f"{CORE_EXTENSION}:{SOURCE_SYNC_JOB}",
         f"{CORE_EXTENSION}:{SPEND_RESUME_JOB}",

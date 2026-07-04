@@ -1,0 +1,352 @@
+"""The memory domain: the `memory_item` table the extension owns, recall's fusion, and the indexer.
+
+`commit` persists one `memory_item` and derives nothing — chunking and embedding are the index
+job's work, never inline on a write. `recall` embeds the query once, asks the deploy index backend
+for its lexical and vector hits under the caller's subject filter, fuses them with reciprocal-rank
+fusion (K=60), and reads the surviving items back. `search_sources` fuses the same legs over
+source-page chunks and reads the matched snippet straight off the index (a tombstoned page's chunks
+are already gone). `MemoryIndexer` is the derivation job: it atomically claims memory items whose
+`embedding_digest` is NULL, chunks and embeds each body, and stamps the digest so the row is no
+longer due. Everything reaches the database through the extension's workspace-scoped
+`transaction()` and the deploy index/embed backends core threads onto its context — never a core
+internal.
+"""
+
+import hashlib
+import logging
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from typing import Literal
+from uuid import UUID, uuid4
+
+import sqlalchemy as sa
+from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncConnection
+
+from selfhost.sdk.context import ExtensionContext
+from selfhost.sdk.index import (
+    OWNER_KIND_MEMORY_ITEM,
+    OWNER_KIND_PAGE,
+    EmbedClient,
+    Hit,
+    IndexBackend,
+    TextChunker,
+    chunk_embed_upsert,
+)
+from selfhost.sdk.sources import SHARED_SUBJECT, member_subject
+
+RRF_K = 60
+DUE_BATCH_MAX_ITEMS = 200
+EMBED_CLAIM_LEASE_SECONDS = 300
+
+logger = logging.getLogger(__name__)
+
+ItemClass = Literal["fact", "episodic", "semantic"]
+FACT: ItemClass = "fact"
+EPISODIC: ItemClass = "episodic"
+SEMANTIC: ItemClass = "semantic"
+
+Transaction = Callable[[], AbstractAsyncContextManager[AsyncConnection]]
+
+_metadata = sa.MetaData()
+memory_item = sa.Table(
+    "memory_item",
+    _metadata,
+    sa.Column("id", sa.Uuid, primary_key=True),
+    sa.Column("workspace_id", sa.Uuid, nullable=False),
+    sa.Column("subject", sa.Text, nullable=False),
+    sa.Column("body", sa.Text, nullable=False),
+    sa.Column("item_class", sa.Text, nullable=False),
+    sa.Column("source_ref", sa.Text, nullable=True),
+    sa.Column("embedding_digest", sa.Text, nullable=True),
+    sa.Column("embedding_claimed_at", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("superseded_by", sa.Uuid, nullable=True),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+)
+
+
+def recall_subjects(member_id: UUID | None) -> frozenset[str]:
+    """The subjects a turn recalls under: the member's own space plus the shared space, or shared
+    alone when the conversation has no linked member."""
+    if member_id is None:
+        return frozenset({SHARED_SUBJECT})
+    return frozenset({member_subject(member_id), SHARED_SUBJECT})
+
+
+class MemoryWrite(BaseModel):
+    """What a commit records: the subject scoping visibility, the body, its class, and the ref back
+    to what produced it."""
+
+    subject: str
+    body: str
+    item_class: ItemClass = FACT
+    source_ref: str | None = None
+
+
+class MemoryItem(BaseModel):
+    """A stored memory row as the derivation job loads it. `embedding_digest` NULL means the item is
+    due for indexing; `superseded_by` points at the item that replaced it."""
+
+    id: UUID
+    subject: str
+    body: str
+    item_class: ItemClass
+    source_ref: str | None = None
+    embedding_digest: str | None = None
+    superseded_by: UUID | None = None
+
+
+@dataclass(frozen=True)
+class Fused:
+    owner_id: str
+    score: float
+    text: str
+
+
+def fuse_hits(
+    lexical: tuple[Hit, ...], vector: tuple[Hit, ...], limit: int
+) -> tuple[Fused, ...]:
+    """Reciprocal-rank fusion (K=60) over the two legs, collapsed to one score per owning row: each
+    leg ranks its chunk hits, a chunk's RRF score sums 1/(K+rank) across the legs it placed in, and
+    a row takes its best-scoring chunk — that chunk's text rides along as the matched snippet."""
+    ranks = tuple(
+        {hit.chunk_digest: rank for rank, hit in enumerate(leg, start=1) if hit.score > 0}
+        for leg in (lexical, vector)
+    )
+    best: dict[str, tuple[float, str]] = {}
+    for hit in (*lexical, *vector):
+        rrf = sum(
+            1.0 / (RRF_K + leg[hit.chunk_digest]) for leg in ranks if hit.chunk_digest in leg
+        )
+        current = best.get(hit.owner_id)
+        if current is None or rrf > current[0]:
+            best[hit.owner_id] = (rrf, hit.text)
+    ranked = sorted(best.items(), key=lambda item: item[1][0], reverse=True)[:limit]
+    return tuple(Fused(owner_id, score, text) for owner_id, (score, text) in ranked)
+
+
+@dataclass(frozen=True)
+class Recalled:
+    memory_id: UUID
+    subject: str
+    item_class: str
+    body: str
+    source_ref: str | None
+    score: float
+
+
+@dataclass(frozen=True)
+class SourceMatch:
+    page_id: UUID
+    subject: str
+    text: str
+    score: float
+
+
+@dataclass(frozen=True)
+class MemoryStore:
+    """The memory workflow over the extension's scoped handle: commit one item, recall facts, search
+    source pages. Holds the deploy index/embed backends core threaded onto the context and the
+    workspace-scoped transaction opener; reads and writes only the extension's own `memory_item`."""
+
+    index: IndexBackend
+    embed: EmbedClient
+    transaction: Transaction
+    workspace_id: UUID
+
+    async def commit(self, write: MemoryWrite) -> None:
+        """Persist one memory_item with no derived state: embedding_digest stays NULL, marking the
+        row due for the index job — the sole producer of chunks and embeddings."""
+        async with self.transaction() as connection:
+            await connection.execute(
+                sa.insert(memory_item).values(
+                    id=uuid4(),
+                    workspace_id=self.workspace_id,
+                    subject=write.subject,
+                    body=write.body,
+                    item_class=write.item_class,
+                    source_ref=write.source_ref,
+                    superseded_by=None,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+
+    async def recall(
+        self,
+        query: str,
+        subjects: frozenset[str],
+        limit: int,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> tuple[Recalled, ...]:
+        """Fuse the index legs, then read the surviving items back. An optional half-open
+        `[start, end)` bound on `created_at` restricts recall to a window; the index never sees the
+        bound, so the filter lands in the row read-back alongside the superseded drop."""
+        fused = fuse_hits(*await self._legs(query, subjects, OWNER_KIND_MEMORY_ITEM, limit), limit)
+        return await self._enrich(fused, start, end)
+
+    async def search_sources(
+        self, query: str, subjects: frozenset[str], limit: int
+    ) -> tuple[SourceMatch, ...]:
+        """Search synced source pages the same way recall searches facts: fuse the two index legs
+        under the subject filter over the page owner kind, and carry each surviving chunk's snippet
+        straight off the fused hit. A tombstoned page's chunks are deleted from the index by the
+        page-index job, so a removed document never surfaces here."""
+        fused = fuse_hits(*await self._legs(query, subjects, OWNER_KIND_PAGE, limit), limit)
+        return tuple(
+            SourceMatch(page_id=UUID(hit.owner_id), subject="", text=hit.text, score=hit.score)
+            for hit in fused
+        )
+
+    async def _legs(
+        self, query: str, subjects: frozenset[str], owner_kind: str, limit: int
+    ) -> tuple[tuple[Hit, ...], tuple[Hit, ...]]:
+        embedding = await self._embed_query(query)
+        lexical = await self.index.lexical(query, subjects, owner_kind, limit)
+        vector = (
+            await self.index.vector(embedding, subjects, owner_kind, limit) if embedding else ()
+        )
+        return lexical, vector
+
+    async def _embed_query(self, query: str) -> tuple[float, ...]:
+        if not query.strip():
+            return ()
+        try:
+            vectors = await self.embed.embed((query,))
+        except Exception:
+            logger.warning("memory.recall.embed_query_failed", exc_info=True)
+            return ()
+        return vectors[0] if vectors else ()
+
+    async def _enrich(
+        self, fused: tuple[Fused, ...], start: datetime | None, end: datetime | None
+    ) -> tuple[Recalled, ...]:
+        """Read the surviving (non-superseded) items back in fused order; a superseded item — or one
+        outside the `[start, end)` `created_at` window — drops out here rather than being served."""
+        if not fused:
+            return ()
+        ids = [UUID(hit.owner_id) for hit in fused]
+        conditions = [
+            memory_item.c.id.in_(ids),
+            memory_item.c.superseded_by.is_(None),
+        ]
+        if start is not None:
+            conditions.append(memory_item.c.created_at >= start)
+        if end is not None:
+            conditions.append(memory_item.c.created_at < end)
+        async with self.transaction() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(
+                        memory_item.c.id,
+                        memory_item.c.subject,
+                        memory_item.c.item_class,
+                        memory_item.c.body,
+                        memory_item.c.source_ref,
+                    ).where(*conditions)
+                )
+            ).mappings().all()
+        by_id = {row["id"]: row for row in rows}
+        return tuple(
+            Recalled(
+                memory_id=UUID(hit.owner_id),
+                subject=by_id[UUID(hit.owner_id)]["subject"],
+                item_class=by_id[UUID(hit.owner_id)]["item_class"],
+                body=by_id[UUID(hit.owner_id)]["body"],
+                source_ref=by_id[UUID(hit.owner_id)]["source_ref"],
+                score=hit.score,
+            )
+            for hit in fused
+            if UUID(hit.owner_id) in by_id
+        )
+
+
+def store_for(ext: ExtensionContext) -> MemoryStore:
+    """Build the memory workflow over a scoped context, failing loud when the deploy index/embed
+    backends are not threaded onto it."""
+    if ext.index is None or ext.embed is None:
+        raise RuntimeError("memory requires the index and embed backends; none are wired")
+    return MemoryStore(
+        index=ext.index,
+        embed=ext.embed,
+        transaction=ext.transaction,
+        workspace_id=ext.store.workspace_id,
+    )
+
+
+@dataclass(frozen=True)
+class MemoryIndexer:
+    """The derivation job: turn memory items due for indexing into chunks, off the write path. A run
+    atomically claims a batch of rows whose `embedding_digest` is NULL and whose claim is unset or
+    lease-expired — stamping `embedding_claimed_at` (Postgres `FOR UPDATE SKIP LOCKED`, SQLite the
+    single writer) so an overlapping tick skips them and never double-embeds — chunks and embeds
+    each body, then writes the content digest and clears the claim so the row is no longer due."""
+
+    index: IndexBackend
+    embed: EmbedClient
+    transaction: Transaction
+    chunker: TextChunker
+
+    async def run(self) -> None:
+        for item in await self._claim_due():
+            await self._index_item(item)
+
+    async def _claim_due(self) -> tuple[MemoryItem, ...]:
+        now = datetime.now(UTC)
+        cutoff = now - timedelta(seconds=EMBED_CLAIM_LEASE_SECONDS)
+        due = (
+            sa.select(
+                memory_item.c.id,
+                memory_item.c.subject,
+                memory_item.c.body,
+                memory_item.c.item_class,
+                memory_item.c.source_ref,
+                memory_item.c.embedding_digest,
+                memory_item.c.superseded_by,
+            )
+            .where(
+                memory_item.c.embedding_digest.is_(None),
+                sa.or_(
+                    memory_item.c.embedding_claimed_at.is_(None),
+                    memory_item.c.embedding_claimed_at < cutoff,
+                ),
+            )
+            .limit(DUE_BATCH_MAX_ITEMS)
+        )
+        async with self.transaction() as connection:
+            if connection.dialect.name == "postgresql":
+                due = due.with_for_update(skip_locked=True)
+            rows = (await connection.execute(due)).mappings().all()
+            if rows:
+                await connection.execute(
+                    sa.update(memory_item)
+                    .values(embedding_claimed_at=now, updated_at=sa.func.now())
+                    .where(memory_item.c.id.in_([row["id"] for row in rows]))
+                )
+        return tuple(MemoryItem.model_validate(dict(row)) for row in rows)
+
+    async def _index_item(self, item: MemoryItem) -> None:
+        await chunk_embed_upsert(
+            self.index,
+            self.embed,
+            self.chunker,
+            OWNER_KIND_MEMORY_ITEM,
+            str(item.id),
+            item.subject,
+            item.body,
+        )
+        digest = "sha256:" + hashlib.sha256(item.body.encode()).hexdigest()
+        async with self.transaction() as connection:
+            await connection.execute(
+                sa.update(memory_item)
+                .values(
+                    embedding_digest=digest,
+                    embedding_claimed_at=None,
+                    updated_at=sa.func.now(),
+                )
+                .where(memory_item.c.id == item.id)
+            )

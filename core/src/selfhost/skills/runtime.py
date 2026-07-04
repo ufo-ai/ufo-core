@@ -2,8 +2,8 @@
 sandbox.
 
 A skill is a folder of files — a `SKILL.md` (YAML frontmatter + markdown workflow) plus any assets.
-Core ships exactly three, teaching its own builtins: `sandbox`, `memory`, `delegation`; a CI gate
-holds that core set. Packs contribute more through the manifest `skills` point, which the loader
+Core ships exactly two, teaching its own builtins: `sandbox`, `delegation`; a CI gate holds that
+core set. Packs contribute more through the manifest `skills` point, which the loader
 aggregates with core's into one `SkillRegistry` per boot. `load_skill` resolves a skill and its
 `depends` closure through `SkillRegistry.tree`, then `mount_skill` writes each into the
 conversation's workspace under `.skills/<name>/` — inside the scoped subtree the sandbox permits,
@@ -22,7 +22,7 @@ SKILL_MD = "SKILL.md"
 FRONTMATTER_FENCE = "---\n"
 SKILLS_MOUNT_DIR = f"{WORKSPACE_DIR}/.skills"
 CORE_SKILLS_ROOT = Path(__file__).parent
-CORE_SKILL_NAMES = frozenset({"sandbox", "memory", "delegation"})
+CORE_SKILL_NAMES = frozenset({"sandbox", "delegation"})
 
 
 @dataclass(frozen=True)

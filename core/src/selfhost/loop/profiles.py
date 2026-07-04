@@ -22,8 +22,6 @@ GENERAL_PURPOSE_TOOLS = (
     "edit",
     "glob",
     "grep",
-    "memory_search",
-    "memory_update",
     "load_skill",
     "share_file",
 )

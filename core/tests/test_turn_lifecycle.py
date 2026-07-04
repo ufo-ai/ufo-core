@@ -13,6 +13,7 @@ from dbos import DBOSClient
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from pydantic import BaseModel
+from selfhost_ext_index_default import DefaultIndex
 
 from selfhost.accounting import CORE_PRICING
 from selfhost.blob import FilesystemBlobStore
@@ -47,15 +48,12 @@ STREAM_TIMEOUT_SECONDS = 30
 
 
 @dataclass(frozen=True)
-class StubMemory:
-    """Stand-in memory service for the lifecycle turns: recall yields nothing, so the turn loop runs
-    end to end without asserting memory behavior (recall/commit are proven in the memory tests)."""
+class StubEmbed:
+    """Stand-in embed client for the lifecycle Runtime: these turns run with no extensions, so the
+    index/embed backends are never reached (memory recall is proven in the memory tests)."""
 
-    async def recall(self, query: str, subjects: frozenset[str], limit: int) -> tuple:
-        return ()
-
-    async def commit(self, write: object) -> None:
-        return None
+    async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+        return tuple(() for _ in texts)
 
 
 class RoundTripInput(BaseModel):
@@ -206,7 +204,8 @@ def dbos_runtime(
             registry=STANDIN_REGISTRY,
             skills=skill_registry(()),
             credentials=None,
-            memory=StubMemory(),
+            index=DefaultIndex(embed=StubEmbed(), transaction=workspace_tx),
+            embed=StubEmbed(),
             artifact_token_secret="",
         )
     )

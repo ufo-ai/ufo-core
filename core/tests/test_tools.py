@@ -47,18 +47,6 @@ async def _unavailable_spawn(
 
 
 @dataclass
-class StubMemory:
-    """Stand-in for the memory service: these tests drive the file/shell builtins, not the memory
-    tools, so recall/commit are never asserted here (their own tests cover them)."""
-
-    async def recall(self, query: str, subjects: frozenset[str], limit: int) -> tuple:
-        return ()
-
-    async def commit(self, write: object) -> None:
-        return None
-
-
-@dataclass
 class StubSubagentControl:
     """Stand-in for the Subagents workflow: records the ids the lifecycle tools pass and returns
     scripted statuses, so these tests assert the tool's id-parsing and result shaping — the DBOS
@@ -104,7 +92,6 @@ def make_context(
         turn=turn,
         agent=Agent(prompt="be terse", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
-        memory=StubMemory(),
         member_id=None,
         artifact_token_secret=artifact_secret,
         subagents=subagents,
@@ -146,8 +133,6 @@ def test_registry_schemas_cover_every_tool() -> None:
         "grep",
         "share_file",
         "spawn_subagent",
-        "memory_search",
-        "memory_update",
         "load_sessions",
         "ask_user",
         "load_skill",
@@ -250,12 +235,12 @@ async def test_load_skill_mounts_files_under_the_workspace_and_returns_instructi
 ) -> None:
     sandbox = FakeSandbox()
     ctx = make_context(sandbox, tmp_path)
-    result = await _load_skill(ctx, "memory")
+    result = await _load_skill(ctx, "sandbox")
     assert result.is_error is False
-    assert "Loaded skill(s): memory" in result.content[0].text
-    assert "Remembering and recalling" in result.content[0].text
-    mounted = sandbox.files["/workspace/.skills/memory/SKILL.md"]
-    assert b"name: memory" in mounted
+    assert "Loaded skill(s): sandbox" in result.content[0].text
+    assert "Working files and shell commands" in result.content[0].text
+    mounted = sandbox.files["/workspace/.skills/sandbox/SKILL.md"]
+    assert b"name: sandbox" in mounted
 
 
 async def test_load_skill_unknown_name_fails_loud(tmp_path: Path) -> None:
@@ -288,7 +273,7 @@ async def test_list_skills_reports_the_loadable_skills(tmp_path: Path) -> None:
     result = await run("list_skills", ctx)
     skills = json.loads(result.content[0].text)["skills"]
     names = {skill["name"] for skill in skills}
-    assert {"memory", "sandbox"} <= names
+    assert {"delegation", "sandbox"} <= names
     assert all(skill["description"] for skill in skills)
 
 

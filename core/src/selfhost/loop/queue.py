@@ -17,12 +17,12 @@ from selfhost.ext.loader import turn_hooks, turn_tools
 from selfhost.ext.manifest import Manifest
 from selfhost.grants import GrantStore
 from selfhost.hub import Hub, Terminal
+from selfhost.indexing import EmbedClient, IndexBackend
 from selfhost.loop.compaction import Compaction
 from selfhost.loop.engine import MAIN_ROUND_LIMIT, TurnEngine, TurnParked
 from selfhost.loop.prompts.render import render_system_prompt, rendered_prompt
 from selfhost.loop.subagents import SubagentRegistry, Subagents, subagent_system_prompt
 from selfhost.loop.transcript import Transcript
-from selfhost.memory.service import MemoryService
 from selfhost.models.registry import ModelRegistry
 from selfhost.o11y import log
 from selfhost.sandbox.session import (
@@ -72,7 +72,8 @@ class Runtime:
     registry: ModelRegistry
     skills: SkillRegistry
     credentials: CredentialStore | None
-    memory: MemoryService
+    index: IndexBackend
+    embed: EmbedClient
     artifact_token_secret: str
 
 
@@ -103,10 +104,10 @@ async def _execute_turn(turn_id: str) -> str:
         turn, agent, member_id = await _load_turn(UUID(turn_id))
         subagents = Subagents(client=runtime.dbos, registry=runtime.subagents, parent=turn)
         all_tools, tool_ext = turn_tools(
-            runtime.manifests, turn.workspace_id, runtime.credentials, runtime.memory
+            runtime.manifests, turn.workspace_id, runtime.credentials, runtime.index, runtime.embed
         )
         hooks = turn_hooks(
-            runtime.manifests, turn.workspace_id, runtime.credentials, runtime.memory
+            runtime.manifests, turn.workspace_id, runtime.credentials, runtime.index, runtime.embed
         )
         sections = tuple(
             (section.name, section.body)
@@ -162,7 +163,6 @@ async def _execute_turn(turn_id: str) -> str:
             blob=runtime.blob,
             spawn=subagents.spawn,
             subagents=subagents,
-            memory=runtime.memory,
             member_id=member_id,
             artifact_token_secret=runtime.artifact_token_secret,
             grants=(

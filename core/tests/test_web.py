@@ -13,6 +13,8 @@ import sqlalchemy as sa
 from dbos import DBOSClient
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from selfhost_ext_index_default import DefaultIndex
+from selfhost_ext_memory.store import recall_subjects
 
 from selfhost.accounting import CORE_PRICING, record_egress_request, record_turn_usage
 from selfhost.artifact_token import (
@@ -31,12 +33,12 @@ from selfhost.ext.manifest import ModelProviderSpec
 from selfhost.hub import InProcessHub, SkillLoad, ToolCall
 from selfhost.loop import queue as loop_queue
 from selfhost.loop.subagents import SubagentRegistry
-from selfhost.memory.service import SHARED_SUBJECT, member_subject, recall_subjects
 from selfhost.models.interface import ModelEvent, ModelRequest, TextDelta
 from selfhost.models.registry import ModelRegistry
 from selfhost.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
 from selfhost.schema import tables
 from selfhost.schema.records import TerminalFrame, Usage
+from selfhost.subjects import SHARED_SUBJECT, member_subject
 from selfhost.surfaces.admission import Admission
 from selfhost.surfaces.web import SESSION_COOKIE, WebSurface, _sse
 from selfhost.surfaces.web import router as web_router
@@ -93,12 +95,9 @@ class StandInCarrier:
 
 
 @dataclass(frozen=True)
-class StubMemory:
-    async def recall(self, query: str, subjects: frozenset[str], limit: int) -> tuple:
-        return ()
-
-    async def commit(self, write: object) -> None:
-        return None
+class StubEmbed:
+    async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+        return tuple(() for _ in texts)
 
 
 @dataclass
@@ -185,7 +184,8 @@ def dbos_runtime(
             registry=STANDIN_REGISTRY,
             skills=skill_registry(()),
             credentials=None,
-            memory=StubMemory(),
+            index=DefaultIndex(embed=StubEmbed(), transaction=workspace_tx),
+            embed=StubEmbed(),
             artifact_token_secret=SECRET,
         )
     )

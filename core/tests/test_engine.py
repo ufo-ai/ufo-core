@@ -1,7 +1,6 @@
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
-from itertools import pairwise
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -22,7 +21,6 @@ from selfhost.loop.engine import (
     FORCE_FINAL_PROMPT,
     MAX_TOOL_RESULT_CHARS,
     OFFLOAD_NOTICE,
-    RECALL_CONTEXT_PREFIX,
     TOOL_OUTPUT_DIR,
     TOOL_RESULT_PREVIEW_CHARS,
     UNTRUSTED_RESULT_CLOSE,
@@ -35,7 +33,6 @@ from selfhost.loop.engine import (
 )
 from selfhost.loop.prompts.render import rendered_prompt
 from selfhost.loop.transcript import Transcript
-from selfhost.memory.service import Recalled
 from selfhost.models.interface import (
     ImageBlock,
     Message,
@@ -61,52 +58,6 @@ from selfhost.tools.context import (
 )
 from selfhost.tools.registry import ToolDef, ToolRegistry
 from selfhost.transcript import Conversation
-
-
-@dataclass(frozen=True)
-class StubMemory:
-    """Stand-in for the memory service: recall yields nothing so these tests exercise the turn loop
-    without asserting memory behavior (recall/commit have their own tests)."""
-
-    async def recall(self, query: str, subjects: frozenset[str], limit: int) -> tuple:
-        return ()
-
-    async def commit(self, write: object) -> None:
-        return None
-
-
-@dataclass(frozen=True)
-class OneHitMemory:
-    """Recall that always returns one item — the dependency that lets these tests assert the
-    engine prepends recalled context to the round."""
-
-    body: str
-
-    async def recall(
-        self, query: str, subjects: frozenset[str], limit: int
-    ) -> tuple[Recalled, ...]:
-        return (
-            Recalled(
-                memory_id=uuid4(),
-                subject="shared",
-                item_class="fact",
-                body=self.body,
-                source_ref=None,
-                score=1.0,
-            ),
-        )
-
-    async def commit(self, write: object) -> None:
-        return None
-
-
-@dataclass(frozen=True)
-class RaisingMemory:
-    async def recall(self, query: str, subjects: frozenset[str], limit: int) -> tuple:
-        raise RuntimeError("index backend unreachable")
-
-    async def commit(self, write: object) -> None:
-        return None
 
 
 @dataclass
@@ -391,7 +342,6 @@ def _engine(
     tmp_path: Path,
     carrier: RecordingCarrier | None = None,
     compaction: Compaction | None = None,
-    memory: object | None = None,
 ) -> TurnEngine:
     carrier = carrier or RecordingCarrier()
     blob = FilesystemBlobStore(root=tmp_path)
@@ -414,7 +364,6 @@ def _engine(
         hooks=HookChain(),
         blob=blob,
         spawn=_unavailable_spawn,
-        memory=memory or StubMemory(),
         member_id=None,
         artifact_token_secret="",
         grants=None,
@@ -666,36 +615,6 @@ async def test_cancel_winning_mid_round_keeps_cancelled_terminal_bills_and_prese
     assert stored.messages == (Message(role="user", content="hi"),)
 
 
-async def test_recall_rides_the_system_prompt_not_the_messages_and_is_not_persisted(
-    db: None, tmp_path: Path
-) -> None:
-    turn = await _seed_turn("queued", None)
-    model = CapturingModel()
-    engine = _engine(turn, model, tmp_path, memory=OneHitMemory("the launch is on tuesday"))
-    frame = await engine.run()
-    assert frame.status == "done"
-    assert RECALL_CONTEXT_PREFIX in model.seen_system[0]
-    assert "the launch is on tuesday" in model.seen_system[0]
-    sent = model.seen[0]
-    assert all(RECALL_CONTEXT_PREFIX not in str(message.content) for message in sent)
-    roles = [message.role for message in sent]
-    assert all(earlier != later for earlier, later in pairwise(roles))
-    stored = await engine.transcript.read()
-    assert stored is not None
-    assert all(RECALL_CONTEXT_PREFIX not in str(message.content) for message in stored.messages)
-
-
-async def test_recall_failure_degrades_to_no_context_and_never_fails_the_turn(
-    db: None, tmp_path: Path
-) -> None:
-    turn = await _seed_turn("queued", None)
-    model = CapturingModel()
-    engine = _engine(turn, model, tmp_path, memory=RaisingMemory())
-    frame = await engine.run()
-    assert frame.status == "done"
-    assert model.seen[0] == (Message(role="user", content="hi"),)
-
-
 async def test_per_step_cap_parks_a_running_turn(db: None, tmp_path: Path) -> None:
     turn = await _seed_turn("queued", None)
     async with workspace_tx() as connection:
@@ -840,7 +759,6 @@ async def test_dispatch_bounds_an_oversize_error_result_and_leaves_within_cap_un
         turn=engine.turn,
         agent=engine.agent,
         spawn=engine.spawn,
-        memory=engine.memory,
         member_id=engine.member_id,
         artifact_token_secret=engine.artifact_token_secret,
         grants=engine.grants,
@@ -873,7 +791,6 @@ async def test_dispatch_offloads_an_oversize_nonerror_result_and_keeps_a_preview
         turn=engine.turn,
         agent=engine.agent,
         spawn=engine.spawn,
-        memory=engine.memory,
         member_id=engine.member_id,
         artifact_token_secret=engine.artifact_token_secret,
         grants=engine.grants,
@@ -912,7 +829,6 @@ async def test_dispatch_offload_preview_is_walled_for_an_untrusted_tool(
         turn=engine.turn,
         agent=engine.agent,
         spawn=engine.spawn,
-        memory=engine.memory,
         member_id=engine.member_id,
         artifact_token_secret=engine.artifact_token_secret,
         grants=engine.grants,
@@ -955,7 +871,6 @@ async def test_dispatch_folds_tool_image_content_into_the_tool_result_block(
         turn=engine.turn,
         agent=engine.agent,
         spawn=engine.spawn,
-        memory=engine.memory,
         member_id=engine.member_id,
         artifact_token_secret=engine.artifact_token_secret,
         grants=engine.grants,
@@ -997,7 +912,6 @@ async def test_dispatch_keeps_an_error_result_str_typed_and_drops_image_content(
         turn=engine.turn,
         agent=engine.agent,
         spawn=engine.spawn,
-        memory=engine.memory,
         member_id=engine.member_id,
         artifact_token_secret=engine.artifact_token_secret,
         grants=engine.grants,

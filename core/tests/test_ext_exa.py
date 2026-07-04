@@ -86,7 +86,6 @@ def _context(carrier: _RecordingCarrier) -> ToolContext:
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=None,
-        memory=None,
         member_id=None,
         artifact_token_secret="",
     )

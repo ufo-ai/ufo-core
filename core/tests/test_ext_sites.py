@@ -71,7 +71,6 @@ def _context(sandbox: FakeSandbox, tmp_path: Path) -> ToolContext:
         turn=turn,
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
-        memory=_StubMemory(),
         member_id=None,
         artifact_token_secret="",
     )

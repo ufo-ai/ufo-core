@@ -89,7 +89,8 @@ async def live_surface(
             subagents=SubagentRegistry(()),
             manifests=(),
             credentials=None,
-            memory=_StubMemory(),
+            index=None,
+            embed=None,
             artifact_token_secret="",
         )
     )

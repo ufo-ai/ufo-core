@@ -1,29 +1,32 @@
+"""The memory extension's derivation job: commit stays chunk-free until MemoryIndexer runs.
+
+The indexer, the store, and the memory-index JobSpec are the extension's; they are driven here over
+the real DefaultIndex and the workspace-scoped transaction, exactly as core threads them onto the
+job's context. The embed client is a real dependency counted (never asserted) to witness that
+overlapping runs embed each row once."""
+
 import asyncio
 from collections.abc import AsyncIterator
-from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
+import selfhost_ext_memory.manifest as memory_manifest
 import sqlalchemy as sa
 from selfhost_ext_embed_openai import EMBED_DIM
 from selfhost_ext_index_default import DefaultIndex
+from selfhost_ext_memory.store import (
+    MemoryIndexer,
+    MemoryStore,
+    MemoryWrite,
+    memory_item,
+    recall_subjects,
+)
 
-from selfhost.blob import FilesystemBlobStore
 from selfhost.db import workspace_tx
 from selfhost.indexing import TextChunker
-from selfhost.jobs import (
-    CORE_EXTENSION,
-    MEMORY_INDEX_JOB,
-    MEMORY_INDEX_SCHEDULE,
-    SpendResume,
-    bindings_from,
-    core_jobs,
-)
-from selfhost.memory.indexer import MemoryIndexer, PageIndexer
-from selfhost.memory.service import MemoryService, member_subject, recall_subjects
-from selfhost.memory.sources import FOLDER_BACKEND, FolderSource, SyncDriver
+from selfhost.jobs import CORE_EXTENSION, bindings_from
 from selfhost.schema import tables
-from selfhost.schema.records import MemoryWrite
+from selfhost.subjects import member_subject
 
 
 def vec(*axes: tuple[int, float]) -> tuple[float, ...]:
@@ -77,17 +80,15 @@ async def _workspace() -> UUID:
     return workspace_id
 
 
-def _wire(database_url: str, vector: tuple[float, ...]) -> tuple[MemoryService, MemoryIndexer]:
-    embed = StubEmbed(vector)
+def _wire(embed: object, workspace_id: UUID) -> tuple[MemoryStore, MemoryIndexer]:
     index = DefaultIndex(embed=embed, transaction=workspace_tx)
-    service = MemoryService(index=index, embed=embed)
-    indexer = MemoryIndexer(
-        index=index,
-        embed=embed,
-        chunker=TextChunker(),
-        postgres=database_url.startswith("postgresql"),
+    store = MemoryStore(
+        index=index, embed=embed, transaction=workspace_tx, workspace_id=workspace_id
     )
-    return service, indexer
+    indexer = MemoryIndexer(
+        index=index, embed=embed, transaction=workspace_tx, chunker=TextChunker()
+    )
+    return store, indexer
 
 
 async def _chunk_count() -> int:
@@ -95,10 +96,10 @@ async def _chunk_count() -> int:
         return (await connection.execute(sa.text("select count(*) from chunk"))).scalar_one()
 
 
-async def test_index_job_derives_chunks_and_stamps_digest(clean: None, database_url: str) -> None:
-    await _workspace()
-    service, indexer = _wire(database_url, vec((0, 1.0)))
-    await service.commit(MemoryWrite(subject="shared", body="the capital of france is paris"))
+async def test_index_job_derives_chunks_and_stamps_digest(clean: None) -> None:
+    workspace_id = await _workspace()
+    store, indexer = _wire(StubEmbed(vec((0, 1.0))), workspace_id)
+    await store.commit(MemoryWrite(subject="shared", body="the capital of france is paris"))
     assert await _chunk_count() == 0
 
     await indexer.run()
@@ -106,7 +107,7 @@ async def test_index_job_derives_chunks_and_stamps_digest(clean: None, database_
     assert derived >= 1
     async with workspace_tx() as connection:
         digest = (
-            await connection.execute(sa.select(tables.memory_item.c.embedding_digest))
+            await connection.execute(sa.select(memory_item.c.embedding_digest))
         ).scalar_one()
     assert digest is not None and digest.startswith("sha256:")
 
@@ -114,18 +115,21 @@ async def test_index_job_derives_chunks_and_stamps_digest(clean: None, database_
     assert await _chunk_count() == derived
 
 
-async def test_overlapping_index_runs_embed_each_row_once(clean: None, database_url: str) -> None:
-    await _workspace()
+async def test_overlapping_index_runs_embed_each_row_once(clean: None) -> None:
+    workspace_id = await _workspace()
     embed = CountingEmbed(vec((0, 1.0)))
-    index = DefaultIndex(embed=embed, transaction=workspace_tx)
-    service = MemoryService(index=index, embed=embed)
-    postgres = database_url.startswith("postgresql")
+    store, _ = _wire(embed, workspace_id)
     bodies = tuple(f"fact number {n} worth remembering" for n in range(6))
     for body in bodies:
-        await service.commit(MemoryWrite(subject="shared", body=body))
+        await store.commit(MemoryWrite(subject="shared", body=body))
 
     runs = tuple(
-        MemoryIndexer(index=index, embed=embed, chunker=TextChunker(), postgres=postgres)
+        MemoryIndexer(
+            index=DefaultIndex(embed=embed, transaction=workspace_tx),
+            embed=embed,
+            transaction=workspace_tx,
+            chunker=TextChunker(),
+        )
         for _ in range(2)
     )
     await asyncio.gather(*(indexer.run() for indexer in runs))
@@ -135,57 +139,45 @@ async def test_overlapping_index_runs_embed_each_row_once(clean: None, database_
         pending = (
             await connection.execute(
                 sa.select(sa.func.count())
-                .select_from(tables.memory_item)
-                .where(tables.memory_item.c.embedding_digest.is_(None))
+                .select_from(memory_item)
+                .where(memory_item.c.embedding_digest.is_(None))
             )
         ).scalar_one()
     assert pending == 0
 
 
-async def test_committed_fact_recalls_after_indexing(clean: None, database_url: str) -> None:
-    await _workspace()
+async def test_committed_fact_recalls_after_indexing(clean: None) -> None:
+    workspace_id = await _workspace()
     probe = vec((4, 1.0))
-    service, indexer = _wire(database_url, probe)
-    await service.commit(MemoryWrite(subject="shared", body="the mascot is named zoltar"))
+    store, indexer = _wire(StubEmbed(probe), workspace_id)
+    await store.commit(MemoryWrite(subject="shared", body="the mascot is named zoltar"))
     await indexer.run()
 
-    hits = await service.recall("zoltar mascot", frozenset({"shared"}), 5)
+    hits = await store.recall("zoltar mascot", frozenset({"shared"}), 5)
     assert len(hits) == 1
     assert "zoltar" in hits[0].body
 
 
-async def test_member_memory_is_invisible_to_another_member(clean: None, database_url: str) -> None:
-    await _workspace()
+async def test_member_memory_is_invisible_to_another_member(clean: None) -> None:
+    workspace_id = await _workspace()
     alice, bob = uuid4(), uuid4()
     probe = vec((5, 1.0))
-    service, indexer = _wire(database_url, probe)
-    await service.commit(
+    store, indexer = _wire(StubEmbed(probe), workspace_id)
+    await store.commit(
         MemoryWrite(subject=member_subject(alice), body="alice prefers a window seat")
     )
     await indexer.run()
 
-    assert await service.recall("window seat", recall_subjects(bob), 5) == ()
-    mine = await service.recall("window seat", recall_subjects(alice), 5)
+    assert await store.recall("window seat", recall_subjects(bob), 5) == ()
+    mine = await store.recall("window seat", recall_subjects(alice), 5)
     assert len(mine) == 1 and "alice" in mine[0].body
 
 
-def test_memory_index_registers_as_a_core_job(database_url: str, tmp_path: Path) -> None:
-    embed = StubEmbed(())
-    index = DefaultIndex(embed=embed, transaction=workspace_tx)
-    blob = FilesystemBlobStore(root=tmp_path)
-    postgres = database_url.startswith("postgresql")
-    specs = core_jobs(
-        MemoryIndexer(index=index, embed=embed, chunker=TextChunker(), postgres=postgres),
-        PageIndexer(index=index, embed=embed, chunker=TextChunker(), blob=blob, postgres=postgres),
-        SyncDriver(
-            backends={FOLDER_BACKEND: FolderSource()},
-            blob=blob,
-            postgres=postgres,
-        ),
-        SpendResume(client=None),
-    )
-    assert specs[0].name == MEMORY_INDEX_JOB
-    assert specs[0].schedule == MEMORY_INDEX_SCHEDULE
-    bindings = bindings_from((), specs)
-    assert f"{CORE_EXTENSION}:{MEMORY_INDEX_JOB}" in {b.key for b in bindings}
-    assert all(b.extension == CORE_EXTENSION and b.declared == frozenset() for b in bindings)
+def test_memory_index_registers_as_an_extension_job() -> None:
+    manifest = memory_manifest.manifest()
+    job = next(job for job in manifest.jobs if job.name == memory_manifest.MEMORY_INDEX_JOB)
+    assert job.schedule == memory_manifest.MEMORY_INDEX_SCHEDULE
+    bindings = bindings_from((manifest,), ())
+    keys = {binding.key for binding in bindings}
+    assert f"{manifest.name}:{memory_manifest.MEMORY_INDEX_JOB}" in keys
+    assert f"{CORE_EXTENSION}:{memory_manifest.MEMORY_INDEX_JOB}" not in keys

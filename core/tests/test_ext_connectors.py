@@ -454,7 +454,6 @@ def _turn_context(
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=None,
-        memory=None,
         member_id=member_id,
         artifact_token_secret="",
     )
@@ -482,7 +481,6 @@ def _ctx(
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=None,
-        memory=None,
         member_id=None,
         artifact_token_secret="",
         grants=grants,

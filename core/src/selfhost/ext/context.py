@@ -5,8 +5,9 @@ A handler never sees a raw DB handle, a raw blob store, or another workspace: it
 manifest declared), and — when trajectory reads are wired — a `TrajectoryCorpus` (this workspace's
 transcripts, read only). `context_for` builds the same shape for an extension (its manifest name +
 declared slots) and for a core job (the `core` namespace, no slots) — so a core job rides the exact
-path an extension does. The `ExtensionContext` shape is open: later units add methods (memory
-writes, governed proposals, invoke) without reshaping what handlers already hold."""
+path an extension does. The `ExtensionContext` shape is open: it carries the selected index/embed
+backends, a transaction over the extension's own tables, governed proposals, and invoke, without
+reshaping what handlers already hold."""
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -23,14 +24,13 @@ from selfhost.blob import BlobNotFound, BlobStore
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.governance import Governance, prompt_digest
-from selfhost.memory.service import MemoryService, Recalled
+from selfhost.indexing import EmbedClient, IndexBackend
 from selfhost.memory.sources import source_row_id
 from selfhost.models.interface import Message
 from selfhost.o11y import log
 from selfhost.scheduling import ScheduleStore
 from selfhost.schema import tables
-from selfhost.schema.records import AgentChange, MemoryWrite, ProposalRef
-from selfhost.subjects import SHARED_SUBJECT
+from selfhost.schema.records import AgentChange, ProposalRef
 from selfhost.transcript import TranscriptDecodeError, decode, transcript_key
 
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
@@ -38,10 +38,6 @@ type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, J
 
 class UndeclaredCredentialSlot(KeyError):
     """A handler asked for a credential slot its manifest never declared."""
-
-
-class OutOfScopeSubject(ValueError):
-    """A handler tried to recall or commit memory under a subject its context does not scope to."""
 
 
 @dataclass(frozen=True)
@@ -119,27 +115,6 @@ class CredentialAccess:
         if self._store is None:
             raise RuntimeError(f"credential slot {slot!r} declared but no credential key is set")
         return await self._store.get(self.workspace_id, slot)
-
-
-EXTENSION_MEMORY_SUBJECTS = frozenset({SHARED_SUBJECT})
-
-
-@dataclass(frozen=True)
-class MemoryAccess:
-    """An extension acts for the workspace, never for a member, so its memory reach is the shared
-    subject alone: recall derives that subject rather than trusting a caller-supplied one, and
-    commit refuses any other subject. The service stays module-private (`_memory`), so a member's
-    private space is unreachable through this handle — no arbitrary-subject read or write."""
-
-    _memory: MemoryService
-
-    async def recall(self, query: str, limit: int) -> tuple[Recalled, ...]:
-        return await self._memory.recall(query, EXTENSION_MEMORY_SUBJECTS, limit)
-
-    async def commit(self, write: MemoryWrite) -> None:
-        if write.subject not in EXTENSION_MEMORY_SUBJECTS:
-            raise OutOfScopeSubject(write.subject)
-        await self._memory.commit(write)
 
 
 @dataclass(frozen=True)
@@ -227,7 +202,8 @@ class TurnInvoker(Protocol):
 class ExtensionContext:
     store: ScopedStore
     credentials: CredentialAccess
-    memory: MemoryAccess | None = None
+    index: IndexBackend | None = None
+    embed: EmbedClient | None = None
     corpus: TrajectoryCorpus | None = None
     scheduler: ScheduleStore | None = None
     invoker: TurnInvoker | None = None
@@ -240,8 +216,7 @@ class ExtensionContext:
         restricted to the extension's schema and enforces no workspace scoping — reaching only its
         own tables, scoped to its workspace, is the extension's responsibility, not a guarantee of
         this handle (the SDK import boundary is a static gate over imports, not over runtime SQL).
-        Commits on exit, rolls back on error — the same one transaction the ScopedStore and memory
-        writes ride."""
+        Commits on exit, rolls back on error — the same one transaction the ScopedStore rides."""
         async with workspace_tx() as connection:
             yield connection
 
@@ -253,13 +228,6 @@ class ExtensionContext:
         if self.invoker is None:
             raise RuntimeError("invoke requires a turn invoker; none is wired")
         return await self.invoker.invoke(conversation_id, agent_id, message, idempotency_key)
-
-    async def memory_write(self, write: MemoryWrite) -> None:
-        """Commit a memory item for this workspace. Fails loud when no memory service is wired,
-        rather than silently dropping the write."""
-        if self.memory is None:
-            raise RuntimeError("memory_write requires a memory service; none is wired")
-        await self.memory.commit(write)
 
     async def register_source(self, backend: str, config: BaseModel) -> None:
         """Register a content-sync source for this workspace under `backend` — a `SourceBackend` an
@@ -314,7 +282,8 @@ def context_for(
     extension: str,
     declared: frozenset[str],
     credential_store: CredentialStore | None,
-    memory: MemoryService | None = None,
+    index: IndexBackend | None = None,
+    embed: EmbedClient | None = None,
     blob: BlobStore | None = None,
     invoker: TurnInvoker | None = None,
 ) -> ExtensionContext:
@@ -322,12 +291,12 @@ def context_for(
     credentials = CredentialAccess(
         workspace_id=workspace_id, declared=declared, _store=credential_store
     )
-    scoped_memory = None if memory is None else MemoryAccess(memory)
     corpus = None if blob is None else TrajectoryCorpus(workspace_id, blob)
     return ExtensionContext(
         store=store,
         credentials=credentials,
-        memory=scoped_memory,
+        index=index,
+        embed=embed,
         corpus=corpus,
         scheduler=ScheduleStore(workspace_id=workspace_id),
         invoker=invoker,

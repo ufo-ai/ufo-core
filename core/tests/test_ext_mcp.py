@@ -290,7 +290,6 @@ async def _tool_context() -> ToolContext:
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=None,
-        memory=None,
         member_id=None,
         artifact_token_secret="",
         ext=ext_by_tool["call_mcp_tool"],

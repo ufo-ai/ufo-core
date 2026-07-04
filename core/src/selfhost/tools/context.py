@@ -2,12 +2,12 @@
 
 A handler reaches the outside world only through the fields here: the sandbox for filesystem and
 shell, the blob store for artifacts, the turn/agent it runs under, `spawn` to delegate a typed
-subtask to a child turn, `memory` (with the conversation's `member_id`) for recall and commit
-scoped to the turn's subject, and `artifact_token_secret` with which `share_file` mints the signed
-download URLs the web surface verifies. `read_paths` is the working set that lets `edit` refuse to
-touch a file the turn has not read first. `connector_account` hands a connector tool the broker's
-connected-account id it passes to the broker's server-side execute API, resolved strictly from the
-turn-agent's own grants so a tool reaches only the turn-agent's accounts. `skills` is the loadable
+subtask to a child turn, the conversation's `member_id`, and `artifact_token_secret` with which
+`share_file` mints the signed download URLs the web surface verifies. `read_paths` is the working
+set that lets `edit` refuse to touch a file the turn has not read first. `connector_account` hands
+a connector tool the broker's connected-account id it passes to the broker's server-side execute
+API, resolved strictly from the turn-agent's own grants so a tool reaches only the turn-agent's
+accounts. `skills` is the loadable
 skill set for the deploy (core plus the active packs') that `load_skill` resolves against; it
 defaults to the core floor so a context built without the loader still resolves the core three.
 `browser` is the turn's live browser surface — the selected browser backend's per-turn handle the
@@ -25,7 +25,6 @@ from selfhost.blob import BlobStore
 from selfhost.browser.backend import BrowserSurface
 from selfhost.ext.context import ExtensionContext
 from selfhost.grants import ConnectUnavailable, GrantStore
-from selfhost.memory.service import MemoryService
 from selfhost.sandbox.session import SandboxSession
 from selfhost.schema.records import Agent, Turn
 from selfhost.skills.runtime import CORE_SKILL_REGISTRY, SkillRegistry
@@ -99,7 +98,6 @@ class ToolContext:
     turn: Turn
     agent: Agent
     spawn: Spawn
-    memory: MemoryService
     member_id: UUID | None
     artifact_token_secret: str
     grants: GrantStore | None = None
