@@ -56,6 +56,7 @@ from selfhost.schema.records import (
     Turn,
     Usage,
 )
+from selfhost.search import SearchProvider
 from selfhost.skills.runtime import CORE_SKILL_REGISTRY, SkillRegistry
 from selfhost.tools.context import ImageContent, Spawn, SubagentControl, TextContent, ToolContext
 from selfhost.tools.registry import ToolRegistry
@@ -142,6 +143,7 @@ class TurnEngine:
     hub: Hub
     sandbox: SandboxSession
     cdp_provider: CdpProvider
+    search_provider: SearchProvider | None
     tools: ToolRegistry
     tool_ext: dict[str, ExtensionContext]
     hooks: HookChain
@@ -199,6 +201,7 @@ class TurnEngine:
                 grants=self.grants,
                 skills=self.skills,
                 cdp_provider=self.cdp_provider,
+                search_provider=self.search_provider,
                 find=rank_find,
             )
             try:

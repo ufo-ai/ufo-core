@@ -509,6 +509,7 @@ async def test_engine_offloads_an_oversize_result_to_a_readable_workspace_file(
         hub=InProcessHub(),
         sandbox=ctx.sandbox,
         cdp_provider=SandboxCdpProvider(endpoint=None),
+        search_provider=None,
         tools=ToolRegistry((_oversize_tool("big", full),)),
         tool_ext={},
         hooks=HookChain(),

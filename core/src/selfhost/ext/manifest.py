@@ -29,6 +29,7 @@ from selfhost.indexing import EmbedClient, IndexBackend
 from selfhost.models.interface import ModelClient
 from selfhost.sandbox.session import Carrier
 from selfhost.schema.records import Agent, Turn
+from selfhost.search import SearchProvider
 from selfhost.sources.sync import SourceBackend
 from selfhost.tools.registry import ToolDef
 
@@ -211,6 +212,19 @@ class CdpProviderSpec:
 
 
 @dataclass(frozen=True)
+class SearchProviderSpec:
+    """A search provider an extension registers, selected by `config.research.search_provider`.
+    `backend` is the name; `build` constructs the process-wide SearchProvider once at boot, only
+    when selected, given a credential reader scoped to this manifest's slots — the backend reads its
+    BYOK key in-process, host-side, never in the sandbox. Core ships no default: every search
+    backend is an extension, and the research extension `requires` this seam so a deploy with
+    research active but no search backend fails at boot rather than on the first search."""
+
+    backend: str
+    build: Callable[[CredentialAccess], SearchProvider]
+
+
+@dataclass(frozen=True)
 class OnboardingStep:
     """A first-run step an extension contributes to workspace onboarding. `handler` runs once, after
     the core steps, with the extension's scoped ExtensionContext — the same handle its jobs receive,
@@ -380,6 +394,7 @@ class Manifest:
     cdp_providers: tuple[CdpProviderSpec, ...] = ()
     carriers: tuple[CarrierSpec, ...] = ()
     auth_proxies: tuple[AuthProxySpec, ...] = ()
+    search_providers: tuple[SearchProviderSpec, ...] = ()
     requires: tuple[str, ...] = field(default_factory=tuple)
 
 

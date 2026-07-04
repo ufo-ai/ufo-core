@@ -31,6 +31,7 @@ from selfhost.config import (
     ConnectorsConfig,
     DatabaseConfig,
     HubConfig,
+    ResearchConfig,
     SandboxConfig,
 )
 from selfhost.credentials import CredentialStore
@@ -61,6 +62,7 @@ from selfhost.serve import (
     _select_carrier,
     _select_cdp_provider,
     _select_hub,
+    _select_search_provider,
     _source_backends,
 )
 from selfhost.skills.runtime import parse_skill
@@ -84,6 +86,7 @@ def _config(
     cdp_provider: str = DEFAULT_CDP_PROVIDER,
     sandbox_backend: str = "local",
     auth_backend: str = "composio",
+    search_provider: str | None = None,
 ) -> Config:
     return Config(
         database=DatabaseConfig(url="sqlite+aiosqlite:///:memory:"),
@@ -93,6 +96,7 @@ def _config(
         browser=BrowserConfig(cdp_provider=cdp_provider),
         sandbox=SandboxConfig(backend=sandbox_backend),
         connectors=ConnectorsConfig(auth_backend=auth_backend),
+        research=ResearchConfig(search_provider=search_provider),
     )
 
 
@@ -218,6 +222,15 @@ def _check_auth_proxies(manifest: Manifest, store: CredentialStore) -> None:
         )
 
 
+def _check_search_providers(manifest: Manifest, store: CredentialStore) -> None:
+    for spec in manifest.search_providers:
+        _resolve_backend(
+            lambda spec=spec: _select_search_provider(
+                _config(search_provider=spec.backend), (manifest,), WORKSPACE_ID, store
+            )
+        )
+
+
 def _check_surfaces(manifest: Manifest, store: CredentialStore, tmp_path: Path) -> None:
     if not manifest.surfaces:
         return
@@ -330,6 +343,7 @@ def test_installed_extension_registers_every_declared_point(name: str, tmp_path:
     _check_models(manifest)
     _check_sources(manifest)
     _check_auth_proxies(manifest, store)
+    _check_search_providers(manifest, store)
     _check_surfaces(manifest, store, tmp_path)
     _check_routes(manifest, store)
     _check_hooks(manifest, store)

@@ -13,8 +13,10 @@ defaults to the core floor so a context built without the loader still resolves 
 `cdp_provider` is the turn's selected browser transport and `find` its host-side element-ranking
 hook — the browser tools build one per-turn surface from them on first use and register its `aclose`
 on `cleanup`, the per-turn registry the loop drains at turn end so a CDP connection never outlives
-its turn. An extension tool also gets `ext`, its owning extension's workspace-scoped
-ExtensionContext; a builtin tool gets `ext=None`."""
+its turn. `search_provider` is the deploy's selected web-search backend (None when no research
+extension is active) — the research tools call it host-side, so the provider reads its key in the
+serve process and the sandbox never sees it. An extension tool also gets `ext`, its owning
+extension's workspace-scoped ExtensionContext; a builtin tool gets `ext=None`."""
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -30,6 +32,7 @@ from selfhost.grants import ConnectUnavailable, GrantStore
 from selfhost.o11y import log
 from selfhost.sandbox.session import SandboxSession
 from selfhost.schema.records import Agent, Turn
+from selfhost.search import SearchProvider
 from selfhost.skills.runtime import CORE_SKILL_REGISTRY, SkillRegistry
 
 
@@ -132,6 +135,7 @@ class ToolContext:
     skills: SkillRegistry = CORE_SKILL_REGISTRY
     ext: ExtensionContext | None = None
     cdp_provider: CdpProvider | None = None
+    search_provider: SearchProvider | None = None
     find: FindCompleter | None = None
     cleanup: TurnCleanup = field(default_factory=TurnCleanup)
 

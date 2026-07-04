@@ -34,6 +34,7 @@ from selfhost.config import (
     ConnectorsConfig,
     DatabaseConfig,
     HubConfig,
+    ResearchConfig,
     SandboxConfig,
 )
 from selfhost.credentials import CredentialSlotUnset, CredentialStore
@@ -72,6 +73,7 @@ from selfhost.sandbox.proxy.rules import InjectionRule, MeterRule, derive_creden
 from selfhost.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from selfhost.schema import tables
 from selfhost.schema.records import Agent, Turn, Usage
+from selfhost.search import FetchRequest, SearchQuery
 from selfhost.serve import (
     _mount_ext_routes,
     _mount_surfaces,
@@ -79,6 +81,7 @@ from selfhost.serve import (
     _select_carrier,
     _select_cdp_provider,
     _select_hub,
+    _select_search_provider,
     _validate_requires,
 )
 from selfhost.skills.runtime import mount_skill
@@ -216,6 +219,7 @@ async def test_sample_is_discovered_via_its_entry_point() -> None:
     assert {spec.backend for spec in manifest.cdp_providers} == {sample.CDP_PROVIDER}
     assert {carrier.name for carrier in manifest.carriers} == {sample.CARRIER_NAME}
     assert {spec.backend for spec in manifest.auth_proxies} == {sample.AUTH_PROXY_BACKEND}
+    assert {spec.backend for spec in manifest.search_providers} == {sample.SEARCH_PROVIDER}
 
 
 def test_core_selects_a_manifest_contributed_hub() -> None:
@@ -344,6 +348,72 @@ async def test_sample_auth_proxy_resolves_a_credential() -> None:
     credential = await sample.SampleAuthProxy().credential(uuid4(), "provider", "account")
     assert credential.bearer == sample.AUTH_PROXY_BEARER
     assert credential.transport is None
+
+
+def _search_config(search_provider: str | None) -> Config:
+    return Config(
+        database=DatabaseConfig(url="sqlite+aiosqlite:///dev.db"),
+        blob=BlobConfig(backend="filesystem", root=Path()),
+        research=ResearchConfig(search_provider=search_provider),
+    )
+
+
+def test_core_selects_a_manifest_contributed_search_provider() -> None:
+    """The `search_providers` seam end to end: core ships no default search backend, so resolving
+    the sample's provider name proves the Manifest `search_providers` point flowed into selection,
+    built with a credential reader. An unset knob yields None (no research backend selected);
+    selecting a name no extension registers, two extensions claiming one name, and a selected
+    backend with no credential key each fail loud."""
+    manifest = _sample_manifest()
+    workspace_id = uuid4()
+    store = _credential_store()
+
+    assert _select_search_provider(_search_config(None), (manifest,), workspace_id, store) is None
+    selected = _select_search_provider(
+        _search_config(sample.SEARCH_PROVIDER), (manifest,), workspace_id, store
+    )
+    assert isinstance(selected, sample.SampleSearchProvider)
+    with pytest.raises(RuntimeError, match="no extension registers it"):
+        _select_search_provider(_search_config("nope"), (manifest,), workspace_id, store)
+    with pytest.raises(RuntimeError, match="two extensions register search provider"):
+        _select_search_provider(
+            _search_config(sample.SEARCH_PROVIDER), (manifest, manifest), workspace_id, store
+        )
+    with pytest.raises(RuntimeError, match="needs a credential key"):
+        _select_search_provider(
+            _search_config(sample.SEARCH_PROVIDER), (manifest,), workspace_id, None
+        )
+
+
+async def test_sample_search_provider_answers_a_query_and_fetches() -> None:
+    """The consumer half of the `search_providers` seam through the probe: the registered provider
+    answers a `SearchQuery` and fetches a URL through the same protocol the research tools call — a
+    real object driven end to end, not a mock."""
+    provider = sample.SampleSearchProvider()
+    assert provider.supports_fetch is True
+    results = await provider.search(SearchQuery(query="orbital widgets", num_results=3))
+    assert results.answer == sample.SAMPLE_SEARCH_ANSWER
+    assert results.hits[0].url == sample.SAMPLE_SEARCH_URL
+    page = await provider.fetch(FetchRequest(url="https://sample.test/page"))
+    assert page.url == "https://sample.test/page"
+    assert page.text == sample.SAMPLE_FETCH_TEXT
+
+
+def test_boot_validation_of_requires_fails_when_no_search_backend_is_configured() -> None:
+    """The `requires` + boot-validation seam for search: an extension declaring `requires`
+    `search_providers` fails `serve` at boot when `[research] search_provider` is unset or names no
+    registered backend, and clears once the knob names a registered backend the sample provides."""
+    workspace_id = uuid4()
+    store = _credential_store()
+    manifest = _sample_manifest()
+    research = Manifest(name="research", version="0", requires=("search_providers",))
+    with pytest.raises(RuntimeError, match=r"requires the 'search_providers' seam"):
+        _validate_requires(_search_config(None), (research, manifest), workspace_id, store)
+    with pytest.raises(RuntimeError, match=r"requires the 'search_providers' seam"):
+        _validate_requires(_search_config("nope"), (research, manifest), workspace_id, store)
+    _validate_requires(
+        _search_config(sample.SEARCH_PROVIDER), (research, manifest), workspace_id, store
+    )
 
 
 def _carrier_config(backend: str) -> Config:

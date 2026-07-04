@@ -252,6 +252,7 @@ async def test_turn_execs_bash_in_a_live_container(
         hub=InProcessHub(),
         sandbox=SandboxSession(carrier=DockerCarrier(), handle=live_container),
         cdp_provider=SandboxCdpProvider(endpoint=None),
+        search_provider=None,
         tools=ToolRegistry(BUILTIN_TOOLS),
         tool_ext={},
         hooks=HookChain(),

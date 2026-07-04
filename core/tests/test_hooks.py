@@ -418,6 +418,7 @@ def _engine(
         hub=InProcessHub(),
         sandbox=SandboxSession(carrier=carrier or RecordingCarrier(), handle=handle),
         cdp_provider=SandboxCdpProvider(endpoint=None),
+        search_provider=None,
         tools=ToolRegistry(tools),
         tool_ext=tool_ext or {},
         hooks=hooks,

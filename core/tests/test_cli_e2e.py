@@ -337,6 +337,7 @@ def chat_server(
             hub=hub,
             carrier=StandInCarrier(),
             cdp_provider=SandboxCdpProvider(endpoint=None),
+            search_provider=None,
             proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
             dbos=dbos_client,
             subagents=SubagentRegistry(()),

@@ -197,6 +197,7 @@ def dbos_runtime(
             hub=hub,
             carrier=StandInCarrier(),
             cdp_provider=SandboxCdpProvider(endpoint=None),
+            search_provider=None,
             proxy=proxy,
             dbos=dbos_client,
             subagents=SubagentRegistry((ROUNDTRIP_PROFILE, EXHAUST_PROFILE, PINNED_PROFILE)),

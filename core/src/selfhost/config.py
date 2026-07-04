@@ -182,6 +182,16 @@ class ConnectorsConfig(BaseModel):
     auth_backend: str = "composio"
 
 
+class ResearchConfig(BaseModel):
+    """Web research settings. `search_provider` names a search backend an extension registers
+    through its Manifest `search_providers` point (e.g. the `exa` backend); the research extension's
+    tools call the selected provider host-side. Unset selects no backend — a deploy with a research
+    extension active (which `requires` the seam) fails loud at boot until it is set."""
+
+    model_config = ConfigDict(extra="forbid")
+    search_provider: str | None = None
+
+
 class PackConfig(BaseModel):
     """The active pack. `name` selects one pack a workspace member under `packs/<name>/` registers
     through the `selfhost.pack` entry point; activating it narrows the deploy to exactly the
@@ -209,6 +219,7 @@ class Config(BaseModel):
     hub: HubConfig = HubConfig()
     browser: BrowserConfig = BrowserConfig()
     connectors: ConnectorsConfig = ConnectorsConfig()
+    research: ResearchConfig = ResearchConfig()
     pack: PackConfig = PackConfig()
 
 

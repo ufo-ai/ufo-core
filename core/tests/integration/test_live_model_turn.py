@@ -83,6 +83,7 @@ async def live_surface(
             hub=hub,
             carrier=_StandInCarrier(),
             cdp_provider=SandboxCdpProvider(endpoint=None),
+            search_provider=None,
             proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
             dbos=runtime_dbos,
             subagents=SubagentRegistry(()),

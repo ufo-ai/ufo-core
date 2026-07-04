@@ -32,7 +32,7 @@ from selfhost.ext.loader import (
     turn_subagents,
     validate_ext_tools,
 )
-from selfhost.ext.manifest import AuthProxySpec, CdpProviderSpec, Manifest
+from selfhost.ext.manifest import AuthProxySpec, CdpProviderSpec, Manifest, SearchProviderSpec
 from selfhost.ext.surface import SurfaceContext, SurfaceSpec, WritebackPoller
 from selfhost.grants import ConnectFlow, GrantStore, OAuthProvider, install_connect_flow
 from selfhost.hub import Hub, InProcessHub
@@ -55,6 +55,7 @@ from selfhost.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_c
 from selfhost.sandbox.session import Carrier, ProxyEndpoint
 from selfhost.schema import tables
 from selfhost.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION
+from selfhost.search import SearchProvider
 from selfhost.sources.sync import (
     FOLDER_BACKEND,
     CorePageFeed,
@@ -107,6 +108,7 @@ def run() -> None:
             hub=hub,
             carrier=_select_carrier(config, manifests),
             cdp_provider=_select_cdp_provider(config, manifests, workspace_id, credentials),
+            search_provider=_select_search_provider(config, manifests, workspace_id, credentials),
             proxy=_egress_proxy(asyncio.run(_resolver(config, credentials))),
             dbos=dbos_client,
             subagents=SubagentRegistry((*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests))),
@@ -358,9 +360,67 @@ def _require_cdp_provider(
         )
 
 
+def _select_search_provider(
+    config: Config,
+    manifests: tuple[Manifest, ...],
+    workspace_id: UUID,
+    credentials: CredentialStore | None,
+) -> SearchProvider | None:
+    """The process-wide search provider the deploy selects, chosen by `[research] search_provider`:
+    a backend an extension registers through its Manifest `search_providers` point, built once at
+    boot with a credential reader scoped to its slots (the backend reads its BYOK key in-process,
+    host-side, never in the sandbox). Core ships no default, so an unset knob yields None — a deploy
+    without a research extension still boots. Two extensions claiming one name fail loud, as does
+    selecting a name no extension registers or building a selected backend with no credential key
+    set; a research extension's `requires` turns the unset knob into a boot failure through
+    `_validate_requires`."""
+    specs: dict[str, tuple[SearchProviderSpec, Manifest]] = {}
+    for manifest in manifests:
+        for spec in manifest.search_providers:
+            if spec.backend in specs:
+                raise RuntimeError(
+                    f"two extensions register search provider backend {spec.backend!r}"
+                )
+            specs[spec.backend] = (spec, manifest)
+    if config.research.search_provider is None:
+        return None
+    found = specs.get(config.research.search_provider)
+    if found is None:
+        raise NotRegisteredError(
+            f"config selects search provider backend {config.research.search_provider!r} "
+            "but no extension registers it"
+        )
+    spec, manifest = found
+    if credentials is None:
+        raise RuntimeError(
+            f"search provider backend {config.research.search_provider!r} needs a credential key "
+            "but none is set"
+        )
+    declared = frozenset(slot.name for slot in manifest.credentials)
+    context = context_for(workspace_id, manifest.name, declared, credentials)
+    return spec.build(context.credentials)
+
+
+def _require_search_provider(
+    config: Config,
+    manifests: tuple[Manifest, ...],
+    workspace_id: UUID,
+    credentials: CredentialStore | None,
+) -> None:
+    """The `search_providers` readiness contract: `[research] search_provider` is set and the named
+    backend resolves (unknown name, collision, or missing credential key each fail loud) — so a
+    research extension active with no search backend fails at boot, not on the first search."""
+    if config.research.search_provider is None:
+        raise RuntimeError(
+            "[research] search_provider is unset; set it to a registered search backend so the "
+            "research tools have a provider"
+        )
+    _select_search_provider(config, manifests, workspace_id, credentials)
+
+
 _REQUIRED_SEAM_CHECKS: dict[
     str, Callable[[Config, tuple[Manifest, ...], UUID, CredentialStore | None], None]
-] = {"cdp_providers": _require_cdp_provider}
+] = {"cdp_providers": _require_cdp_provider, "search_providers": _require_search_provider}
 
 
 def _select_auth_proxy(

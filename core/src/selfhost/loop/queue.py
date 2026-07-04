@@ -43,6 +43,7 @@ from selfhost.schema.records import (
     TerminalFrame,
     Turn,
 )
+from selfhost.search import SearchProvider
 from selfhost.skills.runtime import SkillRegistry
 from selfhost.tools.registry import ToolRegistry
 
@@ -65,6 +66,7 @@ class Runtime:
     hub: Hub
     carrier: Carrier
     cdp_provider: CdpProvider
+    search_provider: SearchProvider | None
     proxy: ProxyEndpoint
     dbos: DBOSClient
     subagents: SubagentRegistry
@@ -156,6 +158,7 @@ async def _execute_turn(turn_id: str) -> str:
             hub=runtime.hub,
             sandbox=SandboxSession(carrier=runtime.carrier, handle=handle),
             cdp_provider=runtime.cdp_provider,
+            search_provider=runtime.search_provider,
             tools=tools,
             tool_ext=tool_ext,
             hooks=hooks,

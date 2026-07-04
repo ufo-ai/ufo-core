@@ -51,6 +51,7 @@ from selfhost.sdk.manifest import (
     PostToolUse,
     PromptSection,
     RouteSpec,
+    SearchProviderSpec,
     SkillSpec,
     SourceProvider,
     SubagentProfile,
@@ -62,6 +63,13 @@ from selfhost.sdk.sandbox import (
     ExecResult,
     SandboxHandle,
     SandboxSpec,
+)
+from selfhost.sdk.search import (
+    FetchedPage,
+    FetchRequest,
+    SearchHit,
+    SearchQuery,
+    SearchResults,
 )
 from selfhost.sdk.sources import SHARED_SUBJECT, Page, SourceAuth, SyncResult
 from selfhost.sdk.surfaces import SurfaceContext, SurfaceRoute, SurfaceSpec, Writeback
@@ -131,6 +139,12 @@ CARRIER_NAME = "sample_carrier"
 CARRIER_CONTAINER = "sample-container"
 AUTH_PROXY_BACKEND = "sample_auth_proxy"
 AUTH_PROXY_BEARER = "sample"
+SEARCH_PROVIDER = "sample_search"
+SAMPLE_SEARCH_URL = "https://sample.test/result"
+SAMPLE_SEARCH_TITLE = "Sample result"
+SAMPLE_SEARCH_TEXT = "the sample search backend answers a canned hit"
+SAMPLE_SEARCH_ANSWER = "the sample search backend answers directly"
+SAMPLE_FETCH_TEXT = "the sample search backend fetched a canned page"
 
 
 NOTE_TABLE = sa.Table(
@@ -520,6 +534,29 @@ class SampleAuthProxy:
         return Credential(bearer=AUTH_PROXY_BEARER)
 
 
+@dataclass(frozen=True)
+class SampleSearchProvider:
+    """A trivial SearchProvider the probe registers through the `search_providers` Manifest point:
+    `search` answers a canned SearchResults (carrying an `answer` to exercise that field) and
+    `fetch` a canned FetchedPage. A real object consumed through the protocol, so a test drives it
+    as core selects and the research tools call it; the exa backend keeps its own HTTP proof."""
+
+    supports_fetch: bool = True
+
+    async def search(self, query: SearchQuery) -> SearchResults:
+        return SearchResults(
+            hits=(
+                SearchHit(
+                    url=SAMPLE_SEARCH_URL, title=SAMPLE_SEARCH_TITLE, text=SAMPLE_SEARCH_TEXT
+                ),
+            ),
+            answer=SAMPLE_SEARCH_ANSWER,
+        )
+
+    async def fetch(self, request: FetchRequest) -> FetchedPage:
+        return FetchedPage(url=request.url, text=SAMPLE_FETCH_TEXT)
+
+
 class SampleCarrier:
     """A trivial in-process carrier the probe registers so `serve`'s backend selection has a
     manifest-contributed carrier to choose. It implements the whole Carrier protocol without a real
@@ -644,5 +681,10 @@ def manifest() -> Manifest:
         carriers=(CarrierSpec(name=CARRIER_NAME, factory=SampleCarrier),),
         auth_proxies=(
             AuthProxySpec(backend=AUTH_PROXY_BACKEND, build=lambda credentials: SampleAuthProxy()),
+        ),
+        search_providers=(
+            SearchProviderSpec(
+                backend=SEARCH_PROVIDER, build=lambda credentials: SampleSearchProvider()
+            ),
         ),
     )
