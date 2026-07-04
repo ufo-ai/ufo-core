@@ -24,6 +24,7 @@ from selfhost.credentials import CredentialStore
 from selfhost.db import init_db, workspace_tx
 from selfhost.ext.context import context_for
 from selfhost.ext.loader import (
+    NotRegisteredError,
     embed_backend,
     index_backend,
     load_manifests,
@@ -221,7 +222,7 @@ def _select_carrier(config: Config, manifests: tuple[Manifest, ...]) -> Carrier:
             factories[spec.name] = spec.factory
     factory = factories.get(config.sandbox.backend)
     if factory is None:
-        raise RuntimeError(
+        raise NotRegisteredError(
             f"sandbox backend {config.sandbox.backend!r} is not a registered carrier "
             f"(have {sorted(factories)})"
         )
@@ -256,7 +257,7 @@ def _select_hub(config: Config, manifests: tuple[Manifest, ...]) -> Hub:
             builders[spec.backend] = spec.build
     build = builders.get(config.hub.backend)
     if build is None:
-        raise RuntimeError(
+        raise NotRegisteredError(
             f"config selects hub backend {config.hub.backend!r} but no extension registers it"
         )
     return build(config.hub.url)
@@ -290,7 +291,7 @@ def _select_browser(
             specs[spec.backend] = (spec, manifest)
     found = specs.get(config.browser.backend)
     if found is None:
-        raise RuntimeError(
+        raise NotRegisteredError(
             f"config selects browser backend {config.browser.backend!r} "
             "but no extension registers it"
         )

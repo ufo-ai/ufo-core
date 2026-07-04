@@ -35,6 +35,7 @@ from selfhost.config import (
 from selfhost.credentials import CredentialStore
 from selfhost.ext.context import context_for
 from selfhost.ext.loader import (
+    NotRegisteredError,
     discovered,
     discovered_packs,
     embed_backend,
@@ -67,7 +68,6 @@ PACKS = discovered_packs()
 WORKSPACE_ID = uuid4()
 REDIS_URL = "redis://localhost:6379/0"
 PUBLIC_BASE_URL = "https://selfhost.test"
-NOT_REGISTERED = ("no extension registers", "not a registered carrier")
 
 
 def _credential_store() -> CredentialStore:
@@ -109,15 +109,17 @@ class _StubDbos:
 
 def _resolve_backend(select) -> None:
     """Run a backend selection seam and prove it routed to the extension's spec: a returned backend
-    is full in-process construction; the only registration defect is core's own not-registered
-    signal (always a RuntimeError raised by the selection seam before it reaches the factory). Any
-    other error means the seam found the spec and a key- or service-gated factory declined to build
-    keyless — e2b's carrier fails without its template env — which the Tier-B integration proofs
-    cover, not this registration floor."""
+    is full in-process construction. A `NotRegisteredError` means the seam knew no extension by the
+    selected name — a real registration defect this test names. Any other error means the seam found
+    the spec and a key- or service-gated factory declined to build keyless — e2b's carrier fails
+    without its template env — which the Tier-B integration proofs cover, not this registration
+    floor. Keying on the exception type, not a message substring, is reword-proof."""
     try:
         assert select() is not None
-    except Exception as error:
-        assert not any(signal in str(error) for signal in NOT_REGISTERED), str(error)
+    except NotRegisteredError as error:
+        raise AssertionError(f"no extension registers the selected backend: {error}") from error
+    except Exception:
+        pass
 
 
 def _check_tools(manifest: Manifest, store: CredentialStore) -> None:

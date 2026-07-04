@@ -65,6 +65,13 @@ ALLOWED_OUTCOMES: dict[HookEvent, tuple[type, ...]] = {
 }
 
 
+class NotRegisteredError(RuntimeError):
+    """A backend-selection seam was handed a name no active extension registers. Distinct from the
+    other boot-fail-loud RuntimeErrors these seams raise (a name collision, a key-gated factory
+    declining) so a caller — the registration-evidence test — asserts on the type, not on a message
+    substring a reword could silently drift past."""
+
+
 class ExtensionPin(BaseModel):
     """One extension the lockfile pins: its name, the version pinned, and the digest of its
     installed source the loader re-checks at boot."""
@@ -330,7 +337,7 @@ def index_backend(
                 raise RuntimeError(f"index backend {name!r} needs a credential key but none is set")
             context = context_for(workspace_id, manifest.name, declared, credential_store)
             return spec.factory(embed, context)
-    raise RuntimeError(f"config selects index backend {name!r} but no extension registers it")
+    raise NotRegisteredError(f"config selects index backend {name!r} but no extension registers it")
 
 
 def embed_backend(
@@ -354,7 +361,7 @@ def embed_backend(
                 raise RuntimeError(f"embed backend {name!r} needs a credential key but none is set")
             context = context_for(workspace_id, manifest.name, declared, credential_store)
             return spec.factory(context)
-    raise RuntimeError(f"config selects embed backend {name!r} but no extension registers it")
+    raise NotRegisteredError(f"config selects embed backend {name!r} but no extension registers it")
 
 
 def validate_ext_tools(
