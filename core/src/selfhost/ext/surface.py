@@ -327,7 +327,10 @@ class SurfaceContext:
                 await connection.execute(
                     sa.select(tables.conversation.c.member_id)
                     .select_from(tables.turn.join(tables.conversation))
-                    .where(tables.turn.c.id == turn_id)
+                    .where(
+                        tables.turn.c.id == turn_id,
+                        tables.turn.c.workspace_id == self.workspace_id,
+                    )
                 )
             ).one_or_none()
         return None if row is None else row.member_id
