@@ -30,4 +30,10 @@ jobs:
       - run: uv sync
       - run: uv run ruff check
       - run: uv run python gates.py
+      # Rot-guard: the gated integration suite must always import + collect, even where its live
+      # dependencies (a model key, extra services) are absent, so it can't silently bit-rot.
+      - run: uv run pytest core/tests/integration --collect-only -m integration -q
+      # The full suite runs serially (no xdist) — the DBOS executor is a process singleton — and the
+      # runner has Docker, so the `docker` and container-backed `integration` turns execute here;
+      # `integration` tests needing an absent key (a live model) skip with a clear reason.
       - run: uv run pytest

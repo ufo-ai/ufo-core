@@ -18,3 +18,9 @@ known-first-party = ["selfhost"]
 [tool.pytest.ini_options]
 testpaths = ["core/tests"]
 asyncio_mode = "auto"
+addopts = "--strict-markers"
+markers = [
+    "integration: end-to-end against a real dependency (a live model, a real container) — never a fake; gated + serial",
+    "docker: needs a working Docker daemon (builds and runs a real container)",
+    "serial: shares the process-singleton DBOS executor, a live container, or one database — must not run in parallel",
+]

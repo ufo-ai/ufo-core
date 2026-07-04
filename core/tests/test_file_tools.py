@@ -55,6 +55,8 @@ from selfhost.tools.context import (
 )
 from selfhost.tools.registry import ToolDef, ToolRegistry
 
+pytestmark = pytest.mark.docker
+
 SANDBOX_TEST_IMAGE = "selfhost-sandbox:test"
 OVER_INMEMORY_BYTES = 25 * 1024 * 1024
 ARTIFACT_SECRET = "file-tools-secret"

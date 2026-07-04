@@ -122,6 +122,7 @@ def s3_store() -> Iterator[S3BlobStore]:
         subprocess.run(["docker", "rm", "-f", container], capture_output=True, check=False)
 
 
+@pytest.mark.docker
 async def test_s3_round_trip(s3_store: S3BlobStore) -> None:
     await s3_store.put("conversations/c1/messages.json", b"hello")
     assert await s3_store.get("conversations/c1/messages.json") == b"hello"
