@@ -4,18 +4,16 @@ Atlassian Cloud site synced into recallable pages.
 Atlassian Cloud fans out from the OAuth token itself: `GET /oauth/token/accessible-resources` names
 every site (its `cloud_id`) the grant reaches, and each stream's requests are scoped under
 `/ex/jira/{cloud_id}/...`, so a newly-shared site lands on the next sync with no manual config. Jira
-paginates its REST collections with `startAt`+`maxResults` and terminates on `isLast`/`total`
-(`_offset_pages`); `users/search` answers a bare JSON array walked by the same `startAt` cursor.
-`projects`, `users`, and `boards` re-enumerate their whole current collection each run and return
-as `delete_missing` snapshots — a record that vanished from the grant's view is tombstoned, which is
-how deletes are detected on an API with no delete signal. `issues` are incremental: the run filters
-`ORDER BY updated ASC` past the stored `updated` watermark with a JQL `updated > "<cursor>"` clause,
-and `issue_comments`/`sprints` fan out per issue/board and advance their own watermark. A grant that
-can't reach a site or resource (`401`/`403`) yields `StreamSkipped` so the run records a skip, not a
-failure. `render` lifts an issue into its summary, status, assignee, and description text (Jira's
-description and comment bodies are Atlassian Document Format trees, walked by `_doc_text`) rather
-than the raw JSON. The credential is resolved through the auth proxy the runner threads — this
-connector holds no token. The write path is intentionally absent — the source seam only reads."""
+paginates its REST collections with `startAt`+`maxResults` and terminates on `isLast`/`total`;
+`users/search` answers a bare JSON array read as a single page. `issues` are incremental: the run
+filters `ORDER BY updated ASC` past the stored `updated` watermark with a JQL `updated > "<cursor>"`
+clause, and `issue_comments`/`sprints` fan out per issue/board and advance their own watermark. A
+grant that can't reach a site or resource (`401`/`403`) yields `StreamSkipped` so the run records a
+skip, not a failure. `render` lifts an issue into its summary, status, assignee, and description
+text (Jira's description and comment bodies are Atlassian Document Format trees, walked by
+`_doc_text`) rather than the raw JSON. The credential is resolved through the auth proxy the runner
+threads — this connector holds no token. The write path is intentionally absent — the source seam
+only reads."""
 
 from collections.abc import AsyncIterator
 from typing import Any
@@ -24,14 +22,14 @@ import httpx
 
 from selfhost.sdk.sources import StreamSkipped
 from selfhost_ext_sources.connector import StreamSpec
-from selfhost_ext_sources.rest import RestConnector, list_or_empty, records_at
+from selfhost_ext_sources.rest import RestConnector, list_or_empty, records_at, with_context
 
 PAGE_SIZE = 100
 ISSUE_FIELDS = "summary,description,status,priority,created,updated,project,assignee,reporter"
 _REFUSAL_STATUS = frozenset({401, 403})
 
 JIRA_STREAMS: list[StreamSpec] = [
-    StreamSpec(name="projects", source_object="project", primary_key="id", delete_missing=True),
+    StreamSpec(name="projects", source_object="project", primary_key="id"),
     StreamSpec(name="issues", source_object="issue", primary_key="id", cursor_field="updated"),
     StreamSpec(
         name="issue_comments",
@@ -40,10 +38,8 @@ JIRA_STREAMS: list[StreamSpec] = [
         cursor_field="updated",
         canonical=False,
     ),
-    StreamSpec(name="users", source_object="user", primary_key="accountId", delete_missing=True),
-    StreamSpec(
-        name="boards", source_object="board", primary_key="id", delete_missing=True, canonical=False
-    ),
+    StreamSpec(name="users", source_object="user", primary_key="accountId"),
+    StreamSpec(name="boards", source_object="board", primary_key="id", canonical=False),
     StreamSpec(
         name="sprints",
         source_object="sprint",
@@ -98,7 +94,7 @@ class JiraConnector(RestConnector):
         response = await self._get_raw(client, "/oauth/token/accessible-resources")
         return list_or_empty(response.json() if response.content else [])
 
-    async def _offset_pages(
+    async def _offset_values(
         self,
         client: httpx.AsyncClient,
         path: str,
@@ -106,7 +102,8 @@ class JiraConnector(RestConnector):
         params: dict[str, Any] | None = None,
         result_key: str = "values",
     ) -> AsyncIterator[list[dict[str, Any]]]:
-        """A `startAt`+`maxResults` collection read, terminating on `isLast`/`total`."""
+        """A `startAt`+`maxResults` collection read from an envelope list path, terminating on
+        `isLast`/`total`."""
         start_at = 0
         while True:
             query = {"startAt": start_at, "maxResults": PAGE_SIZE, **(params or {})}
@@ -125,8 +122,8 @@ class JiraConnector(RestConnector):
             if not isinstance(cloud_id, str) or not cloud_id:
                 continue
             path = f"/ex/jira/{cloud_id}/rest/api/3/project/search"
-            async for page in self._offset_pages(client, path):
-                yield _with_context(page, cloud_id=cloud_id, site_url=site.get("url"))
+            async for page in self._offset_values(client, path):
+                yield with_context(page, cloud_id=cloud_id, site_url=site.get("url"))
 
     async def _issues(
         self, client: httpx.AsyncClient, *, cursor: str | None
@@ -137,10 +134,10 @@ class JiraConnector(RestConnector):
             if not isinstance(cloud_id, str) or not cloud_id:
                 continue
             path = f"/ex/jira/{cloud_id}/rest/api/3/search"
-            async for page in self._offset_pages(
+            async for page in self._offset_values(
                 client, path, params={"jql": jql, "fields": ISSUE_FIELDS}, result_key="issues"
             ):
-                yield _with_context(page, cloud_id=cloud_id, site_url=site.get("url"))
+                yield with_context(page, cloud_id=cloud_id, site_url=site.get("url"))
 
     async def _comments(
         self, client: httpx.AsyncClient, *, cursor: str | None
@@ -152,11 +149,11 @@ class JiraConnector(RestConnector):
                 if not isinstance(issue_id, str) or not isinstance(cloud_id, str):
                     continue
                 path = f"/ex/jira/{cloud_id}/rest/api/3/issue/{issue_id}/comment"
-                async for comments in self._offset_pages(client, path, result_key="comments"):
+                async for comments in self._offset_values(client, path, result_key="comments"):
                     if cursor:
                         comments = [c for c in comments if str(c.get("updated") or "") > cursor]
                     if comments:
-                        yield _with_context(
+                        yield with_context(
                             comments,
                             cloud_id=cloud_id,
                             site_url=issue.get("site_url"),
@@ -170,17 +167,12 @@ class JiraConnector(RestConnector):
             if not isinstance(cloud_id, str) or not cloud_id:
                 continue
             path = f"/ex/jira/{cloud_id}/rest/api/3/users/search"
-            start_at = 0
-            while True:
-                response = await self._get_raw(
-                    client, path, params={"startAt": start_at, "maxResults": PAGE_SIZE}
-                )
-                users = list_or_empty(response.json() if response.content else [])
-                if users:
-                    yield _with_context(users, cloud_id=cloud_id, site_url=site.get("url"))
-                if len(users) < PAGE_SIZE:
-                    break
-                start_at += len(users)
+            response = await self._get_raw(
+                client, path, params={"startAt": 0, "maxResults": PAGE_SIZE}
+            )
+            users = list_or_empty(response.json() if response.content else [])
+            if users:
+                yield with_context(users, cloud_id=cloud_id, site_url=site.get("url"))
 
     async def _boards(self, client: httpx.AsyncClient) -> AsyncIterator[list[dict[str, Any]]]:
         for site in await self._sites(client):
@@ -188,8 +180,8 @@ class JiraConnector(RestConnector):
             if not isinstance(cloud_id, str) or not cloud_id:
                 continue
             path = f"/ex/jira/{cloud_id}/rest/agile/1.0/board"
-            async for page in self._offset_pages(client, path):
-                yield _with_context(page, cloud_id=cloud_id, site_url=site.get("url"))
+            async for page in self._offset_values(client, path):
+                yield with_context(page, cloud_id=cloud_id, site_url=site.get("url"))
 
     async def _sprints(
         self, client: httpx.AsyncClient, *, cursor: str | None
@@ -201,73 +193,44 @@ class JiraConnector(RestConnector):
                 if board_id is None or not isinstance(cloud_id, str):
                     continue
                 path = f"/ex/jira/{cloud_id}/rest/agile/1.0/board/{board_id}/sprint"
-                async for sprints in self._offset_pages(client, path):
+                async for sprints in self._offset_values(client, path):
                     if cursor:
                         sprints = [s for s in sprints if str(s.get("updatedDate") or "") > cursor]
                     if sprints:
-                        yield _with_context(sprints, cloud_id=cloud_id, board_id=board_id)
+                        yield with_context(sprints, cloud_id=cloud_id, board_id=board_id)
 
     def flatten(self, record: dict[str, Any], stream: StreamSpec) -> dict[str, Any]:
-        match stream.name:
-            case "users":
-                return {
-                    **record,
-                    "name": record.get("displayName"),
-                    "email": record.get("emailAddress"),
-                }
-            case "projects" | "boards":
-                return {
-                    **record,
-                    "name": record.get("name"),
-                    "api_url": record.get("self"),
-                    "created_at": record.get("created"),
-                }
-            case "issues":
-                fields = _dict_or_empty(record.get("fields"))
-                status = _dict_or_empty(fields.get("status"))
-                priority = _dict_or_empty(fields.get("priority"))
-                return {
-                    **record,
-                    "subject": fields.get("summary"),
-                    "status": status.get("name"),
-                    "priority": priority.get("name"),
-                    "description": _doc_text(fields.get("description")),
-                    "url": f"{record.get('site_url')}/browse/{record.get('key')}",
-                    "api_url": record.get("self"),
-                    "created_at": fields.get("created"),
-                    "updated": fields.get("updated"),
-                }
-            case "issue_comments":
-                author = _dict_or_empty(record.get("author"))
-                return {
-                    **record,
-                    "body": _doc_text(record.get("body")),
-                    "author": author.get("emailAddress") or author.get("displayName"),
-                    "created_at": record.get("created"),
-                    "parent_external_id": record.get("issue_id"),
-                }
-            case _:
-                return record
+        """Lift the nested `fields.updated` an issue carries into the flat `updated` the sync
+        advances its watermark over; every other stream's cursor and primary key already sit at the
+        top level, so they pass through untouched."""
+        if stream.name == "issues":
+            fields = _dict_or_empty(record.get("fields"))
+            return {**record, "updated": fields.get("updated")}
+        return record
 
     def render(self, record: dict[str, Any], stream: StreamSpec) -> tuple[str, str]:
         match stream.name:
             case "issues":
-                title = _str(record.get("subject"))
                 fields = _dict_or_empty(record.get("fields"))
+                title = _str(fields.get("summary"))
+                status = _dict_or_empty(fields.get("status")).get("name")
+                priority = _dict_or_empty(fields.get("priority")).get("name")
                 meta = "\n".join(
                     line
                     for line in (
-                        _field_line("Status", record.get("status")),
-                        _field_line("Priority", record.get("priority")),
+                        _field_line("Status", _str(status)),
+                        _field_line("Priority", _str(priority)),
                         _field_line("Assignee", _person(fields.get("assignee"))),
                         _field_line("Reporter", _person(fields.get("reporter"))),
                     )
                     if line
                 )
-                body = "\n\n".join(part for part in (meta, _str(record.get("description"))) if part)
+                body = "\n\n".join(
+                    part for part in (meta, _doc_text(fields.get("description"))) if part
+                )
             case "issue_comments":
-                title = _str(record.get("author"))
-                body = _str(record.get("body"))
+                title = _person(record.get("author"))
+                body = _doc_text(record.get("body"))
             case _:
                 return super().render(record, stream)
         heading = f"# jira {stream.name}: {title}".rstrip()
@@ -282,18 +245,12 @@ def _dict_or_empty(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _with_context(records: list[dict[str, Any]], **context: Any) -> list[dict[str, Any]]:
-    """Copy each record and stamp partition context (the site's `cloud_id`, a parent id) so a
-    downstream fan-out and `render` can resolve the record's origin."""
-    return [{**record, **context} for record in records]
-
-
 def _person(value: Any) -> str:
     person = _dict_or_empty(value)
     return _str(person.get("displayName")) or _str(person.get("emailAddress"))
 
 
-def _field_line(label: str, value: str | None) -> str:
+def _field_line(label: str, value: str) -> str:
     return f"{label}: {value}" if value else ""
 
 

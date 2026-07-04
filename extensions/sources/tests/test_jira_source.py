@@ -6,8 +6,9 @@ token. Covered: the `/oauth/token/accessible-resources` site fan-out feeding `st
 the incremental `issues` stream advancing an `updated` watermark and — the point of this provider —
 `render` lifting an issue's summary/status/assignee/description out of its Atlassian Document Format
 body rather than dumping JSON, the JQL `updated > "<cursor>"` filter on an incremental run, the
-`projects`/`users` full-collection snapshots, and a permission refusal (403) surfacing as
-`StreamSkipped` so the run records a skip, not a failure."""
+`users` bare-array read, and a permission refusal (403) surfacing as `StreamSkipped` so the run
+records a skip, not a failure. Every Jira stream is incremental (no `delete_missing`), so a run is
+never an authoritative snapshot."""
 
 from collections.abc import Callable
 from uuid import UUID, uuid4
@@ -153,7 +154,7 @@ async def test_issues_incremental_filters_with_jql_and_advances_the_watermark() 
     assert result.next_cursor == "2026-02-05T00:00:00.000+0000"
 
 
-async def test_projects_returns_a_full_collection_snapshot() -> None:
+async def test_projects_are_incremental_not_a_snapshot() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if path == "/oauth/token/accessible-resources":
@@ -170,12 +171,12 @@ async def test_projects_returns_a_full_collection_snapshot() -> None:
         return httpx.Response(404, json={"path": path})
 
     result = await _fetch("projects", handle)
-    assert result.snapshot is True
+    assert result.snapshot is False
     assert result.next_cursor is None
     assert _refs(result) == {"projects/p1"}
 
 
-async def test_users_snapshot_walks_the_bare_array_start_at() -> None:
+async def test_users_read_the_bare_array_page() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if path == "/oauth/token/accessible-resources":
@@ -191,7 +192,7 @@ async def test_users_snapshot_walks_the_bare_array_start_at() -> None:
         return httpx.Response(404, json={"path": path})
 
     result = await _fetch("users", handle)
-    assert result.snapshot is True
+    assert result.snapshot is False
     assert result.next_cursor is None
     assert _refs(result) == {"users/a1", "users/a2"}
 

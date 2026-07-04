@@ -14,7 +14,7 @@ path (CRUD, field discovery) is deliberately absent — the source seam only rea
 
 import asyncio
 import re
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from typing import Any, ClassVar
 
 import httpx
@@ -63,6 +63,12 @@ def records_at(data: Any, path: str | None) -> list[dict[str, Any]]:
     if not isinstance(data, Mapping):
         return []
     return list_or_empty(get_path(data, path, []))
+
+
+def with_context(records: Iterable[dict[str, Any]], **context: Any) -> list[dict[str, Any]]:
+    """Copy each record and stamp partition context (the site's `cloud_id`, a parent id) onto it, so
+    a downstream fan-out and `render` can resolve the record's origin."""
+    return [{**record, **context} for record in records]
 
 
 def next_link(headers: httpx.Headers) -> str | None:

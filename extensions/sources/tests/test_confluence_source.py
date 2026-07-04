@@ -1,9 +1,9 @@
 """Confluence connector over a mock transport: the accessible-resources site fan-out, the
-`_links.next` cursor walk, the `version.createdAt` watermark lifted to `updated_at`, per-site id
-scoping so two sites never collide on one ref, and — the point of this provider — the `render`
-override that lifts storage-format XHTML into readable prose (tags dropped, entities unescaped,
-macro tags transparent) rather than the default JSON dump. Offline: a canned transport, no DB, no
-token, no broker."""
+`start`+`limit` walk continued while a `_links.next` link is present, the `version.createdAt`
+watermark, per-site id scoping so two sites never collide on one ref, the groups/audit streams, and
+— the point of this provider — the `render` override that lifts storage-format XHTML into readable
+prose (tags dropped, entities unescaped, macro tags transparent) rather than the default JSON dump.
+Offline: a canned transport, no DB, no token, no broker."""
 
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -69,28 +69,25 @@ PAGE_1 = _page("p1", "Release Plan", PAGE_1_BODY, "2026-02-01T00:00:00.000Z")
 PAGE_2 = _page("p2", "Backlog", "<p>Second page</p>", "2026-02-05T00:00:00.000Z")
 
 
-def _pages_handler() -> Callable[[httpx.Request], httpx.Response]:
+def _paginated_pages_handler() -> Callable[[httpx.Request], httpx.Response]:
     def handle(request: httpx.Request) -> httpx.Response:
         assert request.url.host == "api.atlassian.com"
         if request.url.path == RESOURCES:
             return httpx.Response(200, json=[{"id": "cloud-1", "url": "https://x.atlassian.net"}])
         assert request.url.path == "/ex/confluence/cloud-1/wiki/api/v2/pages"
         assert request.url.params.get("body-format") == "storage"
-        if request.url.params.get("cursor") == "CUR":
+        if request.url.params.get("start") == "1":
             return httpx.Response(200, json={"results": [PAGE_2], "_links": {}})
         return httpx.Response(
             200,
-            json={
-                "results": [PAGE_1],
-                "_links": {"next": "/wiki/api/v2/pages?limit=100&cursor=CUR"},
-            },
+            json={"results": [PAGE_1], "_links": {"next": "/wiki/api/v2/pages?cursor=CUR"}},
         )
 
     return handle
 
 
-async def test_pages_follow_cursor_and_render_lifts_readable_prose() -> None:
-    result = await _fetch("pages", _pages_handler())
+async def test_pages_follow_offset_pagination_and_render_lifts_readable_prose() -> None:
+    result = await _fetch("pages", _paginated_pages_handler())
 
     assert _refs(result) == {"pages/cloud-1:p1", "pages/cloud-1:p2"}
     assert result.snapshot is False
@@ -107,7 +104,12 @@ async def test_pages_follow_cursor_and_render_lifts_readable_prose() -> None:
 
 
 async def test_pages_incremental_filters_past_the_watermark() -> None:
-    result = await _fetch("pages", _pages_handler(), cursor="2026-02-03T00:00:00.000Z")
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == RESOURCES:
+            return httpx.Response(200, json=[{"id": "cloud-1"}])
+        return httpx.Response(200, json={"results": [PAGE_1, PAGE_2], "_links": {}})
+
+    result = await _fetch("pages", handle, cursor="2026-02-03T00:00:00.000Z")
     assert _refs(result) == {"pages/cloud-1:p2"}
     assert result.next_cursor == "2026-02-05T00:00:00.000Z"
 
@@ -144,7 +146,7 @@ async def test_spaces_render_lifts_name_and_description() -> None:
         if request.url.path == RESOURCES:
             return httpx.Response(200, json=[{"id": "cloud-1"}])
         assert request.url.path == "/ex/confluence/cloud-1/wiki/api/v2/spaces"
-        assert request.url.params.get("description-format") == "view"
+        assert "description" in (request.url.params.get("expand") or "")
         return httpx.Response(200, json={"results": [space], "_links": {}})
 
     result = await _fetch("spaces", handle)
@@ -178,6 +180,31 @@ async def test_comments_render_the_body() -> None:
     result = await _fetch("comments", handle)
     assert _refs(result) == {"comments/cloud-1:cm1"}
     assert "Looks good & ready" in result.pages[0].body
+
+
+async def test_groups_and_audit_streams_are_runnable() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == RESOURCES:
+            return httpx.Response(200, json=[{"id": "cloud-1"}])
+        if path == "/ex/confluence/cloud-1/wiki/rest/api/group":
+            return httpx.Response(
+                200, json={"results": [{"id": "g1", "name": "admins"}], "_links": {}}
+            )
+        if path == "/ex/confluence/cloud-1/wiki/rest/api/audit":
+            return httpx.Response(
+                200,
+                json={"results": [{"creationDate": "20260201", "summary": "login"}], "_links": {}},
+            )
+        return httpx.Response(404, json={"path": path})
+
+    groups = await _fetch("groups", handle)
+    assert groups.snapshot is False
+    assert _refs(groups) == {"groups/cloud-1:g1"}
+
+    audit = await _fetch("audit", handle)
+    assert audit.snapshot is False
+    assert _refs(audit) == {"audit/20260201"}
 
 
 async def test_stream_skipped_on_permission_refusal() -> None:
