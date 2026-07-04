@@ -22,8 +22,7 @@ from selfhost_ext_docker import DockerCarrier
 
 from selfhost.artifact_token import verify_artifact_token
 from selfhost.blob import FilesystemBlobStore
-from selfhost.browser.backend import BuaBackend
-from selfhost.browser.cdp_provider import BrowserCdpProviderChain
+from selfhost.browser import SandboxCdpProvider
 from selfhost.db import workspace_tx
 from selfhost.ext.loader import HookChain
 from selfhost.hub import InProcessHub
@@ -509,7 +508,7 @@ async def test_engine_offloads_an_oversize_result_to_a_readable_workspace_file(
         ),
         hub=InProcessHub(),
         sandbox=ctx.sandbox,
-        browser_backend=BuaBackend(provider=BrowserCdpProviderChain(hosted=None, local=None)),
+        cdp_provider=SandboxCdpProvider(endpoint=None),
         tools=ToolRegistry((_oversize_tool("big", full),)),
         tool_ext={},
         hooks=HookChain(),

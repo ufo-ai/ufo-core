@@ -12,7 +12,7 @@ from selfhost.models.interface import AUTO_MODEL, DEFAULT_REASONING_EFFORT, Reas
 CONFIG_PATH_ENV = "SELFHOST_CONFIG"
 DEFAULT_CONFIG_PATH = Path("selfhost.toml")
 IN_PROCESS_BACKEND = "in_process"
-BUA_BROWSER_BACKEND = "bua"
+DEFAULT_CDP_PROVIDER = "sandbox-cdp"
 DEFAULT_AUTO_MODEL = "claude-opus-4-8"
 
 
@@ -160,13 +160,14 @@ class HubConfig(BaseModel):
 
 
 class BrowserConfig(BaseModel):
-    """The browser backend. `backend` selects among core's default `bua` engine (Chrome over the
-    CDP endpoint the `BROWSER_CDP_URL` provider yields) and any backend an extension registers
-    through its Manifest `browsers` point (browserbase, browser-use). Selecting a name no extension
-    registers fails loud at boot."""
+    """The browser transport. `cdp_provider` selects where the one BUA engine (the browser
+    extension) connects: core's default `sandbox-cdp` provider (a static lease over the
+    `BROWSER_CDP_URL` endpoint) or any provider an extension registers through its Manifest
+    `cdp_providers` point (browserbase mints a hosted session per turn). Selecting a name no
+    extension registers fails loud at boot."""
 
     model_config = ConfigDict(extra="forbid")
-    backend: str = BUA_BROWSER_BACKEND
+    cdp_provider: str = DEFAULT_CDP_PROVIDER
 
 
 class ConnectorsConfig(BaseModel):

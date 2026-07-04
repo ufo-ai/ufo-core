@@ -4,9 +4,9 @@ import asyncio
 import time
 from urllib.parse import urlparse
 
-from selfhost.browser.cdp import CdpError
-from selfhost.browser.page import Cdp
-from selfhost.browser.wire import JsonDict
+from selfhost_ext_browser.bua.cdp import CdpError
+from selfhost_ext_browser.bua.page import Cdp
+from selfhost_ext_browser.bua.wire import JsonDict
 
 SETTLE_BEAT_S = 0.05
 SETTLE_CHAIN_GAP_S = 0.15

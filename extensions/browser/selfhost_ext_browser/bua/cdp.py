@@ -17,7 +17,7 @@ import httpx
 import websockets
 from websockets.asyncio.client import ClientConnection, connect
 
-from selfhost.browser.wire import JsonDict, as_map, as_str
+from selfhost_ext_browser.bua.wire import JsonDict, as_map, as_str
 
 COMMAND_TIMEOUT_S = 30.0
 EVENT_TIMEOUT_S = 30.0

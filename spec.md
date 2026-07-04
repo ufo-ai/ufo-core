@@ -139,8 +139,9 @@ Manifest registers (each optional):
 | `indexes` | Index backends for memory/source retrieval (turbopuffer); the dialect-native default (SQLite FTS5 + local cosine, Postgres tsvector + pgvector) ships as the base-pinned `index-default` extension registering name `"default"`, which core resolves when `memory.index_backend` is unset. |
 | `embeds` | Embedding backends behind `EmbedClient`, selected by `memory.embed_backend`; OpenAI text-embedding-3-large ships as the base-pinned `embed-openai` extension registering name `"default"`. |
 | `hubs` | Stream hubs for multi-instance deploys (Redis). |
-| `browsers` | Browser-automation backends at the tool-surface seam; the BUA engine driving Chrome over a CDP endpoint is the core default (browserbase swaps the endpoint provider, browser-use the whole surface). |
+| `cdp_providers` | CDP transport backends the one BUA browser engine (an extension, not core) connects, selected by `[browser] cdp_provider` (default `sandbox-cdp`): core's `sandbox-cdp` wraps the `BROWSER_CDP_URL` endpoint in a static lease; browserbase mints a fresh hosted session per turn. A provider mints a per-turn `CdpLease` the loop releases at turn end. The BUA engine is the browser extension, so only the transport is a core seam, never the engine. |
 | `auth_proxies` | Credential backends a feed-sync connector source resolves a provider `Credential` through, selected by `[connectors] auth_backend` (default `composio`): the Composio broker (a proxying transport, token stays server-side) or `direct` BYOK (a member-added key read host-side from the credential store, never reaching the sandbox). No backend installed → connector sources are inert; folder sources need none. |
+| `requires` | Sub-seams this extension consumes from another (the browser pack `requires` `cdp_providers`); `serve` resolves each at boot and fails loud — naming the extension and the seam — if the backend is absent, unknown, or unkeyed, so a missing dependency stops startup rather than the first tool call. |
 
 `ExtensionContext` (capability-scoped, handed to every handler): workspace-scoped store access,
 `credentials.get(slot)`, the selected `index`/`embed` backends, `pages` (the `PageFeed` replaying
@@ -174,8 +175,8 @@ no tables — a pack's pack-level skills and onboarding ride the same manifest-c
 extension's do. The lockfile is the installed+verified universe; a pack selects the active subset,
 so pack integrity derives from the pinned extensions it names. Absent config, the deploy runs the
 unnarrowed set (the lockfile's pins, or every discovered extension in dev). The flagship is
-**assistant** — memory (with its index and embed backends), the sandbox browser over the default BUA
-backend, Composio connectors, and Exa research.
+**assistant** — memory (with its index and embed backends), the browser pack (its BUA engine over
+the default `sandbox-cdp` transport), Composio connectors, and Exa research.
 
 ## Surfaces
 
@@ -314,8 +315,9 @@ bundle installs OSS, on-prem, or hosted.
 | CRM / ATS | connectors, sources, triggers, tools |
 | Websites | tools (sandbox serving), routes |
 
-Packs (activation bundles, not code — see Packs): **assistant** bundles memory, the sandbox browser
-over the default BUA backend, Composio connectors, and Exa research (the flagship); **startup** and
+Packs (activation bundles, not code — see Packs): **assistant** bundles memory, the browser pack
+(its BUA engine over the default `sandbox-cdp` transport), Composio connectors, and Exa research (the
+flagship); **startup** and
 **support bot** name the extensions plus pack-level onboarding a product needs (YC/fundraising docs
 and search; knowledgebase + keys onboarding with the websites plugin). Each activates one coherent
 config, no code of its own beyond what it references.

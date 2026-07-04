@@ -9,8 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from selfhost.browser.cdp import CdpError
-from selfhost.browser.wire import Json, JsonDict, ValidationError
+from selfhost_ext_browser.bua.cdp import CdpError
+from selfhost_ext_browser.bua.wire import Json, JsonDict, ValidationError
 
 logger = logging.getLogger(__name__)
 

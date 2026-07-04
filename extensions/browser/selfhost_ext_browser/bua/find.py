@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Awaitable, Callable
 
-from selfhost.browser.wire import JsonDict
+from selfhost_ext_browser.bua.wire import JsonDict
 
 MAX_RESULTS = 20
 
@@ -27,8 +26,6 @@ FIND_SYSTEM_PROMPT = (
     f"using only refs that appear in the tree, at most {MAX_RESULTS} lines. End with a line "
     "MORE when further elements match; reply NO_MATCHES when nothing does."
 )
-
-FindCompleter = Callable[[str, str], Awaitable[str]]
 
 
 def tree_entries(tree: str) -> list[JsonDict]:

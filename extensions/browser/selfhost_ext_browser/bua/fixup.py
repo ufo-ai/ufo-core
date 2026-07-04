@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from selfhost.browser.actions import CLICK_ACTIONS, ComputerAction, ScrollParameters
-from selfhost.browser.coordinate import Size, effective_model_size
+from selfhost_ext_browser.bua.actions import CLICK_ACTIONS, ComputerAction, ScrollParameters
+from selfhost_ext_browser.bua.coordinate import Size, effective_model_size
 
 DEFAULT_WAIT_DURATION = 3
 ESCAPED_LITERALS = {"\\t": "\t", "\\n": "\n"}

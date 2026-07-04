@@ -18,7 +18,7 @@ from selfhost.accounting import (
     record_turn_usage,
 )
 from selfhost.blob import BlobStore
-from selfhost.browser.backend import BrowserBackend
+from selfhost.browser import CdpProvider
 from selfhost.db import workspace_tx
 from selfhost.ext.context import ExtensionContext
 from selfhost.ext.loader import HookChain
@@ -141,7 +141,7 @@ class TurnEngine:
     compaction: Compaction
     hub: Hub
     sandbox: SandboxSession
-    browser_backend: BrowserBackend
+    cdp_provider: CdpProvider
     tools: ToolRegistry
     tool_ext: dict[str, ExtensionContext]
     hooks: HookChain
@@ -187,7 +187,6 @@ class TurnEngine:
                             usage_events.append(event)
                 return "".join(parts)
 
-            browser = self.browser_backend.surface(rank_find, self.agent.model)
             context = ToolContext(
                 sandbox=self.sandbox,
                 blob=self.blob,
@@ -199,7 +198,8 @@ class TurnEngine:
                 artifact_token_secret=self.artifact_token_secret,
                 grants=self.grants,
                 skills=self.skills,
-                browser=browser,
+                cdp_provider=self.cdp_provider,
+                find=rank_find,
             )
             try:
                 if not await self._mark_running():
@@ -239,7 +239,7 @@ class TurnEngine:
                 await self._persist_inbound()
                 raise
             finally:
-                await browser.aclose()
+                await context.cleanup.drain()
 
     async def _mark_running(self) -> bool:
         """Claim the turn as this execution's single owner, keyed by this run's workflow id. A

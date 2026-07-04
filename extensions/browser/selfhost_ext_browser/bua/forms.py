@@ -3,10 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from selfhost.browser.cdp import CdpError
-from selfhost.browser.errors import HallucinationError
-from selfhost.browser.page import Cdp
-from selfhost.browser.wire import Json, JsonDict, as_list, as_map, as_str
+from selfhost_ext_browser.bua.cdp import CdpError
+from selfhost_ext_browser.bua.errors import HallucinationError
+from selfhost_ext_browser.bua.page import Cdp
+from selfhost_ext_browser.bua.wire import Json, JsonDict, as_list, as_map, as_str
 
 JS_FORM_INPUT = """
 function(value) {

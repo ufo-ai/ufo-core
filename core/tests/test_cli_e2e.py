@@ -32,8 +32,7 @@ from selfhost_testsupport.tables import DELETE_ORDER
 from selfhost import cli
 from selfhost.accounting import CORE_PRICING
 from selfhost.blob import FilesystemBlobStore
-from selfhost.browser.backend import BuaBackend
-from selfhost.browser.cdp_provider import BrowserCdpProviderChain
+from selfhost.browser import SandboxCdpProvider
 from selfhost.config import Config
 from selfhost.db import dispose_db, init_db, workspace_tx
 from selfhost.ext.loader import skill_registry
@@ -337,7 +336,7 @@ def chat_server(
             blob=FilesystemBlobStore(root=config.blob.root),
             hub=hub,
             carrier=StandInCarrier(),
-            browser=BuaBackend(provider=BrowserCdpProviderChain(hosted=None, local=None)),
+            cdp_provider=SandboxCdpProvider(endpoint=None),
             proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
             dbos=dbos_client,
             subagents=SubagentRegistry(()),

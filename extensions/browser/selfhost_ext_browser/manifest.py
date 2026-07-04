@@ -26,4 +26,5 @@ def manifest() -> Manifest:
         tools=(*BROWSER_TOOLS, *DELEGATION_TOOLS),
         subagents=(BROWSER_PROFILE,),
         prompt_sections=(PromptSection(name=SECTION_NAME, body=SECTION_BODY),),
+        requires=("cdp_providers",),
     )

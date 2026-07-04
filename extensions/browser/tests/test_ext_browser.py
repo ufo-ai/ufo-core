@@ -1,22 +1,26 @@
 """The browser pack's proof: its tools drive the turn's browser surface, and its profile registers.
 
-The tools reach the browser only through `ctx.browser` — the per-turn `BrowserSurface` the selected
-backend yields — so a RecordingSurface stands in for the backend, capturing what each tool sent and
-answering with a canned reply. It is a stand-in dependency, never the thing asserted: the tests
-assert the tools' own marshalling (params shape, dropped `user_description`, blank-tab default) and
-their workspace writes (screenshot, download) through the sandbox, plus that the browser profile
-flows through the loader into the SubagentRegistry a spawn dispatches against. The BUA engine keeps
-its own live-CDP end-to-end proof in test_browser_engine.py."""
+The tools reach the browser only through `_browser(ctx)` — the one per-turn `BuaSurface` built from
+the selected cdp provider and cached against the turn. Two seams are proved here without a live
+Chrome. The inversion: a fake `CdpProvider` on the context is leased exactly once per turn, the
+built surface is cached across tool calls, and its `aclose` (which releases the lease) is registered
+on `ctx.cleanup` for the loop to drain. The marshalling: the tools' own params shape, dropped
+`user_description`, blank-tab default, and workspace writes, asserted by seeding a recording
+stand-in into the per-turn cache so `_browser` returns it — a dependency stand-in, never the thing
+asserted. The BUA engine keeps its own live-CDP end-to-end proof in test_browser_engine.py."""
 
 import base64
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 from uuid import uuid4
 
 import pytest
 import selfhost_ext_browser.manifest as browser_manifest
+import selfhost_ext_browser.tools as browser_tools
 from pydantic import JsonValue
+from selfhost_ext_browser.bua.backend import BuaSurface
 from selfhost_ext_browser.subagent import (
     BROWSER_PROFILE,
     BROWSER_SUBAGENT_NAME,
@@ -26,6 +30,7 @@ from selfhost_ext_browser.subagent import (
 from selfhost_ext_browser.tools import BROWSER_TOOL_NAMES, BROWSER_TOOLS
 
 from selfhost.blob import FilesystemBlobStore
+from selfhost.browser import CdpEndpoint, CdpLease, CdpProvider
 from selfhost.ext.loader import turn_subagents
 from selfhost.loop.prompts.render import render_system_prompt
 from selfhost.loop.subagents import SubagentRegistry, subagent_system_prompt
@@ -34,25 +39,11 @@ from selfhost.schema.records import Agent, Turn
 from selfhost.tools.builtins import BUILTIN_TOOLS
 from selfhost.tools.context import ImageContent, SpawnResult, ToolContext
 
-BROWSER_METHODS = (
-    "navigate",
-    "tabs_context",
-    "tabs_create",
-    "tabs_close",
-    "upload_file",
-    "read_page",
-    "get_page_text",
-    "find",
-    "form_input",
-    "computer",
-    "wait_for_download",
-)
-
 
 @dataclass
 class RecordingSurface:
     """Answers each browser tool with a canned reply and records the (method, args) it received —
-    the stand-in for a backend's live surface, never asserted itself."""
+    the stand-in for a live surface seeded into the per-turn cache, never asserted itself."""
 
     reply: dict[str, JsonValue]
     calls: list[tuple[str, dict[str, JsonValue]]] = field(default_factory=list)
@@ -98,10 +89,42 @@ class RecordingSurface:
         return None
 
 
+class _StopAtConnect(RuntimeError):
+    """The fake lease's `endpoint` raises this to short-circuit `_open` before a real websocket
+    dial, so the lease-lifecycle can be proved without a live Chrome."""
+
+
+@dataclass
+class FakeCdpLease:
+    """Records that it was released; its `endpoint` never yields, so `_open` stops before a dial.
+    A real `CdpLease` the surface leases and releases, not a mock."""
+
+    released: bool = False
+
+    async def endpoint(self) -> CdpEndpoint:
+        raise _StopAtConnect()
+
+    async def aclose(self) -> None:
+        self.released = True
+
+
+@dataclass
+class FakeCdpProvider:
+    """A real `CdpProvider` recording every lease it mints, so the test can prove the turn leases
+    exactly once and releases at cleanup."""
+
+    leases: list[FakeCdpLease] = field(default_factory=list)
+
+    async def lease(self) -> CdpLease:
+        lease = FakeCdpLease()
+        self.leases.append(lease)
+        return lease
+
+
 @dataclass
 class WritesCarrier:
     """Records the workspace writes the tools drive (screenshot, download) and refuses any browser
-    reach — the browser is driven through `ctx.browser`, never the sandbox exec seam."""
+    reach — the browser is driven through the surface, never the sandbox exec seam."""
 
     writes: list[tuple[str, bytes]] = field(default_factory=list)
 
@@ -118,15 +141,6 @@ class WritesCarrier:
         raise AssertionError("browser tools do not destroy containers")
 
 
-@dataclass
-class StubMemory:
-    async def recall(self, query: str, subjects: frozenset[str], limit: int) -> tuple:
-        return ()
-
-    async def commit(self, write: object) -> None:
-        return None
-
-
 async def _no_spawn(
     profile: str, payload: dict[str, object], background: bool = False
 ) -> SpawnResult:
@@ -134,7 +148,7 @@ async def _no_spawn(
 
 
 def _context(
-    surface: RecordingSurface | None, carrier: WritesCarrier, tmp_path: Path
+    carrier: WritesCarrier, tmp_path: Path, cdp_provider: CdpProvider | None = None
 ) -> ToolContext:
     return ToolContext(
         sandbox=SandboxSession(
@@ -155,8 +169,18 @@ def _context(
         spawn=_no_spawn,
         member_id=None,
         artifact_token_secret="",
-        browser=surface,
+        cdp_provider=cdp_provider,
     )
+
+
+def _recording_context(
+    surface: RecordingSurface, carrier: WritesCarrier, tmp_path: Path
+) -> ToolContext:
+    """A context whose per-turn surface cache is pre-seeded with the recording stand-in, so
+    `_browser(ctx)` returns it and the tools' marshalling into it is what the test asserts."""
+    ctx = _context(carrier, tmp_path)
+    browser_tools._TURN_SURFACES[ctx.cleanup] = cast(BuaSurface, surface)
+    return ctx
 
 
 async def _run(name: str, ctx: ToolContext, **args: object) -> object:
@@ -172,6 +196,13 @@ def test_manifest_declares_the_browser_tools_and_profile() -> None:
     }
     assert len(BROWSER_TOOL_NAMES) == 11
     assert {profile.name for profile in manifest.subagents} == {BROWSER_SUBAGENT_NAME}
+
+
+def test_manifest_requires_the_cdp_providers_seam() -> None:
+    """The consumer half of the `requires` seam: the browser pack declares it consumes
+    `cdp_providers`, which serve's boot-validation resolves so a browser deploy with no cdp endpoint
+    fails at boot rather than on the first browse."""
+    assert browser_manifest.manifest().requires == ("cdp_providers",)
 
 
 def test_page_derived_tools_are_marked_untrusted() -> None:
@@ -198,11 +229,43 @@ def test_tool_descriptions_are_the_ported_verbatim_strings() -> None:
     )
 
 
+async def test_the_surface_is_built_once_per_turn_leased_and_released_on_cleanup(
+    tmp_path: Path,
+) -> None:
+    """The inversion end to end: the first browser-tool call builds one `BuaSurface` from the turn's
+    cdp provider and registers its `aclose` on `ctx.cleanup`; the provider is leased once and the
+    surface cached, so a second tool call reuses both; and draining the cleanup registry (what the
+    loop does at turn end) releases the lease — the turn never leaks a CDP connection."""
+    provider = FakeCdpProvider()
+    ctx = _context(WritesCarrier(), tmp_path, cdp_provider=provider)
+
+    with pytest.raises(_StopAtConnect):
+        await _run("navigate", ctx, url="https://x.test", user_description="open")
+    surface = browser_tools._TURN_SURFACES[ctx.cleanup]
+    assert isinstance(surface, BuaSurface)
+    assert len(provider.leases) == 1
+
+    with pytest.raises(_StopAtConnect):
+        await _run("read_page", ctx, user_description="inspect")
+    assert browser_tools._TURN_SURFACES[ctx.cleanup] is surface
+    assert len(provider.leases) == 1
+
+    assert provider.leases[0].released is False
+    await ctx.cleanup.drain()
+    assert provider.leases[0].released is True
+
+
+async def test_a_tool_without_a_cdp_provider_fails_loud(tmp_path: Path) -> None:
+    ctx = _context(WritesCarrier(), tmp_path, cdp_provider=None)
+    with pytest.raises(RuntimeError, match="no cdp provider is configured"):
+        await _run("navigate", ctx, url="x", user_description="")
+
+
 async def test_navigate_marshals_params_and_drops_user_description(tmp_path: Path) -> None:
     surface = RecordingSurface(reply={"tab_id": 1, "url": "https://example.com/"})
     result = await _run(
         "navigate",
-        _context(surface, WritesCarrier(), tmp_path),
+        _recording_context(surface, WritesCarrier(), tmp_path),
         url="example.com",
         user_description="open",
         tab_id=2,
@@ -214,13 +277,17 @@ async def test_navigate_marshals_params_and_drops_user_description(tmp_path: Pat
 
 async def test_tabs_context_sends_empty_params(tmp_path: Path) -> None:
     surface = RecordingSurface(reply={"tabs": []})
-    await _run("tabs_context", _context(surface, WritesCarrier(), tmp_path))
+    await _run("tabs_context", _recording_context(surface, WritesCarrier(), tmp_path))
     assert surface.calls[-1] == ("tabs_context", {})
 
 
 async def test_tabs_create_defaults_to_blank(tmp_path: Path) -> None:
     surface = RecordingSurface(reply={"tab_id": 3})
-    await _run("tabs_create", _context(surface, WritesCarrier(), tmp_path), user_description="new")
+    await _run(
+        "tabs_create",
+        _recording_context(surface, WritesCarrier(), tmp_path),
+        user_description="new",
+    )
     assert surface.calls[-1] == ("tabs_create", {"url": "about:blank"})
 
 
@@ -228,7 +295,7 @@ async def test_read_page_excludes_user_description_keeps_filter(tmp_path: Path) 
     surface = RecordingSurface(reply={"tree": "root"})
     await _run(
         "read_page",
-        _context(surface, WritesCarrier(), tmp_path),
+        _recording_context(surface, WritesCarrier(), tmp_path),
         user_description="inspect",
         depth=2,
         filter="interactive",
@@ -240,7 +307,7 @@ async def test_upload_file_passes_the_workspace_paths(tmp_path: Path) -> None:
     surface = RecordingSurface(reply={"ok": True})
     await _run(
         "upload_file",
-        _context(surface, WritesCarrier(), tmp_path),
+        _recording_context(surface, WritesCarrier(), tmp_path),
         ref="ref_9",
         files=["a.pdf", "b.pdf"],
     )
@@ -253,7 +320,7 @@ async def test_computer_saves_screenshot_into_the_workspace(tmp_path: Path) -> N
     surface = RecordingSurface(reply={"screenshot_base64": encoded})
     result = await _run(
         "computer",
-        _context(surface, carrier, tmp_path),
+        _recording_context(surface, carrier, tmp_path),
         actions=[{"action": "screenshot"}],
         user_description="shoot",
         save_to_workspace=True,
@@ -273,7 +340,7 @@ async def test_computer_without_save_writes_nothing(tmp_path: Path) -> None:
     surface = RecordingSurface(reply={"screenshot_base64": base64.b64encode(b"x").decode()})
     await _run(
         "computer",
-        _context(surface, carrier, tmp_path),
+        _recording_context(surface, carrier, tmp_path),
         actions=[{"action": "left_click", "coordinate": [1, 2]}],
         user_description="click",
     )
@@ -294,7 +361,7 @@ async def test_wait_for_download_writes_the_file_and_reports_its_path(tmp_path: 
         }
     )
     result = await _run(
-        "wait_for_download", _context(surface, carrier, tmp_path), user_description="dl"
+        "wait_for_download", _recording_context(surface, carrier, tmp_path), user_description="dl"
     )
     assert ("/workspace/downloads/report.pdf", b"pdf-bytes") in carrier.writes
     assert json.loads(result.content[0].text) == {
@@ -302,12 +369,6 @@ async def test_wait_for_download_writes_the_file_and_reports_its_path(tmp_path: 
         "filename": "report.pdf",
         "size": 9,
     }
-
-
-async def test_a_tool_without_a_browser_backend_fails_loud(tmp_path: Path) -> None:
-    ctx = _context(None, WritesCarrier(), tmp_path)
-    with pytest.raises(RuntimeError, match="no browser backend is configured"):
-        await _run("navigate", ctx, url="x", user_description="")
 
 
 def test_manifest_contributes_the_browser_prompt_section_into_the_rendered_shell() -> None:

@@ -5,13 +5,17 @@ import re
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from selfhost.browser.cdp import CdpError
-from selfhost.browser.coordinate import Size
-from selfhost.browser.downloads import FETCH_DOCUMENT_PATTERN, BrowserDownload, BrowserDownloads
-from selfhost.browser.keys import KeyboardState
-from selfhost.browser.page import FrameNode
-from selfhost.browser.settle import PAINT_LIFECYCLE_EVENTS, SETTLE_NAV_CAP_S, Settle
-from selfhost.browser.wire import Json, JsonDict, ValidationError, as_list, as_map, as_str
+from selfhost_ext_browser.bua.cdp import CdpError
+from selfhost_ext_browser.bua.coordinate import Size
+from selfhost_ext_browser.bua.downloads import (
+    FETCH_DOCUMENT_PATTERN,
+    BrowserDownload,
+    BrowserDownloads,
+)
+from selfhost_ext_browser.bua.keys import KeyboardState
+from selfhost_ext_browser.bua.page import FrameNode
+from selfhost_ext_browser.bua.settle import PAINT_LIFECYCLE_EVENTS, SETTLE_NAV_CAP_S, Settle
+from selfhost_ext_browser.bua.wire import Json, JsonDict, ValidationError, as_list, as_map, as_str
 
 NAVIGATION_TIMEOUT_S = 30.0
 HISTORY_TIMEOUT_S = 10.0

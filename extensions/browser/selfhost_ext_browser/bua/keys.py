@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 
-from selfhost.browser.wire import Json, JsonDict, ValidationError
+from selfhost_ext_browser.bua.wire import Json, JsonDict, ValidationError
 
 CdpCall = tuple[str, JsonDict]
 

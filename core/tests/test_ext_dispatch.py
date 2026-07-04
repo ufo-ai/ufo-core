@@ -9,8 +9,7 @@ from cryptography.fernet import Fernet
 from pydantic import BaseModel
 
 from selfhost.blob import FilesystemBlobStore
-from selfhost.browser.backend import BuaBackend
-from selfhost.browser.cdp_provider import BrowserCdpProviderChain
+from selfhost.browser import SandboxCdpProvider
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.ext.context import ExtensionContext, ScopedStore, context_for
@@ -215,7 +214,7 @@ def _engine(
         ),
         hub=InProcessHub(),
         sandbox=SandboxSession(carrier=StubCarrier(), handle=handle),
-        browser_backend=BuaBackend(provider=BrowserCdpProviderChain(hosted=None, local=None)),
+        cdp_provider=SandboxCdpProvider(endpoint=None),
         tools=ToolRegistry(tools),
         tool_ext=tool_ext,
         hooks=HookChain(),

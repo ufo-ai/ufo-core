@@ -8,16 +8,22 @@ from typing import Any, Protocol
 
 from PIL import Image, ImageDraw
 
-from selfhost.browser.actions import CLICK_ACTIONS, ComputerAction, ScrollParameters
-from selfhost.browser.cdp import CdpError
-from selfhost.browser.coordinate import Coord, Size, model_to_viewport, viewport_to_model
-from selfhost.browser.downloads import BrowserDownload
-from selfhost.browser.errors import HallucinationError
-from selfhost.browser.fixup import fixup_actions, split_at_waits
-from selfhost.browser.keys import CdpCall, KeyboardState, modifiers_mask, press_combo, type_text
-from selfhost.browser.page import Cdp
-from selfhost.browser.settle import SETTLE_ACTION_CAP_S, Settle
-from selfhost.browser.wire import Json, JsonDict, ValidationError, as_list, as_map, as_str
+from selfhost_ext_browser.bua.actions import CLICK_ACTIONS, ComputerAction, ScrollParameters
+from selfhost_ext_browser.bua.cdp import CdpError
+from selfhost_ext_browser.bua.coordinate import Coord, Size, model_to_viewport, viewport_to_model
+from selfhost_ext_browser.bua.downloads import BrowserDownload
+from selfhost_ext_browser.bua.errors import HallucinationError
+from selfhost_ext_browser.bua.fixup import fixup_actions, split_at_waits
+from selfhost_ext_browser.bua.keys import (
+    CdpCall,
+    KeyboardState,
+    modifiers_mask,
+    press_combo,
+    type_text,
+)
+from selfhost_ext_browser.bua.page import Cdp
+from selfhost_ext_browser.bua.settle import SETTLE_ACTION_CAP_S, Settle
+from selfhost_ext_browser.bua.wire import Json, JsonDict, ValidationError, as_list, as_map, as_str
 
 SCREENSHOT_JPEG_QUALITY = 75
 CLICK_MARK_RADIUS = 6

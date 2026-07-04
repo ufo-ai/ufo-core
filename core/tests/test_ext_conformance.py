@@ -26,7 +26,7 @@ from selfhost_ext_index_default import DefaultIndex
 from selfhost_ext_memory.store import MemoryStore, PageIndexer
 
 from selfhost.blob import FilesystemBlobStore
-from selfhost.browser.backend import BuaBackend
+from selfhost.browser import SandboxCdpProvider
 from selfhost.config import (
     BlobConfig,
     BrowserConfig,
@@ -76,9 +76,10 @@ from selfhost.serve import (
     _mount_ext_routes,
     _mount_surfaces,
     _select_auth_proxy,
-    _select_browser,
     _select_carrier,
+    _select_cdp_provider,
     _select_hub,
+    _validate_requires,
 )
 from selfhost.skills.runtime import mount_skill
 from selfhost.sources.sync import CorePageFeed, SyncDriver
@@ -212,7 +213,7 @@ async def test_sample_is_discovered_via_its_entry_point() -> None:
     assert {spec.name for spec in manifest.indexes} == {sample.INDEX_BACKEND}
     assert {spec.backend for spec in manifest.hubs} == {sample.HUB_BACKEND}
     assert {spec.path.name for spec in manifest.skills} == {sample.SKILL_NAME}
-    assert {spec.backend for spec in manifest.browsers} == {sample.BROWSER_BACKEND}
+    assert {spec.backend for spec in manifest.cdp_providers} == {sample.CDP_PROVIDER}
     assert {carrier.name for carrier in manifest.carriers} == {sample.CARRIER_NAME}
     assert {spec.backend for spec in manifest.auth_proxies} == {sample.AUTH_PROXY_BACKEND}
 
@@ -238,45 +239,70 @@ def test_core_selects_a_manifest_contributed_hub() -> None:
         _select_hub(_config(sample.HUB_BACKEND), (manifest, manifest))
 
 
-def test_core_selects_a_manifest_contributed_browser() -> None:
-    """The `browsers` seam end to end: core's boot-time selection knows only the built-in `bua`
-    default, so resolving the sample's backend name proves the Manifest `browsers` point flowed into
-    selection. Selecting a name no manifest registers, and two manifests claiming one name, both
-    fail loud; a named backend with no credential key set fails loud."""
+def _cdp_config(cdp_provider: str) -> Config:
+    return Config(
+        database=DatabaseConfig(url="sqlite+aiosqlite:///dev.db"),
+        blob=BlobConfig(backend="filesystem", root=Path()),
+        browser=BrowserConfig(cdp_provider=cdp_provider),
+    )
+
+
+def test_core_selects_a_manifest_contributed_cdp_provider() -> None:
+    """The `cdp_providers` seam end to end: core's boot-time selection knows only the built-in
+    `sandbox-cdp` default, so resolving the sample's provider name proves the Manifest
+    `cdp_providers` point flowed into selection. Selecting a name no manifest registers, and two
+    manifests claiming one name, both fail loud; a named provider with no credential key set fails
+    loud."""
     manifest = _sample_manifest()
     workspace_id = uuid4()
     store = _credential_store()
 
-    def _config(backend: str) -> Config:
-        return Config(
-            database=DatabaseConfig(url="sqlite+aiosqlite:///dev.db"),
-            blob=BlobConfig(backend="filesystem", root=Path()),
-            browser=BrowserConfig(backend=backend),
-        )
-
-    assert isinstance(_select_browser(_config("bua"), (), workspace_id, None), BuaBackend)
-    selected = _select_browser(_config(sample.BROWSER_BACKEND), (manifest,), workspace_id, store)
-    assert isinstance(selected, sample.SampleBrowserBackend)
+    default = _select_cdp_provider(_cdp_config("sandbox-cdp"), (), workspace_id, None)
+    assert isinstance(default, SandboxCdpProvider)
+    selected = _select_cdp_provider(
+        _cdp_config(sample.CDP_PROVIDER), (manifest,), workspace_id, store
+    )
+    assert isinstance(selected, sample.SampleCdpProvider)
     with pytest.raises(RuntimeError, match="no extension registers it"):
-        _select_browser(_config(sample.BROWSER_BACKEND), (), workspace_id, store)
-    with pytest.raises(RuntimeError, match="two extensions register browser backend"):
-        _select_browser(_config(sample.BROWSER_BACKEND), (manifest, manifest), workspace_id, store)
+        _select_cdp_provider(_cdp_config(sample.CDP_PROVIDER), (), workspace_id, store)
+    with pytest.raises(RuntimeError, match="two extensions register cdp provider"):
+        _select_cdp_provider(
+            _cdp_config(sample.CDP_PROVIDER), (manifest, manifest), workspace_id, store
+        )
     with pytest.raises(RuntimeError, match="needs a credential key"):
-        _select_browser(_config(sample.BROWSER_BACKEND), (manifest,), workspace_id, None)
+        _select_cdp_provider(_cdp_config(sample.CDP_PROVIDER), (manifest,), workspace_id, None)
 
 
-async def test_sample_browser_backend_yields_a_drivable_surface() -> None:
-    """The consumer half of the `browsers` seam through the probe: the registered backend yields a
-    per-turn surface driven through the same protocol the browser tools call, and it answers — a
-    real object exercised end to end, not a mock call-log."""
-    surface = sample.SampleBrowserBackend().surface(None, None)
-    reply = await surface.navigate({"url": "https://x.test"})
-    assert reply == {
-        "action": "navigate",
-        "backend": sample.BROWSER_BACKEND,
-        "args": {"url": "https://x.test"},
-    }
-    await surface.aclose()
+async def test_sample_cdp_provider_yields_a_drivable_lease() -> None:
+    """The consumer half of the `cdp_providers` seam through the probe: the registered provider
+    mints a per-turn lease driven through the same `CdpLease` protocol the browser engine calls — a
+    real object leased and released end to end, not a mock."""
+    lease = await sample.SampleCdpProvider().lease()
+    endpoint = await lease.endpoint()
+    assert endpoint.url == sample.SAMPLE_CDP_URL
+    await lease.aclose()
+
+
+def test_boot_validation_of_requires_fails_when_the_cdp_endpoint_is_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The `requires` + boot-validation seam end to end: an extension declaring `requires` a seam
+    whose backend is unusable fails `serve` at boot. With the browser extension's
+    `requires=("cdp_providers",)` and the default `sandbox-cdp` provider selected but no
+    `BROWSER_CDP_URL`, `_validate_requires` fails loud, naming the extension and the seam; setting
+    the endpoint clears it. A `requires` an extension names that core does not know also fails."""
+    monkeypatch.delenv("BROWSER_CDP_URL", raising=False)
+    workspace_id = uuid4()
+    browser = Manifest(name="browser", version="0", requires=("cdp_providers",))
+    with pytest.raises(RuntimeError, match=r"requires the 'cdp_providers' seam"):
+        _validate_requires(_cdp_config("sandbox-cdp"), (browser,), workspace_id, None)
+
+    monkeypatch.setenv("BROWSER_CDP_URL", "ws://127.0.0.1:9222")
+    _validate_requires(_cdp_config("sandbox-cdp"), (browser,), workspace_id, None)
+
+    unknown = Manifest(name="needs-nothing-real", version="0", requires=("nonesuch",))
+    with pytest.raises(RuntimeError, match="unknown seam 'nonesuch'"):
+        _validate_requires(_cdp_config("sandbox-cdp"), (unknown,), workspace_id, None)
 
 
 def test_core_selects_a_manifest_contributed_auth_proxy() -> None:

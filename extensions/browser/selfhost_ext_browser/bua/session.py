@@ -15,23 +15,23 @@ import tempfile
 from collections.abc import Coroutine
 from typing import Any, Self
 
-from selfhost.browser.cdp import CdpConnection, CdpError, resolve_ws_url
-from selfhost.browser.computer import BrowserComputer
-from selfhost.browser.content import BrowserContent
-from selfhost.browser.coordinate import (
+from selfhost.sdk.browser import CdpEndpoint, FindCompleter
+from selfhost_ext_browser.bua.cdp import CdpConnection, CdpError, resolve_ws_url
+from selfhost_ext_browser.bua.computer import BrowserComputer
+from selfhost_ext_browser.bua.content import BrowserContent
+from selfhost_ext_browser.bua.coordinate import (
     Size,
     compute_screenshot_dimensions,
     model_coordinate_space,
 )
-from selfhost.browser.dialogs import BrowserDialogs
-from selfhost.browser.downloads import BrowserDownload, BrowserDownloads
-from selfhost.browser.find import FindCompleter
-from selfhost.browser.forms import BrowserForms
-from selfhost.browser.page import BrowserPage, FrameNode
-from selfhost.browser.runtime import BrowserRuntime
-from selfhost.browser.settle import Settle
-from selfhost.browser.tabs import BrowserTabEvents, BrowserTabs, Tab
-from selfhost.browser.wire import BrowserCdp, Json, JsonDict, as_str
+from selfhost_ext_browser.bua.dialogs import BrowserDialogs
+from selfhost_ext_browser.bua.downloads import BrowserDownload, BrowserDownloads
+from selfhost_ext_browser.bua.forms import BrowserForms
+from selfhost_ext_browser.bua.page import BrowserPage, FrameNode
+from selfhost_ext_browser.bua.runtime import BrowserRuntime
+from selfhost_ext_browser.bua.settle import Settle
+from selfhost_ext_browser.bua.tabs import BrowserTabEvents, BrowserTabs, Tab
+from selfhost_ext_browser.bua.wire import Json, JsonDict, as_str
 
 VIEWPORT = Size(1440, 900)
 MODEL_SIZE = compute_screenshot_dimensions(VIEWPORT)
@@ -46,7 +46,7 @@ class BrowserUnavailable(RuntimeError):
 class BrowserSession:
     def __init__(
         self,
-        cdp: BrowserCdp | None = None,
+        cdp: CdpEndpoint | None = None,
         model: str | None = None,
     ) -> None:
         self.cdp = cdp

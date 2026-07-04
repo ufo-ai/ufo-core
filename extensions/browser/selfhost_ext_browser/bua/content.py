@@ -3,17 +3,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from selfhost.browser.find import (
+from selfhost.sdk.browser import FindCompleter
+from selfhost_ext_browser.bua.find import (
     FIND_SYSTEM_PROMPT,
     FIND_TREE_CHAR_LIMIT,
     MAX_RESULTS,
-    FindCompleter,
     format_matches,
     parse_tree_matches,
     resolve_find_reply,
 )
-from selfhost.browser.page import PageTab
-from selfhost.browser.wire import Json, JsonDict, as_str
+from selfhost_ext_browser.bua.page import PageTab
+from selfhost_ext_browser.bua.wire import Json, JsonDict, as_str
 
 MAX_READ_CHARS = 50_000
 MAX_TEXT_CHARS = 100_000

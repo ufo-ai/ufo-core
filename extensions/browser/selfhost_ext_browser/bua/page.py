@@ -18,10 +18,10 @@ from dataclasses import dataclass, field
 from typing import Protocol
 from urllib.parse import urlparse
 
-from selfhost.browser.cdp import CdpError
-from selfhost.browser.coordinate import Size, effective_model_size
-from selfhost.browser.errors import HallucinationError
-from selfhost.browser.wire import (
+from selfhost_ext_browser.bua.cdp import CdpError
+from selfhost_ext_browser.bua.coordinate import Size, effective_model_size
+from selfhost_ext_browser.bua.errors import HallucinationError
+from selfhost_ext_browser.bua.wire import (
     Json,
     JsonDict,
     ValidationError,

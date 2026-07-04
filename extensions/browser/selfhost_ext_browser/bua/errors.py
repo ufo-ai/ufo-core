@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from selfhost.browser.wire import ValidationError
+from selfhost_ext_browser.bua.wire import ValidationError
 
 
 class HallucinationError(ValidationError):

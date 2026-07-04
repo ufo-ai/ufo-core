@@ -1,8 +1,9 @@
 """The BUA engine end to end against a REAL Chrome over CDP — the live proof the shell never gave.
 
-A headless Chrome is launched with `--remote-debugging-port`; `BROWSER_CDP_URL` points the endpoint
-provider at it, and the default `BuaBackend` connects and drives a real page: navigate → read_page →
-get_page_text → find → a `computer` screenshot and click → tabs create/context/close. Nothing here
+A headless Chrome is launched with `--remote-debugging-port`; `BROWSER_CDP_URL` points the default
+`SandboxCdpProvider` at it, and one `BuaSurface` connects and drives a real page: navigate →
+read_page → get_page_text → find → a `computer` screenshot and click → tabs create/context/close.
+Nothing here
 is faked — the CDP protocol handling (WebSocket transport, DOMSnapshot + accessibility join, input
 synthesis, settle) is exercised against Chrome itself. Skips with a clear reason where no Chrome
 binary is present, so the suite stays collectable everywhere."""
@@ -18,9 +19,9 @@ from urllib.parse import quote
 
 import httpx
 import pytest
+from selfhost_ext_browser.bua.backend import BuaSurface
 
-from selfhost.browser.backend import BuaBackend
-from selfhost.browser.cdp_provider import BrowserCdpProviderChain, env_browser_cdp_provider
+from selfhost.browser import SandboxCdpProvider
 
 CHROME_CANDIDATES = (
     "google-chrome",
@@ -102,14 +103,12 @@ def chrome_cdp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]
             process.kill()
 
 
-def _backend() -> BuaBackend:
-    return BuaBackend(
-        provider=BrowserCdpProviderChain(hosted=env_browser_cdp_provider(), local=None)
-    )
+def _surface() -> BuaSurface:
+    return BuaSurface(cdp_provider=SandboxCdpProvider.from_env(), find_completer=None, model=None)
 
 
 async def test_bua_engine_drives_a_real_chrome_over_cdp(chrome_cdp: str) -> None:
-    surface = _backend().surface(find=None, model=None)
+    surface = _surface()
     try:
         navigated = await surface.navigate({"url": PROBE_URL})
         assert navigated["title"] == "BUA Probe"
@@ -154,7 +153,7 @@ async def test_bua_engine_drives_a_real_chrome_over_cdp(chrome_cdp: str) -> None
 async def test_bua_form_input_sets_a_field_by_ref(chrome_cdp: str) -> None:
     """form_input resolves a ref from read_page and writes the field value the DOM then reports —
     the ref-grounding + DOM.setValue path against real Chrome."""
-    surface = _backend().surface(find=None, model=None)
+    surface = _surface()
     try:
         await surface.navigate({"url": PROBE_URL})
         page = await surface.read_page({"filter": "interactive"})

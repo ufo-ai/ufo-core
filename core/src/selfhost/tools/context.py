@@ -10,11 +10,13 @@ API, resolved strictly from the turn-agent's own grants so a tool reaches only t
 accounts. `skills` is the loadable
 skill set for the deploy (core plus the active packs') that `load_skill` resolves against; it
 defaults to the core floor so a context built without the loader still resolves the core three.
-`browser` is the turn's live browser surface — the selected browser backend's per-turn handle the
-browser tools drive; it opens its connection lazily on first use and the engine closes it at turn
-end. An extension tool also gets `ext`, its owning extension's workspace-scoped ExtensionContext; a
-builtin tool gets `ext=None`."""
+`cdp_provider` is the turn's selected browser transport and `find` its host-side element-ranking
+hook — the browser tools build one per-turn surface from them on first use and register its `aclose`
+on `cleanup`, the per-turn registry the loop drains at turn end so a CDP connection never outlives
+its turn. An extension tool also gets `ext`, its owning extension's workspace-scoped
+ExtensionContext; a builtin tool gets `ext=None`."""
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Literal, Protocol
 from uuid import UUID
@@ -22,7 +24,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 from selfhost.blob import BlobStore
-from selfhost.browser.backend import BrowserSurface
+from selfhost.browser import CdpProvider, FindCompleter
 from selfhost.ext.context import ExtensionContext
 from selfhost.grants import ConnectUnavailable, GrantStore
 from selfhost.sandbox.session import SandboxSession
@@ -91,6 +93,25 @@ class SubagentControl(Protocol):
     async def cancel(self, turn_id: UUID) -> SubagentStatus: ...
 
 
+@dataclass(eq=False)
+class TurnCleanup:
+    """Per-turn async cleanup registry: a tool registers an `aclose` here on first use of a resource
+    it opens for the turn (the browser surface's CDP connection, a hosted-session lease), and the
+    loop drains it once at turn end — closing in reverse order of registration — so the turn never
+    leaks a connection whether it ended done, failed, or cancelled. Identity-keyed (`eq=False`), so
+    a tool building a once-per-turn resource can cache it against this registry across the per-call
+    context copies dispatch hands it."""
+
+    _closers: list[Callable[[], Awaitable[None]]] = field(default_factory=list)
+
+    def register(self, aclose: Callable[[], Awaitable[None]]) -> None:
+        self._closers.append(aclose)
+
+    async def drain(self) -> None:
+        while self._closers:
+            await self._closers.pop()()
+
+
 @dataclass(frozen=True)
 class ToolContext:
     sandbox: SandboxSession
@@ -105,7 +126,9 @@ class ToolContext:
     read_paths: set[str] = field(default_factory=set)
     skills: SkillRegistry = CORE_SKILL_REGISTRY
     ext: ExtensionContext | None = None
-    browser: BrowserSurface | None = None
+    cdp_provider: CdpProvider | None = None
+    find: FindCompleter | None = None
+    cleanup: TurnCleanup = field(default_factory=TurnCleanup)
 
     async def connector_account(self, provider: str, account_id: str | None = None) -> str:
         """The broker's connected-account id a connector tool passes to the broker's server-side

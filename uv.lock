@@ -2691,11 +2691,21 @@ name = "selfhost-ext-browser"
 version = "0.1.0"
 source = { editable = "extensions/browser" }
 dependencies = [
+    { name = "httpx" },
+    { name = "pillow" },
+    { name = "pydantic" },
     { name = "selfhost" },
+    { name = "websockets" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "selfhost", editable = "core" }]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "pillow", specifier = ">=10.4" },
+    { name = "pydantic", specifier = ">=2.9" },
+    { name = "selfhost", editable = "core" },
+    { name = "websockets", specifier = ">=13.0" },
+]
 
 [[package]]
 name = "selfhost-ext-coding"

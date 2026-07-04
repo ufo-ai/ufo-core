@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from selfhost.browser.wire import Json, JsonDict, as_map
+from selfhost_ext_browser.bua.wire import Json, JsonDict, as_map
 
 
 class BrowserRuntimeCdp(Protocol):

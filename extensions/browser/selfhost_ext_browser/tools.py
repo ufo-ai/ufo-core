@@ -1,24 +1,28 @@
 """The browser tools: one per action of the agent's browser/computer-use surface.
 
-Each tool validates its arguments and drives them through `ctx.browser` — the turn's live
-`BrowserSurface`, yielded by whichever browser backend the deploy selected (core's default BUA
-engine over a CDP endpoint, or an extension backend). A tool never holds a raw browser or CDP
-handle; the backend owns the connection and closes it at turn end. `computer` (when asked) and
+Each tool validates its arguments and drives them through the turn's one `BuaSurface` — the BUA
+engine built lazily on first browser-tool call from `ctx.cdp_provider` (the deploy's selected CDP
+transport) and `ctx.find` (the host-side ranking hook). The surface is cached for the turn and its
+`aclose` registered on `ctx.cleanup`, so the CDP connection and any hosted-session lease open once
+and release at turn end regardless of how the turn ends. `computer` (when asked) and
 `wait_for_download` persist bytes into the shared workspace through the sandbox, so the parent agent
 and sibling subagents reach them by path."""
 
 import base64
 import json
 from typing import Literal
+from weakref import WeakKeyDictionary
 
 from pydantic import BaseModel, JsonValue
 
-from selfhost.sdk.browser import BrowserSurface
 from selfhost.sdk.tools import ImageContent, TextContent, ToolContext, ToolDef, ToolResult
+from selfhost_ext_browser.bua.backend import BuaSurface
 
 DEFAULT_SCREENSHOT_PATH = "browser-screenshot.jpg"
 DEFAULT_DOWNLOAD_DIR = "downloads"
 SCREENSHOT_MEDIA_TYPE = "image/jpeg"
+
+_TURN_SURFACES: "WeakKeyDictionary[object, BuaSurface]" = WeakKeyDictionary()
 
 
 class NavigateInput(BaseModel):
@@ -87,10 +91,21 @@ class WaitForDownloadInput(BaseModel):
     timeout: int | None = None
 
 
-def _browser(ctx: ToolContext) -> BrowserSurface:
-    if ctx.browser is None:
-        raise RuntimeError("no browser backend is configured for this turn")
-    return ctx.browser
+def _browser(ctx: ToolContext) -> BuaSurface:
+    """The turn's one browser surface: built lazily on first browser-tool call from the selected cdp
+    provider, cached for the turn (keyed by its per-turn cleanup registry), and registered on that
+    registry so its CDP connection and any hosted-session lease release at turn end. Later calls in
+    the turn reuse it."""
+    surface = _TURN_SURFACES.get(ctx.cleanup)
+    if surface is None:
+        if ctx.cdp_provider is None:
+            raise RuntimeError("no cdp provider is configured for this turn")
+        surface = BuaSurface(
+            cdp_provider=ctx.cdp_provider, find_completer=ctx.find, model=ctx.agent.model
+        )
+        _TURN_SURFACES[ctx.cleanup] = surface
+        ctx.cleanup.register(surface.aclose)
+    return surface
 
 
 def _json_result(reply: dict[str, JsonValue]) -> ToolResult:

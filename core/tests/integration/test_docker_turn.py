@@ -19,8 +19,7 @@ import sqlalchemy as sa
 from selfhost_ext_docker import DockerCarrier
 
 from selfhost.blob import FilesystemBlobStore
-from selfhost.browser.backend import BuaBackend
-from selfhost.browser.cdp_provider import BrowserCdpProviderChain
+from selfhost.browser import SandboxCdpProvider
 from selfhost.db import workspace_tx
 from selfhost.ext.loader import HookChain
 from selfhost.hub import InProcessHub
@@ -252,7 +251,7 @@ async def test_turn_execs_bash_in_a_live_container(
         ),
         hub=InProcessHub(),
         sandbox=SandboxSession(carrier=DockerCarrier(), handle=live_container),
-        browser_backend=BuaBackend(provider=BrowserCdpProviderChain(hosted=None, local=None)),
+        cdp_provider=SandboxCdpProvider(endpoint=None),
         tools=ToolRegistry(BUILTIN_TOOLS),
         tool_ext={},
         hooks=HookChain(),

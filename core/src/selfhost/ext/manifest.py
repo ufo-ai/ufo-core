@@ -9,7 +9,7 @@ installed extensions it bundles plus any pack-level skills and onboarding steps 
 activating one named pack brings a coherent product config up together."""
 
 from collections.abc import Awaitable, Callable
-from dataclasses import KW_ONLY, dataclass
+from dataclasses import KW_ONLY, dataclass, field
 from pathlib import Path
 from typing import Literal
 from uuid import UUID
@@ -19,7 +19,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from selfhost.accounting import ModelPrice
-from selfhost.browser.backend import BrowserBackend
+from selfhost.browser import CdpProvider
 from selfhost.connectors import AuthProxy
 from selfhost.ext.context import CredentialAccess, ExtensionContext
 from selfhost.ext.surface import SurfaceSpec
@@ -183,7 +183,7 @@ class HubSpec:
 
 @dataclass(frozen=True)
 class AuthProxySpec:
-    """One auth-proxy backend an extension registers, mirroring `BrowserBackendSpec`: the `backend`
+    """One auth-proxy backend an extension registers, mirroring `CdpProviderSpec`: the `backend`
     name a deploy selects it by (`config.connectors.auth_backend`, default `"composio"`) and the
     `build` core calls once at boot, only when selected, given a credential reader scoped to this
     manifest's slots. A broker backend (Composio) needs no slot and returns a proxying transport; a
@@ -196,17 +196,18 @@ class AuthProxySpec:
 
 
 @dataclass(frozen=True)
-class BrowserBackendSpec:
-    """A browser backend an extension registers, selected at the tool-surface level. `backend` is
-    the name `config.browser.backend` selects it by; `build` constructs the process-wide
-    BrowserBackend once at boot, only when selected, given a credential reader scoped to this
-    manifest's slots (a remote provider reads its key in-process, host-side, never in the sandbox).
-    Core's default `bua` backend drives Chrome over the CDP endpoint an endpoint provider yields; an
-    extension reuses that engine with its own endpoint provider (browserbase) or replaces the whole
-    surface (browser-use)."""
+class CdpProviderSpec:
+    """A cdp provider an extension registers, selected by `config.browser.cdp_provider`. `backend`
+    is the name; `build` constructs the process-wide CdpProvider once at boot, only when selected,
+    given a credential reader scoped to this manifest's slots (a remote provider reads its key
+    in-process, host-side, never in the sandbox). Core's default `sandbox-cdp` provider wraps the
+    `BROWSER_CDP_URL` endpoint in a static lease; a browserbase extension mints a fresh hosted
+    session per turn. The one BUA engine (the browser extension) connects whatever endpoint the
+    selected provider's per-turn lease yields — only the transport is configurable, never the
+    engine."""
 
     backend: str
-    build: Callable[[CredentialAccess], BrowserBackend]
+    build: Callable[[CredentialAccess], CdpProvider]
 
 
 @dataclass(frozen=True)
@@ -351,7 +352,11 @@ class SkillSpec:
 
 @dataclass(frozen=True)
 class Manifest:
-    """What one extension declares, returned by its `selfhost.extension` entry point."""
+    """What one extension declares, returned by its `selfhost.extension` entry point. `requires`
+    names the sub-seams this extension consumes from another (a browser extension `requires` the
+    `cdp_providers` seam); `serve` eagerly resolves each at boot and fails loud — naming the
+    extension and the seam — if the backend is absent or unkeyed, so a missing dependency stops the
+    process at startup rather than on the first tool call."""
 
     name: str
     version: str
@@ -372,9 +377,10 @@ class Manifest:
     models: tuple[ModelProviderSpec, ...] = ()
     hubs: tuple[HubSpec, ...] = ()
     skills: tuple[SkillSpec, ...] = ()
-    browsers: tuple[BrowserBackendSpec, ...] = ()
+    cdp_providers: tuple[CdpProviderSpec, ...] = ()
     carriers: tuple[CarrierSpec, ...] = ()
     auth_proxies: tuple[AuthProxySpec, ...] = ()
+    requires: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)

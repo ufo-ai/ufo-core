@@ -17,9 +17,8 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from selfhost.blob import BlobStore, blob_store_for
-from selfhost.browser.backend import BrowserBackend, BuaBackend
-from selfhost.browser.cdp_provider import BrowserCdpProviderChain, env_browser_cdp_provider
-from selfhost.config import BUA_BROWSER_BACKEND, IN_PROCESS_BACKEND, Config, load_config
+from selfhost.browser import BROWSER_CDP_URL_ENV, CdpProvider, SandboxCdpProvider
+from selfhost.config import DEFAULT_CDP_PROVIDER, IN_PROCESS_BACKEND, Config, load_config
 from selfhost.connectors import AuthProxy
 from selfhost.credentials import CredentialStore
 from selfhost.db import init_db, workspace_tx
@@ -33,7 +32,7 @@ from selfhost.ext.loader import (
     turn_subagents,
     validate_ext_tools,
 )
-from selfhost.ext.manifest import AuthProxySpec, Manifest
+from selfhost.ext.manifest import AuthProxySpec, CdpProviderSpec, Manifest
 from selfhost.ext.surface import SurfaceContext, SurfaceSpec, WritebackPoller
 from selfhost.grants import ConnectFlow, GrantStore, OAuthProvider, install_connect_flow
 from selfhost.hub import Hub, InProcessHub
@@ -85,6 +84,7 @@ def run() -> None:
     key = os.environ.get(config.credentials.key_env)
     credentials = CredentialStore(fernet=Fernet(key.encode())) if key else None
     validate_ext_tools(manifests, workspace_id, credentials)
+    _validate_requires(config, manifests, workspace_id, credentials)
     embed = embed_backend(manifests, config.memory.embed_backend, workspace_id, credentials)
     index = index_backend(manifests, config.memory.index_backend, embed, workspace_id, credentials)
     blob = blob_store_for(config.blob)
@@ -106,7 +106,7 @@ def run() -> None:
             blob=blob,
             hub=hub,
             carrier=_select_carrier(config, manifests),
-            browser=_select_browser(config, manifests, workspace_id, credentials),
+            cdp_provider=_select_cdp_provider(config, manifests, workspace_id, credentials),
             proxy=_egress_proxy(asyncio.run(_resolver(config, credentials))),
             dbos=dbos_client,
             subagents=SubagentRegistry((*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests))),
@@ -268,46 +268,99 @@ def _select_hub(config: Config, manifests: tuple[Manifest, ...]) -> Hub:
     return build(config.hub.url)
 
 
-def _select_browser(
+def _select_cdp_provider(
     config: Config,
     manifests: tuple[Manifest, ...],
     workspace_id: UUID,
     credentials: CredentialStore | None,
-) -> BrowserBackend:
-    """The process-wide browser backend the deploy selects: core's default `bua` engine driving
-    Chrome over the CDP endpoint the `BROWSER_CDP_URL` provider yields, or a backend an extension
-    registers through its Manifest `browsers` point, built once at boot with a credential reader
-    scoped to that extension's slots. Two extensions claiming one name fail loud, as does selecting
-    a name no extension registers or an extension shadowing the core `bua` default; a named backend
-    with no credential key set fails loud, since its factory may read a BYOK slot host-side."""
-    if config.browser.backend == BUA_BROWSER_BACKEND:
-        return BuaBackend(
-            provider=BrowserCdpProviderChain(hosted=env_browser_cdp_provider(), local=None)
-        )
-    specs = {}
+) -> CdpProvider:
+    """The process-wide cdp provider the deploy selects: core's default `sandbox-cdp` provider (a
+    static lease over the `BROWSER_CDP_URL` endpoint), or a provider an extension registers through
+    its Manifest `cdp_providers` point, built once at boot with a credential reader scoped to that
+    extension's slots. Two extensions claiming one name fail loud, as does selecting a name no
+    extension registers or an extension shadowing the core `sandbox-cdp` default; a named provider
+    with no credential key set fails loud, since its factory may read a BYOK slot host-side. The
+    default is lazy — a missing URL fails at connect, not here — so a deploy without a browser
+    extension still boots; a browser extension's `requires` turns the missing URL into a boot
+    failure through `_validate_requires`."""
+    if config.browser.cdp_provider == DEFAULT_CDP_PROVIDER:
+        return SandboxCdpProvider.from_env()
+    specs: dict[str, tuple[CdpProviderSpec, Manifest]] = {}
     for manifest in manifests:
-        for spec in manifest.browsers:
-            if spec.backend == BUA_BROWSER_BACKEND:
+        for spec in manifest.cdp_providers:
+            if spec.backend == DEFAULT_CDP_PROVIDER:
                 raise RuntimeError(
-                    f"extension may not register the core browser backend {spec.backend!r}"
+                    f"extension may not register the core cdp provider {spec.backend!r}"
                 )
             if spec.backend in specs:
-                raise RuntimeError(f"two extensions register browser backend {spec.backend!r}")
+                raise RuntimeError(f"two extensions register cdp provider {spec.backend!r}")
             specs[spec.backend] = (spec, manifest)
-    found = specs.get(config.browser.backend)
+    found = specs.get(config.browser.cdp_provider)
     if found is None:
         raise NotRegisteredError(
-            f"config selects browser backend {config.browser.backend!r} "
+            f"config selects cdp provider {config.browser.cdp_provider!r} "
             "but no extension registers it"
         )
     spec, manifest = found
     if credentials is None:
         raise RuntimeError(
-            f"browser backend {config.browser.backend!r} needs a credential key but none is set"
+            f"cdp provider {config.browser.cdp_provider!r} needs a credential key but none is set"
         )
     declared = frozenset(slot.name for slot in manifest.credentials)
     context = context_for(workspace_id, manifest.name, declared, credentials)
     return spec.build(context.credentials)
+
+
+def _validate_requires(
+    config: Config,
+    manifests: tuple[Manifest, ...],
+    workspace_id: UUID,
+    credentials: CredentialStore | None,
+) -> None:
+    """Boot-validation for every active extension's declared `requires`: eagerly resolve each named
+    sub-seam so a consumer whose backend is absent, unknown, or unkeyed fails `serve` here — naming
+    the extension and the seam — rather than on the first tool call. A seam an extension names that
+    core does not know is itself a boot error."""
+    for manifest in manifests:
+        for seam in manifest.requires:
+            check = _REQUIRED_SEAM_CHECKS.get(seam)
+            if check is None:
+                raise RuntimeError(
+                    f"extension {manifest.name!r} requires unknown seam {seam!r} "
+                    f"(have {sorted(_REQUIRED_SEAM_CHECKS)})"
+                )
+            try:
+                check(config, manifests, workspace_id, credentials)
+            except Exception as error:
+                raise RuntimeError(
+                    f"extension {manifest.name!r} requires the {seam!r} seam but it is "
+                    f"unavailable: {error}"
+                ) from error
+
+
+def _require_cdp_provider(
+    config: Config,
+    manifests: tuple[Manifest, ...],
+    workspace_id: UUID,
+    credentials: CredentialStore | None,
+) -> None:
+    """The `cdp_providers` readiness contract: the selected provider resolves (unknown name,
+    collision, or missing credential key each fail loud) and, for the core `sandbox-cdp` default,
+    `BROWSER_CDP_URL` is set — so a browser extension active with no reachable Chrome fails at boot
+    rather than on the first browse."""
+    _select_cdp_provider(config, manifests, workspace_id, credentials)
+    if config.browser.cdp_provider == DEFAULT_CDP_PROVIDER and not os.environ.get(
+        BROWSER_CDP_URL_ENV
+    ):
+        raise RuntimeError(
+            f"the {DEFAULT_CDP_PROVIDER!r} provider needs {BROWSER_CDP_URL_ENV} set to a reachable "
+            "Chrome DevTools endpoint"
+        )
+
+
+_REQUIRED_SEAM_CHECKS: dict[
+    str, Callable[[Config, tuple[Manifest, ...], UUID, CredentialStore | None], None]
+] = {"cdp_providers": _require_cdp_provider}
 
 
 def _select_auth_proxy(

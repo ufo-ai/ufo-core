@@ -22,7 +22,7 @@ from fastapi import FastAPI
 
 from selfhost.blob import FilesystemBlobStore
 from selfhost.config import (
-    BUA_BROWSER_BACKEND,
+    DEFAULT_CDP_PROVIDER,
     IN_PROCESS_BACKEND,
     BlobConfig,
     BrowserConfig,
@@ -58,8 +58,8 @@ from selfhost.serve import (
     _mount_ext_routes,
     _mount_surfaces,
     _select_auth_proxy,
-    _select_browser,
     _select_carrier,
+    _select_cdp_provider,
     _select_hub,
     _source_backends,
 )
@@ -81,7 +81,7 @@ def _config(
     *,
     hub_backend: str = IN_PROCESS_BACKEND,
     hub_url: str | None = None,
-    browser_backend: str = BUA_BROWSER_BACKEND,
+    cdp_provider: str = DEFAULT_CDP_PROVIDER,
     sandbox_backend: str = "local",
     auth_backend: str = "composio",
 ) -> Config:
@@ -90,7 +90,7 @@ def _config(
         blob=BlobConfig(backend="filesystem", root=Path("blobs")),
         connect=ConnectConfig(public_base_url=PUBLIC_BASE_URL),
         hub=HubConfig(backend=hub_backend, url=hub_url),
-        browser=BrowserConfig(backend=browser_backend),
+        browser=BrowserConfig(cdp_provider=cdp_provider),
         sandbox=SandboxConfig(backend=sandbox_backend),
         connectors=ConnectorsConfig(auth_backend=auth_backend),
     )
@@ -182,11 +182,11 @@ def _check_carriers(manifest: Manifest) -> None:
         )
 
 
-def _check_browsers(manifest: Manifest, store: CredentialStore) -> None:
-    for spec in manifest.browsers:
+def _check_cdp_providers(manifest: Manifest, store: CredentialStore) -> None:
+    for spec in manifest.cdp_providers:
         _resolve_backend(
-            lambda spec=spec: _select_browser(
-                _config(browser_backend=spec.backend), (manifest,), WORKSPACE_ID, store
+            lambda spec=spec: _select_cdp_provider(
+                _config(cdp_provider=spec.backend), (manifest,), WORKSPACE_ID, store
             )
         )
 
@@ -326,7 +326,7 @@ def test_installed_extension_registers_every_declared_point(name: str, tmp_path:
     _check_embeds(manifest, store)
     _check_hubs(manifest)
     _check_carriers(manifest)
-    _check_browsers(manifest, store)
+    _check_cdp_providers(manifest, store)
     _check_models(manifest)
     _check_sources(manifest)
     _check_auth_proxies(manifest, store)

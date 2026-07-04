@@ -17,10 +17,10 @@ from typing import ClassVar
 from uuid import UUID
 
 import sqlalchemy as sa
-from pydantic import BaseModel, JsonValue
+from pydantic import BaseModel
 
 from selfhost.sdk.authproxy import AuthProxySpec, Credential
-from selfhost.sdk.browser import BrowserSurface, FindCompleter
+from selfhost.sdk.browser import CdpEndpoint, CdpLease
 from selfhost.sdk.connectors import OAuthAccount
 from selfhost.sdk.context import AgentChange, ExtensionContext
 from selfhost.sdk.http import (
@@ -34,7 +34,7 @@ from selfhost.sdk.hub import InProcessHub
 from selfhost.sdk.index import Chunk, EmbedClient, Hit, IndexScope
 from selfhost.sdk.jobs import JobSpec
 from selfhost.sdk.manifest import (
-    BrowserBackendSpec,
+    CdpProviderSpec,
     ConnectorProvider,
     CredentialSlot,
     Deny,
@@ -125,7 +125,8 @@ SKILL_NAME = "sample_skill"
 SKILL_SCRIPT = "probe.py"
 SKILL_SCRIPT_MARKER = "sample-skill-probe-ok"
 SKILL_DIR = Path(__file__).parent / "skills" / SKILL_NAME
-BROWSER_BACKEND = "sample_browser"
+CDP_PROVIDER = "sample_cdp"
+SAMPLE_CDP_URL = "wss://sample.test/cdp"
 CARRIER_NAME = "sample_carrier"
 CARRIER_CONTAINER = "sample-container"
 AUTH_PROXY_BACKEND = "sample_auth_proxy"
@@ -485,61 +486,26 @@ class SampleModelClient:
 
 
 @dataclass(frozen=True)
-class SampleBrowserSurface:
-    """The canned per-turn surface the sample's browser backend yields: each tool method returns a
-    deterministic reply echoing its action and args, so the seam — core selecting a
-    manifest-contributed browser backend and the browser tools dispatching through the yielded
-    surface — is exercised by a real backend, never a mock call-log."""
+class SampleCdpLease:
+    """The canned per-turn lease the sample's cdp provider mints: `endpoint` returns a fixed
+    `CdpEndpoint`, `aclose` is a no-op — a real object exercised through the `CdpLease` protocol the
+    browser engine drives, never a mock."""
 
-    async def navigate(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]:
-        return _browser_reply("navigate", args)
-
-    async def tabs_context(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]:
-        return _browser_reply("tabs_context", args)
-
-    async def tabs_create(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]:
-        return _browser_reply("tabs_create", args)
-
-    async def tabs_close(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]:
-        return _browser_reply("tabs_close", args)
-
-    async def upload_file(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]:
-        return _browser_reply("upload_file", args)
-
-    async def read_page(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]:
-        return _browser_reply("read_page", args)
-
-    async def get_page_text(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]:
-        return _browser_reply("get_page_text", args)
-
-    async def find(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]:
-        return _browser_reply("find", args)
-
-    async def form_input(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]:
-        return _browser_reply("form_input", args)
-
-    async def computer(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]:
-        return _browser_reply("computer", args)
-
-    async def wait_for_download(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]:
-        return _browser_reply("wait_for_download", args)
+    async def endpoint(self) -> CdpEndpoint:
+        return CdpEndpoint(url=SAMPLE_CDP_URL)
 
     async def aclose(self) -> None:
         return None
 
 
 @dataclass(frozen=True)
-class SampleBrowserBackend:
-    """A trivial BrowserBackend the probe registers through the `browsers` Manifest point: `surface`
-    yields a canned SampleBrowserSurface. A real backend consumed through the protocol, so a test
-    drives it exactly as core does; the BUA engine keeps its own live-CDP end-to-end proof."""
+class SampleCdpProvider:
+    """A trivial CdpProvider the probe registers through the `cdp_providers` Manifest point: `lease`
+    mints a canned SampleCdpLease. A real object consumed through the protocol, so a test drives it
+    exactly as core selects and leases it; the BUA engine keeps its own live-CDP proof."""
 
-    def surface(self, find: FindCompleter | None, model: str | None) -> BrowserSurface:
-        return SampleBrowserSurface()
-
-
-def _browser_reply(action: str, args: dict[str, JsonValue]) -> dict[str, JsonValue]:
-    return {"action": action, "backend": BROWSER_BACKEND, "args": args}
+    async def lease(self) -> CdpLease:
+        return SampleCdpLease()
 
 
 @dataclass(frozen=True)
@@ -672,10 +638,8 @@ def manifest() -> Manifest:
         ),
         hubs=(HubSpec(backend=HUB_BACKEND, build=lambda _url: InProcessHub()),),
         skills=(SkillSpec(path=SKILL_DIR),),
-        browsers=(
-            BrowserBackendSpec(
-                backend=BROWSER_BACKEND, build=lambda credentials: SampleBrowserBackend()
-            ),
+        cdp_providers=(
+            CdpProviderSpec(backend=CDP_PROVIDER, build=lambda credentials: SampleCdpProvider()),
         ),
         carriers=(CarrierSpec(name=CARRIER_NAME, factory=SampleCarrier),),
         auth_proxies=(

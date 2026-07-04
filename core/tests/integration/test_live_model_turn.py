@@ -23,8 +23,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from selfhost.blob import FilesystemBlobStore
-from selfhost.browser.backend import BuaBackend
-from selfhost.browser.cdp_provider import BrowserCdpProviderChain
+from selfhost.browser import SandboxCdpProvider
 from selfhost.config import Config
 from selfhost.db import workspace_tx
 from selfhost.hub import InProcessHub
@@ -83,7 +82,7 @@ async def live_surface(
             blob=blob,
             hub=hub,
             carrier=_StandInCarrier(),
-            browser=BuaBackend(provider=BrowserCdpProviderChain(hosted=None, local=None)),
+            cdp_provider=SandboxCdpProvider(endpoint=None),
             proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
             dbos=runtime_dbos,
             subagents=SubagentRegistry(()),

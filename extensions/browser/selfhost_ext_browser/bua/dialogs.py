@@ -5,8 +5,8 @@ from collections.abc import Coroutine
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from selfhost.browser.cdp import CdpError
-from selfhost.browser.wire import JsonDict
+from selfhost_ext_browser.bua.cdp import CdpError
+from selfhost_ext_browser.bua.wire import JsonDict
 
 logger = logging.getLogger(__name__)
 

@@ -1,34 +1,21 @@
-"""Public re-export: the browser seam an extension implements or reuses to contribute a backend.
+"""Public re-export: the browser transport seam an extension implements or the engine connects.
 
-An extension pairs a `BrowserBackendSpec` (`selfhost.sdk.manifest`) with a backend name a deploy
-selects through `config.browser.backend`. A backend yields a per-turn `BrowserSurface` — the browser
-tools' eleven methods. Two shapes slot in here: reuse core's `BuaBackend` with a different
-`BrowserCdpProvider` — only the CDP endpoint changes (browserbase), built with a
-`StaticBrowserCdpProvider`/`BrowserCdpProviderChain` over a resolved `BrowserCdp`; or implement
-`BrowserBackend`/`BrowserSurface` outright — the whole surface changes (browser-use). The concrete
-shapes live in `selfhost.browser.*`, reached only here."""
+An extension pairs a `CdpProviderSpec` (`selfhost.sdk.manifest`) with a provider name a deploy
+selects through `config.browser.cdp_provider`. A `CdpProvider` mints a per-turn `CdpLease` yielding
+a `CdpEndpoint` — the CDP URL plus any connection headers — released at turn end (browserbase mints
+and releases a fresh hosted session per turn). `FindCompleter` is the host-side element-ranking hook
+the browser engine calls back through. The concrete seam lives in `selfhost.browser`, reached only
+here."""
 
-from selfhost.browser.backend import (
-    BrowserBackend as BrowserBackend,
+from selfhost.browser import (
+    CdpEndpoint as CdpEndpoint,
 )
-from selfhost.browser.backend import (
-    BrowserSurface as BrowserSurface,
+from selfhost.browser import (
+    CdpLease as CdpLease,
 )
-from selfhost.browser.backend import (
-    BuaBackend as BuaBackend,
+from selfhost.browser import (
+    CdpProvider as CdpProvider,
 )
-from selfhost.browser.cdp_provider import (
-    BrowserCdpProviderChain as BrowserCdpProviderChain,
-)
-from selfhost.browser.cdp_provider import (
-    StaticBrowserCdpProvider as StaticBrowserCdpProvider,
-)
-from selfhost.browser.find import (
+from selfhost.browser import (
     FindCompleter as FindCompleter,
-)
-from selfhost.browser.wire import (
-    BrowserCdp as BrowserCdp,
-)
-from selfhost.browser.wire import (
-    BrowserCdpProvider as BrowserCdpProvider,
 )

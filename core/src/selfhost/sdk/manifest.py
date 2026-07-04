@@ -4,7 +4,7 @@
 code in any `__init__.py`), so the public surface lives in named modules like this one."""
 
 from selfhost.ext.manifest import (
-    BrowserBackendSpec as BrowserBackendSpec,
+    CdpProviderSpec as CdpProviderSpec,
 )
 from selfhost.ext.manifest import (
     ConnectorProvider as ConnectorProvider,
