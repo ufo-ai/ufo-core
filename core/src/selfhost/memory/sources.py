@@ -37,6 +37,7 @@ FOLDER_BACKEND = "folder"
 SOURCE_SYNC_JOB = "source_sync"
 SOURCE_SYNC_SCHEDULE = "0 * * * * *"
 SOURCE_SYNC_INTERVAL_SECONDS = 60
+SOURCE_ERROR_BACKOFF_CAP_SECONDS = 3600
 CLAIM_LEASE_SECONDS = 300
 DUE_BATCH_MAX_SOURCES = 50
 SOURCE_BLOB_PREFIX = "sources"
@@ -55,6 +56,13 @@ class Page(BaseModel):
 class SyncResult(BaseModel):
     pages: tuple[Page, ...]
     next_cursor: str | None = None
+
+
+class CursorExpired(Exception):
+    """A `SourceBackend.fetch` raises this when its incremental cursor is no longer valid — a
+    provider delta/sync token the source rejected (aged out, invalidated). The driver clears the
+    stored cursor so the next run refetches from scratch, rather than re-failing on the dead cursor
+    every interval forever."""
 
 
 @dataclass(frozen=True)
@@ -76,7 +84,8 @@ class SourceBackend(Protocol[ConfigT]):
     the typed per-source config the driver validates a row's JSON `config` against — each backend
     owns its own model, so a source carries typed parameters, never an untyped bag. `fetch` returns
     the documents the source holds now plus a resume cursor, given that config, the prior `cursor`,
-    and the workspace `auth` the runner threads."""
+    and the workspace `auth` the runner threads. It raises `CursorExpired` when a stored incremental
+    cursor is rejected by the provider, so the driver clears it and the next run refetches fresh."""
 
     config_model: type[ConfigT]
 
@@ -172,6 +181,7 @@ class ClaimedSource:
     backend: str
     config: Mapping[str, object]
     cursor: str | None
+    consecutive_errors: int
 
 
 @dataclass(frozen=True)
@@ -190,13 +200,15 @@ class SyncDriver:
                 result = await self._fetch(source)
                 await self._commit(source, result)
             except Exception as error:
+                cursor_reset = isinstance(error, CursorExpired)
                 log(
                     "source_sync.failed",
                     source_id=str(source.source_id),
                     backend=source.backend,
                     error_class=type(error).__name__,
+                    cursor_reset=cursor_reset,
                 )
-                await self._release(source)
+                await self._release(source, cursor_reset)
 
     async def _claim_due(self, claim: str) -> tuple[ClaimedSource, ...]:
         now = datetime.now(UTC)
@@ -207,6 +219,7 @@ class SyncDriver:
                 tables.source.c.backend,
                 tables.source.c.config,
                 tables.source.c.cursor,
+                tables.source.c.consecutive_errors,
             )
             .where(
                 tables.source.c.next_sync_at <= now,
@@ -235,6 +248,7 @@ class SyncDriver:
                 backend=row["backend"],
                 config=row["config"],
                 cursor=row["cursor"],
+                consecutive_errors=row["consecutive_errors"],
             )
             for row in rows
         )
@@ -326,6 +340,7 @@ class SyncDriver:
                 .values(
                     cursor=next_cursor,
                     next_sync_at=now + timedelta(seconds=SOURCE_SYNC_INTERVAL_SECONDS),
+                    consecutive_errors=0,
                     claimed_by=None,
                     claim_expires_at=None,
                     updated_at=sa.func.now(),
@@ -333,16 +348,25 @@ class SyncDriver:
                 .where(tables.source.c.id == source.source_id)
             )
 
-    async def _release(self, source: ClaimedSource) -> None:
-        """Free a source whose fetch or commit raised: clear its claim and push next_sync_at forward
-        one interval, so one bad source neither blocks its siblings this run nor re-fails on every
-        lease cycle — its cursor is untouched, so the next attempt resumes where it left off."""
+    async def _release(self, source: ClaimedSource, cursor_reset: bool) -> None:
+        """Free a source whose fetch or commit raised: clear its claim, count the error, and push
+        next_sync_at forward by a bounded exponential backoff (base interval doubling per
+        consecutive error, capped) so a persistently-failing source neither blocks its siblings this
+        run nor hammers its provider every lease cycle. On `CursorExpired` the stored cursor is
+        cleared so the next run refetches from scratch; otherwise it resumes where it left off. A
+        successful sync resets the counter and the interval in `_write`."""
+        errors = source.consecutive_errors + 1
+        backoff = min(
+            SOURCE_SYNC_INTERVAL_SECONDS * 2 ** (errors - 1), SOURCE_ERROR_BACKOFF_CAP_SECONDS
+        )
         now = datetime.now(UTC)
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.update(tables.source)
                 .values(
-                    next_sync_at=now + timedelta(seconds=SOURCE_SYNC_INTERVAL_SECONDS),
+                    cursor=None if cursor_reset else source.cursor,
+                    next_sync_at=now + timedelta(seconds=backoff),
+                    consecutive_errors=errors,
                     claimed_by=None,
                     claim_expires_at=None,
                     updated_at=sa.func.now(),

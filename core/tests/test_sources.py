@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import ClassVar
 from uuid import UUID, uuid4
 
 import pytest
@@ -31,8 +32,12 @@ from selfhost.memory.service import (
 from selfhost.memory.sources import (
     FOLDER_BACKEND,
     SOURCE_SYNC_JOB,
+    CursorExpired,
     FolderSource,
+    Page,
+    SourceAuth,
     SyncDriver,
+    SyncResult,
     register_sources,
 )
 from selfhost.schema import tables
@@ -415,6 +420,146 @@ async def test_a_failing_source_is_isolated_and_released(
     assert good_row["claimed_by"] is None
     assert missing_row["claimed_by"] is None  # released, not stuck claimed
     assert missing_row["next_sync_at"] > before  # backed off, won't re-fail every lease
+
+
+SCRIPTED_BACKEND = "scripted"
+
+
+class _ScriptedSource:
+    """A `SourceBackend` stand-in whose `fetch` is scripted per call: it raises the given error or
+    returns the given result, recording the cursor it was handed. The dependency the driver drives,
+    never the thing asserted — the tests read the driver's effect (the stored cursor, error count,
+    and backoff) back from the real source row."""
+
+    config_model: ClassVar[type[SourceConfig]] = SourceConfig
+
+    def __init__(self, outcomes: list[SyncResult | Exception]) -> None:
+        self._outcomes = outcomes
+        self.cursors: list[str | None] = []
+
+    async def fetch(self, config: SourceConfig, cursor: str | None, auth: SourceAuth) -> SyncResult:
+        self.cursors.append(cursor)
+        outcome = self._outcomes.pop(0)
+        match outcome:
+            case Exception():
+                raise outcome
+            case _:
+                return outcome
+
+
+def _scripted_driver(
+    outcomes: list[SyncResult | Exception], database_url: str, blob_root: Path
+) -> tuple[SyncDriver, _ScriptedSource]:
+    backend = _ScriptedSource(outcomes)
+    driver = SyncDriver(
+        backends={SCRIPTED_BACKEND: backend},
+        blob=FilesystemBlobStore(root=blob_root),
+        postgres=database_url.startswith("postgresql"),
+    )
+    return driver, backend
+
+
+async def _seed_scripted_source(workspace_id: UUID, cursor: str | None) -> UUID:
+    source_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.source).values(
+                id=source_id,
+                workspace_id=workspace_id,
+                backend=SCRIPTED_BACKEND,
+                config={"root": "/unused"},
+                cursor=cursor,
+                next_sync_at=sa.func.now(),
+                claimed_by=None,
+                claim_expires_at=None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return source_id
+
+
+async def _source_state(source_id: UUID) -> sa.RowMapping:
+    async with workspace_tx() as connection:
+        return (
+            await connection.execute(
+                sa.select(
+                    tables.source.c.cursor,
+                    tables.source.c.consecutive_errors,
+                    tables.source.c.next_sync_at,
+                ).where(tables.source.c.id == source_id)
+            )
+        ).mappings().one()
+
+
+async def test_cursor_expired_clears_stored_cursor_and_next_run_refetches(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    """A source on an expiring delta token must recover: when the backend raises `CursorExpired`,
+    the driver clears the stored cursor so the next run refetches from scratch rather than
+    re-failing on the dead cursor forever."""
+    workspace_id = await _workspace()
+    source_id = await _seed_scripted_source(workspace_id, "stale-token")
+    page = Page(
+        source_ref="doc",
+        digest="sha256:fresh",
+        subject=SHARED_SUBJECT,
+        body="the launch window opens at dawn",
+    )
+    driver, backend = _scripted_driver(
+        [
+            CursorExpired("delta token aged out"),
+            SyncResult(pages=(page,), next_cursor="fresh-token"),
+        ],
+        database_url,
+        tmp_path / "blobs",
+    )
+
+    await driver.run()
+    expired = await _source_state(source_id)
+    assert backend.cursors == ["stale-token"]
+    assert expired["cursor"] is None
+    assert expired["consecutive_errors"] == 1
+
+    await _make_due()
+    await driver.run()
+    refetched = await _source_state(source_id)
+    assert backend.cursors == ["stale-token", None]
+    assert refetched["cursor"] == "fresh-token"
+    assert refetched["consecutive_errors"] == 0
+    assert len(await _pages()) == 1
+
+
+async def test_consecutive_errors_back_off_and_a_success_resets_the_counter(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    """A persistently-failing source counts its errors and pushes next_sync_at out further each
+    time, so it doesn't hammer its provider every interval; a successful sync resets the counter."""
+    workspace_id = await _workspace()
+    source_id = await _seed_scripted_source(workspace_id, None)
+    driver, _ = _scripted_driver(
+        [RuntimeError("provider 500"), RuntimeError("provider 500"), SyncResult(pages=())],
+        database_url,
+        tmp_path / "blobs",
+    )
+
+    baseline_first = (await _source_state(source_id))["next_sync_at"]
+    await driver.run()
+    first = await _source_state(source_id)
+    assert first["consecutive_errors"] == 1
+    gap_first = first["next_sync_at"] - baseline_first
+
+    await _make_due()
+    baseline_second = (await _source_state(source_id))["next_sync_at"]
+    await driver.run()
+    second = await _source_state(source_id)
+    assert second["consecutive_errors"] == 2
+    gap_second = second["next_sync_at"] - baseline_second
+    assert gap_second > gap_first
+
+    await _make_due()
+    await driver.run()
+    assert (await _source_state(source_id))["consecutive_errors"] == 0
 
 
 def test_sync_and_page_index_register_as_core_jobs(database_url: str, tmp_path: Path) -> None:

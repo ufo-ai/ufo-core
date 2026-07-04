@@ -268,6 +268,7 @@ source = sa.Table(
     sa.Column("config", sa.JSON, nullable=False),
     sa.Column("cursor", sa.Text, nullable=True),
     sa.Column("next_sync_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("consecutive_errors", sa.Integer, nullable=False, server_default="0"),
     sa.Column("claimed_by", sa.Text, nullable=True),
     sa.Column("claim_expires_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
