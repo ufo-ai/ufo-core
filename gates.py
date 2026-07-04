@@ -19,6 +19,7 @@ ENVELOPE_COLUMNS = {"workspace_id", "created_at", "updated_at"}
 SCHEMA_TABLES = CORE_SRC / "schema" / "tables.py"
 EXTENSIONS_ROOT = "extensions"
 PACKS_ROOT = "packs"
+EXT_SCAFFOLD_DIRS = frozenset({"tests", "evals"})
 SDK_PUBLIC_PREFIX = "selfhost.sdk"
 MANIFEST_MODULE = CORE_SRC / "ext" / "manifest.py"
 SAMPLE_MODULE = Path(EXTENSIONS_ROOT) / "sample" / "selfhost_ext_sample.py"
@@ -120,6 +121,14 @@ def _boundary_failures(trees: dict[Path, ast.Module]) -> list[str]:
     return failures
 
 
+def _is_ext_scaffold(rel: Path) -> bool:
+    """A test or eval file under an extension — `extensions/<name>/{tests,evals}/...`. It is an
+    in-repo consumer of the extension, never shipped in its wheel, so it reaches core internals for
+    setup exactly as core's own tests do; the SDK seam is held only for the shipped package
+    (`extensions/<name>/<module>`), never for its test/eval scaffold."""
+    return len(rel.parts) > 2 and rel.parts[2] in EXT_SCAFFOLD_DIRS
+
+
 def _sdk_import_failures(trees: dict[Path, ast.Module]) -> list[str]:
     """Every file under `extensions/` and `packs/` reaches core only through the public
     `selfhost.sdk` surface; any other `selfhost.<internal>` import is a break of the seam the SDK
@@ -127,6 +136,8 @@ def _sdk_import_failures(trees: dict[Path, ast.Module]) -> list[str]:
     failures = []
     for rel, tree in trees.items():
         if rel.parts[0] not in (EXTENSIONS_ROOT, PACKS_ROOT):
+            continue
+        if _is_ext_scaffold(rel):
             continue
         for imported in _imported_modules(tree):
             in_sdk = imported == SDK_PUBLIC_PREFIX or imported.startswith(SDK_PUBLIC_PREFIX + ".")

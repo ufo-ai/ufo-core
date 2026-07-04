@@ -14,6 +14,10 @@ _spec.loader.exec_module(gates)
 
 ROGUE = Path("extensions/rogue/rogue.py")
 CORE_FILE = Path("core/src/selfhost/db.py")
+EXT_TEST = Path("extensions/exa/tests/test_ext_exa.py")
+EXT_EVAL = Path("extensions/exa/evals/web_research.py")
+EXT_SHIPPED_MODULE = Path("extensions/exa/selfhost_ext_exa.py")
+EXT_SHIPPED_PACKAGE = Path("extensions/memory/selfhost_ext_memory/store.py")
 
 
 def test_sdk_only_gate_rejects_core_internal_import_from_extensions() -> None:
@@ -35,6 +39,23 @@ def test_sdk_only_gate_allows_sdk_import_from_extensions() -> None:
 def test_sdk_only_gate_ignores_core_internal_imports() -> None:
     trees = {CORE_FILE: ast.parse("from selfhost.db import workspace_tx\n")}
     assert gates._sdk_import_failures(trees) == []
+
+
+def test_sdk_only_gate_exempts_extension_test_and_eval_scaffold() -> None:
+    trees = {
+        EXT_TEST: ast.parse("from selfhost.db import workspace_tx\n"),
+        EXT_EVAL: ast.parse("from selfhost.config import Config\n"),
+    }
+    assert gates._sdk_import_failures(trees) == []
+
+
+def test_sdk_only_gate_still_binds_the_shipped_extension_package() -> None:
+    trees = {
+        EXT_SHIPPED_MODULE: ast.parse("from selfhost.db import workspace_tx\n"),
+        EXT_SHIPPED_PACKAGE: ast.parse("from selfhost.db import workspace_tx\n"),
+    }
+    failures = gates._sdk_import_failures(trees)
+    assert len(failures) == 2 and all("selfhost.db" in failure for failure in failures)
 
 
 def test_conformance_gate_flags_a_manifest_point_the_sample_drops() -> None:

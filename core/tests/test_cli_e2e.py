@@ -24,10 +24,10 @@ import sqlalchemy as sa
 import uvicorn
 from click.testing import CliRunner
 from cryptography.fernet import Fernet
-from db_reset import DELETE_ORDER
 from dbos import DBOSClient
 from fastapi import FastAPI
 from selfhost_ext_index_default import DefaultIndex
+from selfhost_testsupport.tables import DELETE_ORDER
 
 from selfhost import cli
 from selfhost.accounting import CORE_PRICING

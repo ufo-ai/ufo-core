@@ -1,5 +1,5 @@
 [tool.uv.workspace]
-members = ["core", "extensions/*", "packs/*"]
+members = ["core", "extensions/*", "packs/*", "testsupport"]
 
 [tool.ruff]
 line-length = 100
@@ -24,14 +24,14 @@ warn_unused_ignores = true
 warn_redundant_casts = true
 mypy_path = "core/src"
 files = ["core/src/selfhost", "extensions", "gates.py"]
-exclude = ["extensions/.*/skills/"]
+exclude = ["extensions/.*/skills/", "extensions/.*/tests/", "extensions/.*/evals/"]
 
 [[tool.mypy.overrides]]
 module = ["asyncpg", "aiobotocore.*", "botocore.*", "lz4.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
-testpaths = ["core/tests"]
+testpaths = ["core/tests", "extensions/*/tests"]
 asyncio_mode = "auto"
 addopts = "--strict-markers"
 markers = [

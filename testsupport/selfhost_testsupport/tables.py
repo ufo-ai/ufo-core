@@ -1,7 +1,6 @@
 """The workspace tables in foreign-key-safe delete order — the shared truncation order the `db`
-fixture and the CLI e2e's bootstrap both reset through. It lives in a uniquely-named module, not in
-`conftest`, so every test directory imports the same one: a bare `from conftest import` resolves
-ambiguously the moment a sibling `integration/conftest.py` is also on the collection path."""
+fixture and the CLI e2e's bootstrap both reset through. It lives in the shared testsupport package,
+so every test directory imports the same one from a stable, unambiguous path."""
 
 from selfhost.schema import tables
 

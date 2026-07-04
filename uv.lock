@@ -38,6 +38,7 @@ members = [
     "selfhost-ext-web",
     "selfhost-pack-assistant",
     "selfhost-pack-sample",
+    "selfhost-testsupport",
 ]
 
 [[package]]
@@ -3008,6 +3009,17 @@ requires-dist = [{ name = "selfhost", editable = "core" }]
 name = "selfhost-pack-sample"
 version = "0.1.0"
 source = { editable = "packs/sample_pack" }
+dependencies = [
+    { name = "selfhost" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "selfhost", editable = "core" }]
+
+[[package]]
+name = "selfhost-testsupport"
+version = "0.1.0"
+source = { editable = "testsupport" }
 dependencies = [
     { name = "selfhost" },
 ]

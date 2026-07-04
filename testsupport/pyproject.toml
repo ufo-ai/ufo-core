@@ -1,0 +1,19 @@
+[project]
+name = "selfhost-testsupport"
+version = "0.1.0"
+description = "The one pytest plugin every test directory shares: the session DBOS launch, the db-reset fixture, and the integration/serial stamping — registered once via a pytest11 entry point so core/tests and every extension's tests resolve the same fixtures with no conftest"
+requires-python = ">=3.12"
+dependencies = ["selfhost"]
+
+[project.entry-points.pytest11]
+selfhost_testsupport = "selfhost_testsupport.plugin"
+
+[tool.uv.sources]
+selfhost = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+only-include = ["selfhost_testsupport"]
