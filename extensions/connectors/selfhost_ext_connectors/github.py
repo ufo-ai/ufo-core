@@ -9,7 +9,9 @@ grant exposes (`/user/orgs` → `/orgs/{org}/repos`), so a fresh issue lands on 
 manual repo config. `issues` and `comments` fetch incrementally with `?since` and advance a
 watermark cursor (snapshot=False); the rest re-enumerate each run. GitHub surfaces no delete
 signal, so no
-stream reports removals. The write path is intentionally absent — the source seam only reads."""
+stream reports removals. A grant that can't enumerate orgs at all (`/user/orgs` refused) can read no
+stream, so the walk raises `StreamSkipped` and the run records a skip, never a failure. The write
+path is intentionally absent — the source seam only reads."""
 
 import asyncio
 from collections.abc import AsyncIterator
@@ -17,6 +19,7 @@ from typing import Any
 
 import httpx
 
+from selfhost.sdk.sources import StreamSkipped
 from selfhost_ext_connectors.connector import StreamPage, StreamSpec
 from selfhost_ext_connectors.rest import RestConnector
 
@@ -29,6 +32,7 @@ _SINCE_STREAMS = frozenset({"issues", "comments"})
 _STATE_ALL_STREAMS = frozenset({"issues", "pull_requests"})
 _REPO_SKIP_STATUS = frozenset({404, 409, 410})
 _ORG_SKIP_STATUS = frozenset({403, 404, 410})
+_ORG_SCOPE_GATE_STATUS = frozenset({403})
 
 
 def _stream(
@@ -236,14 +240,27 @@ class GitHubConnector(RestConnector):
                 raise
 
     async def _iter_user_orgs(self, client: httpx.AsyncClient) -> AsyncIterator[str]:
-        """Yield each org login the grant exposes, driving org-scoped fan-out."""
-        async for page in self._paginate_link_header(
-            client, "/user/orgs", params={"per_page": PAGE_SIZE}
-        ):
-            for record in page:
-                login = record.get("login")
-                if isinstance(login, str) and login:
-                    yield login
+        """Yield each org login the grant exposes, driving org-scoped fan-out. Every runnable stream
+        fans out from this enumeration, so a grant refused it here — the whole account lacks org
+        scope or is policy-gated (`/user/orgs` → 403) — can read no stream at all: raise
+        `StreamSkipped` so the run records a skip rather than failing. A per-org refusal deeper in
+        the walk is skipped there and the other orgs still sync; only the root refusal skips the
+        stream."""
+        try:
+            async for page in self._paginate_link_header(
+                client, "/user/orgs", params={"per_page": PAGE_SIZE}
+            ):
+                for record in page:
+                    login = record.get("login")
+                    if isinstance(login, str) and login:
+                        yield login
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code in _ORG_SCOPE_GATE_STATUS:
+                raise StreamSkipped(
+                    f"github: org enumeration refused ({error.response.status_code}); "
+                    "the grant is missing org scope"
+                ) from error
+            raise
 
     async def _enrich_users(
         self, client: httpx.AsyncClient, page: list[dict[str, Any]], *, semaphore: asyncio.Semaphore

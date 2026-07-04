@@ -77,6 +77,19 @@ class CursorExpired(Exception):
     every interval forever."""
 
 
+class StreamSkipped(RuntimeError):
+    """A `SourceBackend.fetch` raises this when the provider refuses this source's stream in a way
+    that is not a data failure — a missing OAuth scope, a disabled workspace object, a plan gate.
+    The driver records the run as skipped, not failed: it commits no pages, so snapshot
+    delete-detection never runs and the source's existing pages stand, and it reschedules at the
+    normal interval with the cursor held and the error counter untouched, rather than backing the
+    source off as if it had errored. A genuine fault still raises through and fails the run."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 @dataclass(frozen=True)
 class SourceAuth:
     """What the sync runner threads into a backend's `fetch` so it can reach its provider without
@@ -101,7 +114,10 @@ class SourceBackend(Protocol[ConfigT]):
     delta/incremental backend returns `snapshot=False` and names removals explicitly in
     `SyncResult.deletes`, so the driver tombstones only those and never sweeps pages a partial fetch
     didn't mention. It raises `CursorExpired` when a stored incremental cursor is rejected by the
-    provider, so the driver clears it and the next run refetches fresh."""
+    provider, so the driver clears it and the next run refetches fresh. It raises `StreamSkipped`
+    when the provider refuses the stream for this account (a missing scope, a plan gate), so the
+    driver records the run skipped, not failed — no pages commit, nothing is tombstoned — and
+    reschedules at the normal interval."""
 
     config_model: type[ConfigT]
 
@@ -221,6 +237,14 @@ class SyncDriver:
             try:
                 result = await self._fetch(source)
                 await self._commit(source, result)
+            except StreamSkipped as skipped:
+                log(
+                    "source_sync.skipped",
+                    source_id=str(source.source_id),
+                    backend=source.backend,
+                    reason=skipped.reason,
+                )
+                await self._skip(source)
             except Exception as error:
                 cursor_reset = isinstance(error, CursorExpired)
                 log(
@@ -405,6 +429,25 @@ class SyncDriver:
                     cursor=None if cursor_reset else source.cursor,
                     next_sync_at=now + timedelta(seconds=backoff),
                     consecutive_errors=errors,
+                    claimed_by=None,
+                    claim_expires_at=None,
+                    updated_at=sa.func.now(),
+                )
+                .where(tables.source.c.id == source.source_id)
+            )
+
+    async def _skip(self, source: ClaimedSource) -> None:
+        """A backend raised `StreamSkipped`: the source is intentionally unreadable this run (a
+        missing scope, a plan gate), not failed. Free the claim and reschedule at the normal
+        interval with the cursor held and the error counter reset — no pages committed, so snapshot
+        delete-detection never runs and the source's existing pages stand."""
+        now = datetime.now(UTC)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.source)
+                .values(
+                    next_sync_at=now + timedelta(seconds=SOURCE_SYNC_INTERVAL_SECONDS),
+                    consecutive_errors=0,
                     claimed_by=None,
                     claim_expires_at=None,
                     updated_at=sa.func.now(),

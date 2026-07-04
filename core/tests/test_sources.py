@@ -30,10 +30,12 @@ from selfhost.memory.sources import (
     FolderSource,
     Page,
     SourceAuth,
+    StreamSkipped,
     SyncDriver,
     SyncResult,
     page_id_for,
     register_sources,
+    source_row_id,
 )
 from selfhost.schema import tables
 from selfhost.schema.records import Agent, Turn
@@ -759,6 +761,50 @@ async def test_snapshot_fetch_tombstones_prior_pages_absent_from_the_fetch(
     await driver.run()
     assert await _tombstone(gone_id) is True  # absent from the authoritative snapshot → swept
     assert await _tombstone(kept_id) is False
+
+
+async def test_stream_skipped_records_a_skip_not_a_failure_and_never_tombstones(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    """A backend that raises `StreamSkipped` (a scope/plan gate) records a skip, not a failure: the
+    error counter stays reset and the cursor is held, and the source's existing pages are never
+    swept. A sibling that raises a real error still fails, and a healthy sibling still syncs — the
+    both-ends proof that a controlled skip suppresses snapshot delete-detection while a genuine
+    fault does not."""
+    workspace_id = await _workspace()
+    skipped_id = await _seed_scripted_source(workspace_id, "held-cursor")
+    kept_id = await _seed_prior_page(workspace_id, skipped_id, "kept/doc")
+    good = tmp_path / "good"
+    good.mkdir()
+    (good / "doc.md").write_text("the wifi password is maple syrup")
+    missing = tmp_path / "missing"  # never created → FolderSource._read raises FileNotFoundError
+    driver = SyncDriver(
+        backends={
+            SCRIPTED_BACKEND: _ScriptedSource(
+                [StreamSkipped("github: org scope not granted (403)")]
+            ),
+            FOLDER_BACKEND: FolderSource(),
+        },
+        blob=FilesystemBlobStore(root=tmp_path / "blobs"),
+        postgres=database_url.startswith("postgresql"),
+    )
+    await _register_folder(good)
+    await _register_folder(missing)
+    baseline = (await _source_state(skipped_id))["next_sync_at"]
+
+    await driver.run()
+
+    skip_state = await _source_state(skipped_id)
+    assert skip_state["consecutive_errors"] == 0  # a skip is not a failure
+    assert skip_state["cursor"] == "held-cursor"  # cursor held, not reset
+    assert skip_state["next_sync_at"] > baseline  # rescheduled and released, not stuck claimed
+    assert await _tombstone(kept_id) is False  # existing page not swept — no snapshot delete
+
+    failed_id = source_row_id(workspace_id, FOLDER_BACKEND, {"root": str(missing)})
+    assert (await _source_state(failed_id))["consecutive_errors"] == 1  # real error still fails
+
+    active = [page for page in await _pages() if page["tombstone"] in (False, 0)]
+    assert len(active) == 2  # the held page and the healthy sibling's page, both synced
 
 
 def test_source_sync_and_spend_resume_register_as_core_jobs(

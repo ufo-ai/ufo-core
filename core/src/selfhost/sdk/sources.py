@@ -9,8 +9,10 @@ a complete collection each run returns `SyncResult(snapshot=True)` and core tomb
 the fetch no longer holds; a delta/incremental backend returns `snapshot=False` and names removals
 in `SyncResult.deletes`, so core tombstones only those and never sweeps pages a partial fetch didn't
 mention. A backend raises `CursorExpired` when a stored incremental cursor is rejected, and core
-clears it so the next run refetches fresh. The concrete shapes live in `selfhost.memory.sources`,
-reached only here."""
+clears it so the next run refetches fresh. A backend raises `StreamSkipped` when the provider
+refuses the stream for this account (a missing scope, a plan gate), and core records the run
+skipped, not failed — committing no pages, so nothing is tombstoned. The concrete shapes live in
+`selfhost.memory.sources`, reached only here."""
 
 from selfhost.memory.sources import (
     CursorExpired as CursorExpired,
@@ -32,6 +34,9 @@ from selfhost.memory.sources import (
 )
 from selfhost.memory.sources import (
     SourceBackend as SourceBackend,
+)
+from selfhost.memory.sources import (
+    StreamSkipped as StreamSkipped,
 )
 from selfhost.memory.sources import (
     SyncResult as SyncResult,

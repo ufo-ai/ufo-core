@@ -28,7 +28,7 @@ from selfhost_ext_connectors.connector import (
 from selfhost_ext_connectors.github import GitHubConnector
 from selfhost_ext_connectors.rest import RestConnector
 
-from selfhost.memory.sources import SourceAuth
+from selfhost.memory.sources import SourceAuth, StreamSkipped
 
 GITHUB_ACCOUNT = "ca_gh_1"
 
@@ -387,6 +387,45 @@ async def test_github_issues_send_since_when_a_cursor_is_stored(
     issue_calls = [params for endpoint, params in seen if endpoint.endswith("/issues")]
     assert issue_calls and issue_calls[0].get("since") == "2026-01-01T00:00:00Z"
     assert issue_calls[0].get("state") == "all"
+
+
+def _github_scope_gated_client(owner: str) -> Callable[[], composio.ComposioClient]:
+    """A grant whose org enumeration is refused: `/user/orgs` answers 403, the code every runnable
+    stream fans out from."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "GET" and "/connected_accounts/" in path:
+            return httpx.Response(
+                200, json={"id": GITHUB_ACCOUNT, "user_id": owner, "status": "ACTIVE"}
+            )
+        if request.method != "POST" or not path.endswith(composio_proxy.PROXY_EXECUTE_PATH):
+            return httpx.Response(404, json={})
+        if json.loads(request.content)["endpoint"].endswith("/user/orgs"):
+            return httpx.Response(
+                200,
+                json={"data": {"data": {"message": "insufficient scope"}, "status": 403}},
+            )
+        return httpx.Response(404, json={})
+
+    client = composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handle))
+    return lambda: client
+
+
+async def test_github_scope_gated_org_enumeration_skips_the_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A grant that can't enumerate orgs (`/user/orgs` → 403) can read no stream: the connector
+    raises `StreamSkipped`, so the driver records a skip rather than failing the run and sweeping
+    the source's pages."""
+    workspace_id = uuid4()
+    monkeypatch.setattr(
+        composio,
+        "composio_client",
+        _github_scope_gated_client(f"{composio.EXTERNAL_USER_PREFIX}{workspace_id}"),
+    )
+    with pytest.raises(StreamSkipped, match="org"):
+        await _fetch(GitHubConnector(), "issues", None, workspace_id)
 
 
 # --- Composio Tool Router semantic search --------------------------------------------------------
