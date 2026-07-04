@@ -12,6 +12,7 @@ resolution-markers = [
 members = [
     "selfhost",
     "selfhost-ext-browser",
+    "selfhost-ext-coding",
     "selfhost-ext-connectors",
     "selfhost-ext-documents",
     "selfhost-ext-eval-harness",
@@ -2360,6 +2361,17 @@ dev = [
 name = "selfhost-ext-browser"
 version = "0.1.0"
 source = { editable = "extensions/browser" }
+dependencies = [
+    { name = "selfhost" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "selfhost", editable = "core" }]
+
+[[package]]
+name = "selfhost-ext-coding"
+version = "0.1.0"
+source = { editable = "extensions/coding" }
 dependencies = [
     { name = "selfhost" },
 ]

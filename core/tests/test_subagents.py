@@ -2,7 +2,7 @@ import pytest
 from pydantic import BaseModel
 
 from selfhost.ext.manifest import SUBAGENT_ROUND_LIMIT, SubagentProfile
-from selfhost.loop.profiles import CODING, CORE_SUBAGENT_PROFILES, GENERAL_PURPOSE
+from selfhost.loop.profiles import CORE_SUBAGENT_PROFILES, GENERAL_PURPOSE
 from selfhost.loop.subagents import SubagentRegistry, subagent_system_prompt
 from selfhost.tools.builtins import BUILTIN_TOOLS
 
@@ -96,16 +96,8 @@ def test_general_purpose_prompt_lists_the_loadable_skills_and_binds_its_output()
     assert "result" in prompt and "JSON" in prompt
 
 
-def test_core_ships_a_coding_profile_whose_tools_all_resolve_to_builtins() -> None:
-    profile = SubagentRegistry(CORE_SUBAGENT_PROFILES).get(CODING)
-    assert profile.name == CODING
-    assert profile.input_model.model_validate({"objective": "fix it"}).objective == "fix it"
-    assert profile.output_model.model_validate({"result": "fixed"}).result == "fixed"
-    builtin_names = {tool.name for tool in BUILTIN_TOOLS}
-    assert set(profile.tool_names) <= builtin_names
-    assert {"ask_user", "spawn_subagent", "wait_for_subagents", "cancel_subagent"}.isdisjoint(
-        profile.tool_names
-    )
+def test_core_ships_only_the_general_purpose_profile() -> None:
+    assert {profile.name for profile in CORE_SUBAGENT_PROFILES} == {GENERAL_PURPOSE}
 
 
 def test_subagent_prompt_wraps_the_profile_with_the_shared_citation_discipline() -> None:
