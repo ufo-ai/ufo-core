@@ -86,12 +86,17 @@ class BuaSurface:
         return await session.wait_for_download(args)
 
     async def aclose(self) -> None:
-        if self.session is not None:
-            await self.session.close()
-            self.session = None
-        if self.lease is not None:
-            await self.lease.aclose()
-            self.lease = None
+        """Release the CDP session and the transport lease. The lease releases even if the session
+        close raises (a broken CDP socket on an errored turn) — so a paid hosted-browser lease is
+        never orphaned by a failed session teardown."""
+        try:
+            if self.session is not None:
+                await self.session.close()
+                self.session = None
+        finally:
+            if self.lease is not None:
+                await self.lease.aclose()
+                self.lease = None
 
 
 def _tab_id(value: JsonValue) -> int | None:

@@ -37,7 +37,7 @@ from selfhost.loop.subagents import SubagentRegistry, subagent_system_prompt
 from selfhost.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from selfhost.schema.records import Agent, Turn
 from selfhost.tools.builtins import BUILTIN_TOOLS
-from selfhost.tools.context import ImageContent, SpawnResult, ToolContext
+from selfhost.tools.context import ImageContent, SpawnResult, ToolContext, TurnCleanup
 
 
 @dataclass
@@ -396,3 +396,42 @@ def test_browser_prompt_preserves_no_skill_index_slot() -> None:
     assert "{{" not in BROWSER_SUBAGENT_PROMPT
     assert "skill_index" not in BROWSER_SUBAGENT_PROMPT
     assert "JSON" in subagent_system_prompt(BROWSER_PROFILE)
+
+
+async def test_aclose_releases_the_lease_even_when_session_close_raises() -> None:
+    """A broken CDP socket on an errored turn makes the session close raise; the transport lease
+    (a paid hosted browser, browserbase-style) must still be released, never orphaned."""
+
+    class _RaisingSession:
+        async def close(self) -> None:
+            raise RuntimeError("CDP websocket already broken")
+
+    lease = FakeCdpLease()
+    surface = BuaSurface(
+        cdp_provider=FakeCdpProvider(),
+        find_completer=None,
+        model=None,
+        lease=lease,
+        session=_RaisingSession(),
+    )
+    with pytest.raises(RuntimeError):
+        await surface.aclose()
+    assert lease.released is True
+
+
+async def test_turn_cleanup_drain_isolates_a_failing_closer() -> None:
+    """One closer raising during drain must not skip the rest — else a failed CDP-session close
+    would strand the lease closer registered beside it."""
+    cleanup = TurnCleanup()
+    ran: list[str] = []
+
+    async def ok() -> None:
+        ran.append("ok")
+
+    async def boom() -> None:
+        raise RuntimeError("teardown failed")
+
+    cleanup.register(ok)
+    cleanup.register(boom)  # LIFO: popped first; its raise must not skip `ok`
+    await cleanup.drain()  # must not propagate
+    assert ran == ["ok"]

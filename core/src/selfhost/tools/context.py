@@ -27,6 +27,7 @@ from selfhost.blob import BlobStore
 from selfhost.browser import CdpProvider, FindCompleter
 from selfhost.ext.context import ExtensionContext
 from selfhost.grants import ConnectUnavailable, GrantStore
+from selfhost.o11y import log
 from selfhost.sandbox.session import SandboxSession
 from selfhost.schema.records import Agent, Turn
 from selfhost.skills.runtime import CORE_SKILL_REGISTRY, SkillRegistry
@@ -109,7 +110,11 @@ class TurnCleanup:
 
     async def drain(self) -> None:
         while self._closers:
-            await self._closers.pop()()
+            closer = self._closers.pop()
+            try:
+                await closer()
+            except Exception as error:
+                log("turn.cleanup.failed", error=repr(error))
 
 
 @dataclass(frozen=True)
