@@ -112,8 +112,8 @@ def _resolve_backend(select) -> None:
     is full in-process construction; the only registration defect is core's own not-registered
     signal (always a RuntimeError raised by the selection seam before it reaches the factory). Any
     other error means the seam found the spec and a key- or service-gated factory declined to build
-    keyless — e2b's carrier fails without its template env, embed-openai's SDK client refuses an
-    empty key — which the Tier-B integration proofs cover, not this registration floor."""
+    keyless — e2b's carrier fails without its template env — which the Tier-B integration proofs
+    cover, not this registration floor."""
     try:
         assert select() is not None
     except Exception as error:

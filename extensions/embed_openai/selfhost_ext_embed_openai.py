@@ -49,30 +49,32 @@ def plan_embed_batches(texts: tuple[str, ...]) -> tuple[tuple[str, ...], ...]:
 
 @dataclass(frozen=True)
 class OpenAIEmbedClient:
-    """text-embedding-3-large over the async OpenAI SDK; injected, never module-global."""
+    """text-embedding-3-large over the async OpenAI SDK. The deploy `OPENAI_API_KEY` is read from
+    the environment on each embed call, not at boot: a zero-config dev serve with no key boots, and
+    an embed call without one fails loud — the OpenAI SDK raises on an empty key at construction, so
+    the client is built here on use (retries disabled; embedding runs off the write path)."""
 
-    client: openai.AsyncOpenAI
     model: str = EMBED_MODEL
 
     async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+        key = os.environ.get(API_KEY_ENV, "")
+        if not key:
+            raise RuntimeError(f"{API_KEY_ENV} required to embed")
+        client = openai.AsyncOpenAI(api_key=key, max_retries=0, timeout=PROVIDER_TIMEOUT_SECONDS)
         vectors: list[tuple[float, ...]] = []
         for batch in plan_embed_batches(texts):
-            response = await self.client.embeddings.create(model=self.model, input=list(batch))
+            response = await client.embeddings.create(model=self.model, input=list(batch))
             ordered = sorted(response.data, key=lambda row: row.index)
             vectors.extend(tuple(float(value) for value in row.embedding) for row in ordered)
         return tuple(vectors)
 
 
 def build(ctx: ExtensionContext) -> EmbedClient:
-    """The deploy embed client core builds at boot: an async OpenAI SDK client keyed by the deploy
-    `OPENAI_API_KEY`, its own retries disabled (embedding runs off the write path, on the jobs
-    role). `ctx` is the workspace scope the seam threads; this deploy-key backend reads no slot."""
-    client = openai.AsyncOpenAI(
-        api_key=os.environ.get(API_KEY_ENV, ""),
-        max_retries=0,
-        timeout=PROVIDER_TIMEOUT_SECONDS,
-    )
-    return OpenAIEmbedClient(client=client)
+    """The deploy embed client core builds at boot. Construction is key-free — the OpenAI SDK client
+    is built on each embed call, keyed by the deploy `OPENAI_API_KEY` — so a zero-config dev serve
+    boots without one and embedding without a key fails loud on use. `ctx` is the workspace scope
+    the seam threads; this deploy-key backend reads no slot."""
+    return OpenAIEmbedClient()
 
 
 def manifest() -> Manifest:
