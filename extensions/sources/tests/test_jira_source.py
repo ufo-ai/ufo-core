@@ -1,0 +1,206 @@
+"""The Jira source connector, offline over a mock transport.
+
+Jira authenticates through the `AuthProxy` seam, so these drive the connector with a mock proxy
+whose `Credential` carries an `httpx.MockTransport` bound to `api.atlassian.com` — no live API, no
+token. Covered: the `/oauth/token/accessible-resources` site fan-out feeding `startAt` pagination,
+the incremental `issues` stream advancing an `updated` watermark and — the point of this provider —
+`render` lifting an issue's summary/status/assignee/description out of its Atlassian Document Format
+body rather than dumping JSON, the JQL `updated > "<cursor>"` filter on an incremental run, the
+`projects`/`users` full-collection snapshots, and a permission refusal (403) surfacing as
+`StreamSkipped` so the run records a skip, not a failure."""
+
+from collections.abc import Callable
+from uuid import UUID, uuid4
+
+import httpx
+import pytest
+from selfhost_ext_sources.backend import ConnectorBackend, ConnectorSourceConfig
+from selfhost_ext_sources.jira import JiraConnector
+
+from selfhost.connectors import Credential
+from selfhost.memory.sources import SourceAuth, StreamSkipped, SyncResult
+
+ACCOUNT = "acct-1"
+CLOUD_ID = "cloud-1"
+SITE = {"id": CLOUD_ID, "url": "https://acme.atlassian.net", "name": "Acme"}
+
+
+class _MockProxy:
+    def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
+        self._handler = handler
+
+    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
+        return Credential(transport=httpx.MockTransport(self._handler))
+
+
+async def _fetch(
+    stream: str,
+    handler: Callable[[httpx.Request], httpx.Response],
+    *,
+    cursor: str | None = None,
+) -> SyncResult:
+    auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler))
+    return await ConnectorBackend(connector=JiraConnector()).fetch(
+        ConnectorSourceConfig(account=ACCOUNT, stream=stream), cursor, auth
+    )
+
+
+def _refs(result: SyncResult) -> set[str]:
+    return {page.source_ref for page in result.pages}
+
+
+def _issue(
+    issue_id: str,
+    key: str,
+    summary: str,
+    description: str,
+    status: str,
+    assignee: str,
+    updated: str,
+) -> dict[str, object]:
+    return {
+        "id": issue_id,
+        "key": key,
+        "self": f"https://acme.atlassian.net/rest/api/3/issue/{issue_id}",
+        "fields": {
+            "summary": summary,
+            "description": {
+                "type": "doc",
+                "version": 1,
+                "content": [
+                    {"type": "paragraph", "content": [{"type": "text", "text": description}]}
+                ],
+            },
+            "status": {"name": status},
+            "priority": {"name": "High"},
+            "created": "2026-01-01T00:00:00.000+0000",
+            "updated": updated,
+            "assignee": {"displayName": assignee, "emailAddress": f"{assignee}@acme.com"},
+            "reporter": {"displayName": "Reporter One"},
+        },
+    }
+
+
+ISSUE_1 = _issue(
+    "10001",
+    "ACME-1",
+    "Fix login bug",
+    "Users cannot log in on mobile",
+    "In Progress",
+    "Alice",
+    "2026-02-01T00:00:00.000+0000",
+)
+ISSUE_2 = _issue(
+    "10002",
+    "ACME-2",
+    "Add dark mode",
+    "Support a system dark-mode toggle",
+    "To Do",
+    "Bob",
+    "2026-02-05T00:00:00.000+0000",
+)
+
+
+def _search_handler(seen: list[str]) -> Callable[[httpx.Request], httpx.Response]:
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "api.atlassian.com"
+        path = request.url.path
+        if path == "/oauth/token/accessible-resources":
+            return httpx.Response(200, json=[SITE])
+        if path == f"/ex/jira/{CLOUD_ID}/rest/api/3/search":
+            jql = request.url.params.get("jql") or ""
+            seen.append(jql)
+            if jql.startswith("updated >"):
+                return httpx.Response(
+                    200, json={"issues": [ISSUE_2], "startAt": 0, "maxResults": 100, "total": 1}
+                )
+            start = int(request.url.params.get("startAt") or "0")
+            if start == 0:
+                return httpx.Response(
+                    200,
+                    json={"issues": [ISSUE_1], "startAt": 0, "maxResults": 1, "total": 2},
+                )
+            return httpx.Response(
+                200, json={"issues": [ISSUE_2], "startAt": 1, "maxResults": 1, "total": 2}
+            )
+        return httpx.Response(404, json={"path": path})
+
+    return handle
+
+
+async def test_issues_paginate_advance_watermark_and_render_readable_body() -> None:
+    result = await _fetch("issues", _search_handler([]))
+
+    assert _refs(result) == {"issues/10001", "issues/10002"}
+    assert result.snapshot is False
+    assert result.deletes == ()
+    assert result.next_cursor == "2026-02-05T00:00:00.000+0000"
+
+    body = next(page.body for page in result.pages if page.source_ref == "issues/10001")
+    assert "Fix login bug" in body
+    assert "Status: In Progress" in body
+    assert "Assignee: Alice" in body
+    assert "Users cannot log in on mobile" in body
+    assert "paragraph" not in body
+    assert "emailAddress" not in body
+
+
+async def test_issues_incremental_filters_with_jql_and_advances_the_watermark() -> None:
+    seen: list[str] = []
+    result = await _fetch("issues", _search_handler(seen), cursor="2026-02-03T00:00:00.000+0000")
+    assert seen and seen[0] == 'updated > "2026-02-03T00:00:00.000+0000" ORDER BY updated ASC'
+    assert _refs(result) == {"issues/10002"}
+    assert result.next_cursor == "2026-02-05T00:00:00.000+0000"
+
+
+async def test_projects_returns_a_full_collection_snapshot() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/oauth/token/accessible-resources":
+            return httpx.Response(200, json=[SITE])
+        if path == f"/ex/jira/{CLOUD_ID}/rest/api/3/project/search":
+            return httpx.Response(
+                200,
+                json={
+                    "values": [{"id": "p1", "key": "ACME", "name": "Acme", "self": "https://x/p1"}],
+                    "isLast": True,
+                    "total": 1,
+                },
+            )
+        return httpx.Response(404, json={"path": path})
+
+    result = await _fetch("projects", handle)
+    assert result.snapshot is True
+    assert result.next_cursor is None
+    assert _refs(result) == {"projects/p1"}
+
+
+async def test_users_snapshot_walks_the_bare_array_start_at() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/oauth/token/accessible-resources":
+            return httpx.Response(200, json=[SITE])
+        if path == f"/ex/jira/{CLOUD_ID}/rest/api/3/users/search":
+            return httpx.Response(
+                200,
+                json=[
+                    {"accountId": "a1", "displayName": "Alice", "emailAddress": "alice@acme.com"},
+                    {"accountId": "a2", "displayName": "Bob", "emailAddress": "bob@acme.com"},
+                ],
+            )
+        return httpx.Response(404, json={"path": path})
+
+    result = await _fetch("users", handle)
+    assert result.snapshot is True
+    assert result.next_cursor is None
+    assert _refs(result) == {"users/a1", "users/a2"}
+
+
+async def test_permission_refusal_raises_stream_skipped() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth/token/accessible-resources":
+            return httpx.Response(200, json=[SITE])
+        return httpx.Response(403, json={"errorMessages": ["forbidden"]})
+
+    with pytest.raises(StreamSkipped, match="refused"):
+        await _fetch("issues", handle)

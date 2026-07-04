@@ -8,6 +8,7 @@ the credential slot the direct backend reads its key from; the manifest wraps ea
 from selfhost_ext_sources.asana import AsanaConnector
 from selfhost_ext_sources.connector import Connector
 from selfhost_ext_sources.github import GitHubConnector
+from selfhost_ext_sources.jira import JiraConnector
 from selfhost_ext_sources.linear import LinearConnector
 from selfhost_ext_sources.notion import NotionConnector
 from selfhost_ext_sources.slack import SlackConnector
@@ -18,4 +19,5 @@ CONNECTORS: dict[str, type[Connector]] = {
     NotionConnector.name: NotionConnector,
     SlackConnector.name: SlackConnector,
     LinearConnector.name: LinearConnector,
+    JiraConnector.name: JiraConnector,
 }
