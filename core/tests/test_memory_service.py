@@ -22,13 +22,15 @@ from selfhost_ext_memory.store import (
     Recalled,
     decay_factor,
     enforce_type_diversity,
+    fuse_hits,
+    fuse_recall,
     mem_page,
     memory_item,
     recall_subjects,
 )
 
 from selfhost.db import workspace_tx
-from selfhost.indexing import OWNER_KIND_MEMORY_ITEM, OWNER_KIND_PAGE, Chunk, TextChunker
+from selfhost.indexing import OWNER_KIND_MEMORY_ITEM, OWNER_KIND_PAGE, Chunk, Hit, TextChunker
 from selfhost.schema import tables
 from selfhost.subjects import SHARED_SUBJECT, member_subject
 
@@ -184,6 +186,40 @@ async def test_recommitting_a_fact_updates_in_place_not_duplicated(clean: None) 
     hits = await store.recall("vault code", frozenset({SHARED_SUBJECT}), 10)
     assert len(hits) == 1
     assert "4821" in hits[0].body
+
+
+def test_fuse_recall_blends_cosine_to_break_a_rrf_tie() -> None:
+    """Two rows tied on fused rank (each leads one leg) split by the cosine term: pure RRF keeps the
+    lexical-leader first, the recall blend promotes the row nearer in embedding space."""
+    lexical = (
+        Hit("a", OWNER_KIND_MEMORY_ITEM, "A", SHARED_SUBJECT, 0, "alpha", 5.0),
+        Hit("b", OWNER_KIND_MEMORY_ITEM, "B", SHARED_SUBJECT, 0, "beta", 3.0),
+    )
+    vector = (
+        Hit("b", OWNER_KIND_MEMORY_ITEM, "B", SHARED_SUBJECT, 0, "beta", 0.9),
+        Hit("a", OWNER_KIND_MEMORY_ITEM, "A", SHARED_SUBJECT, 0, "alpha", 0.4),
+    )
+    assert [fused.owner_id for fused in fuse_hits(lexical, vector, 10)] == ["A", "B"]
+    assert [fused.owner_id for fused in fuse_recall(lexical, vector, 10)] == ["B", "A"]
+
+
+async def test_recall_blend_promotes_the_semantically_closer_fact(clean: None) -> None:
+    """The cosine blend end to end: two equally-worded facts committed at the same time tie on the
+    lexical leg and on decay, so recall's order is decided by the raw query-chunk cosine — the fact
+    whose embedding is nearer the query ranks first."""
+    workspace_id = await _workspace()
+    when = datetime(2025, 1, 1, tzinfo=UTC)
+    close = await _seed_item(
+        workspace_id, SHARED_SUBJECT, "budget review notes", vec((0, 1.0)), created_at=when
+    )
+    far = await _seed_item(
+        workspace_id, SHARED_SUBJECT, "budget review notes", vec((0, 0.3), (1, 0.95)),
+        created_at=when,
+    )
+    recalled = await _store(StubEmbed(vec((0, 1.0))), workspace_id).recall(
+        "budget review notes", frozenset({SHARED_SUBJECT}), 10
+    )
+    assert [item.memory_id for item in recalled] == [close, far]
 
 
 async def test_recall_returns_items_scoped_to_subject(clean: None) -> None:

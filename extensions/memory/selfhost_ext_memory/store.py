@@ -41,6 +41,8 @@ from selfhost.sdk.index import (
 from selfhost.sdk.sources import SHARED_SUBJECT, PageChange, PageFeed, member_subject
 
 RRF_K = 60
+RRF_WEIGHT = 0.7
+COSINE_WEIGHT = 0.3
 MEMORY_ITEM_NAMESPACE = UUID("32492d08-3cb7-59ac-8962-b2e384f024fc")
 DUE_BATCH_MAX_ITEMS = 200
 EMBED_CLAIM_LEASE_SECONDS = 300
@@ -141,16 +143,21 @@ class Fused:
     text: str
 
 
-def fuse_hits(
-    lexical: tuple[Hit, ...], vector: tuple[Hit, ...], limit: int
-) -> tuple[Fused, ...]:
-    """Reciprocal-rank fusion (K=60) over the two legs, collapsed to one score per owning row: each
-    leg ranks its chunk hits, a chunk's RRF score sums 1/(K+rank) across the legs it placed in, and
-    a row takes its best-scoring chunk — that chunk's text rides along as the matched snippet."""
+def _fuse(
+    lexical: tuple[Hit, ...], vector: tuple[Hit, ...]
+) -> dict[str, tuple[float, float, str]]:
+    """Per owning row: its reciprocal-rank-fusion score (K=60) with the matched snippet, and its raw
+    vector-leg cosine. Each leg ranks its chunk hits, a chunk's RRF sums 1/(K+rank) across the legs
+    it placed in, and a row takes its best-scoring chunk (that chunk's text rides along); the cosine
+    is the row's largest raw vector-leg score — the continuous semantic-closeness signal recall
+    blends into its rank."""
     ranks = tuple(
         {hit.chunk_digest: rank for rank, hit in enumerate(leg, start=1) if hit.score > 0}
         for leg in (lexical, vector)
     )
+    cosine: dict[str, float] = {}
+    for hit in vector:
+        cosine[hit.owner_id] = max(cosine.get(hit.owner_id, 0.0), hit.score)
     best: dict[str, tuple[float, str]] = {}
     for hit in (*lexical, *vector):
         rrf = sum(
@@ -159,8 +166,38 @@ def fuse_hits(
         current = best.get(hit.owner_id)
         if current is None or rrf > current[0]:
             best[hit.owner_id] = (rrf, hit.text)
-    ranked = sorted(best.items(), key=lambda item: item[1][0], reverse=True)[:limit]
-    return tuple(Fused(owner_id, score, text) for owner_id, (score, text) in ranked)
+    return {
+        owner_id: (rrf, cosine.get(owner_id, 0.0), text)
+        for owner_id, (rrf, text) in best.items()
+    }
+
+
+def fuse_hits(
+    lexical: tuple[Hit, ...], vector: tuple[Hit, ...], limit: int
+) -> tuple[Fused, ...]:
+    """Pure reciprocal-rank fusion collapsed to one score per owning row — source-page search's
+    ranking, where the fused rank across the lexical and vector legs is the whole signal."""
+    fused = _fuse(lexical, vector)
+    ranked = sorted(fused.items(), key=lambda item: item[1][0], reverse=True)[:limit]
+    return tuple(Fused(owner_id, rrf, text) for owner_id, (rrf, _cosine, text) in ranked)
+
+
+def fuse_recall(
+    lexical: tuple[Hit, ...], vector: tuple[Hit, ...], limit: int
+) -> tuple[Fused, ...]:
+    """gbrain cosine re-score blend: `RRF_WEIGHT·(normalized RRF) + COSINE_WEIGHT·(raw query-chunk
+    cosine)`, so a semantically closer row is promoted by a continuous signal, not only its fused
+    rank — the score recall ranks by before recency decay. The RRF is normalized by the top fused
+    score across rows; the cosine is the row's best vector-leg score (0 when the query never
+    embedded, degrading the blend to normalized RRF alone)."""
+    fused = _fuse(lexical, vector)
+    top_rrf = max((rrf for rrf, _cosine, _text in fused.values()), default=0.0) or 1.0
+    scored = [
+        (owner_id, RRF_WEIGHT * (rrf / top_rrf) + COSINE_WEIGHT * cosine, text)
+        for owner_id, (rrf, cosine, text) in fused.items()
+    ]
+    ranked = sorted(scored, key=lambda item: item[1], reverse=True)[:limit]
+    return tuple(Fused(owner_id, score, text) for owner_id, score, text in ranked)
 
 
 @dataclass(frozen=True)
@@ -290,12 +327,12 @@ class MemoryStore:
         start: datetime | None = None,
         end: datetime | None = None,
     ) -> tuple[Recalled, ...]:
-        """Fuse the index legs, read the surviving items back, then rank by recency decay (fact
-        half-lives), cap per-class diversity, and rewrite episodic hits to topic pointers. An
-        optional half-open `[start, end)` bound on `created_at` restricts recall to a window; the
-        index never sees the bound, so the filter lands in the row read-back alongside the
-        superseded drop."""
-        enriched = await self._enrich(fuse_hits(
+        """Fuse the index legs with the cosine re-score blend, read the surviving items back, then
+        rank by recency decay (fact half-lives), cap per-class diversity, and rewrite episodic hits
+        to topic pointers. An optional half-open `[start, end)` bound on `created_at` restricts
+        recall to a window; the index never sees the bound, so the filter lands in the row read-back
+        alongside the superseded drop."""
+        enriched = await self._enrich(fuse_recall(
             *await self._legs(query, subjects, OWNER_KIND_MEMORY_ITEM, limit), limit
         ), start, end)
         now = datetime.now(UTC)
