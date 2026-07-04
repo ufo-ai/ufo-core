@@ -27,6 +27,7 @@ from selfhost_ext_scheduled_tasks.tasks import (
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.ext.context import ExtensionContext, context_for
+from selfhost.ext.loader import skill_registry
 from selfhost.jobs import JobRunner, bindings_from
 from selfhost.scheduling import ScheduleStore
 from selfhost.schema import tables
@@ -235,6 +236,11 @@ async def test_schedule_task_rejects_non_five_field_cron(db: None) -> None:
         await schedule_task(
             ctx, ScheduleTaskInput(schedule="0 9 * * * *", prompt="too many fields")
         )
+
+
+def test_task_scheduling_skill_parses_and_indexes() -> None:
+    index = dict(skill_registry((manifest(),)).index())
+    assert "task-scheduling" in index
 
 
 async def test_manifest_job_fires_through_job_runner(db: None) -> None:

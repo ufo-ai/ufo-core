@@ -1,13 +1,16 @@
-"""What the scheduled-tasks extension declares: the chat tools and the batch-at-interval runner.
+"""What the scheduled-tasks extension declares: the chat tools, the batch-at-interval runner, and
+the task-scheduling skill the agent loads before scheduling.
 
 The runner is a recurring job (fires on the clock, never on the schedule rows it writes); the tools
 let an agent schedule, cancel, and list its recurring tasks in chat. Both reach the durable schedule
 rows through the workspace-scoped `ScheduleStore` their ExtensionContext carries, and a fire drives
 the admit-turn seam through `ExtensionContext.invoke`."""
 
+from pathlib import Path
+
 from selfhost.sdk.context import ExtensionContext
 from selfhost.sdk.jobs import JobSpec
-from selfhost.sdk.manifest import Manifest
+from selfhost.sdk.manifest import Manifest, SkillSpec
 from selfhost.sdk.tools import ToolDef
 from selfhost_ext_scheduled_tasks.runner import ScheduledTaskRunner
 from selfhost_ext_scheduled_tasks.tasks import (
@@ -23,6 +26,8 @@ NAME = "scheduled_tasks"
 VERSION = "0.1.0"
 RUNNER_JOB = "scheduled_task_runner"
 RUNNER_SCHEDULE = "0 * * * * *"
+SKILLS_ROOT = Path(__file__).parent / "skills"
+SKILL_NAMES = ("task-scheduling",)
 
 
 async def _run(ctx: ExtensionContext) -> None:
@@ -65,4 +70,5 @@ def manifest() -> Manifest:
             ),
         ),
         jobs=(JobSpec(name=RUNNER_JOB, schedule=RUNNER_SCHEDULE, handler=_run),),
+        skills=tuple(SkillSpec(path=SKILLS_ROOT / name) for name in SKILL_NAMES),
     )
