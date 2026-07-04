@@ -1,263 +1,141 @@
-"""The research web tool pack: `search_web` and `fetch_url`, backed by the Exa API.
+"""The Exa search backend: one implementation of core's `search_providers` seam.
 
-Neither tool holds the Exa key. Each shapes an Exa request body and sends it to `api.exa.ai` through
-the sandbox's egress proxy, carrying the sentinel `x-api-key` value in the header. The proxy admits
-the host (an unconfigured slot opens no egress, so the CONNECT is refused), swaps the sentinel for
-the workspace's stored BYOK key on the wire, and meters the request under `requests` — so the raw
-secret never enters the sandbox and the call shows in `selfhost spend`. The `exa_api` credential
-slot the Manifest declares is what drives that injection."""
+`ExaSearchProvider` runs host-side in the serve process — it reads the workspace's BYOK Exa key in
+process through the scoped `CredentialAccess`, shapes each Exa request body, and sends it to
+`api.exa.ai` over async httpx, mapping the response into the seam's `SearchResults`/`FetchedPage`.
+The raw key never enters the sandbox: the `exa_api` credential slot the Manifest declares is a plain
+host-side slot with no wire-injection, so the egress proxy derives no rule for it. The research
+extension's tools call this backend through the turn's `ToolContext`; a deploy selects it with
+`[research] search_provider = "exa"`."""
 
-import json
-import shlex
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
-from typing import Literal
 
-from pydantic import BaseModel, Field
+import httpx
 
-from selfhost.sdk.manifest import (
-    CredentialSlot,
-    InjectionTarget,
-    Manifest,
-    PromptSection,
-    SubagentProfile,
-)
-from selfhost.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
+from selfhost.sdk.context import CredentialAccess
+from selfhost.sdk.manifest import CredentialSlot, Manifest, SearchProviderSpec
+from selfhost.sdk.search import FetchedPage, FetchRequest, SearchHit, SearchQuery, SearchResults
 
 type Json = str | int | float | bool | None | list["Json"] | dict[str, "Json"]
 
 NAME = "exa"
 VERSION = "0.1.0"
-SEARCH_WEB_TOOL = "search_web"
-FETCH_URL_TOOL = "fetch_url"
-SEARCH_VERTICAL_TOOL = "search_vertical"
+EXA_BACKEND = "exa"
 EXA_SLOT = "exa_api"
 EXA_HOST = "api.exa.ai"
 EXA_API_KEY_HEADER = "x-api-key"
-EXA_SENTINEL = "SELFHOST_SENTINEL_EXA_KEY"
-EGRESS_DIMENSION = "requests"
+EXA_TIMEOUT_SECONDS = 30
 SEARCH_PATH = "/search"
 CONTENTS_PATH = "/contents"
-MAX_SEARCH_QUERIES = 5
-DEFAULT_SEARCH_RESULTS = 5
 SEARCH_TEXT_CHARS = 1000
 VERTICAL_TEXT_CHARS = 500
 MAX_FETCH_CHARS = 20_000
 RECENCY_DAYS = {"day": 1, "week": 7, "month": 30}
 VERTICAL_CATEGORY = {"academic": "research paper", "people": "linkedin profile"}
 
-SEARCH_WEB_DESCRIPTION = (
-    "Searches the web for current and factual information. Returns results with titles, "
-    "URLs, and content snippets. Best for news, prices, and time-sensitive data. Use "
-    "short, keyword-focused queries — max 3-5 per call. Run parallel queries for "
-    "different topics rather than one combined query."
-)
-FETCH_URL_DESCRIPTION = (
-    "Fetches content from an HTTP/HTTPS URL. Optionally extracts specific information via LLM "
-    "prompt. Use to read web pages, documentation, articles, or any publicly accessible URL. "
-    "Results are cached — use force_fetch=true if content appears stale."
-)
-SEARCH_VERTICAL_DESCRIPTION = (
-    "Search specialized content verticals. Use instead of search_web when you need a specific "
-    "content type: images, professional profiles, academic papers, videos, or product listings."
-)
 
-SECTION_NAME = "web"
-SECTION_BODY = (Path(__file__).parent / "web_section.md").read_text().strip()
+class ExaError(RuntimeError):
+    """Exa answered a non-2xx status or a body without a results list — surfaced to the turn as an
+    error result carrying the status and body, never a silent empty answer."""
 
 
-class SearchWebInput(BaseModel):
-    queries: tuple[str, ...] = Field(max_length=MAX_SEARCH_QUERIES)
-    recency_filter: Literal["day", "week", "month"] | None = None
-    allowed_domains: tuple[str, ...] | None = None
+@dataclass(frozen=True)
+class ExaSearchProvider:
+    """Core's `search_providers` seam backed by Exa: `search` runs one Exa `/search`, `fetch` reads
+    one URL through `/contents`, both host-side over async httpx with the BYOK key read in process.
+    `supports_fetch` is True — Exa fetches page content. The `transport` field is the httpx
+    testability seam a test injects a `MockTransport` on; production leaves it None."""
 
+    credentials: CredentialAccess
+    transport: httpx.AsyncBaseTransport | None = None
+    supports_fetch: bool = True
 
-class FetchUrlInput(BaseModel):
-    url: str
-    prompt: str | None = None
-    max_length: int | None = None
-    force_fetch: bool | None = None
-    user_description: str
+    async def search(self, query: SearchQuery) -> SearchResults:
+        payload = await self._post(SEARCH_PATH, self._search_body(query))
+        return SearchResults(hits=tuple(self._hit(item) for item in _results(payload)))
 
-
-class SearchVerticalInput(BaseModel):
-    vertical: Literal["image", "people", "academic", "video", "shopping"]
-    query: str
-    user_description: str
-
-
-async def _search_web(ctx: ToolContext, args: SearchWebInput) -> ToolResult:
-    start_date: str | None = None
-    if args.recency_filter is not None:
-        start = datetime.now(UTC) - timedelta(days=RECENCY_DAYS[args.recency_filter])
-        start_date = start.strftime("%Y-%m-%dT%H:%M:%SZ")
-    results: list[Json] = []
-    for query in args.queries:
+    async def fetch(self, request: FetchRequest) -> FetchedPage:
         body: dict[str, Json] = {
-            "query": query,
-            "numResults": DEFAULT_SEARCH_RESULTS,
-            "contents": {"text": {"maxCharacters": SEARCH_TEXT_CHARS}, "highlights": True},
+            "urls": [request.url],
+            "text": {"maxCharacters": min(request.max_chars or MAX_FETCH_CHARS, MAX_FETCH_CHARS)},
         }
-        if args.allowed_domains:
-            body["includeDomains"] = list(args.allowed_domains)
-        if start_date is not None:
-            body["startPublishedDate"] = start_date
-        result = await _exa_post(ctx, SEARCH_PATH, body)
-        if result.exit_code != 0:
-            return ToolResult(
-                content=(TextContent(text=result.stdout or result.stderr),), is_error=True
-            )
-        payload = json.loads(result.stdout)
-        found = payload.get("results") if isinstance(payload, dict) else None
-        if not isinstance(found, list):
-            raise ValueError("exa search response has no results list")
-        results.extend(found)
-    return ToolResult(content=(TextContent(text=json.dumps({"results": results})),))
+        if request.prompt:
+            body["summary"] = {"query": request.prompt}
+        if request.force:
+            body["livecrawl"] = "always"
+        payload = await self._post(CONTENTS_PATH, body)
+        results = _results(payload)
+        item = results[0] if results else {}
+        return FetchedPage(
+            url=str(item.get("url") or request.url),
+            text=str(item.get("text") or ""),
+            summary=_opt_str(item.get("summary")),
+        )
+
+    @staticmethod
+    def _search_body(query: SearchQuery) -> dict[str, Json]:
+        body: dict[str, Json] = {"query": query.query, "numResults": query.num_results}
+        if query.vertical is None:
+            body["contents"] = {"text": {"maxCharacters": SEARCH_TEXT_CHARS}, "highlights": True}
+            if query.allowed_domains:
+                body["includeDomains"] = list(query.allowed_domains)
+            if query.recency is not None:
+                start = datetime.now(UTC) - timedelta(days=RECENCY_DAYS[query.recency])
+                body["startPublishedDate"] = start.strftime("%Y-%m-%dT%H:%M:%SZ")
+        else:
+            body["contents"] = {"text": {"maxCharacters": VERTICAL_TEXT_CHARS}}
+            category = VERTICAL_CATEGORY.get(query.vertical)
+            if category is not None:
+                body["category"] = category
+        return body
+
+    @staticmethod
+    def _hit(item: dict[str, object]) -> SearchHit:
+        highlights = item.get("highlights")
+        return SearchHit(
+            url=str(item.get("url") or ""),
+            title=str(item.get("title") or ""),
+            text=str(item.get("text") or ""),
+            published_date=_opt_str(item.get("publishedDate")),
+            highlights=tuple(h for h in highlights if isinstance(h, str))
+            if isinstance(highlights, list)
+            else (),
+        )
+
+    async def _post(self, path: str, body: dict[str, Json]) -> object:
+        key = await self.credentials.get(EXA_SLOT)
+        async with httpx.AsyncClient(
+            base_url=f"https://{EXA_HOST}", timeout=EXA_TIMEOUT_SECONDS, transport=self.transport
+        ) as http:
+            response = await http.post(path, json=body, headers={EXA_API_KEY_HEADER: key})
+        if response.status_code >= 400:
+            raise ExaError(f"exa {path} failed ({response.status_code}): {response.text}")
+        return response.json()
 
 
-async def _fetch_url(ctx: ToolContext, args: FetchUrlInput) -> ToolResult:
-    body: dict[str, Json] = {
-        "urls": [args.url],
-        "text": {"maxCharacters": min(args.max_length or MAX_FETCH_CHARS, MAX_FETCH_CHARS)},
-    }
-    if args.prompt:
-        body["summary"] = {"query": args.prompt}
-    if args.force_fetch:
-        body["livecrawl"] = "always"
-    result = await _exa_post(ctx, CONTENTS_PATH, body)
-    return ToolResult(
-        content=(TextContent(text=result.stdout or result.stderr),),
-        is_error=result.exit_code != 0,
-    )
+def _results(payload: object) -> list[dict[str, object]]:
+    found = payload.get("results") if isinstance(payload, dict) else None
+    if not isinstance(found, list):
+        raise ExaError(f"exa response has no results list: {payload!r}")
+    return [item for item in found if isinstance(item, dict)]
 
 
-async def _search_vertical(ctx: ToolContext, args: SearchVerticalInput) -> ToolResult:
-    body: dict[str, Json] = {
-        "query": args.query,
-        "numResults": DEFAULT_SEARCH_RESULTS,
-        "contents": {"text": {"maxCharacters": VERTICAL_TEXT_CHARS}},
-    }
-    category = VERTICAL_CATEGORY.get(args.vertical)
-    if category is not None:
-        body["category"] = category
-    result = await _exa_post(ctx, SEARCH_PATH, body)
-    return ToolResult(
-        content=(TextContent(text=result.stdout or result.stderr),),
-        is_error=result.exit_code != 0,
-    )
-
-
-async def _exa_post(ctx: ToolContext, path: str, body: dict[str, Json]):
-    """POST the Exa request body to `path` through the sandbox egress proxy, carrying the sentinel
-    `x-api-key` the proxy swaps for the workspace's BYOK Exa key. The request originates inside the
-    sandbox — the only route the proxy meters and injects — so the raw key never enters the box."""
-    api_key = shlex.quote(f"{EXA_API_KEY_HEADER}: {EXA_SENTINEL}")
-    content_type = shlex.quote("Content-Type: application/json")
-    data = shlex.quote(json.dumps(body))
-    url = shlex.quote(f"https://{EXA_HOST}{path}")
-    command = (
-        f"curl -sS --fail-with-body -X POST -H {api_key} -H {content_type} --data {data} {url}"
-    )
-    return await ctx.sandbox.bash(command)
-
-
-RESEARCH_PROFILE_NAME = "research"
-DEEP_RESEARCH_PROFILE_NAME = "deep_research"
-DEEP_RESEARCH_ROUND_LIMIT = 200
-RESEARCH_TOOL_NAMES = (
-    SEARCH_WEB_TOOL,
-    FETCH_URL_TOOL,
-    SEARCH_VERTICAL_TOOL,
-    "navigate",
-    "read_page",
-    "get_page_text",
-    "find",
-    "tabs_context",
-    "tabs_create",
-    "tabs_close",
-    "list_external_tools",
-    "describe_external_tools",
-    "call_external_tool",
-    "bash",
-    "read",
-    "write",
-    "edit",
-    "glob",
-    "grep",
-    "load_skill",
-    "list_skills",
-    "share_file",
-    "memory_search",
-)
-RESEARCH_PROMPT = (Path(__file__).parent / "subagent_research.md").read_text()
-DEEP_RESEARCH_PROMPT = (Path(__file__).parent / "subagent_deep_research.md").read_text()
-
-
-class ResearchInput(BaseModel):
-    objective: str
-
-
-class ResearchOutput(BaseModel):
-    result: str
-
-
-RESEARCH_PROFILE = SubagentProfile(
-    name=RESEARCH_PROFILE_NAME,
-    prompt=RESEARCH_PROMPT,
-    tool_names=RESEARCH_TOOL_NAMES,
-    input_model=ResearchInput,
-    output_model=ResearchOutput,
-)
-DEEP_RESEARCH_PROFILE = SubagentProfile(
-    name=DEEP_RESEARCH_PROFILE_NAME,
-    prompt=DEEP_RESEARCH_PROMPT,
-    tool_names=RESEARCH_TOOL_NAMES,
-    input_model=ResearchInput,
-    output_model=ResearchOutput,
-    max_rounds=DEEP_RESEARCH_ROUND_LIMIT,
-)
+def _opt_str(value: object) -> str | None:
+    return value if isinstance(value, str) else None
 
 
 def manifest() -> Manifest:
     return Manifest(
         name=NAME,
         version=VERSION,
-        tools=(
-            ToolDef(
-                name=SEARCH_WEB_TOOL,
-                description=SEARCH_WEB_DESCRIPTION,
-                input_model=SearchWebInput,
-                handler=_search_web,
-                untrusted=True,
-            ),
-            ToolDef(
-                name=FETCH_URL_TOOL,
-                description=FETCH_URL_DESCRIPTION,
-                input_model=FetchUrlInput,
-                handler=_fetch_url,
-                untrusted=True,
-            ),
-            ToolDef(
-                name=SEARCH_VERTICAL_TOOL,
-                description=SEARCH_VERTICAL_DESCRIPTION,
-                input_model=SearchVerticalInput,
-                handler=_search_vertical,
-                untrusted=True,
-            ),
-        ),
         credentials=(
             CredentialSlot(
                 name=EXA_SLOT,
-                description="BYOK Exa API key; the egress proxy swaps it onto api.exa.ai for the "
-                "sentinel the sandbox sends.",
-                injection=InjectionTarget(
-                    host=EXA_HOST,
-                    header=EXA_API_KEY_HEADER,
-                    sentinel=EXA_SENTINEL,
-                    dimension=EGRESS_DIMENSION,
-                ),
+                description="BYOK Exa API key; the search backend reads it in-process, host-side.",
             ),
         ),
-        prompt_sections=(PromptSection(name=SECTION_NAME, body=SECTION_BODY),),
-        subagents=(RESEARCH_PROFILE, DEEP_RESEARCH_PROFILE),
+        search_providers=(
+            SearchProviderSpec(backend=EXA_BACKEND, build=lambda creds: ExaSearchProvider(creds)),
+        ),
     )

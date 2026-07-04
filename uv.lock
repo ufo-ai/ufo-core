@@ -28,6 +28,7 @@ members = [
     "selfhost-ext-openrouter",
     "selfhost-ext-redis-hub",
     "selfhost-ext-repl",
+    "selfhost-ext-research",
     "selfhost-ext-sample",
     "selfhost-ext-scheduled-tasks",
     "selfhost-ext-self-improvement",
@@ -2807,11 +2808,15 @@ name = "selfhost-ext-exa"
 version = "0.1.0"
 source = { editable = "extensions/exa" }
 dependencies = [
+    { name = "httpx" },
     { name = "selfhost" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "selfhost", editable = "core" }]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "selfhost", editable = "core" },
+]
 
 [[package]]
 name = "selfhost-ext-index-default"
@@ -2900,6 +2905,21 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "selfhost", editable = "core" }]
+
+[[package]]
+name = "selfhost-ext-research"
+version = "0.1.0"
+source = { editable = "extensions/research" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "selfhost" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pydantic", specifier = ">=2.9" },
+    { name = "selfhost", editable = "core" },
+]
 
 [[package]]
 name = "selfhost-ext-sample"

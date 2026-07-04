@@ -15,7 +15,7 @@ _spec.loader.exec_module(gates)
 ROGUE = Path("extensions/rogue/rogue.py")
 CORE_FILE = Path("core/src/selfhost/db.py")
 EXT_TEST = Path("extensions/exa/tests/test_ext_exa.py")
-EXT_EVAL = Path("extensions/exa/evals/web_research.py")
+EXT_EVAL = Path("extensions/research/evals/web_research.py")
 EXT_SHIPPED_MODULE = Path("extensions/exa/selfhost_ext_exa.py")
 EXT_SHIPPED_PACKAGE = Path("extensions/memory/selfhost_ext_memory/store.py")
 

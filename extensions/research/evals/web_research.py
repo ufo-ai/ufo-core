@@ -1,7 +1,7 @@
 """Web research cases: score both the agent's answer AND its trajectory — each question needs a
-live web lookup (exa's `search_web`/`fetch_url`) and has a stable, permanently-checkable answer, so
-grading the answer never goes stale even though the fact must be looked up. `web_dependent` marks
-every case: a real outage infra-excludes it rather than counting a capability failure."""
+live web lookup (the research pack's `search_web`/`fetch_url`) and has a stable, permanently-
+checkable answer, so grading the answer never goes stale even though the fact must be looked up.
+`web_dependent` marks every case: a real outage infra-excludes it rather than counting a failure."""
 
 from selfhost_ext_eval_harness.capability import CapabilityCase, Grader
 from selfhost_ext_eval_harness.scorers import (

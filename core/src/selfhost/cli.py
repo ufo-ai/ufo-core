@@ -43,6 +43,9 @@ url = "sqlite+aiosqlite:///selfhost.db"
 [blob]
 backend = "filesystem"
 root = "./blobs"
+
+[research]
+search_provider = "exa"
 """
 
 
