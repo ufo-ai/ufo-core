@@ -206,18 +206,21 @@ BROWSER_TOOLS: tuple[ToolDef, ...] = (
         description="Read the browser page accessibility tree.",
         input_model=ReadPageInput,
         handler=_read_page,
+        untrusted=True,
     ),
     ToolDef(
         name="get_page_text",
         description="Extract raw text from the browser page.",
         input_model=GetPageTextInput,
         handler=_get_page_text,
+        untrusted=True,
     ),
     ToolDef(
         name="find",
         description="Find browser page elements by role, text, name, or URL.",
         input_model=FindInput,
         handler=_find,
+        untrusted=True,
     ),
     ToolDef(
         name="form_input",

@@ -125,6 +125,12 @@ def test_manifest_declares_search_and_fetch_with_verbatim_descriptions() -> None
     }
 
 
+def test_web_results_are_marked_untrusted() -> None:
+    by_name = {tool.name: tool for tool in web.manifest().tools}
+    assert by_name["search_web"].untrusted is True
+    assert by_name["fetch_url"].untrusted is True
+
+
 def test_manifest_declares_the_exa_injection_slot() -> None:
     (slot,) = web.manifest().credentials
     assert slot.name == "exa_api"

@@ -237,6 +237,13 @@ def test_serve_registers_every_provider_and_declares_the_dynamic_tools() -> None
     assert {"list_external_tools", "describe_external_tools", "call_external_tool"} <= names
 
 
+def test_call_external_tool_result_is_marked_untrusted() -> None:
+    by_name = {tool.name: tool for tool in connectors.manifest().tools}
+    assert by_name["call_external_tool"].untrusted is True
+    assert by_name["list_external_tools"].untrusted is False
+    assert by_name["describe_external_tools"].untrusted is False
+
+
 async def test_list_external_tools_filters_the_connector_catalog() -> None:
     result = await list_external_tools(
         _ctx(uuid4(), uuid4(), uuid4(), None),
