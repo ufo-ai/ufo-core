@@ -5,9 +5,9 @@ slug is the connector's `name` and doubles as the source `backend` name a `sourc
 the credential slot the direct backend reads its key from; the manifest wraps each in a
 `ConnectorBackend` and registers it as a source the sync driver drives."""
 
+from selfhost.sdk.sources import Connector
 from selfhost_ext_sources.asana import AsanaConnector
 from selfhost_ext_sources.confluence import ConfluenceConnector
-from selfhost_ext_sources.connector import Connector
 from selfhost_ext_sources.github import GitHubConnector
 from selfhost_ext_sources.gmail import GmailConnector
 from selfhost_ext_sources.google_calendar import GoogleCalendarConnector

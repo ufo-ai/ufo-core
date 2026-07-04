@@ -8,11 +8,11 @@ from collections.abc import Callable
 from uuid import UUID, uuid4
 
 import httpx
-from selfhost_ext_sources.backend import ConnectorBackend, ConnectorSourceConfig
 from selfhost_ext_sources.google_calendar import GoogleCalendarConnector
 
 from selfhost.connectors import Credential
-from selfhost.memory.sources import CursorExpired, SourceAuth, StreamSkipped
+from selfhost.sdk.sources import ConnectorBackend, ConnectorSourceConfig
+from selfhost.sources.sync import CursorExpired, SourceAuth, StreamSkipped
 
 ACCOUNT = "acct-1"
 EVENTS_PATH = "/calendar/v3/calendars/primary/events"

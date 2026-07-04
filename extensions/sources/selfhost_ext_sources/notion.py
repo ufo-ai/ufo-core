@@ -25,9 +25,7 @@ from typing import Any
 import httpx
 
 from selfhost.sdk.authproxy import Credential
-from selfhost.sdk.sources import StreamSkipped
-from selfhost_ext_sources.connector import StreamSpec
-from selfhost_ext_sources.rest import RestConnector, list_or_empty
+from selfhost.sdk.sources import RestConnector, StreamSkipped, StreamSpec, list_or_empty
 
 PAGE_SIZE = 100
 MAX_BLOCK_DEPTH = 30

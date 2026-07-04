@@ -19,8 +19,8 @@ from typing import Any, ClassVar
 
 import httpx
 
-from selfhost.sdk.authproxy import Credential
-from selfhost_ext_sources.connector import (
+from selfhost.connectors import Credential
+from selfhost.sources.connector import (
     Connector,
     PaginationStrategy,
     StreamPage,

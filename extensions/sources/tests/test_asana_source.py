@@ -11,10 +11,10 @@ from uuid import UUID, uuid4
 
 import httpx
 from selfhost_ext_sources.asana import AsanaConnector
-from selfhost_ext_sources.backend import ConnectorBackend, ConnectorSourceConfig
 
 from selfhost.connectors import Credential
-from selfhost.memory.sources import SourceAuth, SyncResult
+from selfhost.sdk.sources import ConnectorBackend, ConnectorSourceConfig
+from selfhost.sources.sync import SourceAuth, SyncResult
 
 ACCOUNT = "acct-1"
 

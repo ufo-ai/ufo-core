@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, ClassVar
 
-from selfhost.sdk.authproxy import Credential
+from selfhost.connectors import Credential
 
 TITLE_KEYS = ("title", "name", "full_name", "login", "subject")
 

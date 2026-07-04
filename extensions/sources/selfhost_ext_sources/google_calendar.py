@@ -17,9 +17,7 @@ from typing import Any
 
 import httpx
 
-from selfhost.sdk.sources import CursorExpired, StreamSkipped
-from selfhost_ext_sources.connector import StreamPage, StreamSpec
-from selfhost_ext_sources.rest import RestConnector
+from selfhost.sdk.sources import CursorExpired, RestConnector, StreamPage, StreamSkipped, StreamSpec
 
 EVENTS_PATH = "/calendar/v3/calendars/primary/events"
 LIST_PAGE_SIZE = 250

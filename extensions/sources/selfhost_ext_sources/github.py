@@ -22,9 +22,7 @@ from typing import Any
 import httpx
 
 from selfhost.sdk.authproxy import Credential
-from selfhost.sdk.sources import StreamSkipped
-from selfhost_ext_sources.connector import StreamPage, StreamSpec
-from selfhost_ext_sources.rest import RestConnector
+from selfhost.sdk.sources import RestConnector, StreamPage, StreamSkipped, StreamSpec
 
 PAGE_SIZE = 100
 _REPO_LIST_PARAMS = {"per_page": PAGE_SIZE, "type": "all", "sort": "pushed", "direction": "desc"}

@@ -27,9 +27,7 @@ from typing import Any
 
 import httpx
 
-from selfhost.sdk.sources import CursorExpired, StreamSkipped
-from selfhost_ext_sources.connector import StreamPage, StreamSpec
-from selfhost_ext_sources.rest import RestConnector
+from selfhost.sdk.sources import CursorExpired, RestConnector, StreamPage, StreamSkipped, StreamSpec
 
 GMAIL_API_BASE = "https://gmail.googleapis.com"
 MESSAGES_PATH = "/gmail/v1/users/me/messages"

@@ -24,17 +24,8 @@ from selfhost_ext_embed_openai import EMBED_DIM
 from selfhost_ext_index_default import DefaultIndex
 from selfhost_ext_memory.store import MemoryStore, PageIndexer
 from selfhost_ext_sources.asana import AsanaConnector
-from selfhost_ext_sources.backend import ConnectorBackend, ConnectorSourceConfig
-from selfhost_ext_sources.connector import (
-    Connector,
-    Pagination,
-    PaginationStrategy,
-    StreamPage,
-    StreamSpec,
-)
 from selfhost_ext_sources.direct import DirectAuthProxy
 from selfhost_ext_sources.github import GitHubConnector
-from selfhost_ext_sources.rest import RestConnector
 
 from selfhost.blob import FilesystemBlobStore
 from selfhost.connectors import Credential
@@ -42,8 +33,18 @@ from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.ext.context import CredentialAccess, ScopedStore, context_for
 from selfhost.indexing import TextChunker
-from selfhost.memory.sources import CorePageFeed, SourceAuth, StreamSkipped, SyncDriver
 from selfhost.schema import tables
+from selfhost.sdk.sources import (
+    Connector,
+    ConnectorBackend,
+    ConnectorSourceConfig,
+    Pagination,
+    PaginationStrategy,
+    RestConnector,
+    StreamPage,
+    StreamSpec,
+)
+from selfhost.sources.sync import CorePageFeed, SourceAuth, StreamSkipped, SyncDriver
 from selfhost.subjects import SHARED_SUBJECT
 
 ACCOUNT = "acct-1"

@@ -28,15 +28,15 @@ from selfhost.config import SourceConfig, SourceEntry
 from selfhost.db import workspace_tx
 from selfhost.ext.context import ScopedStore
 from selfhost.indexing import TextChunker
-from selfhost.memory.sources import (
+from selfhost.schema import tables
+from selfhost.schema.records import Usage
+from selfhost.sources.sync import (
     FOLDER_BACKEND,
     CorePageFeed,
     FolderSource,
     SyncDriver,
     register_sources,
 )
-from selfhost.schema import tables
-from selfhost.schema.records import Usage
 from selfhost.subjects import SHARED_SUBJECT, member_subject
 
 pytestmark = pytest.mark.integration

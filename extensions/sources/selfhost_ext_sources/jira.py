@@ -20,9 +20,14 @@ from typing import Any
 
 import httpx
 
-from selfhost.sdk.sources import StreamSkipped
-from selfhost_ext_sources.connector import StreamSpec
-from selfhost_ext_sources.rest import RestConnector, list_or_empty, records_at, with_context
+from selfhost.sdk.sources import (
+    RestConnector,
+    StreamSkipped,
+    StreamSpec,
+    list_or_empty,
+    records_at,
+    with_context,
+)
 
 PAGE_SIZE = 100
 ISSUE_FIELDS = "summary,description,status,priority,created,updated,project,assignee,reporter"

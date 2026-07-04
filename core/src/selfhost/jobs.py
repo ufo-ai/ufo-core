@@ -22,12 +22,6 @@ from selfhost.db import workspace_tx
 from selfhost.ext.context import ExtensionContext, TurnInvoker, context_for
 from selfhost.ext.manifest import JobSpec, Manifest
 from selfhost.indexing import EmbedClient, IndexBackend
-from selfhost.memory.sources import (
-    SOURCE_SYNC_JOB,
-    SOURCE_SYNC_SCHEDULE,
-    PageFeed,
-    SyncDriver,
-)
 from selfhost.o11y import log
 from selfhost.schema import tables
 from selfhost.schema.records import (
@@ -35,6 +29,12 @@ from selfhost.schema.records import (
     PARKED,
     TURN_QUEUE_NAME,
     TURN_WORKFLOW_NAME,
+)
+from selfhost.sources.sync import (
+    SOURCE_SYNC_JOB,
+    SOURCE_SYNC_SCHEDULE,
+    PageFeed,
+    SyncDriver,
 )
 
 JOB_QUEUE_NAME = "jobs"

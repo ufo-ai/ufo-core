@@ -42,14 +42,6 @@ from selfhost.jobs import JobRunner, SpendResume, bindings_from, core_jobs
 from selfhost.loop.profiles import CORE_SUBAGENT_PROFILES
 from selfhost.loop.queue import Runtime, init_runtime
 from selfhost.loop.subagents import SubagentRegistry
-from selfhost.memory.sources import (
-    FOLDER_BACKEND,
-    CorePageFeed,
-    FolderSource,
-    SourceBackend,
-    SyncDriver,
-    register_sources,
-)
 from selfhost.models.registry import model_registry
 from selfhost.o11y import init_o11y, log
 from selfhost.runtime_instance import BootGuard, Heartbeat
@@ -64,6 +56,14 @@ from selfhost.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_c
 from selfhost.sandbox.session import Carrier, ProxyEndpoint
 from selfhost.schema import tables
 from selfhost.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION
+from selfhost.sources.sync import (
+    FOLDER_BACKEND,
+    CorePageFeed,
+    FolderSource,
+    SourceBackend,
+    SyncDriver,
+    register_sources,
+)
 from selfhost.surfaces.admission import Admission, AdmissionInvoker
 from selfhost.surfaces.artifacts import router as artifacts_router
 from selfhost.surfaces.cli import CONNECT_CALLBACK_PATH, router

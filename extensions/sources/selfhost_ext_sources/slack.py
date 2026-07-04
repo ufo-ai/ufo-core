@@ -23,9 +23,7 @@ from typing import Any
 
 import httpx
 
-from selfhost.sdk.sources import StreamSkipped
-from selfhost_ext_sources.connector import StreamPage, StreamSpec
-from selfhost_ext_sources.rest import RestConnector
+from selfhost.sdk.sources import RestConnector, StreamPage, StreamSkipped, StreamSpec
 
 USER_PAGE_SIZE = 200
 CONVERSATION_PAGE_SIZE = 200

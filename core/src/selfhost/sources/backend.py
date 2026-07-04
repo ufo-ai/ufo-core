@@ -21,8 +21,9 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel
 
-from selfhost.sdk.sources import SHARED_SUBJECT, Page, SourceAuth, SyncResult
-from selfhost_ext_sources.connector import Connector, StreamPage, StreamSpec
+from selfhost.sources.connector import Connector, StreamPage, StreamSpec
+from selfhost.sources.sync import Page, SourceAuth, SyncResult
+from selfhost.subjects import SHARED_SUBJECT
 
 
 class ConnectorSourceConfig(BaseModel):

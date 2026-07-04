@@ -17,9 +17,7 @@ from typing import Any
 
 import httpx
 
-from selfhost.sdk.sources import StreamSkipped
-from selfhost_ext_sources.connector import StreamSpec
-from selfhost_ext_sources.rest import RestConnector, list_or_empty
+from selfhost.sdk.sources import RestConnector, StreamSkipped, StreamSpec, list_or_empty
 
 DOC_MIME = "application/vnd.google-apps.document"
 DOCS_API_URL = "https://docs.googleapis.com/v1"

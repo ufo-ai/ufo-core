@@ -22,7 +22,9 @@ from selfhost.jobs import (
     bindings_from,
     core_jobs,
 )
-from selfhost.memory.sources import (
+from selfhost.schema import tables
+from selfhost.schema.records import Agent, Turn
+from selfhost.sources.sync import (
     FOLDER_BACKEND,
     SOURCE_SYNC_JOB,
     CorePageFeed,
@@ -37,8 +39,6 @@ from selfhost.memory.sources import (
     register_sources,
     source_row_id,
 )
-from selfhost.schema import tables
-from selfhost.schema.records import Agent, Turn
 from selfhost.subjects import SHARED_SUBJECT, member_subject
 from selfhost.tools.context import SpawnResult, ToolContext, ToolResult
 

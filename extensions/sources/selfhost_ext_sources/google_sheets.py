@@ -20,9 +20,7 @@ from urllib.parse import quote
 
 import httpx
 
-from selfhost.sdk.sources import StreamSkipped
-from selfhost_ext_sources.connector import StreamSpec
-from selfhost_ext_sources.rest import RestConnector, list_or_empty
+from selfhost.sdk.sources import RestConnector, StreamSkipped, StreamSpec, list_or_empty
 
 SHEET_MIME = "application/vnd.google-apps.spreadsheet"
 SHEETS_API_URL = "https://sheets.googleapis.com/v4"

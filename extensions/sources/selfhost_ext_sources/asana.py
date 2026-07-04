@@ -15,8 +15,7 @@ from typing import Any
 
 import httpx
 
-from selfhost_ext_sources.connector import StreamSpec
-from selfhost_ext_sources.rest import RestConnector, list_or_empty
+from selfhost.sdk.sources import RestConnector, StreamSpec, list_or_empty
 
 PAGE_SIZE = 100
 _MODIFIED_SINCE_STREAMS = frozenset({"tasks", "projects"})

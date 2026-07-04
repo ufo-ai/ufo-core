@@ -64,7 +64,6 @@ from selfhost.jobs import JobRunner, bindings_from
 from selfhost.loop.prompts.render import render_system_prompt
 from selfhost.loop.subagents import SubagentRegistry, subagent_system_prompt
 from selfhost.loop.transcript import Transcript
-from selfhost.memory.sources import CorePageFeed, SyncDriver
 from selfhost.models.interface import Message, ModelRequest, TextDelta
 from selfhost.models.registry import model_registry
 from selfhost.onboarding import run_onboarding_steps
@@ -82,6 +81,7 @@ from selfhost.serve import (
     _select_hub,
 )
 from selfhost.skills.runtime import mount_skill
+from selfhost.sources.sync import CorePageFeed, SyncDriver
 from selfhost.subjects import SHARED_SUBJECT
 from selfhost.tools.context import SpawnResult, ToolContext
 from selfhost.transcript import Conversation, transcript_key

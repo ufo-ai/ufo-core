@@ -25,12 +25,12 @@ from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.governance import Governance, prompt_digest
 from selfhost.indexing import EmbedClient, IndexBackend
-from selfhost.memory.sources import PageFeed, source_row_id
 from selfhost.models.interface import Message
 from selfhost.o11y import log
 from selfhost.scheduling import ScheduleStore
 from selfhost.schema import tables
 from selfhost.schema.records import AgentChange, ProposalRef
+from selfhost.sources.sync import PageFeed, source_row_id
 from selfhost.transcript import TranscriptDecodeError, decode, transcript_key
 
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]

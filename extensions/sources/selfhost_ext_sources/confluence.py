@@ -24,10 +24,10 @@ from typing import Any
 
 import httpx
 
-from selfhost.sdk.sources import StreamSkipped
-from selfhost_ext_sources.connector import StreamSpec
-from selfhost_ext_sources.rest import (
+from selfhost.sdk.sources import (
     RestConnector,
+    StreamSkipped,
+    StreamSpec,
     get_path,
     list_or_empty,
     records_at,

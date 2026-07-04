@@ -26,10 +26,10 @@ from selfhost.ext.surface import SurfaceSpec
 from selfhost.grants import OAuthProvider
 from selfhost.hub import Hub
 from selfhost.indexing import EmbedClient, IndexBackend
-from selfhost.memory.sources import SourceBackend
 from selfhost.models.interface import ModelClient
 from selfhost.sandbox.session import Carrier
 from selfhost.schema.records import Agent, Turn
+from selfhost.sources.sync import SourceBackend
 from selfhost.tools.registry import ToolDef
 
 

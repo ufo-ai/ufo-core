@@ -1,14 +1,15 @@
 """What the sources extension declares: one content-source backend per registered connector, the
 credential slots the direct auth backend reads BYOK keys from, and the `direct` auth-proxy backend
-itself. One extension, N backends — the connector framework relocated here off the composio broker,
-consuming the pluggable auth-proxy seam rather than importing a broker. `serve` sources the backends
+itself. One extension, N backends — each provider builds on the REST connector framework from
+`selfhost.sdk.sources`, consuming the pluggable auth-proxy seam rather than importing a broker.
+`serve` sources the backends
 into the sync driver's backend map (so a registered account syncs offline into memory) and, when a
 deploy selects `[connectors] auth_backend = "direct"`, builds the direct proxy with a reader scoped
 to these slots. The Composio broker is a separate backend the `connectors` extension registers."""
 
 from selfhost.sdk.authproxy import AuthProxySpec
 from selfhost.sdk.manifest import CredentialSlot, Manifest, SourceProvider
-from selfhost_ext_sources.backend import ConnectorBackend
+from selfhost.sdk.sources import ConnectorBackend
 from selfhost_ext_sources.direct import DirectAuthProxy
 from selfhost_ext_sources.registry import CONNECTORS
 

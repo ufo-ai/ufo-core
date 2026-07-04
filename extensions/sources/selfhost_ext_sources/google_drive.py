@@ -18,9 +18,14 @@ from typing import Any
 
 import httpx
 
-from selfhost.sdk.sources import CursorExpired, StreamSkipped
-from selfhost_ext_sources.connector import StreamPage, StreamSpec
-from selfhost_ext_sources.rest import RestConnector, list_or_empty
+from selfhost.sdk.sources import (
+    CursorExpired,
+    RestConnector,
+    StreamPage,
+    StreamSkipped,
+    StreamSpec,
+    list_or_empty,
+)
 
 PAGE_SIZE = 1000
 CHILD_PAGE_SIZE = 100

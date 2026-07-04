@@ -7,11 +7,11 @@ from collections.abc import Callable
 from uuid import UUID, uuid4
 
 import httpx
-from selfhost_ext_sources.backend import ConnectorBackend, ConnectorSourceConfig
 from selfhost_ext_sources.google_sheets import GoogleSheetsConnector
 
 from selfhost.connectors import Credential
-from selfhost.memory.sources import SourceAuth, StreamSkipped
+from selfhost.sdk.sources import ConnectorBackend, ConnectorSourceConfig
+from selfhost.sources.sync import SourceAuth, StreamSkipped
 
 ACCOUNT = "acct-1"
 
