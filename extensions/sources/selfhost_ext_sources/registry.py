@@ -6,6 +6,7 @@ the credential slot the direct backend reads its key from; the manifest wraps ea
 `ConnectorBackend` and registers it as a source the sync driver drives."""
 
 from selfhost_ext_sources.asana import AsanaConnector
+from selfhost_ext_sources.confluence import ConfluenceConnector
 from selfhost_ext_sources.connector import Connector
 from selfhost_ext_sources.github import GitHubConnector
 from selfhost_ext_sources.jira import JiraConnector
@@ -20,4 +21,5 @@ CONNECTORS: dict[str, type[Connector]] = {
     SlackConnector.name: SlackConnector,
     LinearConnector.name: LinearConnector,
     JiraConnector.name: JiraConnector,
+    ConfluenceConnector.name: ConfluenceConnector,
 }
