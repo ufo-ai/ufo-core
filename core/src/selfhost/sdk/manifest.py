@@ -70,6 +70,9 @@ from selfhost.ext.manifest import (
     RouteSpec as RouteSpec,
 )
 from selfhost.ext.manifest import (
+    SkillSpec as SkillSpec,
+)
+from selfhost.ext.manifest import (
     SourceProvider as SourceProvider,
 )
 from selfhost.ext.manifest import (

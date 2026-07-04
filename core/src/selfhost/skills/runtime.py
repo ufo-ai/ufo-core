@@ -1,12 +1,15 @@
-"""Core skills: the value object, the SKILL.md parser, and mounting into the sandbox.
+"""Skills: the value object, the SKILL.md parser, the load-time registry, and mounting into the
+sandbox.
 
 A skill is a folder of files — a `SKILL.md` (YAML frontmatter + markdown workflow) plus any assets.
 Core ships exactly three, teaching its own builtins: `sandbox`, `memory`, `delegation`; a CI gate
-holds that set. `load_skill` resolves a skill and its `depends` closure through `skill_tree`, then
-`mount_skill` writes each into the conversation's workspace under `.skills/<name>/` — inside the
-scoped subtree the sandbox permits, never the framework paths above it — so the agent reads the
-mounted `SKILL.md` and follows it. The instructions ride the tool result too, so the workflow is in
-front of the model the moment it loads."""
+holds that core set. Packs contribute more through the manifest `skills` point, which the loader
+aggregates with core's into one `SkillRegistry` per boot. `load_skill` resolves a skill and its
+`depends` closure through `SkillRegistry.tree`, then `mount_skill` writes each into the
+conversation's workspace under `.skills/<name>/` — inside the scoped subtree the sandbox permits,
+never the framework paths above it — so the agent reads the mounted `SKILL.md` and follows it. The
+instructions ride the tool result too, so the workflow is in front of the model the moment it
+loads."""
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -94,28 +97,45 @@ CORE_SKILLS_BY_NAME = _load_core_skills(CORE_SKILLS_ROOT)
 CORE_SKILLS: tuple[RuntimeSkill, ...] = tuple(CORE_SKILLS_BY_NAME.values())
 
 
-def skill_named(name: str) -> RuntimeSkill:
-    try:
-        return CORE_SKILLS_BY_NAME[name]
-    except KeyError as error:
-        available = ", ".join(sorted(CORE_SKILLS_BY_NAME)) or "none"
-        raise ValueError(f"unknown skill {name!r} (available: {available})") from error
+@dataclass(frozen=True)
+class SkillRegistry:
+    """Every skill a turn can load — the core three plus each active pack's contributed skills, by
+    name — built once per boot by the loader from the active manifests. `load_skill` resolves a name
+    and its `depends` closure through `tree`; the system prompt's `{{skill_index}}` renders `index`.
+    A name collision (a pack shadowing another skill) is refused where the registry is built, so a
+    lookup here is always unambiguous."""
+
+    by_name: dict[str, RuntimeSkill]
+
+    def named(self, name: str) -> RuntimeSkill:
+        try:
+            return self.by_name[name]
+        except KeyError as error:
+            available = ", ".join(sorted(self.by_name)) or "none"
+            raise ValueError(f"unknown skill {name!r} (available: {available})") from error
+
+    def tree(self, name: str) -> tuple[RuntimeSkill, ...]:
+        """The skill plus its transitive `depends`, each once, dependencies before the skill that
+        names them — the set `load_skill` mounts for one request."""
+        loaded: dict[str, RuntimeSkill] = {}
+
+        def add(skill: RuntimeSkill) -> None:
+            if skill.name in loaded:
+                return
+            for dependency in skill.depends:
+                add(self.named(dependency))
+            loaded[skill.name] = skill
+
+        add(self.named(name))
+        return tuple(loaded.values())
+
+    def index(self) -> tuple[tuple[str, str], ...]:
+        """The loadable-skill index the `{{skill_index}}` slot renders: each skill's name and
+        description, in registration order (core first, then packs in load order)."""
+        return tuple((skill.name, skill.description) for skill in self.by_name.values())
 
 
-def skill_tree(name: str) -> tuple[RuntimeSkill, ...]:
-    """The skill plus its transitive `depends`, each once, dependencies before the skill that
-    names them — the set `load_skill` mounts for one request."""
-    loaded: dict[str, RuntimeSkill] = {}
-
-    def add(skill: RuntimeSkill) -> None:
-        if skill.name in loaded:
-            return
-        for dependency in skill.depends:
-            add(skill_named(dependency))
-        loaded[skill.name] = skill
-
-    add(skill_named(name))
-    return tuple(loaded.values())
+CORE_SKILL_REGISTRY = SkillRegistry(dict(CORE_SKILLS_BY_NAME))
 
 
 async def mount_skill(sandbox: SandboxSession, skill: RuntimeSkill) -> None:

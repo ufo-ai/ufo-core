@@ -24,6 +24,7 @@ from selfhost.artifact_token import (
 from selfhost.blob import FilesystemBlobStore
 from selfhost.config import Config
 from selfhost.db import workspace_tx
+from selfhost.ext.loader import skill_registry
 from selfhost.ext.manifest import ModelProviderSpec
 from selfhost.hub import InProcessHub, SkillLoad, ToolCall
 from selfhost.loop import queue as loop_queue
@@ -179,6 +180,7 @@ def dbos_runtime(
             subagents=SubagentRegistry(()),
             manifests=(),
             registry=STANDIN_REGISTRY,
+            skills=skill_registry(()),
             credentials=None,
             memory=StubMemory(),
             artifact_token_secret=SECRET,

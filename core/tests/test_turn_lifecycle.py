@@ -18,6 +18,7 @@ from selfhost.accounting import CORE_PRICING
 from selfhost.blob import FilesystemBlobStore
 from selfhost.config import Config
 from selfhost.db import workspace_tx
+from selfhost.ext.loader import skill_registry
 from selfhost.ext.manifest import ModelProviderSpec
 from selfhost.hub import InProcessHub
 from selfhost.jobs import SpendResume
@@ -200,6 +201,7 @@ def dbos_runtime(
             subagents=SubagentRegistry((ROUNDTRIP_PROFILE, EXHAUST_PROFILE, PINNED_PROFILE)),
             manifests=(),
             registry=STANDIN_REGISTRY,
+            skills=skill_registry(()),
             credentials=None,
             memory=StubMemory(),
             artifact_token_secret="",

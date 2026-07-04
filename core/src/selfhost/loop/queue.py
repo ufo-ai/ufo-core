@@ -42,14 +42,13 @@ from selfhost.schema.records import (
     TerminalFrame,
     Turn,
 )
-from selfhost.skills.runtime import CORE_SKILLS
+from selfhost.skills.runtime import SkillRegistry
 from selfhost.tools.registry import ToolRegistry
 
 SANDBOX_IMAGE_REF = "selfhost-sandbox:latest"
 TURN_QUEUE_POLL_SECONDS = 0.1
 FAILED_TERMINAL_RETRY_SECONDS = 1.0
 FAILED_TERMINAL_RETRY_MAX_SECONDS = 30.0
-CORE_SKILL_INDEX = tuple((skill.name, skill.description) for skill in CORE_SKILLS)
 TURN_QUEUE = Queue(
     TURN_QUEUE_NAME,
     concurrency=1,
@@ -69,6 +68,7 @@ class Runtime:
     subagents: SubagentRegistry
     manifests: tuple[Manifest, ...]
     registry: ModelRegistry
+    skills: SkillRegistry
     credentials: CredentialStore | None
     memory: MemoryService
     artifact_token_secret: str
@@ -113,7 +113,9 @@ async def _execute_turn(turn_id: str) -> str:
         )
         if turn.subagent_profile is None:
             resolved, tools = agent, ToolRegistry(all_tools)
-            system_prompt = render_system_prompt(agent.prompt, sections, skills=CORE_SKILL_INDEX)
+            system_prompt = render_system_prompt(
+                agent.prompt, sections, skills=runtime.skills.index()
+            )
             max_rounds = MAIN_ROUND_LIMIT
         else:
             profile = runtime.subagents.get(turn.subagent_profile)
@@ -167,6 +169,7 @@ async def _execute_turn(turn_id: str) -> str:
             pricing=runtime.registry.pricing,
             attempt=DBOS.workflow_id or turn_id,
             max_rounds=max_rounds,
+            skills=runtime.skills,
         )
         frame = await engine.run()
         return "superseded" if frame is None else frame.status

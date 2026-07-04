@@ -13,6 +13,7 @@ members = [
     "selfhost",
     "selfhost-ext-browser",
     "selfhost-ext-connectors",
+    "selfhost-ext-documents",
     "selfhost-ext-eval-harness",
     "selfhost-ext-mcp",
     "selfhost-ext-openrouter",
@@ -2379,6 +2380,17 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "selfhost", editable = "core" },
 ]
+
+[[package]]
+name = "selfhost-ext-documents"
+version = "0.1.0"
+source = { editable = "extensions/documents" }
+dependencies = [
+    { name = "selfhost" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "selfhost", editable = "core" }]
 
 [[package]]
 name = "selfhost-ext-eval-harness"

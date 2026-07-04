@@ -2,16 +2,17 @@
 
 It imports only `selfhost.sdk` — the surface a CI gate pins — and its entry point returns a Manifest
 declaring exactly the landed points: one tool, one job, one route, one credential slot carrying a
-wire-injection target, one onboarding step, one typed subagent profile, and one hub backend. Each
-handler records the call it received through its own `ExtensionContext.store` (durable `ext_store`
-rows, never a mock log), so the tests read those rows back through the same public surfaces core
-writes them by.
+wire-injection target, one onboarding step, one typed subagent profile, one hub backend, and one
+contributed skill (a `SKILL.md` plus a bundled script under `skills/`). Each handler records the
+call it received through its own `ExtensionContext.store` (durable `ext_store` rows, never a mock
+log), so the tests read those rows back through the same public surfaces core writes them by.
 `UNDECLARED_SLOT` names a slot the Manifest never declares — the probe that a handler asking for an
 undeclared slot is refused."""
 
 import hashlib
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import ClassVar
 from uuid import UUID
 
@@ -39,6 +40,7 @@ from selfhost.sdk.manifest import (
     PostToolUse,
     PromptSection,
     RouteSpec,
+    SkillSpec,
     SourceProvider,
     SubagentProfile,
 )
@@ -94,6 +96,10 @@ MODEL_PROVIDER_NAME = "sample_models"
 SAMPLE_MODEL = "sample-model-x1"
 SAMPLE_MODEL_REPLY = "sample model backend reply"
 SAMPLE_MODEL_PRICE = ModelPrice(input=2_000_000, output=4_000_000, cache_read=0, cache_write=0)
+SKILL_NAME = "sample_skill"
+SKILL_SCRIPT = "probe.py"
+SKILL_SCRIPT_MARKER = "sample-skill-probe-ok"
+SKILL_DIR = Path(__file__).parent / "skills" / SKILL_NAME
 
 
 class EchoInput(BaseModel):
@@ -436,4 +442,5 @@ def manifest() -> Manifest:
             ),
         ),
         hubs=(HubSpec(backend=HUB_BACKEND, build=lambda _url: InProcessHub()),),
+        skills=(SkillSpec(path=SKILL_DIR),),
     )

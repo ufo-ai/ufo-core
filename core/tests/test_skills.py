@@ -2,15 +2,14 @@ from pathlib import Path
 
 import pytest
 
-from selfhost.skills import runtime
 from selfhost.skills.runtime import (
     CORE_SKILL_NAMES,
+    CORE_SKILL_REGISTRY,
     CORE_SKILLS,
     RuntimeSkill,
+    SkillRegistry,
     mount_skill,
     parse_skill,
-    skill_named,
-    skill_tree,
 )
 
 
@@ -39,7 +38,7 @@ def test_core_ships_exactly_the_three_fixed_skills() -> None:
 
 def test_skill_named_unknown_fails_loud_and_lists_the_available() -> None:
     with pytest.raises(ValueError, match="unknown skill 'ghost'"):
-        skill_named("ghost")
+        CORE_SKILL_REGISTRY.named("ghost")
 
 
 def test_parse_reads_frontmatter_body_and_bundled_files(tmp_path: Path) -> None:
@@ -69,18 +68,28 @@ def test_parse_rejects_a_file_without_frontmatter(tmp_path: Path) -> None:
 
 
 def test_skill_tree_resolves_dependencies_before_the_skill_that_names_them(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     base = parse_skill(_write_skill(tmp_path, "base", "base skill", "base body"))
     leaf = parse_skill(
         _write_skill(tmp_path, "leaf", "leaf skill", "leaf body", depends=("base",))
     )
-    monkeypatch.setattr(runtime, "CORE_SKILLS_BY_NAME", {"base": base, "leaf": leaf})
-    assert [skill.name for skill in skill_tree("leaf")] == ["base", "leaf"]
+    registry = SkillRegistry({"base": base, "leaf": leaf})
+    assert [skill.name for skill in registry.tree("leaf")] == ["base", "leaf"]
 
 
-def test_skill_tree_of_a_core_skill_returns_it(tmp_path: Path) -> None:
-    assert [skill.name for skill in skill_tree("delegation")] == ["delegation"]
+def test_skill_tree_of_a_core_skill_returns_it() -> None:
+    assert [skill.name for skill in CORE_SKILL_REGISTRY.tree("delegation")] == ["delegation"]
+
+
+def test_registry_index_lists_every_skills_name_and_description() -> None:
+    registry = SkillRegistry(
+        {
+            "base": RuntimeSkill(name="base", description="base skill", instructions="b"),
+            "leaf": RuntimeSkill(name="leaf", description="leaf skill", instructions="l"),
+        }
+    )
+    assert registry.index() == (("base", "base skill"), ("leaf", "leaf skill"))
 
 
 async def test_mount_writes_the_verbatim_skill_md_and_assets_under_the_workspace() -> None:

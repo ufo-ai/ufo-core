@@ -46,6 +46,7 @@ from selfhost.memory.index import IndexBackend, index_backend_for
 from selfhost.memory.service import MemoryService
 from selfhost.o11y import log
 from selfhost.schema.records import Agent, Turn
+from selfhost.skills.runtime import CORE_SKILLS_BY_NAME, RuntimeSkill, SkillRegistry, parse_skill
 from selfhost.tools.builtins import BUILTIN_TOOLS
 from selfhost.tools.registry import ToolDef, ToolRegistry
 
@@ -187,6 +188,24 @@ def turn_tools(
             tools.append(tool)
             ext_by_tool[tool.name] = context
     return tuple(tools), ext_by_tool
+
+
+def skill_registry(manifests: tuple[Manifest, ...]) -> SkillRegistry:
+    """The loadable-skill set for the deploy: the core three plus every active pack's contributed
+    skills, parsed from disk once at boot (sync file I/O, off the loop). A pack skill whose name
+    collides with a core skill or another pack's is refused loud here, so no reader downstream — the
+    `load_skill` resolver or the `{{skill_index}}` render — has to disambiguate."""
+    by_name: dict[str, RuntimeSkill] = dict(CORE_SKILLS_BY_NAME)
+    for manifest in manifests:
+        for spec in manifest.skills:
+            skill = parse_skill(spec.path)
+            if skill.name in by_name:
+                raise ValueError(
+                    f"extension {manifest.name!r} contributes skill {skill.name!r}, "
+                    f"which is already registered"
+                )
+            by_name[skill.name] = skill
+    return SkillRegistry(by_name)
 
 
 def turn_subagents(manifests: tuple[Manifest, ...]) -> tuple[SubagentProfile, ...]:

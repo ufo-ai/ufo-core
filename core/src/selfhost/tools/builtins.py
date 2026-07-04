@@ -52,7 +52,7 @@ from selfhost.models.interface import TextBlock
 from selfhost.sandbox.session import workspace_path
 from selfhost.schema import tables
 from selfhost.schema.records import FACT, ItemClass, MemoryWrite
-from selfhost.skills.runtime import mount_skill, skill_tree
+from selfhost.skills.runtime import mount_skill
 from selfhost.tools.context import ImageContent, TextContent, ToolContext, ToolResult
 from selfhost.tools.registry import ToolDef
 from selfhost.transcript import TranscriptDecodeError, decode, transcript_key
@@ -518,7 +518,7 @@ async def load_skill_handler(ctx: ToolContext, args: LoadSkillInput) -> ToolResu
     """Resolve the named skill and its dependency closure, mount each into the workspace under
     `.skills/<name>/`, and return their instructions so the workflow is in front of the model at
     once. An unknown name fails loud as a recoverable tool error."""
-    loaded = skill_tree(args.name)
+    loaded = ctx.skills.tree(args.name)
     for skill in loaded:
         await mount_skill(ctx.sandbox, skill)
     header = "Loaded skill(s): " + ", ".join(skill.name for skill in loaded)

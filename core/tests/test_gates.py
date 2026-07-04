@@ -68,7 +68,28 @@ def test_skills_gate_flags_a_missing_core_skill() -> None:
     assert any("memory" in failure for failure in failures)
 
 
-def test_conformance_gate_passes_when_sample_covers_every_point() -> None:
+def test_skill_boundary_gate_flags_a_script_importing_selfhost() -> None:
+    trees = {
+        Path("extensions/x/skills/y/s.py"): ast.parse("from selfhost.sdk.tools import ToolDef\n")
+    }
+    failures = gates._skill_boundary_failures(trees)
+    assert failures and "selfhost.sdk" in failures[0]
+
+
+def test_skill_boundary_gate_allows_stdlib_and_third_party_imports() -> None:
+    trees = {
+        Path("extensions/x/skills/y/s.py"): ast.parse("import sys\nfrom pypdf import PdfReader\n")
+    }
+    assert gates._skill_boundary_failures(trees) == []
+
+
+def test_skill_content_is_held_out_of_the_code_gates() -> None:
+    """A bundled skill script (a .py file under a SKILL.md folder) is sandbox content, not framework
+    code: it appears in `_skill_scripts` for the boundary gate and never in `_python_files`, so the
+    process-side code gates skip it."""
+    scripts = gates._skill_scripts()
+    assert any(str(path).endswith("skills/pdf/render.py") for path in scripts)
+    assert not any(gates._is_skill_content(path) for path in gates._python_files())
     manifest_src = (
         "class Manifest:\n"
         "    name: str\n"

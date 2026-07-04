@@ -53,6 +53,7 @@ from selfhost.schema.records import (
     Turn,
     Usage,
 )
+from selfhost.skills.runtime import CORE_SKILL_REGISTRY, SkillRegistry
 from selfhost.tools.context import ImageContent, Spawn, TextContent, ToolContext
 from selfhost.tools.registry import ToolRegistry
 from selfhost.transcript import Conversation
@@ -150,6 +151,7 @@ class TurnEngine:
     pricing: Pricing = CORE_PRICING
     attempt: str = ""
     max_rounds: int = MAIN_ROUND_LIMIT
+    skills: SkillRegistry = CORE_SKILL_REGISTRY
 
     async def run(self) -> TerminalFrame | None:
         with turn_span(self.turn.id, self.turn.conversation_id):
@@ -171,6 +173,7 @@ class TurnEngine:
                 member_id=self.member_id,
                 artifact_token_secret=self.artifact_token_secret,
                 grants=self.grants,
+                skills=self.skills,
             )
             try:
                 if not await self._mark_running():

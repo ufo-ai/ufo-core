@@ -7,9 +7,11 @@ scoped to the turn's subject, and `artifact_token_secret` with which `share_file
 download URLs the web surface verifies. `read_paths` is the working set that lets `edit` refuse to
 touch a file the turn has not read first. `connector_account` hands a connector tool the broker's
 connected-account id it passes to the broker's server-side execute API, resolved strictly from the
-turn-agent's own grants so a tool reaches only the turn-agent's accounts. An extension tool also
-gets `ext`, its owning extension's workspace-scoped ExtensionContext; a builtin tool gets
-`ext=None`."""
+turn-agent's own grants so a tool reaches only the turn-agent's accounts. `skills` is the loadable
+skill set for the deploy (core plus the active packs') that `load_skill` resolves against; it
+defaults to the core floor so a context built without the loader still resolves the core three. An
+extension tool also gets `ext`, its owning extension's workspace-scoped ExtensionContext; a builtin
+tool gets `ext=None`."""
 
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Literal, Protocol
@@ -23,6 +25,7 @@ from selfhost.grants import ConnectUnavailable, GrantStore
 from selfhost.memory.service import MemoryService
 from selfhost.sandbox.session import SandboxSession
 from selfhost.schema.records import Agent, Turn
+from selfhost.skills.runtime import CORE_SKILL_REGISTRY, SkillRegistry
 
 
 class TextContent(BaseModel):
@@ -77,6 +80,7 @@ class ToolContext:
     artifact_token_secret: str
     grants: GrantStore | None = None
     read_paths: set[str] = field(default_factory=set)
+    skills: SkillRegistry = CORE_SKILL_REGISTRY
     ext: ExtensionContext | None = None
 
     async def connector_account(self, provider: str, account_id: str | None = None) -> str:

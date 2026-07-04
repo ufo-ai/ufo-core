@@ -120,6 +120,7 @@ Manifest registers (each optional):
 |---|---|
 | `tools` | Typed tool defs + handlers; appear in agents' granted tool sets. |
 | `subagents` | Typed subagent profiles. |
+| `skills` | Skill folders (SKILL.md + bundled scripts/assets) contributed to the loadable set; the loader parses each into the registry `load_skill` and the `{{skill_index}}` consult, mounted into the sandbox under `.skills/<name>/` beside core's own three. A skill script imports nothing from selfhost (it runs in the sandbox) — a CI gate holds that boundary. |
 | `connectors` | Provider actions behind the connector framework; OAuth via the grant flow. **Composio brokers auth by PROXY: every call goes through Composio (`/tools/execute` for tools; the proxy transport → `/tools/execute/proxy` for source HTTP) carrying `(user_id, connected_account_id)` — Composio holds the provider token and injects it server-side; the token is NEVER exposed to us. A connector grant stores only `connected_account_id`; the confused-deputy check reads the account's `user_id` metadata, never a token. Composio grants derive NO egress InjectionRule — the sentinel→key swap (§Sandboxing) is ONLY for user-supplied BYOK `credentials` keys.** |
 | `sources` | Data-feed backends: `sync(cursor) -> pages` run as jobs; pages land in memory/knowledge via the derivation pipeline. Each backend is pluggable — S3, GitHub, provider APIs (via connectors), webhooks; core ships only `folder` (local files). |
 | `triggers` | Data → memory (and → invocation): hooks on source pages and platform events. |

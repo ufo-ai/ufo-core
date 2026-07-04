@@ -30,7 +30,13 @@ from selfhost.ext.context import (
     UndeclaredCredentialSlot,
     context_for,
 )
-from selfhost.ext.loader import index_backend, load_manifests, turn_subagents, turn_tools
+from selfhost.ext.loader import (
+    index_backend,
+    load_manifests,
+    skill_registry,
+    turn_subagents,
+    turn_tools,
+)
 from selfhost.ext.manifest import Manifest
 from selfhost.ext.surface import WRITEBACK_DELIVERED, WRITEBACK_PENDING, workspace_key
 from selfhost.governance import prompt_digest
@@ -54,6 +60,7 @@ from selfhost.sandbox.session import ExecResult, SandboxHandle, SandboxSession, 
 from selfhost.schema import tables
 from selfhost.schema.records import Agent, Turn, Usage
 from selfhost.serve import _mount_ext_routes, _mount_surfaces, _select_hub
+from selfhost.skills.runtime import mount_skill
 from selfhost.tools.context import SpawnResult, ToolContext
 from selfhost.transcript import Conversation, transcript_key
 
@@ -170,6 +177,7 @@ async def test_sample_is_discovered_via_its_entry_point() -> None:
     assert {source.backend for source in manifest.sources} == {sample.SOURCE_BACKEND}
     assert {spec.name for spec in manifest.indexes} == {sample.INDEX_BACKEND}
     assert {spec.backend for spec in manifest.hubs} == {sample.HUB_BACKEND}
+    assert {spec.path.name for spec in manifest.skills} == {sample.SKILL_NAME}
 
 
 def test_core_selects_a_manifest_contributed_hub() -> None:
@@ -203,6 +211,32 @@ def test_pack_prompt_section_reaches_the_rendered_system_prompt() -> None:
     assert sample.SECTION_BODY in rendered.content
     assert "You are the workspace assistant." in rendered.content
     assert rendered.digest.startswith("sha256:")
+
+
+async def test_sample_skill_parses_indexes_and_mounts_with_its_script() -> None:
+    """The skills seam end to end through the probe: the skill the sample contributes parses into
+    the registry the loader aggregates, renders into the `{{skill_index}}` the main prompt carries,
+    and mounts into the sandbox under `.skills/<name>/` with its bundled script — every step the
+    real `load_skill` path runs, minus the live-sandbox execution deferred to the Docker proofs."""
+    manifest = _sample_manifest()
+    registry = skill_registry((manifest,))
+
+    assert sample.SKILL_NAME in dict(registry.index())
+    prompt = render_system_prompt("You are the assistant.", (), skills=registry.index())
+    assert sample.SKILL_NAME in prompt.content
+
+    written: dict[str, bytes] = {}
+
+    class _Recorder:
+        async def write_file(self, path: str, content: bytes) -> None:
+            written[path] = content
+
+    for skill in registry.tree(sample.SKILL_NAME):
+        await mount_skill(_Recorder(), skill)
+
+    root = f"/workspace/.skills/{sample.SKILL_NAME}"
+    assert f"name: {sample.SKILL_NAME}" in written[f"{root}/SKILL.md"].decode()
+    assert sample.SKILL_SCRIPT_MARKER in written[f"{root}/{sample.SKILL_SCRIPT}"].decode()
 
 
 def test_sample_subagent_profile_flows_through_the_loader_into_the_registry() -> None:

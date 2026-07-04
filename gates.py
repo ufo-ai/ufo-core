@@ -25,12 +25,29 @@ CORE_SKILL_NAMES = frozenset({"sandbox", "memory", "delegation"})
 SKILL_MANIFEST = "SKILL.md"
 
 
+def _is_skill_content(path: Path) -> bool:
+    """A file bundled inside a skill folder — a directory holding a `SKILL.md`, at or above it. Such
+    a file is sandbox content mounted verbatim (a script the agent runs in the sandbox, an asset it
+    reads), never framework Python: it is held only to the skill boundary gate, not the code gates
+    that govern the selfhost process."""
+    return any((parent / SKILL_MANIFEST).is_file() for parent in path.parents)
+
+
+def _skill_scripts() -> list[Path]:
+    return [
+        path
+        for root in SOURCE_ROOTS
+        for path in (ROOT / root).rglob("*.py")
+        if ".venv" not in path.parts and _is_skill_content(path)
+    ]
+
+
 def _python_files() -> list[Path]:
     return [
         path
         for root in SOURCE_ROOTS
         for path in (ROOT / root).rglob("*.py")
-        if ".venv" not in path.parts
+        if ".venv" not in path.parts and not _is_skill_content(path)
     ]
 
 
@@ -312,13 +329,31 @@ def _rogue_skill_failures(present: frozenset[str]) -> list[str]:
 
 def _skill_failures() -> list[str]:
     """A skill ships with the thing it teaches, and core teaches only its own builtins, so core
-    ships exactly three skills — sandbox, memory, delegation. A fourth SKILL.md folder under
-    core/skills is an extension or a pack, never core; a missing one is a broken floor."""
+    ships exactly three skills — sandbox, memory, delegation. This gate is scoped to `core/skills`
+    alone: a fourth SKILL.md folder there is an extension or a pack living in the wrong tree, a
+    missing one is a broken floor. Packs contribute any number of their own skills elsewhere, held
+    only to the skill boundary gate."""
     root = ROOT / CORE_SKILLS_DIR
     if not root.is_dir():
         return [f"skills: core skills directory missing at {CORE_SKILLS_DIR}"]
     present = frozenset(path.parent.name for path in root.rglob(SKILL_MANIFEST))
     return _rogue_skill_failures(present)
+
+
+def _skill_boundary_failures(trees: dict[Path, ast.Module]) -> list[str]:
+    """A bundled skill script runs inside the sandbox, where the selfhost package does not exist; it
+    imports only the standard library and third-party tools, never selfhost — not core internals and
+    not the SDK, which are process-side surfaces. A skill script that imports selfhost is either
+    mis-placed framework code or a leak of the process boundary into sandbox content."""
+    failures = []
+    for rel, tree in trees.items():
+        for imported in _imported_modules(tree):
+            if imported == "selfhost" or imported.startswith("selfhost."):
+                failures.append(
+                    f"{rel}: skill script imports {imported!r} — skill content runs in the "
+                    f"sandbox and must not import selfhost"
+                )
+    return failures
 
 
 def main() -> int:
@@ -354,6 +389,11 @@ def main() -> int:
     failures.extend(_live_frame_failures(trees))
     failures.extend(_to_thread_failures(trees))
     failures.extend(_skill_failures())
+    skill_trees = {
+        path.relative_to(ROOT): ast.parse(path.read_text(), filename=str(path))
+        for path in _skill_scripts()
+    }
+    failures.extend(_skill_boundary_failures(skill_trees))
 
     for failure in failures:
         print(f"GATE: {failure}")

@@ -24,6 +24,7 @@ from selfhost.ext.context import context_for
 from selfhost.ext.loader import (
     index_backend,
     load_manifests,
+    skill_registry,
     turn_subagents,
     validate_ext_tools,
 )
@@ -121,6 +122,7 @@ def run() -> None:
             subagents=SubagentRegistry((*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests))),
             manifests=manifests,
             registry=model_registry(config, manifests),
+            skills=skill_registry(manifests),
             credentials=credentials,
             memory=memory,
             artifact_token_secret=artifact_secret,

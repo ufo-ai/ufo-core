@@ -8,6 +8,7 @@ policy filter over the tools grants already admit."""
 
 from collections.abc import Awaitable, Callable
 from dataclasses import KW_ONLY, dataclass
+from pathlib import Path
 from typing import Literal
 from uuid import UUID
 
@@ -277,6 +278,18 @@ class SubagentProfile:
 
 
 @dataclass(frozen=True)
+class SkillSpec:
+    """A skill a pack contributes: the directory holding its `SKILL.md` and any bundled scripts and
+    assets. The loader parses each into the skill registry `load_skill` and the `{{skill_index}}`
+    consult, so a pack's workflow joins the loadable set beside core's own; its files mount into
+    the sandbox under `.skills/<name>/` exactly as a core skill's do. `path` is resolved by the
+    extension against its own package (`Path(__file__).parent / "skills" / <name>`), so the content
+    ships and is digested with the extension."""
+
+    path: Path
+
+
+@dataclass(frozen=True)
 class Manifest:
     """What one extension declares, returned by its `selfhost.extension` entry point."""
 
@@ -297,3 +310,4 @@ class Manifest:
     surfaces: tuple[SurfaceSpec, ...] = ()
     models: tuple[ModelProviderSpec, ...] = ()
     hubs: tuple[HubSpec, ...] = ()
+    skills: tuple[SkillSpec, ...] = ()
