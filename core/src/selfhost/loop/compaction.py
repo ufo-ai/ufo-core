@@ -178,9 +178,7 @@ class Compaction:
                 case ToolResultBlock(content=str(content)):
                     rendered.append(content)
                 case ToolResultBlock(content=tuple(parts)):
-                    rendered.extend(
-                        part.text for part in parts if isinstance(part, TextBlock)
-                    )
+                    rendered.extend(part.text for part in parts if isinstance(part, TextBlock))
                 case ToolUseBlock(name=name, input=arguments):
                     rendered.append(f"{name}({json.dumps(arguments, sort_keys=True)})")
         return "\n".join(rendered)

@@ -199,9 +199,7 @@ class ScheduleStore:
             )
         return tuple(_task(row) for row in rows)
 
-    async def reschedule(
-        self, task_id: UUID, next_run_at: datetime, last_run_at: datetime
-    ) -> None:
+    async def reschedule(self, task_id: UUID, next_run_at: datetime, last_run_at: datetime) -> None:
         """Advance a fired task to its next run and clear its claim, recording when it last ran."""
         async with workspace_tx() as connection:
             await connection.execute(

@@ -91,5 +91,3 @@ class AgentChange(BaseModel):
 @dataclass(frozen=True)
 class ProposalRef:
     proposal_id: UUID
-
-

@@ -413,9 +413,7 @@ async def test_connect_account_tool_yields_authorize_url_and_callback_binds_the_
     state = parse_qs(urlparse(url).query)["state"][0]
     app = FastAPI()
     app.include_router(router)
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://surface"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://surface") as client:
         for _ in range(2):
             done = await client.get(
                 "/v1/connect/callback", params={"state": state, "code": "the-code"}
@@ -456,13 +454,9 @@ async def test_the_begin_route_is_gone_and_the_callback_reports_unavailable_with
     install_connect_flow(None)
     app = FastAPI()
     app.include_router(router)
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://surface"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://surface") as client:
         begun = await client.post("/v1/connect", params={"provider": "stub"})
-        callback = await client.get(
-            "/v1/connect/callback", params={"state": "s", "code": "c"}
-        )
+        callback = await client.get("/v1/connect/callback", params={"state": "s", "code": "c"})
     assert begun.status_code == 404
     assert callback.status_code == 503
 
@@ -484,9 +478,7 @@ async def _agent(workspace_id: UUID, name: str) -> UUID:
     return agent_id
 
 
-async def _turn(
-    workspace_id: UUID, agent_id: UUID, conversation_id: UUID, seq: int = 1
-) -> UUID:
+async def _turn(workspace_id: UUID, agent_id: UUID, conversation_id: UUID, seq: int = 1) -> UUID:
     turn_id = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(

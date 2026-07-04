@@ -126,9 +126,7 @@ async def _seed_page_chunk(subject: str, body: str, vector: tuple[float, ...]) -
     )
     async with workspace_tx() as connection:
         await connection.execute(
-            sa.insert(mem_page).values(
-                page_id=page_id, subject=subject, created_at=sa.func.now()
-            )
+            sa.insert(mem_page).values(page_id=page_id, subject=subject, created_at=sa.func.now())
         )
 
 
@@ -172,12 +170,16 @@ async def test_recommitting_a_fact_updates_in_place_not_duplicated(clean: None) 
 
     async with workspace_tx() as connection:
         confidences = (
-            await connection.execute(
-                sa.select(memory_item.c.confidence).where(
-                    memory_item.c.subject == SHARED_SUBJECT
+            (
+                await connection.execute(
+                    sa.select(memory_item.c.confidence).where(
+                        memory_item.c.subject == SHARED_SUBJECT
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
     assert confidences == [9]
 
     await MemoryIndexer(
@@ -223,7 +225,10 @@ async def test_recall_blend_promotes_the_semantically_closer_fact(clean: None) -
         workspace_id, SHARED_SUBJECT, "budget review notes", vec((0, 1.0)), created_at=when
     )
     far = await _seed_item(
-        workspace_id, SHARED_SUBJECT, "budget review notes", vec((0, 0.3), (1, 0.95)),
+        workspace_id,
+        SHARED_SUBJECT,
+        "budget review notes",
+        vec((0, 0.3), (1, 0.95)),
         created_at=when,
     )
     recalled = await _store(StubEmbed(vec((0, 1.0))), workspace_id).recall(
@@ -260,9 +265,7 @@ async def test_untail_leg_respects_subject_scoping(clean: None) -> None:
     workspace_id = await _workspace()
     alice, bob = uuid4(), uuid4()
     store = _store(StubEmbed(vec((0, 1.0))), workspace_id)
-    await store.commit(
-        MemoryWrite(subject=member_subject(alice), body="alices locker code is 77")
-    )
+    await store.commit(MemoryWrite(subject=member_subject(alice), body="alices locker code is 77"))
     assert await store.recall("locker code", recall_subjects(bob), 10) == ()
     mine = await store.recall("locker code", recall_subjects(alice), 10)
     assert len(mine) == 1 and "77" in mine[0].body
@@ -289,9 +292,7 @@ async def test_recall_returns_items_scoped_to_subject(clean: None) -> None:
 async def test_recall_skips_a_superseded_item(clean: None) -> None:
     workspace_id = await _workspace()
     probe = vec((2, 1.0))
-    stale = await _seed_item(
-        workspace_id, SHARED_SUBJECT, "the release ship date is friday", probe
-    )
+    stale = await _seed_item(workspace_id, SHARED_SUBJECT, "the release ship date is friday", probe)
     async with workspace_tx() as connection:
         await connection.execute(
             sa.update(memory_item)
@@ -339,8 +340,15 @@ async def test_pages_and_facts_do_not_crowd_each_others_candidate_window(clean: 
 def test_decay_factor_weights_recency_kind_and_confidence() -> None:
     now = datetime(2026, 1, 1, tzinfo=UTC)
     fresh = Recalled(
-        uuid4(), "shared", "fact", "b", None, 1.0,
-        memory_kind="fact", confidence=10, created_at=now,
+        uuid4(),
+        "shared",
+        "fact",
+        "b",
+        None,
+        1.0,
+        memory_kind="fact",
+        confidence=10,
+        created_at=now,
     )
     assert decay_factor(fresh, now) == 1.0
     old = replace(fresh, created_at=datetime(2020, 1, 1, tzinfo=UTC))
@@ -368,11 +376,17 @@ async def test_recall_reorders_by_recency_decay(clean: None) -> None:
     workspace_id = await _workspace()
     probe = vec((8, 1.0))
     old = await _seed_item(
-        workspace_id, SHARED_SUBJECT, "budget review meeting", probe,
+        workspace_id,
+        SHARED_SUBJECT,
+        "budget review meeting",
+        probe,
         created_at=datetime(2020, 1, 1, tzinfo=UTC),
     )
     new = await _seed_item(
-        workspace_id, SHARED_SUBJECT, "budget review meeting", probe,
+        workspace_id,
+        SHARED_SUBJECT,
+        "budget review meeting",
+        probe,
         created_at=datetime(2025, 6, 1, tzinfo=UTC),
     )
     recalled = await _store(StubEmbed(probe), workspace_id).recall(
@@ -385,11 +399,17 @@ async def test_recall_filters_to_the_created_at_window(clean: None) -> None:
     workspace_id = await _workspace()
     probe = vec((0, 1.0))
     old = await _seed_item(
-        workspace_id, SHARED_SUBJECT, "alpha budget review", probe,
+        workspace_id,
+        SHARED_SUBJECT,
+        "alpha budget review",
+        probe,
         created_at=datetime(2020, 1, 1, tzinfo=UTC),
     )
     new = await _seed_item(
-        workspace_id, SHARED_SUBJECT, "alpha budget review", probe,
+        workspace_id,
+        SHARED_SUBJECT,
+        "alpha budget review",
+        probe,
         created_at=datetime(2025, 1, 1, tzinfo=UTC),
     )
     store = _store(StubEmbed(probe), workspace_id)
@@ -398,8 +418,11 @@ async def test_recall_filters_to_the_created_at_window(clean: None) -> None:
     since = await store.recall("alpha", subjects, 8, start=datetime(2024, 1, 1, tzinfo=UTC))
     before = await store.recall("alpha", subjects, 8, end=datetime(2021, 1, 1, tzinfo=UTC))
     span = await store.recall(
-        "alpha", subjects, 8,
-        start=datetime(2019, 1, 1, tzinfo=UTC), end=datetime(2026, 1, 1, tzinfo=UTC),
+        "alpha",
+        subjects,
+        8,
+        start=datetime(2019, 1, 1, tzinfo=UTC),
+        end=datetime(2026, 1, 1, tzinfo=UTC),
     )
 
     assert {item.memory_id for item in since} == {new}

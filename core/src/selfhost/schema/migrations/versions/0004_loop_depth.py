@@ -14,9 +14,7 @@ def upgrade() -> None:
     op.add_column("turn", sa.Column("subagent_profile", sa.Text(), nullable=True))
     with op.batch_alter_table("conversation") as batch:
         batch.drop_constraint("conversation_surface", type_="check")
-        batch.create_check_constraint(
-            "conversation_surface", "surface in ('cli', 'subagent')"
-        )
+        batch.create_check_constraint("conversation_surface", "surface in ('cli', 'subagent')")
 
 
 def downgrade() -> None:

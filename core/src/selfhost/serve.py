@@ -84,9 +84,7 @@ def run() -> None:
     credentials = CredentialStore(fernet=Fernet(key.encode())) if key else None
     validate_ext_tools(manifests, workspace_id, credentials)
     embed = embed_backend(manifests, config.memory.embed_backend, workspace_id, credentials)
-    index = index_backend(
-        manifests, config.memory.index_backend, embed, workspace_id, credentials
-    )
+    index = index_backend(manifests, config.memory.index_backend, embed, workspace_id, credentials)
     blob = blob_store_for(config.blob)
     artifact_secret = os.environ.get(config.artifacts.token_secret_env, "")
     postgres = config.database.url.startswith("postgresql")
@@ -238,9 +236,7 @@ def _source_backends(manifests: tuple[Manifest, ...]) -> dict[str, SourceBackend
     for manifest in manifests:
         for provider in manifest.sources:
             if provider.backend in backends:
-                raise RuntimeError(
-                    f"two extensions register source backend {provider.backend!r}"
-                )
+                raise RuntimeError(f"two extensions register source backend {provider.backend!r}")
             backends[provider.backend] = provider.source
     return backends
 
@@ -361,9 +357,7 @@ def _mount_surfaces(
     for manifest in manifests:
         for spec in manifest.surfaces:
             if credentials is None:
-                raise RuntimeError(
-                    f"surface {spec.name!r} needs a credential key but none is set"
-                )
+                raise RuntimeError(f"surface {spec.name!r} needs a credential key but none is set")
             context = SurfaceContext(
                 workspace_id=workspace_id,
                 surface=spec.name,
@@ -553,7 +547,5 @@ async def _credential_rules(config: Config) -> tuple[Rule, ...]:
         )
     store = CredentialStore(fernet=Fernet(key.encode()))
     async with workspace_tx() as connection:
-        workspace_id = (
-            await connection.execute(sa.select(tables.workspace.c.id))
-        ).scalar_one()
+        workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
     return await derive_credential_rules(manifests, workspace_id, store)

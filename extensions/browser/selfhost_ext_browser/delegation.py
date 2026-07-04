@@ -90,9 +90,7 @@ async def _wide_browse(ctx: ToolContext, args: WideBrowseInput) -> ToolResult:
     rows = list(await asyncio.gather(*(visit(entity) for entity in entities)))
     await ctx.sandbox.write_file(WIDE_BROWSE_OUTPUT, json.dumps(rows, indent=2).encode())
     return ToolResult(
-        content=(
-            TextContent(text=json.dumps({"rows": rows, "output_file": WIDE_BROWSE_OUTPUT})),
-        )
+        content=(TextContent(text=json.dumps({"rows": rows, "output_file": WIDE_BROWSE_OUTPUT})),)
     )
 
 

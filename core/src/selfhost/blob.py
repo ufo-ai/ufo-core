@@ -142,9 +142,7 @@ class S3BlobStore:
             try:
                 parts: list[dict[str, object]] = []
                 for number, offset in enumerate(range(0, size, S3_MULTIPART_PART_BYTES), start=1):
-                    chunk = await asyncio.to_thread(
-                        os.pread, fd, S3_MULTIPART_PART_BYTES, offset
-                    )
+                    chunk = await asyncio.to_thread(os.pread, fd, S3_MULTIPART_PART_BYTES, offset)
                     part = await client.upload_part(
                         Bucket=self.bucket,
                         Key=key,
@@ -160,9 +158,7 @@ class S3BlobStore:
                     MultipartUpload={"Parts": parts},
                 )
             except Exception:
-                await client.abort_multipart_upload(
-                    Bucket=self.bucket, Key=key, UploadId=upload_id
-                )
+                await client.abort_multipart_upload(Bucket=self.bucket, Key=key, UploadId=upload_id)
                 raise
             finally:
                 await asyncio.to_thread(os.close, fd)
@@ -212,9 +208,7 @@ class S3BlobStore:
                     if len(buffer) < S3_MULTIPART_PART_BYTES:
                         continue
                     if upload_id is None:
-                        started = await client.create_multipart_upload(
-                            Bucket=self.bucket, Key=key
-                        )
+                        started = await client.create_multipart_upload(Bucket=self.bucket, Key=key)
                         upload_id = started["UploadId"]
                     uploaded = await client.upload_part(
                         Bucket=self.bucket,

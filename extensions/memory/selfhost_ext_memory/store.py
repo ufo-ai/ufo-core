@@ -163,21 +163,16 @@ def _fuse(
         cosine[hit.owner_id] = max(cosine.get(hit.owner_id, 0.0), hit.score)
     best: dict[str, tuple[float, str]] = {}
     for hit in chain.from_iterable(legs):
-        rrf = sum(
-            1.0 / (RRF_K + leg[hit.chunk_digest]) for leg in ranks if hit.chunk_digest in leg
-        )
+        rrf = sum(1.0 / (RRF_K + leg[hit.chunk_digest]) for leg in ranks if hit.chunk_digest in leg)
         current = best.get(hit.owner_id)
         if current is None or rrf > current[0]:
             best[hit.owner_id] = (rrf, hit.text)
     return {
-        owner_id: (rrf, cosine.get(owner_id, 0.0), text)
-        for owner_id, (rrf, text) in best.items()
+        owner_id: (rrf, cosine.get(owner_id, 0.0), text) for owner_id, (rrf, text) in best.items()
     }
 
 
-def fuse_hits(
-    lexical: tuple[Hit, ...], vector: tuple[Hit, ...], limit: int
-) -> tuple[Fused, ...]:
+def fuse_hits(lexical: tuple[Hit, ...], vector: tuple[Hit, ...], limit: int) -> tuple[Fused, ...]:
     """Pure reciprocal-rank fusion collapsed to one score per owning row — source-page search's
     ranking, where the fused rank across the lexical and vector legs is the whole signal."""
     fused = _fuse((lexical, vector), vector)
@@ -376,10 +371,14 @@ class MemoryStore:
             conditions.append(mem_page.c.created_at < end)
         async with self.transaction() as connection:
             rows = (
-                await connection.execute(
-                    sa.select(mem_page.c.page_id, mem_page.c.subject).where(*conditions)
+                (
+                    await connection.execute(
+                        sa.select(mem_page.c.page_id, mem_page.c.subject).where(*conditions)
+                    )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
         by_id = {row["page_id"]: row for row in rows}
         return tuple(
             SourceMatch(
@@ -416,18 +415,22 @@ class MemoryStore:
             return ()
         async with self.transaction() as connection:
             rows = (
-                await connection.execute(
-                    sa.select(memory_item.c.id, memory_item.c.subject, memory_item.c.body)
-                    .where(
-                        memory_item.c.workspace_id == self.workspace_id,
-                        memory_item.c.subject.in_(subjects),
-                        memory_item.c.embedding_digest.is_(None),
-                        memory_item.c.superseded_by.is_(None),
+                (
+                    await connection.execute(
+                        sa.select(memory_item.c.id, memory_item.c.subject, memory_item.c.body)
+                        .where(
+                            memory_item.c.workspace_id == self.workspace_id,
+                            memory_item.c.subject.in_(subjects),
+                            memory_item.c.embedding_digest.is_(None),
+                            memory_item.c.superseded_by.is_(None),
+                        )
+                        .order_by(memory_item.c.created_at.desc())
+                        .limit(TAIL_SCAN_MAX)
                     )
-                    .order_by(memory_item.c.created_at.desc())
-                    .limit(TAIL_SCAN_MAX)
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
         scored = tuple(
             Hit(
                 chunk_digest=f"tail:{row['id']}",
@@ -471,19 +474,23 @@ class MemoryStore:
             conditions.append(memory_item.c.created_at < end)
         async with self.transaction() as connection:
             rows = (
-                await connection.execute(
-                    sa.select(
-                        memory_item.c.id,
-                        memory_item.c.subject,
-                        memory_item.c.item_class,
-                        memory_item.c.memory_kind,
-                        memory_item.c.confidence,
-                        memory_item.c.body,
-                        memory_item.c.source_ref,
-                        memory_item.c.created_at,
-                    ).where(*conditions)
+                (
+                    await connection.execute(
+                        sa.select(
+                            memory_item.c.id,
+                            memory_item.c.subject,
+                            memory_item.c.item_class,
+                            memory_item.c.memory_kind,
+                            memory_item.c.confidence,
+                            memory_item.c.body,
+                            memory_item.c.source_ref,
+                            memory_item.c.created_at,
+                        ).where(*conditions)
+                    )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
         by_id = {row["id"]: row for row in rows}
         return tuple(
             Recalled(

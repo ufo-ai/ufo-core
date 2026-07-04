@@ -41,9 +41,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["workspace_id"], ["workspace.id"]),
         sa.ForeignKeyConstraint(["source_id"], ["source.id"]),
         sa.PrimaryKeyConstraint("id"),
-        sa.CheckConstraint(
-            "subject = 'shared' or subject like 'member:%'", name="page_subject"
-        ),
+        sa.CheckConstraint("subject = 'shared' or subject like 'member:%'", name="page_subject"),
     )
     op.create_index("page_feed", "page", ["workspace_id", "updated_at", "id"])
     op.create_index("page_source", "page", ["source_id"])

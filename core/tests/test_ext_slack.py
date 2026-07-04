@@ -60,9 +60,7 @@ def _mock_transport(recorder: list[httpx.Request], users: dict[str, str]) -> htt
         if url == slack.SLACK_CHAT_POST_MESSAGE_URL:
             return httpx.Response(200, json={"ok": True, "channel": "C5", "ts": "999.100"})
         if url == slack.SLACK_FILES_GET_UPLOAD_URL:
-            return httpx.Response(
-                200, json={"ok": True, "upload_url": UPLOAD_URL, "file_id": "F1"}
-            )
+            return httpx.Response(200, json={"ok": True, "upload_url": UPLOAD_URL, "file_id": "F1"})
         if url == UPLOAD_URL:
             return httpx.Response(200, text="OK")
         if url == slack.SLACK_FILES_COMPLETE_UPLOAD:
@@ -240,9 +238,7 @@ async def test_one_mention_admits_exactly_one_turn(db: None, tmp_path, monkeypat
                 )
             )
         ).all()
-        writeback = (
-            await connection.execute(sa.select(tables.writeback.c.status))
-        ).scalar_one()
+        writeback = (await connection.execute(sa.select(tables.writeback.c.status))).scalar_one()
     assert len(turns) == 1
     assert turns[0].idempotency_key == "C1:100.5"
     assert writeback == WRITEBACK_PENDING
@@ -291,7 +287,11 @@ async def test_inbound_file_streams_into_the_workspace(db: None, tmp_path, monke
         "mimetype": "text/csv",
     }
     body = _event_body(
-        type="app_mention", user="U1", channel="C1", ts="5.0", text="<@UBOT00000> see file",
+        type="app_mention",
+        user="U1",
+        channel="C1",
+        ts="5.0",
+        text="<@UBOT00000> see file",
         files=[file],
     )
     async with client:
@@ -459,9 +459,7 @@ async def test_oversize_artifact_is_delivered_as_a_download_link(
     async with workspace_tx() as connection:
         status = (
             await connection.execute(
-                sa.select(tables.writeback.c.status).where(
-                    tables.writeback.c.turn_id == turn_id
-                )
+                sa.select(tables.writeback.c.status).where(tables.writeback.c.turn_id == turn_id)
             )
         ).scalar_one()
     assert status == WRITEBACK_DELIVERED
@@ -476,9 +474,7 @@ async def test_invalid_blocks_reposts_once_as_plain_text(db: None, tmp_path, mon
         if str(request.url).split("?")[0] != slack.SLACK_CHAT_POST_MESSAGE_URL:
             return httpx.Response(404, json={"ok": False, "error": "not_mocked"})
         prior = [
-            r
-            for r in recorder
-            if str(r.url).split("?")[0] == slack.SLACK_CHAT_POST_MESSAGE_URL
+            r for r in recorder if str(r.url).split("?")[0] == slack.SLACK_CHAT_POST_MESSAGE_URL
         ]
         if len(prior) == 1:
             return httpx.Response(200, json={"ok": False, "error": "invalid_blocks"})
@@ -545,7 +541,11 @@ async def test_inbound_oversize_file_is_skipped_and_reported(
         },
     ]
     body = _event_body(
-        type="app_mention", user="U1", channel="C1", ts="6.0", text="<@UBOT00000> files",
+        type="app_mention",
+        user="U1",
+        channel="C1",
+        ts="6.0",
+        text="<@UBOT00000> files",
         files=files,
     )
     async with client:

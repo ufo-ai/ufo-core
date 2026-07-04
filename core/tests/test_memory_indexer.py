@@ -106,9 +106,7 @@ async def test_index_job_derives_chunks_and_stamps_digest(clean: None) -> None:
     derived = await _chunk_count()
     assert derived >= 1
     async with workspace_tx() as connection:
-        digest = (
-            await connection.execute(sa.select(memory_item.c.embedding_digest))
-        ).scalar_one()
+        digest = (await connection.execute(sa.select(memory_item.c.embedding_digest))).scalar_one()
     assert digest is not None and digest.startswith("sha256:")
 
     await indexer.run()

@@ -363,7 +363,7 @@ def chat_server(
     config_path.write_text(
         f'[database]\nurl = "{config.database.url}"\n\n'
         f'[blob]\nbackend = "filesystem"\nroot = "{config.blob.root}"\n\n'
-        f"[serve]\nhost = \"127.0.0.1\"\nport = {port}\n"
+        f'[serve]\nhost = "127.0.0.1"\nport = {port}\n'
     )
     monkeypatch.setenv("SELFHOST_CONFIG", str(config_path))
     monkeypatch.setattr(cli, "SELFHOST_DIR", tmp_path / ".selfhost")

@@ -205,9 +205,7 @@ async def record_turn_usage(
     )
 
 
-async def read_turn_cost(
-    connection: AsyncConnection, turn_id: UUID
-) -> tuple[int, int, str] | None:
+async def read_turn_cost(connection: AsyncConnection, turn_id: UUID) -> tuple[int, int, str] | None:
     """The billed tokens, micro-USD, and model for a turn, summed across its run attempts; None when
     nothing was billed. A parked-then-resumed turn has one ledger row per attempt, so the terminal
     cost is their total — the true provider charge."""
@@ -352,14 +350,11 @@ class SpendEvaluator:
         breaches = [
             cap
             for cap in caps
-            if await self._used_micro_usd(connection, cap) + pending_micro_usd
-            > cap.limit_micro_usd
+            if await self._used_micro_usd(connection, cap) + pending_micro_usd > cap.limit_micro_usd
         ]
         if not breaches:
             return SpendDecision(outcome=ALLOW, message="")
-        outcome: SpendOutcome = (
-            REJECT if any(cap.on_breach == REJECT for cap in breaches) else PARK
-        )
+        outcome: SpendOutcome = REJECT if any(cap.on_breach == REJECT for cap in breaches) else PARK
         return SpendDecision(outcome=outcome, message=self._message(outcome, breaches))
 
     async def _applicable_caps(self, connection: AsyncConnection) -> tuple[SpendCap, ...]:
@@ -512,9 +507,7 @@ class SpendRollup:
                     sa.func.sum(tables.ledger.c.priced_micro_usd).label("priced"),
                 )
                 .select_from(
-                    tables.ledger.join(tables.turn)
-                    .join(tables.conversation)
-                    .join(tables.member)
+                    tables.ledger.join(tables.turn).join(tables.conversation).join(tables.member)
                 )
                 .where(window)
                 .group_by(tables.conversation.c.member_id, tables.member.c.email)

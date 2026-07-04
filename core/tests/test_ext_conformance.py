@@ -199,9 +199,9 @@ async def test_sample_is_discovered_via_its_entry_point() -> None:
     assert {connector.oauth.provider for connector in manifest.connectors} == {
         sample.CONNECTOR_PROVIDER
     }
-    assert {
-        tool.name for connector in manifest.connectors for tool in connector.tools
-    } == {sample.CONNECTOR_EXECUTE_TOOL_NAME}
+    assert {tool.name for connector in manifest.connectors for tool in connector.tools} == {
+        sample.CONNECTOR_EXECUTE_TOOL_NAME
+    }
     assert {section.name for section in manifest.prompt_sections} == {sample.SECTION_NAME}
     assert {profile.name for profile in manifest.subagents} == {sample.SUBAGENT_NAME}
     assert {surface.name for surface in manifest.surfaces} == {sample.SURFACE_NAME}
@@ -812,9 +812,7 @@ async def test_sample_surface_admits_links_streams_and_delivers(db: None, tmp_pa
     blob = FilesystemBlobStore(root=tmp_path)
     dbos = _StubDbos()
     app = FastAPI()
-    _mount_surfaces(
-        app, (manifest,), workspace_id, _credential_store(), blob, dbos, "", None
-    )
+    _mount_surfaces(app, (manifest,), workspace_id, _credential_store(), blob, dbos, "", None)
     body = json.dumps(
         {"external_id": "ext-1", "email": email, "message": "hello", "inbound_text": "note!"}
     )
@@ -948,14 +946,10 @@ async def test_sample_source_syncs_a_page_recallable_through_memory(
     async with workspace_tx() as connection:
         page = (
             await connection.execute(
-                sa.select(tables.page.c.subject).where(
-                    tables.page.c.workspace_id == workspace_id
-                )
+                sa.select(tables.page.c.subject).where(tables.page.c.workspace_id == workspace_id)
             )
         ).one()
-        chunks = (
-            await connection.execute(sa.text("select count(*) from chunk"))
-        ).scalar_one()
+        chunks = (await connection.execute(sa.text("select count(*) from chunk"))).scalar_one()
     assert page.subject == SHARED_SUBJECT
     assert chunks == 0
 
@@ -985,9 +979,7 @@ async def test_core_selects_a_manifest_index_backend_by_name(db: None, database_
     hits = await selected.lexical("orbital", frozenset({SHARED_SUBJECT}), OWNER_KIND_MEMORY_ITEM, 5)
     assert [hit.chunk_digest for hit in hits] == ["d1"]
 
-    default = index_backend(
-        (manifest, index_default.manifest()), None, embed, workspace_id, store
-    )
+    default = index_backend((manifest, index_default.manifest()), None, embed, workspace_id, store)
     assert isinstance(default, DefaultIndex)
 
     with pytest.raises(RuntimeError, match="no extension registers"):
@@ -1049,8 +1041,6 @@ async def test_sample_pack_onboarding_step_runs_through_its_scoped_context(db: N
     onboarding step with a context scoped to the pack's name, which records through its scoped store
     — read back here through the same public surface, proving the step ran scoped to the pack."""
     workspace_id = await _workspace()
-    await run_onboarding_steps(
-        load_manifests(sample_pack.NAME), workspace_id, _credential_store()
-    )
+    await run_onboarding_steps(load_manifests(sample_pack.NAME), workspace_id, _credential_store())
     scoped = ScopedStore(workspace_id=workspace_id, extension=sample_pack.NAME)
     assert await scoped.get(sample_pack.ONBOARDING_KEY) == {"pack_onboarded": True}

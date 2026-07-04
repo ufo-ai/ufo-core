@@ -71,9 +71,7 @@ def test_skill_tree_resolves_dependencies_before_the_skill_that_names_them(
     tmp_path: Path,
 ) -> None:
     base = parse_skill(_write_skill(tmp_path, "base", "base skill", "base body"))
-    leaf = parse_skill(
-        _write_skill(tmp_path, "leaf", "leaf skill", "leaf body", depends=("base",))
-    )
+    leaf = parse_skill(_write_skill(tmp_path, "leaf", "leaf skill", "leaf body", depends=("base",)))
     registry = SkillRegistry({"base": base, "leaf": leaf})
     assert [skill.name for skill in registry.tree("leaf")] == ["base", "leaf"]
 

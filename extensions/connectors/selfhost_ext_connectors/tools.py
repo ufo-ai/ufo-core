@@ -61,9 +61,7 @@ async def list_external_tools(ctx: ToolContext, args: ListExternalToolsInput) ->
     return _json_result({"connectors": matches})
 
 
-async def describe_external_tools(
-    ctx: ToolContext, args: DescribeExternalToolsInput
-) -> ToolResult:
+async def describe_external_tools(ctx: ToolContext, args: DescribeExternalToolsInput) -> ToolResult:
     client = composio.composio_client()
     schemas: dict[str, object] = {}
     unresolved: list[str] = []
@@ -99,9 +97,7 @@ async def call_external_tool(ctx: ToolContext, args: CallExternalToolInput) -> T
     return _json_result(response)
 
 
-async def search_connector_tools(
-    ctx: ToolContext, args: SearchConnectorToolsInput
-) -> ToolResult:
+async def search_connector_tools(ctx: ToolContext, args: SearchConnectorToolsInput) -> ToolResult:
     client = composio.composio_client()
     payload = await composio.search_connector_tools(
         client, ctx.turn.workspace_id, args.source_id, args.query

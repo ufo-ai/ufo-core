@@ -355,9 +355,7 @@ async def test_call_external_tool_without_a_grant_fails_loud(
 ) -> None:
     workspace_id, agent_id, conversation_id, turn_id = uuid4(), uuid4(), uuid4(), uuid4()
     executed: list[dict[str, object]] = []
-    monkeypatch.setattr(
-        composio, "composio_client", lambda: _mock_client(COMPOSIO_USER, executed)
-    )
+    monkeypatch.setattr(composio, "composio_client", lambda: _mock_client(COMPOSIO_USER, executed))
     ctx = _ctx(workspace_id, agent_id, conversation_id, turn_id, GrantStore())
     with pytest.raises(ValueError, match="grant"):
         await call_external_tool(
@@ -428,9 +426,7 @@ async def test_complete_rejects_an_account_owned_by_a_foreign_composio_user(
 
 
 def _request(query: str) -> Request:
-    return Request(
-        {"type": "http", "method": "GET", "headers": [], "query_string": query.encode()}
-    )
+    return Request({"type": "http", "method": "GET", "headers": [], "query_string": query.encode()})
 
 
 def _turn_context(

@@ -139,9 +139,7 @@ VECTOR_ROWS_SQLITE = sa.text(
     where subject in :subjects and owner_kind = :owner_kind and embedding is not null
     """
 ).bindparams(sa.bindparam("subjects", expanding=True))
-DELETE_SQLITE = sa.text(
-    "delete from chunk where owner_kind = :owner_kind and owner_id = :owner_id"
-)
+DELETE_SQLITE = sa.text("delete from chunk where owner_kind = :owner_kind and owner_id = :owner_id")
 DELETE_FTS_SCOPE = sa.text(
     """
     delete from chunk_fts where chunk_digest in (
@@ -299,10 +297,14 @@ class DefaultIndex:
                 ).mappings()
                 return tuple(_hit(row, row["score"]) for row in rows)
             rows = (
-                await connection.execute(
-                    VECTOR_ROWS_SQLITE, {"subjects": list(subjects), "owner_kind": owner_kind}
+                (
+                    await connection.execute(
+                        VECTOR_ROWS_SQLITE, {"subjects": list(subjects), "owner_kind": owner_kind}
+                    )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
         scored = sorted(
             ((row, cosine(unpack_embedding(row["embedding"]), embedding)) for row in rows),
             key=lambda item: item[1],
@@ -315,8 +317,10 @@ class DefaultIndex:
         async with self.transaction() as connection:
             postgres = connection.dialect.name == "postgresql"
             rows = (
-                await connection.execute(SCOPE_TEXT_PG if postgres else SCOPE_TEXT_SQLITE, params)
-            ).mappings().all()
+                (await connection.execute(SCOPE_TEXT_PG if postgres else SCOPE_TEXT_SQLITE, params))
+                .mappings()
+                .all()
+            )
         if not rows:
             return
         vectors = await self.embed.embed(tuple(row["text"] for row in rows))

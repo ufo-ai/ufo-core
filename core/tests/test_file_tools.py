@@ -144,8 +144,20 @@ def file_ctx(sandbox_image: str, tmp_path: Path) -> Iterator[tuple[ToolContext, 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     chowned = subprocess.run(
-        ["docker", "run", "--rm", "--user", "0:0", "-v", f"{workspace}:/workspace", sandbox_image,
-         "chown", "-R", f"{SANDBOX_UID}:{SANDBOX_GID}", "/workspace"],
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--user",
+            "0:0",
+            "-v",
+            f"{workspace}:/workspace",
+            sandbox_image,
+            "chown",
+            "-R",
+            f"{SANDBOX_UID}:{SANDBOX_GID}",
+            "/workspace",
+        ],
         capture_output=True,
         text=True,
         check=False,
@@ -153,8 +165,17 @@ def file_ctx(sandbox_image: str, tmp_path: Path) -> Iterator[tuple[ToolContext, 
     if chowned.returncode != 0:
         pytest.skip(f"docker cannot chown the workspace mount: {chowned.stderr.strip()}")
     started = subprocess.run(
-        ["docker", "run", "-d", "--rm", "-v", f"{workspace}:/workspace", sandbox_image,
-         "sleep", "infinity"],
+        [
+            "docker",
+            "run",
+            "-d",
+            "--rm",
+            "-v",
+            f"{workspace}:/workspace",
+            sandbox_image,
+            "sleep",
+            "infinity",
+        ],
         capture_output=True,
         text=True,
         check=False,
@@ -392,9 +413,7 @@ async def test_edit_non_unique_without_replace_all_raises(
     await ctx.sandbox.write_file("dup.py", b"x\nx\n")
     await _run("read", ctx, file_path="dup.py")
     with pytest.raises(ValueError, match="found 2 times"):
-        await _run(
-            "edit", ctx, file_path="dup.py", edits=[{"old_string": "x", "new_string": "y"}]
-        )
+        await _run("edit", ctx, file_path="dup.py", edits=[{"old_string": "x", "new_string": "y"}])
 
 
 async def test_share_file_streams_a_file_over_the_read_cap_byte_exact(

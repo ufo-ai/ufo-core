@@ -74,9 +74,19 @@ async def generate_ca() -> tuple[str, str]:
         key_path = Path(work) / "ca.key"
         cert_path = Path(work) / "ca.crt"
         await _openssl(
-            "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-            "-keyout", str(key_path), "-out", str(cert_path),
-            "-days", CA_VALID_DAYS, "-subj", "/CN=selfhost-sandbox-proxy",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            str(key_path),
+            "-out",
+            str(cert_path),
+            "-days",
+            CA_VALID_DAYS,
+            "-subj",
+            "/CN=selfhost-sandbox-proxy",
         )
         return cert_path.read_text(), key_path.read_text()
 
@@ -313,13 +323,31 @@ class EgressProxy:
             ext_path = root / f"leaf-{host}.ext"
             ext_path.write_text(f"subjectAltName=DNS:{host}\nextendedKeyUsage=serverAuth\n")
             await _openssl(
-                "req", "-new", "-key", str(root / "leaf.key"),
-                "-subj", f"/CN={host}", "-out", str(root / f"leaf-{host}.csr"),
+                "req",
+                "-new",
+                "-key",
+                str(root / "leaf.key"),
+                "-subj",
+                f"/CN={host}",
+                "-out",
+                str(root / f"leaf-{host}.csr"),
             )
             await _openssl(
-                "x509", "-req", "-in", str(root / f"leaf-{host}.csr"),
-                "-CA", str(root / "ca.crt"), "-CAkey", str(root / "ca.key"), "-CAcreateserial",
-                "-days", LEAF_VALID_DAYS, "-extfile", str(ext_path), "-out", str(cert_path),
+                "x509",
+                "-req",
+                "-in",
+                str(root / f"leaf-{host}.csr"),
+                "-CA",
+                str(root / "ca.crt"),
+                "-CAkey",
+                str(root / "ca.key"),
+                "-CAcreateserial",
+                "-days",
+                LEAF_VALID_DAYS,
+                "-extfile",
+                str(ext_path),
+                "-out",
+                str(cert_path),
             )
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             context.load_cert_chain(certfile=str(cert_path), keyfile=str(root / "leaf.key"))

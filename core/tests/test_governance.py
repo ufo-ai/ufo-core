@@ -164,9 +164,7 @@ async def test_cli_approve_endpoint_applies_the_change(db: None) -> None:
     )
     app = FastAPI()
     app.include_router(router)
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://surface"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://surface") as client:
         response = await client.post(
             f"/v1/proposals/{ref.proposal_id}/approve",
             headers={"authorization": f"Bearer {seed.token}"},

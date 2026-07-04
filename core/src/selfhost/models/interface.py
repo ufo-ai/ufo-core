@@ -136,9 +136,7 @@ def trim_images(messages: tuple[Message, ...]) -> tuple[Message, ...]:
     drop = set(positions) - (keep_request & keep_message)
     if not drop:
         return messages
-    return tuple(
-        _trim_message(index, message, drop) for index, message in enumerate(messages)
-    )
+    return tuple(_trim_message(index, message, drop) for index, message in enumerate(messages))
 
 
 def _image_positions(

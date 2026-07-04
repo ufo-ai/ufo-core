@@ -169,9 +169,7 @@ class ComposioClient:
             raise ValueError("connector tool arguments exceed the Composio execute payload bound")
         return await self._post(f"/tools/execute/{slug}", body)
 
-    async def tool_router_session(
-        self, user_id: str, toolkits: list[str]
-    ) -> ToolRouterSession:
+    async def tool_router_session(self, user_id: str, toolkits: list[str]) -> ToolRouterSession:
         """Open a Tool Router session scoped to `toolkits` for `user_id`, returning its id and MCP
         endpoint. The endpoint hosts the `COMPOSIO_SEARCH_TOOLS` tool that semantic search calls."""
         payload = await self._post(

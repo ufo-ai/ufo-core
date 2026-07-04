@@ -121,9 +121,7 @@ class SourceBackend(Protocol[ConfigT]):
 
     config_model: type[ConfigT]
 
-    async def fetch(
-        self, config: ConfigT, cursor: str | None, auth: SourceAuth
-    ) -> SyncResult: ...
+    async def fetch(self, config: ConfigT, cursor: str | None, auth: SourceAuth) -> SyncResult: ...
 
 
 @dataclass(frozen=True)
@@ -325,12 +323,16 @@ class SyncDriver:
     async def _prior_pages(self, source_id: UUID) -> dict[UUID, tuple[str, bool]]:
         async with workspace_tx() as connection:
             rows = (
-                await connection.execute(
-                    sa.select(
-                        tables.page.c.id, tables.page.c.digest, tables.page.c.tombstone
-                    ).where(tables.page.c.source_id == source_id)
+                (
+                    await connection.execute(
+                        sa.select(
+                            tables.page.c.id, tables.page.c.digest, tables.page.c.tombstone
+                        ).where(tables.page.c.source_id == source_id)
+                    )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
         return {row["id"]: (row["digest"], bool(row["tombstone"])) for row in rows}
 
     async def _write(
@@ -348,9 +350,7 @@ class SyncDriver:
         indexed is not missed."""
         now = datetime.now(UTC)
         async with workspace_tx() as connection:
-            workspace_id = (
-                await connection.execute(sa.select(tables.workspace.c.id))
-            ).scalar_one()
+            workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
             for page_id, body_ref, digest, subject in changed:
                 updated = await connection.execute(
                     sa.update(tables.page)

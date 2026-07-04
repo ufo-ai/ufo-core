@@ -119,16 +119,41 @@ def live_container(sandbox_image: str, tmp_path: Path) -> Iterator[SandboxHandle
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     chowned = subprocess.run(
-        ["docker", "run", "--rm", "--user", "0:0", "-v", f"{workspace}:/workspace", sandbox_image,
-         "chown", "-R", f"{SANDBOX_UID}:{SANDBOX_GID}", "/workspace"],
-        capture_output=True, text=True, check=False,
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--user",
+            "0:0",
+            "-v",
+            f"{workspace}:/workspace",
+            sandbox_image,
+            "chown",
+            "-R",
+            f"{SANDBOX_UID}:{SANDBOX_GID}",
+            "/workspace",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
     )
     if chowned.returncode != 0:
         pytest.skip(f"docker cannot chown the workspace mount: {chowned.stderr.strip()}")
     started = subprocess.run(
-        ["docker", "run", "-d", "--rm", "-v", f"{workspace}:/workspace", sandbox_image,
-         "sleep", "infinity"],
-        capture_output=True, text=True, check=False,
+        [
+            "docker",
+            "run",
+            "-d",
+            "--rm",
+            "-v",
+            f"{workspace}:/workspace",
+            sandbox_image,
+            "sleep",
+            "infinity",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
     )
     if started.returncode != 0:
         pytest.skip(f"docker cannot run the sandbox image: {started.stderr.strip()}")
@@ -153,33 +178,57 @@ async def _seed_turn(conversation_id: UUID) -> Turn:
         )
         await connection.execute(
             sa.insert(tables.member).values(
-                id=member_id, workspace_id=workspace_id, email="a@b.c",
-                created_at=sa.func.now(), updated_at=sa.func.now(),
+                id=member_id,
+                workspace_id=workspace_id,
+                email="a@b.c",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
             )
         )
         await connection.execute(
             sa.insert(tables.agent).values(
-                id=agent_id, workspace_id=workspace_id, name="assistant", prompt="p",
-                model="claude-opus-4-8", created_at=sa.func.now(), updated_at=sa.func.now(),
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="assistant",
+                prompt="p",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
             )
         )
         await connection.execute(
             sa.insert(tables.conversation).values(
-                id=conversation_id, workspace_id=workspace_id, surface="cli",
-                queue_key=uuid4().hex, member_id=member_id,
-                created_at=sa.func.now(), updated_at=sa.func.now(),
+                id=conversation_id,
+                workspace_id=workspace_id,
+                surface="cli",
+                queue_key=uuid4().hex,
+                member_id=member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
             )
         )
         await connection.execute(
             sa.insert(tables.turn).values(
-                id=turn_id, workspace_id=workspace_id, conversation_id=conversation_id,
-                agent_id=agent_id, seq=1, status="queued", inbound="run the marker",
-                terminal=None, created_at=sa.func.now(), updated_at=sa.func.now(),
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="queued",
+                inbound="run the marker",
+                terminal=None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
             )
         )
     return Turn(
-        id=turn_id, workspace_id=workspace_id, conversation_id=conversation_id,
-        agent_id=agent_id, seq=1, status="queued", inbound="run the marker",
+        id=turn_id,
+        workspace_id=workspace_id,
+        conversation_id=conversation_id,
+        agent_id=agent_id,
+        seq=1,
+        status="queued",
+        inbound="run the marker",
     )
 
 
@@ -196,7 +245,9 @@ async def test_turn_execs_bash_in_a_live_container(
         model=model,
         transcript=Transcript(blob=blob, conversation_id=turn.conversation_id),
         compaction=Compaction(
-            client=model, model="claude-opus-4-8", blob=blob,
+            client=model,
+            model="claude-opus-4-8",
+            blob=blob,
             conversation_id=turn.conversation_id,
         ),
         hub=InProcessHub(),

@@ -164,8 +164,12 @@ async def _make_due() -> None:
 
 def _context(memory: MemoryStore, member_id: UUID | None, blob_root: Path) -> ToolContext:
     ext = context_for(
-        memory.workspace_id, "memory", frozenset(), None,
-        index=memory.index, embed=memory.embed,
+        memory.workspace_id,
+        "memory",
+        frozenset(),
+        None,
+        index=memory.index,
+        embed=memory.embed,
     )
     return ToolContext(
         sandbox=None,
@@ -187,9 +191,7 @@ def _context(memory: MemoryStore, member_id: UUID | None, blob_root: Path) -> To
     )
 
 
-async def _search(
-    memory: MemoryStore, member_id: UUID | None, blob_root: Path, query: str
-) -> str:
+async def _search(memory: MemoryStore, member_id: UUID | None, blob_root: Path, query: str) -> str:
     tool = MEMORY_TOOLS["memory_search"]
     result: ToolResult = await tool.handler(
         _context(memory, member_id, blob_root),
@@ -205,9 +207,7 @@ async def test_folder_syncs_a_page_body_to_blob_no_chunk_until_indexed(
     root = tmp_path / "src"
     root.mkdir()
     (root / "brief.md").write_text("the quarterly revenue target is twelve million dollars")
-    driver, page_indexer, _ = _wire(
-        database_url, vec((7, 1.0)), tmp_path / "blobs", workspace_id
-    )
+    driver, page_indexer, _ = _wire(database_url, vec((7, 1.0)), tmp_path / "blobs", workspace_id)
     await _register_folder(root)
 
     await driver.run()
@@ -250,9 +250,7 @@ async def test_unchanged_doc_resync_does_not_reindex_or_duplicate(
     root = tmp_path / "src"
     root.mkdir()
     (root / "note.md").write_text("the mascot is a friendly otter named pip")
-    driver, page_indexer, _ = _wire(
-        database_url, vec((9, 1.0)), tmp_path / "blobs", workspace_id
-    )
+    driver, page_indexer, _ = _wire(database_url, vec((9, 1.0)), tmp_path / "blobs", workspace_id)
     await _register_folder(root)
     await driver.run()
     await page_indexer.run()
@@ -369,9 +367,7 @@ async def test_page_index_cursor_resumes_across_a_fresh_indexer(
     embed = CountingEmbed(vec((15, 1.0)))
     blob = FilesystemBlobStore(root=tmp_path / "blobs")
     postgres = database_url.startswith("postgresql")
-    driver = SyncDriver(
-        backends={FOLDER_BACKEND: FolderSource()}, blob=blob, postgres=postgres
-    )
+    driver = SyncDriver(backends={FOLDER_BACKEND: FolderSource()}, blob=blob, postgres=postgres)
     cursor_store = ScopedStore(workspace_id=workspace_id, extension="memory")
 
     def fresh_indexer() -> PageIndexer:
@@ -422,9 +418,7 @@ async def test_shared_page_scoping_excludes_a_member_only_search(
     )
     assert member_only == ()
 
-    with_shared = await service.search_sources(
-        "expense reports due", recall_subjects(uuid4()), 8
-    )
+    with_shared = await service.search_sources("expense reports due", recall_subjects(uuid4()), 8)
     assert len(with_shared) == 1
 
 
@@ -469,9 +463,7 @@ async def test_member_scoped_page_is_invisible_to_another_member(
                 page_id=page_id, subject=member_subject(alice), created_at=sa.func.now()
             )
         )
-    _, _, service = _wire(
-        database_url, probe, tmp_path / "blobs", workspace_id
-    )
+    _, _, service = _wire(database_url, probe, tmp_path / "blobs", workspace_id)
     await service.index.upsert(
         (
             Chunk(
@@ -502,23 +494,25 @@ async def test_a_failing_source_is_isolated_and_released(
     good.mkdir()
     (good / "doc.md").write_text("the wifi password is maple syrup")
     missing = tmp_path / "missing"  # never created → FolderSource._read raises FileNotFoundError
-    driver, _, _ = _wire(
-        database_url, vec((14, 1.0)), tmp_path / "blobs", workspace_id
-    )
+    driver, _, _ = _wire(database_url, vec((14, 1.0)), tmp_path / "blobs", workspace_id)
     await _register_folder(good)
     await _register_folder(missing)
 
     async def _row(root: Path) -> sa.RowMapping:
         async with workspace_tx() as connection:
             rows = (
-                await connection.execute(
-                    sa.select(
-                        tables.source.c.config,
-                        tables.source.c.claimed_by,
-                        tables.source.c.next_sync_at,
+                (
+                    await connection.execute(
+                        sa.select(
+                            tables.source.c.config,
+                            tables.source.c.claimed_by,
+                            tables.source.c.next_sync_at,
+                        )
                     )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
         return next(row for row in rows if row["config"]["root"] == str(root))
 
     before = (await _row(missing))["next_sync_at"]
@@ -592,14 +586,18 @@ async def _seed_scripted_source(workspace_id: UUID, cursor: str | None) -> UUID:
 async def _source_state(source_id: UUID) -> sa.RowMapping:
     async with workspace_tx() as connection:
         return (
-            await connection.execute(
-                sa.select(
-                    tables.source.c.cursor,
-                    tables.source.c.consecutive_errors,
-                    tables.source.c.next_sync_at,
-                ).where(tables.source.c.id == source_id)
+            (
+                await connection.execute(
+                    sa.select(
+                        tables.source.c.cursor,
+                        tables.source.c.consecutive_errors,
+                        tables.source.c.next_sync_at,
+                    ).where(tables.source.c.id == source_id)
+                )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
 
 
 async def _tombstone(page_id: UUID) -> bool:

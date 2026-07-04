@@ -23,9 +23,7 @@ def upgrade() -> None:
         sa.Column("approved_by", sa.Uuid(), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.CheckConstraint(
-            "status in ('pending', 'approved', 'rejected')", name="proposal_status"
-        ),
+        sa.CheckConstraint("status in ('pending', 'approved', 'rejected')", name="proposal_status"),
         sa.ForeignKeyConstraint(["agent_id"], ["agent.id"]),
         sa.ForeignKeyConstraint(["approved_by"], ["member.id"]),
         sa.ForeignKeyConstraint(["workspace_id"], ["workspace.id"]),

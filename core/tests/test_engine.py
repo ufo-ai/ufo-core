@@ -160,9 +160,7 @@ class RecordingHub:
         self.frames.append(frame)
         return str(len(self.frames))
 
-    def subscribe(
-        self, turn_id: UUID, cursor: str = ""
-    ) -> AsyncIterator[tuple[str, LiveFrame]]:
+    def subscribe(self, turn_id: UUID, cursor: str = "") -> AsyncIterator[tuple[str, LiveFrame]]:
         raise NotImplementedError
 
     async def covers(self, turn_id: UUID, cursor: str) -> bool:
@@ -419,9 +417,7 @@ async def test_running_turn_is_claimed_only_by_its_own_workflow_id(
     assert stamp is None
 
 
-async def test_tool_call_round_dispatches_in_sandbox_then_answers(
-    db: None, tmp_path: Path
-) -> None:
+async def test_tool_call_round_dispatches_in_sandbox_then_answers(db: None, tmp_path: Path) -> None:
     turn = await _seed_turn("queued", None)
     carrier = RecordingCarrier(result=ExecResult(stdout="hi\n", stderr="", exit_code=0))
     engine = _engine(turn, ToolCallingModel(), tmp_path, carrier=carrier)

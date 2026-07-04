@@ -104,9 +104,7 @@ async def test_stored_bytes_are_lz4_compact_json(tmp_path: Path) -> None:
     blob = FilesystemBlobStore(root=tmp_path)
     conversation_id = uuid4()
     transcript = Transcript(blob=blob, conversation_id=conversation_id)
-    await transcript.write(
-        Conversation(seq=1, messages=(Message(role="user", content="hi"),))
-    )
+    await transcript.write(Conversation(seq=1, messages=(Message(role="user", content="hi"),)))
     raw = await blob.get(transcript_key(conversation_id))
     decoded = lz4.frame.decompress(raw).decode()
     assert decoded == '{"messages":[{"content":"hi","role":"user"}],"seq":1}'

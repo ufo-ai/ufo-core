@@ -154,9 +154,7 @@ class SandboxSession:
     carrier: Carrier
     handle: SandboxHandle
 
-    async def bash(
-        self, command: str, timeout_s: int = DEFAULT_EXEC_TIMEOUT_SECONDS
-    ) -> ExecResult:
+    async def bash(self, command: str, timeout_s: int = DEFAULT_EXEC_TIMEOUT_SECONDS) -> ExecResult:
         return await self.carrier.exec(
             self.handle, ("bash", "-lc", command), stdin=b"", timeout_s=timeout_s
         )

@@ -195,7 +195,7 @@ async def test_exec_pipes_stdin_through_base64() -> None:
     assert command.startswith("printf %s ")
     assert "| base64 -d | " in command
     assert base64.b64encode(b"payload").decode() in command
-    assert command.endswith('sh -c \'cat > "$1"\' sh /workspace/f')
+    assert command.endswith("sh -c 'cat > \"$1\"' sh /workspace/f")
 
 
 async def test_exec_maps_a_nonzero_exit_to_the_command_result() -> None:

@@ -220,9 +220,7 @@ class SampleSource:
         self, config: SampleSourceConfig, cursor: str | None, auth: SourceAuth
     ) -> SyncResult:
         digest = "sha256:" + hashlib.sha256(config.topic.encode()).hexdigest()
-        page = Page(
-            source_ref=SOURCE_REF, digest=digest, subject=SHARED_SUBJECT, body=config.topic
-        )
+        page = Page(source_ref=SOURCE_REF, digest=digest, subject=SHARED_SUBJECT, body=config.topic)
         return SyncResult(pages=(page,), next_cursor=None)
 
 
@@ -243,9 +241,7 @@ class SampleIndex:
             self.chunks[chunk.chunk_digest] = chunk
 
     async def delete(self, scope: IndexScope) -> None:
-        for digest in [
-            digest for digest, chunk in self.chunks.items() if _in_scope(chunk, scope)
-        ]:
+        for digest in [digest for digest, chunk in self.chunks.items() if _in_scope(chunk, scope)]:
             del self.chunks[digest]
 
     async def prune(self, scope: IndexScope, keep: frozenset[str]) -> None:

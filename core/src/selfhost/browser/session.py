@@ -82,9 +82,7 @@ class BrowserSession:
         conn = self.conn
         version = await conn.send("Browser.getVersion")
         self.is_mac = "Mac" in str(version.get("userAgent", ""))
-        self.download_dir = await asyncio.to_thread(
-            tempfile.mkdtemp, prefix="selfhost-downloads-"
-        )
+        self.download_dir = await asyncio.to_thread(tempfile.mkdtemp, prefix="selfhost-downloads-")
         tabs = self.tab_reader()
         downloads = self.download_reader()
         dialogs = self.dialog_reader()

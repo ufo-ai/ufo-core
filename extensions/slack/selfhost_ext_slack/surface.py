@@ -141,9 +141,7 @@ def slack_message_gated(event: Mapping[str, object], bot_user_id: str, is_dm: bo
     return f"<@{bot_user_id}>" in str(event.get("text") or "")
 
 
-def slack_reply_body(
-    channel: str, thread_ts: str | None, text: str, blocks: bool = True
-) -> bytes:
+def slack_reply_body(channel: str, thread_ts: str | None, text: str, blocks: bool = True) -> bytes:
     """The chat.postMessage body: one Block Kit `markdown` block so Slack renders the agent's own
     markdown natively, degrading to a text-only body when the reply exceeds Slack's block-character
     or payload-byte caps, or when `blocks=False` forces plain text after Slack rejects the blocks as
@@ -245,9 +243,7 @@ async def _to_inbound(ctx: SurfaceContext, raw: bytes) -> Inbound | None:
     )
 
 
-async def _resolve_member(
-    ctx: SurfaceContext, bot_token: str, inbound: Inbound
-) -> UUID | None:
+async def _resolve_member(ctx: SurfaceContext, bot_token: str, inbound: Inbound) -> UUID | None:
     linked = await ctx.linked_member(inbound.slack_user_id)
     if linked is not None:
         return linked
@@ -435,10 +431,7 @@ async def attach(ctx: SurfaceContext, writeback: Writeback, reply_ref: str) -> N
     channel, _, reply_ts = reply_ref.partition(":")
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
     results = await asyncio.gather(
-        *(
-            _upload_artifact(ctx, bot_token, channel, reply_ts, artifact)
-            for artifact in inline
-        ),
+        *(_upload_artifact(ctx, bot_token, channel, reply_ts, artifact) for artifact in inline),
         return_exceptions=True,
     )
     for artifact, result in zip(inline, results, strict=True):

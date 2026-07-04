@@ -277,9 +277,7 @@ async def _consume(
 ) -> tuple[str, dict[str, object]]:
     deltas: list[str] = []
     async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
-        async with client.stream(
-            "GET", f"/v1/turns/{turn_id}/stream", headers=headers
-        ) as stream:
+        async with client.stream("GET", f"/v1/turns/{turn_id}/stream", headers=headers) as stream:
             assert stream.status_code == 200
             async for line in stream.aiter_lines():
                 if not line:
@@ -372,14 +370,10 @@ async def test_auto_model_resolves_to_the_configured_default(surface: AsyncClien
 
 async def test_cost_ticks_stream_as_a_turn_accrues_spend(surface: AsyncClient) -> None:
     headers = await _bootstrap()
-    turn_id = (await surface.post("/v1/chat", content=b"ping", headers=headers)).json()[
-        "turn_id"
-    ]
+    turn_id = (await surface.post("/v1/chat", content=b"ping", headers=headers)).json()["turn_id"]
     costs: list[dict[str, object]] = []
     async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
-        async with surface.stream(
-            "GET", f"/v1/turns/{turn_id}/stream", headers=headers
-        ) as stream:
+        async with surface.stream("GET", f"/v1/turns/{turn_id}/stream", headers=headers) as stream:
             assert stream.status_code == 200
             async for line in stream.aiter_lines():
                 if not line:
@@ -448,9 +442,7 @@ async def test_failure_commits_terminal_bills_nothing_preserves_inbound(
 
 async def test_next_turn_sees_a_failed_turns_inbound(surface: AsyncClient) -> None:
     headers = await _bootstrap()
-    first = (await surface.post("/v1/chat", content=b"explode", headers=headers)).json()[
-        "turn_id"
-    ]
+    first = (await surface.post("/v1/chat", content=b"explode", headers=headers)).json()["turn_id"]
     _, first_terminal = await _consume(surface, headers, first)
     assert first_terminal["status"] == "failed"
     second = (await surface.post("/v1/chat", content=b"ok", headers=headers)).json()["turn_id"]
@@ -464,9 +456,7 @@ async def test_next_turn_sees_a_failed_turns_inbound(surface: AsyncClient) -> No
 
 async def test_cancel_commits_terminal_while_model_runs(surface: AsyncClient) -> None:
     headers = await _bootstrap()
-    turn_id = (await surface.post("/v1/chat", content=b"slow", headers=headers)).json()[
-        "turn_id"
-    ]
+    turn_id = (await surface.post("/v1/chat", content=b"slow", headers=headers)).json()["turn_id"]
     await asyncio.sleep(1.0)
     cancelled = await surface.post(f"/v1/turns/{turn_id}/cancel", headers=headers)
     assert cancelled.json() == {"status": "cancelled"}
@@ -479,9 +469,7 @@ async def test_cancel_commits_terminal_while_model_runs(surface: AsyncClient) ->
 async def test_foreign_token_cannot_reach_the_turn(surface: AsyncClient) -> None:
     headers = await _bootstrap()
     other = await _bootstrap()
-    turn_id = (await surface.post("/v1/chat", content=b"ping", headers=headers)).json()[
-        "turn_id"
-    ]
+    turn_id = (await surface.post("/v1/chat", content=b"ping", headers=headers)).json()["turn_id"]
     await _consume(surface, headers, turn_id)
     denied = await surface.post(f"/v1/turns/{turn_id}/cancel", headers=other)
     assert denied.status_code == 403
@@ -496,9 +484,7 @@ def _runtime_parts(surface: AsyncClient) -> tuple[Config, InProcessHub, Filesyst
 
 async def _consume_park(client: AsyncClient, headers: dict[str, str], turn_id: str) -> str:
     async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
-        async with client.stream(
-            "GET", f"/v1/turns/{turn_id}/stream", headers=headers
-        ) as stream:
+        async with client.stream("GET", f"/v1/turns/{turn_id}/stream", headers=headers) as stream:
             assert stream.status_code == 200
             async for line in stream.aiter_lines():
                 if not line:
@@ -526,9 +512,7 @@ async def test_member_cap_parks_a_turn_in_surface_then_resumes_when_raised(
     _, first_terminal = await _consume(surface, headers, first)
     assert first_terminal["status"] == "done"
     async with workspace_tx() as connection:
-        workspace_id = (
-            await connection.execute(sa.select(tables.workspace.c.id))
-        ).scalar_one()
+        workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
         member_id = (await connection.execute(sa.select(tables.member.c.id))).scalar_one()
         cap_id = uuid4()
         await connection.execute(
@@ -544,9 +528,7 @@ async def test_member_cap_parks_a_turn_in_surface_then_resumes_when_raised(
                 updated_at=sa.func.now(),
             )
         )
-    second = (await surface.post("/v1/chat", content=b"again", headers=headers)).json()[
-        "turn_id"
-    ]
+    second = (await surface.post("/v1/chat", content=b"again", headers=headers)).json()["turn_id"]
     park_message = await _consume_park(surface, headers, second)
     assert "parked" in park_message
     status, _ = await _turn_row(second)
@@ -592,9 +574,7 @@ async def test_failure_after_usage_bills_partial_usage(surface: AsyncClient) -> 
     async with workspace_tx() as connection:
         billed = (
             await connection.execute(
-                sa.select(tables.ledger.c.amount).where(
-                    tables.ledger.c.turn_id == UUID(turn_id)
-                )
+                sa.select(tables.ledger.c.amount).where(tables.ledger.c.turn_id == UUID(turn_id))
             )
         ).scalar_one()
     assert int(billed) == 10
@@ -604,9 +584,7 @@ async def test_empty_response_nudge_recovers_and_bills_both_calls(
     surface: AsyncClient,
 ) -> None:
     headers = await _bootstrap()
-    turn_id = (await surface.post("/v1/chat", content=b"shy", headers=headers)).json()[
-        "turn_id"
-    ]
+    turn_id = (await surface.post("/v1/chat", content=b"shy", headers=headers)).json()["turn_id"]
     streamed, terminal = await _consume(surface, headers, turn_id)
     assert terminal["status"] == "done"
     assert streamed == "echo:2"
@@ -619,9 +597,7 @@ async def test_empty_response_nudge_recovers_and_bills_both_calls(
 
 async def test_empty_response_twice_fails_loud(surface: AsyncClient) -> None:
     headers = await _bootstrap()
-    turn_id = (await surface.post("/v1/chat", content=b"mute", headers=headers)).json()[
-        "turn_id"
-    ]
+    turn_id = (await surface.post("/v1/chat", content=b"mute", headers=headers)).json()["turn_id"]
     streamed, terminal = await _consume(surface, headers, turn_id)
     assert streamed == ""
     assert terminal["status"] == "failed"
@@ -653,9 +629,9 @@ async def test_concurrent_admissions_allocate_unique_seqs(surface: AsyncClient) 
 
 async def test_typed_subagent_round_trips_schema(surface: AsyncClient) -> None:
     headers = await _bootstrap()
-    parent = (
-        await surface.post("/v1/chat", content=b"spawn-subagent", headers=headers)
-    ).json()["turn_id"]
+    parent = (await surface.post("/v1/chat", content=b"spawn-subagent", headers=headers)).json()[
+        "turn_id"
+    ]
     _, terminal = await _consume(surface, headers, parent)
     assert terminal["status"] == "done"
     async with workspace_tx() as connection:
@@ -690,9 +666,9 @@ async def test_subagent_exhausting_its_round_budget_does_not_detonate_its_parent
     surface: AsyncClient,
 ) -> None:
     headers = await _bootstrap()
-    parent = (
-        await surface.post("/v1/chat", content=b"spawn-exhaust", headers=headers)
-    ).json()["turn_id"]
+    parent = (await surface.post("/v1/chat", content=b"spawn-exhaust", headers=headers)).json()[
+        "turn_id"
+    ]
     _, terminal = await _consume(surface, headers, parent)
     assert terminal["status"] == "done"
     async with workspace_tx() as connection:
@@ -712,9 +688,9 @@ async def test_subagent_bills_under_its_profile_model_not_the_parents(
     surface: AsyncClient,
 ) -> None:
     headers = await _bootstrap()
-    parent = (
-        await surface.post("/v1/chat", content=b"spawn-pinned", headers=headers)
-    ).json()["turn_id"]
+    parent = (await surface.post("/v1/chat", content=b"spawn-pinned", headers=headers)).json()[
+        "turn_id"
+    ]
     _, terminal = await _consume(surface, headers, parent)
     assert terminal["status"] == "done"
     assert terminal["model"] == "claude-opus-4-8"
@@ -731,9 +707,12 @@ async def test_subagent_bills_under_its_profile_model_not_the_parents(
         ).one()
     assert child.subagent_profile == "pinned"
     assert child.status == "done"
-    assert RoundTripOutput.model_validate_json(
-        TerminalFrame.model_validate(child.terminal).text
-    ).echoed == 7
+    assert (
+        RoundTripOutput.model_validate_json(
+            TerminalFrame.model_validate(child.terminal).text
+        ).echoed
+        == 7
+    )
     async with workspace_tx() as connection:
         child_model = (
             await connection.execute(
@@ -742,9 +721,7 @@ async def test_subagent_bills_under_its_profile_model_not_the_parents(
         ).scalar_one()
         parent_model = (
             await connection.execute(
-                sa.select(tables.ledger.c.model).where(
-                    tables.ledger.c.turn_id == UUID(parent)
-                )
+                sa.select(tables.ledger.c.model).where(tables.ledger.c.turn_id == UUID(parent))
             )
         ).scalar_one()
     assert child_model == PINNED_MODEL

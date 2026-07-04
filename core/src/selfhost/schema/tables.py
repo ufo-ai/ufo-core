@@ -124,9 +124,7 @@ spend_cap = sa.Table(
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.CheckConstraint("scope in ('workspace', 'member', 'agent')", name="spend_cap_scope"),
-    sa.CheckConstraint(
-        "(scope = 'workspace') = (subject_id is null)", name="spend_cap_subject"
-    ),
+    sa.CheckConstraint("(scope = 'workspace') = (subject_id is null)", name="spend_cap_subject"),
     sa.CheckConstraint("window_seconds > 0", name="spend_cap_window"),
     sa.CheckConstraint("limit_micro_usd > 0", name="spend_cap_limit"),
     sa.CheckConstraint("on_breach in ('park', 'reject')", name="spend_cap_on_breach"),

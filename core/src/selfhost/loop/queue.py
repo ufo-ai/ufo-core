@@ -138,9 +138,7 @@ async def _execute_turn(turn_id: str) -> str:
                 image_ref=SANDBOX_IMAGE_REF,
                 mount=await _workspace_mount(runtime.blob, turn.conversation_id),
                 proxy=runtime.proxy,
-                run_token=RunToken(
-                    workspace_id=turn.workspace_id, turn_id=turn.id
-                ).encode(),
+                run_token=RunToken(workspace_id=turn.workspace_id, turn_id=turn.id).encode(),
             )
         )
         engine = TurnEngine(
@@ -166,11 +164,7 @@ async def _execute_turn(turn_id: str) -> str:
             subagents=subagents,
             member_id=member_id,
             artifact_token_secret=runtime.artifact_token_secret,
-            grants=(
-                GrantStore()
-                if runtime.credentials is not None
-                else None
-            ),
+            grants=(GrantStore() if runtime.credentials is not None else None),
             pricing=runtime.registry.pricing,
             reasoning=runtime.config.models.reasoning_effort,
             attempt=DBOS.workflow_id or turn_id,

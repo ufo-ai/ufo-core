@@ -98,9 +98,7 @@ async def live_surface(
     app.state.hub = hub
     app.state.dbos = DBOSClient(system_database_url=config.database.system_url)
     app.include_router(router)
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://live"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://live") as client:
         yield client, blob
     app.state.dbos.destroy()
     runtime_dbos.destroy()
@@ -154,9 +152,7 @@ async def _consume(
 ) -> tuple[str, dict[str, object]]:
     deltas: list[str] = []
     async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
-        async with client.stream(
-            "GET", f"/v1/turns/{turn_id}/stream", headers=headers
-        ) as stream:
+        async with client.stream("GET", f"/v1/turns/{turn_id}/stream", headers=headers) as stream:
             assert stream.status_code == 200
             async for line in stream.aiter_lines():
                 if not line:

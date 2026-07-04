@@ -61,8 +61,9 @@ def _single_return_defs(tree: ast.Module, path: Path) -> list[str]:
     names = []
     for node in tree.body:
         match node:
-            case ast.FunctionDef(decorator_list=[], body=body) | ast.AsyncFunctionDef(
-                decorator_list=[], body=body
+            case (
+                ast.FunctionDef(decorator_list=[], body=body)
+                | ast.AsyncFunctionDef(decorator_list=[], body=body)
             ):
                 statements = [s for s in body if not isinstance(s, ast.Expr)]
                 if len(statements) == 1 and isinstance(statements[0], ast.Return):
@@ -459,8 +460,10 @@ def _migration_failures(trees: dict[Path, ast.Module]) -> list[str]:
                     f"by {owner_of[down]!r}); an extension chains only within its own dir and "
                     f"attaches to core via depends_on"
                 )
-        if owner != CORE_OWNER and down is None and not any(
-            owner_of.get(dep) == CORE_OWNER for dep in depends
+        if (
+            owner != CORE_OWNER
+            and down is None
+            and not any(owner_of.get(dep) == CORE_OWNER for dep in depends)
         ):
             failures.append(
                 f"migrations: extension {owner!r} base {revision!r} must declare depends_on a core "
@@ -497,9 +500,7 @@ def main() -> int:
             )
         trees[rel] = ast.parse(text, filename=str(path))
 
-    aliases = {
-        name: rel for rel, tree in trees.items() for name in _single_return_defs(tree, rel)
-    }
+    aliases = {name: rel for rel, tree in trees.items() for name in _single_return_defs(tree, rel)}
     calls = [name for tree in trees.values() for name in _call_names(tree)]
     failures.extend(
         f"{rel}: single-return function {name!r} has exactly one call site — inline it"

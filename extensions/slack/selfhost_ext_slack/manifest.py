@@ -28,15 +28,9 @@ def manifest() -> Manifest:
             CredentialSlot(
                 name=SLACK_BOT_TOKEN_SLOT, description="Slack bot OAuth token (xoxb-...)."
             ),
-            CredentialSlot(
-                name=SLACK_SIGNING_SECRET_SLOT, description="Slack app signing secret."
-            ),
-            CredentialSlot(
-                name=SLACK_BOT_USER_ID_SLOT, description="The bot's own Slack user id."
-            ),
-            CredentialSlot(
-                name=SLACK_TEAM_ID_SLOT, description="The Slack workspace (team) id."
-            ),
+            CredentialSlot(name=SLACK_SIGNING_SECRET_SLOT, description="Slack app signing secret."),
+            CredentialSlot(name=SLACK_BOT_USER_ID_SLOT, description="The bot's own Slack user id."),
+            CredentialSlot(name=SLACK_TEAM_ID_SLOT, description="The Slack workspace (team) id."),
         ),
         surfaces=(SurfaceSpec(name=SURFACE_SLACK, ingest=ingest, post=post, attach=attach),),
     )

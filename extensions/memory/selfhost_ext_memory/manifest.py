@@ -138,9 +138,7 @@ async def memory_update_handler(ctx: ToolContext, args: MemoryUpdateInput) -> To
     if ctx.ext is None:
         raise RuntimeError("memory_update dispatched without its ExtensionContext")
     subject = (
-        SHARED_SUBJECT
-        if args.shared or ctx.member_id is None
-        else member_subject(ctx.member_id)
+        SHARED_SUBJECT if args.shared or ctx.member_id is None else member_subject(ctx.member_id)
     )
     await store_for(ctx.ext).commit(
         MemoryWrite(

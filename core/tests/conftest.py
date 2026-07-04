@@ -85,9 +85,7 @@ async def db(database_url: str) -> AsyncIterator[None]:
 
 
 @pytest.fixture(scope="session")
-def dbos_launched(
-    database_url: str, tmp_path_factory: pytest.TempPathFactory
-) -> Iterator[Config]:
+def dbos_launched(database_url: str, tmp_path_factory: pytest.TempPathFactory) -> Iterator[Config]:
     """The one DBOS instance per session: DBOS is a process singleton that cannot launch twice, so
     every DBOS-driving test module shares this launch."""
     config = Config(

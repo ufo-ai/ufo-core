@@ -86,9 +86,7 @@ def parse_skill(skill_dir: Path) -> RuntimeSkill:
 
 def _load_core_skills(root: Path) -> dict[str, RuntimeSkill]:
     skill_dirs = sorted(
-        path
-        for path in root.iterdir()
-        if path.is_dir() and not path.name.startswith((".", "_"))
+        path for path in root.iterdir() if path.is_dir() and not path.name.startswith((".", "_"))
     )
     return {skill.name: skill for skill in (parse_skill(path) for path in skill_dirs)}
 

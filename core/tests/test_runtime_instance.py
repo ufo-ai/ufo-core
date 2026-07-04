@@ -139,9 +139,7 @@ async def test_a_second_live_instance_is_refused_even_with_production_backends(d
 async def test_a_shared_hub_lifts_the_single_instance_refusal(db: None) -> None:
     workspace_id = await _workspace()
     await _insert_instance(workspace_id, heartbeat_age_seconds=0)
-    guard = BootGuard(
-        config=_shared_hub_config(), workspace_id=workspace_id, instance_id=uuid4()
-    )
+    guard = BootGuard(config=_shared_hub_config(), workspace_id=workspace_id, instance_id=uuid4())
     await guard.admit()
     assert await _row_present(guard.instance_id)
 

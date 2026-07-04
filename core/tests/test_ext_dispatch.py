@@ -302,9 +302,7 @@ def test_turn_tools_fails_loud_when_tools_declared_without_credential_key() -> N
 
 
 def test_validate_ext_tools_rejects_a_name_colliding_with_a_builtin() -> None:
-    collision = ToolDef(
-        name="bash", description="dup", input_model=ProbeInput, handler=_report_ext
-    )
+    collision = ToolDef(name="bash", description="dup", input_model=ProbeInput, handler=_report_ext)
     manifest = Manifest(
         name=EXTENSION,
         version="0.1.0",

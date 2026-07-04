@@ -171,9 +171,7 @@ def _check_hubs(manifest: Manifest) -> None:
 def _check_carriers(manifest: Manifest) -> None:
     for spec in manifest.carriers:
         _resolve_backend(
-            lambda spec=spec: _select_carrier(
-                _config(sandbox_backend=spec.name), (manifest,)
-            )
+            lambda spec=spec: _select_carrier(_config(sandbox_backend=spec.name), (manifest,))
         )
 
 

@@ -75,9 +75,7 @@ class ComposioProxyTransport(httpx.AsyncBaseTransport):
             key = raw_key.decode("latin-1")
             if key.lower() in _SKIP_REQUEST_HEADERS:
                 continue
-            parameters.append(
-                {"name": key, "value": raw_value.decode("latin-1"), "type": "header"}
-            )
+            parameters.append({"name": key, "value": raw_value.decode("latin-1"), "type": "header"})
         if parameters:
             payload["parameters"] = parameters
         if content:
@@ -101,9 +99,7 @@ class ComposioProxyTransport(httpx.AsyncBaseTransport):
             )
         return self._provider_response(json.loads(proxy_content.decode("utf-8")), request)
 
-    def _provider_response(
-        self, payload: dict[str, Any], request: httpx.Request
-    ) -> httpx.Response:
+    def _provider_response(self, payload: dict[str, Any], request: httpx.Request) -> httpx.Response:
         """Reconstruct the provider's response from a proxy-execute payload, unwrapping Composio's
         `data` envelope down to the innermost provider status/body/headers."""
         while True:
@@ -125,9 +121,7 @@ class ComposioProxyTransport(httpx.AsyncBaseTransport):
             content = data.encode("utf-8")
         else:
             content = b"" if data is None else json.dumps(data).encode("utf-8")
-        return httpx.Response(
-            status_code=status, headers=headers, content=content, request=request
-        )
+        return httpx.Response(status_code=status, headers=headers, content=content, request=request)
 
     async def aclose(self) -> None:
         await self.inner.aclose()

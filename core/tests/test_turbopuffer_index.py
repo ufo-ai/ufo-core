@@ -56,9 +56,7 @@ async def _workspace() -> UUID:
 async def _access(workspace_id: UUID) -> CredentialAccess:
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     await store.put(workspace_id, tpuf.API_KEY_SLOT, API_KEY)
-    return context_for(
-        workspace_id, tpuf.NAME, frozenset({tpuf.API_KEY_SLOT}), store
-    ).credentials
+    return context_for(workspace_id, tpuf.NAME, frozenset({tpuf.API_KEY_SLOT}), store).credentials
 
 
 def _recorder(
@@ -128,12 +126,22 @@ async def test_lexical_and_vector_queries_filter_and_parse_hits(db: None) -> Non
     d1, d2 = _digest("a"), _digest("b")
     rows = [
         {
-            "id": tpuf.turbopuffer_id(d1), "owner_kind": OWNER_KIND, "owner_id": "m1",
-            "subject": SHARED, "ordinal": 0, "text": "orbital widget", "$dist": 0.25,
+            "id": tpuf.turbopuffer_id(d1),
+            "owner_kind": OWNER_KIND,
+            "owner_id": "m1",
+            "subject": SHARED,
+            "ordinal": 0,
+            "text": "orbital widget",
+            "$dist": 0.25,
         },
         {
-            "id": tpuf.turbopuffer_id(d2), "owner_kind": OWNER_KIND, "owner_id": "m2",
-            "subject": SHARED, "ordinal": 1, "text": "second", "$dist": 0.75,
+            "id": tpuf.turbopuffer_id(d2),
+            "owner_kind": OWNER_KIND,
+            "owner_id": "m2",
+            "subject": SHARED,
+            "ordinal": 1,
+            "text": "second",
+            "$dist": 0.75,
         },
     ]
     transport, seen = _recorder(rows)
@@ -146,7 +154,8 @@ async def test_lexical_and_vector_queries_filter_and_parse_hits(db: None) -> Non
     assert lex_body["rank_by"] == ["text", "BM25", "orbital"]
     assert lex_body["top_k"] == 10
     assert lex_body["filters"] == [
-        "And", [["owner_kind", "Eq", OWNER_KIND], ["subject", "In", [SHARED]]]
+        "And",
+        [["owner_kind", "Eq", OWNER_KIND], ["subject", "In", [SHARED]]],
     ]
     assert [hit.chunk_digest for hit in lexical] == [d1, d2]
     assert lexical[0].text == "orbital widget" and lexical[0].score > lexical[1].score
@@ -163,8 +172,12 @@ async def test_delete_enumerates_a_scope_then_posts_id_deletes(db: None) -> None
     workspace_id = await _workspace()
     d1 = _digest("a")
     row = {
-        "id": tpuf.turbopuffer_id(d1), "owner_kind": OWNER_KIND, "owner_id": "m1",
-        "subject": SHARED, "ordinal": 0, "text": "x",
+        "id": tpuf.turbopuffer_id(d1),
+        "owner_kind": OWNER_KIND,
+        "owner_id": "m1",
+        "subject": SHARED,
+        "ordinal": 0,
+        "text": "x",
     }
     transport, seen = _recorder([row])
     index = tpuf.TurbopufferIndex(
@@ -174,7 +187,8 @@ async def test_delete_enumerates_a_scope_then_posts_id_deletes(db: None) -> None
     query_request, query_body = seen[0]
     assert query_request.url.path.endswith("/query")
     assert query_body["filters"] == [
-        "And", [["owner_kind", "Eq", OWNER_KIND], ["owner_id", "Eq", "m1"]]
+        "And",
+        [["owner_kind", "Eq", OWNER_KIND], ["owner_id", "Eq", "m1"]],
     ]
     delete_request, delete_body = seen[1]
     assert not delete_request.url.path.endswith("/query")

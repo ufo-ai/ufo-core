@@ -463,9 +463,7 @@ class TurnEngine:
             + usage.cache_write_tokens
         )
         await self._publish(
-            CostTick(
-                cost_micro_usd=self.pricing.micro_usd(self.agent.model, usage), tokens=tokens
-            )
+            CostTick(cost_micro_usd=self.pricing.micro_usd(self.agent.model, usage), tokens=tokens)
         )
 
     async def _dispatch(self, context: ToolContext, call: ToolUseBlock) -> ToolResultBlock:

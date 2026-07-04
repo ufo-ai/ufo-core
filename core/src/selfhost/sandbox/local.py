@@ -99,9 +99,7 @@ class LocalCarrier:
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(stdin), timeout=timeout_s
-            )
+            stdout, stderr = await asyncio.wait_for(process.communicate(stdin), timeout=timeout_s)
         except TimeoutError:
             process.kill()
             await process.wait()

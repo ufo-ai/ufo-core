@@ -406,9 +406,7 @@ PROVIDERS = [
 async def test_retryable_status_retries_then_succeeds(
     harness: ProviderHarness, status: int
 ) -> None:
-    create = ScriptedCreate(
-        provider_error(harness.error_type, status), (harness.ok_events(), None)
-    )
+    create = ScriptedCreate(provider_error(harness.error_type, status), (harness.ok_events(), None))
     events = await collect(harness.build(create))
     assert create.calls == 2
     assert events[0] == TextDelta(text="ok")
@@ -417,9 +415,7 @@ async def test_retryable_status_retries_then_succeeds(
 
 @pytest.mark.parametrize("harness", PROVIDERS)
 async def test_client_error_does_not_retry(harness: ProviderHarness) -> None:
-    create = ScriptedCreate(
-        provider_error(harness.error_type, 400), (harness.ok_events(), None)
-    )
+    create = ScriptedCreate(provider_error(harness.error_type, 400), (harness.ok_events(), None))
     with pytest.raises(harness.error_type):
         await collect(harness.build(create))
     assert create.calls == 1

@@ -273,9 +273,7 @@ def turn_tools(
                 f"extension {manifest.name!r} declares tools but no credential key is set"
             )
         declared = frozenset(slot.name for slot in manifest.credentials)
-        context = context_for(
-            workspace_id, manifest.name, declared, credential_store, index, embed
-        )
+        context = context_for(workspace_id, manifest.name, declared, credential_store, index, embed)
         for tool in declared_tools:
             tools.append(tool)
             ext_by_tool[tool.name] = context
@@ -329,9 +327,7 @@ def index_backend(
                 continue
             declared = frozenset(slot.name for slot in manifest.credentials)
             if declared and credential_store is None:
-                raise RuntimeError(
-                    f"index backend {name!r} needs a credential key but none is set"
-                )
+                raise RuntimeError(f"index backend {name!r} needs a credential key but none is set")
             context = context_for(workspace_id, manifest.name, declared, credential_store)
             return spec.factory(embed, context)
     raise RuntimeError(f"config selects index backend {name!r} but no extension registers it")
@@ -355,9 +351,7 @@ def embed_backend(
                 continue
             declared = frozenset(slot.name for slot in manifest.credentials)
             if declared and credential_store is None:
-                raise RuntimeError(
-                    f"embed backend {name!r} needs a credential key but none is set"
-                )
+                raise RuntimeError(f"embed backend {name!r} needs a credential key but none is set")
             context = context_for(workspace_id, manifest.name, declared, credential_store)
             return spec.factory(context)
     raise RuntimeError(f"config selects embed backend {name!r} but no extension registers it")
@@ -503,9 +497,7 @@ def turn_hooks(
                 f"extension {manifest.name!r} declares hooks but no credential key is set"
             )
         declared = frozenset(slot.name for slot in manifest.credentials)
-        context = context_for(
-            workspace_id, manifest.name, declared, credential_store, index, embed
-        )
+        context = context_for(workspace_id, manifest.name, declared, credential_store, index, embed)
         for spec in manifest.hooks:
             grouped[spec.event].append(BoundHook(spec=spec, ext=context))
     return HookChain(

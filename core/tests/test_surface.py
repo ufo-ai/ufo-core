@@ -208,9 +208,9 @@ async def _set_writeback(turn_id: UUID, **values: object) -> None:
         )
 
 
-def _poller(workspace_id: UUID, surface: RecordingSurface, blob: FilesystemBlobStore) -> tuple[
-    WritebackPoller, RecordingSurface
-]:
+def _poller(
+    workspace_id: UUID, surface: RecordingSurface, blob: FilesystemBlobStore
+) -> tuple[WritebackPoller, RecordingSurface]:
     spec = SurfaceSpec(
         name=SURFACE, ingest=_unused_ingest, post=surface.post, attach=surface.attach
     )

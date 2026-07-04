@@ -25,9 +25,7 @@ CREATE_CHUNK_TSV_GIN = "create index chunk_tsv on chunk using gin (tsv)"
 CREATE_CHUNK_EMBEDDING_HNSW = (
     "create index chunk_embedding on chunk using hnsw (embedding halfvec_cosine_ops)"
 )
-CREATE_CHUNK_FTS_SQLITE = (
-    "create virtual table chunk_fts using fts5 (chunk_digest unindexed, text)"
-)
+CREATE_CHUNK_FTS_SQLITE = "create virtual table chunk_fts using fts5 (chunk_digest unindexed, text)"
 
 
 def upgrade() -> None:

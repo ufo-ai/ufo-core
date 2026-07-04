@@ -89,9 +89,7 @@ async def _fire(chain: HookChain, event: str, payload: object) -> loader.HookRes
         status="running",
         inbound="hi",
     )
-    return await chain.fire(
-        event, payload, turn, Agent(prompt="p", model="claude-opus-4-8"), None
-    )
+    return await chain.fire(event, payload, turn, Agent(prompt="p", model="claude-opus-4-8"), None)
 
 
 def _pre(tool_name: str = "t") -> PreToolUse:
@@ -103,14 +101,18 @@ def _pre(tool_name: str = "t") -> PreToolUse:
 
 async def test_modify_input_folds_left_to_right_each_seeing_the_prior() -> None:
     async def append_a(ctx: HookContext) -> HookOutcome:
-        return ModifyInput(tool_input=ctx.payload.tool_input.model_copy(
-            update={"value": ctx.payload.tool_input.value + "A"}
-        ))
+        return ModifyInput(
+            tool_input=ctx.payload.tool_input.model_copy(
+                update={"value": ctx.payload.tool_input.value + "A"}
+            )
+        )
 
     async def append_b(ctx: HookContext) -> HookOutcome:
-        return ModifyInput(tool_input=ctx.payload.tool_input.model_copy(
-            update={"value": ctx.payload.tool_input.value + "B"}
-        ))
+        return ModifyInput(
+            tool_input=ctx.payload.tool_input.model_copy(
+                update={"value": ctx.payload.tool_input.value + "B"}
+            )
+        )
 
     ext = _ext(uuid4())
     chain = _chain(
@@ -442,9 +444,7 @@ async def test_sample_pre_deny_short_circuits_and_post_captures_the_other(
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     tools, tool_ext = turn_tools((manifest,), turn.workspace_id, store)
     hooks = turn_hooks((manifest,), turn.workspace_id, store)
-    engine = _engine(
-        turn, EchoAndBashModel(), tmp_path, hooks, tools=tools, tool_ext=tool_ext
-    )
+    engine = _engine(turn, EchoAndBashModel(), tmp_path, hooks, tools=tools, tool_ext=tool_ext)
     frame = await engine.run()
     assert frame.status == "done"
 

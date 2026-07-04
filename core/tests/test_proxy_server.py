@@ -258,9 +258,7 @@ async def test_meter_ledger_meters_credential_host_and_skips_model_host(db: None
         dimensions = (
             (
                 await connection.execute(
-                    sa.select(tables.ledger.c.dimension).where(
-                        tables.ledger.c.turn_id == turn_id
-                    )
+                    sa.select(tables.ledger.c.dimension).where(tables.ledger.c.turn_id == turn_id)
                 )
             )
             .scalars()

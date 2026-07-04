@@ -11,9 +11,7 @@ depends_on: str | None = None
 def upgrade() -> None:
     with op.batch_alter_table("ledger") as batch:
         batch.drop_constraint("ledger_dimension", type_="check")
-        batch.create_check_constraint(
-            "ledger_dimension", "dimension in ('tokens', 'egress')"
-        )
+        batch.create_check_constraint("ledger_dimension", "dimension in ('tokens', 'egress')")
 
 
 def downgrade() -> None:

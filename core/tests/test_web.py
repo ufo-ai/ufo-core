@@ -431,12 +431,16 @@ async def test_two_web_members_get_isolated_subjects_and_cannot_cross(web: Async
     await _consume(web, token_b, turn_b)
     async with workspace_tx() as connection:
         owners = (
-            await connection.execute(
-                sa.select(tables.conversation.c.member_id).where(
-                    tables.conversation.c.surface == "web"
+            (
+                await connection.execute(
+                    sa.select(tables.conversation.c.member_id).where(
+                        tables.conversation.c.surface == "web"
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
     assert set(owners) == {member_a, member_b}
     assert recall_subjects(member_a) & recall_subjects(member_b) == frozenset({SHARED_SUBJECT})
     assert member_subject(member_a) not in recall_subjects(member_b)

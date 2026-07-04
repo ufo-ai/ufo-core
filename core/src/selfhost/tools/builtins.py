@@ -438,14 +438,18 @@ async def load_sessions_handler(ctx: ToolContext, args: LoadSessionsInput) -> To
     if requested:
         async with workspace_tx() as connection:
             rows = (
-                await connection.execute(
-                    sa.select(tables.conversation.c.id, tables.conversation.c.surface).where(
-                        tables.conversation.c.id.in_(list(requested)),
-                        tables.conversation.c.workspace_id == ctx.turn.workspace_id,
-                        scope,
+                (
+                    await connection.execute(
+                        sa.select(tables.conversation.c.id, tables.conversation.c.surface).where(
+                            tables.conversation.c.id.in_(list(requested)),
+                            tables.conversation.c.workspace_id == ctx.turn.workspace_id,
+                            scope,
+                        )
                     )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
         surfaces = {row["id"]: row["surface"] for row in rows}
     sessions: list[dict[str, object]] = []
     for conversation_id, raw in requested.items():

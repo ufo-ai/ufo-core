@@ -284,9 +284,7 @@ async def test_memory_update_scopes_to_member_by_default_and_shared_on_flag(
     assert subjects == sorted([member_subject(member), "shared"])
 
 
-async def test_memory_search_reports_no_match_on_empty_memory(
-    clean: None, tmp_path: Path
-) -> None:
+async def test_memory_search_reports_no_match_on_empty_memory(clean: None, tmp_path: Path) -> None:
     workspace_id = await _workspace()
     embed = StubEmbed(vec((0, 1.0)))
     ext = _ext(DefaultIndex(embed=embed, transaction=workspace_tx), embed, workspace_id)
@@ -303,9 +301,7 @@ def test_date_bound_reads_a_bare_end_date_as_the_whole_day() -> None:
     )
 
 
-async def test_memory_search_merges_and_dedups_across_queries(
-    clean: None, tmp_path: Path
-) -> None:
+async def test_memory_search_merges_and_dedups_across_queries(clean: None, tmp_path: Path) -> None:
     workspace_id = await _workspace()
     member = uuid4()
     working = StubEmbed(vec((0, 1.0)))
