@@ -7,7 +7,13 @@ from pydantic import ValidationError
 
 from selfhost.blob import FilesystemBlobStore
 from selfhost.loop.transcript import Transcript
-from selfhost.models.interface import Message
+from selfhost.models.interface import (
+    ImageBlock,
+    ImageSource,
+    Message,
+    TextBlock,
+    ToolResultBlock,
+)
 from selfhost.transcript import Conversation, decode, transcript_key
 
 
@@ -20,6 +26,36 @@ async def test_round_trip(tmp_path: Path) -> None:
     conversation = Conversation(
         seq=1,
         messages=(Message(role="user", content="hi"), Message(role="assistant", content="yo")),
+    )
+    await transcript.write(conversation)
+    assert await transcript.read() == conversation
+
+
+async def test_round_trip_preserves_image_blocks(tmp_path: Path) -> None:
+    transcript = _transcript(tmp_path)
+    conversation = Conversation(
+        seq=1,
+        messages=(
+            Message(
+                role="user",
+                content=(
+                    TextBlock(text="see this"),
+                    ImageBlock(source=ImageSource(media_type="image/png", data="AAAA")),
+                ),
+            ),
+            Message(
+                role="user",
+                content=(
+                    ToolResultBlock(
+                        tool_use_id="t1",
+                        content=(
+                            TextBlock(text="chart.png"),
+                            ImageBlock(source=ImageSource(media_type="image/jpeg", data="BBBB")),
+                        ),
+                    ),
+                ),
+            ),
+        ),
     )
     await transcript.write(conversation)
     assert await transcript.read() == conversation

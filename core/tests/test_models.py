@@ -14,11 +14,18 @@ from selfhost.models.anthropic import MAX_EMPTY_PROVIDER_RETRIES as ANTHROPIC_MA
 from selfhost.models.anthropic import MAX_PROVIDER_RETRIES as ANTHROPIC_MAX_RETRIES
 from selfhost.models.anthropic import AnthropicClient, anthropic_sdk_client
 from selfhost.models.interface import (
+    IMAGE_OMITTED_TEXT,
+    ImageBlock,
+    ImageSource,
     Message,
     ModelEvent,
     ModelRequest,
     ModelResponseTruncated,
+    TextBlock,
     TextDelta,
+    ToolResultBlock,
+    ToolUseBlock,
+    trim_images,
 )
 from selfhost.models.openai import MAX_EMPTY_PROVIDER_RETRIES as OPENAI_MAX_EMPTY_RETRIES
 from selfhost.models.openai import MAX_PROVIDER_RETRIES as OPENAI_MAX_RETRIES
@@ -174,6 +181,122 @@ def provider_error(
 
 async def collect(client: AnthropicClient | OpenAIClient) -> list[ModelEvent]:
     return [event async for event in client.complete(REQUEST)]
+
+
+class CapturingCreate(ScriptedCreate):
+    """A ScriptedCreate that also records the kwargs the client sent — the provider request."""
+
+    def __init__(self, *outcomes: Exception | tuple[list[object], Exception | None]) -> None:
+        super().__init__(*outcomes)
+        self.kwargs: dict[str, object] = {}
+
+    async def __call__(self, **kwargs: object) -> AsyncIterator[object]:
+        self.kwargs = kwargs
+        return await super().__call__(**kwargs)
+
+
+IMAGE_REQUEST = ModelRequest(
+    model="claude-opus-4-8",
+    system="be terse",
+    max_tokens=64,
+    messages=(
+        Message(
+            role="user",
+            content=(
+                TextBlock(text="look at this"),
+                ImageBlock(source=ImageSource(media_type="image/png", data="AAAA")),
+            ),
+        ),
+        Message(
+            role="assistant",
+            content=(ToolUseBlock(id="t1", name="read", input={"file_path": "chart.png"}),),
+        ),
+        Message(
+            role="user",
+            content=(
+                ToolResultBlock(
+                    tool_use_id="t1",
+                    content=(
+                        TextBlock(text="chart.png"),
+                        ImageBlock(source=ImageSource(media_type="image/jpeg", data="BBBB")),
+                    ),
+                ),
+            ),
+        ),
+    ),
+)
+
+
+async def test_anthropic_request_carries_image_and_tool_result_images() -> None:
+    create = CapturingCreate(
+        ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
+    )
+    async for _ in AnthropicClient(client=anthropic_sdk(create)).complete(IMAGE_REQUEST):
+        pass
+    messages = create.kwargs["messages"]
+    assert messages[0]["content"][1] == {
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"},
+    }
+    assert messages[2]["content"][0]["content"] == [
+        {"type": "text", "text": "chart.png"},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "BBBB"}},
+    ]
+
+
+async def test_openai_request_carries_image_url_and_lifts_tool_result_images() -> None:
+    create = CapturingCreate(([openai_text("ok"), openai_usage(prompt=1, completion=1)], None))
+    async for _ in OpenAIClient(client=openai_sdk(create)).complete(IMAGE_REQUEST):
+        pass
+    messages = create.kwargs["messages"]
+    assert {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}} in messages[1][
+        "content"
+    ]
+    tool_messages = [message for message in messages if message["role"] == "tool"]
+    assert tool_messages[0]["content"] == "chart.png"
+    assert messages[-1] == {
+        "role": "user",
+        "content": [{"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,BBBB"}}],
+    }
+
+
+def _images(count: int, base: int = 0) -> tuple[ImageBlock, ...]:
+    return tuple(
+        ImageBlock(source=ImageSource(media_type="image/png", data=str(base + i)))
+        for i in range(count)
+    )
+
+
+def test_trim_images_enforces_per_message_cap() -> None:
+    trimmed = trim_images((Message(role="user", content=_images(22)),))
+    content = trimmed[0].content
+    kept = [block for block in content if isinstance(block, ImageBlock)]
+    dropped = [block for block in content if isinstance(block, TextBlock)]
+    assert len(kept) == 20
+    assert kept[0].source.data == "2"
+    assert [block.text for block in dropped] == [IMAGE_OMITTED_TEXT, IMAGE_OMITTED_TEXT]
+
+
+def test_trim_images_enforces_request_cap() -> None:
+    messages = tuple(
+        Message(role="user", content=_images(20, base=group * 20)) for group in range(6)
+    )
+    trimmed = trim_images(messages)
+    total = sum(
+        1 for message in trimmed for block in message.content if isinstance(block, ImageBlock)
+    )
+    assert total == 100
+    assert all(isinstance(block, TextBlock) for block in trimmed[0].content)
+
+
+def test_trim_images_trims_images_nested_in_a_tool_result() -> None:
+    result = ToolResultBlock(tool_use_id="t1", content=_images(22))
+    trimmed = trim_images((Message(role="user", content=(result,)),))
+    parts = trimmed[0].content[0].content
+    kept = [part for part in parts if isinstance(part, ImageBlock)]
+    dropped = [part for part in parts if isinstance(part, TextBlock)]
+    assert len(kept) == 20 and len(dropped) == 2
+    assert kept[0].source.data == "2"
 
 
 async def test_anthropic_maps_deltas_then_single_usage() -> None:

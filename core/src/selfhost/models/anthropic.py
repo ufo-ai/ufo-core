@@ -8,6 +8,8 @@ import anthropic
 
 from selfhost.models.interface import (
     ContentBlock,
+    ImageBlock,
+    ImageSource,
     ModelEvent,
     ModelRequest,
     ModelResponseTruncated,
@@ -16,7 +18,9 @@ from selfhost.models.interface import (
     ToolCallDelta,
     ToolCallStart,
     ToolResultBlock,
+    ToolResultContent,
     ToolUseBlock,
+    trim_images,
 )
 from selfhost.schema.records import Usage
 
@@ -34,6 +38,21 @@ def anthropic_sdk_client(api_key: str) -> anthropic.AsyncAnthropic:
     )
 
 
+def _anthropic_image(source: ImageSource) -> dict[str, object]:
+    return {
+        "type": "image",
+        "source": {"type": "base64", "media_type": source.media_type, "data": source.data},
+    }
+
+
+def _anthropic_tool_result_part(part: ToolResultContent) -> dict[str, object]:
+    match part:
+        case TextBlock(text=text):
+            return {"type": "text", "text": text}
+        case ImageBlock(source=source):
+            return _anthropic_image(source)
+
+
 def anthropic_content(content: str | tuple[ContentBlock, ...]) -> str | list[dict[str, object]]:
     if isinstance(content, str):
         return content
@@ -42,6 +61,8 @@ def anthropic_content(content: str | tuple[ContentBlock, ...]) -> str | list[dic
         match block:
             case TextBlock(text=text):
                 blocks.append({"type": "text", "text": text})
+            case ImageBlock(source=source):
+                blocks.append(_anthropic_image(source))
             case ToolUseBlock(id=block_id, name=name, input=block_input):
                 blocks.append(
                     {"type": "tool_use", "id": block_id, "name": name, "input": block_input}
@@ -51,7 +72,9 @@ def anthropic_content(content: str | tuple[ContentBlock, ...]) -> str | list[dic
                     {
                         "type": "tool_result",
                         "tool_use_id": tool_use_id,
-                        "content": result,
+                        "content": result
+                        if isinstance(result, str)
+                        else [_anthropic_tool_result_part(part) for part in result],
                         "is_error": is_error,
                     }
                 )
@@ -88,7 +111,7 @@ class AnthropicClient:
                 "system": request.system,
                 "messages": [
                     {"role": m.role, "content": anthropic_content(m.content)}
-                    for m in request.messages
+                    for m in trim_images(request.messages)
                 ],
                 "max_tokens": request.max_tokens,
                 "stream": True,

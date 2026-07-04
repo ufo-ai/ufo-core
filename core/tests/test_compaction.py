@@ -7,6 +7,8 @@ from uuid import uuid4
 from selfhost.blob import FilesystemBlobStore
 from selfhost.loop.compaction import COMPACTED_CONTEXT_PREFIX, Compaction
 from selfhost.models.interface import (
+    ImageBlock,
+    ImageSource,
     Message,
     ModelEvent,
     ModelRequest,
@@ -131,6 +133,31 @@ async def test_compaction_boundary_never_orphans_a_tool_result_or_repeats_a_role
         if isinstance(block, ToolResultBlock)
     }
     assert tool_results <= tool_uses
+
+
+async def test_images_count_toward_the_compaction_budget(tmp_path: Path) -> None:
+    compaction = _compaction(tmp_path, trigger_tokens=100, keep_messages=2)
+    short_text = (
+        Message(role="user", content="hi"),
+        Message(role="assistant", content="ok"),
+        Message(role="user", content="more"),
+        Message(role="assistant", content="sure"),
+        Message(role="user", content="tail"),
+    )
+    _, text_usage = await compaction.maybe_compact(short_text)
+    assert text_usage == ()
+    with_image = (
+        Message(
+            role="user",
+            content=(
+                TextBlock(text="hi"),
+                ImageBlock(source=ImageSource(media_type="image/png", data="AAAA")),
+            ),
+        ),
+        *short_text[1:],
+    )
+    _, image_usage = await compaction.maybe_compact(with_image)
+    assert len(image_usage) == 1
 
 
 async def test_compaction_index_is_monotonic(tmp_path: Path) -> None:

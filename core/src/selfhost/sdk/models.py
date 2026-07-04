@@ -7,6 +7,12 @@ from selfhost.models.interface import (
     ContentBlock as ContentBlock,
 )
 from selfhost.models.interface import (
+    ImageBlock as ImageBlock,
+)
+from selfhost.models.interface import (
+    ImageSource as ImageSource,
+)
+from selfhost.models.interface import (
     Message as Message,
 )
 from selfhost.models.interface import (

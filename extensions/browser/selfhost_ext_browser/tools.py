@@ -12,10 +12,11 @@ from typing import Literal
 
 from pydantic import BaseModel, JsonValue
 
-from selfhost.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
+from selfhost.sdk.tools import ImageContent, TextContent, ToolContext, ToolDef, ToolResult
 
 DEFAULT_SCREENSHOT_PATH = "browser-screenshot.jpg"
 DEFAULT_DOWNLOAD_DIR = "downloads"
+SCREENSHOT_MEDIA_TYPE = "image/jpeg"
 
 
 class NavigateInput(BaseModel):
@@ -156,7 +157,16 @@ async def _computer(ctx: ToolContext, args: ComputerInput) -> ToolResult:
         screenshot = _required_str(reply.get("screenshot_base64"), "screenshot_base64")
         await ctx.sandbox.write_file(path, base64.b64decode(screenshot))
         reply["screenshot_path"] = path
-    return _json_result(reply)
+    screenshot = reply.get("screenshot_base64")
+    if not isinstance(screenshot, str) or not screenshot:
+        return _json_result(reply)
+    rest = {key: value for key, value in reply.items() if key != "screenshot_base64"}
+    return ToolResult(
+        content=(
+            TextContent(text=json.dumps(rest)),
+            ImageContent(media_type=SCREENSHOT_MEDIA_TYPE, data=screenshot),
+        )
+    )
 
 
 async def _wait_for_download(ctx: ToolContext, args: WaitForDownloadInput) -> ToolResult:

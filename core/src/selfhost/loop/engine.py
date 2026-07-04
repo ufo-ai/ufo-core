@@ -28,6 +28,8 @@ from selfhost.loop.prompts.render import RenderedPrompt
 from selfhost.loop.transcript import Transcript
 from selfhost.memory.service import MemoryService, recall_subjects
 from selfhost.models.interface import (
+    ImageBlock,
+    ImageSource,
     Message,
     ModelClient,
     ModelRequest,
@@ -50,7 +52,7 @@ from selfhost.schema.records import (
     Turn,
     Usage,
 )
-from selfhost.tools.context import Spawn, ToolContext
+from selfhost.tools.context import ImageContent, Spawn, TextContent, ToolContext
 from selfhost.tools.registry import ToolRegistry
 from selfhost.transcript import Conversation
 
@@ -418,7 +420,10 @@ class TurnEngine:
         guidance stays trusted outside the wall and the wall's close tag survives the bound.
         post_tool_use may ModifyOutput (replace the result) or InjectContext (append to it), and
         fires on the error path too. An extension tool gets its owning ExtensionContext; a builtin
-        runs ext=None."""
+        runs ext=None. A tool's image content (a read of an image/PDF, a browser screenshot)
+        bypasses the text bound, wall, and hooks and rides a successful result as image blocks
+        the model sees; an error result stays plain text so error-content consumers stay
+        str-typed."""
         await self._publish_activity(call)
         try:
             tool = self.tools.get(call.name)
@@ -437,9 +442,19 @@ class TurnEngine:
         if pre.denied is not None:
             return ToolResultBlock(tool_use_id=call.id, content=pre.denied, is_error=True)
         args = pre.tool_input if pre.tool_input is not None else args
+        images: list[ImageBlock] = []
         try:
             result = await tool.handler(replace(context, ext=self.tool_ext.get(call.name)), args)
-            content = "".join(block.text for block in result.content)
+            text_parts: list[str] = []
+            for block in result.content:
+                match block:
+                    case TextContent(text=text):
+                        text_parts.append(text)
+                    case ImageContent(media_type=media_type, data=data):
+                        images.append(
+                            ImageBlock(source=ImageSource(media_type=media_type, data=data))
+                        )
+            content = "".join(text_parts)
             is_error = result.is_error
         except Exception as error:
             content, is_error = f"{type(error).__name__}: {error}", True
@@ -463,6 +478,12 @@ class TurnEngine:
             content = post.output
         if post.injected:
             content = f"{content}\n{post.injected}"
+        if images and not is_error:
+            blocks: tuple[TextBlock | ImageBlock, ...] = (
+                *((TextBlock(text=content),) if content else ()),
+                *images,
+            )
+            return ToolResultBlock(tool_use_id=call.id, content=blocks, is_error=is_error)
         return ToolResultBlock(tool_use_id=call.id, content=content, is_error=is_error)
 
     async def _publish_activity(self, call: ToolUseBlock) -> None:

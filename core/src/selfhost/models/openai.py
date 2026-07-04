@@ -8,6 +8,8 @@ from dataclasses import dataclass
 import openai
 
 from selfhost.models.interface import (
+    ImageBlock,
+    ImageSource,
     Message,
     ModelEvent,
     ModelRequest,
@@ -17,7 +19,9 @@ from selfhost.models.interface import (
     ToolCallDelta,
     ToolCallStart,
     ToolResultBlock,
+    ToolResultContent,
     ToolUseBlock,
+    trim_images,
 )
 from selfhost.schema.records import Usage
 
@@ -33,19 +37,49 @@ def openai_sdk_client(api_key: str) -> openai.AsyncOpenAI:
     return openai.AsyncOpenAI(api_key=api_key, max_retries=0, timeout=PROVIDER_TIMEOUT_SECONDS)
 
 
+def _openai_image(source: ImageSource) -> dict[str, object]:
+    return {
+        "type": "image_url",
+        "image_url": {"url": f"data:{source.media_type};base64,{source.data}"},
+    }
+
+
+def _openai_tool_result(
+    result: str | tuple[ToolResultContent, ...],
+) -> tuple[str, list[dict[str, object]]]:
+    """A tool result split into its text (for the OpenAI `tool` message, which is text-only) and its
+    images as `image_url` parts (which OpenAI carries only in a user message, so the caller lifts
+    them into a trailing one)."""
+    if isinstance(result, str):
+        return result, []
+    text_parts: list[str] = []
+    images: list[dict[str, object]] = []
+    for part in result:
+        match part:
+            case TextBlock(text=text):
+                text_parts.append(text)
+            case ImageBlock(source=source):
+                images.append(_openai_image(source))
+    return "\n".join(text_parts), images
+
+
 def openai_messages(system: str, messages: tuple[Message, ...]) -> list[dict[str, object]]:
     out: list[dict[str, object]] = [{"role": "system", "content": system}]
-    for message in messages:
+    for message in trim_images(messages):
         content = message.content
         if isinstance(content, str):
             out.append({"role": message.role, "content": content})
             continue
         text_parts: list[str] = []
         tool_calls: list[dict[str, object]] = []
+        image_parts: list[dict[str, object]] = []
+        lifted_images: list[dict[str, object]] = []
         for block in content:
             match block:
                 case TextBlock(text=text):
                     text_parts.append(text)
+                case ImageBlock(source=source):
+                    image_parts.append(_openai_image(source))
                 case ToolUseBlock(id=block_id, name=name, input=block_input):
                     tool_calls.append(
                         {
@@ -55,13 +89,17 @@ def openai_messages(system: str, messages: tuple[Message, ...]) -> list[dict[str
                         }
                     )
                 case ToolResultBlock(tool_use_id=tool_use_id, content=result, is_error=is_error):
+                    text, images = _openai_tool_result(result)
+                    if not text and images:
+                        text = "[image result follows in the next message]"
                     out.append(
                         {
                             "role": "tool",
                             "tool_call_id": tool_use_id,
-                            "content": f"[tool error] {result}" if is_error else result,
+                            "content": f"[tool error] {text}" if is_error else text,
                         }
                     )
+                    lifted_images.extend(images)
         if tool_calls:
             out.append(
                 {
@@ -70,8 +108,14 @@ def openai_messages(system: str, messages: tuple[Message, ...]) -> list[dict[str
                     "tool_calls": tool_calls,
                 }
             )
+        elif image_parts:
+            joined = "".join(text_parts)
+            parts = [{"type": "text", "text": joined}, *image_parts] if joined else image_parts
+            out.append({"role": message.role, "content": parts})
         elif text_parts:
             out.append({"role": message.role, "content": "".join(text_parts)})
+        if lifted_images:
+            out.append({"role": "user", "content": lifted_images})
     return out
 
 

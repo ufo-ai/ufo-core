@@ -32,9 +32,11 @@ from selfhost.loop.prompts.render import rendered_prompt
 from selfhost.loop.transcript import Transcript
 from selfhost.memory.service import Recalled
 from selfhost.models.interface import (
+    ImageBlock,
     Message,
     ModelEvent,
     ModelRequest,
+    TextBlock,
     TextDelta,
     ToolCallDelta,
     ToolCallStart,
@@ -45,7 +47,13 @@ from selfhost.sandbox.session import ExecResult, SandboxHandle, SandboxSession, 
 from selfhost.schema import tables
 from selfhost.schema.records import Agent, TerminalFrame, Turn, Usage
 from selfhost.tools.builtins import BUILTIN_TOOLS
-from selfhost.tools.context import SpawnResult, TextContent, ToolContext, ToolResult
+from selfhost.tools.context import (
+    ImageContent,
+    SpawnResult,
+    TextContent,
+    ToolContext,
+    ToolResult,
+)
 from selfhost.tools.registry import ToolDef, ToolRegistry
 from selfhost.transcript import Conversation
 
@@ -779,6 +787,84 @@ async def test_dispatch_bounds_over_cap_result_and_leaves_within_cap_untouched(
 
     small = await engine._dispatch(context, ToolUseBlock(id="c3", name="small", input={}))
     assert small.content == "c" * (MAX_TOOL_RESULT_CHARS - 1)
+
+
+def _image_result_tool(name: str) -> ToolDef:
+    async def handler(context: ToolContext, args: BaseModel) -> ToolResult:
+        return ToolResult(
+            content=(
+                TextContent(text="chart.png"),
+                ImageContent(media_type="image/png", data="AAAA"),
+            )
+        )
+
+    return ToolDef(name=name, description="d", input_model=_NoArgs, handler=handler)
+
+
+async def test_dispatch_folds_tool_image_content_into_the_tool_result_block(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        tools=ToolRegistry((_image_result_tool("shot"),)),
+    )
+    context = ToolContext(
+        sandbox=engine.sandbox,
+        blob=engine.blob,
+        turn=engine.turn,
+        agent=engine.agent,
+        spawn=engine.spawn,
+        memory=engine.memory,
+        member_id=engine.member_id,
+        artifact_token_secret=engine.artifact_token_secret,
+        grants=engine.grants,
+    )
+    result = await engine._dispatch(context, ToolUseBlock(id="c1", name="shot", input={}))
+    assert not result.is_error
+    assert result.content == (
+        TextBlock(text="chart.png"),
+        ImageBlock(source=result.content[1].source),
+    )
+    assert result.content[1].source.media_type == "image/png"
+    assert result.content[1].source.data == "AAAA"
+
+
+def _image_error_tool(name: str) -> ToolDef:
+    async def handler(context: ToolContext, args: BaseModel) -> ToolResult:
+        return ToolResult(
+            content=(
+                TextContent(text="render failed"),
+                ImageContent(media_type="image/png", data="AAAA"),
+            ),
+            is_error=True,
+        )
+
+    return ToolDef(name=name, description="d", input_model=_NoArgs, handler=handler)
+
+
+async def test_dispatch_keeps_an_error_result_str_typed_and_drops_image_content(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        tools=ToolRegistry((_image_error_tool("shot"),)),
+    )
+    context = ToolContext(
+        sandbox=engine.sandbox,
+        blob=engine.blob,
+        turn=engine.turn,
+        agent=engine.agent,
+        spawn=engine.spawn,
+        memory=engine.memory,
+        member_id=engine.member_id,
+        artifact_token_secret=engine.artifact_token_secret,
+        grants=engine.grants,
+    )
+    result = await engine._dispatch(context, ToolUseBlock(id="c1", name="shot", input={}))
+    assert result.is_error
+    assert result.content == "render failed"
 
 
 class _ProbeInput(BaseModel):

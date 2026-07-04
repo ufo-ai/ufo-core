@@ -33,7 +33,7 @@ from selfhost.sandbox.session import (
 from selfhost.schema import tables
 from selfhost.schema.records import Agent, Turn
 from selfhost.tools.builtins import BUILTIN_TOOLS
-from selfhost.tools.context import SpawnResult, ToolContext
+from selfhost.tools.context import ImageContent, SpawnResult, TextContent, ToolContext
 from selfhost.tools.registry import ToolRegistry
 
 SANDBOX_TEST_IMAGE = "selfhost-sandbox:test"
@@ -239,31 +239,32 @@ async def test_read_is_one_based_and_windows_from_offset(
     assert result.content[0].text == "2\tb\n3\tc\n\n[lines 2-3 of 5]; 2 more - read with offset=4"
 
 
-async def test_read_image_returns_base64_and_media_type(
+async def test_read_image_returns_an_image_content_block(
     file_ctx: tuple[ToolContext, Path],
 ) -> None:
     ctx, _ = file_ctx
     png = _png_1x1()
     await ctx.sandbox.write_file("pixel.png", png)
     result = await _run("read", ctx, file_path="pixel.png")
-    payload = json.loads(result.content[0].text)
-    assert payload["type"] == "image"
-    assert payload["media_type"] == "image/png"
-    assert base64.b64decode(payload["data"]) == png
+    block = result.content[0]
+    assert isinstance(block, ImageContent)
+    assert block.media_type == "image/png"
+    assert base64.b64decode(block.data) == png
 
 
-async def test_read_pdf_returns_text_and_page_render(
+async def test_read_pdf_returns_text_then_page_image_blocks(
     file_ctx: tuple[ToolContext, Path],
 ) -> None:
     ctx, _ = file_ctx
     await ctx.sandbox.write_file("doc.pdf", MINIMAL_PDF)
     result = await _run("read", ctx, file_path="doc.pdf")
-    payload = json.loads(result.content[0].text)
-    assert payload["type"] == "pdf"
-    assert "Hello sbxfs PDF" in payload["text"]
-    assert payload["total_pages"] == 1
-    assert payload["pages"] and payload["pages"][0]["media_type"] == "image/png"
-    assert base64.b64decode(payload["pages"][0]["data"]).startswith(b"\x89PNG")
+    text_block = result.content[0]
+    assert isinstance(text_block, TextContent)
+    assert "Hello sbxfs PDF" in text_block.text
+    assert "of 1]" in text_block.text
+    pages = [block for block in result.content if isinstance(block, ImageContent)]
+    assert pages and pages[0].media_type == "image/png"
+    assert base64.b64decode(pages[0].data).startswith(b"\x89PNG")
 
 
 async def test_read_refuses_a_binary_file(file_ctx: tuple[ToolContext, Path]) -> None:

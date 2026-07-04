@@ -35,7 +35,7 @@ from selfhost.sandbox.session import (
 )
 from selfhost.schema.records import Agent, Turn
 from selfhost.tools.builtins import BUILTIN_TOOLS
-from selfhost.tools.context import SpawnResult, ToolContext
+from selfhost.tools.context import ImageContent, SpawnResult, ToolContext
 
 
 @dataclass
@@ -188,7 +188,8 @@ async def test_upload_file_passes_the_workspace_paths(tmp_path: Path) -> None:
 
 
 async def test_computer_saves_screenshot_into_the_workspace(tmp_path: Path) -> None:
-    carrier = RecordingCarrier(reply={"screenshot_base64": base64.b64encode(b"png-bytes").decode()})
+    encoded = base64.b64encode(b"png-bytes").decode()
+    carrier = RecordingCarrier(reply={"screenshot_base64": encoded})
     result = await _run(
         "computer",
         _context(carrier, tmp_path),
@@ -198,6 +199,11 @@ async def test_computer_saves_screenshot_into_the_workspace(tmp_path: Path) -> N
     )
     assert ("/workspace/browser-screenshot.jpg", b"png-bytes") in carrier.writes
     assert json.loads(result.content[0].text)["screenshot_path"] == "browser-screenshot.jpg"
+    assert "screenshot_base64" not in json.loads(result.content[0].text)
+    image = result.content[1]
+    assert isinstance(image, ImageContent)
+    assert image.media_type == "image/jpeg"
+    assert image.data == encoded
 
 
 async def test_computer_without_save_writes_nothing(tmp_path: Path) -> None:

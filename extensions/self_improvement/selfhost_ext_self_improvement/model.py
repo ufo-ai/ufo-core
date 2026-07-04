@@ -7,7 +7,14 @@ from typing import Protocol
 
 import anthropic
 
-from selfhost.sdk.models import Message, TextBlock, ToolResultBlock, ToolUseBlock
+from selfhost.sdk.models import (
+    ContentBlock,
+    ImageBlock,
+    Message,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+)
 
 MAX_OUTPUT_TOKENS = 2048
 PROVIDER_TIMEOUT_SECONDS = 60.0
@@ -17,17 +24,28 @@ class ModelLeg(Protocol):
     async def complete(self, system: str, messages: tuple[Message, ...]) -> str: ...
 
 
-def _wire_block(block: TextBlock | ToolUseBlock | ToolResultBlock) -> dict[str, object]:
+def _wire_block(block: ContentBlock) -> dict[str, object]:
     match block:
         case TextBlock(text=text):
             return {"type": "text", "text": text}
+        case ImageBlock(source=source):
+            return {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": source.media_type,
+                    "data": source.data,
+                },
+            }
         case ToolUseBlock(id=block_id, name=name, input=block_input):
             return {"type": "tool_use", "id": block_id, "name": name, "input": block_input}
         case ToolResultBlock(tool_use_id=tool_use_id, content=content, is_error=is_error):
             return {
                 "type": "tool_result",
                 "tool_use_id": tool_use_id,
-                "content": content,
+                "content": content
+                if isinstance(content, str)
+                else [_wire_block(part) for part in content],
                 "is_error": is_error,
             }
 

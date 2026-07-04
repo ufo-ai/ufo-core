@@ -53,7 +53,7 @@ from selfhost.sandbox.session import workspace_path
 from selfhost.schema import tables
 from selfhost.schema.records import FACT, ItemClass, MemoryWrite
 from selfhost.skills.runtime import mount_skill, skill_tree
-from selfhost.tools.context import TextContent, ToolContext, ToolResult
+from selfhost.tools.context import ImageContent, TextContent, ToolContext, ToolResult
 from selfhost.tools.registry import ToolDef
 from selfhost.transcript import TranscriptDecodeError, decode, transcript_key
 
@@ -176,6 +176,57 @@ async def bash_handler(ctx: ToolContext, args: BashInput) -> ToolResult:
     )
 
 
+def _require_str(value: object, field: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise RuntimeError(f"sbxfs read returned no {field}")
+    return value
+
+
+def _pdf_result(result: dict[str, object]) -> ToolResult:
+    """A PDF read as model content: a text block (extracted text, the page window, any poppler note)
+    then one image block per rendered page. Page renders are absent when poppler is unavailable in
+    the sandbox, leaving a text-only result."""
+    lines: list[str] = []
+    text = result.get("text")
+    if isinstance(text, str) and text.strip():
+        lines.append(text.rstrip())
+    total = result.get("total_pages")
+    start = result.get("start_page")
+    returned = result.get("pages_returned")
+    if (
+        isinstance(total, int)
+        and isinstance(start, int)
+        and isinstance(returned, int)
+        and returned > 0
+    ):
+        footer = f"[pdf pages {start}-{start + returned - 1} of {total}]"
+        next_page = result.get("next_page")
+        if isinstance(next_page, int):
+            footer += f"; more pages - read with offset={next_page}"
+        lines.append(footer)
+    for key in ("note", "quality_reminder"):
+        value = result.get(key)
+        if isinstance(value, str) and value:
+            lines.append(value)
+    blocks: list[TextContent | ImageContent] = []
+    if lines:
+        blocks.append(TextContent(text="\n\n".join(lines)))
+    pages = result.get("pages")
+    if isinstance(pages, list):
+        for page in pages:
+            if not isinstance(page, dict):
+                raise RuntimeError("sbxfs read returned a malformed pdf page")
+            blocks.append(
+                ImageContent(
+                    media_type=_require_str(page.get("media_type"), "media_type"),
+                    data=_require_str(page.get("data"), "data"),
+                )
+            )
+    if not blocks:
+        raise RuntimeError("sbxfs read returned an empty pdf result")
+    return ToolResult(content=tuple(blocks))
+
+
 async def read_handler(ctx: ToolContext, args: ReadInput) -> ToolResult:
     params: dict[str, object] = {"path": args.file_path}
     if args.offset is not None:
@@ -184,8 +235,17 @@ async def read_handler(ctx: ToolContext, args: ReadInput) -> ToolResult:
         params["limit"] = args.limit
     result = await ctx.sandbox.run_sbxfs("read", params)
     ctx.read_paths.add(args.file_path)
-    if result.get("type") in ("image", "pdf"):
-        return ToolResult(content=(TextContent(text=json.dumps(result)),))
+    if result.get("type") == "image":
+        return ToolResult(
+            content=(
+                ImageContent(
+                    media_type=_require_str(result.get("media_type"), "media_type"),
+                    data=_require_str(result.get("data"), "data"),
+                ),
+            )
+        )
+    if result.get("type") == "pdf":
+        return _pdf_result(result)
     if result.get("is_empty"):
         return ToolResult(content=(TextContent(text="(file is empty)"),))
     start = result.get("start_line")

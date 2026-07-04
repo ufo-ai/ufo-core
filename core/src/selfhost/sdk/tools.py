@@ -4,6 +4,9 @@
 code in any `__init__.py`), so the public surface lives in named modules like this one."""
 
 from selfhost.tools.context import (
+    ImageContent as ImageContent,
+)
+from selfhost.tools.context import (
     TextContent as TextContent,
 )
 from selfhost.tools.context import (

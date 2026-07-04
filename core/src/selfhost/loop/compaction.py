@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from selfhost.blob import BlobNotFound, BlobStore
 from selfhost.loop.prompts.render import COMPACTION_SYSTEM_PROMPT
 from selfhost.models.interface import (
+    ImageBlock,
     Message,
     ModelClient,
     ModelRequest,
@@ -27,6 +28,7 @@ from selfhost.models.interface import (
 from selfhost.schema.records import Usage
 
 CHARS_PER_TOKEN = 4
+IMAGE_TOKEN_ESTIMATE = 1_600
 COMPACTION_TRIGGER_TOKENS = 120_000
 COMPACTION_KEEP_MESSAGES = 8
 COMPACTION_SUMMARY_MAX_TOKENS = 8_192
@@ -139,10 +141,26 @@ class Compaction:
         return f"conversations/{self.conversation_id}/compactions/{index}/{half}.json.lz4"
 
     def _tokens(self, messages: tuple[Message, ...]) -> int:
+        """Estimate the window's token cost: text length plus a flat cost per inline image. Images
+        carry no text, so without IMAGE_TOKEN_ESTIMATE an image-heavy window counts as ~0 tokens and
+        never trips the compaction trigger, ballooning the stored conversation."""
         return sum(
             (len(message.role) + len(self._text(message)) + CHARS_PER_TOKEN - 1) // CHARS_PER_TOKEN
+            + IMAGE_TOKEN_ESTIMATE * self._image_count(message)
             for message in messages
         )
+
+    def _image_count(self, message: Message) -> int:
+        if isinstance(message.content, str):
+            return 0
+        total = 0
+        for block in message.content:
+            match block:
+                case ImageBlock():
+                    total += 1
+                case ToolResultBlock(content=tuple(parts)):
+                    total += sum(1 for part in parts if isinstance(part, ImageBlock))
+        return total
 
     def _text(self, message: Message) -> str:
         if isinstance(message.content, str):
@@ -152,8 +170,12 @@ class Compaction:
             match block:
                 case TextBlock(text=text):
                     rendered.append(text)
-                case ToolResultBlock(content=content):
+                case ToolResultBlock(content=str(content)):
                     rendered.append(content)
+                case ToolResultBlock(content=tuple(parts)):
+                    rendered.extend(
+                        part.text for part in parts if isinstance(part, TextBlock)
+                    )
                 case ToolUseBlock(name=name, input=arguments):
                     rendered.append(f"{name}({json.dumps(arguments, sort_keys=True)})")
         return "\n".join(rendered)

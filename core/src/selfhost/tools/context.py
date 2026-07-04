@@ -12,10 +12,10 @@ gets `ext`, its owning extension's workspace-scoped ExtensionContext; a builtin 
 `ext=None`."""
 
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from typing import Annotated, Any, Literal, Protocol
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from selfhost.blob import BlobStore
 from selfhost.ext.context import ExtensionContext
@@ -30,7 +30,16 @@ class TextContent(BaseModel):
     text: str
 
 
-ContentBlock = TextContent
+class ImageContent(BaseModel):
+    """A tool's visual output — the model sees the image, not a base64 string. `data` is base64;
+    the engine folds it into the tool_result's ImageBlock the model client puts on the wire."""
+
+    type: Literal["image"] = "image"
+    media_type: str
+    data: str
+
+
+ContentBlock = Annotated[TextContent | ImageContent, Field(discriminator="type")]
 
 
 class ToolResult(BaseModel):
