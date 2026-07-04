@@ -14,10 +14,10 @@ from selfhost_ext_eval_harness.capability import CapabilityOutput, CapabilityVer
 ANSWER_TOLERANCE = 0.05
 
 # selfhost's tool names: the web pack contributes search_web/fetch_url; the file/shell builtins are
-# read/write/edit/bash (glob and grep are done through bash). Local skills load via load_skill and
+# read/write/edit/bash plus the dedicated grep/glob search tools. Skills load via load_skill;
 # delegation spawns via spawn_subagent.
 WEB_TOOLS = ("search_web", "fetch_url")
-LOCAL_FS_TOOLS = frozenset({"read", "write", "edit", "bash"})
+LOCAL_FS_TOOLS = frozenset({"read", "write", "edit", "bash", "grep", "glob"})
 
 
 def answer_text(text: str) -> str:
