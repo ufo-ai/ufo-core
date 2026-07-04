@@ -1,6 +1,6 @@
 """The builtin tool set: bash, read, write, edit, glob, grep, share_file, spawn_subagent,
 load_sessions, ask_user, load_skill, connect_account, pause_and_wait, list_skills,
-wait_for_subagents, cancel_subagent.
+wait_for_subagents, cancel_subagent, message_subagent.
 
 Each file/shell handler reaches the workspace only through `ctx.sandbox`, so the carrier's scoping
 and egress rules apply whether a byte arrives via a shell command or a file op. `read`, `edit`, and
@@ -21,9 +21,10 @@ next message — no out-of-band prompt. `load_skill` mounts a skill's `SKILL.md`
 workspace and returns its workflow instructions. `list_skills` reports the loadable skills so the
 agent can discover a workflow before starting. `pause_and_wait` is chat-native like `ask_user`: it
 structures a wait the agent poses in its reply and ends the turn, resuming on the next inbound.
-`wait_for_subagents` and `cancel_subagent` reach `ctx.subagents`, the same Subagents workflow that
-backs `spawn`, to await a background child's terminal or cancel a running one — scoped to the
-children this turn spawned."""
+`wait_for_subagents`, `cancel_subagent`, and `message_subagent` reach `ctx.subagents`, the same
+Subagents workflow that backs `spawn`, to await a background child's terminal, cancel a running one,
+or queue it a follow-up message that runs as its next turn — scoped to the children this turn
+spawned."""
 
 import json
 import mimetypes
@@ -183,6 +184,12 @@ class WaitForSubagentsInput(BaseModel):
 
 class CancelSubagentInput(BaseModel):
     subagent_id: str
+    user_description: str
+
+
+class MessageSubagentInput(BaseModel):
+    subagent_id: str
+    message: str
     user_description: str
 
 
@@ -583,6 +590,22 @@ async def cancel_subagent_handler(ctx: ToolContext, args: CancelSubagentInput) -
     )
 
 
+async def message_subagent_handler(ctx: ToolContext, args: MessageSubagentInput) -> ToolResult:
+    """Send a running background subagent a follow-up message; it runs as the subagent's next turn
+    against its accumulated context once the turn in flight ends, and the returned id addresses that
+    follow-up for a later wait. Refuses a turn id this turn did not spawn."""
+    if ctx.subagents is None:
+        raise RuntimeError("subagent control is not available in this context")
+    status = await ctx.subagents.message(UUID(args.subagent_id), args.message)
+    return ToolResult(
+        content=(
+            TextContent(
+                text=json.dumps({"subagent_id": str(status.turn_id), "status": status.status})
+            ),
+        )
+    )
+
+
 BUILTIN_TOOLS: tuple[ToolDef, ...] = (
     ToolDef(
         name="bash",
@@ -748,5 +771,15 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=CancelSubagentInput,
         handler=cancel_subagent_handler,
+    ),
+    ToolDef(
+        name="message_subagent",
+        description=(
+            "Send a follow-up message to a background subagent. It runs as the subagent's next "
+            "turn against its accumulated context once its current turn ends; the returned id "
+            "addresses that follow-up for a later wait_for_subagents."
+        ),
+        input_model=MessageSubagentInput,
+        handler=message_subagent_handler,
     ),
 )

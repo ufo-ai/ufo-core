@@ -55,6 +55,7 @@ class StubSubagentControl:
     statuses: dict[UUID, SubagentStatus] = field(default_factory=dict)
     waited: list[tuple[UUID, ...]] = field(default_factory=list)
     cancelled: list[UUID] = field(default_factory=list)
+    messaged: list[tuple[UUID, str]] = field(default_factory=list)
 
     async def wait(self, turn_ids: tuple[UUID, ...]) -> tuple[SubagentStatus, ...]:
         self.waited.append(turn_ids)
@@ -68,6 +69,10 @@ class StubSubagentControl:
         return self.statuses.get(
             turn_id, SubagentStatus(turn_id=turn_id, status="cancelled", text="")
         )
+
+    async def message(self, turn_id: UUID, text: str) -> SubagentStatus:
+        self.messaged.append((turn_id, text))
+        return self.statuses.get(turn_id, SubagentStatus(turn_id=turn_id, status="queued", text=""))
 
 
 def make_context(
@@ -141,6 +146,7 @@ def test_registry_schemas_cover_every_tool() -> None:
         "list_skills",
         "wait_for_subagents",
         "cancel_subagent",
+        "message_subagent",
     }
     bash = next(schema for schema in schemas if schema.name == "bash")
     assert "command" in bash.input_schema["properties"]
@@ -311,3 +317,18 @@ async def test_cancel_subagent_malformed_id_raises(tmp_path: Path) -> None:
     ctx = make_context(FakeSandbox(), tmp_path, subagents=StubSubagentControl())
     with pytest.raises(ValueError):
         await run("cancel_subagent", ctx, subagent_id="not-a-uuid", user_description="x")
+
+
+async def test_message_subagent_forwards_the_message_and_reports_status(tmp_path: Path) -> None:
+    child = uuid4()
+    control = StubSubagentControl()
+    ctx = make_context(FakeSandbox(), tmp_path, subagents=control)
+    result = await run(
+        "message_subagent",
+        ctx,
+        subagent_id=str(child),
+        message="also check X",
+        user_description="x",
+    )
+    assert control.messaged == [(child, "also check X")]
+    assert json.loads(result.content[0].text) == {"subagent_id": str(child), "status": "queued"}

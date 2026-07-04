@@ -1,3 +1,4 @@
+from dataclasses import dataclass, field
 from uuid import UUID, uuid4
 
 import pytest
@@ -11,7 +12,7 @@ from selfhost.ext.manifest import SUBAGENT_ROUND_LIMIT, SubagentProfile
 from selfhost.loop.profiles import CORE_SUBAGENT_PROFILES, GENERAL_PURPOSE
 from selfhost.loop.subagents import SubagentRegistry, Subagents, subagent_system_prompt
 from selfhost.schema import tables
-from selfhost.schema.records import TerminalFrame, Turn
+from selfhost.schema.records import TerminalFrame, Turn, turn_id_for
 from selfhost.tools.builtins import BUILTIN_TOOLS
 
 
@@ -161,6 +162,133 @@ def test_a_profile_can_pin_a_distinct_model() -> None:
     assert pinned.model == "gpt-5.4"
     assert (pinned.model or "claude-opus-4-8") == "gpt-5.4"
     assert (_profile("a").model or "claude-opus-4-8") == "claude-opus-4-8"
+
+
+@dataclass
+class _RecordingClient:
+    """Records the workflow argument (the follow-up turn id) each enqueue carries, so the message
+    test reads back which turn the workflow placed on the queue — never asserting DBOS itself."""
+
+    enqueued: list[str] = field(default_factory=list)
+
+    async def enqueue_async(self, options: object, workflow_arg: str) -> None:
+        self.enqueued.append(workflow_arg)
+
+
+async def _workspace_agent() -> tuple[UUID, UUID]:
+    workspace_id, agent_id = uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="parent",
+                prompt="p",
+                model="m",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return workspace_id, agent_id
+
+
+async def _running_child(workspace_id: UUID, agent_id: UUID, parent_id: UUID) -> tuple[UUID, UUID]:
+    conversation_id = uuid4()
+    child_id = turn_id_for(workspace_id, conversation_id, 1)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                surface="subagent",
+                queue_key=str(child_id),
+                member_id=None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=child_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="running",
+                inbound="do the task",
+                terminal=None,
+                parent_turn_id=parent_id,
+                subagent_profile=GENERAL_PURPOSE,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return child_id, conversation_id
+
+
+async def test_message_admits_the_running_childs_next_turn_and_enqueues_it(
+    db: None, dbos_launched: Config
+) -> None:
+    """A follow-up message becomes the child's next turn (seq+1) on its own conversation, carrying
+    the child's subagent profile so the continuation runs as the subagent, and lands on the turn
+    queue — the running child receives it once the turn in flight ends."""
+    workspace_id, agent_id = await _workspace_agent()
+    parent = Turn(
+        id=uuid4(),
+        workspace_id=workspace_id,
+        conversation_id=uuid4(),
+        agent_id=agent_id,
+        seq=1,
+        status="running",
+        inbound="parent",
+    )
+    child_id, child_conversation = await _running_child(workspace_id, agent_id, parent.id)
+    client = _RecordingClient()
+    subagents = Subagents(client=client, registry=SubagentRegistry(()), parent=parent)
+    status = await subagents.message(child_id, "also summarize the risks")
+    assert status.status == "queued"
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.turn.c.conversation_id,
+                    tables.turn.c.seq,
+                    tables.turn.c.status,
+                    tables.turn.c.inbound,
+                    tables.turn.c.subagent_profile,
+                    tables.turn.c.parent_turn_id,
+                ).where(tables.turn.c.id == status.turn_id)
+            )
+        ).one()
+    assert row.conversation_id == child_conversation
+    assert (row.seq, row.status, row.inbound) == (2, "queued", "also summarize the risks")
+    assert row.subagent_profile == GENERAL_PURPOSE
+    assert row.parent_turn_id == parent.id
+    assert client.enqueued == [str(status.turn_id)]
+
+
+async def test_message_refuses_a_turn_this_parent_did_not_spawn(
+    db: None, dbos_launched: Config
+) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    parent = Turn(
+        id=uuid4(),
+        workspace_id=workspace_id,
+        conversation_id=uuid4(),
+        agent_id=agent_id,
+        seq=1,
+        status="running",
+        inbound="parent",
+    )
+    stranger, _ = await _running_child(workspace_id, agent_id, uuid4())
+    subagents = Subagents(client=_RecordingClient(), registry=SubagentRegistry(()), parent=parent)
+    with pytest.raises(ValueError, match="not a subagent this turn spawned"):
+        await subagents.message(stranger, "hello")
 
 
 async def _finished_child(workspace_id: UUID, agent_id: UUID, text: str) -> UUID:

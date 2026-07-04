@@ -144,6 +144,51 @@ class Subagents:
         text = "" if row.terminal is None else TerminalFrame.model_validate(row.terminal).text
         return SubagentStatus(turn_id=turn_id, status=row.status, text=text)
 
+    async def message(self, turn_id: UUID, text: str) -> SubagentStatus:
+        """Queue a follow-up for a background child by admitting the next turn on the child's own
+        conversation with `text` as its inbound. The child's partition serializes it after the turn
+        in flight (create-or-attach hands it the same sandbox), and the engine loads the child's
+        accumulated transcript as prior context — so the follow-up continues the subagent under its
+        own profile rather than starting fresh. Returns the queued follow-up's status; refuses a
+        turn id that is not a child of this parent, mirroring cancel."""
+        await self._require_child(turn_id)
+        async with workspace_tx() as connection:
+            child = (
+                await connection.execute(
+                    sa.select(
+                        tables.turn.c.conversation_id,
+                        tables.turn.c.agent_id,
+                        tables.turn.c.subagent_profile,
+                    ).where(tables.turn.c.id == turn_id)
+                )
+            ).one()
+            next_seq = (
+                await connection.execute(
+                    sa.select(sa.func.max(tables.turn.c.seq)).where(
+                        tables.turn.c.conversation_id == child.conversation_id
+                    )
+                )
+            ).scalar_one() + 1
+            followup_id = turn_id_for(self.parent.workspace_id, child.conversation_id, next_seq)
+            await connection.execute(
+                sa.insert(tables.turn).values(
+                    id=followup_id,
+                    workspace_id=self.parent.workspace_id,
+                    conversation_id=child.conversation_id,
+                    agent_id=child.agent_id,
+                    seq=next_seq,
+                    status="queued",
+                    inbound=text,
+                    terminal=None,
+                    parent_turn_id=self.parent.id,
+                    subagent_profile=child.subagent_profile,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        await self._enqueue(followup_id, child.conversation_id)
+        return SubagentStatus(turn_id=followup_id, status="queued", text="")
+
     async def _require_child(self, turn_id: UUID) -> None:
         async with workspace_tx() as connection:
             row = (

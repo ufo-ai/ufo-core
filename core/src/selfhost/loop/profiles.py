@@ -4,9 +4,9 @@ a more specific one.
 `general_purpose` is the catch-all: a focused child given a self-contained task, working in the same
 workspace, that reports back a single summary. Its tool subset is the working set minus the tools a
 subagent must not hold — it never asks the user (`ask_user`), never delegates further
-(`spawn_subagent`), never waits on or cancels a sibling (`wait_for_subagents`, `cancel_subagent`),
-and never gates a member grant (`connect_account`). Every other profile is extension-provided
-through the manifest; this is the floor."""
+(`spawn_subagent`), never waits on, messages, or cancels a sibling (`wait_for_subagents`,
+`message_subagent`, `cancel_subagent`), and never gates a member grant (`connect_account`). Every
+other profile is extension-provided through the manifest; this is the floor."""
 
 from pydantic import BaseModel
 

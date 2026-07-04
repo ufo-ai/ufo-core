@@ -89,12 +89,15 @@ class Spawn(Protocol):
 
 class SubagentControl(Protocol):
     """Lifecycle operations on already-spawned background subagents, keyed by the child turn id a
-    background `spawn` returns: await their terminals, or cancel a running one. Threaded onto the
-    ToolContext from the same Subagents workflow that backs `spawn`."""
+    background `spawn` returns: await their terminals, cancel a running one, or message one a
+    follow-up that runs as its next turn. Threaded onto the ToolContext from the same Subagents
+    workflow that backs `spawn`."""
 
     async def wait(self, turn_ids: tuple[UUID, ...]) -> tuple[SubagentStatus, ...]: ...
 
     async def cancel(self, turn_id: UUID) -> SubagentStatus: ...
+
+    async def message(self, turn_id: UUID, text: str) -> SubagentStatus: ...
 
 
 @dataclass(eq=False)
