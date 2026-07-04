@@ -205,4 +205,4 @@ class AsanaSource:
                 offset = next_page.get("offset") if isinstance(next_page, dict) else None
                 if not offset:
                     break
-        return SyncResult(pages=tuple(pages), next_cursor=None)
+        return SyncResult(pages=tuple(pages), next_cursor=None, snapshot=True)

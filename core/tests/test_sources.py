@@ -38,6 +38,7 @@ from selfhost.memory.sources import (
     SourceAuth,
     SyncDriver,
     SyncResult,
+    page_id_for,
     register_sources,
 )
 from selfhost.schema import tables
@@ -492,6 +493,39 @@ async def _source_state(source_id: UUID) -> sa.RowMapping:
         ).mappings().one()
 
 
+async def _tombstone(page_id: UUID) -> bool:
+    async with workspace_tx() as connection:
+        return bool(
+            (
+                await connection.execute(
+                    sa.select(tables.page.c.tombstone).where(tables.page.c.id == page_id)
+                )
+            ).scalar_one()
+        )
+
+
+async def _seed_prior_page(workspace_id: UUID, source_id: UUID, source_ref: str) -> UUID:
+    """A page a prior snapshot of the source already landed and indexed — active, unrelated to the
+    delta run under test."""
+    page_id = page_id_for(source_id, source_ref)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.page).values(
+                id=page_id,
+                workspace_id=workspace_id,
+                source_id=source_id,
+                digest="sha256:prior",
+                body_ref=f"sources/{source_id}/{page_id}",
+                subject=SHARED_SUBJECT,
+                embedding_digest="sha256:prior",
+                tombstone=False,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return page_id
+
+
 async def test_cursor_expired_clears_stored_cursor_and_next_run_refetches(
     db: None, database_url: str, tmp_path: Path
 ) -> None:
@@ -560,6 +594,65 @@ async def test_consecutive_errors_back_off_and_a_success_resets_the_counter(
     await _make_due()
     await driver.run()
     assert (await _source_state(source_id))["consecutive_errors"] == 0
+
+
+async def test_delta_delete_tombstones_only_named_page_never_blanket_sweeps(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    """A delta backend (`snapshot=False`) that lands a page, then next run explicitly deletes it,
+    tombstones only that page — an unrelated prior page from a different snapshot survives. This is
+    the both-ends proof that a partial fetch never triggers the blanket unseen-page sweep."""
+    workspace_id = await _workspace()
+    source_id = await _seed_scripted_source(workspace_id, None)
+    kept_id = await _seed_prior_page(workspace_id, source_id, "kept/doc")
+    delta = Page(
+        source_ref="delta/doc",
+        digest="sha256:delta",
+        subject=SHARED_SUBJECT,
+        body="the launch window opens at dawn",
+    )
+    delta_id = page_id_for(source_id, "delta/doc")
+    driver, _ = _scripted_driver(
+        [
+            SyncResult(pages=(delta,), snapshot=False),
+            SyncResult(pages=(), deletes=("delta/doc",), snapshot=False),
+        ],
+        database_url,
+        tmp_path / "blobs",
+    )
+
+    await driver.run()
+    assert await _tombstone(delta_id) is False
+    assert await _tombstone(kept_id) is False  # delta run 1 did not sweep the unseen prior page
+
+    await _make_due()
+    await driver.run()
+    assert await _tombstone(delta_id) is True  # explicitly deleted → tombstoned
+    assert await _tombstone(kept_id) is False  # survives: no blanket sweep on a delta run
+
+
+async def test_snapshot_fetch_tombstones_prior_pages_absent_from_the_fetch(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    """A `snapshot=True` fetch is an authoritative full collection: a prior page the fetch no longer
+    holds is swept to a tombstone, while a page still present stays active."""
+    workspace_id = await _workspace()
+    source_id = await _seed_scripted_source(workspace_id, None)
+    gone_id = await _seed_prior_page(workspace_id, source_id, "gone/doc")
+    kept = Page(
+        source_ref="kept/doc",
+        digest="sha256:kept",
+        subject=SHARED_SUBJECT,
+        body="the mascot is a friendly otter named pip",
+    )
+    kept_id = page_id_for(source_id, "kept/doc")
+    driver, _ = _scripted_driver(
+        [SyncResult(pages=(kept,), snapshot=True)], database_url, tmp_path / "blobs"
+    )
+
+    await driver.run()
+    assert await _tombstone(gone_id) is True  # absent from the authoritative snapshot → swept
+    assert await _tombstone(kept_id) is False
 
 
 def test_sync_and_page_index_register_as_core_jobs(database_url: str, tmp_path: Path) -> None:

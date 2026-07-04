@@ -8,8 +8,9 @@ never mints or holds one. Core ships `FolderSource` (a local directory); connect
 backends are extensions registered through the `sources` Manifest point and sourced into
 `SyncDriver.backends` at boot. `SyncDriver` is the core sync job: it claims due sources (one worker
 per source, dialect-native — Postgres `FOR UPDATE SKIP LOCKED`, SQLite the single writer), fetches,
-writes each page's body to the blob store, and upserts page rows — skipping ones unchanged by digest
-and tombstoning ones whose document is gone. It writes NO chunks: a synced page carries a NULL
+writes each page's body to the blob store, and upserts page rows — skipping ones unchanged by
+digest, tombstoning the ones a full-snapshot fetch no longer holds or a delta fetch explicitly
+deletes. It writes NO chunks: a synced page carries a NULL
 `embedding_digest`, marking it due for the page index job (the sole chunk producer). The driver
 polls; it never fires on the writes it makes."""
 
@@ -54,8 +55,17 @@ class Page(BaseModel):
 
 
 class SyncResult(BaseModel):
+    """What a backend's `fetch` returns for one run: the documents the source holds now, the resume
+    cursor, and how the driver reconciles what's gone. `snapshot=True` declares this fetch an
+    authoritative full collection, so the driver tombstones every prior page absent from `pages`.
+    A delta/incremental backend leaves `snapshot=False` and names removals in `deletes` (the
+    source_refs to tombstone), so the driver tombstones only those and never sweeps the pages a
+    partial fetch simply didn't mention."""
+
     pages: tuple[Page, ...]
     next_cursor: str | None = None
+    deletes: tuple[str, ...] = ()
+    snapshot: bool = False
 
 
 class CursorExpired(Exception):
@@ -84,8 +94,12 @@ class SourceBackend(Protocol[ConfigT]):
     the typed per-source config the driver validates a row's JSON `config` against — each backend
     owns its own model, so a source carries typed parameters, never an untyped bag. `fetch` returns
     the documents the source holds now plus a resume cursor, given that config, the prior `cursor`,
-    and the workspace `auth` the runner threads. It raises `CursorExpired` when a stored incremental
-    cursor is rejected by the provider, so the driver clears it and the next run refetches fresh."""
+    and the workspace `auth` the runner threads. A backend that reads a complete collection each run
+    returns `snapshot=True`, and the driver tombstones prior pages the fetch no longer holds; a
+    delta/incremental backend returns `snapshot=False` and names removals explicitly in
+    `SyncResult.deletes`, so the driver tombstones only those and never sweeps pages a partial fetch
+    didn't mention. It raises `CursorExpired` when a stored incremental cursor is rejected by the
+    provider, so the driver clears it and the next run refetches fresh."""
 
     config_model: type[ConfigT]
 
@@ -116,7 +130,7 @@ class FolderSource:
             )
             for source_ref, text in entries
         )
-        return SyncResult(pages=pages, next_cursor=None)
+        return SyncResult(pages=pages, next_cursor=None, snapshot=True)
 
     @staticmethod
     def _read(root: Path) -> tuple[tuple[str, str], ...]:
@@ -137,6 +151,12 @@ def source_row_id(workspace_id: UUID, backend: str, config: Mapping[str, object]
         NAMESPACE_URL,
         f"{workspace_id}/source/{backend}/{json.dumps(dict(config), sort_keys=True)}",
     )
+
+
+def page_id_for(source_id: UUID, source_ref: str) -> UUID:
+    """The deterministic id of a page within a source, so an upsert, a re-fetch of an unchanged
+    document, and an explicit `deletes` entry for one `source_ref` all settle on the same row."""
+    return uuid5(NAMESPACE_URL, f"{source_id}/page/{source_ref}")
 
 
 async def register_sources(configured: tuple[SourceEntry, ...]) -> None:
@@ -266,14 +286,15 @@ class SyncDriver:
         fetched: list[UUID] = []
         changed: list[tuple[UUID, str, str, str]] = []
         for page in result.pages:
-            page_id = uuid5(NAMESPACE_URL, f"{source.source_id}/page/{page.source_ref}")
+            page_id = page_id_for(source.source_id, page.source_ref)
             fetched.append(page_id)
             existing = prior.get(page_id)
             if existing is None or existing[0] != page.digest or existing[1]:
                 body_ref = f"{SOURCE_BLOB_PREFIX}/{source.source_id}/{page_id}"
                 await self.blob.put(body_ref, page.body.encode())
                 changed.append((page_id, body_ref, page.digest, page.subject))
-        await self._write(source, result.next_cursor, changed, fetched)
+        deleted = [page_id_for(source.source_id, ref) for ref in result.deletes]
+        await self._write(source, result.next_cursor, changed, fetched, deleted, result.snapshot)
 
     async def _prior_pages(self, source_id: UUID) -> dict[UUID, tuple[str, bool]]:
         async with workspace_tx() as connection:
@@ -292,6 +313,8 @@ class SyncDriver:
         next_cursor: str | None,
         changed: list[tuple[UUID, str, str, str]],
         fetched: list[UUID],
+        deleted: list[UUID],
+        snapshot: bool,
     ) -> None:
         now = datetime.now(UTC)
         async with workspace_tx() as connection:
@@ -326,15 +349,26 @@ class SyncDriver:
                             updated_at=sa.func.now(),
                         )
                     )
-            await connection.execute(
-                sa.update(tables.page)
-                .values(tombstone=True, embedding_digest=None, updated_at=sa.func.now())
-                .where(
-                    tables.page.c.source_id == source.source_id,
-                    tables.page.c.tombstone.is_(False),
-                    tables.page.c.id.not_in(fetched),
+            if deleted:
+                await connection.execute(
+                    sa.update(tables.page)
+                    .values(tombstone=True, embedding_digest=None, updated_at=sa.func.now())
+                    .where(
+                        tables.page.c.source_id == source.source_id,
+                        tables.page.c.tombstone.is_(False),
+                        tables.page.c.id.in_(deleted),
+                    )
                 )
-            )
+            if snapshot:
+                await connection.execute(
+                    sa.update(tables.page)
+                    .values(tombstone=True, embedding_digest=None, updated_at=sa.func.now())
+                    .where(
+                        tables.page.c.source_id == source.source_id,
+                        tables.page.c.tombstone.is_(False),
+                        tables.page.c.id.not_in(fetched),
+                    )
+                )
             await connection.execute(
                 sa.update(tables.source)
                 .values(
