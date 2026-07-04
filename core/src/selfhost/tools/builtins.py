@@ -1,5 +1,5 @@
 """The builtin tool set: bash, read, write, edit, share_file, spawn_subagent, memory_search,
-memory_update, ask_user, load_skill.
+memory_update, load_sessions, ask_user, load_skill.
 
 Each file/shell handler reaches the workspace only through `ctx.sandbox`, so the carrier's scoping
 and egress rules apply whether a byte arrives via a shell command or a file op. `read`, `edit`, and
@@ -11,19 +11,23 @@ never saw. `share_file` streams a produced workspace file straight out of the mo
 store under `artifacts/<uuid>/` and returns a TTL-token URL the web surface serves — the only path
 that hands a file back outside the sandbox, with no read cap and no whole-file buffer.
 `spawn_subagent` delegates a typed subtask to a child turn through `ctx.spawn`. `memory_search`
-recalls facts and searches synced source pages through `ctx.memory`, and `memory_update` commits —
-both scoped to the conversation's subject (`{member, shared}`). `ask_user` is chat-native: it
+recalls facts and searches synced source pages through `ctx.memory`, fanning up to three queries
+out concurrently and merging them under an optional `created_at` window, and `memory_update`
+commits — both scoped to the conversation's subject (`{member, shared}`). `load_sessions` reads
+specific past conversation transcripts back from the blob store, scoped to the speaking member's
+own conversations. `ask_user` is chat-native: it
 structures a question or confirmation the agent poses in its reply, whose answer rides the member's
 next message — no out-of-band prompt. `load_skill` mounts a skill's `SKILL.md` and assets into the
 workspace and returns its workflow instructions."""
 
+import asyncio
 import json
 import mimetypes
 import shlex
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from pydantic import BaseModel, Field
@@ -33,17 +37,28 @@ from selfhost.artifact_token import (
     ARTIFACT_TOKEN_TTL_SECONDS,
     mint_artifact_token,
 )
+from selfhost.blob import BlobNotFound
 from selfhost.db import workspace_tx
 from selfhost.grants import installed_connect_flow
-from selfhost.memory.service import SHARED_SUBJECT, member_subject, recall_subjects
+from selfhost.memory.service import (
+    SHARED_SUBJECT,
+    Recalled,
+    SourceMatch,
+    member_subject,
+    recall_subjects,
+)
+from selfhost.models.interface import TextBlock
 from selfhost.sandbox.session import workspace_path
 from selfhost.schema import tables
 from selfhost.schema.records import FACT, ItemClass, MemoryWrite
 from selfhost.skills.runtime import mount_skill, skill_tree
 from selfhost.tools.context import TextContent, ToolContext, ToolResult
 from selfhost.tools.registry import ToolDef
+from selfhost.transcript import TranscriptDecodeError, decode, transcript_key
 
 MEMORY_SEARCH_LIMIT = 8
+MAX_MEMORY_QUERIES = 3
+MAX_LOAD_SESSIONS = 25
 ARTIFACT_DOWNLOAD_PATH = "/web/artifacts/download"
 ARTIFACT_FALLBACK_NAME = "download"
 SHARE_PREFLIGHT_TIMEOUT_SECONDS = 300
@@ -107,8 +122,9 @@ class SpawnSubagentInput(BaseModel):
 
 
 class MemorySearchInput(BaseModel):
-    query: str
-    limit: int = MEMORY_SEARCH_LIMIT
+    queries: tuple[str, ...] = Field(min_length=1, max_length=MAX_MEMORY_QUERIES)
+    start_date: str | None = None
+    end_date: str | None = None
 
 
 class MemoryUpdateInput(BaseModel):
@@ -116,6 +132,10 @@ class MemoryUpdateInput(BaseModel):
     item_class: ItemClass = FACT
     shared: bool = False
     source_ref: str | None = None
+
+
+class LoadSessionsInput(BaseModel):
+    session_ids: tuple[str, ...] = Field(min_length=1, max_length=MAX_LOAD_SESSIONS)
 
 
 MAX_USER_QUESTIONS = 4
@@ -288,14 +308,58 @@ async def spawn_subagent_handler(ctx: ToolContext, args: SpawnSubagentInput) -> 
     return ToolResult(content=(TextContent(text=text),))
 
 
+def _date_bound(value: str | None, *, end: bool) -> datetime | None:
+    """Parse an ISO-8601 date or datetime to a UTC bound. A bare `end` date covers its whole day —
+    the exclusive next midnight — so `[start_date, end_date]` reads inclusively; a malformed value
+    raises and surfaces to the model as a recoverable tool error."""
+    if value is None:
+        return None
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    if end and "T" not in value and " " not in value:
+        parsed += timedelta(days=1)
+    return parsed
+
+
 async def memory_search_handler(ctx: ToolContext, args: MemorySearchInput) -> ToolResult:
+    """Fan the queries out concurrently over recall and source search, then merge each kind by
+    keeping every item's best score across the queries that surfaced it and bounding the merged set
+    to MEMORY_SEARCH_LIMIT — so up to MAX_MEMORY_QUERIES queries can never blow the turn's context.
+    start_date/end_date, when given, restrict both kinds to a `created_at` window."""
     subjects = recall_subjects(ctx.member_id)
-    recalled = await ctx.memory.recall(args.query, subjects, args.limit)
-    sources = await ctx.memory.search_sources(args.query, subjects, args.limit)
+    start = _date_bound(args.start_date, end=False)
+    end = _date_bound(args.end_date, end=True)
+    recalled_legs, source_legs = await asyncio.gather(
+        asyncio.gather(
+            *(
+                ctx.memory.recall(query, subjects, MEMORY_SEARCH_LIMIT, start, end)
+                for query in args.queries
+            )
+        ),
+        asyncio.gather(
+            *(
+                ctx.memory.search_sources(query, subjects, MEMORY_SEARCH_LIMIT, start, end)
+                for query in args.queries
+            )
+        ),
+    )
+    recalled: dict[UUID, Recalled] = {}
+    for recall_leg in recalled_legs:
+        for item in recall_leg:
+            if item.memory_id not in recalled or item.score > recalled[item.memory_id].score:
+                recalled[item.memory_id] = item
+    sources: dict[UUID, SourceMatch] = {}
+    for source_leg in source_legs:
+        for match in source_leg:
+            if match.page_id not in sources or match.score > sources[match.page_id].score:
+                sources[match.page_id] = match
     if not recalled and not sources:
         return ToolResult(content=(TextContent(text="No matching memory."),))
-    lines = [f"- [{item.item_class}] {item.body}" for item in recalled]
-    lines.extend(f"- [source] {match.text}" for match in sources)
+    top_recalled = sorted(recalled.values(), key=lambda item: item.score, reverse=True)
+    top_sources = sorted(sources.values(), key=lambda match: match.score, reverse=True)
+    lines = [f"- [{item.item_class}] {item.body}" for item in top_recalled[:MEMORY_SEARCH_LIMIT]]
+    lines.extend(f"- [source] {match.text}" for match in top_sources[:MEMORY_SEARCH_LIMIT])
     return ToolResult(content=(TextContent(text="\n".join(lines)),))
 
 
@@ -311,6 +375,65 @@ async def memory_update_handler(ctx: ToolContext, args: MemoryUpdateInput) -> To
         )
     )
     return ToolResult(content=(TextContent(text=f"Remembered ({subject})."),))
+
+
+async def load_sessions_handler(ctx: ToolContext, args: LoadSessionsInput) -> ToolResult:
+    """Load specific past conversation transcripts by id, scoped to the speaking member's own
+    conversations in this workspace. Each id resolves to its durable transcript, rendered as the
+    user/assistant text exchange; an id that is malformed, not the member's, not in this workspace,
+    or whose transcript is missing or corrupt is collected into `failed` and never aborts the
+    call."""
+    requested: dict[UUID, str] = {}
+    failed: list[str] = []
+    for raw in args.session_ids:
+        try:
+            requested[UUID(raw)] = raw
+        except ValueError:
+            failed.append(raw)
+    scope = (
+        tables.conversation.c.member_id.is_(None)
+        if ctx.member_id is None
+        else tables.conversation.c.member_id == ctx.member_id
+    )
+    surfaces: dict[UUID, str] = {}
+    if requested:
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(tables.conversation.c.id, tables.conversation.c.surface).where(
+                        tables.conversation.c.id.in_(list(requested)),
+                        tables.conversation.c.workspace_id == ctx.turn.workspace_id,
+                        scope,
+                    )
+                )
+            ).mappings().all()
+        surfaces = {row["id"]: row["surface"] for row in rows}
+    sessions: list[dict[str, object]] = []
+    for conversation_id, raw in requested.items():
+        if conversation_id not in surfaces:
+            failed.append(raw)
+            continue
+        try:
+            transcript = decode(await ctx.blob.get(transcript_key(conversation_id)))
+        except (BlobNotFound, TranscriptDecodeError):
+            failed.append(raw)
+            continue
+        messages: list[dict[str, str]] = []
+        for message in transcript.messages:
+            if isinstance(message.content, str):
+                text = message.content
+            else:
+                text = "\n".join(
+                    block.text for block in message.content if isinstance(block, TextBlock)
+                )
+            if text:
+                messages.append({"role": message.role, "text": text})
+        sessions.append(
+            {"session_id": raw, "surface": surfaces[conversation_id], "messages": messages}
+        )
+    return ToolResult(
+        content=(TextContent(text=json.dumps({"sessions": sessions, "failed": failed})),)
+    )
 
 
 ASK_USER_DIRECTIVE = (
@@ -426,9 +549,12 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
     ToolDef(
         name="memory_search",
         description=(
-            "Search memory for facts, notes, and synced source documents relevant to a query, "
-            "over the current member's memory and shared memory. Returns the best-matching items "
-            "and document snippets; use it to recall context before answering."
+            "Search memory for facts, notes, and synced source documents, over the current "
+            "member's memory and shared memory. Pass up to "
+            f"{MAX_MEMORY_QUERIES} distinct queries — they run in parallel and their results are "
+            "merged and deduplicated. Optionally restrict to items written in a window with "
+            "start_date/end_date (ISO-8601, e.g. 2026-01-31). Returns the best-matching items and "
+            "document snippets; use it to recall context before answering."
         ),
         input_model=MemorySearchInput,
         handler=memory_search_handler,
@@ -441,6 +567,17 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=MemoryUpdateInput,
         handler=memory_update_handler,
+    ),
+    ToolDef(
+        name="load_sessions",
+        description=(
+            "Load one or more past conversation transcripts by id, on demand — use when you need "
+            "to recall content from specific past conversations not already in context. Each id is "
+            "one of your own conversations; per-id failures (an unknown id, or one that is not "
+            "yours) are reported in the 'failed' list and do not abort the call."
+        ),
+        input_model=LoadSessionsInput,
+        handler=load_sessions_handler,
     ),
     ToolDef(
         name="ask_user",
