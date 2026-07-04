@@ -37,9 +37,7 @@ SPECS: list[tuple[str, str, Grader]] = [
         "its 'Maximum Line Length' section. Reply with a single line 'ANSWER: <number>'.",
         combine(
             numeric_scorer(79),
-            required_tools_scorer(
-                ("search_web", "fetch_url"), (("search_web", "fetch_url"),)
-            ),
+            required_tools_scorer(("search_web", "fetch_url"), (("search_web", "fetch_url"),)),
         ),
     ),
 ]
