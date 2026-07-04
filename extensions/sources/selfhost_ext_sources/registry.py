@@ -9,9 +9,11 @@ from selfhost_ext_sources.asana import AsanaConnector
 from selfhost_ext_sources.connector import Connector
 from selfhost_ext_sources.github import GitHubConnector
 from selfhost_ext_sources.notion import NotionConnector
+from selfhost_ext_sources.slack import SlackConnector
 
 CONNECTORS: dict[str, type[Connector]] = {
     GitHubConnector.name: GitHubConnector,
     AsanaConnector.name: AsanaConnector,
     NotionConnector.name: NotionConnector,
+    SlackConnector.name: SlackConnector,
 }
