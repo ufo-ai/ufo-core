@@ -2,9 +2,10 @@
 
 Each skill is a folder under `skills/` — its `SKILL.md` workflow plus the scripts and assets it
 references — that the loader parses into the loadable-skill registry and mounts into the sandbox
-under `.skills/<name>/` when `load_skill` resolves it. `pdf` and `office-docx` both build on
-`design-foundations`, the shared visual baseline, which each names in its `depends` so loading
-either pulls it too."""
+under `.skills/<name>/` when `load_skill` resolves it. `office-docx`, `office-pptx`, `pdf`, and
+`theme-factory` build on `design-foundations`, the shared visual baseline, which each names in its
+`depends` so loading any of them pulls it too. `document-review` reviews any of the office formats,
+loading their skills at runtime to annotate."""
 
 from pathlib import Path
 
@@ -13,7 +14,15 @@ from selfhost.sdk.manifest import Manifest, SkillSpec
 NAME = "documents"
 VERSION = "0.1.0"
 SKILLS_ROOT = Path(__file__).parent / "skills"
-SKILL_NAMES = ("design-foundations", "office-docx", "office-xlsx", "pdf")
+SKILL_NAMES = (
+    "design-foundations",
+    "document-review",
+    "office-docx",
+    "office-pptx",
+    "office-xlsx",
+    "pdf",
+    "theme-factory",
+)
 
 
 def manifest() -> Manifest:
