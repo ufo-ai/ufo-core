@@ -192,6 +192,7 @@ BROWSER_TOOLS: tuple[ToolDef, ...] = (
         description="Get context for all browser tabs.",
         input_model=TabsContextInput,
         handler=_tabs_context,
+        untrusted=True,
     ),
     ToolDef(
         name="tabs_create",

@@ -591,7 +591,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
             "(reports, code, csv, json, images, PDFs, large archives); it is streamed out, never "
             "read whole into memory. `name` sets the download name; any directory components in it "
             "are stripped. `subject` is an optional caption shown when a chat surface posts the "
-            "file."
+            "file. Supports version history: use the same `name` parameter for updated versions."
         ),
         input_model=ShareFileInput,
         handler=share_file_handler,
@@ -623,7 +623,11 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         name="memory_update",
         description=(
             "Record a durable memory item so later turns and conversations can recall it. Writes "
-            "to the current member's memory by default, or shared memory when `shared` is true."
+            "to the current member's memory by default, or shared memory when `shared` is true. "
+            "Use proactively when learning persistent facts — name, role, company, team, "
+            "colleagues, preferences, projects, tools, key people, communication style. Do NOT "
+            "store ephemeral instructions (e.g. 'make it shorter'); only store persistent "
+            "information."
         ),
         input_model=MemoryUpdateInput,
         handler=memory_update_handler,
@@ -660,7 +664,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
             "Load a skill — a bundle of workflow instructions and files — so you can follow it. "
             "The skill and anything it depends on are mounted under the workspace and its "
             "instructions are returned at once. Load a skill proactively whenever its subject is "
-            "relevant to the task."
+            "relevant to the task. Cheap operation — be aggressive about loading."
         ),
         input_model=LoadSkillInput,
         handler=load_skill_handler,
