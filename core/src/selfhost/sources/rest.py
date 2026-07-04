@@ -57,12 +57,26 @@ def list_or_empty(value: Any) -> list[dict[str, Any]]:
     return [item for item in value if isinstance(item, dict)]
 
 
+def dict_or_empty(value: Any) -> dict[str, Any]:
+    """`value` when it is a dict-shaped record, else `{}` — the record-shaping sibling of
+    `list_or_empty`, for a provider that reaches into a nested object off a page record."""
+    return value if isinstance(value, dict) else {}
+
+
 def records_at(data: Any, path: str | None) -> list[dict[str, Any]]:
     if path is None:
         return list_or_empty(data)
     if not isinstance(data, Mapping):
         return []
     return list_or_empty(get_path(data, path, []))
+
+
+def _int_or_none(value: Any) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdecimal():
+        return int(value)
+    return None
 
 
 def with_context(records: Iterable[dict[str, Any]], **context: Any) -> list[dict[str, Any]]:
@@ -159,6 +173,14 @@ class RestConnector(Connector):
         """A POST for a read endpoint a provider exposes only over POST (Notion's `/search`),
         retried on transient/5xx like the GET path — still a read, the write path stays absent."""
         return _json_or_empty(await self._send(lambda: client.post(path, json=json)))
+
+    async def _post_raw(
+        self, client: httpx.AsyncClient, path: str, *, json: dict[str, Any] | None = None
+    ) -> httpx.Response:
+        """A POST returning the raw response for a read whose body is a top-level array rather than
+        an object (Google Ads' `googleAds:searchStream` yields a list of result batches), retried on
+        transient/5xx like `_post` — still a read, the write path stays absent."""
+        return await self._send(lambda: client.post(path, json=json))
 
     async def _send(self, request: Callable[[], Awaitable[httpx.Response]]) -> httpx.Response:
         """The shared retry envelope behind `_get_raw`/`_post`: run one request coroutine with
@@ -363,6 +385,27 @@ class RestConnector(Connector):
             if not isinstance(token, str) or not token:
                 return
 
+    async def _get_odata_pages(
+        self,
+        client: httpx.AsyncClient,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        """GET Microsoft Graph / OData pages: records live under `value` and continuation is the
+        absolute `@odata.nextLink` URL. Only the first request carries caller params — the next-link
+        already encodes the continuation query."""
+        next_path: str | None = path
+        query = params
+        while next_path:
+            response = await self._get_raw(client, next_path, params=query)
+            data = response.json() if response.content else {}
+            records = list_or_empty(data.get("value") if isinstance(data, dict) else [])
+            if records:
+                yield records
+            next_path = data.get("@odata.nextLink") if isinstance(data, dict) else None
+            query = None
+
     async def _get_offset_pages(
         self,
         client: httpx.AsyncClient,
@@ -373,8 +416,13 @@ class RestConnector(Connector):
         params: dict[str, Any] | None = None,
         limit_param: str = "limit",
         offset_param: str = "offset",
+        more_path: str | None = None,
+        response_limit_path: str | None = None,
     ) -> AsyncIterator[list[dict[str, Any]]]:
-        """GET offset/limit pages from an envelope list path."""
+        """GET offset/limit pages from an envelope list path. A provider whose envelope reports its
+        own continuation drives the loop off that: `more_path` is a boolean 'is there another page'
+        the server sets, `response_limit_path` the page size it actually applied (which the next
+        offset advances by). Left unset, the loop stops on a short page and steps by `limit`."""
         offset = 0
         while True:
             query = dict(params or {})
@@ -385,9 +433,16 @@ class RestConnector(Connector):
             if not records:
                 return
             yield records
-            if len(records) < limit:
+            if more_path is not None:
+                if not get_path(data, more_path):
+                    return
+            elif len(records) < limit:
                 return
-            offset += limit
+            if response_limit_path:
+                step = _int_or_none(get_path(data, response_limit_path))
+                offset += step or len(records) or limit
+            else:
+                offset += limit
 
     async def _get_page_number_pages(
         self,

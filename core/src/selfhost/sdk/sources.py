@@ -46,6 +46,9 @@ from selfhost.sources.rest import (
     RestConnector as RestConnector,
 )
 from selfhost.sources.rest import (
+    dict_or_empty as dict_or_empty,
+)
+from selfhost.sources.rest import (
     get_path as get_path,
 )
 from selfhost.sources.rest import (
