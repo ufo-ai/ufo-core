@@ -88,10 +88,17 @@ class ImproveCron:
         candidate: CandidateState,
         trajectories: tuple[Trajectory, ...],
     ) -> None:
+        global_held_out = tuple(
+            example
+            for task_class in task_classes(trajectories)
+            if task_class.name != candidate.task
+            for example in task_class.held_out
+        )
         verdict = await self.evaluation.evaluate(
             candidate.prompt,
             trajectories[0].agent_prompt,
             _held_out(trajectories, candidate.held_out),
+            global_held_out,
         )
         if not verdict.passed:
             await self._save(key, candidate, status=REJECTED, gate_passes=0)

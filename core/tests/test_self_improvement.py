@@ -23,7 +23,14 @@ from selfhost_ext_self_improvement.cron import (
     ImproveCron,
 )
 from selfhost_ext_self_improvement.evaluation import CandidateEvaluation
+from selfhost_ext_self_improvement.gate import (
+    OutcomeLabel,
+    score_gate,
+    two_stage_gate,
+)
+from selfhost_ext_self_improvement.model import ReplayTurn, ToolSchema
 from selfhost_ext_self_improvement.proposer import PromptProposer
+from selfhost_ext_self_improvement.replay import ReplayEvaluation
 
 from selfhost.blob import FilesystemBlobStore
 from selfhost.credentials import CredentialStore
@@ -32,7 +39,7 @@ from selfhost.ext.context import Trajectory, context_for
 from selfhost.ext.loader import load_manifests
 from selfhost.governance import prompt_digest
 from selfhost.loop.transcript import Transcript
-from selfhost.models.interface import Message, ToolResultBlock, ToolUseBlock
+from selfhost.models.interface import Message, TextBlock, ToolResultBlock, ToolUseBlock
 from selfhost.schema import tables
 from selfhost.transcript import Conversation
 
@@ -55,11 +62,13 @@ class FixedProposerLeg:
 
 
 class ArmEchoLeg:
-    """A replay stand-in whose regenerated answer is the arm's prompt, so the judge can tell the
-    candidate arm from the current arm."""
+    """A replay stand-in whose regenerated answer is the arm's prompt and calls no tool, so the
+    judge can tell the candidate arm from the current arm."""
 
-    async def complete(self, system: str, messages: tuple[Message, ...]) -> str:
-        return system
+    async def turn(
+        self, system: str, messages: tuple[Message, ...], tools: tuple[ToolSchema, ...]
+    ) -> ReplayTurn:
+        return ReplayTurn(text=system, content=(TextBlock(text=system),), tool_uses=())
 
 
 @dataclass(frozen=True)
@@ -230,7 +239,7 @@ def test_corpus_groups_tool_errors_into_a_split_class() -> None:
 async def test_loop_withholds_promotion_until_it_stabilizes(db: None, tmp_path) -> None:
     workspace_id = await _workspace()
     blob = FilesystemBlobStore(root=tmp_path)
-    agent_id = await _seed_agent(workspace_id, blob, count=4)
+    agent_id = await _seed_agent(workspace_id, blob, count=8)
     ctx = _context(workspace_id, blob)
     cron = _cron(ctx)
 
@@ -262,7 +271,7 @@ async def test_loop_withholds_promotion_until_it_stabilizes(db: None, tmp_path) 
 async def test_loop_rejects_and_suppresses_a_candidate_without_lift(db: None, tmp_path) -> None:
     workspace_id = await _workspace()
     blob = FilesystemBlobStore(root=tmp_path)
-    agent_id = await _seed_agent(workspace_id, blob, count=4)
+    agent_id = await _seed_agent(workspace_id, blob, count=8)
     ctx = _context(workspace_id, blob)
     cron = _cron(ctx, judge_marker="NEVER_IN_ANY_ANSWER")
 
@@ -275,3 +284,108 @@ async def test_loop_rejects_and_suppresses_a_candidate_without_lift(db: None, tm
     await cron.run()
     assert await _proposals(workspace_id) == []
     assert (await _state(ctx, agent_id)).status == REJECTED
+
+
+@dataclass
+class ScriptedReplayLeg:
+    """A replay stand-in that plays a fixed list of turns and records the messages it last saw, so a
+    test can assert the archived tool result was fed back into the replay context."""
+
+    turns: list[ReplayTurn]
+    seen: tuple[Message, ...] = ()
+    index: int = 0
+
+    async def turn(
+        self, system: str, messages: tuple[Message, ...], tools: tuple[ToolSchema, ...]
+    ) -> ReplayTurn:
+        self.seen = messages
+        played = self.turns[self.index]
+        self.index += 1
+        return played
+
+
+def _archived_bash(command: str, result: str) -> tuple[Message, ...]:
+    return (
+        Message(role="user", content="run it"),
+        Message(
+            role="assistant",
+            content=(ToolUseBlock(id="t1", name="bash", input={"command": command}),),
+        ),
+        Message(
+            role="user",
+            content=(ToolResultBlock(tool_use_id="t1", content=result, is_error=False),),
+        ),
+        Message(role="assistant", content="original answer"),
+    )
+
+
+async def test_replay_feeds_the_archived_tool_result_back() -> None:
+    archived = _archived_bash("ls", "file-a\nfile-b")
+    leg = ScriptedReplayLeg(
+        turns=[
+            ReplayTurn(
+                text="",
+                content=(ToolUseBlock(id="r1", name="bash", input={"command": "ls"}),),
+                tool_uses=(ToolUseBlock(id="r1", name="bash", input={"command": "ls"}),),
+            ),
+            ReplayTurn(text="regenerated final", content=(TextBlock(text="x"),), tool_uses=()),
+        ]
+    )
+    result = await ReplayEvaluation(leg).replay(archived, "SYSTEM PROMPT")
+    assert result.final_text == "regenerated final"
+    assert not result.diverged
+    assert result.rounds == 2
+    fed = leg.seen[-1]
+    assert not isinstance(fed.content, str)
+    assert any(
+        isinstance(block, ToolResultBlock) and block.content == "file-a\nfile-b"
+        for block in fed.content
+    )
+
+
+async def test_replay_diverges_when_a_call_has_no_archived_result() -> None:
+    archived = _archived_bash("ls", "file-a")
+    leg = ScriptedReplayLeg(
+        turns=[
+            ReplayTurn(
+                text="",
+                content=(ToolUseBlock(id="r1", name="bash", input={"command": "rm -rf /"}),),
+                tool_uses=(ToolUseBlock(id="r1", name="bash", input={"command": "rm -rf /"}),),
+            )
+        ]
+    )
+    result = await ReplayEvaluation(leg).replay(archived, "SYSTEM PROMPT")
+    assert result.diverged
+
+
+def _labels(present_accepted: int, present_total: int, absent_accepted: int, absent_total: int):
+    present = [
+        OutcomeLabel(present=True, success=i < present_accepted) for i in range(present_total)
+    ]
+    absent = [OutcomeLabel(present=False, success=i < absent_accepted) for i in range(absent_total)]
+    return tuple(present + absent)
+
+
+def test_gate_crosses_on_a_clear_lift_at_floor() -> None:
+    verdict = score_gate(_labels(4, 4, 0, 4))
+    assert verdict.passed
+    assert verdict.acceptance_lower_bound > 0.05
+
+
+def test_gate_fails_below_the_per_arm_floor() -> None:
+    verdict = score_gate(_labels(3, 3, 0, 3))
+    assert not verdict.passed
+    assert "nFloor" in verdict.reason
+
+
+def test_gate_fails_a_no_lift_candidate() -> None:
+    assert not score_gate(_labels(4, 4, 4, 4)).passed
+
+
+def test_two_stage_gate_blocks_a_global_regression() -> None:
+    local = _labels(4, 4, 0, 4)
+    regressed = _labels(0, 4, 4, 4)
+    assert score_gate(local).passed
+    verdict = two_stage_gate(local, regressed)
+    assert not verdict.passed
+    assert "global regression" in verdict.reason
