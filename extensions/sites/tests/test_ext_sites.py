@@ -20,6 +20,7 @@ from selfhost_ext_sites.tools import (
 )
 
 from selfhost.blob import FilesystemBlobStore
+from selfhost.ext.loader import skill_registry
 from selfhost.sandbox.session import ExecResult
 from selfhost.schema.records import Agent, Turn
 from selfhost.tools.context import SpawnResult, ToolContext
@@ -90,6 +91,21 @@ def test_manifest_declares_the_four_tools_the_profile_and_the_section() -> None:
     assert profile.name == "website_building"
     (section,) = manifest.prompt_sections
     assert section.name == "sites" and "<sites>" in section.body
+
+
+def test_website_building_skills_parse_index_and_resolve_flat_depends() -> None:
+    registry = skill_registry((sites_manifest.manifest(),))
+    index = dict(registry.index())
+    for name in ("website-building", "website-building-webapp", "website-building-game"):
+        assert name in index
+    assert {skill.name for skill in registry.tree("website-building-webapp")} == {
+        "website-building",
+        "website-building-webapp",
+    }
+    assert {skill.name for skill in registry.tree("website-building-game")} == {
+        "website-building",
+        "website-building-game",
+    }
 
 
 def test_the_website_building_profile_names_only_meaningful_tools() -> None:
