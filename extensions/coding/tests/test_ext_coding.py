@@ -3,8 +3,9 @@ code builtins, and core's shell-wrap renders it with the shared citation discipl
 skill index. The profile names only tool names, so the pack is self-contained — nothing here
 imports a core internal."""
 
-import selfhost_ext_coding as coding
+import selfhost_ext_coding.manifest as coding
 
+from selfhost.ext.loader import skill_registry
 from selfhost.loop.subagents import subagent_system_prompt
 from selfhost.tools.builtins import BUILTIN_TOOLS
 
@@ -27,6 +28,12 @@ def test_coding_tools_are_core_builtins_plus_the_repl_and_exclude_the_forbidden_
     assert {"ask_user", "spawn_subagent", "wait_for_subagents", "cancel_subagent"}.isdisjoint(
         profile.tool_names
     )
+
+
+def test_coding_skills_parse_and_index() -> None:
+    index = dict(skill_registry((coding.manifest(),)).index())
+    for name in ("coding", "code-review"):
+        assert name in index
 
 
 def test_coding_prompt_wraps_with_citation_and_fills_the_skill_index() -> None:
