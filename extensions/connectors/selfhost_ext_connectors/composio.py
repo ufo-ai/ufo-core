@@ -10,9 +10,11 @@ leaves Composio, so the grant stores only the connected-account id, never a secr
 speaks Composio's v3 REST API over httpx; the deploy's single broker key is read loud from the
 environment (one Composio account per deploy, the analog of the model key)."""
 
+import asyncio
 import json
 import os
 from dataclasses import dataclass
+from uuid import UUID
 
 import httpx
 
@@ -26,6 +28,9 @@ COMPOSIO_TIMEOUT_SECONDS = 30.0
 ACTIVE_STATUS = "ACTIVE"
 TOOL_SEARCH_LIMIT = 10
 MAX_EXECUTE_ARGUMENTS_BYTES = 1024 * 1024
+TOOL_ROUTER_TIMEOUT_SECONDS = 30.0
+TOOL_ROUTER_SESSION_PATH = "/tool_router/session"
+COMPOSIO_SEARCH_TOOL = "COMPOSIO_SEARCH_TOOLS"
 
 
 @dataclass(frozen=True)
@@ -37,6 +42,16 @@ class ConnectorSpec:
     label: str
     toolkit: str
     host: str
+
+
+@dataclass(frozen=True)
+class ToolRouterSession:
+    """A Composio Tool Router session: its id and the MCP endpoint (`mcp.url`) semantic tool search
+    runs against. Minted per (broker user, toolkit) and cached, so a burst of searches on one
+    connector shares one session rather than reopening the router each time."""
+
+    id: str
+    url: str
 
 
 CONNECTORS: dict[str, ConnectorSpec] = {
@@ -62,6 +77,21 @@ CONNECTORS: dict[str, ConnectorSpec] = {
     "clickup": ConnectorSpec("ClickUp", "clickup", "api.clickup.com"),
     "outlook": ConnectorSpec("Outlook", "outlook", "graph.microsoft.com"),
     "microsoft_teams": ConnectorSpec("Microsoft Teams", "microsoft_teams", "graph.microsoft.com"),
+    "zendesk": ConnectorSpec("Zendesk", "zendesk", "api.zendesk.com"),
+    "jira": ConnectorSpec("Jira", "jira", "api.atlassian.com"),
+    "confluence": ConnectorSpec("Confluence", "confluence", "api.atlassian.com"),
+    "freshdesk": ConnectorSpec("Freshdesk", "freshdesk", "api.freshdesk.com"),
+    "bamboohr": ConnectorSpec("BambooHR", "bamboohr", "api.bamboohr.com"),
+    "active_campaign": ConnectorSpec("ActiveCampaign", "active_campaign", "api.activecampaign.com"),
+    "ashby": ConnectorSpec("Ashby", "ashby", "api.ashbyhq.com"),
+    "brex": ConnectorSpec("Brex", "brex", "platform.brexapis.com"),
+    "instagram": ConnectorSpec("Instagram", "instagram", "graph.instagram.com"),
+    "mailchimp": ConnectorSpec("Mailchimp", "mailchimp", "api.mailchimp.com"),
+    "quickbooks": ConnectorSpec("QuickBooks", "quickbooks", "quickbooks.api.intuit.com"),
+    "recruitee": ConnectorSpec("Recruitee", "recruitee", "api.recruitee.com"),
+    "square": ConnectorSpec("Square", "square", "connect.squareup.com"),
+    "wrike": ConnectorSpec("Wrike", "wrike", "www.wrike.com"),
+    "xero": ConnectorSpec("Xero", "xero", "api.xero.com"),
 }
 
 
@@ -139,6 +169,21 @@ class ComposioClient:
             raise ValueError("connector tool arguments exceed the Composio execute payload bound")
         return await self._post(f"/tools/execute/{slug}", body)
 
+    async def tool_router_session(
+        self, user_id: str, toolkits: list[str]
+    ) -> ToolRouterSession:
+        """Open a Tool Router session scoped to `toolkits` for `user_id`, returning its id and MCP
+        endpoint. The endpoint hosts the `COMPOSIO_SEARCH_TOOLS` tool that semantic search calls."""
+        payload = await self._post(
+            TOOL_ROUTER_SESSION_PATH, {"user_id": user_id, "toolkits": {"enable": list(toolkits)}}
+        )
+        session_id = payload.get("session_id")
+        mcp = payload.get("mcp")
+        url = mcp.get("url") if isinstance(mcp, dict) else None
+        if not isinstance(session_id, str) or not isinstance(url, str) or not url:
+            raise ComposioError(502, f"tool router session carried no session_id/url: {payload!r}")
+        return ToolRouterSession(id=session_id, url=url)
+
     async def _auth_config(self, toolkit: str) -> str:
         existing = await self._get(
             "/auth_configs",
@@ -196,3 +241,88 @@ def composio_client() -> ComposioClient:
     if not key:
         raise RuntimeError(f"{COMPOSIO_API_KEY_ENV} is required to broker a connector's OAuth")
     return ComposioClient(api_key=key)
+
+
+_SEARCH_SESSIONS: dict[tuple[str, str], ToolRouterSession] = {}
+_SEARCH_SESSIONS_LOCK = asyncio.Lock()
+
+
+def _dict(value: object) -> dict[str, object]:
+    return value if isinstance(value, dict) else {}
+
+
+def _str_tuple(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(item for item in value if isinstance(item, str) and item)
+
+
+def _connector_search_payload(result: dict[str, object], connector: str) -> dict[str, object]:
+    """Project a Tool Router `COMPOSIO_SEARCH_TOOLS` result into the connector-scoped shape the
+    agent reads: the matched tool slugs + input schemas plus the recommended plan steps, execution
+    guidance, and known pitfalls the router surfaces so the model's next call is informed, not a
+    blind guess."""
+    inner = _dict(result.get("data")) or result
+    schemas = _dict(inner.get("tool_schemas"))
+    tools: list[dict[str, object]] = []
+    plan: list[str] = []
+    guidance: list[str] = []
+    pitfalls: list[str] = []
+    seen: set[str] = set()
+    results = inner.get("results")
+    for res in results if isinstance(results, list) else []:
+        item = _dict(res)
+        for slug in _str_tuple(item.get("primary_tool_slugs")) + _str_tuple(
+            item.get("related_tool_slugs")
+        ):
+            if slug in seen:
+                continue
+            seen.add(slug)
+            schema = _dict(schemas.get(slug))
+            tools.append(
+                {
+                    "slug": slug,
+                    "description": schema.get("description") or "",
+                    "inputSchema": schema.get("input_schema") or {},
+                }
+            )
+        plan.extend(_str_tuple(item.get("recommended_plan_steps")))
+        guidance.extend(_str_tuple([item.get("execution_guidance")]))
+        pitfalls.extend(_str_tuple(item.get("known_pitfalls")))
+    return {
+        "connector": connector,
+        "tools": tools,
+        "plan": plan,
+        "guidance": guidance,
+        "pitfalls": pitfalls,
+    }
+
+
+async def search_connector_tools(
+    client: ComposioClient, workspace_id: UUID, connector: str, query: str
+) -> dict[str, object]:
+    """Semantic tool discovery via Composio's Tool Router: matched tool slugs + input schemas plus
+    the recommended execution plan, guidance, and pitfalls. Search only — execution never goes via
+    Tool Router, so metering and the grant stay on the execute API. The (broker user, toolkit)
+    session is opened once and cached, so concurrent searches on one connector share it."""
+    from selfhost_ext_connectors import mcp_session
+
+    spec = CONNECTORS.get(connector)
+    toolkit = spec.toolkit if spec is not None else connector
+    user_id = f"{EXTERNAL_USER_PREFIX}{workspace_id}"
+    key = (user_id, toolkit)
+    session = _SEARCH_SESSIONS.get(key)
+    if session is None:
+        async with _SEARCH_SESSIONS_LOCK:
+            session = _SEARCH_SESSIONS.get(key)
+            if session is None:
+                session = await client.tool_router_session(user_id, [toolkit])
+                _SEARCH_SESSIONS[key] = session
+    result = await mcp_session.mcp_call_tool(
+        session.url,
+        COMPOSIO_SEARCH_TOOL,
+        {"queries": [{"use_case": query}]},
+        {"x-api-key": client.api_key},
+        TOOL_ROUTER_TIMEOUT_SECONDS,
+    )
+    return _connector_search_payload(result, connector)

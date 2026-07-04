@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 import selfhost_ext_connectors.composio as composio
+import selfhost_ext_connectors.composio_proxy as composio_proxy
 import selfhost_ext_connectors.sources as sources
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
@@ -61,7 +62,7 @@ def _composio_handler(
             return httpx.Response(
                 200, json={"id": COMPOSIO_ACCOUNT, "user_id": owner, "status": "ACTIVE"}
             )
-        if request.method == "POST" and path.endswith(sources.PROXY_EXECUTE_PATH):
+        if request.method == "POST" and path.endswith(composio_proxy.PROXY_EXECUTE_PATH):
             payload = json.loads(request.content)
             offset = next(
                 (

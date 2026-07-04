@@ -40,6 +40,11 @@ class CallExternalToolInput(BaseModel):
     arguments: dict[str, JsonValue]
 
 
+class SearchConnectorToolsInput(BaseModel):
+    source_id: str
+    query: str
+
+
 async def list_external_tools(ctx: ToolContext, args: ListExternalToolsInput) -> ToolResult:
     matches: list[dict[str, str]] = []
     seen: set[str] = set()
@@ -92,6 +97,16 @@ async def call_external_tool(ctx: ToolContext, args: CallExternalToolInput) -> T
             raise
         raise await _tool_not_found(client, args, error) from error
     return _json_result(response)
+
+
+async def search_connector_tools(
+    ctx: ToolContext, args: SearchConnectorToolsInput
+) -> ToolResult:
+    client = composio.composio_client()
+    payload = await composio.search_connector_tools(
+        client, ctx.turn.workspace_id, args.source_id, args.query
+    )
+    return _json_result(payload)
 
 
 async def _tool_not_found(
@@ -184,6 +199,19 @@ CONNECTOR_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=DescribeExternalToolsInput,
         handler=describe_external_tools,
+    ),
+    ToolDef(
+        name="search_connector_tools",
+        description=(
+            "Semantic tool discovery for one connector via Composio's Tool Router. Pass source_id "
+            "plus a natural-language use case (e.g. 'comment on a pull request') to get matching "
+            "real tool slugs and input schemas in 'tools', plus the router's 'plan' (recommended "
+            "steps), 'guidance', and 'pitfalls' for executing them. Richer than "
+            "describe_external_tools when you know the goal but not the tool; still call "
+            "call_external_tool to run a returned slug."
+        ),
+        input_model=SearchConnectorToolsInput,
+        handler=search_connector_tools,
     ),
     ToolDef(
         name="call_external_tool",
