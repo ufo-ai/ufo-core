@@ -20,6 +20,7 @@ from starlette.responses import Response
 
 from selfhost.accounting import ModelPrice
 from selfhost.browser.backend import BrowserBackend
+from selfhost.connectors import AuthProxy
 from selfhost.ext.context import CredentialAccess, ExtensionContext
 from selfhost.ext.surface import SurfaceSpec
 from selfhost.grants import OAuthProvider
@@ -178,6 +179,20 @@ class HubSpec:
 
     backend: str
     build: Callable[[str | None], Hub]
+
+
+@dataclass(frozen=True)
+class AuthProxySpec:
+    """One auth-proxy backend an extension registers, mirroring `BrowserBackendSpec`: the `backend`
+    name a deploy selects it by (`config.connectors.auth_backend`, default `"composio"`) and the
+    `build` core calls once at boot, only when selected, given a credential reader scoped to this
+    manifest's slots. A broker backend (Composio) needs no slot and returns a proxying transport; a
+    direct/BYOK backend reads a member-added provider key through that reader host-side and returns
+    a bearer. The selected proxy is threaded onto the sync runner's `SourceAuth`, so a connector
+    source resolves its provider credential through it without core minting or holding a token."""
+
+    backend: str
+    build: Callable[[CredentialAccess], AuthProxy]
 
 
 @dataclass(frozen=True)
@@ -359,6 +374,7 @@ class Manifest:
     skills: tuple[SkillSpec, ...] = ()
     browsers: tuple[BrowserBackendSpec, ...] = ()
     carriers: tuple[CarrierSpec, ...] = ()
+    auth_proxies: tuple[AuthProxySpec, ...] = ()
 
 
 @dataclass(frozen=True)

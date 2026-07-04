@@ -125,8 +125,8 @@ Manifest registers (each optional):
 | `tools` | Typed tool defs + handlers; appear in agents' granted tool sets. |
 | `subagents` | Typed subagent profiles. |
 | `skills` | Skill folders (SKILL.md + bundled scripts/assets) contributed to the loadable set; the loader parses each into the registry `load_skill` and the `{{skill_index}}` consult, mounted into the sandbox under `.skills/<name>/` beside core's own three. A skill script imports nothing from selfhost (it runs in the sandbox) — a CI gate holds that boundary. |
-| `connectors` | Provider actions behind the connector framework; OAuth via the grant flow. **Composio brokers auth by PROXY: every call goes through Composio (`/tools/execute` for tools; the proxy transport → `/tools/execute/proxy` for source HTTP) carrying `(user_id, connected_account_id)` — Composio holds the provider token and injects it server-side; the token is NEVER exposed to us. A connector grant stores only `connected_account_id`; the confused-deputy check reads the account's `user_id` metadata, never a token. Composio grants derive NO egress InjectionRule — the sentinel→key swap (§Sandboxing) is ONLY for user-supplied BYOK `credentials` keys.** |
-| `sources` | Data-feed backends: `sync(cursor) -> pages` run as jobs; pages land in memory/knowledge via the derivation pipeline. Each backend is pluggable — S3, GitHub, provider APIs (via connectors), webhooks; core ships only `folder` (local files). |
+| `connectors` | Provider actions behind the connector framework; OAuth via the grant flow. **Composio brokers auth by PROXY: every call goes through Composio (`/tools/execute` for tools; a proxying transport → `/tools/execute/proxy` for feed-sync source HTTP, carried by the `composio` auth-proxy backend) carrying `(user_id, connected_account_id)` — Composio holds the provider token and injects it server-side; the token is NEVER exposed to us. A connector grant stores only `connected_account_id`; the confused-deputy check reads the account's `user_id` metadata, never a token. Composio grants derive NO egress InjectionRule — the sentinel→key swap (§Sandboxing) is ONLY for user-supplied BYOK `credentials` keys.** |
+| `sources` | Data-feed backends: `sync(cursor) -> pages` run as jobs; pages land in memory/knowledge via the derivation pipeline. Each backend is pluggable — S3, connector/provider APIs, webhooks; core ships only `folder` (local files). Connector source backends live in `extensions/sources` (the relocated read-only REST connector framework) and resolve a provider `Credential` through the pluggable **auth-proxy** seam, never importing a broker. |
 | `triggers` | Data → memory (and → invocation): hooks on source pages and platform events. |
 | `hooks` | Turn-lifecycle policy filters — `pre_tool_use`/`post_tool_use`/`on_inbound` handlers, scoped like a job, that observe, deny, modify, or inject over the tools grants already admit; a runtime filter on top of grants, never a second grant path. Distinct axis from `triggers` (data-plane). |
 | `jobs` | Recurring/one-time background work. |
@@ -140,6 +140,7 @@ Manifest registers (each optional):
 | `embeds` | Embedding backends behind `EmbedClient`, selected by `memory.embed_backend`; OpenAI text-embedding-3-large ships as the base-pinned `embed-openai` extension registering name `"default"`. |
 | `hubs` | Stream hubs for multi-instance deploys (Redis). |
 | `browsers` | Browser-automation backends at the tool-surface seam; the BUA engine driving Chrome over a CDP endpoint is the core default (browserbase swaps the endpoint provider, browser-use the whole surface). |
+| `auth_proxies` | Credential backends a feed-sync connector source resolves a provider `Credential` through, selected by `[connectors] auth_backend` (default `composio`): the Composio broker (a proxying transport, token stays server-side) or `direct` BYOK (a member-added key read host-side from the credential store, never reaching the sandbox). No backend installed → connector sources are inert; folder sources need none. |
 
 `ExtensionContext` (capability-scoped, handed to every handler): workspace-scoped store access,
 `credentials.get(slot)`, the selected `index`/`embed` backends, `pages` (the `PageFeed` replaying
@@ -299,11 +300,11 @@ bundle installs OSS, on-prem, or hosted.
 |---|---|
 | OpenRouter (any model router) | models |
 | Slack surface (ingest + writeback + attachments) | surfaces, credentials |
-| Composio connectors | connectors, credentials, routes (OAuth) |
+| Composio connectors | connectors, credentials, routes (OAuth), auth_proxies |
 | Docker, E2B | carriers |
 | Redis stream hub | hubs |
 | turbopuffer index | indexes |
-| GitHub / S3 source backends | sources |
+| GitHub / Asana feed-sync sources | sources, credentials, auth_proxies (`direct`) |
 | Agent-guided education / onboarding | onboarding, tools |
 | Scheduled tasks (cron / one-time) | jobs, invoke, tools |
 | GH code review on PR + auto-merge | routes (webhook), credentials, invoke, tools |

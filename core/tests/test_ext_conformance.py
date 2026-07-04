@@ -31,6 +31,7 @@ from selfhost.config import (
     BlobConfig,
     BrowserConfig,
     Config,
+    ConnectorsConfig,
     DatabaseConfig,
     HubConfig,
     SandboxConfig,
@@ -75,6 +76,7 @@ from selfhost.schema.records import Agent, Turn, Usage
 from selfhost.serve import (
     _mount_ext_routes,
     _mount_surfaces,
+    _select_auth_proxy,
     _select_browser,
     _select_carrier,
     _select_hub,
@@ -212,6 +214,7 @@ async def test_sample_is_discovered_via_its_entry_point() -> None:
     assert {spec.path.name for spec in manifest.skills} == {sample.SKILL_NAME}
     assert {spec.backend for spec in manifest.browsers} == {sample.BROWSER_BACKEND}
     assert {carrier.name for carrier in manifest.carriers} == {sample.CARRIER_NAME}
+    assert {spec.backend for spec in manifest.auth_proxies} == {sample.AUTH_PROXY_BACKEND}
 
 
 def test_core_selects_a_manifest_contributed_hub() -> None:
@@ -274,6 +277,47 @@ async def test_sample_browser_backend_yields_a_drivable_surface() -> None:
         "args": {"url": "https://x.test"},
     }
     await surface.aclose()
+
+
+def test_core_selects_a_manifest_contributed_auth_proxy() -> None:
+    """The `auth_proxies` seam end to end: core's boot-time selection has no built-in auth proxy, so
+    resolving the sample's backend name proves the Manifest `auth_proxies` point flowed into
+    selection and was built with a credential reader. No extension registering any auth proxy yields
+    None (folder sources need none); selecting a name no extension registers, two extensions
+    claiming one name, and a selected backend with no credential key each fail loud."""
+    manifest = _sample_manifest()
+    workspace_id = uuid4()
+    store = _credential_store()
+
+    def _config(backend: str) -> Config:
+        return Config(
+            database=DatabaseConfig(url="sqlite+aiosqlite:///dev.db"),
+            blob=BlobConfig(backend="filesystem", root=Path()),
+            connectors=ConnectorsConfig(auth_backend=backend),
+        )
+
+    selected = _select_auth_proxy(
+        _config(sample.AUTH_PROXY_BACKEND), (manifest,), workspace_id, store
+    )
+    assert isinstance(selected, sample.SampleAuthProxy)
+    assert _select_auth_proxy(_config("composio"), (), workspace_id, store) is None
+    with pytest.raises(RuntimeError, match="no extension registers it"):
+        _select_auth_proxy(_config("nope"), (manifest,), workspace_id, store)
+    with pytest.raises(RuntimeError, match="two extensions register auth proxy"):
+        _select_auth_proxy(
+            _config(sample.AUTH_PROXY_BACKEND), (manifest, manifest), workspace_id, store
+        )
+    with pytest.raises(RuntimeError, match="needs a credential key"):
+        _select_auth_proxy(_config(sample.AUTH_PROXY_BACKEND), (manifest,), workspace_id, None)
+
+
+async def test_sample_auth_proxy_resolves_a_credential() -> None:
+    """The consumer half of the `auth_proxies` seam through the probe: the registered proxy resolves
+    a `Credential` through the same protocol the connector backend calls — a real object exercised,
+    not a mock."""
+    credential = await sample.SampleAuthProxy().credential(uuid4(), "provider", "account")
+    assert credential.bearer == sample.AUTH_PROXY_BEARER
+    assert credential.transport is None
 
 
 def _carrier_config(backend: str) -> Config:

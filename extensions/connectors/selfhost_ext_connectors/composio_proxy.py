@@ -1,14 +1,13 @@
-"""The Composio proxy transport, shared by every connector source backend.
+"""The Composio proxy transport, carried by the Composio auth-proxy's `Credential`.
 
-A source is a workspace-level offline sync, and Composio never exposes the provider credential — so
-a source cannot hold a token and call the provider directly. This transport rewrites each provider
-request to Composio's `POST /tools/execute/proxy`, which injects the account's credential
-server-side and returns the provider's status/body/headers; `proxied_client` wraps it in an
-`httpx.AsyncClient` bound to the provider host, so a connector issues ordinary provider HTTP and
-header-driven pagination still works. The connected-account id rides in the proxy payload; ownership
-is confirmed against the
-workspace's broker user before any request through `composio.ComposioClient.connected_account`, so a
-foreign account id is refused before a page is fetched."""
+Composio never exposes the provider credential, so a feed-sync source cannot hold a token and call
+the provider directly. This transport rewrites each provider request to Composio's
+`POST /tools/execute/proxy`, which injects the account's credential server-side and returns the
+provider's status/body/headers, so a connector issues ordinary provider HTTP over an
+`httpx.AsyncClient` bound to the provider host and header-driven pagination still works. The
+connected-account id rides in the proxy payload; ownership is confirmed against the workspace's
+broker user before the transport is built (`ComposioAuthProxy.credential`), so a foreign account id
+is refused before a page is fetched."""
 
 import json
 from dataclasses import dataclass
@@ -16,10 +15,7 @@ from typing import Any, cast
 
 import httpx
 
-from selfhost_ext_connectors import composio
-
 PROXY_EXECUTE_PATH = "/tools/execute/proxy"
-PROXY_TOKEN_PREFIX = "composio-proxy:"
 
 _BODY_HEADERS = frozenset({"content-encoding", "content-length", "transfer-encoding"})
 _SKIP_REQUEST_HEADERS = frozenset(
@@ -36,16 +32,6 @@ _SKIP_REQUEST_HEADERS = frozenset(
         "expect",
     }
 )
-
-
-def account_id_from_proxy_token(token: str) -> str:
-    """The connected-account id inside a `PROXY_TOKEN_PREFIX` sentinel — the value a source backend
-    hands a connector in place of a bearer token, so the connector's `_make_client` recognizes the
-    prefix and builds a proxied client rather than a direct one."""
-    account_id = token.removeprefix(PROXY_TOKEN_PREFIX)
-    if not account_id:
-        raise ValueError("proxy token carries no connected-account id")
-    return account_id
 
 
 @dataclass(frozen=True)
@@ -125,28 +111,3 @@ class ComposioProxyTransport(httpx.AsyncBaseTransport):
 
     async def aclose(self) -> None:
         await self.inner.aclose()
-
-
-def proxied_client(
-    *,
-    client: composio.ComposioClient,
-    connected_account_id: str,
-    base_url: str,
-    timeout: float = composio.COMPOSIO_TIMEOUT_SECONDS,
-    headers: dict[str, str] | None = None,
-) -> httpx.AsyncClient:
-    """An `httpx.AsyncClient` bound to `base_url` whose transport proxies every request through
-    Composio under `connected_account_id`. The broker's test transport (a `MockTransport`) is
-    honoured when set, so a source's whole fetch runs against canned Composio responses."""
-    transport = ComposioProxyTransport(
-        api_base=composio.COMPOSIO_API_BASE,
-        api_key=client.api_key,
-        connected_account_id=connected_account_id,
-        inner=client.transport or httpx.AsyncHTTPTransport(),
-    )
-    return httpx.AsyncClient(
-        base_url=base_url.rstrip("/"),
-        transport=transport,
-        timeout=timeout,
-        headers=headers or {},
-    )

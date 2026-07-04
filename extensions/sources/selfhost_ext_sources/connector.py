@@ -1,21 +1,29 @@
-"""What a connector is: the stream vocabulary and the `Connector` ABC every provider implements.
+"""What a connector is: the stream vocabulary, the `Connector` ABC every provider implements, and
+the render hook that turns a record into a recallable page body.
 
 A connector knows a set of `StreamSpec`s (one per source-side collection it can sync) and, given a
-stream plus an access token and base URL, async-yields the provider's records grouped into pages. A
-page is a plain `list[dict]` when the source only returns live rows, or a `StreamPage` when a
-delta/token source also reports removals (the removed records' external ids) and carries its own
-resume cursor. The
-`ConnectorBackend` adapter drives one stream to completion per sync run and collapses the pages into
-the core `SyncResult` the source seam expects — a full-collection stream (`delete_missing`) becomes
-an authoritative snapshot, an incremental stream advances a watermark and names its removals. `Page`
+stream plus a `Credential` (the auth-proxy resolves it, so the connector stays agnostic about where
+the secret lives) and a base URL, async-yields the provider's records grouped into pages. A page is
+a plain `list[dict]` when the source only returns live rows, or a `StreamPage` when a delta/token
+source also reports removals (the removed records' external ids) and carries its own resume cursor.
+`render` turns one record into `(title, body)` — the default emits the record's JSON under a title
+line; a content provider (docs, notion, gmail) overrides it to produce prose. The `ConnectorBackend`
+adapter drives one stream to completion per sync run and collapses the pages into the core
+`SyncResult` the source seam expects — a full-collection stream (`delete_missing`) becomes an
+authoritative snapshot, an incremental stream advances a watermark and names its removals. `Page`
 shapes are internal value objects: they never cross a wire, so they are frozen dataclasses, not
 `BaseModel`."""
 
+import json
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, ClassVar
+
+from selfhost.sdk.authproxy import Credential
+
+TITLE_KEYS = ("title", "name", "full_name", "login", "subject")
 
 
 class PaginationStrategy(StrEnum):
@@ -86,8 +94,8 @@ class StreamPage:
 
 class Connector(ABC):
     """A SaaS data-source connector. `streams` names the streams it can sync; `fetch_page`
-    async-yields a stream's records grouped into pages given a per-account token and base URL. The
-    runner
+    async-yields a stream's records grouped into pages given a resolved `Credential` and base URL;
+    `render` turns one record into the `(title, body)` the adapter lands as a page. The runner
     consumes pages in order. Returning a smaller page gives more durable cursor checkpoints at the
     cost of more work."""
 
@@ -104,7 +112,20 @@ class Connector(ABC):
         stream: StreamSpec,
         *,
         cursor: str | None,
-        access_token: str,
+        credential: Credential,
         base_url: str,
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         """Async-yield the stream's records grouped into pages, incrementally from `cursor`."""
+
+    def render(self, record: dict[str, Any], stream: StreamSpec) -> tuple[str, str]:
+        """One record as `(title, body)` for recall. The default titles from the first present
+        title-like key and dumps the record's JSON beneath it; a content provider overrides this to
+        emit prose (a doc's text, an email's body) so the page recalls as readable content."""
+        title = next(
+            (record[key] for key in TITLE_KEYS if isinstance(record.get(key), str)),
+            "",
+        )
+        return (
+            title,
+            f"# {self.name} {stream.name}: {title}\n\n{json.dumps(record, sort_keys=True)}",
+        )

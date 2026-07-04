@@ -31,6 +31,7 @@ from pydantic import BaseModel
 
 from selfhost.blob import BlobStore
 from selfhost.config import SourceConfig, SourceEntry
+from selfhost.connectors import AuthProxy
 from selfhost.db import workspace_tx
 from selfhost.o11y import log
 from selfhost.schema import tables
@@ -93,12 +94,13 @@ class StreamSkipped(RuntimeError):
 @dataclass(frozen=True)
 class SourceAuth:
     """What the sync runner threads into a backend's `fetch` so it can reach its provider without
-    core minting or holding a token: the workspace the sync runs for. A connector backend derives
-    its broker user from `workspace_id` and reads the account's real access token itself (the
-    broker is the extension's concern); the folder backend ignores it. A value object, never
-    persisted."""
+    core minting or holding a token: the workspace the sync runs for, and the selected `auth_proxy`
+    the deploy resolves connector credentials through. A connector backend asks `auth_proxy` for the
+    `Credential` authenticating its provider (a broker's proxying transport, or a member-added key
+    read host-side); the folder backend ignores both. A value object, never persisted."""
 
     workspace_id: UUID
+    auth_proxy: AuthProxy | None = None
 
 
 ConfigT = TypeVar("ConfigT", bound=BaseModel)
@@ -229,6 +231,7 @@ class SyncDriver:
     backends: Mapping[str, SourceBackend]
     blob: BlobStore
     postgres: bool
+    auth_proxy: AuthProxy | None = None
 
     async def run(self) -> None:
         claim = uuid4().hex
@@ -303,7 +306,7 @@ class SyncDriver:
         if backend is None:
             raise RuntimeError(f"no source backend for {source.backend!r}")
         config = backend.config_model.model_validate(source.config)
-        auth = SourceAuth(workspace_id=source.workspace_id)
+        auth = SourceAuth(workspace_id=source.workspace_id, auth_proxy=self.auth_proxy)
         return await backend.fetch(config, source.cursor, auth)
 
     async def _commit(self, source: ClaimedSource, result: SyncResult) -> None:

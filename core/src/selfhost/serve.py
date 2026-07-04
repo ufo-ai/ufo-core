@@ -20,6 +20,7 @@ from selfhost.blob import BlobStore, blob_store_for
 from selfhost.browser.backend import BrowserBackend, BuaBackend
 from selfhost.browser.cdp_provider import BrowserCdpProviderChain, env_browser_cdp_provider
 from selfhost.config import BUA_BROWSER_BACKEND, IN_PROCESS_BACKEND, Config, load_config
+from selfhost.connectors import AuthProxy
 from selfhost.credentials import CredentialStore
 from selfhost.db import init_db, workspace_tx
 from selfhost.ext.context import context_for
@@ -32,7 +33,7 @@ from selfhost.ext.loader import (
     turn_subagents,
     validate_ext_tools,
 )
-from selfhost.ext.manifest import Manifest
+from selfhost.ext.manifest import AuthProxySpec, Manifest
 from selfhost.ext.surface import SurfaceContext, SurfaceSpec, WritebackPoller
 from selfhost.grants import ConnectFlow, GrantStore, OAuthProvider, install_connect_flow
 from selfhost.hub import Hub, InProcessHub
@@ -94,6 +95,7 @@ def run() -> None:
         backends=_source_backends(manifests),
         blob=blob,
         postgres=postgres,
+        auth_proxy=_select_auth_proxy(config, manifests, workspace_id, credentials),
     )
     asyncio.run(register_sources(config.sources))
     hub = _select_hub(config, manifests)
@@ -302,6 +304,44 @@ def _select_browser(
     if credentials is None:
         raise RuntimeError(
             f"browser backend {config.browser.backend!r} needs a credential key but none is set"
+        )
+    declared = frozenset(slot.name for slot in manifest.credentials)
+    context = context_for(workspace_id, manifest.name, declared, credentials)
+    return spec.build(context.credentials)
+
+
+def _select_auth_proxy(
+    config: Config,
+    manifests: tuple[Manifest, ...],
+    workspace_id: UUID,
+    credentials: CredentialStore | None,
+) -> AuthProxy | None:
+    """The one auth-proxy backend feed-sync resolves connector credentials through, chosen by
+    `[connectors] auth_backend`: a backend an extension registers through its Manifest
+    `auth_proxies` point, built once at boot with a credential reader scoped to its slots (a direct
+    BYOK backend reads its key in-process, host-side, never in the sandbox). No auth-proxy extension
+    installed means no connector source can run — folder sources need none — so selection yields
+    None rather than fail. Two extensions claiming one name fail loud, as does selecting a name no
+    extension registers or building a selected backend with no credential key set."""
+    specs: dict[str, tuple[AuthProxySpec, Manifest]] = {}
+    for manifest in manifests:
+        for spec in manifest.auth_proxies:
+            if spec.backend in specs:
+                raise RuntimeError(f"two extensions register auth proxy backend {spec.backend!r}")
+            specs[spec.backend] = (spec, manifest)
+    if not specs:
+        return None
+    found = specs.get(config.connectors.auth_backend)
+    if found is None:
+        raise NotRegisteredError(
+            f"config selects auth proxy backend {config.connectors.auth_backend!r} "
+            "but no extension registers it"
+        )
+    spec, manifest = found
+    if credentials is None:
+        raise RuntimeError(
+            f"auth proxy backend {config.connectors.auth_backend!r} needs a credential key "
+            "but none is set"
         )
     declared = frozenset(slot.name for slot in manifest.credentials)
     context = context_for(workspace_id, manifest.name, declared, credentials)

@@ -19,6 +19,7 @@ from uuid import UUID
 import sqlalchemy as sa
 from pydantic import BaseModel, JsonValue
 
+from selfhost.sdk.authproxy import AuthProxySpec, Credential
 from selfhost.sdk.browser import BrowserSurface, FindCompleter
 from selfhost.sdk.connectors import OAuthAccount
 from selfhost.sdk.context import AgentChange, ExtensionContext
@@ -127,6 +128,8 @@ SKILL_DIR = Path(__file__).parent / "skills" / SKILL_NAME
 BROWSER_BACKEND = "sample_browser"
 CARRIER_NAME = "sample_carrier"
 CARRIER_CONTAINER = "sample-container"
+AUTH_PROXY_BACKEND = "sample_auth_proxy"
+AUTH_PROXY_BEARER = "sample"
 
 
 NOTE_TABLE = sa.Table(
@@ -539,6 +542,18 @@ def _browser_reply(action: str, args: dict[str, JsonValue]) -> dict[str, JsonVal
     return {"action": action, "backend": BROWSER_BACKEND, "args": args}
 
 
+@dataclass(frozen=True)
+class SampleAuthProxy:
+    """A trivial AuthProxy the probe registers through the `auth_proxies` Manifest point:
+    `credential` returns a fixed bearer, exercising the seam core drives (select a
+    manifest-contributed auth-proxy backend by name and thread it onto the sync runner). A real
+    object consumed through the protocol, so a test drives it exactly as core does; the Composio and
+    direct backends keep their own proofs."""
+
+    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
+        return Credential(bearer=AUTH_PROXY_BEARER)
+
+
 class SampleCarrier:
     """A trivial in-process carrier the probe registers so `serve`'s backend selection has a
     manifest-contributed carrier to choose. It implements the whole Carrier protocol without a real
@@ -663,4 +678,7 @@ def manifest() -> Manifest:
             ),
         ),
         carriers=(CarrierSpec(name=CARRIER_NAME, factory=SampleCarrier),),
+        auth_proxies=(
+            AuthProxySpec(backend=AUTH_PROXY_BACKEND, build=lambda credentials: SampleAuthProxy()),
+        ),
     )

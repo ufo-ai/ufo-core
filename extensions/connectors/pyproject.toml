@@ -1,7 +1,7 @@
 [project]
 name = "selfhost-ext-connectors"
 version = "0.1.0"
-description = "Connector extension: Composio-brokered OAuth providers, their action tools, and offline content-source sync"
+description = "Connector extension: Composio-brokered OAuth providers, their dynamic action tools, and the Composio auth-proxy backend for feed-sync"
 requires-python = ">=3.12"
 dependencies = ["selfhost", "httpx>=0.27", "fastmcp>=3.4.2"]
 

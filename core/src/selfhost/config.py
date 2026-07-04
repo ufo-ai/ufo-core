@@ -169,6 +169,18 @@ class BrowserConfig(BaseModel):
     backend: str = BUA_BROWSER_BACKEND
 
 
+class ConnectorsConfig(BaseModel):
+    """Feed-sync connector settings. `auth_backend` names the auth-proxy backend the sync runner
+    resolves a connector's provider credential through — the Composio broker default (the token
+    stays server-side), a `direct` BYOK backend (a member-added key read host-side), or any backend
+    an extension registers through its Manifest `auth_proxies` point. Selecting a name no extension
+    registers fails loud at boot; a deploy with no auth-proxy extension installed runs no connector
+    source."""
+
+    model_config = ConfigDict(extra="forbid")
+    auth_backend: str = "composio"
+
+
 class PackConfig(BaseModel):
     """The active pack. `name` selects one pack a workspace member under `packs/<name>/` registers
     through the `selfhost.pack` entry point; activating it narrows the deploy to exactly the
@@ -195,6 +207,7 @@ class Config(BaseModel):
     artifacts: ArtifactsConfig = ArtifactsConfig()
     hub: HubConfig = HubConfig()
     browser: BrowserConfig = BrowserConfig()
+    connectors: ConnectorsConfig = ConnectorsConfig()
     pack: PackConfig = PackConfig()
 
 

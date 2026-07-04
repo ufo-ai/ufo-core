@@ -1,8 +1,8 @@
 """RestConnector: the shared read scaffolding every REST-API connector reuses.
 
-Owns the boilerplate a provider would otherwise duplicate: the httpx client (a direct bearer client
-for a real token, a Composio-proxied client for the `composio-proxy:` sentinel a source backend
-hands it), exponential-backoff retry on transient/5xx responses, and one page loop per declared
+Owns the boilerplate a provider would otherwise duplicate: the httpx client (built from whichever
+`Credential` the auth-proxy resolved — a broker's proxying transport, a bearer token, or auth
+headers), exponential-backoff retry on transient/5xx responses, and one page loop per declared
 `PaginationStrategy`. Async — a connector runs from the core sync driver where a blocking network
 call would stall every other surface.
 
@@ -19,8 +19,8 @@ from typing import Any, ClassVar
 
 import httpx
 
-from selfhost_ext_connectors import composio, composio_proxy
-from selfhost_ext_connectors.connector import (
+from selfhost.sdk.authproxy import Credential
+from selfhost_ext_sources.connector import (
     Connector,
     PaginationStrategy,
     StreamPage,
@@ -73,14 +73,6 @@ def next_link(headers: httpx.Headers) -> str | None:
     return match.group(1) if match else None
 
 
-def _int_or_none(value: Any) -> int | None:
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str) and value.isdecimal():
-        return int(value)
-    return None
-
-
 def _is_retryable(error: BaseException) -> bool:
     if isinstance(error, httpx.TransportError):
         return True
@@ -125,27 +117,24 @@ class RestConnector(Connector):
     def streams(self) -> list[StreamSpec]:
         return list(self.streams_list)
 
-    def _make_client(self, base_url: str, access_token: str) -> httpx.AsyncClient:
-        """The HTTP client for one account. A `composio-proxy:` sentinel builds a Composio-proxied
-        client (the broker injects the credential server-side, so the source holds no token); a real
-        token builds a direct bearer client (tests, any non-brokered path)."""
-        if access_token.startswith(composio_proxy.PROXY_TOKEN_PREFIX):
-            return composio_proxy.proxied_client(
-                client=composio.composio_client(),
-                connected_account_id=composio_proxy.account_id_from_proxy_token(access_token),
-                base_url=base_url,
-                timeout=TIMEOUT_READ_SECONDS,
-                headers={"Accept": "application/json", "Content-Type": "application/json"},
+    def _make_client(self, base_url: str, credential: Credential) -> httpx.AsyncClient:
+        """The HTTP client for one account, built from the resolved `Credential`. A `transport`
+        wraps a broker's proxy-execute (the secret stays server-side); a `bearer` or auth `headers`
+        send the credential directly (BYOK/direct, read host-side). Exactly one path is populated;
+        an empty credential fails loud rather than issue an unauthenticated request."""
+        timeout = httpx.Timeout(TIMEOUT_CONNECT_SECONDS, read=TIMEOUT_READ_SECONDS)
+        base = base_url.rstrip("/")
+        headers = {"Accept": "application/json", "Content-Type": "application/json"}
+        if credential.transport is not None:
+            return httpx.AsyncClient(
+                base_url=base, transport=credential.transport, timeout=timeout, headers=headers
             )
-        return httpx.AsyncClient(
-            base_url=base_url.rstrip("/"),
-            timeout=httpx.Timeout(TIMEOUT_CONNECT_SECONDS, read=TIMEOUT_READ_SECONDS),
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-            },
-        )
+        if credential.bearer is not None:
+            headers["Authorization"] = f"Bearer {credential.bearer}"
+        elif not credential.headers:
+            raise RuntimeError(f"{type(self).__name__}: credential carries no auth")
+        headers.update(credential.headers)
+        return httpx.AsyncClient(base_url=base, timeout=timeout, headers=headers)
 
     async def _get(
         self, client: httpx.AsyncClient, path: str, *, params: dict[str, Any] | None = None
@@ -174,13 +163,13 @@ class RestConnector(Connector):
         stream: StreamSpec,
         *,
         cursor: str | None,
-        access_token: str,
+        credential: Credential,
         base_url: str,
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         url = (base_url or self.base_url) or ""
         if not url:
             raise RuntimeError(f"{type(self).__name__}: no base_url available")
-        async with self._make_client(url, access_token) as client:
+        async with self._make_client(url, credential) as client:
             async for page in self.paginate(client, stream, cursor=cursor):
                 if not page:
                     continue

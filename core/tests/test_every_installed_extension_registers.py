@@ -28,6 +28,7 @@ from selfhost.config import (
     BrowserConfig,
     Config,
     ConnectConfig,
+    ConnectorsConfig,
     DatabaseConfig,
     HubConfig,
     SandboxConfig,
@@ -56,6 +57,7 @@ from selfhost.serve import (
     _connect_flow,
     _mount_ext_routes,
     _mount_surfaces,
+    _select_auth_proxy,
     _select_browser,
     _select_carrier,
     _select_hub,
@@ -81,6 +83,7 @@ def _config(
     hub_url: str | None = None,
     browser_backend: str = BUA_BROWSER_BACKEND,
     sandbox_backend: str = "local",
+    auth_backend: str = "composio",
 ) -> Config:
     return Config(
         database=DatabaseConfig(url="sqlite+aiosqlite:///:memory:"),
@@ -89,6 +92,7 @@ def _config(
         hub=HubConfig(backend=hub_backend, url=hub_url),
         browser=BrowserConfig(backend=browser_backend),
         sandbox=SandboxConfig(backend=sandbox_backend),
+        connectors=ConnectorsConfig(auth_backend=auth_backend),
     )
 
 
@@ -205,6 +209,15 @@ def _check_sources(manifest: Manifest) -> None:
         assert backends[provider.backend] is provider.source
 
 
+def _check_auth_proxies(manifest: Manifest, store: CredentialStore) -> None:
+    for spec in manifest.auth_proxies:
+        _resolve_backend(
+            lambda spec=spec: _select_auth_proxy(
+                _config(auth_backend=spec.backend), (manifest,), WORKSPACE_ID, store
+            )
+        )
+
+
 def _check_surfaces(manifest: Manifest, store: CredentialStore, tmp_path: Path) -> None:
     if not manifest.surfaces:
         return
@@ -316,6 +329,7 @@ def test_installed_extension_registers_every_declared_point(name: str, tmp_path:
     _check_browsers(manifest, store)
     _check_models(manifest)
     _check_sources(manifest)
+    _check_auth_proxies(manifest, store)
     _check_surfaces(manifest, store, tmp_path)
     _check_routes(manifest, store)
     _check_hooks(manifest, store)

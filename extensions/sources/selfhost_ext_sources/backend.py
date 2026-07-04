@@ -2,13 +2,17 @@
 
 A connector speaks in streams and async page generators; the source seam speaks in one `SyncResult`
 per run. `ConnectorBackend` bridges them: one `source` row is one (account, stream), so `fetch`
-confirms the account belongs to this workspace's broker user, drives the connector's one stream to
-completion through the Composio proxy, and renders each record into a recallable `Page`. A
-full-collection stream (`delete_missing`) returns as an authoritative `snapshot` so the driver
-tombstones records that vanished; an incremental stream returns `snapshot=False`, advances a
-watermark over its `cursor_field`, and names any provider-reported removals in `deletes`. The source
-holds no token — every provider request is rewritten through Composio, which injects the credential
-server-side. The manifest registers one backend per connector in the registry."""
+resolves the account's `Credential` through the runner's auth proxy, drives the connector's one
+stream to completion, and renders each record into a recallable `Page`. A full-collection stream
+(`delete_missing`) returns as an authoritative `snapshot` so the driver tombstones records that
+vanished; an incremental stream returns `snapshot=False`, advances a watermark over its
+`cursor_field`, and names any provider-reported removals in `deletes`.
+
+The credential the proxy hands back is a broker's proxying transport (the secret never leaves the
+broker) or a member-added key read host-side from the credential store (the direct/BYOK backend) —
+either way it is used in-process by the sync job in the jobs role and NEVER reaches the sandbox or
+agent surface, which is the invariant this preserves. Keep the `Credential` out of any structured
+log. The manifest registers one backend per connector in the registry."""
 
 import hashlib
 import json
@@ -18,17 +22,14 @@ from typing import Any, ClassVar
 from pydantic import BaseModel
 
 from selfhost.sdk.sources import SHARED_SUBJECT, Page, SourceAuth, SyncResult
-from selfhost_ext_connectors import composio, composio_proxy
-from selfhost_ext_connectors.connector import Connector, StreamPage, StreamSpec
-
-_TITLE_KEYS = ("title", "name", "full_name", "login", "subject")
+from selfhost_ext_sources.connector import Connector, StreamPage, StreamSpec
 
 
 class ConnectorSourceConfig(BaseModel):
-    """Which brokered account + stream one connector source row syncs. `account` is the
-    connected-account id the OAuth consent recorded; `stream` is the connector stream this row
-    pulls. The backend derives the workspace's broker user from the runner's auth and proxies every
-    provider call through Composio under this account — it never reads the token."""
+    """Which account + stream one connector source row syncs. `account` is the handle the auth proxy
+    resolves the credential for (a broker connected-account id under Composio, a label under the
+    direct backend, whose key is keyed by the provider name); `stream` is the connector stream this
+    row pulls. The backend never reads a raw token — it asks the proxy for a `Credential`."""
 
     account: str
     stream: str
@@ -44,21 +45,25 @@ class ConnectorBackend:
     async def fetch(
         self, config: ConnectorSourceConfig, cursor: str | None, auth: SourceAuth
     ) -> SyncResult:
-        broker_user = f"{composio.EXTERNAL_USER_PREFIX}{auth.workspace_id}"
-        client = composio.composio_client()
-        await client.connected_account(config.account, broker_user)
+        if auth.auth_proxy is None:
+            raise RuntimeError(
+                f"connector source {self.connector.name!r} needs an auth proxy but none is wired "
+                "(set [connectors] auth_backend and install a backend that registers it)"
+            )
+        credential = await auth.auth_proxy.credential(
+            auth.workspace_id, self.connector.name, config.account
+        )
         stream = self._stream(config.stream)
-        token = f"{composio_proxy.PROXY_TOKEN_PREFIX}{config.account}"
         pages: list[Page] = []
         deletes: list[str] = []
         watermark = cursor
         page_cursor: str | None = None
         async for page in self.connector.fetch_page(
-            stream, cursor=cursor, access_token=token, base_url=self.connector.base_url
+            stream, cursor=cursor, credential=credential, base_url=self.connector.base_url
         ):
             records = page.records if isinstance(page, StreamPage) else page
             for record in records:
-                pages.append(_render(self.connector.name, stream, record))
+                pages.append(self._page(stream, record))
                 if stream.cursor_field:
                     watermark = _max_str(watermark, record.get(stream.cursor_field))
             if isinstance(page, StreamPage):
@@ -80,26 +85,18 @@ class ConnectorBackend:
                 return stream
         raise ValueError(f"connector {self.connector.name!r} has no stream {name!r}")
 
-
-def _render(connector_name: str, stream: StreamSpec, record: dict[str, Any]) -> Page:
-    """One provider record as a recallable page: a title line, its stream/id key, and the record's
-    JSON. Keyed by `stream.name/<primary key>` so a re-fetch of an unchanged record, an upsert, and
-    a `deletes` entry all settle on the same page."""
-    ref = _record_ref(stream, record)
-    title = next(
-        (record[key] for key in _TITLE_KEYS if isinstance(record.get(key), str)),
-        "",
-    )
-    body = (
-        f"# {connector_name} {stream.name}: {title}\n"
-        f"{stream.primary_key}: {ref}\n\n{json.dumps(record, sort_keys=True)}"
-    )
-    return Page(
-        source_ref=f"{stream.name}/{ref}",
-        digest="sha256:" + hashlib.sha256(body.encode()).hexdigest(),
-        subject=SHARED_SUBJECT,
-        body=body,
-    )
+    def _page(self, stream: StreamSpec, record: dict[str, Any]) -> Page:
+        """One provider record as a recallable page: the connector's rendered body, keyed by
+        `stream.name/<primary key>` so a re-fetch of an unchanged record, an upsert, and a `deletes`
+        entry all settle on the same page."""
+        ref = _record_ref(stream, record)
+        _title, body = self.connector.render(record, stream)
+        return Page(
+            source_ref=f"{stream.name}/{ref}",
+            digest="sha256:" + hashlib.sha256(body.encode()).hexdigest(),
+            subject=SHARED_SUBJECT,
+            body=body,
+        )
 
 
 def _record_ref(stream: StreamSpec, record: dict[str, Any]) -> str:

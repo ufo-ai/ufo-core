@@ -1,17 +1,18 @@
 """The GitHub connector — the first provider on the connector framework.
 
 GitHub paginates uniformly: every list endpoint returns records as a bare JSON array and ships an
-RFC 5988 `Link: rel=next` header until the last page (`?per_page=100`). Auth is an OAuth bearer plus
-the two required GitHub headers (the v3 media type and the API version), layered on whichever client
-the base picked — a direct bearer client for a token, a Composio-proxied client for the broker
-sentinel. Most streams hit a per-repo path; the repo catalog is derived from the organizations the
-grant exposes (`/user/orgs` → `/orgs/{org}/repos`), so a fresh issue lands on the next sync with no
-manual repo config. `issues` and `comments` fetch incrementally with `?since` and advance a
-watermark cursor (snapshot=False); the rest re-enumerate each run. GitHub surfaces no delete
-signal, so no
-stream reports removals. A grant that can't enumerate orgs at all (`/user/orgs` refused) can read no
-stream, so the walk raises `StreamSkipped` and the run records a skip, never a failure. The write
-path is intentionally absent — the source seam only reads."""
+RFC 5988 `Link: rel=next` header until the last page (`?per_page=100`). Auth is the two required
+GitHub headers (the v3 media type and the API version) layered on whichever client the base built
+from the resolved `Credential`. Most streams hit a per-repo path; the repo catalog is derived from
+the organizations the grant exposes (`/user/orgs` → `/orgs/{org}/repos`), so a fresh issue lands on
+the next sync with no manual repo config. `issues` and `comments` fetch incrementally with `?since`
+and advance a watermark cursor (snapshot=False); every other stream re-enumerates its full
+collection each run and returns as a `delete_missing` snapshot, so a record that vanished from the
+grant's view is tombstoned — GitHub surfaces no delete signal, so snapshot reconciliation is the
+delete detection. A grant that can't enumerate orgs at all (`/user/orgs` refused) can read no
+stream, so the walk raises `StreamSkipped` and the run records a skip, not a failure. The write path
+is
+intentionally absent — the source seam only reads."""
 
 import asyncio
 from collections.abc import AsyncIterator
@@ -19,9 +20,10 @@ from typing import Any
 
 import httpx
 
+from selfhost.sdk.authproxy import Credential
 from selfhost.sdk.sources import StreamSkipped
-from selfhost_ext_connectors.connector import StreamPage, StreamSpec
-from selfhost_ext_connectors.rest import RestConnector
+from selfhost_ext_sources.connector import StreamPage, StreamSpec
+from selfhost_ext_sources.rest import RestConnector
 
 PAGE_SIZE = 100
 _REPO_LIST_PARAMS = {"per_page": PAGE_SIZE, "type": "all", "sort": "pushed", "direction": "desc"}
@@ -42,11 +44,16 @@ def _stream(
     cursor_field: str | None = None,
     canonical: bool = False,
 ) -> StreamSpec:
+    """A GitHub stream. Every stream but the two `?since` incremental ones (`issues`, `comments`)
+    re-enumerates its complete collection each run, so it is a `delete_missing` snapshot — a record
+    absent from a run is tombstoned, which is how deletes are detected on an API with no delete
+    signal."""
     return StreamSpec(
         name=name,
         source_object=name,
         primary_key=primary_key,
         cursor_field=cursor_field,
+        delete_missing=name not in _SINCE_STREAMS,
         canonical=canonical,
     )
 
@@ -140,8 +147,8 @@ class GitHubConnector(RestConnector):
         catalogued stream into the runnable set automatically."""
         return [stream for stream in self.streams_list if stream.name in _PATHS]
 
-    def _make_client(self, base_url: str, access_token: str) -> httpx.AsyncClient:
-        client = super()._make_client(base_url, access_token)
+    def _make_client(self, base_url: str, credential: Credential) -> httpx.AsyncClient:
+        client = super()._make_client(base_url, credential)
         client.headers["Accept"] = _GITHUB_ACCEPT
         client.headers["X-GitHub-Api-Version"] = _GITHUB_API_VERSION
         return client
