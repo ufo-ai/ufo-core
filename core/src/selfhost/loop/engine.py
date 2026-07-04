@@ -65,6 +65,7 @@ COMMIT_RETRY_INITIAL_SECONDS = 1.0
 COMMIT_RETRY_MAX_SECONDS = 30.0
 RECALL_LIMIT = 8
 RECALL_CONTEXT_PREFIX = "Relevant memory:\n"
+MAX_TOOL_RESULT_CHARS = 1_048_576
 
 
 class TurnParked(Exception):
@@ -79,6 +80,15 @@ class TurnParked(Exception):
 def _parse_args(partials: list[str]) -> dict[str, object]:
     joined = "".join(partials)
     return json.loads(joined) if joined.strip() else {}
+
+
+def _bounded(content: str) -> str:
+    if len(content) <= MAX_TOOL_RESULT_CHARS:
+        return content
+    return (
+        content[:MAX_TOOL_RESULT_CHARS]
+        + f"\n…[truncated {len(content) - MAX_TOOL_RESULT_CHARS} of {len(content)} chars]"
+    )
 
 
 def _total_usage(usage_events: list[Usage]) -> Usage:
@@ -362,7 +372,9 @@ class TurnEngine:
         (the tool never dispatches) or ModifyInput (fold the args); the handler runs in the sandbox
         with the folded args (a raising handler is an is_error result); post_tool_use may
         ModifyOutput (replace the result) or InjectContext (append to it), and fires on the error
-        path too. An extension tool gets its owning ExtensionContext; a builtin runs ext=None."""
+        path too. An extension tool gets its owning ExtensionContext; a builtin runs ext=None. The
+        final model-facing content is bounded to MAX_TOOL_RESULT_CHARS so a runaway result cannot
+        flow unbounded into context."""
         try:
             tool = self.tools.get(call.name)
             args = tool.input_model.model_validate(call.input)
@@ -397,7 +409,7 @@ class TurnEngine:
             content = post.output
         if post.injected:
             content = f"{content}\n{post.injected}"
-        return ToolResultBlock(tool_use_id=call.id, content=content, is_error=is_error)
+        return ToolResultBlock(tool_use_id=call.id, content=_bounded(content), is_error=is_error)
 
     async def _commit(
         self,
