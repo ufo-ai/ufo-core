@@ -10,11 +10,12 @@ slot the Manifest declares is what drives that injection."""
 import json
 import shlex
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from selfhost.sdk.manifest import CredentialSlot, InjectionTarget, Manifest
+from selfhost.sdk.manifest import CredentialSlot, InjectionTarget, Manifest, PromptSection
 from selfhost.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 
 type Json = str | int | float | bool | None | list["Json"] | dict[str, "Json"]
@@ -47,6 +48,9 @@ FETCH_URL_DESCRIPTION = (
     "prompt. Use to read web pages, documentation, articles, or any publicly accessible URL. "
     "Results are cached — use force_fetch=true if content appears stale."
 )
+
+SECTION_NAME = "web"
+SECTION_BODY = (Path(__file__).parent / "web_section.md").read_text().strip()
 
 
 class SearchWebInput(BaseModel):
@@ -153,4 +157,5 @@ def manifest() -> Manifest:
                 ),
             ),
         ),
+        prompt_sections=(PromptSection(name=SECTION_NAME, body=SECTION_BODY),),
     )

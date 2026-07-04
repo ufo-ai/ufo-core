@@ -24,6 +24,7 @@ from selfhost_ext_browser.tools import BROWSER_TOOL_NAMES, BROWSER_TOOLS
 
 from selfhost.blob import FilesystemBlobStore
 from selfhost.ext.loader import turn_subagents
+from selfhost.loop.prompts.render import render_system_prompt
 from selfhost.loop.subagents import SubagentRegistry, subagent_system_prompt
 from selfhost.sandbox.session import (
     BROWSER_HELPER,
@@ -223,6 +224,18 @@ async def test_wait_for_download_writes_the_file_and_reports_its_path(tmp_path: 
         "filename": "report.pdf",
         "size": 9,
     }
+
+
+def test_manifest_contributes_the_browser_prompt_section_into_the_rendered_shell() -> None:
+    """Both ends of the contribution seam: the browser pack declares a prompt section, and the same
+    tuple the loop builds from `manifest.prompt_sections` renders into the shell's `{{sections}}`
+    slot — so the browse-vs-search rules reach the agent's system prompt."""
+    (section,) = browser_manifest.manifest().prompt_sections
+    assert section.name == "browser"
+    rendered = render_system_prompt("You are the assistant.", ((section.name, section.body),))
+    assert "job boards directly with the browser" in rendered.content
+    assert "no saved sessions or cookies" in rendered.content
+    assert "{{" not in rendered.content
 
 
 def test_browser_profile_registers_and_is_spawnable() -> None:
