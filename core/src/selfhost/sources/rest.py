@@ -34,6 +34,7 @@ RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 TIMEOUT_CONNECT_SECONDS = 30.0
 TIMEOUT_READ_SECONDS = 60.0
 ERROR_BODY_CAP = 800
+MAX_PAGES = 10_000
 
 _LINK_NEXT_RE = re.compile(r'<([^>]+)>\s*;\s*rel="?next"?', re.IGNORECASE)
 
@@ -126,6 +127,24 @@ def _response_list(response: httpx.Response) -> list[dict[str, Any]]:
     if response.status_code == 204 or not response.content:
         return []
     return list_or_empty(response.json())
+
+
+def _bound_pages(who: str, pages: int) -> None:
+    """Fail a pagination loop that runs past `MAX_PAGES` without terminating. A provider that never
+    drops its next-page signal (a bug, or a bad/hostile response) would otherwise spin the fetch
+    forever, holding the source's claim lease and never committing. Failing loud is fail-closed: the
+    run records failed, commits no pages, tombstones nothing, and reschedules."""
+    if pages > MAX_PAGES:
+        raise RuntimeError(f"{who}: pagination exceeded {MAX_PAGES} pages without terminating")
+
+
+def _bound_cursor(who: str, token: str, seen: set[str]) -> None:
+    """Fail a token pager whose next cursor / next-link repeats one already fetched — the provider
+    is not advancing, so following it re-fetches the same page endlessly. Catches a constant-token
+    spin precisely, before the page cap does."""
+    if token in seen:
+        raise RuntimeError(f"{who}: pagination cursor {token!r} repeated; provider not advancing")
+    seen.add(token)
 
 
 class RestConnector(Connector):
@@ -347,14 +366,20 @@ class RestConnector(Connector):
         first_params = dict(params or {})
         if page_size_param and page_size is not None:
             first_params.setdefault(page_size_param, page_size)
+        who = f"{type(self).__name__} {path}"
+        seen: set[str] = set()
+        pages = 0
         response = await self._get_raw(client, path, params=first_params)
         while True:
+            pages += 1
+            _bound_pages(who, pages)
             records = parse_records(response) if parse_records else _response_list(response)
             if records:
                 yield records
             following = next_link(response.headers)
             if not following:
                 return
+            _bound_cursor(who, following, seen)
             response = await self._get_raw(client, following)
 
     async def _get_cursor_pages(
@@ -370,8 +395,13 @@ class RestConnector(Connector):
         page_size: int | None = None,
     ) -> AsyncIterator[list[dict[str, Any]]]:
         """GET pages whose response body carries the next cursor token."""
+        who = f"{type(self).__name__} {path}"
+        seen: set[str] = set()
         token: str | None = None
+        pages = 0
         while True:
+            pages += 1
+            _bound_pages(who, pages)
             query = dict(params or {})
             if page_size_param and page_size is not None:
                 query[page_size_param] = page_size
@@ -384,6 +414,7 @@ class RestConnector(Connector):
             token = get_path(data, next_cursor_path)
             if not isinstance(token, str) or not token:
                 return
+            _bound_cursor(who, token, seen)
 
     async def _get_odata_pages(
         self,
@@ -395,15 +426,22 @@ class RestConnector(Connector):
         """GET Microsoft Graph / OData pages: records live under `value` and continuation is the
         absolute `@odata.nextLink` URL. Only the first request carries caller params — the next-link
         already encodes the continuation query."""
+        who = f"{type(self).__name__} {path}"
+        seen: set[str] = set()
         next_path: str | None = path
         query = params
+        pages = 0
         while next_path:
+            pages += 1
+            _bound_pages(who, pages)
             response = await self._get_raw(client, next_path, params=query)
             data = response.json() if response.content else {}
             records = list_or_empty(data.get("value") if isinstance(data, dict) else [])
             if records:
                 yield records
             next_path = data.get("@odata.nextLink") if isinstance(data, dict) else None
+            if isinstance(next_path, str) and next_path:
+                _bound_cursor(who, next_path, seen)
             query = None
 
     async def _get_offset_pages(
@@ -423,8 +461,12 @@ class RestConnector(Connector):
         own continuation drives the loop off that: `more_path` is a boolean 'is there another page'
         the server sets, `response_limit_path` the page size it actually applied (which the next
         offset advances by). Left unset, the loop stops on a short page and steps by `limit`."""
+        who = f"{type(self).__name__} {path}"
         offset = 0
+        pages = 0
         while True:
+            pages += 1
+            _bound_pages(who, pages)
             query = dict(params or {})
             query.setdefault(limit_param, limit)
             query[offset_param] = offset
@@ -457,8 +499,12 @@ class RestConnector(Connector):
         start_page: int = 1,
     ) -> AsyncIterator[list[dict[str, Any]]]:
         """GET page-numbered collections from an envelope list path."""
+        who = f"{type(self).__name__} {path}"
         page = start_page
+        pages = 0
         while True:
+            pages += 1
+            _bound_pages(who, pages)
             query = dict(params or {})
             query[page_param] = page
             if page_size_param:

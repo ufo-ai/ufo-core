@@ -224,6 +224,44 @@ async def test_undeclared_pagination_raises() -> None:
         await _pages(_ProbeConnector(stream, handle))
 
 
+async def test_next_cursor_strategy_fails_on_a_repeated_cursor() -> None:
+    """A provider returning a constant next-cursor (a bug or a bad/hostile response) must fail the
+    run, not spin the fetch loop forever re-fetching the same page while holding the claim lease."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [{"id": 1}], "next": "stuck"})
+
+    stream = StreamSpec(
+        name="things",
+        source_object="things",
+        pagination=Pagination(
+            strategy=PaginationStrategy.next_cursor,
+            path="/things",
+            record_path="data",
+            cursor_path="next",
+            cursor_param="cursor",
+        ),
+    )
+    with pytest.raises(RuntimeError, match="repeated"):
+        await _pages(_ProbeConnector(stream, handle))
+
+
+async def test_next_link_strategy_fails_on_a_repeated_link() -> None:
+    """A constant `Link: rel=next` pointing back at the same page must fail the run, not spin."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        link = '<https://api.probe.test/items?page=stuck>; rel="next"'
+        return httpx.Response(200, json=[{"id": 1}], headers={"link": link})
+
+    stream = StreamSpec(
+        name="items",
+        source_object="items",
+        pagination=Pagination(strategy=PaginationStrategy.next_link, path="/items"),
+    )
+    with pytest.raises(RuntimeError, match="repeated"):
+        await _pages(_ProbeConnector(stream, handle))
+
+
 # --- the adapter: connector pages → SyncResult ---------------------------------------------------
 
 
