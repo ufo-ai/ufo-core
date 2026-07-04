@@ -118,6 +118,7 @@ def test_registry_schemas_cover_every_tool() -> None:
         "spawn_subagent",
         "memory_search",
         "memory_update",
+        "load_sessions",
         "ask_user",
         "load_skill",
         "connect_account",

@@ -11,6 +11,7 @@ context.
 """
 
 from dataclasses import dataclass
+from datetime import datetime
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -117,20 +118,35 @@ class MemoryService:
             )
 
     async def recall(
-        self, query: str, subjects: frozenset[str], limit: int
+        self,
+        query: str,
+        subjects: frozenset[str],
+        limit: int,
+        start: datetime | None = None,
+        end: datetime | None = None,
     ) -> tuple[Recalled, ...]:
+        """Fuse the index legs, then read the surviving items back. An optional half-open
+        `[start, end)` bound on `created_at` restricts recall to items written in a window; the
+        index never sees the bound (it stays dialect-native), so the filter lands in the row
+        read-back alongside the superseded drop."""
         fused = fuse_hits(*await self._legs(query, subjects, OWNER_KIND_MEMORY_ITEM, limit), limit)
-        return await self._enrich(fused)
+        return await self._enrich(fused, start, end)
 
     async def search_sources(
-        self, query: str, subjects: frozenset[str], limit: int
+        self,
+        query: str,
+        subjects: frozenset[str],
+        limit: int,
+        start: datetime | None = None,
+        end: datetime | None = None,
     ) -> tuple[SourceMatch, ...]:
         """Search synced source pages the same way recall searches facts: fuse the two index legs
         under the subject filter, then read the surviving (non-tombstoned) pages back with the
         matched snippet. Pages and facts query the index under separate owner kinds, so a synced
-        folder can never crowd facts out of recall's candidate window (or vice versa)."""
+        folder can never crowd facts out of recall's candidate window (or vice versa). The same
+        optional `[start, end)` `created_at` bound recall takes lands in the page read-back."""
         fused = fuse_hits(*await self._legs(query, subjects, OWNER_KIND_PAGE, limit), limit)
-        return await self._enrich_pages(fused)
+        return await self._enrich_pages(fused, start, end)
 
     async def _legs(
         self, query: str, subjects: frozenset[str], owner_kind: str, limit: int
@@ -152,12 +168,22 @@ class MemoryService:
             return ()
         return vectors[0] if vectors else ()
 
-    async def _enrich(self, fused: tuple[Fused, ...]) -> tuple[Recalled, ...]:
-        """Read the surviving (non-superseded) items back in fused order; a superseded item drops
-        out here rather than being served stale."""
+    async def _enrich(
+        self, fused: tuple[Fused, ...], start: datetime | None, end: datetime | None
+    ) -> tuple[Recalled, ...]:
+        """Read the surviving (non-superseded) items back in fused order; a superseded item — or one
+        outside the `[start, end)` `created_at` window — drops out here rather than being served."""
         if not fused:
             return ()
         ids = [UUID(hit.owner_id) for hit in fused]
+        conditions = [
+            tables.memory_item.c.id.in_(ids),
+            tables.memory_item.c.superseded_by.is_(None),
+        ]
+        if start is not None:
+            conditions.append(tables.memory_item.c.created_at >= start)
+        if end is not None:
+            conditions.append(tables.memory_item.c.created_at < end)
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
@@ -167,10 +193,7 @@ class MemoryService:
                         tables.memory_item.c.item_class,
                         tables.memory_item.c.body,
                         tables.memory_item.c.source_ref,
-                    ).where(
-                        tables.memory_item.c.id.in_(ids),
-                        tables.memory_item.c.superseded_by.is_(None),
-                    )
+                    ).where(*conditions)
                 )
             ).mappings().all()
         by_id = {row["id"]: row for row in rows}
@@ -187,19 +210,27 @@ class MemoryService:
             if UUID(hit.owner_id) in by_id
         )
 
-    async def _enrich_pages(self, fused: tuple[Fused, ...]) -> tuple[SourceMatch, ...]:
+    async def _enrich_pages(
+        self, fused: tuple[Fused, ...], start: datetime | None, end: datetime | None
+    ) -> tuple[SourceMatch, ...]:
         """Read the surviving (non-tombstoned) pages back in fused order, carrying the matched
-        snippet; a tombstoned page drops out rather than being served after its document is gone."""
+        snippet; a tombstoned page — or one outside the `[start, end)` `created_at` window — drops
+        out rather than being served after its document is gone."""
         if not fused:
             return ()
         ids = [UUID(hit.owner_id) for hit in fused]
+        conditions = [
+            tables.page.c.id.in_(ids),
+            tables.page.c.tombstone.is_(False),
+        ]
+        if start is not None:
+            conditions.append(tables.page.c.created_at >= start)
+        if end is not None:
+            conditions.append(tables.page.c.created_at < end)
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
-                    sa.select(tables.page.c.id, tables.page.c.subject).where(
-                        tables.page.c.id.in_(ids),
-                        tables.page.c.tombstone.is_(False),
-                    )
+                    sa.select(tables.page.c.id, tables.page.c.subject).where(*conditions)
                 )
             ).mappings().all()
         by_id = {row["id"]: row for row in rows}

@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
@@ -64,7 +65,12 @@ async def _workspace() -> UUID:
 
 
 async def _seed_item(
-    database_url: str, workspace_id: UUID, subject: str, body: str, vector: tuple[float, ...]
+    database_url: str,
+    workspace_id: UUID,
+    subject: str,
+    body: str,
+    vector: tuple[float, ...],
+    created_at: datetime | None = None,
 ) -> UUID:
     """Insert a memory_item and its one already-derived chunk directly, so recall can be exercised
     without the derivation job in these unit tests."""
@@ -80,7 +86,7 @@ async def _seed_item(
                 source_ref=None,
                 embedding_digest="sha256:seeded",
                 superseded_by=None,
-                created_at=sa.func.now(),
+                created_at=created_at if created_at is not None else sa.func.now(),
                 updated_at=sa.func.now(),
             )
         )
@@ -253,3 +259,31 @@ async def test_pages_and_facts_do_not_crowd_each_others_candidate_window(
     assert {item.memory_id for item in facts} == {fact_a, fact_b}
     assert len(pages) == 2
     assert all("quarterly report" in page.text for page in pages)
+
+
+async def test_recall_filters_to_the_created_at_window(clean: None, database_url: str) -> None:
+    workspace_id = await _workspace()
+    probe = vec((0, 1.0))
+    old = await _seed_item(
+        database_url, workspace_id, SHARED_SUBJECT, "alpha budget review", probe,
+        created_at=datetime(2020, 1, 1, tzinfo=UTC),
+    )
+    new = await _seed_item(
+        database_url, workspace_id, SHARED_SUBJECT, "alpha budget review", probe,
+        created_at=datetime(2025, 1, 1, tzinfo=UTC),
+    )
+    service = _service(database_url, probe)
+    subjects = frozenset({SHARED_SUBJECT})
+
+    since = await service.recall(
+        "alpha", subjects, 8, start=datetime(2024, 1, 1, tzinfo=UTC)
+    )
+    before = await service.recall("alpha", subjects, 8, end=datetime(2021, 1, 1, tzinfo=UTC))
+    span = await service.recall(
+        "alpha", subjects, 8,
+        start=datetime(2019, 1, 1, tzinfo=UTC), end=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    assert {item.memory_id for item in since} == {new}
+    assert {item.memory_id for item in before} == {old}
+    assert {item.memory_id for item in span} == {old, new}
