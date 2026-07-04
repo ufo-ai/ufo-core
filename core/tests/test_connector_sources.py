@@ -20,15 +20,14 @@ import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from selfhost_ext_embed_openai import EMBED_DIM
 from selfhost_ext_index_default import DefaultIndex
-from selfhost_ext_memory.store import MemoryStore
+from selfhost_ext_memory.store import MemoryStore, PageIndexer
 
 from selfhost.blob import FilesystemBlobStore
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
-from selfhost.ext.context import context_for
+from selfhost.ext.context import ScopedStore, context_for
 from selfhost.indexing import TextChunker
-from selfhost.memory.indexer import PageIndexer
-from selfhost.memory.sources import SourceAuth, SyncDriver
+from selfhost.memory.sources import CorePageFeed, SourceAuth, SyncDriver
 from selfhost.schema import tables
 from selfhost.subjects import SHARED_SUBJECT
 
@@ -174,6 +173,7 @@ async def test_asana_source_syncs_through_the_driver_into_recallable_memory(
     monkeypatch.setattr(composio, "composio_client", _composio(owner, _single_page()))
     async with workspace_tx() as connection:
         await connection.execute(sa.text("delete from chunk"))
+        await connection.execute(sa.text("delete from mem_page"))
         if database_url.startswith("sqlite"):
             await connection.execute(sa.text("delete from chunk_fts"))
 
@@ -193,7 +193,12 @@ async def test_asana_source_syncs_through_the_driver_into_recallable_memory(
         postgres=postgres,
     )
     page_indexer = PageIndexer(
-        index=index, embed=embed, chunker=TextChunker(), blob=blob, postgres=postgres
+        pages=CorePageFeed(blob=blob),
+        index=index,
+        embed=embed,
+        transaction=workspace_tx,
+        chunker=TextChunker(),
+        cursor_store=ScopedStore(workspace_id=workspace_id, extension="memory"),
     )
     service = MemoryStore(
         index=index, embed=embed, transaction=workspace_tx, workspace_id=workspace_id
@@ -201,14 +206,10 @@ async def test_asana_source_syncs_through_the_driver_into_recallable_memory(
 
     await driver.run()
     async with workspace_tx() as connection:
-        embedding_digest = (
-            await connection.execute(
-                sa.select(tables.page.c.embedding_digest).where(
-                    tables.page.c.workspace_id == workspace_id
-                )
-            )
+        chunks = (
+            await connection.execute(sa.text("select count(*) from chunk"))
         ).scalar_one()
-    assert embedding_digest is None
+    assert chunks == 0
 
     await page_indexer.run()
     matches = await service.search_sources(

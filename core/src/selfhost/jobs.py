@@ -22,8 +22,12 @@ from selfhost.db import workspace_tx
 from selfhost.ext.context import ExtensionContext, TurnInvoker, context_for
 from selfhost.ext.manifest import JobSpec, Manifest
 from selfhost.indexing import EmbedClient, IndexBackend
-from selfhost.memory.indexer import PageIndexer
-from selfhost.memory.sources import SOURCE_SYNC_JOB, SOURCE_SYNC_SCHEDULE, SyncDriver
+from selfhost.memory.sources import (
+    SOURCE_SYNC_JOB,
+    SOURCE_SYNC_SCHEDULE,
+    PageFeed,
+    SyncDriver,
+)
 from selfhost.o11y import log
 from selfhost.schema import tables
 from selfhost.schema.records import (
@@ -36,8 +40,6 @@ from selfhost.schema.records import (
 JOB_QUEUE_NAME = "jobs"
 JOB_WORKFLOW_NAME = "job"
 CORE_EXTENSION = "core"
-PAGE_INDEX_JOB = "page_index"
-PAGE_INDEX_SCHEDULE = "0 * * * * *"
 SPEND_RESUME_JOB = "spend_resume"
 SPEND_RESUME_SCHEDULE = "0 * * * * *"
 RESUME_ENQUEUE_GRACE_SECONDS = 300
@@ -127,18 +129,14 @@ class SpendResume:
 
 
 def core_jobs(
-    page_indexer: PageIndexer,
     sync_driver: SyncDriver,
     spend_resume: SpendResume,
 ) -> tuple[JobSpec, ...]:
-    """The jobs a deploy always runs, before any extension's — all core because the source
-    pipeline and spend enforcement are core. The page index derivation produces the chunks source
-    search reads, off the write path; the sync driver polls each source and lands its pages,
-    due-marked for the page index; the spend-resume sweep re-admits parked turns their caps now
-    allow. None fires on its own writes. (Memory-item indexing is the memory extension's job.)"""
-
-    async def _index_pages(context: ExtensionContext) -> None:
-        await page_indexer.run()
+    """The jobs a deploy always runs, before any extension's — all core because the source pipeline
+    and spend enforcement are core. The sync driver polls each source and lands its pages (which the
+    memory extension's page-index job then reads through the PageFeed); the spend-resume sweep
+    re-admits parked turns their caps now allow. None fires on its own writes. (Both memory-item and
+    page indexing are the memory extension's jobs.)"""
 
     async def _sync_sources(context: ExtensionContext) -> None:
         await sync_driver.run()
@@ -147,7 +145,6 @@ def core_jobs(
         await spend_resume.run()
 
     return (
-        JobSpec(name=PAGE_INDEX_JOB, schedule=PAGE_INDEX_SCHEDULE, handler=_index_pages),
         JobSpec(name=SOURCE_SYNC_JOB, schedule=SOURCE_SYNC_SCHEDULE, handler=_sync_sources),
         JobSpec(name=SPEND_RESUME_JOB, schedule=SPEND_RESUME_SCHEDULE, handler=_resume_spend),
     )
@@ -199,6 +196,7 @@ class JobRunner:
     bindings: tuple[_Binding, ...]
     index: IndexBackend | None = None
     embed: EmbedClient | None = None
+    pages: PageFeed | None = None
     blob: BlobStore | None = None
     invoker: TurnInvoker | None = None
 
@@ -235,6 +233,7 @@ class JobRunner:
             self.credential_store,
             self.index,
             self.embed,
+            self.pages,
             self.blob,
             self.invoker,
         )

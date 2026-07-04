@@ -17,6 +17,7 @@ from selfhost_ext_memory.store import (
     FACT,
     MemoryStore,
     MemoryWrite,
+    mem_page,
     memory_item,
     recall_subjects,
 )
@@ -54,6 +55,7 @@ class BrokenEmbed:
 async def clean(db: None, database_url: str) -> AsyncIterator[None]:
     async with workspace_tx() as connection:
         await connection.execute(sa.text("delete from chunk"))
+        await connection.execute(sa.text("delete from mem_page"))
         if database_url.startswith("sqlite"):
             await connection.execute(sa.text("delete from chunk_fts"))
     yield
@@ -115,6 +117,12 @@ async def _seed_page_chunk(subject: str, body: str, vector: tuple[float, ...]) -
     await DefaultIndex(embed=StubEmbed(vector), transaction=workspace_tx).upsert(
         (Chunk("p-" + page_id.hex, OWNER_KIND_PAGE, str(page_id), subject, 0, body, vector),)
     )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(mem_page).values(
+                page_id=page_id, subject=subject, created_at=sa.func.now()
+            )
+        )
 
 
 async def test_commit_persists_item_and_derives_no_chunk(clean: None) -> None:

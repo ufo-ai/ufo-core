@@ -8,25 +8,24 @@ import selfhost_ext_memory.manifest as memory_manifest
 import sqlalchemy as sa
 from selfhost_ext_embed_openai import EMBED_DIM
 from selfhost_ext_index_default import DefaultIndex
-from selfhost_ext_memory.store import MemoryStore, recall_subjects
+from selfhost_ext_memory.store import MemoryStore, PageIndexer, mem_page, recall_subjects
 
 from selfhost.blob import FilesystemBlobStore
 from selfhost.config import SourceConfig, SourceEntry
 from selfhost.db import workspace_tx
-from selfhost.ext.context import context_for
+from selfhost.ext.context import ScopedStore, context_for
 from selfhost.indexing import OWNER_KIND_PAGE, Chunk, TextChunker
 from selfhost.jobs import (
     CORE_EXTENSION,
-    PAGE_INDEX_JOB,
     SPEND_RESUME_JOB,
     SpendResume,
     bindings_from,
     core_jobs,
 )
-from selfhost.memory.indexer import PageIndexer
 from selfhost.memory.sources import (
     FOLDER_BACKEND,
     SOURCE_SYNC_JOB,
+    CorePageFeed,
     CursorExpired,
     FolderSource,
     Page,
@@ -62,6 +61,19 @@ class StubEmbed:
         return tuple(self._vector for _ in texts)
 
 
+class CountingEmbed:
+    """Counts embed calls so a test can witness that a resumed cursor re-embeds nothing already
+    indexed — the call count is the only witness; the derived chunks are asserted elsewhere."""
+
+    def __init__(self, vector: tuple[float, ...]) -> None:
+        self._vector = vector
+        self.calls = 0
+
+    async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+        self.calls += 1
+        return tuple(self._vector for _ in texts)
+
+
 async def _unavailable_spawn(
     profile: str, payload: dict[str, object], background: bool = False
 ) -> SpawnResult:
@@ -72,6 +84,7 @@ async def _unavailable_spawn(
 async def clean(db: None, database_url: str) -> AsyncIterator[None]:
     async with workspace_tx() as connection:
         await connection.execute(sa.text("delete from chunk"))
+        await connection.execute(sa.text("delete from mem_page"))
         if database_url.startswith("sqlite"):
             await connection.execute(sa.text("delete from chunk_fts"))
     yield
@@ -89,7 +102,7 @@ async def _workspace() -> UUID:
 
 
 def _wire(
-    database_url: str, vector: tuple[float, ...], blob_root: Path
+    database_url: str, vector: tuple[float, ...], blob_root: Path, workspace_id: UUID
 ) -> tuple[SyncDriver, PageIndexer, MemoryStore]:
     embed = StubEmbed(vector)
     index = DefaultIndex(embed=embed, transaction=workspace_tx)
@@ -100,14 +113,15 @@ def _wire(
         postgres=database_url.startswith("postgresql"),
     )
     page_indexer = PageIndexer(
+        pages=CorePageFeed(blob=blob),
         index=index,
         embed=embed,
+        transaction=workspace_tx,
         chunker=TextChunker(),
-        blob=blob,
-        postgres=database_url.startswith("postgresql"),
+        cursor_store=ScopedStore(workspace_id=workspace_id, extension="memory"),
     )
     service = MemoryStore(
-        index=index, embed=embed, transaction=workspace_tx, workspace_id=uuid4()
+        index=index, embed=embed, transaction=workspace_tx, workspace_id=workspace_id
     )
     return driver, page_indexer, service
 
@@ -127,8 +141,8 @@ async def _pages() -> list[sa.RowMapping]:
                         tables.page.c.subject,
                         tables.page.c.digest,
                         tables.page.c.body_ref,
-                        tables.page.c.embedding_digest,
                         tables.page.c.tombstone,
+                        tables.page.c.updated_at,
                     )
                 )
             ).mappings()
@@ -185,11 +199,13 @@ async def _search(
 async def test_folder_syncs_a_page_body_to_blob_no_chunk_until_indexed(
     clean: None, database_url: str, tmp_path: Path
 ) -> None:
-    await _workspace()
+    workspace_id = await _workspace()
     root = tmp_path / "src"
     root.mkdir()
     (root / "brief.md").write_text("the quarterly revenue target is twelve million dollars")
-    driver, page_indexer, _ = _wire(database_url, vec((7, 1.0)), tmp_path / "blobs")
+    driver, page_indexer, _ = _wire(
+        database_url, vec((7, 1.0)), tmp_path / "blobs", workspace_id
+    )
     await _register_folder(root)
 
     await driver.run()
@@ -197,7 +213,6 @@ async def test_folder_syncs_a_page_body_to_blob_no_chunk_until_indexed(
     assert len(pages) == 1
     assert pages[0]["subject"] == SHARED_SUBJECT
     assert pages[0]["digest"].startswith("sha256:")
-    assert pages[0]["embedding_digest"] is None
     assert pages[0]["tombstone"] is False or pages[0]["tombstone"] == 0
     body = await FilesystemBlobStore(root=tmp_path / "blobs").get(pages[0]["body_ref"])
     assert b"quarterly revenue" in body
@@ -205,17 +220,18 @@ async def test_folder_syncs_a_page_body_to_blob_no_chunk_until_indexed(
 
     await page_indexer.run()
     assert await _chunk_count() >= 1
-    assert (await _pages())[0]["embedding_digest"] is not None
 
 
 async def test_synced_page_content_is_found_via_memory_search(
     clean: None, database_url: str, tmp_path: Path
 ) -> None:
-    await _workspace()
+    workspace_id = await _workspace()
     root = tmp_path / "src"
     root.mkdir()
     (root / "wiki.md").write_text("the office fire assembly point is the north car park")
-    driver, page_indexer, service = _wire(database_url, vec((8, 1.0)), tmp_path / "blobs")
+    driver, page_indexer, service = _wire(
+        database_url, vec((8, 1.0)), tmp_path / "blobs", workspace_id
+    )
     await _register_folder(root)
     await driver.run()
     await page_indexer.run()
@@ -228,22 +244,24 @@ async def test_synced_page_content_is_found_via_memory_search(
 async def test_unchanged_doc_resync_does_not_reindex_or_duplicate(
     clean: None, database_url: str, tmp_path: Path
 ) -> None:
-    await _workspace()
+    workspace_id = await _workspace()
     root = tmp_path / "src"
     root.mkdir()
     (root / "note.md").write_text("the mascot is a friendly otter named pip")
-    driver, page_indexer, _ = _wire(database_url, vec((9, 1.0)), tmp_path / "blobs")
+    driver, page_indexer, _ = _wire(
+        database_url, vec((9, 1.0)), tmp_path / "blobs", workspace_id
+    )
     await _register_folder(root)
     await driver.run()
     await page_indexer.run()
-    stamped = (await _pages())[0]["embedding_digest"]
+    stamped = (await _pages())[0]["updated_at"]
     chunks = await _chunk_count()
 
     await _make_due()
     await driver.run()
     resynced = await _pages()
     assert len(resynced) == 1
-    assert resynced[0]["embedding_digest"] == stamped
+    assert resynced[0]["updated_at"] == stamped
     await page_indexer.run()
     assert await _chunk_count() == chunks
 
@@ -251,12 +269,14 @@ async def test_unchanged_doc_resync_does_not_reindex_or_duplicate(
 async def test_changed_doc_resync_marks_due_and_reindexes(
     clean: None, database_url: str, tmp_path: Path
 ) -> None:
-    await _workspace()
+    workspace_id = await _workspace()
     root = tmp_path / "src"
     root.mkdir()
     doc = root / "spec.md"
     doc.write_text("the release date is friday")
-    driver, page_indexer, service = _wire(database_url, vec((10, 1.0)), tmp_path / "blobs")
+    driver, page_indexer, service = _wire(
+        database_url, vec((10, 1.0)), tmp_path / "blobs", workspace_id
+    )
     await _register_folder(root)
     await driver.run()
     await page_indexer.run()
@@ -268,7 +288,6 @@ async def test_changed_doc_resync_marks_due_and_reindexes(
     pages = await _pages()
     assert len(pages) == 1
     assert pages[0]["digest"] != first_digest
-    assert pages[0]["embedding_digest"] is None
     await page_indexer.run()
     found = await _search(service, uuid4(), tmp_path / "blobs", "release date monday")
     assert "monday" in found
@@ -277,13 +296,15 @@ async def test_changed_doc_resync_marks_due_and_reindexes(
 async def test_removed_file_tombstones_page_and_index_drops_its_chunks(
     clean: None, database_url: str, tmp_path: Path
 ) -> None:
-    await _workspace()
+    workspace_id = await _workspace()
     root = tmp_path / "src"
     root.mkdir()
     (root / "keep.md").write_text("penguins huddle for warmth in antarctica")
     gone = root / "gone.md"
     gone.write_text("volcano magma chamber pressure readings")
-    driver, page_indexer, service = _wire(database_url, vec((11, 1.0)), tmp_path / "blobs")
+    driver, page_indexer, service = _wire(
+        database_url, vec((11, 1.0)), tmp_path / "blobs", workspace_id
+    )
     await _register_folder(root)
     await driver.run()
     await page_indexer.run()
@@ -301,14 +322,60 @@ async def test_removed_file_tombstones_page_and_index_drops_its_chunks(
     assert "penguins" in await _search(service, uuid4(), blobs, "penguins antarctica")
 
 
+async def test_page_index_cursor_resumes_across_a_fresh_indexer(
+    clean: None, database_url: str, tmp_path: Path
+) -> None:
+    """The single-owner cursor lives in the extension's store, so a fresh PageIndexer (a restart)
+    resumes where the last left off: it re-embeds nothing already indexed, and picks up only the
+    pages changed since — the call count is the witness."""
+    workspace_id = await _workspace()
+    root = tmp_path / "src"
+    root.mkdir()
+    (root / "a.md").write_text("alpha document about apples")
+    embed = CountingEmbed(vec((15, 1.0)))
+    blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    postgres = database_url.startswith("postgresql")
+    driver = SyncDriver(
+        backends={FOLDER_BACKEND: FolderSource()}, blob=blob, postgres=postgres
+    )
+    cursor_store = ScopedStore(workspace_id=workspace_id, extension="memory")
+
+    def fresh_indexer() -> PageIndexer:
+        return PageIndexer(
+            pages=CorePageFeed(blob=blob),
+            index=DefaultIndex(embed=embed, transaction=workspace_tx),
+            embed=embed,
+            transaction=workspace_tx,
+            chunker=TextChunker(),
+            cursor_store=cursor_store,
+        )
+
+    await _register_folder(root)
+    await driver.run()
+    await fresh_indexer().run()
+    indexed_a = embed.calls
+    assert indexed_a >= 1
+
+    await fresh_indexer().run()
+    assert embed.calls == indexed_a
+
+    (root / "b.md").write_text("beta document about bananas")
+    await _make_due()
+    await driver.run()
+    await fresh_indexer().run()
+    assert embed.calls == indexed_a + 1
+
+
 async def test_shared_page_scoping_excludes_a_member_only_search(
     clean: None, database_url: str, tmp_path: Path
 ) -> None:
-    await _workspace()
+    workspace_id = await _workspace()
     root = tmp_path / "src"
     root.mkdir()
     (root / "policy.md").write_text("expense reports are due on the last business day")
-    driver, page_indexer, service = _wire(database_url, vec((12, 1.0)), tmp_path / "blobs")
+    driver, page_indexer, service = _wire(
+        database_url, vec((12, 1.0)), tmp_path / "blobs", workspace_id
+    )
     await _register_folder(root)
     await driver.run()
     await page_indexer.run()
@@ -358,13 +425,19 @@ async def test_member_scoped_page_is_invisible_to_another_member(
                 digest="sha256:seed",
                 body_ref="sources/seed",
                 subject=member_subject(alice),
-                embedding_digest="sha256:seed",
                 tombstone=False,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
         )
-    _, _, service = _wire(database_url, probe, tmp_path / "blobs")
+        await connection.execute(
+            sa.insert(mem_page).values(
+                page_id=page_id, subject=member_subject(alice), created_at=sa.func.now()
+            )
+        )
+    _, _, service = _wire(
+        database_url, probe, tmp_path / "blobs", workspace_id
+    )
     await service.index.upsert(
         (
             Chunk(
@@ -390,12 +463,14 @@ async def test_a_failing_source_is_isolated_and_released(
     """One bad source must not wedge the run: its fetch raises, but the sibling still syncs and the
     failing source is released (claim cleared) and backed off (next_sync_at advanced) rather than
     left claimed to re-fail every lease cycle."""
-    await _workspace()
+    workspace_id = await _workspace()
     good = tmp_path / "good"
     good.mkdir()
     (good / "doc.md").write_text("the wifi password is maple syrup")
     missing = tmp_path / "missing"  # never created → FolderSource._read raises FileNotFoundError
-    driver, _, _ = _wire(database_url, vec((14, 1.0)), tmp_path / "blobs")
+    driver, _, _ = _wire(
+        database_url, vec((14, 1.0)), tmp_path / "blobs", workspace_id
+    )
     await _register_folder(good)
     await _register_folder(missing)
 
@@ -517,7 +592,6 @@ async def _seed_prior_page(workspace_id: UUID, source_id: UUID, source_ref: str)
                 digest="sha256:prior",
                 body_ref=f"sources/{source_id}/{page_id}",
                 subject=SHARED_SUBJECT,
-                embedding_digest="sha256:prior",
                 tombstone=False,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
@@ -655,18 +729,19 @@ async def test_snapshot_fetch_tombstones_prior_pages_absent_from_the_fetch(
     assert await _tombstone(kept_id) is False
 
 
-def test_sync_and_page_index_register_as_core_jobs(database_url: str, tmp_path: Path) -> None:
-    driver, page_indexer, _ = _wire(database_url, (), tmp_path / "blobs")
-    specs = core_jobs(page_indexer, driver, SpendResume(client=None))
-    assert [spec.name for spec in specs] == [
-        PAGE_INDEX_JOB,
-        SOURCE_SYNC_JOB,
-        SPEND_RESUME_JOB,
-    ]
+def test_source_sync_and_spend_resume_register_as_core_jobs(
+    database_url: str, tmp_path: Path
+) -> None:
+    driver = SyncDriver(
+        backends={FOLDER_BACKEND: FolderSource()},
+        blob=FilesystemBlobStore(root=tmp_path / "blobs"),
+        postgres=database_url.startswith("postgresql"),
+    )
+    specs = core_jobs(driver, SpendResume(client=None))
+    assert [spec.name for spec in specs] == [SOURCE_SYNC_JOB, SPEND_RESUME_JOB]
     assert all(spec.schedule is not None for spec in specs)
     keys = {binding.key for binding in bindings_from((), specs)}
     assert keys == {
-        f"{CORE_EXTENSION}:{PAGE_INDEX_JOB}",
         f"{CORE_EXTENSION}:{SOURCE_SYNC_JOB}",
         f"{CORE_EXTENSION}:{SPEND_RESUME_JOB}",
     }

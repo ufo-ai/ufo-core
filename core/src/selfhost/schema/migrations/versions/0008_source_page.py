@@ -35,7 +35,6 @@ def upgrade() -> None:
         sa.Column("digest", sa.Text(), nullable=False),
         sa.Column("body_ref", sa.Text(), nullable=False),
         sa.Column("subject", sa.Text(), nullable=False),
-        sa.Column("embedding_digest", sa.Text(), nullable=True),
         sa.Column("tombstone", sa.Boolean(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
@@ -46,13 +45,13 @@ def upgrade() -> None:
             "subject = 'shared' or subject like 'member:%'", name="page_subject"
         ),
     )
-    op.create_index("page_due", "page", ["embedding_digest"])
+    op.create_index("page_feed", "page", ["workspace_id", "updated_at", "id"])
     op.create_index("page_source", "page", ["source_id"])
 
 
 def downgrade() -> None:
     op.drop_index("page_source", "page")
-    op.drop_index("page_due", "page")
+    op.drop_index("page_feed", "page")
     op.drop_table("page")
     op.drop_index("source_due", "source")
     op.drop_table("source")

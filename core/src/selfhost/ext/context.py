@@ -25,7 +25,7 @@ from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.governance import Governance, prompt_digest
 from selfhost.indexing import EmbedClient, IndexBackend
-from selfhost.memory.sources import source_row_id
+from selfhost.memory.sources import PageFeed, source_row_id
 from selfhost.models.interface import Message
 from selfhost.o11y import log
 from selfhost.scheduling import ScheduleStore
@@ -204,6 +204,7 @@ class ExtensionContext:
     credentials: CredentialAccess
     index: IndexBackend | None = None
     embed: EmbedClient | None = None
+    pages: PageFeed | None = None
     corpus: TrajectoryCorpus | None = None
     scheduler: ScheduleStore | None = None
     invoker: TurnInvoker | None = None
@@ -284,6 +285,7 @@ def context_for(
     credential_store: CredentialStore | None,
     index: IndexBackend | None = None,
     embed: EmbedClient | None = None,
+    pages: PageFeed | None = None,
     blob: BlobStore | None = None,
     invoker: TurnInvoker | None = None,
 ) -> ExtensionContext:
@@ -297,6 +299,7 @@ def context_for(
         credentials=credentials,
         index=index,
         embed=embed,
+        pages=pages,
         corpus=corpus,
         scheduler=ScheduleStore(workspace_id=workspace_id),
         invoker=invoker,

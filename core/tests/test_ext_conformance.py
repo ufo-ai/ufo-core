@@ -21,7 +21,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from selfhost_ext_embed_openai import EMBED_DIM
 from selfhost_ext_index_default import DefaultIndex
-from selfhost_ext_memory.store import MemoryStore
+from selfhost_ext_memory.store import MemoryStore, PageIndexer
 
 from selfhost.blob import FilesystemBlobStore
 from selfhost.browser.backend import BuaBackend
@@ -60,8 +60,7 @@ from selfhost.jobs import JobRunner, bindings_from
 from selfhost.loop.prompts.render import render_system_prompt
 from selfhost.loop.subagents import SubagentRegistry, subagent_system_prompt
 from selfhost.loop.transcript import Transcript
-from selfhost.memory.indexer import PageIndexer
-from selfhost.memory.sources import SyncDriver
+from selfhost.memory.sources import CorePageFeed, SyncDriver
 from selfhost.models.interface import Message, ModelRequest, TextDelta
 from selfhost.models.registry import model_registry
 from selfhost.onboarding import run_onboarding_steps
@@ -917,6 +916,7 @@ async def test_sample_source_syncs_a_page_recallable_through_memory(
     manifest = _sample_manifest()
     async with workspace_tx() as connection:
         await connection.execute(sa.text("delete from chunk"))
+        await connection.execute(sa.text("delete from mem_page"))
         if database_url.startswith("sqlite"):
             await connection.execute(sa.text("delete from chunk_fts"))
     await run_onboarding_steps((manifest,), workspace_id, _credential_store())
@@ -931,7 +931,12 @@ async def test_sample_source_syncs_a_page_recallable_through_memory(
         postgres=postgres,
     )
     page_indexer = PageIndexer(
-        index=index, embed=embed, chunker=TextChunker(), blob=blob, postgres=postgres
+        pages=CorePageFeed(blob=blob),
+        index=index,
+        embed=embed,
+        transaction=workspace_tx,
+        chunker=TextChunker(),
+        cursor_store=ScopedStore(workspace_id=workspace_id, extension="memory"),
     )
     service = MemoryStore(
         index=index, embed=embed, transaction=workspace_tx, workspace_id=workspace_id
@@ -941,13 +946,16 @@ async def test_sample_source_syncs_a_page_recallable_through_memory(
     async with workspace_tx() as connection:
         page = (
             await connection.execute(
-                sa.select(tables.page.c.embedding_digest, tables.page.c.subject).where(
+                sa.select(tables.page.c.subject).where(
                     tables.page.c.workspace_id == workspace_id
                 )
             )
         ).one()
+        chunks = (
+            await connection.execute(sa.text("select count(*) from chunk"))
+        ).scalar_one()
     assert page.subject == SHARED_SUBJECT
-    assert page.embedding_digest is None
+    assert chunks == 0
 
     await page_indexer.run()
     matches = await service.search_sources(

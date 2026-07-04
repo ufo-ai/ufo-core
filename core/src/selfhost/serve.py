@@ -35,14 +35,14 @@ from selfhost.ext.manifest import Manifest
 from selfhost.ext.surface import SurfaceContext, SurfaceSpec, WritebackPoller
 from selfhost.grants import ConnectFlow, GrantStore, OAuthProvider, install_connect_flow
 from selfhost.hub import Hub, InProcessHub
-from selfhost.indexing import EmbedClient, IndexBackend, TextChunker
+from selfhost.indexing import EmbedClient, IndexBackend
 from selfhost.jobs import JobRunner, SpendResume, bindings_from, core_jobs
 from selfhost.loop.profiles import CORE_SUBAGENT_PROFILES
 from selfhost.loop.queue import Runtime, init_runtime
 from selfhost.loop.subagents import SubagentRegistry
-from selfhost.memory.indexer import PageIndexer
 from selfhost.memory.sources import (
     FOLDER_BACKEND,
+    CorePageFeed,
     FolderSource,
     SourceBackend,
     SyncDriver,
@@ -87,13 +87,10 @@ def run() -> None:
     index = index_backend(
         manifests, config.memory.index_backend, embed, workspace_id, credentials
     )
-    chunker = TextChunker()
     blob = blob_store_for(config.blob)
     artifact_secret = os.environ.get(config.artifacts.token_secret_env, "")
     postgres = config.database.url.startswith("postgresql")
-    page_indexer = PageIndexer(
-        index=index, embed=embed, chunker=chunker, blob=blob, postgres=postgres
-    )
+    page_feed = CorePageFeed(blob=blob)
     sync_driver = SyncDriver(
         backends=_source_backends(manifests),
         blob=blob,
@@ -131,7 +128,7 @@ def run() -> None:
         }
     )
     DBOS.launch()
-    _launch_jobs(config, page_indexer, sync_driver, index, embed, dbos_client, blob)
+    _launch_jobs(config, sync_driver, index, embed, page_feed, dbos_client, blob)
     app = FastAPI(lifespan=_serve_lifespan)
     app.state.hub = hub
     app.state.dbos = dbos_client
@@ -170,22 +167,22 @@ async def _require_bootstrap() -> None:
 
 def _launch_jobs(
     config: Config,
-    page_indexer: PageIndexer,
     sync_driver: SyncDriver,
     index: IndexBackend,
     embed: EmbedClient,
+    page_feed: CorePageFeed,
     dbos_client: DBOSClient,
     blob: BlobStore,
 ) -> None:
-    """Register this workspace's jobs — core's own (the page index derivation, the source sync
-    driver, and the spend-resume sweep that re-admits parked turns) plus every installed
-    extension's (the memory extension's memory-index job among them) — as DBOS schedules and
-    one-shot enqueues, after launch so the system store is live. Registration is the synchronous
-    DBOS API (off the loop, at startup); a handler may read a declared credential or the deploy
-    index/embed backends, so once any job is registered the credential key must be set."""
+    """Register this workspace's jobs — core's own (the source sync driver and the spend-resume
+    sweep that re-admits parked turns) plus every installed extension's (the memory extension's
+    memory-index and page-index jobs among them) — as DBOS schedules and one-shot enqueues, after
+    launch so the system store is live. Registration is the synchronous DBOS API (off the loop, at
+    startup); a handler may read a declared credential or the deploy index/embed backends or the
+    page feed, so once any job is registered the credential key must be set."""
     bindings = bindings_from(
         load_manifests(),
-        core_jobs(page_indexer, sync_driver, SpendResume(client=dbos_client)),
+        core_jobs(sync_driver, SpendResume(client=dbos_client)),
     )
     if not bindings:
         return
@@ -201,6 +198,7 @@ def _launch_jobs(
         bindings=bindings,
         index=index,
         embed=embed,
+        pages=page_feed,
         blob=blob,
         invoker=AdmissionInvoker(admission=Admission(dbos=dbos_client), workspace_id=workspace_id),
     ).launch()

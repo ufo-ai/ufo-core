@@ -17,6 +17,7 @@ from selfhost_ext_memory.store import (
     MemoryIndexer,
     MemoryStore,
     MemoryWrite,
+    PageIndexer,
     recall_subjects,
 )
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -25,9 +26,15 @@ from selfhost.accounting import SpendEvaluator, record_sandbox_tokens
 from selfhost.blob import FilesystemBlobStore
 from selfhost.config import SourceConfig, SourceEntry
 from selfhost.db import workspace_tx
+from selfhost.ext.context import ScopedStore
 from selfhost.indexing import TextChunker
-from selfhost.memory.indexer import PageIndexer
-from selfhost.memory.sources import FOLDER_BACKEND, FolderSource, SyncDriver, register_sources
+from selfhost.memory.sources import (
+    FOLDER_BACKEND,
+    CorePageFeed,
+    FolderSource,
+    SyncDriver,
+    register_sources,
+)
 from selfhost.schema import tables
 from selfhost.schema.records import Usage
 from selfhost.subjects import SHARED_SUBJECT, member_subject
@@ -172,7 +179,7 @@ async def test_folder_source_syncs_indexes_and_is_recalled(
     and `search_sources` recalls it — the whole source→index→recall data path over the real index
     and blob store."""
     await _clear_chunks(database_url)
-    await _workspace()
+    workspace_id = await _workspace()
     root = tmp_path / "src"
     root.mkdir()
     (root / "runbook.md").write_text("the incident escalation contact is the on-call captain")
@@ -182,10 +189,15 @@ async def test_folder_source_syncs_indexes_and_is_recalled(
     postgres = database_url.startswith("postgresql")
     driver = SyncDriver(backends={FOLDER_BACKEND: FolderSource()}, blob=blob, postgres=postgres)
     page_indexer = PageIndexer(
-        index=index, embed=embed, chunker=TextChunker(), blob=blob, postgres=postgres
+        pages=CorePageFeed(blob=blob),
+        index=index,
+        embed=embed,
+        transaction=workspace_tx,
+        chunker=TextChunker(),
+        cursor_store=ScopedStore(workspace_id=workspace_id, extension="memory"),
     )
     service = MemoryStore(
-        index=index, embed=embed, transaction=workspace_tx, workspace_id=uuid4()
+        index=index, embed=embed, transaction=workspace_tx, workspace_id=workspace_id
     )
     await register_sources(
         (SourceEntry(backend=FOLDER_BACKEND, config=SourceConfig(root=str(root))),)

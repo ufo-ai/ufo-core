@@ -285,12 +285,10 @@ page = sa.Table(
     sa.Column("digest", sa.Text, nullable=False),
     sa.Column("body_ref", sa.Text, nullable=False),
     sa.Column("subject", sa.Text, nullable=False),
-    sa.Column("embedding_digest", sa.Text, nullable=True),
-    sa.Column("embedding_claimed_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("tombstone", sa.Boolean, nullable=False),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.CheckConstraint("subject = 'shared' or subject like 'member:%'", name="page_subject"),
-    sa.Index("page_due", "embedding_digest"),
+    sa.Index("page_feed", "workspace_id", "updated_at", "id"),
     sa.Index("page_source", "source_id"),
 )

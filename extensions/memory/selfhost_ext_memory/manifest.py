@@ -34,6 +34,7 @@ from selfhost_ext_memory.store import (
     ItemClass,
     MemoryIndexer,
     MemoryWrite,
+    PageIndexer,
     Recalled,
     SourceMatch,
     recall_subjects,
@@ -49,6 +50,8 @@ RECALL_SOFT_TIMEOUT_SECONDS = 4.0
 RECALL_CONTEXT_PREFIX = "Relevant memory:\n"
 MEMORY_INDEX_JOB = "memory_index"
 MEMORY_INDEX_SCHEDULE = "0 * * * * *"
+PAGE_INDEX_JOB = "page_index"
+PAGE_INDEX_SCHEDULE = "0 * * * * *"
 SKILL_DIR = Path(__file__).parent / "skills" / "memory"
 
 logger = logging.getLogger(__name__)
@@ -100,7 +103,10 @@ async def memory_search_handler(ctx: ToolContext, args: MemorySearchInput) -> To
             )
         ),
         asyncio.gather(
-            *(store.search_sources(query, subjects, MEMORY_SEARCH_LIMIT) for query in args.queries)
+            *(
+                store.search_sources(query, subjects, MEMORY_SEARCH_LIMIT, start, end)
+                for query in args.queries
+            )
         ),
     )
     recalled: dict[UUID, Recalled] = {}
@@ -164,6 +170,19 @@ async def index_memory(ctx: ExtensionContext) -> None:
     ).run()
 
 
+async def index_pages(ctx: ExtensionContext) -> None:
+    if ctx.index is None or ctx.embed is None or ctx.pages is None:
+        raise RuntimeError("page_index requires the index, embed, and page backends; none wired")
+    await PageIndexer(
+        pages=ctx.pages,
+        index=ctx.index,
+        embed=ctx.embed,
+        transaction=ctx.transaction,
+        chunker=TextChunker(),
+        cursor_store=ctx.store,
+    ).run()
+
+
 def manifest() -> Manifest:
     return Manifest(
         name=NAME,
@@ -200,6 +219,7 @@ def manifest() -> Manifest:
         hooks=(HookSpec(event="on_inbound", handler=recall_hook),),
         jobs=(
             JobSpec(name=MEMORY_INDEX_JOB, schedule=MEMORY_INDEX_SCHEDULE, handler=index_memory),
+            JobSpec(name=PAGE_INDEX_JOB, schedule=PAGE_INDEX_SCHEDULE, handler=index_pages),
         ),
         skills=(SkillSpec(path=SKILL_DIR),),
     )

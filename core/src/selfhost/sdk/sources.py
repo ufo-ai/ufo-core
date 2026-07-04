@@ -19,6 +19,15 @@ from selfhost.memory.sources import (
     Page as Page,
 )
 from selfhost.memory.sources import (
+    PageBatch as PageBatch,
+)
+from selfhost.memory.sources import (
+    PageChange as PageChange,
+)
+from selfhost.memory.sources import (
+    PageFeed as PageFeed,
+)
+from selfhost.memory.sources import (
     SourceAuth as SourceAuth,
 )
 from selfhost.memory.sources import (

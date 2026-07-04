@@ -25,21 +25,24 @@ import sqlalchemy as sa
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from selfhost.sdk.context import ExtensionContext
+from selfhost.sdk.context import ExtensionContext, ScopedStore
 from selfhost.sdk.index import (
     OWNER_KIND_MEMORY_ITEM,
     OWNER_KIND_PAGE,
     EmbedClient,
     Hit,
     IndexBackend,
+    IndexScope,
     TextChunker,
     chunk_embed_upsert,
 )
-from selfhost.sdk.sources import SHARED_SUBJECT, member_subject
+from selfhost.sdk.sources import SHARED_SUBJECT, PageChange, PageFeed, member_subject
 
 RRF_K = 60
 DUE_BATCH_MAX_ITEMS = 200
 EMBED_CLAIM_LEASE_SECONDS = 300
+PAGE_INDEX_BATCH = 50
+PAGE_CURSOR_KEY = "page_index_cursor"
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +68,14 @@ memory_item = sa.Table(
     sa.Column("superseded_by", sa.Uuid, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+)
+
+mem_page = sa.Table(
+    "mem_page",
+    _metadata,
+    sa.Column("page_id", sa.Uuid, primary_key=True),
+    sa.Column("subject", sa.Text, nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
 )
 
 
@@ -190,16 +201,43 @@ class MemoryStore:
         return await self._enrich(fused, start, end)
 
     async def search_sources(
-        self, query: str, subjects: frozenset[str], limit: int
+        self,
+        query: str,
+        subjects: frozenset[str],
+        limit: int,
+        start: datetime | None = None,
+        end: datetime | None = None,
     ) -> tuple[SourceMatch, ...]:
         """Search synced source pages the same way recall searches facts: fuse the two index legs
-        under the subject filter over the page owner kind, and carry each surviving chunk's snippet
-        straight off the fused hit. A tombstoned page's chunks are deleted from the index by the
-        page-index job, so a removed document never surfaces here."""
+        under the subject filter over the page owner kind, then read each surviving page back from
+        the `mem_page` mirror — carrying its subject and dropping any outside the optional
+        `[start, end)` `created_at` window. A tombstoned page's mirror row (and chunks) are dropped
+        by the page-index job, so a removed document never surfaces here."""
         fused = fuse_hits(*await self._legs(query, subjects, OWNER_KIND_PAGE, limit), limit)
+        if not fused:
+            return ()
+        ids = [UUID(hit.owner_id) for hit in fused]
+        conditions = [mem_page.c.page_id.in_(ids)]
+        if start is not None:
+            conditions.append(mem_page.c.created_at >= start)
+        if end is not None:
+            conditions.append(mem_page.c.created_at < end)
+        async with self.transaction() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(mem_page.c.page_id, mem_page.c.subject).where(*conditions)
+                )
+            ).mappings().all()
+        by_id = {row["page_id"]: row for row in rows}
         return tuple(
-            SourceMatch(page_id=UUID(hit.owner_id), subject="", text=hit.text, score=hit.score)
+            SourceMatch(
+                page_id=UUID(hit.owner_id),
+                subject=by_id[UUID(hit.owner_id)]["subject"],
+                text=hit.text,
+                score=hit.score,
+            )
             for hit in fused
+            if UUID(hit.owner_id) in by_id
         )
 
     async def _legs(
@@ -350,3 +388,67 @@ class MemoryIndexer:
                 )
                 .where(memory_item.c.id == item.id)
             )
+
+
+@dataclass(frozen=True)
+class PageIndexer:
+    """The page derivation job: replay source-page changes off the core `PageFeed` and turn each
+    into index chunks + a `mem_page` mirror row, off the write path. A single-owner `(changed_at,
+    id)` cursor lives in the extension's ScopedStore — no lease, no double-embed: the cursor only
+    advances, so a restart resumes exactly where it left off and a page re-appears only when its
+    `updated_at` bumps. A tombstoned change drops the page's chunks and mirror row; every other
+    change chunks and embeds the inlined body and upserts the mirror (subject + created_at for
+    search's date window)."""
+
+    pages: PageFeed
+    index: IndexBackend
+    embed: EmbedClient
+    transaction: Transaction
+    chunker: TextChunker
+    cursor_store: ScopedStore
+
+    async def run(self) -> None:
+        stored = await self.cursor_store.get(PAGE_CURSOR_KEY)
+        cursor = stored if isinstance(stored, str) else None
+        while True:
+            batch = await self.pages.pages_changed_since(cursor, PAGE_INDEX_BATCH)
+            if not batch.changes:
+                return
+            for change in batch.changes:
+                await self._apply(change)
+            cursor = batch.next_cursor
+            await self.cursor_store.put(PAGE_CURSOR_KEY, cursor)
+            if len(batch.changes) < PAGE_INDEX_BATCH:
+                return
+
+    async def _apply(self, change: PageChange) -> None:
+        if change.tombstone:
+            await self.index.delete(IndexScope(OWNER_KIND_PAGE, str(change.page_id)))
+            async with self.transaction() as connection:
+                await connection.execute(
+                    sa.delete(mem_page).where(mem_page.c.page_id == change.page_id)
+                )
+            return
+        await chunk_embed_upsert(
+            self.index,
+            self.embed,
+            self.chunker,
+            OWNER_KIND_PAGE,
+            str(change.page_id),
+            change.subject,
+            change.body,
+        )
+        async with self.transaction() as connection:
+            updated = await connection.execute(
+                sa.update(mem_page)
+                .values(subject=change.subject, created_at=change.created_at)
+                .where(mem_page.c.page_id == change.page_id)
+            )
+            if updated.rowcount == 0:
+                await connection.execute(
+                    sa.insert(mem_page).values(
+                        page_id=change.page_id,
+                        subject=change.subject,
+                        created_at=change.created_at,
+                    )
+                )
