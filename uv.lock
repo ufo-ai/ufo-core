@@ -2454,7 +2454,7 @@ requires-dist = [{ name = "selfhost", editable = "core" }]
 [[package]]
 name = "selfhost-ext-scheduled-tasks"
 version = "0.1.0"
-source = { editable = "extensions/scheduled-tasks" }
+source = { editable = "extensions/scheduled_tasks" }
 dependencies = [
     { name = "croniter" },
     { name = "selfhost" },
