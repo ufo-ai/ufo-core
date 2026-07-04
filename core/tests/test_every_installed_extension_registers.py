@@ -47,6 +47,7 @@ from selfhost.ext.loader import (
     turn_tools,
 )
 from selfhost.ext.manifest import Manifest
+from selfhost.hub import InProcessHub
 from selfhost.jobs import bindings_from
 from selfhost.loop.prompts.render import render_system_prompt
 from selfhost.loop.subagents import SubagentRegistry
@@ -214,13 +215,15 @@ def _check_surfaces(manifest: Manifest, store: CredentialStore, tmp_path: Path) 
         WORKSPACE_ID,
         store,
         FilesystemBlobStore(root=tmp_path),
+        InProcessHub(),
         _StubDbos(),
         "",
         None,
     )
     mounted = {route.path for route in app.routes}
     for spec in manifest.surfaces:
-        assert f"/surface/{spec.name}" in mounted
+        for route in spec.routes:
+            assert f"/surface/{spec.name}/{route.path}".rstrip("/") in mounted
 
 
 def _check_routes(manifest: Manifest, store: CredentialStore) -> None:

@@ -11,8 +11,8 @@ turn has not read — the guard that keeps a blind string-replace from clobberin
 never saw. `glob` and `grep` run the in-sandbox `sbxfs` matcher and ripgrep, so file discovery and
 content search happen in the container and a bounded result crosses back. `share_file` streams a
 produced workspace file straight out of the mount into the blob
-store under `artifacts/<uuid>/` and returns a TTL-token URL the web surface serves — the only path
-that hands a file back outside the sandbox, with no read cap and no whole-file buffer.
+store under `artifacts/<uuid>/` and returns a TTL-token URL core's artifact route serves — the only
+path that hands a file back outside the sandbox, with no read cap and no whole-file buffer.
 `spawn_subagent` delegates a typed subtask to a child turn through `ctx.spawn`. `load_sessions`
 reads specific past conversation transcripts back from the blob store, scoped to the speaking
 member's own conversations. `ask_user` is chat-native: it
@@ -352,7 +352,7 @@ async def grep_handler(ctx: ToolContext, args: GrepInput) -> ToolResult:
 
 async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResult:
     """Stream a produced workspace file into the artifact store under `artifacts/<uuid>/<name>`,
-    record it as a shared_artifact of this turn, and mint a TTL download token the web surface
+    record it as a shared_artifact of this turn, and mint a TTL download token core's artifact route
     serves — the only path a produced file leaves the sandbox. A preflight in the container streams
     the file to derive its size and sha256 without loading it whole; the carrier then copies it out
     of the workspace mount into the blob store the same way, so any file type and size shares

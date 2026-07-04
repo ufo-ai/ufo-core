@@ -3,9 +3,7 @@ import hashlib
 import json
 import secrets
 from collections.abc import AsyncIterator, Iterator
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from email.message import Message
+from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 import pytest
@@ -15,14 +13,10 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from selfhost_ext_index_default import DefaultIndex
 from selfhost_ext_memory.store import recall_subjects
+from selfhost_ext_web.manifest import manifest as web_manifest
+from selfhost_ext_web.surface import CHAT_PAGE, SESSION_COOKIE, _sse
 
 from selfhost.accounting import CORE_PRICING, record_egress_request, record_turn_usage
-from selfhost.artifact_token import (
-    ARTIFACT_KEY_PREFIX,
-    ArtifactTokenError,
-    mint_artifact_token,
-    verify_artifact_token,
-)
 from selfhost.blob import FilesystemBlobStore
 from selfhost.browser.backend import BuaBackend
 from selfhost.browser.cdp_provider import BrowserCdpProviderChain
@@ -38,10 +32,8 @@ from selfhost.models.registry import ModelRegistry
 from selfhost.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
 from selfhost.schema import tables
 from selfhost.schema.records import TerminalFrame, Usage
+from selfhost.serve import _mount_surfaces
 from selfhost.subjects import SHARED_SUBJECT, member_subject
-from selfhost.surfaces.admission import Admission
-from selfhost.surfaces.web import SESSION_COOKIE, WebSurface, _sse
-from selfhost.surfaces.web import router as web_router
 
 SECRET = "artifact-signing-secret"
 STREAM_TIMEOUT_SECONDS = 30
@@ -99,18 +91,6 @@ class StandInCarrier:
 class StubEmbed:
     async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
         return tuple(() for _ in texts)
-
-
-@dataclass
-class StubDbos:
-    enqueued: list[str] = field(default_factory=list)
-
-    async def enqueue_async(self, options: object, workflow_id: str) -> None:
-        self.enqueued.append(workflow_id)
-
-
-def _future() -> int:
-    return int(datetime.now(UTC).timestamp()) + 3600
 
 
 async def _seed_workspace() -> UUID:
@@ -199,34 +179,15 @@ def dbos_runtime(
 async def web(
     db: None,
     dbos_runtime: tuple[Config, InProcessHub, FilesystemBlobStore],
-) -> AsyncIterator[AsyncClient]:
+) -> AsyncIterator[tuple[AsyncClient, UUID]]:
     config, hub, blob = dbos_runtime
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
+    workspace_id = await _seed_workspace()
     app = FastAPI()
-    app.state.web = WebSurface(
-        admission=Admission(dbos=dbos_client), hub=hub, blob=blob, artifact_token_secret=SECRET
-    )
-    app.include_router(web_router)
+    _mount_surfaces(app, (web_manifest(),), workspace_id, None, blob, hub, dbos_client, "", None)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://web") as client:
-        yield client
+        yield client, workspace_id
     dbos_client.destroy()
-
-
-@pytest.fixture
-async def artifact_client(
-    tmp_path,
-) -> AsyncIterator[tuple[AsyncClient, FilesystemBlobStore]]:
-    blob = FilesystemBlobStore(root=tmp_path)
-    app = FastAPI()
-    app.state.web = WebSurface(
-        admission=Admission(dbos=StubDbos()),
-        hub=InProcessHub(),
-        blob=blob,
-        artifact_token_secret=SECRET,
-    )
-    app.include_router(web_router)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://web") as client:
-        yield client, blob
 
 
 async def _consume(client: AsyncClient, token: str, turn_id: str) -> tuple[str, dict[str, object]]:
@@ -234,7 +195,9 @@ async def _consume(client: AsyncClient, token: str, turn_id: str) -> tuple[str, 
     event: str | None = None
     async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
         async with client.stream(
-            "GET", f"/web/turns/{turn_id}/stream", headers={"cookie": f"{SESSION_COOKIE}={token}"}
+            "GET",
+            f"/surface/web/turns/{turn_id}/stream",
+            headers={"cookie": f"{SESSION_COOKIE}={token}"},
         ) as stream:
             assert stream.status_code == 200
             assert stream.headers["content-type"].startswith("text/event-stream")
@@ -253,131 +216,17 @@ async def _consume(client: AsyncClient, token: str, turn_id: str) -> tuple[str, 
     raise AssertionError("stream ended without a terminal frame")
 
 
-def test_verify_artifact_token_accepts_valid_and_rejects_everything_else() -> None:
-    now = datetime.now(UTC)
-    key = "artifacts/abc123"
-    token = mint_artifact_token(SECRET, key, "report.txt", int(now.timestamp()) + 100)
-    claims = verify_artifact_token(token, SECRET, now)
-    assert claims.blob_key == key
-    assert claims.filename == "report.txt"
-    with pytest.raises(ArtifactTokenError):
-        verify_artifact_token(token, "wrong-secret", now)
-    with pytest.raises(ArtifactTokenError):
-        verify_artifact_token(token + "x", SECRET, now)
-    with pytest.raises(ArtifactTokenError):
-        verify_artifact_token(
-            mint_artifact_token(SECRET, key, "", int(now.timestamp()) - 1), SECRET, now
-        )
-    with pytest.raises(ArtifactTokenError):
-        verify_artifact_token(
-            mint_artifact_token(
-                SECRET, "conversations/c/messages.json.lz4", "", int(now.timestamp()) + 100
-            ),
-            SECRET,
-            now,
-        )
-    with pytest.raises(ArtifactTokenError):
-        verify_artifact_token(
-            mint_artifact_token(
-                SECRET,
-                "artifacts/../conversations/c/messages.json.lz4",
-                "",
-                int(now.timestamp()) + 100,
-            ),
-            SECRET,
-            now,
-        )
-    with pytest.raises(ArtifactTokenError):
-        verify_artifact_token("not-a-token", SECRET, now)
-    with pytest.raises(ArtifactTokenError):
-        verify_artifact_token(token, "", now)
-
-
-async def test_artifact_download_serves_bytes_for_a_valid_token(
-    artifact_client: tuple[AsyncClient, FilesystemBlobStore],
+async def test_web_turn_round_trip_admits_streams_and_links_identity(
+    web: tuple[AsyncClient, UUID],
 ) -> None:
-    client, blob = artifact_client
-    key = f"artifacts/{uuid4()}"
-    await blob.put(key, b"the shared bytes")
-    token = mint_artifact_token(SECRET, key, "report.txt", _future())
-    response = await client.get("/web/artifacts/download", params={"token": token})
-    assert response.status_code == 200
-    assert response.content == b"the shared bytes"
-    assert "report.txt" in response.headers["content-disposition"]
-
-
-async def test_artifact_download_escapes_special_filenames(
-    artifact_client: tuple[AsyncClient, FilesystemBlobStore],
-) -> None:
-    """A `"` would break the quoted `filename=` and a unicode name is not header-safe; both must
-    ride out as a well-formed Content-Disposition the download still serves."""
-    client, blob = artifact_client
-    for filename in ('a"quote.txt', "résumé pièce.txt"):
-        key = f"artifacts/{uuid4()}"
-        await blob.put(key, b"the bytes")
-        token = mint_artifact_token(SECRET, key, filename, _future())
-        response = await client.get("/web/artifacts/download", params={"token": token})
-        assert response.status_code == 200
-        assert response.content == b"the bytes"
-        parsed = Message()
-        parsed["content-disposition"] = response.headers["content-disposition"]
-        assert parsed.get_content_disposition() == "attachment"
-        assert parsed.get_filename() == filename
-
-
-async def test_artifact_download_rejects_missing_tampered_expired_and_out_of_namespace(
-    artifact_client: tuple[AsyncClient, FilesystemBlobStore],
-) -> None:
-    client, blob = artifact_client
-    key = f"artifacts/{uuid4()}"
-    await blob.put(key, b"x")
-    missing = await client.get("/web/artifacts/download")
-    tampered = await client.get(
-        "/web/artifacts/download",
-        params={"token": mint_artifact_token(SECRET, key, "", _future()) + "z"},
-    )
-    expired = await client.get(
-        "/web/artifacts/download",
-        params={
-            "token": mint_artifact_token(SECRET, key, "", int(datetime.now(UTC).timestamp()) - 10)
-        },
-    )
-    outside = await client.get(
-        "/web/artifacts/download",
-        params={"token": mint_artifact_token(SECRET, "conversations/c/x", "", _future())},
-    )
-    assert missing.status_code == 401
-    assert tampered.status_code == 403
-    assert expired.status_code == 403
-    assert outside.status_code == 403
-
-
-async def test_download_endpoint_serves_a_minted_artifact(
-    artifact_client: tuple[AsyncClient, FilesystemBlobStore],
-) -> None:
-    """The download endpoint is the consumer of a share_file token: bytes under an artifacts key
-    plus a valid token serve. `share_file` producing that token+blob is proven end-to-end against a
-    real container in test_file_tools; here the token is minted directly to keep this non-Docker."""
-    client, blob = artifact_client
-    key = f"{ARTIFACT_KEY_PREFIX}{uuid4()}/report.txt"
-    await blob.put(key, b"produced report bytes")
-    now = datetime.now(UTC)
-    token = mint_artifact_token(SECRET, key, "report.txt", int(now.timestamp()) + 100)
-    response = await client.get("/web/artifacts/download", params={"token": token})
-    assert response.status_code == 200
-    assert response.content == b"produced report bytes"
-    assert "report.txt" in response.headers["content-disposition"]
-
-
-async def test_web_turn_round_trip_admits_streams_and_links_identity(web: AsyncClient) -> None:
-    workspace_id = await _seed_workspace()
+    client, workspace_id = web
     member_id, token = await _seed_member(workspace_id, "owner@example.com")
-    admitted = await web.post(
-        "/web/chat", content=b"hello", headers={"cookie": f"{SESSION_COOKIE}={token}"}
+    admitted = await client.post(
+        "/surface/web/chat", content=b"hello", headers={"cookie": f"{SESSION_COOKIE}={token}"}
     )
     assert admitted.status_code == 200
     turn_id = admitted.json()["turn_id"]
-    streamed, terminal = await _consume(web, token, turn_id)
+    streamed, terminal = await _consume(client, token, turn_id)
     assert streamed == "echo:1"
     assert terminal["status"] == "done"
     digest = hashlib.sha256(token.encode()).hexdigest()
@@ -397,38 +246,48 @@ async def test_web_turn_round_trip_admits_streams_and_links_identity(web: AsyncC
                 .where(tables.turn.c.id == UUID(turn_id))
             )
         ).one()
+        writeback = (
+            await connection.execute(
+                sa.select(tables.writeback.c.turn_id).where(
+                    tables.writeback.c.turn_id == UUID(turn_id)
+                )
+            )
+        ).one_or_none()
     assert linked.member_id == member_id
     assert conversation.surface == "web"
     assert conversation.member_id == member_id
+    assert writeback is None
 
 
-async def test_unknown_session_token_is_rejected(web: AsyncClient) -> None:
-    await _seed_workspace()
+async def test_unknown_session_token_is_rejected(web: tuple[AsyncClient, UUID]) -> None:
+    client, _workspace_id = web
     stranger = secrets.token_hex(16)
-    denied = await web.post(
-        "/web/chat", content=b"hi", headers={"cookie": f"{SESSION_COOKIE}={stranger}"}
+    denied = await client.post(
+        "/surface/web/chat", content=b"hi", headers={"cookie": f"{SESSION_COOKIE}={stranger}"}
     )
     assert denied.status_code == 401
-    missing = await web.post("/web/chat", content=b"hi")
+    missing = await client.post("/surface/web/chat", content=b"hi")
     assert missing.status_code == 401
 
 
-async def test_two_web_members_get_isolated_subjects_and_cannot_cross(web: AsyncClient) -> None:
-    workspace_id = await _seed_workspace()
+async def test_two_web_members_get_isolated_subjects_and_cannot_cross(
+    web: tuple[AsyncClient, UUID],
+) -> None:
+    client, workspace_id = web
     member_a, token_a = await _seed_member(workspace_id, "a@example.com")
     member_b, token_b = await _seed_member(workspace_id, "b@example.com")
     turn_a = (
-        await web.post(
-            "/web/chat", content=b"hi", headers={"cookie": f"{SESSION_COOKIE}={token_a}"}
+        await client.post(
+            "/surface/web/chat", content=b"hi", headers={"cookie": f"{SESSION_COOKIE}={token_a}"}
         )
     ).json()["turn_id"]
     turn_b = (
-        await web.post(
-            "/web/chat", content=b"hi", headers={"cookie": f"{SESSION_COOKIE}={token_b}"}
+        await client.post(
+            "/surface/web/chat", content=b"hi", headers={"cookie": f"{SESSION_COOKIE}={token_b}"}
         )
     ).json()["turn_id"]
-    await _consume(web, token_a, turn_a)
-    await _consume(web, token_b, turn_b)
+    await _consume(client, token_a, turn_a)
+    await _consume(client, token_b, turn_b)
     async with workspace_tx() as connection:
         owners = (
             (
@@ -444,14 +303,14 @@ async def test_two_web_members_get_isolated_subjects_and_cannot_cross(web: Async
     assert set(owners) == {member_a, member_b}
     assert recall_subjects(member_a) & recall_subjects(member_b) == frozenset({SHARED_SUBJECT})
     assert member_subject(member_a) not in recall_subjects(member_b)
-    crossed = await web.get(
-        f"/web/turns/{turn_a}/stream", headers={"cookie": f"{SESSION_COOKIE}={token_b}"}
+    crossed = await client.get(
+        f"/surface/web/turns/{turn_a}/stream", headers={"cookie": f"{SESSION_COOKIE}={token_b}"}
     )
     assert crossed.status_code == 403
 
 
-async def test_web_spend_view_matches_ledger_sums(web: AsyncClient) -> None:
-    workspace_id = await _seed_workspace()
+async def test_web_spend_view_matches_ledger_sums(web: tuple[AsyncClient, UUID]) -> None:
+    client, workspace_id = web
     member_id, token = await _seed_member(workspace_id, "owner@example.com")
     async with workspace_tx() as connection:
         agent_id = (await connection.execute(sa.select(tables.agent.c.id))).scalar_one()
@@ -489,7 +348,7 @@ async def test_web_spend_view_matches_ledger_sums(web: AsyncClient) -> None:
             Usage(input_tokens=1000, output_tokens=2000),
         )
         await record_egress_request(connection, workspace_id, turn_id)
-    page = await web.get("/web/spend", headers={"cookie": f"{SESSION_COOKIE}={token}"})
+    page = await client.get("/surface/web/spend", headers={"cookie": f"{SESSION_COOKIE}={token}"})
     assert page.status_code == 200
     body = page.text
     assert "owner@example.com" in body
@@ -499,8 +358,6 @@ async def test_web_spend_view_matches_ledger_sums(web: AsyncClient) -> None:
 
 
 def test_chat_page_is_self_contained_and_binds_a_session_cookie() -> None:
-    from selfhost.surfaces.web import CHAT_PAGE
-
     assert "<!doctype html>" in CHAT_PAGE
     assert "EventSource" in CHAT_PAGE
     assert "http://" not in CHAT_PAGE

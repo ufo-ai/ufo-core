@@ -430,7 +430,7 @@ async def test_share_file_streams_a_file_over_the_read_cap_byte_exact(
     assert shared["size_bytes"] == len(payload)
     assert shared["digest"] == "sha256:" + hashlib.sha256(payload).hexdigest()
     assert shared["is_text"] is False
-    assert shared["url"].startswith("/web/artifacts/download?token=")
+    assert shared["url"].startswith("/artifacts/download?token=")
     token = shared["url"].split("token=", 1)[1]
     claims = verify_artifact_token(token, ARTIFACT_SECRET, datetime.now(UTC))
     assert await ctx.blob.get(claims.blob_key) == payload

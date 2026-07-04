@@ -8,6 +8,7 @@ parked turn is non-terminal, so the poll reads the turn's status, not only its t
 
 import asyncio
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from uuid import UUID
 
 import sqlalchemy as sa
@@ -96,3 +97,16 @@ async def terminal_frame(turn_id: UUID) -> TerminalFrame | None:
     if row is None or row.terminal is None:
         return None
     return TerminalFrame.model_validate(row.terminal)
+
+
+@dataclass(frozen=True)
+class HubTailer:
+    """The live-surface seam's tail primitive bound to the process hub: tails one turn's frames off
+    the hub, ending on the durable terminal-or-parked state. Structurally a `TurnTailer`, injected
+    into a `LiveSurfaceContext` exactly as `AdmissionInvoker` injects admit — so a surface extension
+    tails a turn without importing the hub or this role package."""
+
+    hub: Hub
+
+    def tail(self, turn_id: UUID, since: str = "") -> AsyncIterator[tuple[str, LiveFrame]]:
+        return tail_frames(self.hub, turn_id, since)

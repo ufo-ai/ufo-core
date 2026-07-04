@@ -28,6 +28,7 @@ from selfhost.blob import BlobNotFound, FilesystemBlobStore
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.ext.surface import WRITEBACK_DELIVERED, WRITEBACK_PENDING, workspace_key
+from selfhost.hub import InProcessHub
 from selfhost.schema import tables
 from selfhost.schema.records import TerminalFrame
 from selfhost.serve import _mount_surfaces
@@ -147,6 +148,7 @@ async def _mount_transport(
         workspace_id,
         store,
         blob,
+        InProcessHub(),
         StubDbos(),
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
@@ -448,7 +450,7 @@ async def test_oversize_artifact_is_delivered_as_a_download_link(
     match = re.search(r"\[huge\.bin\]\((https://[^)]+)\)", reply["text"])
     assert match is not None
     url = match.group(1)
-    assert url.startswith(f"{PUBLIC_BASE_URL}/web/artifacts/download?token=")
+    assert url.startswith(f"{PUBLIC_BASE_URL}/artifacts/download?token=")
     token = url.split("token=", 1)[1]
     claims = verify_artifact_token(token, ARTIFACT_SECRET, datetime.now(UTC))
     assert claims.blob_key == "artifacts/big/huge.bin"

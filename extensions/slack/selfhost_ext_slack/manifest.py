@@ -4,7 +4,7 @@ id (the app's identity used to gate and verify events). None carry a wire-inject
 surface authenticates to Slack itself, never through the sandbox egress proxy."""
 
 from selfhost.sdk.manifest import CredentialSlot, Manifest
-from selfhost.sdk.surfaces import SurfaceSpec
+from selfhost.sdk.surfaces import SurfaceRoute, SurfaceSpec
 from selfhost_ext_slack.surface import (
     SLACK_BOT_TOKEN_SLOT,
     SLACK_BOT_USER_ID_SLOT,
@@ -32,5 +32,12 @@ def manifest() -> Manifest:
             CredentialSlot(name=SLACK_BOT_USER_ID_SLOT, description="The bot's own Slack user id."),
             CredentialSlot(name=SLACK_TEAM_ID_SLOT, description="The Slack workspace (team) id."),
         ),
-        surfaces=(SurfaceSpec(name=SURFACE_SLACK, ingest=ingest, post=post, attach=attach),),
+        surfaces=(
+            SurfaceSpec(
+                name=SURFACE_SLACK,
+                routes=(SurfaceRoute(method="POST", path="", handler=ingest),),
+                post=post,
+                attach=attach,
+            ),
+        ),
     )

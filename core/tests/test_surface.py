@@ -23,14 +23,17 @@ from selfhost.ext.surface import (
     WRITEBACK_PENDING,
     SharedArtifact,
     SurfaceContext,
+    SurfaceRoute,
     SurfaceSpec,
     Writeback,
     WritebackPoller,
     workspace_key,
 )
+from selfhost.hub import InProcessHub
 from selfhost.schema import tables
 from selfhost.schema.records import TerminalFrame
 from selfhost.surfaces.admission import Admission, AdmissionInvoker
+from selfhost.surfaces.hub_tail import HubTailer
 
 SURFACE = "test_surface"
 
@@ -108,6 +111,7 @@ def _context(workspace_id: UUID, dbos: StubDbos, blob: FilesystemBlobStore) -> S
         surface=SURFACE,
         blob=blob,
         _invoker=AdmissionInvoker(workspace_id=workspace_id, admission=Admission(dbos=dbos)),
+        _tailer=HubTailer(hub=InProcessHub()),
         _credentials=store,
         _artifact_token_secret="artifact-token-secret",
         _public_base_url="https://selfhost.example.test",
@@ -212,7 +216,10 @@ def _poller(
     workspace_id: UUID, surface: RecordingSurface, blob: FilesystemBlobStore
 ) -> tuple[WritebackPoller, RecordingSurface]:
     spec = SurfaceSpec(
-        name=SURFACE, ingest=_unused_ingest, post=surface.post, attach=surface.attach
+        name=SURFACE,
+        routes=(SurfaceRoute(method="POST", path="", handler=_unused_ingest),),
+        post=surface.post,
+        attach=surface.attach,
     )
     context = _context(workspace_id, StubDbos(), blob)
     poller = WritebackPoller(

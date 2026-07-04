@@ -139,20 +139,10 @@ class SourceEntry(BaseModel):
     config: SourceConfig
 
 
-class WebSurfaceConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    enable: bool = False
-
-
-class SurfacesConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    web: WebSurfaceConfig | None = None
-
-
 class ArtifactsConfig(BaseModel):
-    """The HMAC secret that signs artifact delivery tokens. `share_file` mints with it and the web
-    surface verifies with it, so it belongs to neither consumer: `token_secret_env` names the env
-    var holding the secret."""
+    """The HMAC secret that signs artifact delivery tokens. `share_file` mints with it and core's
+    artifact route verifies with it, so it belongs to neither consumer: `token_secret_env` names the
+    env var holding the secret."""
 
     model_config = ConfigDict(extra="forbid")
     token_secret_env: str = "SELFHOST_ARTIFACT_TOKEN_SECRET"
@@ -202,7 +192,6 @@ class Config(BaseModel):
     sandbox: SandboxConfig = SandboxConfig()
     ext: ExtConfig = ExtConfig()
     sources: tuple[SourceEntry, ...] = ()
-    surfaces: SurfacesConfig = SurfacesConfig()
     artifacts: ArtifactsConfig = ArtifactsConfig()
     hub: HubConfig = HubConfig()
     browser: BrowserConfig = BrowserConfig()

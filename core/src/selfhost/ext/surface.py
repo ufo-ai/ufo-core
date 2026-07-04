@@ -2,27 +2,39 @@
 
 A surface is trusted infrastructure — it asserts a member's identity and admits turns as that member
 — so unlike the scoped `ExtensionContext` (a ScopedStore, declared credential slots, a read-only
-trajectory corpus), a `SurfaceContext` carries the three privileged capabilities a surface needs and
-nothing a scoped extension may hold: (1) admit a turn onto the durable queue (the same `invoke`
-scheduled tasks and the eval harness call), registering it for writeback; (2) resolve an external id
-to a member and a conversation, linking a `surface_identity` on first contact; (3) stream an inbound
-file into the conversation's workspace subtree. A surface declares its ingest and its two-phase
-writeback delivery (`post` then best-effort `attach`) as a `SurfaceSpec`; core mounts the ingest and
-runs the `WritebackPoller` that drives delivery — at-least-once, because the hub is lossy, so the
-reply is posted from the durable terminal frame, never a live frame."""
+trajectory corpus), a surface context carries privileged capabilities a scoped extension may not
+hold: admit a turn onto the durable queue (the same `invoke` scheduled tasks and the eval harness
+call), resolve an external id to a member and a conversation (linking a `surface_identity` on first
+contact), and read the workspace's credential slots in-process.
+
+One `SurfaceSpec`/`SurfaceContext` expresses both shapes of surface, differing only in how the reply
+gets back and thus in how much of the one context each uses:
+
+- A **durable** surface (Slack) is delivered to — its member is elsewhere. It admits with writeback
+  and declares a two-phase delivery (`post` then best-effort `attach`); core runs the
+  `WritebackPoller` that delivers at-least-once from the durable terminal frame (the hub is lossy,
+  so never from a live frame). It declares one route (its ingest) and never tails.
+- A **live** surface (web; core's built-in CLI is the twin) holds the member's connection open and
+  tails the turn's frames off the hub as they publish, so it admits with `writeback=False` and no
+  poller row is written. It declares its own routes (page, admit, SSE tail, spend) and reaches the
+  hub through the injected `TurnTailer`.
+
+The poller only ever processes turns that registered a writeback, so it is a no-op for a live
+surface — the efficient downgrade, not a second seam."""
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from starlette.requests import Request
 from starlette.responses import Response
 
+from selfhost.accounting import SpendReport, SpendRollup
 from selfhost.artifact_token import (
     ARTIFACT_DOWNLOAD_PATH,
     ARTIFACT_TOKEN_TTL_SECONDS,
@@ -31,6 +43,7 @@ from selfhost.artifact_token import (
 from selfhost.blob import BlobStore
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
+from selfhost.hub import LiveFrame
 from selfhost.o11y import log
 from selfhost.schema import tables
 from selfhost.schema.records import DEFAULT_AGENT_NAME, TerminalFrame, TerminalStatus
@@ -50,6 +63,15 @@ class TurnInvoker(Protocol):
         message: str,
         idempotency_key: str | None = None,
     ) -> UUID: ...
+
+
+class TurnTailer(Protocol):
+    """Tail one turn's live frames until it ends, each frame with its replay cursor — the live
+    surface's read half, mirroring `TurnInvoker`'s write half. The concrete tailer binds the process
+    hub and ends the stream on the durable terminal-or-parked state; a live surface never touches
+    the hub directly, it reaches it through this one primitive."""
+
+    def tail(self, turn_id: UUID, since: str = "") -> AsyncIterator[tuple[str, LiveFrame]]: ...
 
 
 WRITEBACK_PENDING = "pending"
@@ -104,21 +126,28 @@ class Writeback:
 
 @dataclass(frozen=True)
 class SurfaceContext:
-    """The privileged handle a surface's handlers receive. `blob` and the admit/identity reach
-    are deliberately unscoped for a workspace's trusted surface — the distinction from a scoped
-    extension context, which never admits a turn or asserts identity. `credential` reads the surface
-    workspace's slots (the bot token, the signing secret) in-process, never through the sandbox
-    proxy."""
+    """The privileged handle a surface's route handlers receive — one context spanning both delivery
+    modes. `blob` and the admit/identity reach are deliberately unscoped for a workspace's trusted
+    surface (the distinction from a scoped extension context, which never admits a turn or asserts
+    identity). A **durable** surface (Slack) admits with writeback and delivers through the poller
+    and `artifact_link`; a **live** surface (web; core's CLI is the built-in twin) admits without
+    writeback and delivers by `tail`-ing the turn's frames off the hub in its own SSE route, reading
+    `turn_owner` to gate a tail and `spend_rollup` for a spend view. Each calls only what it needs.
+    `credential` reads the surface workspace's slots in-process (never through the sandbox proxy); a
+    surface declaring no slots holds no store and never calls it."""
 
     workspace_id: UUID
     surface: str
     blob: BlobStore
     _invoker: TurnInvoker
-    _credentials: CredentialStore
+    _tailer: TurnTailer
+    _credentials: CredentialStore | None
     _artifact_token_secret: str
     _public_base_url: str | None
 
     async def credential(self, slot: str) -> str:
+        if self._credentials is None:
+            raise RuntimeError(f"surface {self.surface!r} reads a credential but holds no store")
         return await self._credentials.get(self.workspace_id, slot)
 
     def artifact_link(self, artifact: SharedArtifact) -> str | None:
@@ -148,18 +177,48 @@ class SurfaceContext:
             raise RuntimeError(f"no {DEFAULT_AGENT_NAME!r} agent for surface {self.surface!r}")
         return agent.id
 
-    async def linked_member(self, external_id: str) -> UUID | None:
+    async def _identity_member(self, surface: str, external_id: str) -> UUID | None:
+        """The member a surface's external id is linked to, or None. `linked_member` reads this
+        surface's own identity; `adopt_identity` reads a peer surface's."""
         async with workspace_tx() as connection:
             linked = (
                 await connection.execute(
                     sa.select(tables.surface_identity.c.member_id).where(
                         tables.surface_identity.c.workspace_id == self.workspace_id,
-                        tables.surface_identity.c.surface == self.surface,
+                        tables.surface_identity.c.surface == surface,
                         tables.surface_identity.c.external_id == external_id,
                     )
                 )
             ).one_or_none()
         return None if linked is None else linked.member_id
+
+    async def linked_member(self, external_id: str) -> UUID | None:
+        return await self._identity_member(self.surface, external_id)
+
+    async def adopt_identity(self, peer_surface: str, external_id: str) -> UUID | None:
+        """Link this surface's external id to the member a peer surface already knows it by, so one
+        human spans both surfaces under one member and one memory subject — web's session token,
+        whose canonical home is the CLI, adopts the member the same digest already names there. A
+        peer with no such identity is unknown and leaves this surface unlinked; a lost race
+        collapses on the identity's primary key."""
+        peer_member = await self._identity_member(peer_surface, external_id)
+        if peer_member is None:
+            return None
+        try:
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.insert(tables.surface_identity).values(
+                        workspace_id=self.workspace_id,
+                        member_id=peer_member,
+                        surface=self.surface,
+                        external_id=external_id,
+                        created_at=sa.func.now(),
+                        updated_at=sa.func.now(),
+                    )
+                )
+        except sa.exc.IntegrityError:
+            log("surface.identity_adopt_race", surface=self.surface, external_id=external_id)
+        return peer_member
 
     async def link_member(self, external_id: str, email: str) -> UUID | None:
         """Link this surface's external id to the workspace member whose email matches, the first
@@ -230,13 +289,21 @@ class SurfaceContext:
         agent_id: UUID,
         body: str,
         idempotency_key: str | None = None,
+        writeback: bool = True,
     ) -> UUID:
-        """Admit an inbound message onto the durable turn queue and register it for writeback. A
-        redelivery deduped to the turn already admitted joins it — the writeback insert hits the
-        primary key the poller already owns, so the collision is dropped, not doubled."""
+        """Admit an inbound message onto the durable turn queue and return its turn id. A durable
+        surface admits with `writeback=True` (the default) and registers the turn for the poller to
+        deliver; a live surface admits with `writeback=False` and delivers by tailing the hub in its
+        own route, so no poller row is written — the poller only ever processes turns that
+        registered one, which is the efficient downgrade, not a second delivery path. A redelivery
+        deduped to
+        the turn already admitted joins it; the writeback insert hits the primary key the poller
+        already owns, so the collision is dropped, not doubled."""
         turn_id = await self._invoker.invoke(
             conversation_id, agent_id, body, idempotency_key=idempotency_key
         )
+        if not writeback:
+            return turn_id
         try:
             async with workspace_tx() as connection:
                 await connection.execute(
@@ -252,6 +319,30 @@ class SurfaceContext:
             log("surface.writeback_exists", turn_id=str(turn_id))
         return turn_id
 
+    async def turn_owner(self, turn_id: UUID) -> UUID | None:
+        """The member whose conversation owns a turn, or None when no such turn exists — the check a
+        live surface gates its per-turn tail on, so a member cannot tail another member's turn."""
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(tables.conversation.c.member_id)
+                    .select_from(tables.turn.join(tables.conversation))
+                    .where(tables.turn.c.id == turn_id)
+                )
+            ).one_or_none()
+        return None if row is None else row.member_id
+
+    def tail(self, turn_id: UUID, since: str = "") -> AsyncIterator[tuple[str, LiveFrame]]:
+        """Tail a turn's live frames off the hub until it ends — a live surface streams these to the
+        member's held connection (SSE), reaching the hub only through the injected tailer."""
+        return self._tailer.tail(turn_id, since)
+
+    async def spend_rollup(self, window_seconds: int) -> SpendReport:
+        """The workspace spend rollup over a window — the same sums `selfhost spend` prints — for a
+        surface's spend view."""
+        async with workspace_tx() as connection:
+            return await SpendRollup(self.workspace_id).read(connection, window_seconds)
+
     async def write_workspace_file(
         self, conversation_id: UUID, rel: str, chunks: AsyncIterator[bytes]
     ) -> None:
@@ -261,23 +352,38 @@ class SurfaceContext:
         await self.blob.put_stream(workspace_key(conversation_id, rel), chunks)
 
 
-IngestHandler = Callable[[SurfaceContext, Request], Awaitable[Response]]
+RouteHandler = Callable[[SurfaceContext, Request], Awaitable[Response]]
 PostHandler = Callable[[SurfaceContext, Writeback], Awaitable[str]]
 AttachHandler = Callable[[SurfaceContext, Writeback, str], Awaitable[None]]
 
 
 @dataclass(frozen=True)
+class SurfaceRoute:
+    """One HTTP route a surface serves. Core mounts `handler` for `method` at
+    `/surface/<name>/<path>` bound to the surface's `SurfaceContext` (the handler reads path and
+    query params off the Request and returns the Response). A durable surface declares one route
+    (its ingest, `path=""`); a live surface declares several — chat page, admit, SSE tail, spend."""
+
+    method: Literal["GET", "POST"]
+    path: str
+    handler: RouteHandler
+
+
+@dataclass(frozen=True)
 class SurfaceSpec:
-    """One surface an extension registers. Core mounts `ingest` at `/surface/<name>` bound to the
-    surface's `SurfaceContext`, and the writeback poller drives delivery in two phases: `post` sends
-    the reply and returns its durable reference (recorded before any upload, so a recovered delivery
-    skips the re-post), then `attach` uploads the turn's shared files into that reply — best effort,
-    so a rejected file never re-posts the reply or blocks the rest."""
+    """One surface an extension registers. Core mounts each of `routes` under `/surface/<name>`
+    bound to the surface's `SurfaceContext`. A **durable** surface also declares its two-phase
+    writeback delivery: `post` sends the reply and returns its durable reference (recorded before
+    any upload, so a recovered delivery skips the re-post), then `attach` uploads the turn's shared
+    files into that reply — best effort, so a rejected file never re-posts the reply or blocks the
+    rest; the poller drives these for every turn its ingest admitted with writeback. A **live**
+    surface omits them (`post=attach=None`): it admits without writeback and delivers by tailing the
+    hub in its own route, so the poller never sees its turns."""
 
     name: str
-    ingest: IngestHandler
-    post: PostHandler
-    attach: AttachHandler
+    routes: tuple[SurfaceRoute, ...]
+    post: PostHandler | None = None
+    attach: AttachHandler | None = None
 
 
 @dataclass(frozen=True)
@@ -367,6 +473,10 @@ class WritebackPoller:
             await self._mark_delivered(turn_id)
             return
         spec, context = entry
+        if spec.post is None or spec.attach is None:
+            log("surface.writeback_no_delivery", turn_id=str(turn_id), surface=surface_name)
+            await self._mark_delivered(turn_id)
+            return
         try:
             if reply_ref is None:
                 reply_ref = await spec.post(context, writeback)

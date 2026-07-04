@@ -7,6 +7,7 @@ sample's own recorded rows back through `ScopedStore`. The negative cases ride a
 slot is refused, and a second workspace can reach none of the first's rows. Breaking the sample
 breaks this probe, and a Manifest field the sample stops registering breaks the conformance gate."""
 
+import asyncio
 import json
 from dataclasses import dataclass, field, fields
 from pathlib import Path
@@ -812,7 +813,9 @@ async def test_sample_surface_admits_links_streams_and_delivers(db: None, tmp_pa
     blob = FilesystemBlobStore(root=tmp_path)
     dbos = _StubDbos()
     app = FastAPI()
-    _mount_surfaces(app, (manifest,), workspace_id, _credential_store(), blob, dbos, "", None)
+    _mount_surfaces(
+        app, (manifest,), workspace_id, _credential_store(), blob, InProcessHub(), dbos, "", None
+    )
     body = json.dumps(
         {"external_id": "ext-1", "email": email, "message": "hello", "inbound_text": "note!"}
     )
@@ -884,6 +887,89 @@ async def test_sample_surface_admits_links_streams_and_delivers(db: None, tmp_pa
     assert delivered.reply_ref == sample.SURFACE_POST_REF
     round_tripped = await blob.get(f"{sample.SURFACE_DELIVERED_PREFIX}/{turn_id}/out.txt")
     assert round_tripped == b"shared-bytes"
+
+
+async def test_sample_surface_live_admit_tails_and_stays_off_writeback(
+    db: None, tmp_path: Path
+) -> None:
+    """The seam's LIVE mode end to end through the same probe surface: the live route adopts a
+    member from a peer surface's identity, admits WITHOUT writeback, and reads back turn owner and
+    spend;
+    the contrast against the durable ingest is that NO writeback row is written — the poller never
+    sees this turn. Then the tail route drives `ctx.tail` and streams the turn's terminal frame off
+    the hub, exercising the live delivery path a live surface uses instead of the poller."""
+    workspace_id, member_id, _email = await _surface_workspace()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.surface_identity).values(
+                workspace_id=workspace_id,
+                member_id=member_id,
+                surface=sample.SURFACE_PEER,
+                external_id="ext-live-1",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    manifest = _sample_manifest()
+    blob = FilesystemBlobStore(root=tmp_path)
+    dbos = _StubDbos()
+    app = FastAPI()
+    _mount_surfaces(
+        app, (manifest,), workspace_id, _credential_store(), blob, InProcessHub(), dbos, "", None
+    )
+    body = json.dumps({"external_id": "ext-live-1", "message": "hello"})
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://surface") as client:
+        admitted = await client.post(
+            f"/surface/{sample.SURFACE_NAME}/{sample.SURFACE_LIVE_PATH}", content=body
+        )
+        assert admitted.status_code == 200
+        result = admitted.json()
+        turn_id = UUID(result["turn_id"])
+
+        assert dbos.enqueued == [str(turn_id)]
+        assert result["owner"] == str(member_id)
+        assert result["spend_total_micro_usd"] == 0
+        async with workspace_tx() as connection:
+            turn = (
+                await connection.execute(
+                    sa.select(tables.turn.c.status).where(tables.turn.c.id == turn_id)
+                )
+            ).one()
+            adopted = (
+                await connection.execute(
+                    sa.select(tables.surface_identity.c.member_id).where(
+                        tables.surface_identity.c.surface == sample.SURFACE_NAME,
+                        tables.surface_identity.c.external_id == "ext-live-1",
+                    )
+                )
+            ).one()
+            writeback = (
+                await connection.execute(
+                    sa.select(tables.writeback.c.turn_id).where(
+                        tables.writeback.c.turn_id == turn_id
+                    )
+                )
+            ).one_or_none()
+        assert turn.status == "queued"
+        assert adopted.member_id == member_id
+        assert writeback is None
+
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.turn)
+                .where(tables.turn.c.id == turn_id)
+                .values(status="done", terminal={"status": "done", "text": "live done!"})
+            )
+        frames = []
+        async with asyncio.timeout(30):
+            async with client.stream(
+                "GET", f"/surface/{sample.SURFACE_NAME}/live/{turn_id}/stream"
+            ) as stream:
+                assert stream.status_code == 200
+                async for line in stream.aiter_lines():
+                    if line.strip():
+                        frames.append(json.loads(line))
+    assert any(frame.get("frame", {}).get("status") == "done" for frame in frames)
 
 
 def _vec(*axes: tuple[int, float]) -> tuple[float, ...]:

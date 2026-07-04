@@ -64,9 +64,9 @@ from selfhost.sandbox.session import Carrier, ProxyEndpoint
 from selfhost.schema import tables
 from selfhost.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION
 from selfhost.surfaces.admission import Admission, AdmissionInvoker
+from selfhost.surfaces.artifacts import router as artifacts_router
 from selfhost.surfaces.cli import CONNECT_CALLBACK_PATH, router
-from selfhost.surfaces.web import WebSurface
-from selfhost.surfaces.web import router as web_router
+from selfhost.surfaces.hub_tail import HubTailer
 
 PROXY_STARTUP_TIMEOUT_SECONDS = 30
 
@@ -134,7 +134,10 @@ def run() -> None:
     app.state.instance_id = instance_id
     app.state.workspace_id = workspace_id
     app.state.writeback_poller = None
+    app.state.blob = blob
+    app.state.artifact_token_secret = artifact_secret
     app.include_router(router)
+    app.include_router(artifacts_router)
     _mount_ext_routes(app, manifests, workspace_id, credentials, index, embed)
     _mount_surfaces(
         app,
@@ -142,11 +145,11 @@ def run() -> None:
         workspace_id,
         credentials,
         blob,
+        hub,
         dbos_client,
         artifact_secret,
         config.connect.public_base_url,
     )
-    _mount_web_surface(app, config, blob, hub, dbos_client, artifact_secret)
     log("serve.started", host=config.serve.host, port=config.serve.port)
     try:
         uvicorn.run(app, host=config.serve.host, port=config.serve.port, log_level="warning")
@@ -345,76 +348,62 @@ def _mount_surfaces(
     workspace_id: UUID,
     credentials: CredentialStore | None,
     blob: BlobStore,
+    hub: Hub,
     dbos_client: DBOSClient,
     artifact_secret: str,
     public_base_url: str | None,
 ) -> None:
-    """Mount every installed surface's ingest at `/surface/<name>`, each request bound to that
-    surface's privileged SurfaceContext, and run one writeback poller over them all. A surface reads
-    its own credential slots (a bot token, a signing secret) in-process, so an installed surface
-    without a credential key set fails loud at boot rather than on the first event."""
+    """Mount every installed surface's routes under `/surface/<name>`, each request bound to that
+    surface's privileged SurfaceContext, and run one writeback poller over those that deliver by
+    writeback. A surface reads its own credential slots (a bot token, a signing secret) in-process,
+    so an installed surface whose extension declares slots without a credential key set fails loud
+    at boot rather than on the first event; a slotless surface (web) mounts with no key. A durable
+    surface (declaring `post`/`attach`) joins the poller; a live surface admits without writeback
+    and tails the hub in its own route, so the poller never sees its turns — the tailer is injected
+    the same way the admission invoker is."""
     invoker = AdmissionInvoker(workspace_id=workspace_id, admission=Admission(dbos=dbos_client))
+    tailer = HubTailer(hub=hub)
     registered: dict[str, tuple[SurfaceSpec, SurfaceContext]] = {}
     for manifest in manifests:
         for spec in manifest.surfaces:
-            if credentials is None:
+            if manifest.credentials and credentials is None:
                 raise RuntimeError(f"surface {spec.name!r} needs a credential key but none is set")
             context = SurfaceContext(
                 workspace_id=workspace_id,
                 surface=spec.name,
                 blob=blob,
                 _invoker=invoker,
+                _tailer=tailer,
                 _credentials=credentials,
                 _artifact_token_secret=artifact_secret,
                 _public_base_url=public_base_url,
             )
-            registered[spec.name] = (spec, context)
+            if spec.post is not None:
+                registered[spec.name] = (spec, context)
+            for route in spec.routes:
 
-            async def endpoint(
-                request: Request, handler=spec.ingest, surface_context=context
-            ) -> Response:
-                return await handler(surface_context, request)
+                async def endpoint(
+                    request: Request, handler=route.handler, surface_context=context
+                ) -> Response:
+                    return await handler(surface_context, request)
 
-            app.add_route(f"/surface/{spec.name}", endpoint, methods=["POST"])
+                app.add_route(
+                    f"/surface/{spec.name}/{route.path}".rstrip("/"),
+                    endpoint,
+                    methods=[route.method],
+                )
     if registered:
         app.state.writeback_poller = WritebackPoller(
             workspace_id=workspace_id, worker_id=uuid4().hex, surfaces=registered
         )
 
 
-def _mount_web_surface(
-    app: FastAPI,
-    config: Config,
-    blob: BlobStore,
-    hub: Hub,
-    dbos_client: DBOSClient,
-    artifact_secret: str,
-) -> None:
-    """Mount the web chat surface when the deploy enables it. The surface verifies artifact tokens
-    with the deploy's artifact secret — the same one `share_file` mints with — so an enabled web
-    surface without that env set fails loud at boot rather than on the first download."""
-    web = config.surfaces.web
-    if web is None or not web.enable:
-        return
-    if not artifact_secret:
-        raise RuntimeError(
-            f"web surface is enabled but {config.artifacts.token_secret_env!r} is unset"
-        )
-    app.state.web = WebSurface(
-        admission=Admission(dbos=dbos_client),
-        hub=hub,
-        blob=blob,
-        artifact_token_secret=artifact_secret,
-    )
-    app.include_router(web_router)
-
-
 @asynccontextmanager
 async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Run this instance's background loops for the life of the process: the heartbeat that keeps
     its runtime_instance row live — and retires it on graceful shutdown so peers see the seat free
-    at once — and, when a surface is installed, the writeback poller, the durable half of surface
-    delivery off the hub and off the turn loop."""
+    at once — and, when a durable surface is installed, the writeback poller, the durable half of
+    surface delivery off the hub and off the turn loop."""
     heartbeat = Heartbeat(instance_id=app.state.instance_id, workspace_id=app.state.workspace_id)
     tasks = [asyncio.create_task(heartbeat.run())]
     poller = app.state.writeback_poller

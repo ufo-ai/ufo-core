@@ -35,6 +35,7 @@ members = [
     "selfhost-ext-slack",
     "selfhost-ext-todos",
     "selfhost-ext-turbopuffer",
+    "selfhost-ext-web",
     "selfhost-pack-assistant",
     "selfhost-pack-sample",
 ]
@@ -2980,6 +2981,17 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "selfhost", editable = "core" },
 ]
+
+[[package]]
+name = "selfhost-ext-web"
+version = "0.1.0"
+source = { editable = "extensions/web" }
+dependencies = [
+    { name = "selfhost" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "selfhost", editable = "core" }]
 
 [[package]]
 name = "selfhost-pack-assistant"

@@ -22,7 +22,13 @@ from pydantic import BaseModel, JsonValue
 from selfhost.sdk.browser import BrowserSurface, FindCompleter
 from selfhost.sdk.connectors import OAuthAccount
 from selfhost.sdk.context import AgentChange, ExtensionContext
-from selfhost.sdk.http import JSONResponse, PlainTextResponse, Request, Response
+from selfhost.sdk.http import (
+    JSONResponse,
+    PlainTextResponse,
+    Request,
+    Response,
+    StreamingResponse,
+)
 from selfhost.sdk.hub import InProcessHub
 from selfhost.sdk.index import Chunk, EmbedClient, Hit, IndexScope
 from selfhost.sdk.jobs import JobSpec
@@ -57,7 +63,7 @@ from selfhost.sdk.sandbox import (
     SandboxSpec,
 )
 from selfhost.sdk.sources import SHARED_SUBJECT, Page, SourceAuth, SyncResult
-from selfhost.sdk.surfaces import SurfaceContext, SurfaceSpec, Writeback
+from selfhost.sdk.surfaces import SurfaceContext, SurfaceRoute, SurfaceSpec, Writeback
 from selfhost.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 
 NAME = "sample"
@@ -100,6 +106,10 @@ SURFACE_NAME = "sample_surface"
 SURFACE_INBOX_REL = "sample-inbox/note.txt"
 SURFACE_DELIVERED_PREFIX = "sample-delivered"
 SURFACE_POST_REF = "sample-posted-ref"
+SURFACE_LIVE_PATH = "live"
+SURFACE_LIVE_STREAM_PATH = "live/{turn_id}/stream"
+SURFACE_PEER = "sample_peer"
+SURFACE_SPEND_WINDOW_SECONDS = 3600
 SOURCE_BACKEND = "sample_source"
 SOURCE_REF = "sample/handbook"
 SOURCE_TOPIC = "the sample source syncs a page about migrating the orbital widget fleet"
@@ -421,6 +431,43 @@ async def _surface_attach(ctx: SurfaceContext, writeback: Writeback, reply_ref: 
         await ctx.blob.put_stream(delivered_key, ctx.blob.get_stream(artifact.blob_key))
 
 
+async def _surface_live_admit(ctx: SurfaceContext, request: Request) -> Response:
+    """Exercise the seam's LIVE mode on the one context: adopt a member from a peer surface's
+    identity, get-or-create the conversation, admit WITHOUT writeback (a live surface tails the hub
+    for its reply), then read back the turn's owner and the workspace spend rollup. The conformance
+    test asserts no writeback row exists for this turn — the live/durable contrast against
+    `_surface_ingest`, which admits with writeback."""
+    args = SurfaceIngestInput.model_validate_json(await request.body())
+    member_id = await ctx.linked_member(args.external_id)
+    if member_id is None:
+        member_id = await ctx.adopt_identity(SURFACE_PEER, args.external_id)
+    conversation_id = await ctx.conversation_for(args.external_id, member_id)
+    agent_id = await ctx.default_agent()
+    turn_id = await ctx.admit(conversation_id, agent_id, args.message, writeback=False)
+    owner = await ctx.turn_owner(turn_id)
+    report = await ctx.spend_rollup(SURFACE_SPEND_WINDOW_SECONDS)
+    return JSONResponse(
+        {
+            "turn_id": str(turn_id),
+            "conversation_id": str(conversation_id),
+            "owner": "" if owner is None else str(owner),
+            "spend_total_micro_usd": report.total_micro_usd,
+        }
+    )
+
+
+async def _surface_live_stream(ctx: SurfaceContext, request: Request) -> Response:
+    """Drive the seam's `tail` capability: stream the turn's live frames off the hub as newline-
+    delimited JSON, ending on its durable terminal-or-parked state."""
+    turn_id = UUID(request.path_params["turn_id"])
+    return StreamingResponse(_surface_frames(ctx, turn_id), media_type="application/x-ndjson")
+
+
+async def _surface_frames(ctx: SurfaceContext, turn_id: UUID) -> AsyncIterator[bytes]:
+    async for _cursor, frame in ctx.tail(turn_id):
+        yield frame.model_dump_json().encode() + b"\n"
+
+
 @dataclass(frozen=True)
 class SampleModelClient:
     """The canned backend the sample's model provider builds: `complete` streams one text delta and
@@ -578,7 +625,17 @@ def manifest() -> Manifest:
         surfaces=(
             SurfaceSpec(
                 name=SURFACE_NAME,
-                ingest=_surface_ingest,
+                routes=(
+                    SurfaceRoute(method="POST", path="", handler=_surface_ingest),
+                    SurfaceRoute(
+                        method="POST", path=SURFACE_LIVE_PATH, handler=_surface_live_admit
+                    ),
+                    SurfaceRoute(
+                        method="GET",
+                        path=SURFACE_LIVE_STREAM_PATH,
+                        handler=_surface_live_stream,
+                    ),
+                ),
                 post=_surface_post,
                 attach=_surface_attach,
             ),

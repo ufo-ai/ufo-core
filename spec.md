@@ -86,7 +86,7 @@ terminal frame. A client's wait always ends — the terminal state commits on th
 - **Minimal built-in tools** — `bash`, `read`, `write`, `edit`,
   `ask_user`, `spawn_subagent`, `load_skill`, `share_file`. Everything else arrives via extensions.
   Two tools where one would do is a defect. `share_file` ports the shipped design: byte custody in
-  the blob store, a TTL-bound token URL served by the web surface — no token, no bytes.
+  the blob store, a TTL-bound token URL served by core's artifact route — no token, no bytes.
 
 ## Sandboxing
 
@@ -131,7 +131,7 @@ Manifest registers (each optional):
 | `hooks` | Turn-lifecycle policy filters — `pre_tool_use`/`post_tool_use`/`on_inbound` handlers, scoped like a job, that observe, deny, modify, or inject over the tools grants already admit; a runtime filter on top of grants, never a second grant path. Distinct axis from `triggers` (data-plane). |
 | `jobs` | Recurring/one-time background work. |
 | `routes` | HTTP endpoints under `/ext/<name>/` (webhooks, OAuth callbacks, plugin UIs). |
-| `surfaces` | A chat surface on the privileged surface seam: an ingest mounted at `/surface/<name>` plus two-phase writeback delivery (`post` then `attach`). Slack is one. |
+| `surfaces` | A chat surface on the one privileged surface seam: its `SurfaceRoute`s mounted under `/surface/<name>`. A **durable** surface (Slack) admits with writeback and declares two-phase delivery (`post` then `attach`) the poller drives; a **live** surface (web) admits without writeback and tails the hub over SSE in its own route. Core's CLI is the built-in live twin. |
 | `credentials` | Named BYOK slots the workspace must fill (drives onboarding). |
 | `onboarding` | Steps contributed to the workspace/pack onboarding flow. |
 | `models` | Model providers behind `ModelClient` (OpenRouter, local runtimes). |
@@ -178,23 +178,30 @@ backend, Composio connectors, and Exa research.
 
 ## Surfaces
 
-Core owns the **surface seam**, not every surface. A surface is trusted infrastructure — it asserts
+Core owns **one surface seam**, not every surface. A surface is trusted infrastructure — it asserts
 a member's identity and admits turns as that member — so its `SurfaceContext` is deliberately
-privileged (distinct from the scoped extension context): the three capabilities are (1) **admit** an
-inbound message onto the durable turn queue (the one `invoke` boundary scheduled tasks and the eval
-harness also call, so the spend cap is evaluated once), (2) **identity** resolution — an external id
-→ member + conversation, provisioning and linking a `surface_identity` on first contact, (3) durable
-**writeback** — a `WritebackPoller` delivers the terminal reply at-least-once (the hub is lossy),
-with attachments and rich rendering. Delivery is two-phase: `post` returns the reply's durable
-reference (recorded before any upload), then `attach` streams the turn's shared files into that
-reply. An extension registers a `surfaces` Manifest point; core mounts its ingest at
-`/surface/<name>` and drives the poller.
+privileged (distinct from the scoped extension context): **admit** an inbound message onto the
+durable turn queue (the one `invoke` boundary scheduled tasks and the eval harness also call, so the
+spend cap is evaluated once), **identity** resolution (an external id → member + conversation,
+linking a `surface_identity` on first contact, and `adopt_identity` to span a member across
+surfaces), plus `tail`/`turn_owner`/`spend_rollup` for a live view. An extension registers a
+`surfaces` Manifest point; core mounts its `SurfaceRoute`s under `/surface/<name>`, each bound to the
+one context. The seam supports two delivery modes; a surface uses only the subset it needs:
 
-| Surface | Home | Identity | Conversation key |
-|---|---|---|---|
-| CLI | core | member token | session (private) |
-| Web | core | web session → member | session (private) |
-| Slackbot | `extensions/slack` | Slack user → linked member | channel:thread_ts (shared) |
+- **Durable** (Slack) — the member is elsewhere, so admission registers a writeback and a
+  `WritebackPoller` delivers the terminal reply at-least-once (the hub is lossy), two-phase: `post`
+  returns the reply's durable reference (recorded before any upload), then `attach` streams the
+  turn's shared files into that reply, with rich rendering.
+- **Live** (web; core's CLI is the built-in twin) — the member's connection is held open, so
+  admission skips the writeback and the surface delivers by `tail`-ing the turn's frames off the hub
+  over SSE in its own route. The poller only processes turns that registered a writeback, so it is a
+  no-op for a live surface — the efficient downgrade, not a second seam.
+
+| Surface | Home | Delivery | Identity | Conversation key |
+|---|---|---|---|---|
+| CLI | core | live (hub tail) | member token | session (private) |
+| Web | `extensions/web` | live (hub tail) | web session → member (adopted from CLI) | session (private) |
+| Slackbot | `extensions/slack` | durable (writeback) | Slack user → linked member | channel:thread_ts (shared) |
 
 Two-way attachments stream end to end, never buffering a whole file: an inbound Slack file streams
 from `url_private` into the conversation's workspace before the turn runs; a shared file
@@ -222,7 +229,7 @@ keys come from `credential` slots or deploy config.
 
 One declarative file, `selfhost.toml`: Postgres URL, blob store (filesystem root or S3 endpoint),
 model keys (env refs), enabled extensions + versions, the active pack (`[pack] name`), surface
-config (Slack app, web host), sandbox carrier, stream hub, OTLP export target, extension-store
+config (Slack app), sandbox carrier, stream hub, OTLP export target, extension-store
 toggle, spend defaults.
 
 ## Running it
