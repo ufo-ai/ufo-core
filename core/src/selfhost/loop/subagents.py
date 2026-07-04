@@ -119,11 +119,13 @@ class Subagents:
         ends its own turn and calls this when it has no other independent work, completing the
         background-spawn loop. Each id is polled through the same terminal read a foreground spawn
         awaits, so a child that has already finished returns at once."""
-        return tuple(
-            SubagentStatus(turn_id=turn_id, status=terminal.status, text=terminal.text)
-            for turn_id in turn_ids
-            for terminal in (await self._await_terminal(turn_id),)
-        )
+        statuses = []
+        for turn_id in turn_ids:
+            terminal = await self._await_terminal(turn_id)
+            statuses.append(
+                SubagentStatus(turn_id=turn_id, status=terminal.status, text=terminal.text)
+            )
+        return tuple(statuses)
 
     async def cancel(self, turn_id: UUID) -> SubagentStatus:
         """Cancel a running child by cancelling its durable workflow, then report the turn's current

@@ -119,7 +119,8 @@ class SourceBackend(Protocol[ConfigT]):
     driver records the run skipped, not failed — no pages commit, nothing is tombstoned — and
     reschedules at the normal interval."""
 
-    config_model: type[ConfigT]
+    @property
+    def config_model(self) -> type[ConfigT]: ...
 
     async def fetch(self, config: ConfigT, cursor: str | None, auth: SourceAuth) -> SyncResult: ...
 

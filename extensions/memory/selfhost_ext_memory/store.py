@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.sql.elements import ColumnElement
 
 from selfhost.sdk.context import ExtensionContext, ScopedStore
 from selfhost.sdk.index import (
@@ -364,7 +365,7 @@ class MemoryStore:
         if not fused:
             return ()
         ids = [UUID(hit.owner_id) for hit in fused]
-        conditions = [mem_page.c.page_id.in_(ids)]
+        conditions: list[ColumnElement[bool]] = [mem_page.c.page_id.in_(ids)]
         if start is not None:
             conditions.append(mem_page.c.created_at >= start)
         if end is not None:
@@ -464,7 +465,7 @@ class MemoryStore:
         if not fused:
             return ()
         ids = [UUID(hit.owner_id) for hit in fused]
-        conditions = [
+        conditions: list[ColumnElement[bool]] = [
             memory_item.c.id.in_(ids),
             memory_item.c.superseded_by.is_(None),
         ]

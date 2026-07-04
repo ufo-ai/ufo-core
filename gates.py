@@ -93,7 +93,7 @@ def _role_of(module: str) -> str | None:
 
 
 def _imported_modules(tree: ast.Module) -> list[str]:
-    modules = []
+    modules: list[str] = []
     for node in ast.walk(tree):
         match node:
             case ast.Import(names=aliases):
@@ -174,7 +174,8 @@ def _sample_declared_points(trees: dict[Path, ast.Module]) -> set[str] | None:
                 declared = {
                     keyword.arg
                     for keyword in keywords
-                    if keyword.arg not in (None, "name", "version")
+                    if keyword.arg is not None
+                    and keyword.arg not in ("name", "version")
                     and not (isinstance(keyword.value, ast.Tuple) and not keyword.value.elts)
                 }
     return declared

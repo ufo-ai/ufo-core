@@ -166,14 +166,14 @@ async def _computer(ctx: ToolContext, args: ComputerInput) -> ToolResult:
         screenshot = _required_str(reply.get("screenshot_base64"), "screenshot_base64")
         await ctx.sandbox.write_file(path, base64.b64decode(screenshot))
         reply["screenshot_path"] = path
-    screenshot = reply.get("screenshot_base64")
-    if not isinstance(screenshot, str) or not screenshot:
+    screenshot_base64 = reply.get("screenshot_base64")
+    if not isinstance(screenshot_base64, str) or not screenshot_base64:
         return _json_result(reply)
     rest = {key: value for key, value in reply.items() if key != "screenshot_base64"}
     return ToolResult(
         content=(
             TextContent(text=json.dumps(rest)),
-            ImageContent(media_type=SCREENSHOT_MEDIA_TYPE, data=screenshot),
+            ImageContent(media_type=SCREENSHOT_MEDIA_TYPE, data=screenshot_base64),
         )
     )
 

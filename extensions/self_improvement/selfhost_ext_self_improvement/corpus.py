@@ -60,6 +60,7 @@ def first_tool_error(messages: tuple[Message, ...]) -> tuple[str, str] | None:
             if isinstance(block, ToolResultBlock) and block.is_error:
                 name = names.get(block.tool_use_id)
                 if name:
+                    assert isinstance(block.content, str), "an error result is always plain text"
                     return name, block.content
     return None
 

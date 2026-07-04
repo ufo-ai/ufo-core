@@ -7,10 +7,12 @@ serve out past the single instance the in-process hub allows."""
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from typing import cast
 from uuid import UUID
 
 from pydantic import BaseModel
 from redis.asyncio import Redis
+from redis.typing import StreamEntry, XReadResponse
 
 from selfhost.sdk.hub import (
     CostTick,
@@ -47,12 +49,27 @@ def frame_payload(frame: LiveFrame) -> dict[str, object]:
 
 
 def frame_from_payload(payload: dict[str, object]) -> LiveFrame:
-    return _TYPE_BY_KIND[payload["kind"]].model_validate(payload["data"])
+    kind = payload["kind"]
+    if not isinstance(kind, str) or kind not in _TYPE_BY_KIND:
+        raise ValueError(f"unknown live-frame kind: {kind!r}")
+    return cast(LiveFrame, _TYPE_BY_KIND[kind].model_validate(payload["data"]))
 
 
 def _stream_id(entry_id: str) -> tuple[int, int]:
     ms, _, seq = entry_id.partition("-")
     return int(ms), int(seq or 0)
+
+
+def _stream_entries(batch: XReadResponse) -> list[StreamEntry]:
+    """`xread` against a RESP2 connection always answers `list[[stream, entries]]` — never the
+    dict shape RESP3 would use — so an unexpected shape fails loud rather than misreading a
+    stream name as an entry."""
+    if not batch:
+        return []
+    if not isinstance(batch, list):
+        raise TypeError(f"expected a RESP2 XREAD list response, got {type(batch).__name__}")
+    entries: list[StreamEntry] = batch[0][1]
+    return entries
 
 
 @dataclass(frozen=True)
@@ -83,18 +100,22 @@ class RedisStreamHub:
         stream = self._stream(turn_id)
         last = cursor or "0"
         while True:
-            batch = await self.client.xread({stream: last}, count=SUBSCRIBE_BATCH)
-            entries = batch[0][1] if batch else []
+            entries = _stream_entries(
+                await self.client.xread({stream: last}, count=SUBSCRIBE_BATCH)
+            )
             if not entries:
-                batch = await self.client.xread(
-                    {stream: last}, count=SUBSCRIBE_BATCH, block=SUBSCRIBE_BLOCK_MS
+                entries = _stream_entries(
+                    await self.client.xread(
+                        {stream: last}, count=SUBSCRIBE_BATCH, block=SUBSCRIBE_BLOCK_MS
+                    )
                 )
-                entries = batch[0][1] if batch else []
                 if not entries:
                     continue
             for entry_id, fields in entries:
-                last = entry_id
-                yield str(entry_id), frame_from_payload(json.loads(fields["frame"]))
+                if entry_id is None or fields is None:
+                    continue
+                last = str(entry_id)
+                yield last, frame_from_payload(json.loads(fields["frame"]))
 
     async def covers(self, turn_id: UUID, cursor: str) -> bool:
         if not cursor:

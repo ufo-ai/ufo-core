@@ -254,8 +254,12 @@ def blob_store_for(config: BlobConfig) -> FilesystemBlobStore | S3BlobStore:
     """Build the configured backend; BlobConfig validation guarantees field completeness."""
     match config.backend:
         case "filesystem":
+            if config.root is None:
+                raise ValueError("blob.root is required for the filesystem backend")
             return FilesystemBlobStore(root=config.root)
         case "s3":
+            if config.bucket is None:
+                raise ValueError("blob.bucket is required for the s3 backend")
             return S3BlobStore(
                 bucket=config.bucket, endpoint_url=config.endpoint_url, region=config.region
             )

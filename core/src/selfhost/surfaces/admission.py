@@ -24,12 +24,13 @@ from selfhost.schema.records import (
     TURN_QUEUE_NAME,
     TURN_WORKFLOW_NAME,
     TerminalFrame,
+    TerminalStatus,
     TurnStatus,
     turn_id_for,
 )
 
 QUEUED: TurnStatus = "queued"
-CANCELLED: TurnStatus = "cancelled"
+CANCELLED: TerminalStatus = "cancelled"
 
 
 @dataclass(frozen=True)

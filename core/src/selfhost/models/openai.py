@@ -4,6 +4,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from typing import Any
 
 import openai
 
@@ -145,7 +146,7 @@ class OpenAIClient:
             tool_call_ids: dict[int, str] = {}
             usage: Usage | None = None
             finish_reason: str | None = None
-            create_kwargs: dict[str, object] = {
+            create_kwargs: dict[str, Any] = {
                 "model": request.model,
                 "messages": openai_messages(request.system, request.messages),
                 "max_tokens": request.max_tokens,

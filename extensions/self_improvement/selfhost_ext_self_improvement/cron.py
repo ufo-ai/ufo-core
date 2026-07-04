@@ -19,9 +19,11 @@ from selfhost_ext_self_improvement.proposer import PromptProposer
 
 STABILITY_COUNT = 2
 CANDIDATE_KEY = "candidate:{agent_id}"
-EVALUATING = "evaluating"
-PROMOTED = "promoted"
-REJECTED = "rejected"
+
+CandidateStatus = Literal["evaluating", "promoted", "rejected"]
+EVALUATING: CandidateStatus = "evaluating"
+PROMOTED: CandidateStatus = "promoted"
+REJECTED: CandidateStatus = "rejected"
 
 
 class CandidateState(BaseModel):
@@ -34,7 +36,7 @@ class CandidateState(BaseModel):
     task: str
     held_out: tuple[str, ...]
     gate_passes: int = 0
-    status: Literal["evaluating", "promoted", "rejected"] = EVALUATING
+    status: CandidateStatus = EVALUATING
     proposal_id: str | None = None
 
 
@@ -119,7 +121,7 @@ class ImproveCron:
         key: str,
         candidate: CandidateState,
         *,
-        status: str,
+        status: CandidateStatus,
         gate_passes: int,
         proposal_id: str | None = None,
     ) -> None:

@@ -3,6 +3,7 @@
 import logging
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from typing import cast
 from uuid import UUID
 
 from opentelemetry import metrics, trace
@@ -62,8 +63,11 @@ def init_o11y(otlp_endpoint: str | None) -> None:
 @contextmanager
 def turn_span(turn_id: UUID, conversation_id: UUID) -> Iterator[Span]:
     """Open the SERVER span wrapping one durable turn."""
-    attributes = redact_payload(
-        {"selfhost.turn_id": str(turn_id), "selfhost.conversation_id": str(conversation_id)}
+    attributes = cast(
+        dict[str, str],
+        redact_payload(
+            {"selfhost.turn_id": str(turn_id), "selfhost.conversation_id": str(conversation_id)}
+        ),
     )
     tracer = trace.get_tracer(INSTRUMENTATION_NAME)
     with tracer.start_as_current_span("turn", kind=SpanKind.SERVER, attributes=attributes) as span:

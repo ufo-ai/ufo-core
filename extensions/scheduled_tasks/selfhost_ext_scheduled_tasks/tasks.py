@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 
 from pydantic import BaseModel
 
-from selfhost.sdk.context import ExtensionContext
+from selfhost.sdk.scheduling import ScheduleStore
 from selfhost.sdk.tools import TextContent, ToolContext, ToolResult
 from selfhost_ext_scheduled_tasks.cron import next_fire, validate_cron
 
@@ -34,10 +34,10 @@ class ListScheduledTasksInput(BaseModel):
     pass
 
 
-def _require_ext(ctx: ToolContext) -> ExtensionContext:
+def _require_scheduler(ctx: ToolContext) -> ScheduleStore:
     if ctx.ext is None or ctx.ext.scheduler is None:
         raise RuntimeError("schedule tools require the scheduled-tasks ExtensionContext and store")
-    return ctx.ext
+    return ctx.ext.scheduler
 
 
 def _slug(source: str) -> str:
@@ -48,9 +48,9 @@ def _slug(source: str) -> str:
 
 
 async def schedule_task(ctx: ToolContext, args: ScheduleTaskInput) -> ToolResult:
-    ext = _require_ext(ctx)
+    scheduler = _require_scheduler(ctx)
     schedule = validate_cron(args.schedule)
-    task = await ext.scheduler.create(
+    task = await scheduler.create(
         conversation_id=ctx.turn.conversation_id,
         agent_id=ctx.turn.agent_id,
         name=_slug(args.name or args.prompt),
@@ -73,8 +73,8 @@ async def schedule_task(ctx: ToolContext, args: ScheduleTaskInput) -> ToolResult
 
 
 async def cancel_scheduled_task(ctx: ToolContext, args: CancelScheduledTaskInput) -> ToolResult:
-    ext = _require_ext(ctx)
-    cancelled = await ext.scheduler.cancel(args.name)
+    scheduler = _require_scheduler(ctx)
+    cancelled = await scheduler.cancel(args.name)
     text = (
         f"Cancelled scheduled task {args.name!r}."
         if cancelled
@@ -84,8 +84,8 @@ async def cancel_scheduled_task(ctx: ToolContext, args: CancelScheduledTaskInput
 
 
 async def list_scheduled_tasks(ctx: ToolContext, args: ListScheduledTasksInput) -> ToolResult:
-    ext = _require_ext(ctx)
-    tasks = await ext.scheduler.list()
+    scheduler = _require_scheduler(ctx)
+    tasks = await scheduler.list()
     if not tasks:
         return ToolResult(content=(TextContent(text="No scheduled tasks."),))
     lines = [

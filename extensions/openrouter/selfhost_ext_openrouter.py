@@ -13,6 +13,7 @@ import asyncio
 import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from typing import Any
 
 import openai
 from openai.types.chat import ChatCompletionChunk
@@ -169,13 +170,13 @@ class OpenRouterModelClient:
 
     def _create_kwargs(
         self, request: ModelRequest, ignore_providers: frozenset[str]
-    ) -> dict[str, object]:
-        extra_body: dict[str, object] = {}
+    ) -> dict[str, Any]:
+        extra_body: dict[str, Any] = {}
         if request.reasoning != "off":
             extra_body["reasoning"] = {"effort": request.reasoning}
         if ignore_providers:
             extra_body["provider"] = {"ignore": sorted(ignore_providers)}
-        kwargs: dict[str, object] = {
+        kwargs: dict[str, Any] = {
             "model": openrouter_slug(request.model),
             "messages": openai_messages(request.system, request.messages),
             "max_tokens": request.max_tokens,

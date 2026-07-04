@@ -6,7 +6,7 @@ back. The production leg speaks the Messages API from a credential-slot key; a t
 deterministic stand-in against the same protocols."""
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 import anthropic
 
@@ -22,7 +22,7 @@ from selfhost.sdk.models import (
 MAX_OUTPUT_TOKENS = 2048
 PROVIDER_TIMEOUT_SECONDS = 60.0
 
-type ToolSchema = dict[str, object]
+type ToolSchema = dict[str, Any]
 
 
 class ModelLeg(Protocol):
@@ -45,7 +45,7 @@ class ReplayLeg(Protocol):
     ) -> ReplayTurn: ...
 
 
-def _wire_block(block: ContentBlock) -> dict[str, object]:
+def _wire_block(block: ContentBlock) -> dict[str, Any]:
     match block:
         case TextBlock(text=text):
             return {"type": "text", "text": text}
@@ -71,7 +71,7 @@ def _wire_block(block: ContentBlock) -> dict[str, object]:
             }
 
 
-def _wire_message(message: Message) -> dict[str, object]:
+def _wire_message(message: Message) -> dict[str, Any]:
     if isinstance(message.content, str):
         return {"role": message.role, "content": message.content}
     return {"role": message.role, "content": [_wire_block(block) for block in message.content]}
@@ -87,25 +87,27 @@ class AnthropicModelLeg:
     max_output_tokens: int = MAX_OUTPUT_TOKENS
 
     async def complete(self, system: str, messages: tuple[Message, ...]) -> str:
-        response = await self.client.messages.create(
-            model=self.model,
-            system=system,
-            max_tokens=self.max_output_tokens,
-            messages=[_wire_message(message) for message in messages],
-        )
+        create_kwargs: dict[str, Any] = {
+            "model": self.model,
+            "system": system,
+            "max_tokens": self.max_output_tokens,
+            "messages": [_wire_message(message) for message in messages],
+        }
+        response = await self.client.messages.create(**create_kwargs)
         return "".join(block.text for block in response.content if block.type == "text")
 
     async def turn(
         self, system: str, messages: tuple[Message, ...], tools: tuple[ToolSchema, ...]
     ) -> ReplayTurn:
-        extra = {"tools": list(tools)} if tools else {}
-        response = await self.client.messages.create(
-            model=self.model,
-            system=system,
-            max_tokens=self.max_output_tokens,
-            messages=[_wire_message(message) for message in messages],
-            **extra,
-        )
+        create_kwargs: dict[str, Any] = {
+            "model": self.model,
+            "system": system,
+            "max_tokens": self.max_output_tokens,
+            "messages": [_wire_message(message) for message in messages],
+        }
+        if tools:
+            create_kwargs["tools"] = list(tools)
+        response = await self.client.messages.create(**create_kwargs)
         text: list[str] = []
         content: list[ContentBlock] = []
         tool_uses: list[ToolUseBlock] = []

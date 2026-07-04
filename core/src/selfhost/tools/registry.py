@@ -9,6 +9,7 @@ construction and fails loud on an unknown lookup."""
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -17,11 +18,11 @@ from selfhost.tools.context import ToolContext, ToolResult
 
 
 @dataclass(frozen=True)
-class ToolDef:
+class ToolDef[ModelT: BaseModel]:
     name: str
     description: str
-    input_model: type[BaseModel]
-    handler: Callable[[ToolContext, BaseModel], Awaitable[ToolResult]]
+    input_model: type[ModelT]
+    handler: Callable[[ToolContext, ModelT], Awaitable[ToolResult]]
     untrusted: bool = False
 
     def schema(self) -> ToolSchema:
@@ -34,7 +35,7 @@ class ToolDef:
 
 @dataclass(frozen=True)
 class ToolRegistry:
-    tools: tuple[ToolDef, ...]
+    tools: tuple[ToolDef[Any], ...]
 
     def __post_init__(self) -> None:
         names = [tool.name for tool in self.tools]
@@ -45,7 +46,7 @@ class ToolRegistry:
     def schemas(self) -> tuple[ToolSchema, ...]:
         return tuple(tool.schema() for tool in self.tools)
 
-    def get(self, name: str) -> ToolDef:
+    def get(self, name: str) -> ToolDef[Any]:
         for tool in self.tools:
             if tool.name == name:
                 return tool

@@ -425,14 +425,17 @@ class HookChain:
         output = payload.output if isinstance(payload, PostToolUse) else None
         injected: list[str] = []
         for hook in bound:
+            current: HookPayload
             match payload:
                 case PreToolUse() | PostToolUse() if hook.spec.tools and (
                     payload.tool_name not in hook.spec.tools
                 ):
                     continue
                 case PreToolUse():
+                    assert tool_input is not None
                     current = replace(payload, tool_input=tool_input)
                 case PostToolUse():
+                    assert output is not None
                     current = replace(payload, output=output)
                 case _:
                     current = payload

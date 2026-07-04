@@ -279,7 +279,9 @@ class _TurnDisplay:
             case "done":
                 if not self.streamed:
                     click.echo(frame["text"], file=self.out)
-                dollars = int(frame["cost_micro_usd"]) / MICRO_USD_PER_USD
+                cost_micro_usd = frame["cost_micro_usd"]
+                assert isinstance(cost_micro_usd, int)
+                dollars = cost_micro_usd / MICRO_USD_PER_USD
                 cost = f"{frame['model']} · {frame['tokens']} tok · ${dollars:.6f}"
                 click.echo(click.style(cost, dim=True), file=self.out)
             case "cancelled":

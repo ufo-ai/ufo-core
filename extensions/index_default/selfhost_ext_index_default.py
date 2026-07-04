@@ -296,7 +296,7 @@ class DefaultIndex:
                     )
                 ).mappings()
                 return tuple(_hit(row, row["score"]) for row in rows)
-            rows = (
+            sqlite_rows = (
                 (
                     await connection.execute(
                         VECTOR_ROWS_SQLITE, {"subjects": list(subjects), "owner_kind": owner_kind}
@@ -306,7 +306,7 @@ class DefaultIndex:
                 .all()
             )
         scored = sorted(
-            ((row, cosine(unpack_embedding(row["embedding"]), embedding)) for row in rows),
+            ((row, cosine(unpack_embedding(row["embedding"]), embedding)) for row in sqlite_rows),
             key=lambda item: item[1],
             reverse=True,
         )

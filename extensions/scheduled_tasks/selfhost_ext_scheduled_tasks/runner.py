@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from selfhost.sdk.context import ExtensionContext
-from selfhost.sdk.scheduling import ScheduledTask
+from selfhost.sdk.scheduling import ScheduledTask, ScheduleStore
 from selfhost_ext_scheduled_tasks.cron import next_fire
 
 CLAIM_LEASE_SECONDS = 300
@@ -26,21 +26,24 @@ class ScheduledTaskRunner:
     async def run(self) -> None:
         if self.ctx.scheduler is None:
             raise RuntimeError("scheduled-task runner requires a scheduler; none is wired")
+        scheduler = self.ctx.scheduler
         now = datetime.now(UTC)
         failures: list[str] = []
-        for task in await self.ctx.scheduler.claim_due(now, self.lease_seconds):
-            failure = await self._fire(task, now)
+        for task in await scheduler.claim_due(now, self.lease_seconds):
+            failure = await self._fire(scheduler, task, now)
             if failure is not None:
                 failures.append(failure)
         if failures:
             raise RuntimeError("scheduled task fires failed: " + ", ".join(failures))
 
-    async def _fire(self, task: ScheduledTask, now: datetime) -> str | None:
+    async def _fire(
+        self, scheduler: ScheduleStore, task: ScheduledTask, now: datetime
+    ) -> str | None:
         firing_key = f"{task.id}:{task.next_run_at.isoformat()}"
         failure: str | None = None
         try:
             await self.ctx.invoke(task.conversation_id, task.agent_id, task.prompt, firing_key)
         except Exception as raised:
             failure = f"{task.name} ({type(raised).__name__})"
-        await self.ctx.scheduler.reschedule(task.id, next_fire(task.schedule, now), now)
+        await scheduler.reschedule(task.id, next_fire(task.schedule, now), now)
         return failure

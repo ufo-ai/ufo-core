@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from typing import Any
 
 import anthropic
 
@@ -106,7 +107,7 @@ class AnthropicClient:
             cache_write_tokens = 0
             output_tokens: int | None = None
             stop_reason: str | None = None
-            create_kwargs: dict[str, object] = {
+            create_kwargs: dict[str, Any] = {
                 "model": request.model,
                 "system": request.system,
                 "messages": [

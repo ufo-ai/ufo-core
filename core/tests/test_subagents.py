@@ -1,9 +1,17 @@
+from uuid import UUID, uuid4
+
 import pytest
+import sqlalchemy as sa
+from dbos import DBOSClient
 from pydantic import BaseModel
 
+from selfhost.config import Config
+from selfhost.db import workspace_tx
 from selfhost.ext.manifest import SUBAGENT_ROUND_LIMIT, SubagentProfile
 from selfhost.loop.profiles import CORE_SUBAGENT_PROFILES, GENERAL_PURPOSE
-from selfhost.loop.subagents import SubagentRegistry, subagent_system_prompt
+from selfhost.loop.subagents import SubagentRegistry, Subagents, subagent_system_prompt
+from selfhost.schema import tables
+from selfhost.schema.records import TerminalFrame, Turn
 from selfhost.tools.builtins import BUILTIN_TOOLS
 
 
@@ -153,3 +161,81 @@ def test_a_profile_can_pin_a_distinct_model() -> None:
     assert pinned.model == "gpt-5.4"
     assert (pinned.model or "claude-opus-4-8") == "gpt-5.4"
     assert (_profile("a").model or "claude-opus-4-8") == "claude-opus-4-8"
+
+
+async def _finished_child(workspace_id: UUID, agent_id: UUID, text: str) -> UUID:
+    turn_id = uuid4()
+    conversation_id = uuid4()
+    terminal = TerminalFrame(status="done", text=text)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                surface="subagent",
+                queue_key=str(turn_id),
+                member_id=None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="done",
+                inbound="x",
+                terminal=terminal.model_dump(mode="json"),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return turn_id
+
+
+async def test_wait_reports_every_already_finished_childs_status(
+    db: None, dbos_launched: Config
+) -> None:
+    """`wait` folds each child's terminal into a SubagentStatus in turn_id order — the only way a
+    background-spawn loop collects more than one child. A stray `await` inside the folding
+    generator turns it into an async generator `tuple()` cannot drain, which crashes on every
+    multi-child wait without ever showing up in a single-child smoke test."""
+    workspace_id = uuid4()
+    agent_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="parent",
+                prompt="p",
+                model="m",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    first = await _finished_child(workspace_id, agent_id, "first done")
+    second = await _finished_child(workspace_id, agent_id, "second done")
+    parent = Turn(
+        id=uuid4(),
+        workspace_id=workspace_id,
+        conversation_id=uuid4(),
+        agent_id=agent_id,
+        seq=1,
+        status="running",
+        inbound="parent",
+    )
+    client = DBOSClient(system_database_url=dbos_launched.database.system_url)
+    subagents = Subagents(client=client, registry=SubagentRegistry(()), parent=parent)
+    statuses = await subagents.wait((first, second))
+    assert [status.turn_id for status in statuses] == [first, second]
+    assert [status.text for status in statuses] == ["first done", "second done"]
+    assert all(status.status == "done" for status in statuses)

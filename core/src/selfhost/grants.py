@@ -56,8 +56,11 @@ class OAuthProvider(Protocol):
     code was scoped to, passed for that check. `host` is the provider's own host the grant admits
     and meters at the egress proxy — direct-provider-host, provider-agnostic."""
 
-    provider: str
-    host: str
+    @property
+    def provider(self) -> str: ...
+
+    @property
+    def host(self) -> str: ...
 
     def authorize_url(self, state: str, redirect_uri: str) -> str: ...
 

@@ -314,6 +314,8 @@ class EgressProxy:
         cached = self._contexts.get(host)
         if cached is not None:
             return cached
+        if self._workdir is None:
+            raise RuntimeError("egress proxy must be started before minting a leaf context")
         async with self._mint_lock:
             cached = self._contexts.get(host)
             if cached is not None:
@@ -413,13 +415,13 @@ async def _start_tls_server(
     buffer for the SSL layer instead of being consumed into the plaintext reader."""
     loop = asyncio.get_running_loop()
     transport = writer.transport
-    transport.pause_reading()
+    transport.pause_reading()  # type: ignore[attr-defined]
     writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
     await writer.drain()
     protocol = transport.get_protocol()
     tls_transport = await loop.start_tls(transport, protocol, context, server_side=True)
-    protocol._transport = tls_transport
-    writer._transport = tls_transport
+    protocol._transport = tls_transport  # type: ignore[attr-defined]
+    writer._transport = tls_transport  # type: ignore[attr-defined]
     return reader, writer
 
 
