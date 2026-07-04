@@ -1,0 +1,60 @@
+"""The Recruitee connector over a mock transport: the page-number loop, the stream-named envelope
+(`{"candidates": [...]}`), and a refusal surfacing as `StreamSkipped`. The class base URL is empty
+(per-tenant), so the test binds a tenant URL through a subclass. Offline — a canned transport,
+no token."""
+
+from collections.abc import Callable
+from uuid import UUID, uuid4
+
+import httpx
+import pytest
+from selfhost_ext_sources.recruitee import RecruiteeConnector
+
+from selfhost.connectors import Credential
+from selfhost.sdk.sources import ConnectorBackend, ConnectorSourceConfig
+from selfhost.sources.sync import SourceAuth, StreamSkipped, SyncResult
+
+ACCOUNT = "acct-1"
+
+
+class _Recruitee(RecruiteeConnector):
+    base_url = "https://api.recruitee.com/c/acme"
+
+
+class _MockProxy:
+    def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
+        self._handler = handler
+
+    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
+        return Credential(transport=httpx.MockTransport(self._handler))
+
+
+async def _fetch(stream: str, handler: Callable[[httpx.Request], httpx.Response]) -> SyncResult:
+    auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler))
+    return await ConnectorBackend(connector=_Recruitee()).fetch(
+        ConnectorSourceConfig(account=ACCOUNT, stream=stream), None, auth
+    )
+
+
+def _refs(result: SyncResult) -> set[str]:
+    return {page.source_ref for page in result.pages}
+
+
+async def test_candidates_unwrap_the_named_envelope() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/c/acme/candidates"
+        assert request.url.params.get("page") == "1"
+        return httpx.Response(200, json={"candidates": [{"id": 1, "name": "Ada"}]})
+
+    result = await _fetch("candidates", handle)
+    assert _refs(result) == {"candidates/1"}
+    assert result.snapshot is False
+    assert result.next_cursor is None
+
+
+async def test_stream_skipped_on_refusal() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": "unauthorized"})
+
+    with pytest.raises(StreamSkipped):
+        await _fetch("candidates", handle)

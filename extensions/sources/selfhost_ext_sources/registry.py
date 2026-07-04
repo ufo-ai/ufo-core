@@ -25,7 +25,19 @@ from selfhost_ext_sources.google_sheets import GoogleSheetsConnector
 from selfhost_ext_sources.jira import JiraConnector
 from selfhost_ext_sources.linear import LinearConnector
 from selfhost_ext_sources.notion import NotionConnector
+from selfhost_ext_sources.quickbooks import QuickBooksConnector
+from selfhost_ext_sources.recruitee import RecruiteeConnector
+from selfhost_ext_sources.recurly import RecurlyConnector
+from selfhost_ext_sources.rippling import RipplingConnector
+from selfhost_ext_sources.salesforce import SalesforceConnector
+from selfhost_ext_sources.sentry import SentryConnector
 from selfhost_ext_sources.slack import SlackConnector
+from selfhost_ext_sources.square import SquareConnector
+from selfhost_ext_sources.stripe import StripeConnector
+from selfhost_ext_sources.typeform import TypeformConnector
+from selfhost_ext_sources.wrike import WrikeConnector
+from selfhost_ext_sources.xero import XeroConnector
+from selfhost_ext_sources.zendesk import ZendeskConnector
 
 CONNECTORS: dict[str, type[Connector]] = {
     GitHubConnector.name: GitHubConnector,
@@ -48,4 +60,16 @@ CONNECTORS: dict[str, type[Connector]] = {
     ClickUpConnector.name: ClickUpConnector,
     DeelConnector.name: DeelConnector,
     FacebookAdsConnector.name: FacebookAdsConnector,
+    QuickBooksConnector.name: QuickBooksConnector,
+    RecruiteeConnector.name: RecruiteeConnector,
+    RecurlyConnector.name: RecurlyConnector,
+    RipplingConnector.name: RipplingConnector,
+    SalesforceConnector.name: SalesforceConnector,
+    SentryConnector.name: SentryConnector,
+    SquareConnector.name: SquareConnector,
+    StripeConnector.name: StripeConnector,
+    TypeformConnector.name: TypeformConnector,
+    WrikeConnector.name: WrikeConnector,
+    XeroConnector.name: XeroConnector,
+    ZendeskConnector.name: ZendeskConnector,
 }
