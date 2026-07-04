@@ -28,7 +28,7 @@ from uuid import UUID
 import httpx
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class Credential:
     """One way to authenticate a provider request, produced by an `AuthProxy` for a connector to
     build its HTTP client from. Exactly one path is populated: a `transport` that rewrites the
@@ -38,6 +38,17 @@ class Credential:
     transport: httpx.AsyncBaseTransport | None = None
     bearer: str | None = None
     headers: Mapping[str, str] = field(default_factory=dict)
+
+    def __repr__(self) -> str:
+        """Redact the secret — an accidental log line or exception-with-locals must never leak the
+        token behind `bearer`/`headers`; the shape is enough to debug with."""
+        if self.transport is not None:
+            return "Credential(<transport: redacted>)"
+        if self.bearer is not None:
+            return "Credential(<bearer: redacted>)"
+        if self.headers:
+            return "Credential(<headers: redacted>)"
+        return "Credential(<empty>)"
 
 
 class AuthProxy(Protocol):
