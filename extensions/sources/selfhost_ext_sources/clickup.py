@@ -1,0 +1,189 @@
+"""The ClickUp connector — the team hierarchy (teams, spaces, folders, lists), its members, tasks,
+and per-list comments and custom fields synced into recallable pages.
+
+ClickUp has no flat collection: the connector walks the hierarchy top-down — `/team`, then
+`/team/{id}/space`, `/space/{id}/folder`, `/folder/{id}/list` (and folderless space lists) — and
+fans the leaf reads (tasks, comments, custom fields) out over the discovered lists, stamping each
+record with its parent-id context. `tasks` page by an integer `?page=N` and filter past the stored
+watermark on `date_updated`; per-list child streams filter on their own `cursor_field`. `users` are
+collapsed from the members embedded on each team. Auth is the OAuth bearer the resolved `Credential`
+carries. The write path is intentionally absent — the source seam only reads."""
+
+from collections.abc import AsyncIterator
+from typing import Any
+
+import httpx
+
+from selfhost.sdk.sources import RestConnector, StreamSkipped, StreamSpec, records_at, with_context
+
+CLICKUP_STREAMS: list[StreamSpec] = [
+    StreamSpec(name="teams", source_object="team", primary_key="id"),
+    StreamSpec(name="users", source_object="users", primary_key="id"),
+    StreamSpec(name="spaces", source_object="space", primary_key="id"),
+    StreamSpec(name="folders", source_object="folder", primary_key="id"),
+    StreamSpec(name="lists", source_object="list", primary_key="id"),
+    StreamSpec(name="tasks", source_object="task", primary_key="id", cursor_field="date_updated"),
+    StreamSpec(
+        name="list_comments",
+        source_object="comment",
+        primary_key="id",
+        cursor_field="date",
+        canonical=False,
+    ),
+    StreamSpec(name="list_custom_fields", source_object="field", primary_key="id", canonical=False),
+    StreamSpec(name="goals", source_object="goal", primary_key="id", canonical=False),
+]
+
+
+class ClickUpConnector(RestConnector):
+    name = "clickup"
+    base_url = "https://api.clickup.com/api/v2"
+    streams_list = CLICKUP_STREAMS
+
+    async def _teams(self, client: httpx.AsyncClient) -> list[dict[str, Any]]:
+        data = await self._get(client, "/team")
+        return records_at(data, "teams")
+
+    async def _spaces(self, client: httpx.AsyncClient) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for team in await self._teams(client):
+            team_id = team.get("id")
+            if not isinstance(team_id, str) or not team_id:
+                continue
+            data = await self._get(client, f"/team/{team_id}/space", params={"archived": "false"})
+            out.extend(with_context(records_at(data, "spaces"), team_id=team_id))
+        return out
+
+    async def _folders(self, client: httpx.AsyncClient) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for space in await self._spaces(client):
+            space_id = space.get("id")
+            if not isinstance(space_id, str) or not space_id:
+                continue
+            data = await self._get(
+                client, f"/space/{space_id}/folder", params={"archived": "false"}
+            )
+            out.extend(with_context(records_at(data, "folders"), space_id=space_id))
+        return out
+
+    async def _lists(self, client: httpx.AsyncClient) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for folder in await self._folders(client):
+            folder_id = folder.get("id")
+            if not isinstance(folder_id, str) or not folder_id:
+                continue
+            data = await self._get(
+                client, f"/folder/{folder_id}/list", params={"archived": "false"}
+            )
+            out.extend(with_context(records_at(data, "lists"), folder_id=folder_id))
+        for space in await self._spaces(client):
+            space_id = space.get("id")
+            if not isinstance(space_id, str) or not space_id:
+                continue
+            data = await self._get(client, f"/space/{space_id}/list", params={"archived": "false"})
+            out.extend(with_context(records_at(data, "lists"), space_id=space_id))
+        return out
+
+    async def _tasks(
+        self, client: httpx.AsyncClient, *, cursor: str | None
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        for task_list in await self._lists(client):
+            list_id = task_list.get("id")
+            if not isinstance(list_id, str) or not list_id:
+                continue
+            page_num = 0
+            while True:
+                params: dict[str, Any] = {
+                    "archived": "false",
+                    "include_closed": "true",
+                    "subtasks": "true",
+                    "page": page_num,
+                }
+                data = await self._get(client, f"/list/{list_id}/task", params=params)
+                tasks = with_context(
+                    records_at(data, "tasks"), list_id=list_id, list_name=task_list.get("name")
+                )
+                if cursor:
+                    tasks = [t for t in tasks if str(t.get("date_updated") or "") > cursor]
+                if tasks:
+                    yield tasks
+                if not records_at(data, "tasks"):
+                    break
+                page_num += 1
+
+    async def _list_child_stream(
+        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        for task_list in await self._lists(client):
+            list_id = task_list.get("id")
+            if not isinstance(list_id, str) or not list_id:
+                continue
+            path = {
+                "list_comments": f"/list/{list_id}/comment",
+                "list_custom_fields": f"/list/{list_id}/field",
+            }[stream.name]
+            data = await self._get(client, path)
+            key = "comments" if stream.name == "list_comments" else "fields"
+            records = with_context(
+                records_at(data, key), list_id=list_id, list_name=task_list.get("name")
+            )
+            if cursor and stream.cursor_field:
+                records = [r for r in records if str(r.get(stream.cursor_field) or "") > cursor]
+            if records:
+                yield records
+
+    async def paginate(
+        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        if stream.name == "teams":
+            teams = await self._teams(client)
+            if teams:
+                yield teams
+            return
+        if stream.name == "users":
+            users: dict[str, dict[str, Any]] = {}
+            for team in await self._teams(client):
+                for member in team.get("members") or []:
+                    if not isinstance(member, dict):
+                        continue
+                    user = member.get("user")
+                    if isinstance(user, dict) and user.get("id") is not None:
+                        users[str(user["id"])] = {**user, "team_id": team.get("id")}
+            if users:
+                yield list(users.values())
+            return
+        if stream.name == "spaces":
+            spaces = await self._spaces(client)
+            if spaces:
+                yield spaces
+            return
+        if stream.name == "folders":
+            folders = await self._folders(client)
+            if folders:
+                yield folders
+            return
+        if stream.name == "lists":
+            lists = await self._lists(client)
+            if lists:
+                yield lists
+            return
+        if stream.name == "tasks":
+            async for page in self._tasks(client, cursor=cursor):
+                yield page
+            return
+        if stream.name in {"list_comments", "list_custom_fields"}:
+            async for page in self._list_child_stream(client, stream, cursor=cursor):
+                yield page
+            return
+        if stream.name == "goals":
+            out: list[dict[str, Any]] = []
+            for team in await self._teams(client):
+                team_id = team.get("id")
+                if not isinstance(team_id, str) or not team_id:
+                    continue
+                data = await self._get(client, f"/team/{team_id}/goal")
+                out.extend(with_context(records_at(data, "goals"), team_id=team_id))
+            if out:
+                yield out
+            return
+        raise StreamSkipped(f"clickup stream {stream.name!r} is not implemented")
