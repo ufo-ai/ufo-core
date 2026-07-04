@@ -3,6 +3,7 @@
 import ast
 import re
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).parent
@@ -23,6 +24,8 @@ SAMPLE_MODULE = Path(EXTENSIONS_ROOT) / "sample" / "selfhost_ext_sample.py"
 CORE_SKILLS_DIR = CORE_SRC / "skills"
 CORE_SKILL_NAMES = frozenset({"sandbox", "memory", "delegation"})
 SKILL_MANIFEST = "SKILL.md"
+MIGRATION_DIR_PART = "migrations"
+CORE_OWNER = "core"
 
 
 def _is_skill_content(path: Path) -> bool:
@@ -356,6 +359,126 @@ def _skill_boundary_failures(trees: dict[Path, ast.Module]) -> list[str]:
     return failures
 
 
+def _migration_owner(rel: Path) -> str | None:
+    """Which schema owner a revision file belongs to: `core` for core's version location, the
+    extension (or pack) directory name for an extension's. A non-migration file returns None."""
+    if MIGRATION_DIR_PART not in rel.parts:
+        return None
+    if rel.parts[0] == "core":
+        return CORE_OWNER
+    if rel.parts[0] in ("extensions", "packs"):
+        return rel.parts[1]
+    return None
+
+
+def _str_or_none(node: ast.expr | None) -> str | None:
+    return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+
+
+def _str_sequence(node: ast.expr | None) -> tuple[str, ...]:
+    match node:
+        case ast.Constant(value=str() as value):
+            return (value,)
+        case ast.Tuple(elts=elts) | ast.List(elts=elts):
+            return tuple(
+                e.value for e in elts if isinstance(e, ast.Constant) and isinstance(e.value, str)
+            )
+        case _:
+            return ()
+
+
+Revision = tuple[Path, str, str, str | None, tuple[str, ...]]
+
+
+def _revisions(trees: dict[Path, ast.Module]) -> list[Revision]:
+    """Every alembic revision across core and the extensions, as (path, owner, revision,
+    down_revision, depends_on). A file is a revision iff it assigns a module-level `revision`."""
+    found: list[Revision] = []
+    for rel, tree in trees.items():
+        owner = _migration_owner(rel)
+        if owner is None:
+            continue
+        constants: dict[str, ast.expr | None] = {}
+        for node in tree.body:
+            match node:
+                case ast.AnnAssign(target=ast.Name(id=name), value=value) if value is not None:
+                    constants[name] = value
+                case ast.Assign(targets=[ast.Name(id=name)], value=value):
+                    constants[name] = value
+        revision = _str_or_none(constants.get("revision"))
+        if revision is None:
+            continue
+        found.append(
+            (
+                rel,
+                owner,
+                revision,
+                _str_or_none(constants.get("down_revision")),
+                _str_sequence(constants.get("depends_on")),
+            )
+        )
+    return found
+
+
+def _migration_failures(trees: dict[Path, ast.Module]) -> list[str]:
+    """The migration seam's single-head discipline, generalized across owners so it composes with
+    optional table-owning extensions. Each owner (core, each extension) is one linear chain: a
+    single base and a single head, chaining only within itself — an extension never chains onto core
+    or a sibling via down_revision (that would fork core or dangle when the sibling is not pinned),
+    it attaches by declaring depends_on a core revision so `upgrade heads` applies core's shared
+    tables first. So the DAG is deterministic and core-first, with exactly one head per owner and no
+    orphan reference."""
+    revisions = _revisions(trees)
+    owner_of = {revision: owner for _, owner, revision, _, _ in revisions}
+    failures: list[str] = []
+    seen: dict[str, Path] = {}
+    for rel, _, revision, _, _ in revisions:
+        if revision in seen:
+            failures.append(
+                f"migrations: revision {revision!r} defined in {rel} and {seen[revision]}"
+            )
+        seen[revision] = rel
+    down_by_owner: dict[str, set[str]] = defaultdict(set)
+    revs_by_owner: dict[str, set[str]] = defaultdict(set)
+    bases_by_owner: dict[str, list[str]] = defaultdict(list)
+    for rel, owner, revision, down, depends in revisions:
+        revs_by_owner[owner].add(revision)
+        if down is None:
+            bases_by_owner[owner].append(revision)
+        else:
+            down_by_owner[owner].add(down)
+            if down not in owner_of:
+                failures.append(
+                    f"migrations: {rel} down_revision {down!r} references no known revision"
+                )
+            elif owner_of[down] != owner:
+                failures.append(
+                    f"migrations: {rel} chains across owners (down_revision {down!r} is owned "
+                    f"by {owner_of[down]!r}); an extension chains only within its own dir and "
+                    f"attaches to core via depends_on"
+                )
+        if owner != CORE_OWNER and down is None and not any(
+            owner_of.get(dep) == CORE_OWNER for dep in depends
+        ):
+            failures.append(
+                f"migrations: extension {owner!r} base {revision!r} must declare depends_on a core "
+                f"revision so upgrade applies core's shared tables before the extension's"
+            )
+    for owner, revs in revs_by_owner.items():
+        heads = revs - down_by_owner[owner]
+        if len(heads) != 1:
+            failures.append(
+                f"migrations: owner {owner!r} has {len(heads)} heads {sorted(heads)}; "
+                f"each owner is one linear chain with a single head"
+            )
+        if len(bases_by_owner[owner]) != 1:
+            failures.append(
+                f"migrations: owner {owner!r} has {len(bases_by_owner[owner])} base revisions; "
+                f"each owner has a single root"
+            )
+    return failures
+
+
 def main() -> int:
     failures = []
     trees: dict[Path, ast.Module] = {}
@@ -394,6 +517,7 @@ def main() -> int:
         for path in _skill_scripts()
     }
     failures.extend(_skill_boundary_failures(skill_trees))
+    failures.extend(_migration_failures(trees))
 
     for failure in failures:
         print(f"GATE: {failure}")

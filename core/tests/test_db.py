@@ -1,15 +1,35 @@
+import os
 from uuid import uuid4
 
 import pytest
 import sqlalchemy as sa
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 
-from selfhost.db import apply_migrations, workspace_tx
+from selfhost.db import MIGRATIONS_DIR, apply_migrations, workspace_tx
+from selfhost.ext.loader import migration_locations
 from selfhost.schema import tables
 
 
 def test_migrations_are_idempotent(database_url: str) -> None:
     apply_migrations(database_url)
     apply_migrations(database_url)
+
+
+def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None:
+    """The migration seam's schema invariant: the sample extension's version location layers over
+    core's — `apply_migrations` ran clean in the fixture — and the graph has exactly one head per
+    owner (core's chain and the sample branch), so `upgrade heads` is deterministic, core-first."""
+    config = Config()
+    config.set_main_option("script_location", str(MIGRATIONS_DIR))
+    config.set_main_option(
+        "version_locations",
+        os.pathsep.join((str(MIGRATIONS_DIR / "versions"), *migration_locations())),
+    )
+    config.set_main_option("path_separator", "os")
+    heads = set(ScriptDirectory.from_config(config).get_heads())
+    assert "sample_ext_note_0001" in heads
+    assert len(heads) == 2
 
 
 async def test_workspace_tx_round_trip(db: None) -> None:

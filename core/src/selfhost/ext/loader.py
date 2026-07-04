@@ -19,6 +19,7 @@ import hashlib
 import importlib.util
 import os
 from dataclasses import dataclass, replace
+from importlib.machinery import ModuleSpec
 from importlib.metadata import EntryPoint, entry_points
 from pathlib import Path
 from uuid import UUID
@@ -54,6 +55,7 @@ EXTENSION_ENTRY_POINT_GROUP = "selfhost.extension"
 LOCKFILE_PATH_ENV = "SELFHOST_LOCKFILE"
 DEFAULT_LOCKFILE_PATH = Path("selfhost.lock")
 DIGEST_PREFIX = "sha256:"
+MIGRATIONS_DIRNAME = "migrations"
 HOOK_TIMEOUT_SECONDS = 5.0
 GATING_EVENTS: frozenset[HookEvent] = frozenset({"pre_tool_use", "on_inbound"})
 ALLOWED_OUTCOMES: dict[HookEvent, tuple[type, ...]] = {
@@ -108,15 +110,28 @@ def discovered() -> dict[str, tuple[Manifest, EntryPoint]]:
     return found
 
 
+def _entry_spec(entry: EntryPoint) -> ModuleSpec:
+    top = entry.module.split(".", 1)[0]
+    spec = importlib.util.find_spec(top)
+    if spec is None or spec.origin is None:
+        raise RuntimeError(f"extension package {top!r} has no importable source")
+    return spec
+
+
+def _package_dir(spec: ModuleSpec) -> Path:
+    """The directory an extension's migrations sit beside: the package directory for a multi-file
+    extension, the entry module's parent for a single-file one."""
+    if spec.submodule_search_locations:
+        return Path(next(iter(spec.submodule_search_locations)))
+    return Path(spec.origin).parent  # type: ignore[arg-type]
+
+
 def extension_digest(entry: EntryPoint) -> str:
     """The digest that pins an extension: sha256 over every source file of the installed package the
     entry point belongs to — not only its entry module — so editing any file in a multi-file
     extension changes the digest and a pinned deploy refuses to run it. Bytecode caches, which are
     machine-specific and rebuilt on import, are excluded so the digest is stable across machines."""
-    top = entry.module.split(".", 1)[0]
-    spec = importlib.util.find_spec(top)
-    if spec is None or spec.origin is None:
-        raise RuntimeError(f"extension package {top!r} has no importable source")
+    spec = _entry_spec(entry)
     if spec.submodule_search_locations:
         root = Path(next(iter(spec.submodule_search_locations)))
         files = {
@@ -125,13 +140,28 @@ def extension_digest(entry: EntryPoint) -> str:
             if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc"
         }
     else:
-        origin = Path(spec.origin)
+        origin = Path(spec.origin)  # type: ignore[arg-type]
         files = {origin.name: origin}
     digest = hashlib.sha256()
     for name in sorted(files):
         digest.update(hashlib.sha256(name.encode()).digest())
         digest.update(hashlib.sha256(files[name].read_bytes()).digest())
     return DIGEST_PREFIX + digest.hexdigest()
+
+
+def migration_locations() -> tuple[str, ...]:
+    """The `migrations/` directory of each active extension — the alembic version locations
+    `apply_migrations` layers over core's own. Each is a self-contained branch of revision files
+    that attaches to core through the `depends_on` its base declares, so `upgrade heads` brings the
+    deploy to core's head plus each pinned extension's — one head per owner. Only the pinned set
+    contributes (via `load_manifests`), so an installed-but-unpinned extension adds no tables."""
+    installed = discovered()
+    locations: list[str] = []
+    for manifest in load_manifests():
+        migrations = _package_dir(_entry_spec(installed[manifest.name][1])) / MIGRATIONS_DIRNAME
+        if migrations.is_dir():
+            locations.append(str(migrations))
+    return tuple(locations)
 
 
 def load_manifests() -> tuple[Manifest, ...]:

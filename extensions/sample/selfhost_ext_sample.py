@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import ClassVar
 from uuid import UUID
 
+import sqlalchemy as sa
 from pydantic import BaseModel
 
 from selfhost.sdk.connectors import OAuthAccount
@@ -52,6 +53,7 @@ from selfhost.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 NAME = "sample"
 VERSION = "0.1.0"
 TOOL_NAME = "sample_echo"
+NOTE_TOOL_NAME = "sample_note"
 JOB_NAME = "sample_tick"
 ROUTE_PATH = "hook"
 ONBOARDING_NAME = "sample_setup"
@@ -102,8 +104,20 @@ SKILL_SCRIPT_MARKER = "sample-skill-probe-ok"
 SKILL_DIR = Path(__file__).parent / "skills" / SKILL_NAME
 
 
+NOTE_TABLE = sa.Table(
+    "sample_ext_note",
+    sa.MetaData(),
+    sa.Column("workspace_id", sa.Uuid(), primary_key=True),
+    sa.Column("note", sa.Text(), nullable=False),
+)
+
+
 class EchoInput(BaseModel):
     message: str
+
+
+class NoteInput(BaseModel):
+    text: str
 
 
 class ProbeTask(BaseModel):
@@ -119,6 +133,31 @@ async def _echo(ctx: ToolContext, args: EchoInput) -> ToolResult:
         raise RuntimeError("sample tool dispatched without its ExtensionContext")
     await ctx.ext.store.put(TOOL_KEY, args.model_dump())
     return ToolResult(content=(TextContent(text=args.message),))
+
+
+async def _note(ctx: ToolContext, args: NoteInput) -> ToolResult:
+    """Write a note into `sample_ext_note` — the table the sample's own migration creates — and read
+    it back through the extension's workspace-scoped transaction. The migration seam end to end: an
+    extension owns a table and its capability reads and writes it, scoped to this workspace."""
+    if ctx.ext is None:
+        raise RuntimeError("sample note tool dispatched without its ExtensionContext")
+    workspace_id = ctx.ext.store.workspace_id
+    async with ctx.ext.transaction() as connection:
+        updated = await connection.execute(
+            sa.update(NOTE_TABLE)
+            .values(note=args.text)
+            .where(NOTE_TABLE.c.workspace_id == workspace_id)
+        )
+        if updated.rowcount == 0:
+            await connection.execute(
+                sa.insert(NOTE_TABLE).values(workspace_id=workspace_id, note=args.text)
+            )
+        stored = (
+            await connection.execute(
+                sa.select(NOTE_TABLE.c.note).where(NOTE_TABLE.c.workspace_id == workspace_id)
+            )
+        ).one()
+    return ToolResult(content=(TextContent(text=stored.note),))
 
 
 async def _tick(ctx: ExtensionContext) -> None:
@@ -375,6 +414,12 @@ def manifest() -> Manifest:
                 description="Echo a message, recording it through the extension's scoped store.",
                 input_model=EchoInput,
                 handler=_echo,
+            ),
+            ToolDef(
+                name=NOTE_TOOL_NAME,
+                description="Write and read a note in the sample's own migration-created table.",
+                input_model=NoteInput,
+                handler=_note,
             ),
         ),
         jobs=(JobSpec(name=JOB_NAME, schedule=None, handler=_tick),),

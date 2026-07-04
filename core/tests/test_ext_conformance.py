@@ -24,6 +24,7 @@ from selfhost.config import BlobConfig, Config, DatabaseConfig, HubConfig
 from selfhost.credentials import CredentialSlotUnset, CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.ext.context import (
+    ExtensionContext,
     MemoryAccess,
     ScopedStore,
     TrajectoryCorpus,
@@ -158,9 +159,34 @@ async def _unavailable_spawn(
     raise AssertionError("the sample tool must not spawn a subagent")
 
 
+def _tool_context(workspace_id: UUID, ext: ExtensionContext, tmp_path: Path) -> ToolContext:
+    return ToolContext(
+        sandbox=SandboxSession(
+            carrier=_UntouchedCarrier(),
+            handle=SandboxHandle(conversation_id=uuid4(), container_id="test"),
+        ),
+        blob=FilesystemBlobStore(root=tmp_path),
+        turn=Turn(
+            id=uuid4(),
+            workspace_id=workspace_id,
+            conversation_id=uuid4(),
+            agent_id=uuid4(),
+            seq=1,
+            status="running",
+            inbound="hi",
+        ),
+        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        spawn=_unavailable_spawn,
+        memory=StubMemory(),
+        member_id=None,
+        artifact_token_secret="",
+        ext=ext,
+    )
+
+
 async def test_sample_is_discovered_via_its_entry_point() -> None:
     manifest = _sample_manifest()
-    assert {tool.name for tool in manifest.tools} == {sample.TOOL_NAME}
+    assert {tool.name for tool in manifest.tools} == {sample.TOOL_NAME, sample.NOTE_TOOL_NAME}
     assert {job.name for job in manifest.jobs} == {sample.JOB_NAME}
     assert {route.path for route in manifest.routes} == {sample.ROUTE_PATH}
     assert {slot.name for slot in manifest.credentials} == {sample.API_SLOT}
@@ -305,6 +331,43 @@ async def test_tool_dispatches_with_its_scoped_context(db: None, tmp_path: Path)
     assert result.is_error is False
     scoped = ScopedStore(workspace_id=workspace_id, extension=sample.NAME)
     assert await scoped.get(sample.TOOL_KEY) == {"message": "conformance-echo"}
+
+
+async def test_extension_owns_a_table_through_its_own_migration(db: None, tmp_path: Path) -> None:
+    """The migration seam end to end: the sample's own migration created `sample_ext_note`, so its
+    note tool writes and reads that table through the extension's workspace-scoped transaction. Two
+    workspaces keep separate rows — the extension's table is scoped exactly as core's are, so an
+    extension owns a real table and reaches only its own workspace's rows."""
+    manifest = _sample_manifest()
+    first, second = await _workspace(), await _workspace()
+    tools, ext_by_tool = turn_tools((manifest,), first, _credential_store())
+    note = next(tool for tool in tools if tool.name == sample.NOTE_TOOL_NAME)
+
+    write = await note.handler(
+        _tool_context(first, ext_by_tool[note.name], tmp_path),
+        note.input_model.model_validate({"text": "first note"}),
+    )
+    assert write.is_error is False
+    assert write.content[0].text == "first note"
+
+    _, other_ext = turn_tools((manifest,), second, _credential_store())
+    await note.handler(
+        _tool_context(second, other_ext[note.name], tmp_path),
+        note.input_model.model_validate({"text": "second note"}),
+    )
+
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(sample.NOTE_TABLE.c.workspace_id, sample.NOTE_TABLE.c.note).order_by(
+                    sample.NOTE_TABLE.c.note
+                )
+            )
+        ).all()
+    assert [(row.workspace_id, row.note) for row in rows] == [
+        (first, "first note"),
+        (second, "second note"),
+    ]
 
 
 async def test_connector_execute_tool_resolves_the_bound_account_without_the_sandbox(

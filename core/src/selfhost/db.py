@@ -1,6 +1,7 @@
 """The tenancy boundary: module-private engine, workspace_tx as the only session source."""
 
 import asyncio
+import os
 import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -80,11 +81,21 @@ async def workspace_tx() -> AsyncIterator[AsyncConnection]:
 
 
 def apply_migrations(url: str) -> None:
-    """Alembic owns the schema; runs off the loop (CLI startup, test fixtures)."""
+    """Alembic owns the schema; runs off the loop (CLI startup, test fixtures). Core's version
+    location and every active extension's are layered into one run, so `upgrade heads` brings the
+    deploy to core's head plus each pinned extension's — one head per owner, each extension ordered
+    after core by the `depends_on` its base declares. The loader import is local to break the
+    db↔loader↔context cycle (the loader reaches core through the same context that binds to this
+    module)."""
+    from selfhost.ext.loader import migration_locations
+
     config = AlembicConfig()
     config.set_main_option("script_location", str(MIGRATIONS_DIR))
+    locations = (str(MIGRATIONS_DIR / "versions"), *migration_locations())
+    config.set_main_option("version_locations", os.pathsep.join(locations))
+    config.set_main_option("path_separator", "os")
     config.set_main_option("sqlalchemy.url", url.replace("%", "%%"))
-    command.upgrade(config, "head")
+    command.upgrade(config, "heads")
 
 
 def _sqlite_on_connect(dbapi_connection: Any, connection_record: Any) -> None:
