@@ -9,9 +9,10 @@ on the deploy's template or resumes the conversation's live one; `exec` runs a c
 so its next turn resumes cheaply. The container stays a disposable cache over the durable workspace.
 
 Egress for a remote sandbox needs a publicly-reachable proxy URL the sandbox dials back through;
-that route, the durable conversation→sandbox map that survives a process restart, workspace
-materialization, and the idle reaper are the e2b depth this carrier is built to carry but does not
-yet wire."""
+that route, the durable conversation→sandbox map that survives a process restart (so the reaper can
+reach a sandbox created by a prior process rather than leaving it to the provider's own idle-pause),
+and workspace materialization are the e2b depth this carrier is built to carry but does not yet
+wire."""
 
 import asyncio
 import base64
@@ -159,8 +160,13 @@ class E2BCarrier:
         await blob.put(key, data)
 
     async def destroy(self, handle: SandboxHandle) -> None:
-        sandbox = await self._sandbox(handle)
-        await asyncio.to_thread(sandbox.pause, api_key=self.api_key)
+        """Pause and drop the conversation's sandbox. The idle reaper reaps by conversation identity
+        with no container id, so a conversation this process still holds is paused, and one it never
+        held (already gone, or created before a restart) is a no-op that never raises — the
+        provider's own idle-pause reclaims a sandbox this process can no longer address."""
+        live = self._live.pop(handle.conversation_id, None)
+        if live is not None:
+            await asyncio.to_thread(live.pause, api_key=self.api_key)
 
     async def _sandbox(self, handle: SandboxHandle) -> E2BSandbox:
         live = self._live.get(handle.conversation_id)

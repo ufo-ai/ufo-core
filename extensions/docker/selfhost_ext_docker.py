@@ -121,7 +121,11 @@ class DockerCarrier:
         await blob.put_file(key, Path(mount.host_path) / rel)
 
     async def destroy(self, handle: SandboxHandle) -> None:
-        await _docker("rm", "-f", handle.container_id)
+        """Reap by the conversation's container name, the same key `create` derives — the durable
+        identity a reaper holds, not the ephemeral id a live handle also carries. `rm -f` on a name
+        that no longer exists is a no-op, so destroying an already-gone or never-created sandbox
+        never raises."""
+        await _docker("rm", "-f", f"{CONTAINER_NAME_PREFIX}{handle.conversation_id}")
 
     async def _running_id(self, name: str) -> str | None:
         code, stdout, _ = await _docker(

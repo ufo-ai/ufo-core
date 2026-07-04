@@ -17,11 +17,14 @@ from selfhost.ext.context import ScopedStore, context_for
 from selfhost.indexing import OWNER_KIND_PAGE, Chunk, TextChunker
 from selfhost.jobs import (
     CORE_EXTENSION,
+    SANDBOX_REAP_JOB,
     SPEND_RESUME_JOB,
+    SandboxReaper,
     SpendResume,
     bindings_from,
     core_jobs,
 )
+from selfhost.sandbox.local import LocalCarrier
 from selfhost.schema import tables
 from selfhost.schema.records import Agent, Turn
 from selfhost.sources.sync import (
@@ -805,7 +808,7 @@ async def test_stream_skipped_records_a_skip_not_a_failure_and_never_tombstones(
     assert len(active) == 2  # the held page and the healthy sibling's page, both synced
 
 
-def test_source_sync_and_spend_resume_register_as_core_jobs(
+def test_source_sync_spend_resume_and_sandbox_reap_register_as_core_jobs(
     database_url: str, tmp_path: Path
 ) -> None:
     driver = SyncDriver(
@@ -813,11 +816,16 @@ def test_source_sync_and_spend_resume_register_as_core_jobs(
         blob=FilesystemBlobStore(root=tmp_path / "blobs"),
         postgres=database_url.startswith("postgresql"),
     )
-    specs = core_jobs(driver, SpendResume(client=None))
-    assert [spec.name for spec in specs] == [SOURCE_SYNC_JOB, SPEND_RESUME_JOB]
+    specs = core_jobs(driver, SpendResume(client=None), SandboxReaper(carrier=LocalCarrier()))
+    assert [spec.name for spec in specs] == [
+        SOURCE_SYNC_JOB,
+        SPEND_RESUME_JOB,
+        SANDBOX_REAP_JOB,
+    ]
     assert all(spec.schedule is not None for spec in specs)
     keys = {binding.key for binding in bindings_from((), specs)}
     assert keys == {
         f"{CORE_EXTENSION}:{SOURCE_SYNC_JOB}",
         f"{CORE_EXTENSION}:{SPEND_RESUME_JOB}",
+        f"{CORE_EXTENSION}:{SANDBOX_REAP_JOB}",
     }

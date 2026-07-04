@@ -23,9 +23,11 @@ from selfhost.ext.context import ExtensionContext, TurnInvoker, context_for
 from selfhost.ext.manifest import JobSpec, Manifest
 from selfhost.indexing import EmbedClient, IndexBackend
 from selfhost.o11y import log
+from selfhost.sandbox.session import Carrier, SandboxHandle
 from selfhost.schema import tables
 from selfhost.schema.records import (
     DBOS_APP_VERSION,
+    NON_TERMINAL_STATUSES,
     PARKED,
     TURN_QUEUE_NAME,
     TURN_WORKFLOW_NAME,
@@ -43,6 +45,9 @@ CORE_EXTENSION = "core"
 SPEND_RESUME_JOB = "spend_resume"
 SPEND_RESUME_SCHEDULE = "0 * * * * *"
 RESUME_ENQUEUE_GRACE_SECONDS = 300
+SANDBOX_REAP_JOB = "sandbox_reap"
+SANDBOX_REAP_SCHEDULE = "0 */10 * * * *"
+SANDBOX_IDLE_TTL_SECONDS = 1800
 JOB_QUEUE = Queue(JOB_QUEUE_NAME)
 
 
@@ -128,15 +133,56 @@ class SpendResume:
         await self.client.enqueue_async(options, str(turn.id))
 
 
+@dataclass(frozen=True)
+class SandboxReaper:
+    """Reclaim the disposable container behind each idle conversation. The workspace is the truth
+    and the container is cache (§Sandboxing): a conversation whose most recent turn settled longer
+    ago than the idle TTL, with no turn still in flight, has its sandbox destroyed through the
+    carrier seam — the next turn recreates it from the same durable workspace and notices only
+    latency. A batch-at-interval sweep, never fired by a turn it reclaims; the carrier's destroy is
+    idempotent, so a container already gone (or one the local carrier never held) is a no-op, and a
+    still-idle conversation re-selected on the next sweep costs one such no-op. The reaper holds
+    only conversation identity — the durable key create-or-attach reuses — so it reaps by
+    conversation, never by the ephemeral container id no durable row carries."""
+
+    carrier: Carrier
+
+    async def run(self) -> None:
+        for conversation_id in await self._idle_conversations():
+            await self.carrier.destroy(
+                SandboxHandle(conversation_id=conversation_id, container_id="")
+            )
+
+    async def _idle_conversations(self) -> tuple[UUID, ...]:
+        cutoff = datetime.now(UTC) - timedelta(seconds=SANDBOX_IDLE_TTL_SECONDS)
+        in_flight = (
+            sa.select(tables.turn.c.conversation_id)
+            .where(tables.turn.c.status.in_(NON_TERMINAL_STATUSES))
+            .distinct()
+        )
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(tables.turn.c.conversation_id)
+                    .where(tables.turn.c.conversation_id.notin_(in_flight))
+                    .group_by(tables.turn.c.conversation_id)
+                    .having(sa.func.max(tables.turn.c.updated_at) < cutoff)
+                )
+            ).all()
+        return tuple(row.conversation_id for row in rows)
+
+
 def core_jobs(
     sync_driver: SyncDriver,
     spend_resume: SpendResume,
+    reaper: SandboxReaper,
 ) -> tuple[JobSpec, ...]:
-    """The jobs a deploy always runs, before any extension's — all core because the source pipeline
-    and spend enforcement are core. The sync driver polls each source and lands its pages (which the
-    memory extension's page-index job then reads through the PageFeed); the spend-resume sweep
-    re-admits parked turns their caps now allow. None fires on its own writes. (Both memory-item and
-    page indexing are the memory extension's jobs.)"""
+    """The jobs a deploy always runs, before any extension's — all core because the source pipeline,
+    spend enforcement, and sandbox lifecycle are core. The sync driver polls each source and lands
+    its pages (which the memory extension's page-index job then reads through the PageFeed); the
+    spend-resume sweep re-admits parked turns their caps now allow; the sandbox reaper destroys the
+    disposable container behind each idle conversation through the carrier seam. None fires on its
+    own writes. (Both memory-item and page indexing are the memory extension's jobs.)"""
 
     async def _sync_sources(context: ExtensionContext) -> None:
         await sync_driver.run()
@@ -144,9 +190,13 @@ def core_jobs(
     async def _resume_spend(context: ExtensionContext) -> None:
         await spend_resume.run()
 
+    async def _reap_sandboxes(context: ExtensionContext) -> None:
+        await reaper.run()
+
     return (
         JobSpec(name=SOURCE_SYNC_JOB, schedule=SOURCE_SYNC_SCHEDULE, handler=_sync_sources),
         JobSpec(name=SPEND_RESUME_JOB, schedule=SPEND_RESUME_SCHEDULE, handler=_resume_spend),
+        JobSpec(name=SANDBOX_REAP_JOB, schedule=SANDBOX_REAP_SCHEDULE, handler=_reap_sandboxes),
     )
 
 

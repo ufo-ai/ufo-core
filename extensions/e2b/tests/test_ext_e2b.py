@@ -35,6 +35,7 @@ from selfhost.sandbox.session import (
     ExecResult,
     MountSpec,
     ProxyEndpoint,
+    SandboxHandle,
     SandboxSpec,
 )
 from selfhost.serve import _select_carrier
@@ -243,6 +244,18 @@ async def test_destroy_pauses_the_sandbox() -> None:
     await carrier.destroy(handle)
 
     assert sdk.sandboxes["sbx-1"].paused == 1
+
+
+async def test_destroy_on_a_conversation_never_created_is_a_no_op() -> None:
+    """The idle reaper reaps by conversation identity with no container id; a conversation this
+    process never held is a no-op that neither connects nor raises."""
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+
+    await carrier.destroy(SandboxHandle(conversation_id=uuid4(), container_id=""))
+
+    assert sdk.connected == []
+    assert sdk.sandboxes == {}
 
 
 def _clear_e2b_env(monkeypatch: pytest.MonkeyPatch) -> None:

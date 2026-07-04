@@ -37,7 +37,7 @@ from selfhost.ext.surface import SurfaceContext, SurfaceSpec, WritebackPoller
 from selfhost.grants import ConnectFlow, GrantStore, OAuthProvider, install_connect_flow
 from selfhost.hub import Hub, InProcessHub
 from selfhost.indexing import EmbedClient, IndexBackend
-from selfhost.jobs import JobRunner, SpendResume, bindings_from, core_jobs
+from selfhost.jobs import JobRunner, SandboxReaper, SpendResume, bindings_from, core_jobs
 from selfhost.loop.profiles import CORE_SUBAGENT_PROFILES
 from selfhost.loop.queue import Runtime, init_runtime
 from selfhost.loop.subagents import SubagentRegistry
@@ -101,12 +101,13 @@ def run() -> None:
     asyncio.run(register_sources(config.sources))
     hub = _select_hub(config, manifests)
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
+    carrier = _select_carrier(config, manifests)
     init_runtime(
         Runtime(
             config=config,
             blob=blob,
             hub=hub,
-            carrier=_select_carrier(config, manifests),
+            carrier=carrier,
             cdp_provider=_select_cdp_provider(config, manifests, workspace_id, credentials),
             search_provider=_select_search_provider(config, manifests, workspace_id, credentials),
             proxy=_egress_proxy(asyncio.run(_resolver(config, credentials))),
@@ -131,7 +132,7 @@ def run() -> None:
         }
     )
     DBOS.launch()
-    _launch_jobs(config, sync_driver, index, embed, page_feed, dbos_client, blob)
+    _launch_jobs(config, sync_driver, index, embed, page_feed, dbos_client, blob, carrier)
     app = FastAPI(lifespan=_serve_lifespan)
     app.state.hub = hub
     app.state.dbos = dbos_client
@@ -179,16 +180,18 @@ def _launch_jobs(
     page_feed: CorePageFeed,
     dbos_client: DBOSClient,
     blob: BlobStore,
+    carrier: Carrier,
 ) -> None:
-    """Register this workspace's jobs — core's own (the source sync driver and the spend-resume
-    sweep that re-admits parked turns) plus every installed extension's (the memory extension's
-    memory-index and page-index jobs among them) — as DBOS schedules and one-shot enqueues, after
+    """Register this workspace's jobs — core's own (the source sync driver, the spend-resume sweep
+    that re-admits parked turns, and the sandbox reaper that reclaims idle containers) plus every
+    installed extension's (the memory extension's memory-index and page-index jobs among them) — as
+    DBOS schedules and one-shot enqueues, after
     launch so the system store is live. Registration is the synchronous DBOS API (off the loop, at
     startup); a handler may read a declared credential or the deploy index/embed backends or the
     page feed, so once any job is registered the credential key must be set."""
     bindings = bindings_from(
         load_manifests(config.pack.name),
-        core_jobs(sync_driver, SpendResume(client=dbos_client)),
+        core_jobs(sync_driver, SpendResume(client=dbos_client), SandboxReaper(carrier=carrier)),
     )
     if not bindings:
         return
