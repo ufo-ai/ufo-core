@@ -47,6 +47,7 @@ from selfhost.memory.sources import (
     register_sources,
 )
 from selfhost.models.openai import openai_sdk_client
+from selfhost.models.registry import model_registry
 from selfhost.o11y import init_o11y, log
 from selfhost.runtime_instance import BootGuard, Heartbeat
 from selfhost.sandbox.carrier import DockerCarrier
@@ -119,6 +120,7 @@ def run() -> None:
             dbos=dbos_client,
             subagents=SubagentRegistry((*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests))),
             manifests=manifests,
+            registry=model_registry(config, manifests),
             credentials=credentials,
             memory=memory,
             artifact_token_secret=artifact_secret,

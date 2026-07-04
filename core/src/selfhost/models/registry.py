@@ -1,0 +1,88 @@
+"""The model backend registry: which client serves a model, and the price table that prices it.
+
+Core ships direct Anthropic + OpenAI clients; a model-provider extension contributes more through
+its Manifest `models` point. `model_registry` folds core's two providers and every manifest's into
+one ordered table — core first — that the turn loop selects a client from and the accounting layer
+prices against. A provider resolves its own API key when the turn selects it, so a serve missing one
+key runs fine until an agent pinned to that backend actually runs; a model no provider claims fails
+loud rather than guessing a backend."""
+
+import os
+from dataclasses import dataclass
+
+from selfhost.accounting import Pricing, pricing_with
+from selfhost.config import Config
+from selfhost.ext.manifest import Manifest, ModelProviderSpec
+from selfhost.models.anthropic import AnthropicClient, anthropic_sdk_client
+from selfhost.models.interface import (
+    ANTHROPIC_MODEL_PREFIXES,
+    OPENAI_MODEL_PREFIXES,
+    PROVIDER_ANTHROPIC,
+    PROVIDER_OPENAI,
+    ModelClient,
+)
+from selfhost.models.openai import OpenAIClient, openai_sdk_client
+
+
+def _api_key(env_name: str) -> str:
+    key = os.environ.get(env_name, "")
+    if not key:
+        raise RuntimeError(f"model api key env var {env_name} is not set")
+    return key
+
+
+@dataclass(frozen=True)
+class ModelRegistry:
+    """The active model backends as one ordered table — core's direct clients first, then every
+    manifest-contributed provider — with the merged price table their entries build. `client_for`
+    returns the client of the first provider whose matcher claims the model id; `pricing` prices any
+    model against the merged table; `model_key_env` is onboarding's eager key check. A model no
+    provider claims fails loud."""
+
+    providers: tuple[ModelProviderSpec, ...]
+    pricing: Pricing
+
+    def client_for(self, model: str) -> ModelClient:
+        return self._provider_for(model).client(model)
+
+    def model_key_env(self, model: str, config: Config) -> str | None:
+        """The env var onboarding requires set before this model's first turn: a core provider's
+        configured key, or None for a contributed provider that resolves its own key lazily at turn
+        time — an env core cannot name to check eagerly."""
+        name = self._provider_for(model).name
+        if name == PROVIDER_ANTHROPIC:
+            return config.models.anthropic_api_key_env
+        if name == PROVIDER_OPENAI:
+            return config.models.openai_api_key_env
+        return None
+
+    def _provider_for(self, model: str) -> ModelProviderSpec:
+        provider = next((spec for spec in self.providers if spec.matches(model)), None)
+        if provider is None:
+            raise ValueError(f"no model provider serves model {model!r}")
+        return provider
+
+
+def model_registry(config: Config, manifests: tuple[Manifest, ...]) -> ModelRegistry:
+    """Core's two direct backends followed by every extension-contributed provider, and the price
+    table merging their entries over core's rates. Core is first, so a bare Anthropic/OpenAI id
+    always resolves to its direct client; a contributed provider serves only what core does not."""
+    core = (
+        ModelProviderSpec(
+            name=PROVIDER_ANTHROPIC,
+            matches=lambda model: model.startswith(ANTHROPIC_MODEL_PREFIXES),
+            client=lambda model: AnthropicClient(
+                client=anthropic_sdk_client(_api_key(config.models.anthropic_api_key_env))
+            ),
+        ),
+        ModelProviderSpec(
+            name=PROVIDER_OPENAI,
+            matches=lambda model: model.startswith(OPENAI_MODEL_PREFIXES),
+            client=lambda model: OpenAIClient(
+                client=openai_sdk_client(_api_key(config.models.openai_api_key_env))
+            ),
+        ),
+    )
+    providers = (*core, *(spec for manifest in manifests for spec in manifest.models))
+    contributed = {model: price for spec in providers for model, price in spec.prices}
+    return ModelRegistry(providers=providers, pricing=pricing_with(contributed))

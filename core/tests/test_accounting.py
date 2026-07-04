@@ -63,6 +63,28 @@ def test_price_digest_changes_when_price_table_changes(monkeypatch: pytest.Monke
     assert accounting.price_digest() != baseline
 
 
+def test_pricing_with_prices_a_contributed_model() -> None:
+    contributed = {"vendor/model-x": accounting.ModelPrice(1_000_000, 2_000_000, 0, 0)}
+    pricing = accounting.pricing_with(contributed)
+    assert (
+        pricing.micro_usd("vendor/model-x", Usage(input_tokens=1_000_000, output_tokens=1_000_000))
+        == 3_000_000
+    )
+    assert pricing.micro_usd("claude-opus-4-8", Usage(input_tokens=1_000_000)) == 5_000_000
+    assert pricing.digest != accounting.CORE_PRICING.digest
+
+
+def test_core_pricing_is_the_core_table() -> None:
+    assert accounting.CORE_PRICING.digest == accounting.PRICE_DIGEST
+    assert (
+        accounting.CORE_PRICING.micro_usd(
+            "claude-opus-4-8", Usage(input_tokens=1000, output_tokens=2000)
+        )
+        == 55_000
+    )
+    assert accounting.CORE_PRICING.micro_usd("vendor/model-x", FULL_USAGE) == 0
+
+
 async def test_unknown_model_records_tokens_at_zero_price(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)

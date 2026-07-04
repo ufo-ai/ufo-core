@@ -20,6 +20,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from selfhost.blob import FilesystemBlobStore
+from selfhost.config import BlobConfig, Config, DatabaseConfig
 from selfhost.credentials import CredentialSlotUnset, CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.ext.context import (
@@ -44,12 +45,13 @@ from selfhost.memory.index import PgvectorIndex, SqliteFtsIndex, index_backend_f
 from selfhost.memory.indexer import PageIndexer
 from selfhost.memory.service import OWNER_KIND_MEMORY_ITEM, SHARED_SUBJECT, MemoryService
 from selfhost.memory.sources import SyncDriver
-from selfhost.models.interface import Message
+from selfhost.models.interface import Message, ModelRequest, TextDelta
+from selfhost.models.registry import model_registry
 from selfhost.onboarding import run_onboarding_steps
 from selfhost.sandbox.proxy.rules import InjectionRule, MeterRule, derive_credential_rules
 from selfhost.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from selfhost.schema import tables
-from selfhost.schema.records import Agent, Turn
+from selfhost.schema.records import Agent, Turn, Usage
 from selfhost.serve import _mount_ext_routes, _mount_surfaces
 from selfhost.tools.context import SpawnResult, ToolContext
 from selfhost.transcript import Conversation, transcript_key
@@ -186,6 +188,32 @@ def test_sample_subagent_profile_flows_through_the_loader_into_the_registry() ->
     profile = registry.get(sample.SUBAGENT_NAME)
     assert profile.tool_names == (sample.TOOL_NAME,)
     assert "JSON" in subagent_system_prompt(profile)
+
+
+async def test_sample_model_provider_is_selected_priced_and_streams(tmp_path: Path) -> None:
+    """The models Manifest point end to end through the probe: the registry selects the sample's
+    contributed backend for its model id, that client streams a real ModelEvent, and the registry
+    prices the id against the contributed rate — core's direct providers still claim bare ids."""
+    manifest = _sample_manifest()
+    config = Config(
+        database=DatabaseConfig(url="sqlite+aiosqlite:///:memory:"),
+        blob=BlobConfig(backend="filesystem", root=tmp_path),
+    )
+    registry = model_registry(config, (manifest,))
+    client = registry.client_for(sample.SAMPLE_MODEL)
+    assert isinstance(client, sample.SampleModelClient)
+    request = ModelRequest(
+        model=sample.SAMPLE_MODEL,
+        system="",
+        messages=(Message(role="user", content="hi"),),
+        max_tokens=16,
+    )
+    events = [event async for event in client.complete(request)]
+    assert TextDelta(text=sample.SAMPLE_MODEL_REPLY) in events
+    priced = registry.pricing.micro_usd(
+        sample.SAMPLE_MODEL, Usage(input_tokens=1_000_000, output_tokens=1_000_000)
+    )
+    assert priced == 6_000_000
 
 
 async def test_tool_dispatches_with_its_scoped_context(db: None, tmp_path: Path) -> None:

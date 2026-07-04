@@ -31,6 +31,7 @@ from selfhost.sdk.manifest import (
     IndexBackendSpec,
     InjectionTarget,
     Manifest,
+    ModelProviderSpec,
     OnboardingStep,
     PostToolUse,
     PromptSection,
@@ -38,6 +39,7 @@ from selfhost.sdk.manifest import (
     SourceProvider,
     SubagentProfile,
 )
+from selfhost.sdk.models import ModelEvent, ModelPrice, ModelRequest, TextDelta, Usage
 from selfhost.sdk.sources import SHARED_SUBJECT, Page, SourceAuth, SyncResult
 from selfhost.sdk.surfaces import SurfaceContext, SurfaceSpec, Writeback
 from selfhost.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
@@ -84,6 +86,10 @@ SOURCE_BACKEND = "sample_source"
 SOURCE_REF = "sample/handbook"
 SOURCE_TOPIC = "the sample source syncs a page about migrating the orbital widget fleet"
 INDEX_BACKEND = "sample_index"
+MODEL_PROVIDER_NAME = "sample_models"
+SAMPLE_MODEL = "sample-model-x1"
+SAMPLE_MODEL_REPLY = "sample model backend reply"
+SAMPLE_MODEL_PRICE = ModelPrice(input=2_000_000, output=4_000_000, cache_read=0, cache_write=0)
 
 
 class EchoInput(BaseModel):
@@ -336,6 +342,19 @@ async def _surface_attach(ctx: SurfaceContext, writeback: Writeback, reply_ref: 
         await ctx.blob.put_stream(delivered_key, ctx.blob.get_stream(artifact.blob_key))
 
 
+@dataclass(frozen=True)
+class SampleModelClient:
+    """The canned backend the sample's model provider builds: `complete` streams one text delta and
+    a fixed Usage, so the registry seam — core selecting a manifest-contributed model client and
+    pricing its id against the contributed rate — is exercised by a real client, never a mock."""
+
+    model: str
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        yield TextDelta(text=SAMPLE_MODEL_REPLY)
+        yield Usage(input_tokens=1, output_tokens=1)
+
+
 def manifest() -> Manifest:
     return Manifest(
         name=NAME,
@@ -402,6 +421,14 @@ def manifest() -> Manifest:
         indexes=(
             IndexBackendSpec(
                 name=INDEX_BACKEND, factory=lambda embed, credentials: SampleIndex(embed=embed)
+            ),
+        ),
+        models=(
+            ModelProviderSpec(
+                name=MODEL_PROVIDER_NAME,
+                matches=lambda model: model == SAMPLE_MODEL,
+                client=lambda model: SampleModelClient(model=model),
+                prices=((SAMPLE_MODEL, SAMPLE_MODEL_PRICE),),
             ),
         ),
     )

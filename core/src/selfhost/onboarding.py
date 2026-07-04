@@ -19,7 +19,7 @@ from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.ext.context import context_for
 from selfhost.ext.manifest import Manifest
-from selfhost.models.interface import PROVIDER_ANTHROPIC, provider_for
+from selfhost.models.registry import model_registry
 from selfhost.o11y import log
 from selfhost.schema import tables
 from selfhost.schema.records import DEFAULT_AGENT_NAME
@@ -109,15 +109,17 @@ class Onboarding:
 
     def _require_model_key(self) -> None:
         env_name = self._model_key_env()
+        if env_name is None:
+            return
         if not os.environ.get(env_name):
             raise RuntimeError(
                 f"model {self.model!r} needs {env_name} set before the first turn can run"
             )
 
-    def _model_key_env(self) -> str:
-        if provider_for(self.model) == PROVIDER_ANTHROPIC:
-            return self.config.models.anthropic_api_key_env
-        return self.config.models.openai_api_key_env
+    def _model_key_env(self) -> str | None:
+        """A core provider's configured key env, or None for an extension-contributed provider that
+        resolves its own key lazily at turn time (which init cannot name to check eagerly)."""
+        return model_registry(self.config, self.manifests).model_key_env(self.model, self.config)
 
     async def _create_workspace(self) -> Onboarded:
         async with workspace_tx() as connection:

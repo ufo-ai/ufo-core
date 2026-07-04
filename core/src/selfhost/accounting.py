@@ -3,6 +3,7 @@
 import hashlib
 import json
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -87,11 +88,13 @@ MODEL_TOKEN_PRICE: dict[str, ModelPrice] = {
 }
 
 
-def price_digest() -> str:
-    """A deterministic version stamp of the price table: sha256 over the sorted per-model rates.
+def price_digest(prices: Mapping[str, ModelPrice] | None = None) -> str:
+    """A deterministic version stamp of a price table: sha256 over its sorted per-model rates.
     Stamped on every priced ledger row so a burn stays attributable to the rate that priced it —
-    after a MODEL_TOKEN_PRICE edit historical rows keep their original digest and reprice/audit
-    reconciliation over a window that spans the change stays exact."""
+    after a price-table edit historical rows keep their original digest and reprice/audit
+    reconciliation over a window that spans the change stays exact. `prices` defaults to the core
+    table; a model-provider extension's merged table is stamped through its Pricing."""
+    table = MODEL_TOKEN_PRICE if prices is None else prices
     payload = json.dumps(
         {
             model: {
@@ -100,7 +103,7 @@ def price_digest() -> str:
                 "cache_read": price.cache_read,
                 "cache_write": price.cache_write,
             }
-            for model, price in sorted(MODEL_TOKEN_PRICE.items())
+            for model, price in sorted(table.items())
         },
         separators=(",", ":"),
         sort_keys=True,
@@ -111,13 +114,16 @@ def price_digest() -> str:
 PRICE_DIGEST = price_digest()
 
 
-def usage_priced_micro_usd(model: str, usage: Usage) -> int:
+def usage_priced_micro_usd(
+    model: str, usage: Usage, prices: Mapping[str, ModelPrice] | None = None
+) -> int:
     """Micro-USD for a usage split: integer dot product, floored at micro-dollar precision.
 
-    An unknown model warns loudly and prices at zero — never a silent fallback to another
-    model's price, and never a raise: pricing runs inside the turn's terminal commit, so raising
-    would wedge the commit-retry loop instead of ending the client's wait."""
-    price = MODEL_TOKEN_PRICE.get(model)
+    `prices` defaults to the core table; a model-provider extension's merged table is priced
+    through its Pricing. An unknown model warns loudly and prices at zero — never a silent fallback
+    to another model's price, and never a raise: pricing runs inside the turn's terminal commit, so
+    raising would wedge the commit-retry loop instead of ending the client's wait."""
+    price = (MODEL_TOKEN_PRICE if prices is None else prices).get(model)
     if price is None:
         log("pricing.unknown_model", model=model)
         return 0
@@ -130,6 +136,32 @@ def usage_priced_micro_usd(model: str, usage: Usage) -> int:
     return micro_usd_mtok // TOKENS_PER_MTOK
 
 
+@dataclass(frozen=True, slots=True)
+class Pricing:
+    """The model price table in force for a burn — core's rates plus every model-provider
+    extension's contributed entries — and the version stamp derived from it. Built once from the
+    model registry at serve and threaded to the host turn's priced write, so a contributed slug is
+    billed and stamped by exactly the merged table that priced it; the unknown-model warns+zero and
+    the per-usage arithmetic stay in `usage_priced_micro_usd`, priced here against this table."""
+
+    prices: Mapping[str, ModelPrice]
+    digest: str
+
+    def micro_usd(self, model: str, usage: Usage) -> int:
+        return usage_priced_micro_usd(model, usage, self.prices)
+
+
+def pricing_with(contributed: Mapping[str, ModelPrice]) -> Pricing:
+    """Core's rates with every provider-contributed entry merged over them, plus the digest of the
+    merged table. A slug the core table lacks becomes billable; a slug colliding with a core id is
+    overridden by the contribution. `pricing_with({})` is the core-only table (`CORE_PRICING`)."""
+    prices = {**MODEL_TOKEN_PRICE, **contributed}
+    return Pricing(prices=prices, digest=price_digest(prices))
+
+
+CORE_PRICING = pricing_with({})
+
+
 async def record_turn_usage(
     connection: AsyncConnection,
     workspace_id: UUID,
@@ -137,6 +169,7 @@ async def record_turn_usage(
     model: str,
     usage: Usage,
     attempt: str = "",
+    pricing: Pricing = CORE_PRICING,
 ) -> None:
     """One billing write per turn per run attempt; select-then-insert is replay-safe because DBOS
     re-executes a given attempt sequentially, never concurrently with itself. A turn parked mid-run
@@ -163,9 +196,9 @@ async def record_turn_usage(
             turn_id=turn_id,
             dimension=TOKENS_DIMENSION,
             amount=total,
-            priced_micro_usd=usage_priced_micro_usd(model, usage),
+            priced_micro_usd=pricing.micro_usd(model, usage),
             model=model,
-            price_digest=PRICE_DIGEST,
+            price_digest=pricing.digest,
             created_at=sa.func.now(),
             updated_at=sa.func.now(),
         )

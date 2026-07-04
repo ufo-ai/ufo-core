@@ -14,7 +14,7 @@ from dbos import DBOSClient
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from selfhost.accounting import record_egress_request, record_turn_usage
+from selfhost.accounting import CORE_PRICING, record_egress_request, record_turn_usage
 from selfhost.artifact_token import (
     ARTIFACT_KEY_PREFIX,
     ArtifactTokenError,
@@ -24,11 +24,13 @@ from selfhost.artifact_token import (
 from selfhost.blob import FilesystemBlobStore
 from selfhost.config import Config
 from selfhost.db import workspace_tx
+from selfhost.ext.manifest import ModelProviderSpec
 from selfhost.hub import InProcessHub, SkillLoad, ToolCall
 from selfhost.loop import queue as loop_queue
 from selfhost.loop.subagents import SubagentRegistry
 from selfhost.memory.service import SHARED_SUBJECT, member_subject, recall_subjects
 from selfhost.models.interface import ModelEvent, ModelRequest, TextDelta
+from selfhost.models.registry import ModelRegistry
 from selfhost.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
 from selfhost.schema import tables
 from selfhost.schema.records import TerminalFrame, Usage
@@ -60,6 +62,18 @@ class StandInModel:
         yield TextDelta(text="echo:")
         yield TextDelta(text=str(len(request.messages)))
         yield Usage(input_tokens=7, output_tokens=3)
+
+
+STANDIN_REGISTRY = ModelRegistry(
+    providers=(
+        ModelProviderSpec(
+            name="standin",
+            matches=lambda model: True,
+            client=lambda model: StandInModel(),
+        ),
+    ),
+    pricing=CORE_PRICING,
+)
 
 
 @dataclass(frozen=True)
@@ -164,6 +178,7 @@ def dbos_runtime(
             dbos=dbos_client,
             subagents=SubagentRegistry(()),
             manifests=(),
+            registry=STANDIN_REGISTRY,
             credentials=None,
             memory=StubMemory(),
             artifact_token_secret=SECRET,
@@ -178,10 +193,8 @@ def dbos_runtime(
 async def web(
     db: None,
     dbos_runtime: tuple[Config, InProcessHub, FilesystemBlobStore],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> AsyncIterator[AsyncClient]:
     config, hub, blob = dbos_runtime
-    monkeypatch.setattr(loop_queue, "_model_client", lambda model, config: StandInModel())
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
     app = FastAPI()
     app.state.web = WebSurface(

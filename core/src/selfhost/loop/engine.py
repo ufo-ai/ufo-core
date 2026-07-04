@@ -10,11 +10,12 @@ import sqlalchemy as sa
 
 from selfhost.accounting import (
     ALLOW,
+    CORE_PRICING,
+    Pricing,
     SpendEvaluator,
     applicable_caps_absent,
     read_turn_cost,
     record_turn_usage,
-    usage_priced_micro_usd,
 )
 from selfhost.blob import BlobStore
 from selfhost.db import workspace_tx
@@ -146,6 +147,7 @@ class TurnEngine:
     member_id: UUID | None
     artifact_token_secret: str
     grants: GrantStore | None
+    pricing: Pricing = CORE_PRICING
     attempt: str = ""
     max_rounds: int = MAIN_ROUND_LIMIT
 
@@ -368,7 +370,7 @@ class TurnEngine:
         the DB round-trip entirely once a recent decision confirmed no cap applies to this turn."""
         if applicable_caps_absent(self.turn.workspace_id, self.member_id, self.turn.agent_id):
             return
-        pending = usage_priced_micro_usd(self.agent.model, _total_usage(usage_events))
+        pending = self.pricing.micro_usd(self.agent.model, _total_usage(usage_events))
         async with workspace_tx() as connection:
             decision = await SpendEvaluator(
                 self.turn.workspace_id, self.member_id, self.turn.agent_id
@@ -449,7 +451,7 @@ class TurnEngine:
         )
         await self._publish(
             CostTick(
-                cost_micro_usd=usage_priced_micro_usd(self.agent.model, usage), tokens=tokens
+                cost_micro_usd=self.pricing.micro_usd(self.agent.model, usage), tokens=tokens
             )
         )
 
@@ -595,6 +597,7 @@ class TurnEngine:
                 self.agent.model,
                 usage,
                 self.attempt,
+                pricing=self.pricing,
             )
             cost = await read_turn_cost(connection, self.turn.id)
             tokens, micro_usd, model = cost if cost is not None else (0, 0, "")
@@ -652,6 +655,7 @@ class TurnEngine:
                     self.agent.model,
                     _total_usage(usage_events),
                     self.attempt,
+                    pricing=self.pricing,
                 )
         if updated.rowcount == 1:
             await self._publish(Parked(message=message))
@@ -681,6 +685,7 @@ class TurnEngine:
                     self.agent.model,
                     usage,
                     self.attempt,
+                    pricing=self.pricing,
                 )
         except Exception as error:
             log(

@@ -14,9 +14,11 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from pydantic import BaseModel
 
+from selfhost.accounting import CORE_PRICING
 from selfhost.blob import FilesystemBlobStore
 from selfhost.config import Config
 from selfhost.db import workspace_tx
+from selfhost.ext.manifest import ModelProviderSpec
 from selfhost.hub import InProcessHub
 from selfhost.jobs import SpendResume
 from selfhost.loop import queue as loop_queue
@@ -31,6 +33,7 @@ from selfhost.models.interface import (
     ToolCallStart,
     ToolResultBlock,
 )
+from selfhost.models.registry import ModelRegistry
 from selfhost.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
 from selfhost.schema import tables
 from selfhost.schema.records import TerminalFrame, Usage
@@ -148,6 +151,18 @@ class StandInModel:
         yield Usage(input_tokens=7, output_tokens=3)
 
 
+STANDIN_REGISTRY = ModelRegistry(
+    providers=(
+        ModelProviderSpec(
+            name="standin",
+            matches=lambda model: True,
+            client=lambda model: StandInModel(),
+        ),
+    ),
+    pricing=CORE_PRICING,
+)
+
+
 @dataclass(frozen=True)
 class StandInCarrier:
     """Stands in for the Docker carrier through the full queue path: create-or-attach returns a
@@ -184,6 +199,7 @@ def dbos_runtime(
             dbos=dbos_client,
             subagents=SubagentRegistry((ROUNDTRIP_PROFILE, EXHAUST_PROFILE, PINNED_PROFILE)),
             manifests=(),
+            registry=STANDIN_REGISTRY,
             credentials=None,
             memory=StubMemory(),
             artifact_token_secret="",
@@ -198,10 +214,8 @@ def dbos_runtime(
 async def surface(
     db: None,
     dbos_runtime: tuple[Config, InProcessHub, FilesystemBlobStore],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> AsyncIterator[AsyncClient]:
     config, hub, _ = dbos_runtime
-    monkeypatch.setattr(loop_queue, "_model_client", lambda model, config: StandInModel())
     app = FastAPI()
     app.state.hub = hub
     app.state.dbos = DBOSClient(system_database_url=config.database.system_url)

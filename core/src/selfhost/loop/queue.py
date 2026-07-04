@@ -22,9 +22,7 @@ from selfhost.loop.prompts.render import render_system_prompt, rendered_prompt
 from selfhost.loop.subagents import SubagentRegistry, Subagents, subagent_system_prompt
 from selfhost.loop.transcript import Transcript
 from selfhost.memory.service import MemoryService
-from selfhost.models.anthropic import AnthropicClient, anthropic_sdk_client
-from selfhost.models.interface import PROVIDER_ANTHROPIC, ModelClient, provider_for
-from selfhost.models.openai import OpenAIClient, openai_sdk_client
+from selfhost.models.registry import ModelRegistry
 from selfhost.o11y import log
 from selfhost.sandbox.session import (
     SANDBOX_GID,
@@ -70,6 +68,7 @@ class Runtime:
     dbos: DBOSClient
     subagents: SubagentRegistry
     manifests: tuple[Manifest, ...]
+    registry: ModelRegistry
     credentials: CredentialStore | None
     memory: MemoryService
     artifact_token_secret: str
@@ -126,7 +125,7 @@ async def _execute_turn(turn_id: str) -> str:
             )
             system_prompt = rendered_prompt(resolved.prompt)
             max_rounds = profile.max_rounds
-        model = _model_client(resolved.model, runtime.config)
+        model = runtime.registry.client_for(resolved.model)
         handle = await runtime.carrier.create(
             SandboxSpec(
                 conversation_id=turn.conversation_id,
@@ -165,6 +164,7 @@ async def _execute_turn(turn_id: str) -> str:
                 if runtime.credentials is not None
                 else None
             ),
+            pricing=runtime.registry.pricing,
             attempt=DBOS.workflow_id or turn_id,
             max_rounds=max_rounds,
         )
@@ -273,18 +273,3 @@ async def _workspace_mount(blob: BlobStore, conversation_id: UUID) -> MountSpec:
     if os.geteuid() == 0:
         await asyncio.to_thread(os.chown, host_path, SANDBOX_UID, SANDBOX_GID)
     return MountSpec(kind="filesystem", host_path=str(host_path))
-
-
-def _model_client(model: str, config: Config) -> ModelClient:
-    if provider_for(model) == PROVIDER_ANTHROPIC:
-        key = _api_key(config.models.anthropic_api_key_env)
-        return AnthropicClient(client=anthropic_sdk_client(key))
-    key = _api_key(config.models.openai_api_key_env)
-    return OpenAIClient(client=openai_sdk_client(key))
-
-
-def _api_key(env_name: str) -> str:
-    key = os.environ.get(env_name, "")
-    if not key:
-        raise RuntimeError(f"model api key env var {env_name} is not set")
-    return key

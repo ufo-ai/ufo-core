@@ -15,12 +15,14 @@ from pydantic import BaseModel
 from starlette.requests import Request
 from starlette.responses import Response
 
+from selfhost.accounting import ModelPrice
 from selfhost.ext.context import CredentialAccess, ExtensionContext
 from selfhost.ext.surface import SurfaceSpec
 from selfhost.grants import OAuthProvider
 from selfhost.memory.embed import EmbedClient
 from selfhost.memory.index import IndexBackend
 from selfhost.memory.sources import SourceBackend
+from selfhost.models.interface import ModelClient
 from selfhost.schema.records import Agent, Turn
 from selfhost.tools.registry import ToolDef
 
@@ -116,6 +118,22 @@ class IndexBackendSpec:
 
     name: str
     factory: Callable[[EmbedClient, CredentialAccess], IndexBackend]
+
+
+@dataclass(frozen=True)
+class ModelProviderSpec:
+    """One model backend an extension contributes. `matches` claims the model ids this backend
+    serves — an explicit-slug test, a prefix test, or a catch-all router; `client` builds the
+    `ModelClient` for a served id, resolving its own API key when the turn selects it (once per
+    turn, never at boot); `prices` are the `(model_id, ModelPrice)` rates it knows, merged over
+    core's table so its slugs are billed and stamped. The registry tries providers in order — core's
+    direct Anthropic + OpenAI first — so a contributed router serves only what core does not
+    claim."""
+
+    name: str
+    matches: Callable[[str], bool]
+    client: Callable[[str], ModelClient]
+    prices: tuple[tuple[str, ModelPrice], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -265,3 +283,4 @@ class Manifest:
     prompt_sections: tuple[PromptSection, ...] = ()
     subagents: tuple[SubagentProfile, ...] = ()
     surfaces: tuple[SurfaceSpec, ...] = ()
+    models: tuple[ModelProviderSpec, ...] = ()

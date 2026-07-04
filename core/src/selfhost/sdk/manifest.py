@@ -40,6 +40,9 @@ from selfhost.ext.manifest import (
     Manifest as Manifest,
 )
 from selfhost.ext.manifest import (
+    ModelProviderSpec as ModelProviderSpec,
+)
+from selfhost.ext.manifest import (
     ModifyInput as ModifyInput,
 )
 from selfhost.ext.manifest import (

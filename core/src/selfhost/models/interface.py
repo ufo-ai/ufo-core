@@ -107,17 +107,6 @@ ANTHROPIC_MODEL_PREFIXES = ("claude-",)
 OPENAI_MODEL_PREFIXES = ("gpt-", "o1", "o3", "o4", "chatgpt-")
 
 
-def provider_for(model: str) -> str:
-    """The provider that serves a model, decided by name prefix — the single home for the
-    model→provider mapping, shared by the turn loop's client selection and onboarding's key check.
-    Fail loud on an unrecognized model rather than guess a provider."""
-    if model.startswith(ANTHROPIC_MODEL_PREFIXES):
-        return PROVIDER_ANTHROPIC
-    if model.startswith(OPENAI_MODEL_PREFIXES):
-        return PROVIDER_OPENAI
-    raise ValueError(f"no provider serves model {model!r}")
-
-
 def trim_images(messages: tuple[Message, ...]) -> tuple[Message, ...]:
     """Drop the OLDEST inline images until each message holds ≤MAX_IMAGES_PER_MESSAGE and the whole
     request holds ≤MAX_IMAGES_PER_REQUEST — Anthropic's caps, the tightest across providers, applied

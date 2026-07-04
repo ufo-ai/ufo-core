@@ -15,6 +15,7 @@ members = [
     "selfhost-ext-connectors",
     "selfhost-ext-eval-harness",
     "selfhost-ext-mcp",
+    "selfhost-ext-openrouter",
     "selfhost-ext-sample",
     "selfhost-ext-scheduled-tasks",
     "selfhost-ext-self-improvement",
@@ -2396,6 +2397,21 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
+    { name = "selfhost", editable = "core" },
+]
+
+[[package]]
+name = "selfhost-ext-openrouter"
+version = "0.1.0"
+source = { editable = "extensions/openrouter" }
+dependencies = [
+    { name = "openai" },
+    { name = "selfhost" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "openai", specifier = ">=1.0" },
     { name = "selfhost", editable = "core" },
 ]
 

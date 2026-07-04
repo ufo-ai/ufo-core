@@ -32,9 +32,13 @@ MAX_RETRY_DELAY_SECONDS = 60.0
 MAX_EMPTY_PROVIDER_RETRIES = 3
 
 
-def openai_sdk_client(api_key: str) -> openai.AsyncOpenAI:
-    """SDK client with its own retries disabled: the retry policy lives in OpenAIClient."""
-    return openai.AsyncOpenAI(api_key=api_key, max_retries=0, timeout=PROVIDER_TIMEOUT_SECONDS)
+def openai_sdk_client(api_key: str, base_url: str | None = None) -> openai.AsyncOpenAI:
+    """SDK client with its own retries disabled: the retry policy lives in OpenAIClient. A base_url
+    points the OpenAI-compatible client at another host — an OpenRouter or similar model-provider
+    extension speaks the OpenAI wire against its own endpoint."""
+    return openai.AsyncOpenAI(
+        api_key=api_key, base_url=base_url, max_retries=0, timeout=PROVIDER_TIMEOUT_SECONDS
+    )
 
 
 def _openai_image(source: ImageSource) -> dict[str, object]:
