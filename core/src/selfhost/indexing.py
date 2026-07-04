@@ -4,9 +4,10 @@
 retrieval and embedding; `Chunk`/`Hit`/`IndexScope` are the dialect-neutral value objects that cross
 that seam. `TextChunker.chunk` is the workflow — recursive-delimiter split to ~target-word pieces
 with sentence-aware overlap, char-capped. `chunk_embed_upsert` is the derivation step a memory or
-page indexer shares: chunk one body, embed each chunk, upsert them under the owner. None of these
-touch the database or a dialect — a backend does storage, ANN/FTS, and the subject filter; these
-stay in-process value objects reached by both core and the extensions that implement the seam.
+page indexer shares: chunk one body, embed each chunk, upsert them under the owner, then prune the
+owner's chunks outside that set so an edit leaves no orphan. None of these touch the database or a
+dialect — a backend does storage, ANN/FTS, and the subject filter; these stay in-process value
+objects reached by both core and the extensions that implement the seam.
 """
 
 import hashlib
@@ -68,6 +69,8 @@ class IndexBackend(Protocol):
 
     async def delete(self, scope: IndexScope) -> None: ...
 
+    async def prune(self, scope: IndexScope, keep: frozenset[str]) -> None: ...
+
     async def lexical(
         self, query: str, subjects: frozenset[str], owner_kind: str, limit: int
     ) -> tuple[Hit, ...]: ...
@@ -92,18 +95,22 @@ async def chunk_embed_upsert(
     subject: str,
     body: str,
 ) -> None:
-    """Chunk one body, embed each chunk, and upsert them under the owner — the derivation step both
-    indexers share. Upsert is idempotent on chunk_digest, so a re-run over unchanged content
-    rewrites the same rows rather than duplicating them."""
+    """Chunk one body, embed each chunk, upsert them under the owner, then prune the owner's chunks
+    outside this desired set — the derivation step both indexers share. Upsert is idempotent on
+    chunk_digest, so a re-run over unchanged content rewrites the same rows; the prune drops the
+    digests an edit no longer produces (all of them when the new body is empty), so re-chunked
+    content leaves no orphaned chunk to surface as a stale hit."""
     chunks = chunker.chunk(body, owner_kind, owner_id, subject)
-    if not chunks:
-        return
-    vectors = await embed.embed(tuple(chunk.text for chunk in chunks))
-    await index.upsert(
-        tuple(
-            replace(chunk, embedding=vector)
-            for chunk, vector in zip(chunks, vectors, strict=True)
+    if chunks:
+        vectors = await embed.embed(tuple(chunk.text for chunk in chunks))
+        await index.upsert(
+            tuple(
+                replace(chunk, embedding=vector)
+                for chunk, vector in zip(chunks, vectors, strict=True)
+            )
         )
+    await index.prune(
+        IndexScope(owner_kind, owner_id), frozenset(chunk.chunk_digest for chunk in chunks)
     )
 
 

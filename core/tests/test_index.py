@@ -92,6 +92,40 @@ async def test_delete_removes_only_its_scope(clean_chunk: None, database_url: st
     assert [hit.chunk_digest for hit in vector] == ["keep"]
 
 
+async def test_prune_drops_the_scopes_chunks_outside_the_keep_set(
+    clean_chunk: None, database_url: str
+) -> None:
+    backend = DefaultIndex(embed=StubEmbed(vec((0, 1.0))), transaction=workspace_tx)
+    await backend.upsert(
+        (
+            Chunk("stale", "page", "p1", SUBJECT, 0, "apple", vec((0, 1.0))),
+            Chunk("fresh", "page", "p1", SUBJECT, 1, "apple", vec((0, 1.0))),
+            Chunk("other", "page", "p2", SUBJECT, 0, "apple", vec((0, 1.0))),
+        )
+    )
+    await backend.prune(IndexScope("page", "p1"), frozenset({"fresh"}))
+    lexical = await backend.lexical("apple", frozenset({SUBJECT}), "page", 10)
+    assert sorted(hit.chunk_digest for hit in lexical) == ["fresh", "other"]
+    vector = await backend.vector(vec((0, 1.0)), frozenset({SUBJECT}), "page", 10)
+    assert sorted(hit.chunk_digest for hit in vector) == ["fresh", "other"]
+
+
+async def test_prune_with_an_empty_keep_set_drops_the_whole_scope(
+    clean_chunk: None, database_url: str
+) -> None:
+    backend = DefaultIndex(embed=StubEmbed(vec((0, 1.0))), transaction=workspace_tx)
+    await backend.upsert(
+        (
+            Chunk("gone-a", "page", "p1", SUBJECT, 0, "apple", vec((0, 1.0))),
+            Chunk("gone-b", "page", "p1", SUBJECT, 1, "apple", vec((0, 1.0))),
+            Chunk("kept", "page", "p2", SUBJECT, 0, "apple", vec((0, 1.0))),
+        )
+    )
+    await backend.prune(IndexScope("page", "p1"), frozenset())
+    lexical = await backend.lexical("apple", frozenset({SUBJECT}), "page", 10)
+    assert [hit.chunk_digest for hit in lexical] == ["kept"]
+
+
 async def test_reindex_reembeds_scope_through_client(clean_chunk: None, database_url: str) -> None:
     backend = DefaultIndex(embed=StubEmbed(vec((5, 1.0))), transaction=workspace_tx)
     await backend.upsert((Chunk("c", "memory_item", "o", SUBJECT, 0, "apple", vec((0, 1.0))),))

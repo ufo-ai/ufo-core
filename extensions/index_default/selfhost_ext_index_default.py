@@ -6,7 +6,8 @@ name `"default"` — the backend core resolves when `memory.index_backend` is un
 halfvec/HNSW, SQLite FTS5 + brute-force cosine. Dialect-only types (halfvec, tsvector, FTS5) never
 leave this module — `Chunk`/`Hit`/`IndexScope` stay dialect-neutral. It owns the `chunk`/`chunk_fts`
 tables (its migration), reached through the workspace-scoped `transaction()` core hands the factory,
-and re-embeds a scope through the deploy `EmbedClient` on reindex.
+prunes a scope's chunks outside a keep-set so a re-chunked owner leaves no orphan, and re-embeds a
+scope through the deploy `EmbedClient` on reindex.
 """
 
 import math
@@ -97,6 +98,10 @@ VECTOR_PG = sa.text(
     """
 )
 DELETE_PG = sa.text("delete from chunk where owner_kind = :owner_kind and owner_id = :owner_id")
+PRUNE_PG = sa.text(
+    "delete from chunk where owner_kind = :owner_kind and owner_id = :owner_id "
+    "and chunk_digest <> all(:keep)"
+)
 SCOPE_TEXT_PG = sa.text(
     "select chunk_digest, text from chunk where owner_kind = :owner_kind and owner_id = :owner_id"
 )
@@ -144,6 +149,18 @@ DELETE_FTS_SCOPE = sa.text(
     )
     """
 )
+PRUNE_FTS_SQLITE = sa.text(
+    """
+    delete from chunk_fts where chunk_digest in (
+      select chunk_digest from chunk
+      where owner_kind = :owner_kind and owner_id = :owner_id and chunk_digest not in :keep
+    )
+    """
+).bindparams(sa.bindparam("keep", expanding=True))
+PRUNE_SQLITE = sa.text(
+    "delete from chunk where owner_kind = :owner_kind and owner_id = :owner_id "
+    "and chunk_digest not in :keep"
+).bindparams(sa.bindparam("keep", expanding=True))
 SCOPE_TEXT_SQLITE = sa.text(
     "select chunk_digest, text from chunk where owner_kind = :owner_kind and owner_id = :owner_id"
 )
@@ -208,6 +225,22 @@ class DefaultIndex:
                 return
             await connection.execute(DELETE_FTS_SCOPE, params)
             await connection.execute(DELETE_SQLITE, params)
+
+    async def prune(self, scope: IndexScope, keep: frozenset[str]) -> None:
+        if not keep:
+            await self.delete(scope)
+            return
+        params = {
+            "owner_kind": scope.owner_kind,
+            "owner_id": scope.owner_id,
+            "keep": list(keep),
+        }
+        async with self.transaction() as connection:
+            if connection.dialect.name == "postgresql":
+                await connection.execute(PRUNE_PG, params)
+                return
+            await connection.execute(PRUNE_FTS_SQLITE, params)
+            await connection.execute(PRUNE_SQLITE, params)
 
     async def lexical(
         self, query: str, subjects: frozenset[str], owner_kind: str, limit: int

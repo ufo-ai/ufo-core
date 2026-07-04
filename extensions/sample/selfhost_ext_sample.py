@@ -230,8 +230,9 @@ class SampleSource:
 class SampleIndex:
     """A trivial in-process IndexBackend the probe registers through the `indexes` Manifest point:
     it stores chunks in a dict, ranks lexical by term count and vector by dot product, each filtered
-    to the queried owner kind and subjects, and reindex re-embeds a scope through the embed client
-    core hands the factory. A real backend consumed through the protocol, so a test drives it
+    to the queried owner kind and subjects, prunes a scope's chunks outside a keep-set, and reindex
+    re-embeds a scope through the embed client core hands the factory. A real backend consumed
+    through the protocol, so a test drives it
     exactly as core does; the dialect-native backends keep their own retrieval proofs."""
 
     embed: EmbedClient
@@ -244,6 +245,14 @@ class SampleIndex:
     async def delete(self, scope: IndexScope) -> None:
         for digest in [
             digest for digest, chunk in self.chunks.items() if _in_scope(chunk, scope)
+        ]:
+            del self.chunks[digest]
+
+    async def prune(self, scope: IndexScope, keep: frozenset[str]) -> None:
+        for digest in [
+            digest
+            for digest, chunk in self.chunks.items()
+            if _in_scope(chunk, scope) and digest not in keep
         ]:
             del self.chunks[digest]
 

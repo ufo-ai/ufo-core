@@ -293,6 +293,38 @@ async def test_changed_doc_resync_marks_due_and_reindexes(
     assert "monday" in found
 
 
+async def test_edited_page_leaves_no_stale_chunk_in_search_sources(
+    clean: None, database_url: str, tmp_path: Path
+) -> None:
+    """Re-indexing an edited page prunes the old body's chunks: a term unique to the prior body no
+    longer surfaces through `search_sources`, while the new body's term does. Without the prune the
+    orphaned old chunk stays indexed under the same page and returns as a stale snippet."""
+    workspace_id = await _workspace()
+    root = tmp_path / "src"
+    root.mkdir()
+    doc = root / "spec.md"
+    doc.write_text("the launch codename is thunderbird")
+    driver, page_indexer, service = _wire(
+        database_url, vec((16, 1.0)), tmp_path / "blobs", workspace_id
+    )
+    await _register_folder(root)
+    await driver.run()
+    await page_indexer.run()
+    before = await service.search_sources("launch codename", frozenset({SHARED_SUBJECT}), 8)
+    assert before and "thunderbird" in before[0].text
+
+    doc.write_text("the launch codename is nighthawk")
+    await _make_due()
+    await driver.run()
+    await page_indexer.run()
+
+    matches = await service.search_sources(
+        "launch codename thunderbird", frozenset({SHARED_SUBJECT}), 8
+    )
+    assert matches and all("thunderbird" not in match.text for match in matches)
+    assert "nighthawk" in matches[0].text
+
+
 async def test_removed_file_tombstones_page_and_index_drops_its_chunks(
     clean: None, database_url: str, tmp_path: Path
 ) -> None:

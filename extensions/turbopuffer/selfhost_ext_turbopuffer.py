@@ -9,7 +9,8 @@ egress proxy.
 Chunks store as documents in a per-workspace namespace keyed by chunk_digest (base64url-shortened),
 with the embedding as the vector and owner_kind/owner_id/subject/ordinal/text as attributes; queries
 filter by owner_kind and the recall subject set and return `Hit`s. `delete` drops a scope by
-enumerating its ids; `reindex` re-embeds a scope's stored text and re-upserts. This adapts
+enumerating its ids; `prune` drops only the scope's ids outside a keep-set so a re-chunked owner
+leaves no orphan; `reindex` re-embeds a scope's stored text and re-upserts. This adapts
 metalcraft's page-based `TurbopufferIndex` to selfhost's chunk-based `IndexBackend` protocol
 (owner_kind/subject filter, `Chunk`/`Hit`/`IndexScope` value objects); the base URL is the default
 region endpoint rather than a per-deploy override."""
@@ -144,6 +145,20 @@ class TurbopufferIndex:
         async with await self._client() as api:
             chunks = await self._scope_chunks(api, scope)
             ids = [turbopuffer_id(chunk.chunk_digest) for chunk in chunks]
+            for start in range(0, len(ids), WRITE_BATCH):
+                response = await api.post(
+                    self._path(), json={"deletes": ids[start : start + WRITE_BATCH]}
+                )
+                response.raise_for_status()
+
+    async def prune(self, scope: IndexScope, keep: frozenset[str]) -> None:
+        async with await self._client() as api:
+            chunks = await self._scope_chunks(api, scope)
+            ids = [
+                turbopuffer_id(chunk.chunk_digest)
+                for chunk in chunks
+                if chunk.chunk_digest not in keep
+            ]
             for start in range(0, len(ids), WRITE_BATCH):
                 response = await api.post(
                     self._path(), json={"deletes": ids[start : start + WRITE_BATCH]}
