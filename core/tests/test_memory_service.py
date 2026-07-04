@@ -16,6 +16,7 @@ from selfhost_ext_embed_openai import EMBED_DIM
 from selfhost_ext_index_default import DefaultIndex
 from selfhost_ext_memory.store import (
     FACT,
+    MemoryIndexer,
     MemoryStore,
     MemoryWrite,
     Recalled,
@@ -27,7 +28,7 @@ from selfhost_ext_memory.store import (
 )
 
 from selfhost.db import workspace_tx
-from selfhost.indexing import OWNER_KIND_MEMORY_ITEM, OWNER_KIND_PAGE, Chunk
+from selfhost.indexing import OWNER_KIND_MEMORY_ITEM, OWNER_KIND_PAGE, Chunk, TextChunker
 from selfhost.schema import tables
 from selfhost.subjects import SHARED_SUBJECT, member_subject
 
@@ -149,6 +150,40 @@ async def test_commit_persists_item_and_derives_no_chunk(clean: None) -> None:
     assert row.item_class == FACT
     assert row.embedding_digest is None
     assert chunks == 0
+
+
+async def test_recommitting_a_fact_updates_in_place_not_duplicated(clean: None) -> None:
+    """A fact committed twice is content-addressed to one row: the id derives from
+    (workspace, subject, item_class, body), so the re-commit upserts its decay inputs in place and
+    one recallable item survives — not two hits for the same claim. The re-commit's confidence
+    wins, and the identical body leaves the derived chunk untouched."""
+    workspace_id = await _workspace()
+    probe = vec((6, 1.0))
+    embed = StubEmbed(probe)
+    store = _store(embed, workspace_id)
+    await store.commit(
+        MemoryWrite(subject=SHARED_SUBJECT, body="the vault code is 4821", confidence=3)
+    )
+    await store.commit(
+        MemoryWrite(subject=SHARED_SUBJECT, body="the vault code is 4821", confidence=9)
+    )
+
+    async with workspace_tx() as connection:
+        confidences = (
+            await connection.execute(
+                sa.select(memory_item.c.confidence).where(
+                    memory_item.c.subject == SHARED_SUBJECT
+                )
+            )
+        ).scalars().all()
+    assert confidences == [9]
+
+    await MemoryIndexer(
+        index=store.index, embed=embed, transaction=workspace_tx, chunker=TextChunker()
+    ).run()
+    hits = await store.recall("vault code", frozenset({SHARED_SUBJECT}), 10)
+    assert len(hits) == 1
+    assert "4821" in hits[0].body
 
 
 async def test_recall_returns_items_scoped_to_subject(clean: None) -> None:

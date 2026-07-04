@@ -19,10 +19,12 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Literal
-from uuid import UUID, uuid4
+from uuid import UUID, uuid5
 
 import sqlalchemy as sa
 from pydantic import BaseModel, Field
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from selfhost.sdk.context import ExtensionContext, ScopedStore
@@ -39,6 +41,7 @@ from selfhost.sdk.index import (
 from selfhost.sdk.sources import SHARED_SUBJECT, PageChange, PageFeed, member_subject
 
 RRF_K = 60
+MEMORY_ITEM_NAMESPACE = UUID("32492d08-3cb7-59ac-8962-b2e384f024fc")
 DUE_BATCH_MAX_ITEMS = 200
 EMBED_CLAIM_LEASE_SECONDS = 300
 PAGE_INDEX_BATCH = 50
@@ -243,21 +246,39 @@ class MemoryStore:
 
     async def commit(self, write: MemoryWrite) -> None:
         """Persist one memory_item with no derived state: embedding_digest stays NULL, marking the
-        row due for the index job — the sole producer of chunks and embeddings."""
+        row due for the index job — the sole producer of chunks and embeddings. The id is
+        content-addressed over `(workspace, subject, item_class, body)`, so re-committing the same
+        fact upserts its decay inputs in place rather than accumulating a duplicate recallable row;
+        the identical body leaves the existing chunks (and their digest) untouched."""
         async with self.transaction() as connection:
+            insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
+            statement = insert(memory_item).values(
+                id=uuid5(
+                    MEMORY_ITEM_NAMESPACE,
+                    "\x00".join(
+                        (str(self.workspace_id), write.subject, write.item_class, write.body)
+                    ),
+                ),
+                workspace_id=self.workspace_id,
+                subject=write.subject,
+                body=write.body,
+                item_class=write.item_class,
+                memory_kind=write.memory_kind,
+                confidence=write.confidence,
+                source_ref=write.source_ref,
+                superseded_by=None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
             await connection.execute(
-                sa.insert(memory_item).values(
-                    id=uuid4(),
-                    workspace_id=self.workspace_id,
-                    subject=write.subject,
-                    body=write.body,
-                    item_class=write.item_class,
-                    memory_kind=write.memory_kind,
-                    confidence=write.confidence,
-                    source_ref=write.source_ref,
-                    superseded_by=None,
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
+                statement.on_conflict_do_update(
+                    index_elements=[memory_item.c.id],
+                    set_={
+                        memory_item.c.memory_kind: statement.excluded.memory_kind,
+                        memory_item.c.confidence: statement.excluded.confidence,
+                        memory_item.c.source_ref: statement.excluded.source_ref,
+                        memory_item.c.updated_at: sa.func.now(),
+                    },
                 )
             )
 
