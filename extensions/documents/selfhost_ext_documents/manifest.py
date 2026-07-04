@@ -13,7 +13,7 @@ from selfhost.sdk.manifest import Manifest, SkillSpec
 NAME = "documents"
 VERSION = "0.1.0"
 SKILLS_ROOT = Path(__file__).parent / "skills"
-SKILL_NAMES = ("design-foundations", "office-docx", "pdf")
+SKILL_NAMES = ("design-foundations", "office-docx", "office-xlsx", "pdf")
 
 
 def manifest() -> Manifest:

@@ -10,7 +10,7 @@ from selfhost.ext.loader import skill_registry
 
 def test_documents_skills_parse_and_index() -> None:
     index = dict(skill_registry((documents.manifest(),)).index())
-    for name in ("design-foundations", "office-docx", "pdf"):
+    for name in ("design-foundations", "office-docx", "office-xlsx", "pdf"):
         assert name in index
 
 

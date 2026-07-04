@@ -41,7 +41,7 @@ JS_REPL_DESCRIPTION = (
 )
 XLSX_REPL_DESCRIPTION = (
     "Persistent Python REPL for Excel spreadsheet manipulation using openpyxl. Variables persist "
-    "across calls. MUST call load_skill(name='office/xlsx') before first use. Set result = ... to "
+    "across calls. MUST call load_skill(name='office-xlsx') before first use. Set result = ... to "
     "return data."
 )
 
