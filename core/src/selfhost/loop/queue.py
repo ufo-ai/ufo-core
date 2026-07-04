@@ -9,6 +9,7 @@ import sqlalchemy as sa
 from dbos import DBOS, DBOSClient, Queue
 
 from selfhost.blob import BlobStore, FilesystemBlobStore
+from selfhost.browser.backend import BrowserBackend
 from selfhost.config import Config
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
@@ -63,6 +64,7 @@ class Runtime:
     blob: BlobStore
     hub: Hub
     carrier: Carrier
+    browser: BrowserBackend
     proxy: ProxyEndpoint
     dbos: DBOSClient
     subagents: SubagentRegistry
@@ -153,6 +155,7 @@ async def _execute_turn(turn_id: str) -> str:
             ),
             hub=runtime.hub,
             sandbox=SandboxSession(carrier=runtime.carrier, handle=handle),
+            browser_backend=runtime.browser,
             tools=tools,
             tool_ext=tool_ext,
             hooks=hooks,

@@ -136,6 +136,7 @@ Manifest registers (each optional):
 | `memory` | Derivation pipeline stages (condensers, graph updaters) — see Agent loop / Memory. |
 | `indexes` | Index backends for memory/source retrieval (turbopuffer); pgvector is the core default. |
 | `hubs` | Stream hubs for multi-instance deploys (Redis). |
+| `browsers` | Browser-automation backends at the tool-surface seam; the BUA engine driving Chrome over a CDP endpoint is the core default (browserbase swaps the endpoint provider, browser-use the whole surface). |
 
 `ExtensionContext` (capability-scoped, handed to every handler): workspace-scoped store access,
 `credentials.get(slot)`, `memory.write(...)`, `invoke(agent, input, conversation=...)`,

@@ -11,6 +11,8 @@ from cryptography.fernet import Fernet
 from pydantic import BaseModel
 
 from selfhost.blob import FilesystemBlobStore
+from selfhost.browser.backend import BuaBackend
+from selfhost.browser.cdp_provider import BrowserCdpProviderChain
 from selfhost.db import workspace_tx
 from selfhost.ext.loader import HookChain
 from selfhost.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
@@ -406,6 +408,7 @@ def _engine(
         ),
         hub=InProcessHub(),
         sandbox=SandboxSession(carrier=carrier, handle=handle),
+        browser_backend=BuaBackend(provider=BrowserCdpProviderChain(hosted=None, local=None)),
         tools=ToolRegistry(BUILTIN_TOOLS),
         tool_ext={},
         hooks=HookChain(),

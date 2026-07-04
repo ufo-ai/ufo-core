@@ -21,6 +21,8 @@ from pydantic import BaseModel
 
 import selfhost.ext.loader as loader
 from selfhost.blob import FilesystemBlobStore
+from selfhost.browser.backend import BuaBackend
+from selfhost.browser.cdp_provider import BrowserCdpProviderChain
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.ext.context import ExtensionContext, ScopedStore, context_for
@@ -414,6 +416,7 @@ def _engine(
         ),
         hub=InProcessHub(),
         sandbox=SandboxSession(carrier=carrier or RecordingCarrier(), handle=handle),
+        browser_backend=BuaBackend(provider=BrowserCdpProviderChain(hosted=None, local=None)),
         tools=ToolRegistry(tools),
         tool_ext=tool_ext or {},
         hooks=hooks,

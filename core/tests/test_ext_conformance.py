@@ -20,7 +20,8 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from selfhost.blob import FilesystemBlobStore
-from selfhost.config import BlobConfig, Config, DatabaseConfig, HubConfig
+from selfhost.browser.backend import BuaBackend
+from selfhost.config import BlobConfig, BrowserConfig, Config, DatabaseConfig, HubConfig
 from selfhost.credentials import CredentialSlotUnset, CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.ext.context import (
@@ -60,7 +61,7 @@ from selfhost.sandbox.proxy.rules import InjectionRule, MeterRule, derive_creden
 from selfhost.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from selfhost.schema import tables
 from selfhost.schema.records import Agent, Turn, Usage
-from selfhost.serve import _mount_ext_routes, _mount_surfaces, _select_hub
+from selfhost.serve import _mount_ext_routes, _mount_surfaces, _select_browser, _select_hub
 from selfhost.skills.runtime import mount_skill
 from selfhost.tools.context import SpawnResult, ToolContext
 from selfhost.transcript import Conversation, transcript_key
@@ -204,6 +205,7 @@ async def test_sample_is_discovered_via_its_entry_point() -> None:
     assert {spec.name for spec in manifest.indexes} == {sample.INDEX_BACKEND}
     assert {spec.backend for spec in manifest.hubs} == {sample.HUB_BACKEND}
     assert {spec.path.name for spec in manifest.skills} == {sample.SKILL_NAME}
+    assert {spec.backend for spec in manifest.browsers} == {sample.BROWSER_BACKEND}
 
 
 def test_core_selects_a_manifest_contributed_hub() -> None:
@@ -225,6 +227,47 @@ def test_core_selects_a_manifest_contributed_hub() -> None:
         _select_hub(_config(sample.HUB_BACKEND), ())
     with pytest.raises(RuntimeError, match="two extensions register hub backend"):
         _select_hub(_config(sample.HUB_BACKEND), (manifest, manifest))
+
+
+def test_core_selects_a_manifest_contributed_browser() -> None:
+    """The `browsers` seam end to end: core's boot-time selection knows only the built-in `bua`
+    default, so resolving the sample's backend name proves the Manifest `browsers` point flowed into
+    selection. Selecting a name no manifest registers, and two manifests claiming one name, both
+    fail loud; a named backend with no credential key set fails loud."""
+    manifest = _sample_manifest()
+    workspace_id = uuid4()
+    store = _credential_store()
+
+    def _config(backend: str) -> Config:
+        return Config(
+            database=DatabaseConfig(url="sqlite+aiosqlite:///dev.db"),
+            blob=BlobConfig(backend="filesystem", root=Path()),
+            browser=BrowserConfig(backend=backend),
+        )
+
+    assert isinstance(_select_browser(_config("bua"), (), workspace_id, None), BuaBackend)
+    selected = _select_browser(_config(sample.BROWSER_BACKEND), (manifest,), workspace_id, store)
+    assert isinstance(selected, sample.SampleBrowserBackend)
+    with pytest.raises(RuntimeError, match="no extension registers it"):
+        _select_browser(_config(sample.BROWSER_BACKEND), (), workspace_id, store)
+    with pytest.raises(RuntimeError, match="two extensions register browser backend"):
+        _select_browser(_config(sample.BROWSER_BACKEND), (manifest, manifest), workspace_id, store)
+    with pytest.raises(RuntimeError, match="needs a credential key"):
+        _select_browser(_config(sample.BROWSER_BACKEND), (manifest,), workspace_id, None)
+
+
+async def test_sample_browser_backend_yields_a_drivable_surface() -> None:
+    """The consumer half of the `browsers` seam through the probe: the registered backend yields a
+    per-turn surface driven through the same protocol the browser tools call, and it answers — a
+    real object exercised end to end, not a mock call-log."""
+    surface = sample.SampleBrowserBackend().surface(None, None)
+    reply = await surface.navigate({"url": "https://x.test"})
+    assert reply == {
+        "action": "navigate",
+        "backend": sample.BROWSER_BACKEND,
+        "args": {"url": "https://x.test"},
+    }
+    await surface.aclose()
 
 
 def test_pack_prompt_section_reaches_the_rendered_system_prompt() -> None:

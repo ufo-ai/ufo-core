@@ -22,6 +22,8 @@ from selfhost.artifact_token import (
     verify_artifact_token,
 )
 from selfhost.blob import FilesystemBlobStore
+from selfhost.browser.backend import BuaBackend
+from selfhost.browser.cdp_provider import BrowserCdpProviderChain
 from selfhost.config import Config
 from selfhost.db import workspace_tx
 from selfhost.ext.loader import skill_registry
@@ -175,6 +177,7 @@ def dbos_runtime(
             blob=blob,
             hub=hub,
             carrier=StandInCarrier(),
+            browser=BuaBackend(provider=BrowserCdpProviderChain(hosted=None, local=None)),
             proxy=proxy,
             dbos=dbos_client,
             subagents=SubagentRegistry(()),

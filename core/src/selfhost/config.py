@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 CONFIG_PATH_ENV = "SELFHOST_CONFIG"
 DEFAULT_CONFIG_PATH = Path("selfhost.toml")
 IN_PROCESS_BACKEND = "in_process"
+BUA_BROWSER_BACKEND = "bua"
 
 
 class DatabaseConfig(BaseModel):
@@ -139,6 +140,16 @@ class HubConfig(BaseModel):
     url: str | None = None
 
 
+class BrowserConfig(BaseModel):
+    """The browser backend. `backend` selects among core's default `bua` engine (Chrome over the
+    CDP endpoint the `BROWSER_CDP_URL` provider yields) and any backend an extension registers
+    through its Manifest `browsers` point (browserbase, browser-use). Selecting a name no extension
+    registers fails loud at boot."""
+
+    model_config = ConfigDict(extra="forbid")
+    backend: str = BUA_BROWSER_BACKEND
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
     database: DatabaseConfig
@@ -154,6 +165,7 @@ class Config(BaseModel):
     surfaces: SurfacesConfig = SurfacesConfig()
     artifacts: ArtifactsConfig = ArtifactsConfig()
     hub: HubConfig = HubConfig()
+    browser: BrowserConfig = BrowserConfig()
 
 
 def config_path() -> Path:

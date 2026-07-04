@@ -9,9 +9,11 @@ touch a file the turn has not read first. `connector_account` hands a connector 
 connected-account id it passes to the broker's server-side execute API, resolved strictly from the
 turn-agent's own grants so a tool reaches only the turn-agent's accounts. `skills` is the loadable
 skill set for the deploy (core plus the active packs') that `load_skill` resolves against; it
-defaults to the core floor so a context built without the loader still resolves the core three. An
-extension tool also gets `ext`, its owning extension's workspace-scoped ExtensionContext; a builtin
-tool gets `ext=None`."""
+defaults to the core floor so a context built without the loader still resolves the core three.
+`browser` is the turn's live browser surface — the selected browser backend's per-turn handle the
+browser tools drive; it opens its connection lazily on first use and the engine closes it at turn
+end. An extension tool also gets `ext`, its owning extension's workspace-scoped ExtensionContext; a
+builtin tool gets `ext=None`."""
 
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Literal, Protocol
@@ -20,6 +22,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 from selfhost.blob import BlobStore
+from selfhost.browser.backend import BrowserSurface
 from selfhost.ext.context import ExtensionContext
 from selfhost.grants import ConnectUnavailable, GrantStore
 from selfhost.memory.service import MemoryService
@@ -104,6 +107,7 @@ class ToolContext:
     read_paths: set[str] = field(default_factory=set)
     skills: SkillRegistry = CORE_SKILL_REGISTRY
     ext: ExtensionContext | None = None
+    browser: BrowserSurface | None = None
 
     async def connector_account(self, provider: str, account_id: str | None = None) -> str:
         """The broker's connected-account id a connector tool passes to the broker's server-side

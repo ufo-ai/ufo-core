@@ -17,8 +17,9 @@ from typing import ClassVar
 from uuid import UUID
 
 import sqlalchemy as sa
-from pydantic import BaseModel
+from pydantic import BaseModel, JsonValue
 
+from selfhost.sdk.browser import BrowserSurface, FindCompleter
 from selfhost.sdk.connectors import OAuthAccount
 from selfhost.sdk.context import AgentChange, ExtensionContext
 from selfhost.sdk.http import JSONResponse, PlainTextResponse, Request, Response
@@ -26,6 +27,7 @@ from selfhost.sdk.hub import InProcessHub
 from selfhost.sdk.index import Chunk, EmbedClient, Hit, IndexScope
 from selfhost.sdk.jobs import JobSpec
 from selfhost.sdk.manifest import (
+    BrowserBackendSpec,
     ConnectorProvider,
     CredentialSlot,
     Deny,
@@ -102,6 +104,7 @@ SKILL_NAME = "sample_skill"
 SKILL_SCRIPT = "probe.py"
 SKILL_SCRIPT_MARKER = "sample-skill-probe-ok"
 SKILL_DIR = Path(__file__).parent / "skills" / SKILL_NAME
+BROWSER_BACKEND = "sample_browser"
 
 
 NOTE_TABLE = sa.Table(
@@ -404,6 +407,64 @@ class SampleModelClient:
         yield Usage(input_tokens=1, output_tokens=1)
 
 
+@dataclass(frozen=True)
+class SampleBrowserSurface:
+    """The canned per-turn surface the sample's browser backend yields: each tool method returns a
+    deterministic reply echoing its action and args, so the seam — core selecting a
+    manifest-contributed browser backend and the browser tools dispatching through the yielded
+    surface — is exercised by a real backend, never a mock call-log."""
+
+    async def navigate(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        return _browser_reply("navigate", args)
+
+    async def tabs_context(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        return _browser_reply("tabs_context", args)
+
+    async def tabs_create(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        return _browser_reply("tabs_create", args)
+
+    async def tabs_close(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        return _browser_reply("tabs_close", args)
+
+    async def upload_file(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        return _browser_reply("upload_file", args)
+
+    async def read_page(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        return _browser_reply("read_page", args)
+
+    async def get_page_text(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        return _browser_reply("get_page_text", args)
+
+    async def find(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        return _browser_reply("find", args)
+
+    async def form_input(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        return _browser_reply("form_input", args)
+
+    async def computer(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        return _browser_reply("computer", args)
+
+    async def wait_for_download(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        return _browser_reply("wait_for_download", args)
+
+    async def aclose(self) -> None:
+        return None
+
+
+@dataclass(frozen=True)
+class SampleBrowserBackend:
+    """A trivial BrowserBackend the probe registers through the `browsers` Manifest point: `surface`
+    yields a canned SampleBrowserSurface. A real backend consumed through the protocol, so a test
+    drives it exactly as core does; the BUA engine keeps its own live-CDP end-to-end proof."""
+
+    def surface(self, find: FindCompleter | None, model: str | None) -> BrowserSurface:
+        return SampleBrowserSurface()
+
+
+def _browser_reply(action: str, args: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    return {"action": action, "backend": BROWSER_BACKEND, "args": args}
+
+
 def manifest() -> Manifest:
     return Manifest(
         name=NAME,
@@ -488,4 +549,9 @@ def manifest() -> Manifest:
         ),
         hubs=(HubSpec(backend=HUB_BACKEND, build=lambda _url: InProcessHub()),),
         skills=(SkillSpec(path=SKILL_DIR),),
+        browsers=(
+            BrowserBackendSpec(
+                backend=BROWSER_BACKEND, build=lambda credentials: SampleBrowserBackend()
+            ),
+        ),
     )

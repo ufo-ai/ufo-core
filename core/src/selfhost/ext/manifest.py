@@ -17,6 +17,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from selfhost.accounting import ModelPrice
+from selfhost.browser.backend import BrowserBackend
 from selfhost.ext.context import CredentialAccess, ExtensionContext
 from selfhost.ext.surface import SurfaceSpec
 from selfhost.grants import OAuthProvider
@@ -147,6 +148,20 @@ class HubSpec:
 
     backend: str
     build: Callable[[str | None], Hub]
+
+
+@dataclass(frozen=True)
+class BrowserBackendSpec:
+    """A browser backend an extension registers, selected at the tool-surface level. `backend` is
+    the name `config.browser.backend` selects it by; `build` constructs the process-wide
+    BrowserBackend once at boot, only when selected, given a credential reader scoped to this
+    manifest's slots (a remote provider reads its key in-process, host-side, never in the sandbox).
+    Core's default `bua` backend drives Chrome over the CDP endpoint an endpoint provider yields; an
+    extension reuses that engine with its own endpoint provider (browserbase) or replaces the whole
+    surface (browser-use)."""
+
+    backend: str
+    build: Callable[[CredentialAccess], BrowserBackend]
 
 
 @dataclass(frozen=True)
@@ -311,3 +326,4 @@ class Manifest:
     models: tuple[ModelProviderSpec, ...] = ()
     hubs: tuple[HubSpec, ...] = ()
     skills: tuple[SkillSpec, ...] = ()
+    browsers: tuple[BrowserBackendSpec, ...] = ()

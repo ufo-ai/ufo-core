@@ -1,10 +1,11 @@
-"""The browser tools: one per action of the sandbox's browser/computer-use surface.
+"""The browser tools: one per action of the agent's browser/computer-use surface.
 
-Each tool validates its arguments, marshals them to a command the in-sandbox browser helper
-understands, and drives it through `ctx.sandbox.browser` — the same seam bash and file ops use, so a
-tool never holds a raw browser or CDP handle and the mount and egress scoping hold on every action.
-`computer` (when asked) and `wait_for_download` persist bytes into the shared workspace through the
-same session, so the parent agent and sibling subagents reach them by path."""
+Each tool validates its arguments and drives them through `ctx.browser` — the turn's live
+`BrowserSurface`, yielded by whichever browser backend the deploy selected (core's default BUA
+engine over a CDP endpoint, or an extension backend). A tool never holds a raw browser or CDP
+handle; the backend owns the connection and closes it at turn end. `computer` (when asked) and
+`wait_for_download` persist bytes into the shared workspace through the sandbox, so the parent agent
+and sibling subagents reach them by path."""
 
 import base64
 import json
@@ -12,6 +13,7 @@ from typing import Literal
 
 from pydantic import BaseModel, JsonValue
 
+from selfhost.sdk.browser import BrowserSurface
 from selfhost.sdk.tools import ImageContent, TextContent, ToolContext, ToolDef, ToolResult
 
 DEFAULT_SCREENSHOT_PATH = "browser-screenshot.jpg"
@@ -85,6 +87,12 @@ class WaitForDownloadInput(BaseModel):
     timeout: int | None = None
 
 
+def _browser(ctx: ToolContext) -> BrowserSurface:
+    if ctx.browser is None:
+        raise RuntimeError("no browser backend is configured for this turn")
+    return ctx.browser
+
+
 def _json_result(reply: dict[str, JsonValue]) -> ToolResult:
     return ToolResult(content=(TextContent(text=json.dumps(reply)),))
 
@@ -96,61 +104,62 @@ def _required_str(value: JsonValue, field: str) -> str:
 
 
 async def _navigate(ctx: ToolContext, args: NavigateInput) -> ToolResult:
-    reply = await ctx.sandbox.browser(
-        "navigate", args.model_dump(exclude_none=True, exclude={"user_description"})
+    reply = await _browser(ctx).navigate(
+        args.model_dump(mode="json", exclude_none=True, exclude={"user_description"})
     )
     return _json_result(reply)
 
 
 async def _tabs_context(ctx: ToolContext, args: TabsContextInput) -> ToolResult:
-    return _json_result(await ctx.sandbox.browser("tabs_context", {}))
+    return _json_result(await _browser(ctx).tabs_context({}))
 
 
 async def _tabs_create(ctx: ToolContext, args: TabsCreateInput) -> ToolResult:
-    reply = await ctx.sandbox.browser("tabs_create", {"url": args.url or "about:blank"})
+    reply = await _browser(ctx).tabs_create({"url": args.url or "about:blank"})
     return _json_result(reply)
 
 
 async def _tabs_close(ctx: ToolContext, args: TabsCloseInput) -> ToolResult:
-    return _json_result(await ctx.sandbox.browser("tabs_close", args.model_dump(exclude_none=True)))
+    reply = await _browser(ctx).tabs_close(args.model_dump(mode="json", exclude_none=True))
+    return _json_result(reply)
 
 
 async def _upload_file(ctx: ToolContext, args: UploadFileInput) -> ToolResult:
-    reply = await ctx.sandbox.browser("upload_file", args.model_dump(exclude_none=True))
+    reply = await _browser(ctx).upload_file(args.model_dump(mode="json", exclude_none=True))
     return _json_result(reply)
 
 
 async def _read_page(ctx: ToolContext, args: ReadPageInput) -> ToolResult:
-    reply = await ctx.sandbox.browser(
-        "read_page", args.model_dump(exclude_none=True, exclude={"user_description"})
+    reply = await _browser(ctx).read_page(
+        args.model_dump(mode="json", exclude_none=True, exclude={"user_description"})
     )
     return _json_result(reply)
 
 
 async def _get_page_text(ctx: ToolContext, args: GetPageTextInput) -> ToolResult:
-    reply = await ctx.sandbox.browser(
-        "get_page_text", args.model_dump(exclude_none=True, exclude={"user_description"})
+    reply = await _browser(ctx).get_page_text(
+        args.model_dump(mode="json", exclude_none=True, exclude={"user_description"})
     )
     return _json_result(reply)
 
 
 async def _find(ctx: ToolContext, args: FindInput) -> ToolResult:
-    reply = await ctx.sandbox.browser(
-        "find", args.model_dump(exclude_none=True, exclude={"user_description"})
+    reply = await _browser(ctx).find(
+        args.model_dump(mode="json", exclude_none=True, exclude={"user_description"})
     )
     return _json_result(reply)
 
 
 async def _form_input(ctx: ToolContext, args: FormInputInput) -> ToolResult:
-    reply = await ctx.sandbox.browser(
-        "form_input", args.model_dump(exclude_none=True, exclude={"user_description"})
+    reply = await _browser(ctx).form_input(
+        args.model_dump(mode="json", exclude_none=True, exclude={"user_description"})
     )
     return _json_result(reply)
 
 
 async def _computer(ctx: ToolContext, args: ComputerInput) -> ToolResult:
-    reply = await ctx.sandbox.browser(
-        "computer", args.model_dump(exclude_none=True, exclude={"user_description"})
+    reply = await _browser(ctx).computer(
+        args.model_dump(mode="json", exclude_none=True, exclude={"user_description"})
     )
     if args.save_to_workspace is True:
         path = args.path or DEFAULT_SCREENSHOT_PATH
@@ -170,8 +179,8 @@ async def _computer(ctx: ToolContext, args: ComputerInput) -> ToolResult:
 
 
 async def _wait_for_download(ctx: ToolContext, args: WaitForDownloadInput) -> ToolResult:
-    download = await ctx.sandbox.browser(
-        "wait_for_download", args.model_dump(exclude_none=True, exclude={"user_description"})
+    download = await _browser(ctx).wait_for_download(
+        args.model_dump(mode="json", exclude_none=True, exclude={"user_description"})
     )
     filename = _required_str(download.get("filename"), "filename")
     content = _required_str(download.get("content_base64"), "content_base64")

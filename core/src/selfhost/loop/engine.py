@@ -18,6 +18,7 @@ from selfhost.accounting import (
     record_turn_usage,
 )
 from selfhost.blob import BlobStore
+from selfhost.browser.backend import BrowserBackend
 from selfhost.db import workspace_tx
 from selfhost.ext.context import ExtensionContext
 from selfhost.ext.loader import HookChain
@@ -59,6 +60,7 @@ from selfhost.tools.registry import ToolRegistry
 from selfhost.transcript import Conversation
 
 MAX_OUTPUT_TOKENS = 16_000
+FIND_MAX_TOKENS = 2_000
 MAIN_ROUND_LIMIT = 200
 DELTA_FLUSH_BYTES = 2048
 DELTA_FLUSH_SECONDS = 0.2
@@ -139,6 +141,7 @@ class TurnEngine:
     compaction: Compaction
     hub: Hub
     sandbox: SandboxSession
+    browser_backend: BrowserBackend
     tools: ToolRegistry
     tool_ext: dict[str, ExtensionContext]
     hooks: HookChain
@@ -164,6 +167,26 @@ class TurnEngine:
                 prompt_digest=self.system_prompt.digest,
             )
             usage_events: list[Usage] = []
+
+            async def rank_find(system: str, user: str) -> str:
+                """The browser `find` tool's element ranking: a host-side model call (the engine
+                runs on the host, never in the sandbox) whose usage meters onto this turn."""
+                request = ModelRequest(
+                    model=self.agent.model,
+                    system=system,
+                    messages=(Message(role="user", content=user),),
+                    max_tokens=FIND_MAX_TOKENS,
+                )
+                parts: list[str] = []
+                async for event in self.model.complete(request):
+                    match event:
+                        case TextDelta(text=text):
+                            parts.append(text)
+                        case Usage():
+                            usage_events.append(event)
+                return "".join(parts)
+
+            browser = self.browser_backend.surface(rank_find, self.agent.model)
             context = ToolContext(
                 sandbox=self.sandbox,
                 blob=self.blob,
@@ -176,6 +199,7 @@ class TurnEngine:
                 artifact_token_secret=self.artifact_token_secret,
                 grants=self.grants,
                 skills=self.skills,
+                browser=browser,
             )
             try:
                 if not await self._mark_running():
@@ -218,6 +242,8 @@ class TurnEngine:
                 await self._commit("failed", usage_events, error_class=type(error).__name__)
                 await self._persist_inbound()
                 raise
+            finally:
+                await browser.aclose()
 
     async def _mark_running(self) -> bool:
         """Claim the turn as this execution's single owner, keyed by this run's workflow id. A

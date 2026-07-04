@@ -17,7 +17,9 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from selfhost.blob import BlobStore, blob_store_for
-from selfhost.config import IN_PROCESS_BACKEND, Config, load_config
+from selfhost.browser.backend import BrowserBackend, BuaBackend
+from selfhost.browser.cdp_provider import BrowserCdpProviderChain, env_browser_cdp_provider
+from selfhost.config import BUA_BROWSER_BACKEND, IN_PROCESS_BACKEND, Config, load_config
 from selfhost.credentials import CredentialStore
 from selfhost.db import init_db, workspace_tx
 from selfhost.ext.context import context_for
@@ -117,6 +119,7 @@ def run() -> None:
             blob=blob,
             hub=hub,
             carrier=DockerCarrier(),
+            browser=_select_browser(config, manifests, workspace_id, credentials),
             proxy=_egress_proxy(asyncio.run(_resolver(config, credentials))),
             dbos=dbos_client,
             subagents=SubagentRegistry((*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests))),
@@ -250,6 +253,48 @@ def _select_hub(config: Config, manifests: tuple[Manifest, ...]) -> Hub:
             f"config selects hub backend {config.hub.backend!r} but no extension registers it"
         )
     return build(config.hub.url)
+
+
+def _select_browser(
+    config: Config,
+    manifests: tuple[Manifest, ...],
+    workspace_id: UUID,
+    credentials: CredentialStore | None,
+) -> BrowserBackend:
+    """The process-wide browser backend the deploy selects: core's default `bua` engine driving
+    Chrome over the CDP endpoint the `BROWSER_CDP_URL` provider yields, or a backend an extension
+    registers through its Manifest `browsers` point, built once at boot with a credential reader
+    scoped to that extension's slots. Two extensions claiming one name fail loud, as does selecting
+    a name no extension registers or an extension shadowing the core `bua` default; a named backend
+    with no credential key set fails loud, since its factory may read a BYOK slot host-side."""
+    if config.browser.backend == BUA_BROWSER_BACKEND:
+        return BuaBackend(
+            provider=BrowserCdpProviderChain(hosted=env_browser_cdp_provider(), local=None)
+        )
+    specs = {}
+    for manifest in manifests:
+        for spec in manifest.browsers:
+            if spec.backend == BUA_BROWSER_BACKEND:
+                raise RuntimeError(
+                    f"extension may not register the core browser backend {spec.backend!r}"
+                )
+            if spec.backend in specs:
+                raise RuntimeError(f"two extensions register browser backend {spec.backend!r}")
+            specs[spec.backend] = (spec, manifest)
+    found = specs.get(config.browser.backend)
+    if found is None:
+        raise RuntimeError(
+            f"config selects browser backend {config.browser.backend!r} "
+            "but no extension registers it"
+        )
+    spec, manifest = found
+    if credentials is None:
+        raise RuntimeError(
+            f"browser backend {config.browser.backend!r} needs a credential key but none is set"
+        )
+    declared = frozenset(slot.name for slot in manifest.credentials)
+    context = context_for(workspace_id, manifest.name, declared, credentials)
+    return spec.build(context.credentials)
 
 
 def _mount_ext_routes(
