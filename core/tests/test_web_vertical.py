@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
-import selfhost_ext_web as web
+import selfhost_ext_exa as exa
 
 from selfhost.blob import FilesystemBlobStore
 from selfhost.loop.subagents import subagent_system_prompt
@@ -56,12 +56,12 @@ def _context(sandbox: CommandRecordingSandbox, tmp_path: Path) -> ToolContext:
 
 
 def _tool():
-    return next(tool for tool in web.manifest().tools if tool.name == web.SEARCH_VERTICAL_TOOL)
+    return next(tool for tool in exa.manifest().tools if tool.name == exa.SEARCH_VERTICAL_TOOL)
 
 
 def test_search_vertical_registers_with_verbatim_description_and_enum() -> None:
     tool = _tool()
-    assert tool.description == web.SEARCH_VERTICAL_DESCRIPTION
+    assert tool.description == exa.SEARCH_VERTICAL_DESCRIPTION
     assert tool.untrusted is True
     schema = tool.schema().input_schema
     assert set(schema["properties"]["vertical"]["enum"]) == {
@@ -103,7 +103,7 @@ async def test_search_vertical_video_sends_no_category(tmp_path: Path) -> None:
 
 
 def test_web_registers_the_research_and_deep_research_profiles() -> None:
-    profiles = {profile.name: profile for profile in web.manifest().subagents}
+    profiles = {profile.name: profile for profile in exa.manifest().subagents}
     assert set(profiles) == {"research", "deep_research"}
     research = profiles["research"]
     assert research.input_model.model_validate({"objective": "size the market"}).objective
@@ -113,13 +113,13 @@ def test_web_registers_the_research_and_deep_research_profiles() -> None:
 
 
 def test_deep_research_lifts_its_round_budget_above_the_default() -> None:
-    profiles = {profile.name: profile for profile in web.manifest().subagents}
-    assert profiles["deep_research"].max_rounds == web.DEEP_RESEARCH_ROUND_LIMIT == 200
+    profiles = {profile.name: profile for profile in exa.manifest().subagents}
+    assert profiles["deep_research"].max_rounds == exa.DEEP_RESEARCH_ROUND_LIMIT == 200
     assert profiles["research"].max_rounds < profiles["deep_research"].max_rounds
 
 
 def test_research_profile_prompt_wraps_with_citation_and_fills_the_skill_index() -> None:
-    prompt = subagent_system_prompt(web.RESEARCH_PROFILE)
+    prompt = subagent_system_prompt(exa.RESEARCH_PROFILE)
     assert "{{skill_index}}" not in prompt
     assert "<available_skills>" in prompt
     assert "<citation_instructions>" in prompt

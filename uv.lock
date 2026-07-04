@@ -16,6 +16,7 @@ members = [
     "selfhost-ext-connectors",
     "selfhost-ext-documents",
     "selfhost-ext-eval-harness",
+    "selfhost-ext-exa",
     "selfhost-ext-mcp",
     "selfhost-ext-openrouter",
     "selfhost-ext-redis-hub",
@@ -27,7 +28,6 @@ members = [
     "selfhost-ext-slack",
     "selfhost-ext-todos",
     "selfhost-ext-turbopuffer",
-    "selfhost-ext-web",
 ]
 
 [[package]]
@@ -2423,6 +2423,17 @@ requires-dist = [
 ]
 
 [[package]]
+name = "selfhost-ext-exa"
+version = "0.1.0"
+source = { editable = "extensions/exa" }
+dependencies = [
+    { name = "selfhost" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "selfhost", editable = "core" }]
+
+[[package]]
 name = "selfhost-ext-mcp"
 version = "0.1.0"
 source = { editable = "extensions/mcp" }
@@ -2570,17 +2581,6 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "selfhost", editable = "core" },
 ]
-
-[[package]]
-name = "selfhost-ext-web"
-version = "0.1.0"
-source = { editable = "extensions/web" }
-dependencies = [
-    { name = "selfhost" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "selfhost", editable = "core" }]
 
 [[package]]
 name = "shellingham"

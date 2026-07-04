@@ -26,7 +26,7 @@ from selfhost.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 
 type Json = str | int | float | bool | None | list["Json"] | dict[str, "Json"]
 
-NAME = "web"
+NAME = "exa"
 VERSION = "0.1.0"
 SEARCH_WEB_TOOL = "search_web"
 FETCH_URL_TOOL = "fetch_url"

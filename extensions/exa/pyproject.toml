@@ -1,12 +1,12 @@
 [project]
-name = "selfhost-ext-web"
+name = "selfhost-ext-exa"
 version = "0.1.0"
 description = "Research web tool pack: search_web, fetch_url, and search_vertical over Exa (egress-proxied via a BYOK credential slot), plus the research and deep_research subagent profiles"
 requires-python = ">=3.12"
 dependencies = ["selfhost"]
 
 [project.entry-points."selfhost.extension"]
-web = "selfhost_ext_web:manifest"
+exa = "selfhost_ext_exa:manifest"
 
 [tool.uv.sources]
 selfhost = { workspace = true }
@@ -17,7 +17,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 only-include = [
-    "selfhost_ext_web.py",
+    "selfhost_ext_exa.py",
     "web_section.md",
     "subagent_research.md",
     "subagent_deep_research.md",

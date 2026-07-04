@@ -12,7 +12,7 @@ import json
 import shlex
 from uuid import uuid4
 
-import selfhost_ext_web as web
+import selfhost_ext_exa as exa
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 
@@ -93,7 +93,7 @@ def _context(carrier: _RecordingCarrier) -> ToolContext:
 
 
 def _tool(name: str) -> object:
-    return next(tool for tool in web.manifest().tools if tool.name == name)
+    return next(tool for tool in exa.manifest().tools if tool.name == name)
 
 
 def _body_of(command: str) -> dict[str, object]:
@@ -106,18 +106,18 @@ def _url_of(command: str) -> str:
 
 
 def test_manifest_declares_search_and_fetch_with_verbatim_descriptions() -> None:
-    manifest = web.manifest()
-    assert manifest.name == "web"
+    manifest = exa.manifest()
+    assert manifest.name == "exa"
     by_name = {tool.name: tool for tool in manifest.tools}
-    assert set(by_name) == {"search_web", "fetch_url"}
+    assert set(by_name) == {"search_web", "fetch_url", "search_vertical"}
     assert by_name["search_web"].description == SEARCH_WEB_DESCRIPTION
     assert by_name["fetch_url"].description == FETCH_URL_DESCRIPTION
-    assert set(web.SearchWebInput.model_fields) == {
+    assert set(exa.SearchWebInput.model_fields) == {
         "queries",
         "recency_filter",
         "allowed_domains",
     }
-    assert set(web.FetchUrlInput.model_fields) == {
+    assert set(exa.FetchUrlInput.model_fields) == {
         "url",
         "prompt",
         "max_length",
@@ -130,7 +130,7 @@ def test_manifest_contributes_the_web_prompt_section_into_the_rendered_shell() -
     """Both ends of the contribution seam: the web pack declares a prompt section, and the same
     tuple the loop builds from `manifest.prompt_sections` renders into the shell's `{{sections}}`
     slot — so the search rules reach the agent's system prompt without core naming it."""
-    (section,) = web.manifest().prompt_sections
+    (section,) = exa.manifest().prompt_sections
     assert section.name == "web"
     rendered = render_system_prompt("You are the assistant.", ((section.name, section.body),))
     assert "search_web" in rendered.content
@@ -139,20 +139,20 @@ def test_manifest_contributes_the_web_prompt_section_into_the_rendered_shell() -
 
 
 def test_web_results_are_marked_untrusted() -> None:
-    by_name = {tool.name: tool for tool in web.manifest().tools}
+    by_name = {tool.name: tool for tool in exa.manifest().tools}
     assert by_name["search_web"].untrusted is True
     assert by_name["fetch_url"].untrusted is True
 
 
 def test_manifest_declares_the_exa_injection_slot() -> None:
-    (slot,) = web.manifest().credentials
+    (slot,) = exa.manifest().credentials
     assert slot.name == "exa_api"
     injection = slot.injection
     assert injection is not None
     assert (injection.host, injection.header, injection.sentinel, injection.dimension) == (
         "api.exa.ai",
         "x-api-key",
-        web.EXA_SENTINEL,
+        exa.EXA_SENTINEL,
         "requests",
     )
 
@@ -167,7 +167,7 @@ async def test_search_web_posts_one_exa_search_per_query_and_merges_results() ->
     assert result.is_error is False
     assert len(carrier.commands) == 2
     assert _url_of(carrier.commands[0]) == "https://api.exa.ai/search"
-    assert f"x-api-key: {web.EXA_SENTINEL}" in shlex.split(carrier.commands[0])
+    assert f"x-api-key: {exa.EXA_SENTINEL}" in shlex.split(carrier.commands[0])
     body = _body_of(carrier.commands[0])
     assert body["query"] == "alpha"
     assert body["numResults"] == 5
@@ -205,7 +205,7 @@ async def test_fetch_url_posts_contents_with_summary_livecrawl_and_clamped_lengt
     result = await tool.handler(_context(carrier), args)
     assert result.is_error is False
     assert _url_of(carrier.commands[0]) == "https://api.exa.ai/contents"
-    assert f"x-api-key: {web.EXA_SENTINEL}" in shlex.split(carrier.commands[0])
+    assert f"x-api-key: {exa.EXA_SENTINEL}" in shlex.split(carrier.commands[0])
     body = _body_of(carrier.commands[0])
     assert body["urls"] == ["https://ex.test/a"]
     assert body["text"] == {"maxCharacters": 20_000}
@@ -251,7 +251,7 @@ async def test_the_declared_injection_swaps_the_emitted_sentinel_for_the_stored_
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     await store.put(workspace_id, "exa_api", real_key)
 
-    rules = await derive_credential_rules((web.manifest(),), workspace_id, store)
+    rules = await derive_credential_rules((exa.manifest(),), workspace_id, store)
     assert any(isinstance(r, ScopeRule) and "api.exa.ai" in r.allowed_hosts for r in rules)
     assert MeterRule(host="api.exa.ai", dimension="requests") in rules
     candidates = [r for r in rules if isinstance(r, InjectionRule) and r.host == "api.exa.ai"]
@@ -266,4 +266,4 @@ async def test_the_declared_injection_swaps_the_emitted_sentinel_for_the_stored_
 
     upstream = _inject([f"x-api-key: {emitted}\r\n".encode()], candidates)
     assert real_key.encode() in upstream
-    assert web.EXA_SENTINEL.encode() not in upstream
+    assert exa.EXA_SENTINEL.encode() not in upstream
