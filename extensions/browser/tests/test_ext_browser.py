@@ -31,7 +31,7 @@ from selfhost_ext_browser.tools import BROWSER_TOOL_NAMES, BROWSER_TOOLS
 
 from selfhost.blob import FilesystemBlobStore
 from selfhost.browser import CdpEndpoint, CdpLease, CdpProvider
-from selfhost.ext.loader import turn_subagents
+from selfhost.ext.loader import skill_registry, turn_subagents
 from selfhost.loop.prompts.render import render_system_prompt
 from selfhost.loop.subagents import SubagentRegistry, subagent_system_prompt
 from selfhost.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
@@ -196,6 +196,11 @@ def test_manifest_declares_the_browser_tools_and_profile() -> None:
     }
     assert len(BROWSER_TOOL_NAMES) == 11
     assert {profile.name for profile in manifest.subagents} == {BROWSER_SUBAGENT_NAME}
+
+
+def test_browser_operator_skill_parses_and_indexes() -> None:
+    index = dict(skill_registry((browser_manifest.manifest(),)).index())
+    assert "browser-operator" in index
 
 
 def test_manifest_requires_the_cdp_providers_seam() -> None:
