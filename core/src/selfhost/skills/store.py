@@ -22,17 +22,27 @@ from pydantic import BaseModel, ConfigDict
 
 from selfhost.blob import BlobStore
 from selfhost.db import workspace_tx
+from selfhost.o11y import log
 from selfhost.schema import tables
 from selfhost.skills.runtime import RuntimeSkill, parse_skill_content
 
 USER_SKILL_KEY_PREFIX = "user-skills/"
 DIGEST_PREFIX = "sha256:"
 SKILL_NAME_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?")
+# Every saved skill is fetched and parsed on the turn's hot path (load_all), so the count is bounded
+# — a workspace cannot make its own turns arbitrarily slow, and storage stays bounded.
+MAX_USER_SKILLS_PER_WORKSPACE = 100
 
 
 class SkillCollidesWithCoreSkill(ValueError):
     """A save named a skill that a core or pack skill already owns. A user-skill may never shadow
     one, so the save is refused rather than persisted — surfaced to the model as a tool error."""
+
+
+class TooManyUserSkills(ValueError):
+    """A save would exceed the workspace's user-skill cap. Every saved skill is loaded and parsed on
+    each turn, so the count is bounded; the member re-saves an existing name (an update, always
+    allowed) or removes one first — surfaced to the model as a tool error."""
 
 
 class InvalidSkillName(ValueError):
@@ -81,6 +91,11 @@ class UserSkillStore:
             raise SkillCollidesWithCoreSkill(
                 f"skill {name!r} is already a core or pack skill and cannot be overridden"
             )
+        if not already_owned and await self._count(workspace_id) >= MAX_USER_SKILLS_PER_WORKSPACE:
+            raise TooManyUserSkills(
+                f"this workspace already has {MAX_USER_SKILLS_PER_WORKSPACE} saved skills — remove "
+                f"or re-save an existing one instead of adding another"
+            )
         payload = (
             StoredSkill(
                 files={
@@ -117,7 +132,13 @@ class UserSkillStore:
     async def load_all(self, workspace_id: UUID) -> tuple[RuntimeSkill, ...]:
         """Every user-skill this workspace has saved, parsed back into RuntimeSkills for the turn's
         registry. Scoped strictly to `workspace_id`, so one workspace's skills never reach another;
-        each is re-parsed on read, so a stored bundle validates the same way it did on save."""
+        each is re-parsed on read, so a stored bundle validates the same way it did on save.
+
+        A saved skill is optional member content, not core state, so one that no longer loads — a
+        missing/corrupt blob, or a bundle a later parser rejects — is dropped with a log rather than
+        raised, exactly as `SkillRegistry.merged_with` drops a shadowing one. Raising here would
+        wedge every turn in the workspace on a single bad skill, with no in-chat path to remove it;
+        skip-and-log keeps the turn (and the member's other skills) working."""
         async with workspace_tx() as connection:
             rows = (
                 (
@@ -132,12 +153,30 @@ class UserSkillStore:
             )
         skills: list[RuntimeSkill] = []
         for row in rows:
-            stored = StoredSkill.model_validate_json(
-                await self.blob.get(_content_key(workspace_id, row["name"], row["digest"]))
-            )
-            files = {path: base64.b64decode(content) for path, content in stored.files.items()}
-            skills.append(parse_skill_content(row["name"], files))
+            try:
+                stored = StoredSkill.model_validate_json(
+                    await self.blob.get(_content_key(workspace_id, row["name"], row["digest"]))
+                )
+                files = {path: base64.b64decode(content) for path, content in stored.files.items()}
+                skills.append(parse_skill_content(row["name"], files))
+            except Exception as error:
+                log(
+                    "skill.user_skill_load_failed",
+                    workspace_id=str(workspace_id),
+                    skill=row["name"],
+                    error=str(error),
+                )
         return tuple(skills)
+
+    async def _count(self, workspace_id: UUID) -> int:
+        async with workspace_tx() as connection:
+            return (
+                await connection.execute(
+                    sa.select(sa.func.count())
+                    .select_from(tables.user_skill)
+                    .where(tables.user_skill.c.workspace_id == workspace_id)
+                )
+            ).scalar_one()
 
     async def _owns(self, workspace_id: UUID, name: str) -> bool:
         async with workspace_tx() as connection:

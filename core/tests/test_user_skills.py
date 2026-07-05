@@ -27,7 +27,9 @@ from selfhost.skills.runtime import CORE_SKILL_NAMES, CORE_SKILL_REGISTRY, Runti
 from selfhost.skills.store import (
     InvalidSkillName,
     SkillCollidesWithCoreSkill,
+    TooManyUserSkills,
     UserSkillStore,
+    _content_key,
 )
 from selfhost.tools.builtins import SaveCustomSkillInput, save_custom_skill_handler
 from selfhost.tools.context import SpawnResult, ToolContext
@@ -144,6 +146,43 @@ def test_mutually_dependent_user_skills_resolve_without_recursing() -> None:
     resolved = [skill.name for skill in merged.tree("alpha")]
     assert sorted(resolved) == ["alpha", "beta"]
     assert len(resolved) == 2
+
+
+async def test_load_all_skips_a_corrupt_skill_and_keeps_the_rest(db: None, tmp_path) -> None:
+    """A saved skill whose stored bundle no longer parses is dropped with a log, not raised — one
+    bad skill must never wedge the workspace's turns, and the member's other skills still load."""
+    workspace_id = await _workspace()
+    store = UserSkillStore(blob=FilesystemBlobStore(root=tmp_path))
+    await store.save(workspace_id, "alpha", {"SKILL.md": _skill_md("alpha", "A")}, frozenset())
+    await store.save(workspace_id, "beta", {"SKILL.md": _skill_md("beta", "B")}, frozenset())
+    async with workspace_tx() as connection:
+        digest = (
+            await connection.execute(
+                sa.select(tables.user_skill.c.digest).where(
+                    tables.user_skill.c.workspace_id == workspace_id,
+                    tables.user_skill.c.name == "alpha",
+                )
+            )
+        ).scalar_one()
+    await store.blob.put(_content_key(workspace_id, "alpha", digest), b"{ not valid json")
+
+    assert [skill.name for skill in await store.load_all(workspace_id)] == ["beta"]
+
+
+async def test_save_refuses_over_the_skill_cap_but_allows_a_resave(
+    db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("selfhost.skills.store.MAX_USER_SKILLS_PER_WORKSPACE", 2)
+    workspace_id = await _workspace()
+    store = UserSkillStore(blob=FilesystemBlobStore(root=tmp_path))
+    await store.save(workspace_id, "one", {"SKILL.md": _skill_md("one", "1")}, frozenset())
+    await store.save(workspace_id, "two", {"SKILL.md": _skill_md("two", "2")}, frozenset())
+
+    with pytest.raises(TooManyUserSkills):
+        await store.save(workspace_id, "three", {"SKILL.md": _skill_md("three", "3")}, frozenset())
+    await store.save(workspace_id, "one", {"SKILL.md": _skill_md("one", "1b")}, frozenset({"one"}))
+
+    assert sorted(skill.name for skill in await store.load_all(workspace_id)) == ["one", "two"]
 
 
 async def test_resaving_an_owned_skill_replaces_it_in_place(db: None, tmp_path) -> None:
