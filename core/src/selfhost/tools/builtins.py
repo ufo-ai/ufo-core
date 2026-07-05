@@ -95,93 +95,174 @@ class BashInput(BaseModel):
 
 
 class ReadInput(BaseModel):
-    file_path: str
-    offset: int | None = None
-    limit: int | None = None
+    file_path: str = Field(description="Absolute path to the file to read.")
+    offset: int | None = Field(
+        default=None,
+        description="Line/page number to start reading from. Only provide if the file is too large "
+        "to read at once.",
+    )
+    limit: int | None = Field(
+        default=None,
+        description="Number of lines/pages to read. Only provide if the file is too large to read "
+        "at once.",
+    )
 
 
 class WriteInput(BaseModel):
-    file_path: str
-    content: str
+    file_path: str = Field(
+        description="Absolute path to the file to write, e.g. /workspace/output.json."
+    )
+    content: str = Field(description="The text content to write to the file.")
 
 
 class FileEdit(BaseModel):
-    old_string: str
-    new_string: str
-    replace_all: bool = False
+    old_string: str = Field(description="The exact text to replace.")
+    new_string: str = Field(description="The replacement text.")
+    replace_all: bool = Field(
+        default=False,
+        description="Replace all occurrences instead of requiring old_string to be unique.",
+    )
 
 
 class EditInput(BaseModel):
-    file_path: str
-    edits: tuple[FileEdit, ...] = Field(min_length=1)
+    file_path: str = Field(description="Absolute path to the file to modify.")
+    edits: tuple[FileEdit, ...] = Field(
+        min_length=1,
+        description="List of edits to apply sequentially. Each edit is an object with old_string, "
+        "new_string, and optionally replace_all.",
+    )
 
 
 class GlobInput(BaseModel):
-    pattern: str
-    path: str | None = None
+    pattern: str = Field(
+        description="The glob pattern to match files against, e.g. '**/*.py', '*.json', "
+        "'src/**/*.ts'."
+    )
+    path: str | None = Field(
+        default=None,
+        description="Absolute path to the directory to search in. If omitted, searches from the "
+        "workspace root.",
+    )
 
 
 class GrepInput(BaseModel):
-    pattern: str
-    glob: str | None = None
-    context: int | None = None
-    ignore_case: bool | None = None
-    output_mode: Literal["content", "files_with_matches", "count"] | None = None
-    head_limit: int | None = None
+    pattern: str = Field(description="The regex pattern to search for.")
+    glob: str | None = Field(
+        default=None, description="Glob pattern to filter which files to search, e.g. '**/*.py'."
+    )
+    context: int | None = Field(
+        default=None, description="Number of context lines to show around each match."
+    )
+    ignore_case: bool | None = Field(default=None, description="Case-insensitive search.")
+    output_mode: Literal["content", "files_with_matches", "count"] | None = Field(
+        default=None,
+        description="How to display results: 'content' (default, shows matching lines), "
+        "'files_with_matches' (just filenames), 'count' (match counts per file).",
+    )
+    head_limit: int | None = Field(default=None, description="Limit output to first N results.")
 
 
 class ShareFileInput(BaseModel):
-    file_path: str
-    name: str | None = None
-    subject: str | None = None
+    file_path: str = Field(description="Absolute path to the file to share.")
+    name: str | None = Field(
+        default=None,
+        description="Logical asset name, e.g. 'revenue_chart', 'quarterly_report'. Use the SAME "
+        "name when sharing updated versions to enable version history. Defaults to the filename.",
+    )
+    subject: str | None = Field(
+        default=None, description="Optional caption shown when a chat surface posts the file."
+    )
 
 
 class SpawnSubagentInput(BaseModel):
-    profile: str
-    payload: dict[str, Any] = Field(default_factory=dict)
-    background: bool = False
+    profile: str = Field(
+        description="The subagent profile to run — a registered profile name that fixes the "
+        "child's prompt, tool set, and input/output schema."
+    )
+    payload: dict[str, Any] = Field(
+        default_factory=dict, description="Arguments matching the profile's input schema."
+    )
+    background: bool = Field(
+        default=False,
+        description="Run in the background and return the child turn id immediately instead of "
+        "waiting for its validated output.",
+    )
 
 
 class LoadSessionsInput(BaseModel):
-    session_ids: tuple[str, ...] = Field(min_length=1, max_length=MAX_LOAD_SESSIONS)
+    session_ids: tuple[str, ...] = Field(
+        min_length=1,
+        max_length=MAX_LOAD_SESSIONS,
+        description="List of session IDs (full conversation UUIDs) to load. Up to 25 per call; "
+        "per-ID failures are reported and do not abort the call.",
+    )
 
 
 MAX_USER_QUESTIONS = 4
 
 
 class QuestionOption(BaseModel):
-    label: str
-    description: str | None = None
+    label: str = Field(description="The choice shown to the user.")
+    description: str | None = Field(
+        default=None, description="Optional explanation of what the choice means."
+    )
 
 
 class AskQuestion(BaseModel):
-    question: str
-    options: tuple[QuestionOption, ...] | None = None
-    multi_select: bool | None = None
-    free_text_only: bool | None = None
-    header: str | None = None
-    allow_attachments: bool | None = None
+    question: str = Field(description="The question to ask.")
+    options: tuple[QuestionOption, ...] | None = Field(
+        default=None, description="The choices to present; omit for a free-text answer."
+    )
+    multi_select: bool | None = Field(
+        default=None, description="Allow selecting more than one option."
+    )
+    free_text_only: bool | None = Field(
+        default=None, description="Force a free-text answer even when options are given."
+    )
+    header: str | None = Field(default=None, description="Short label shown above the question.")
+    allow_attachments: bool | None = Field(
+        default=None, description="Let the user attach files in their answer."
+    )
 
 
 class AskUserInput(BaseModel):
-    title: str
-    questions: tuple[AskQuestion, ...] = Field(min_length=1, max_length=MAX_USER_QUESTIONS)
+    title: str = Field(
+        description="Brief, friendly prompt explaining why you need more info, shown at the top. "
+        "Should feel conversational and explain the value of answering."
+    )
+    questions: tuple[AskQuestion, ...] = Field(
+        min_length=1, max_length=MAX_USER_QUESTIONS, description="1-4 questions to ask."
+    )
 
 
 class LoadSkillInput(BaseModel):
-    name: str
+    name: str = Field(
+        description="The skill name, e.g. 'office/pptx', 'data/visualization'. See list_skills for "
+        "the full set."
+    )
 
 
 class ConnectAccountInput(BaseModel):
-    provider: str
+    provider: str = Field(
+        description="The provider to connect an account for, e.g. 'github', 'google'."
+    )
 
 
 class PauseAndWaitInput(BaseModel):
-    ai_response: str
-    wait_minutes: int
-    next_steps: str
-    reason: str
-    metadata: dict[str, JsonValue] | None = None
+    ai_response: str = Field(
+        description="Message shown to the user while waiting. Should explain what you're waiting "
+        "for and why."
+    )
+    wait_minutes: int = Field(
+        description="Number of minutes to wait before automatically resuming."
+    )
+    next_steps: str = Field(
+        description="Internal notes about what to do when resuming. Not shown to the user."
+    )
+    reason: str = Field(description="Internal reason for the pause, for logging/debugging.")
+    metadata: dict[str, JsonValue] | None = Field(
+        default=None, description="Optional key-value data to store during the pause."
+    )
 
 
 class ListSkillsInput(BaseModel):
@@ -189,24 +270,38 @@ class ListSkillsInput(BaseModel):
 
 
 class SaveCustomSkillInput(BaseModel):
-    path: str
-    name: str | None = None
+    path: str = Field(
+        description="Path to the skill directory in the workspace; it must contain a SKILL.md."
+    )
+    name: str | None = Field(
+        default=None, description="Skill name; defaults to the directory name."
+    )
 
 
 class WaitForSubagentsInput(BaseModel):
-    subagent_ids: tuple[str, ...] = Field(min_length=1)
-    user_description: str
+    subagent_ids: tuple[str, ...] = Field(
+        min_length=1, description="List of subagent IDs to wait for. Must always be specified."
+    )
+    user_description: str = Field(
+        description="Brief plain-language description shown in the activity timeline."
+    )
 
 
 class CancelSubagentInput(BaseModel):
-    subagent_id: str
-    user_description: str
+    subagent_id: str = Field(description="The subagent ID to cancel.")
+    user_description: str = Field(
+        description="Brief plain-language description shown in the activity timeline."
+    )
 
 
 class MessageSubagentInput(BaseModel):
-    subagent_id: str
-    message: str
-    user_description: str
+    subagent_id: str = Field(description="The subagent ID to message.")
+    message: str = Field(
+        description="The follow-up message to deliver, run as the subagent's next turn."
+    )
+    user_description: str = Field(
+        description="Brief plain-language description shown in the activity timeline."
+    )
 
 
 async def bash_handler(ctx: ToolContext, args: BashInput) -> ToolResult:
