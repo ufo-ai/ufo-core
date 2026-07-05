@@ -132,6 +132,16 @@ async def _create_postgres_system_database(config: Config) -> None:
 
 
 @main.command()
+def migrate() -> None:
+    """Bring the database to head: apply core's schema plus every active extension's migration
+    branch. `init` runs this once at onboarding; run it again after `ext install` adds a
+    table-owning extension, before `serve`, so the extension's tables exist. Idempotent."""
+    config = load_config()
+    apply_migrations(config.database.url, config.pack.name)
+    click.echo("schema at head")
+
+
+@main.command()
 def serve() -> None:
     """Run the workspace: surfaces + workers, one process."""
     serve_run()

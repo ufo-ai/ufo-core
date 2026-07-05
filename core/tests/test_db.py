@@ -34,6 +34,36 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
     assert len(heads) == 4
 
 
+def test_migrate_command_brings_the_schema_to_head(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The operator verb behind the extension-migration seam: `selfhost migrate` applies core's
+    schema plus every active extension's branch, so `ext install` → `migrate` → `serve` actually
+    creates a table-owning extension's tables. Idempotent, so it is safe to re-run."""
+    from click.testing import CliRunner
+
+    from selfhost.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "selfhost.toml").write_text(
+        '[database]\nurl = "sqlite+aiosqlite:///app.db"\n'
+        '[blob]\nbackend = "filesystem"\nroot = "./blobs"\n'
+    )
+    runner = CliRunner()
+    assert runner.invoke(main, ["migrate"]).exit_code == 0
+    assert runner.invoke(main, ["migrate"]).exit_code == 0
+
+    engine = sa.create_engine("sqlite:///" + str(tmp_path / "app.db"))
+    try:
+        with engine.connect() as connection:
+            names = set(sa.inspect(connection).get_table_names())
+    finally:
+        engine.dispose()
+    assert "workspace" in names
+    assert "user_skill" in names
+    assert "sample_ext_note" in names
+
+
 async def test_workspace_tx_round_trip(db: None) -> None:
     workspace_id = uuid4()
     async with workspace_tx() as connection:
