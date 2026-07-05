@@ -21,6 +21,7 @@ from selfhost.config import BlobConfig
 
 MINIO_IMAGE = "minio/minio"
 MINIO_CREDENTIAL = "minioadmin"
+MINIO_OP_TIMEOUT_S = 180
 MINIO_READY_SECONDS = 60.0
 TEST_BUCKET = "selfhost-test"
 
@@ -98,12 +99,16 @@ def s3_store() -> Iterator[S3BlobStore]:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
-    started = subprocess.run(
-        ["docker", "run", "-d", "-p", f"{port}:9000", MINIO_IMAGE, "server", "/data"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        started = subprocess.run(
+            ["docker", "run", "-d", "-p", f"{port}:9000", MINIO_IMAGE, "server", "/data"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=MINIO_OP_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.skip(f"docker run minio exceeded {MINIO_OP_TIMEOUT_S}s (stalled image pull)")
     if started.returncode != 0:
         pytest.skip(f"docker cannot run minio: {started.stderr.strip()}")
     container = started.stdout.strip()

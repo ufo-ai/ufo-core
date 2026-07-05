@@ -61,6 +61,23 @@ SANDBOX_TEST_IMAGE = "selfhost-sandbox:test"
 OVER_INMEMORY_BYTES = 25 * 1024 * 1024
 ARTIFACT_SECRET = "file-tools-secret"
 REGISTRY = ToolRegistry(BUILTIN_TOOLS)
+IMAGE_BUILD_TIMEOUT_S = 1200
+CONTAINER_OP_TIMEOUT_S = 180
+
+
+def _docker_or_skip(
+    argv: list[str], *, timeout: int, stdin_text: str | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run a docker CLI command with a hard wall. A stalled image pull/build or a wedged daemon is
+    external, network-bound work; bounding it skips this docker-gated test with a clear reason
+    instead of hanging the whole suite forever (a client's wait always ends)."""
+    try:
+        return subprocess.run(
+            argv, input=stdin_text, capture_output=True, text=True, check=False, timeout=timeout
+        )
+    except subprocess.TimeoutExpired:
+        pytest.skip(f"docker '{argv[1]}' exceeded {timeout}s (stalled pull/build or wedged daemon)")
+
 
 MINIMAL_PDF = b"""%PDF-1.4
 1 0 obj
@@ -120,12 +137,10 @@ def sandbox_image() -> str:
         pytest.skip("docker is not available")
     from sandbox.build_template import ROOT, pod_dockerfile
 
-    built = subprocess.run(
+    built = _docker_or_skip(
         ["docker", "build", "-t", SANDBOX_TEST_IMAGE, "-f", "-", str(ROOT)],
-        input=pod_dockerfile(),
-        capture_output=True,
-        text=True,
-        check=False,
+        timeout=IMAGE_BUILD_TIMEOUT_S,
+        stdin_text=pod_dockerfile(),
     )
     if built.returncode != 0:
         pytest.skip(f"cannot build the sandbox image: {built.stderr.strip()}")
@@ -143,7 +158,7 @@ def file_ctx(sandbox_image: str, tmp_path: Path) -> Iterator[tuple[ToolContext, 
     so they too are sandbox-owned."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    chowned = subprocess.run(
+    chowned = _docker_or_skip(
         [
             "docker",
             "run",
@@ -158,13 +173,11 @@ def file_ctx(sandbox_image: str, tmp_path: Path) -> Iterator[tuple[ToolContext, 
             f"{SANDBOX_UID}:{SANDBOX_GID}",
             "/workspace",
         ],
-        capture_output=True,
-        text=True,
-        check=False,
+        timeout=CONTAINER_OP_TIMEOUT_S,
     )
     if chowned.returncode != 0:
         pytest.skip(f"docker cannot chown the workspace mount: {chowned.stderr.strip()}")
-    started = subprocess.run(
+    started = _docker_or_skip(
         [
             "docker",
             "run",
@@ -176,9 +189,7 @@ def file_ctx(sandbox_image: str, tmp_path: Path) -> Iterator[tuple[ToolContext, 
             "sleep",
             "infinity",
         ],
-        capture_output=True,
-        text=True,
-        check=False,
+        timeout=CONTAINER_OP_TIMEOUT_S,
     )
     if started.returncode != 0:
         pytest.skip(f"docker cannot run the sandbox image: {started.stderr.strip()}")
@@ -209,7 +220,12 @@ def file_ctx(sandbox_image: str, tmp_path: Path) -> Iterator[tuple[ToolContext, 
     try:
         yield ctx, workspace
     finally:
-        subprocess.run(["docker", "rm", "-f", container], capture_output=True, check=False)
+        subprocess.run(
+            ["docker", "rm", "-f", container],
+            capture_output=True,
+            check=False,
+            timeout=CONTAINER_OP_TIMEOUT_S,
+        )
 
 
 async def _seed_turn_rows(turn: Turn) -> None:
