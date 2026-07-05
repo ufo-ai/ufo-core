@@ -334,6 +334,7 @@ def chat_server(
         loop_queue.Runtime(
             config=config,
             blob=FilesystemBlobStore(root=config.blob.root),
+            workspace_fs=None,
             hub=hub,
             carrier=StandInCarrier(),
             cdp_provider=SandboxCdpProvider(endpoint=None),

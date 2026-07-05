@@ -194,6 +194,7 @@ def dbos_runtime(
         loop_queue.Runtime(
             config=config,
             blob=blob,
+            workspace_fs=None,
             hub=hub,
             carrier=StandInCarrier(),
             cdp_provider=SandboxCdpProvider(endpoint=None),
@@ -323,7 +324,7 @@ async def test_workspace_mount_source_is_absolute_for_a_relative_blob_root(
     turn would otherwise fail at container create under the shipped default config."""
     monkeypatch.chdir(tmp_path)
     blob = FilesystemBlobStore(root=Path("blobs"))
-    mount = await loop_queue._workspace_mount(blob, uuid4())
+    mount = await loop_queue._workspace_mount(blob, None, uuid4())
     assert Path(mount.host_path).is_absolute()
     assert await asyncio.to_thread(Path(mount.host_path).is_dir)
 

@@ -18,7 +18,13 @@ from starlette.responses import Response
 
 from selfhost.blob import BlobStore, blob_store_for
 from selfhost.browser import BROWSER_CDP_URL_ENV, CdpProvider, SandboxCdpProvider
-from selfhost.config import DEFAULT_CDP_PROVIDER, IN_PROCESS_BACKEND, Config, load_config
+from selfhost.config import (
+    DEFAULT_CDP_PROVIDER,
+    IN_PROCESS_BACKEND,
+    BlobConfig,
+    Config,
+    load_config,
+)
 from selfhost.connectors import AuthProxy
 from selfhost.credentials import CredentialStore
 from selfhost.db import init_db, workspace_tx
@@ -44,6 +50,7 @@ from selfhost.loop.subagents import SubagentRegistry
 from selfhost.models.registry import model_registry
 from selfhost.o11y import init_o11y, log
 from selfhost.runtime_instance import BootGuard, Heartbeat
+from selfhost.sandbox.fs_creds import DEFAULT_S3_REGION, AwsStsClient, SandboxFsCredentialMinter
 from selfhost.sandbox.local import LocalCarrier
 from selfhost.sandbox.proxy.rules import (
     Rule,
@@ -106,6 +113,7 @@ def run() -> None:
         Runtime(
             config=config,
             blob=blob,
+            workspace_fs=_sandbox_fs_minter(config.blob),
             hub=hub,
             carrier=carrier,
             cdp_provider=_select_cdp_provider(config, manifests, workspace_id, credentials),
@@ -216,6 +224,25 @@ def _launch_jobs(
 async def _sole_workspace_id() -> UUID:
     async with workspace_tx() as connection:
         return (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
+
+
+def _sandbox_fs_minter(blob: BlobConfig) -> SandboxFsCredentialMinter | None:
+    """The STS-scoped-credential minter the S3-backed workspace mount needs, or None on the local
+    filesystem backend (a bind mount needs no minter). BlobConfig's validator guarantees the S3
+    backend carries bucket/s3_url/sts_role_arn; the None-checks re-read them for the type checker
+    and fail loud the same way `blob_store_for` does."""
+    if blob.backend != "s3":
+        return None
+    if blob.bucket is None or blob.s3_url is None or blob.sts_role_arn is None:
+        raise ValueError("the s3 blob backend requires bucket, s3_url, and sts_role_arn")
+    return SandboxFsCredentialMinter(
+        sts=AwsStsClient(endpoint_url=blob.sts_endpoint, region=blob.region),
+        role_arn=blob.sts_role_arn,
+        bucket=blob.bucket,
+        s3_url=blob.s3_url,
+        region=blob.region or DEFAULT_S3_REGION,
+        path_style=blob.path_style,
+    )
 
 
 def _select_carrier(config: Config, manifests: tuple[Manifest, ...]) -> Carrier:

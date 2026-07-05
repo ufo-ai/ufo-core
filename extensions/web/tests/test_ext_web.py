@@ -154,6 +154,7 @@ def dbos_runtime(
         loop_queue.Runtime(
             config=config,
             blob=blob,
+            workspace_fs=None,
             hub=hub,
             carrier=StandInCarrier(),
             cdp_provider=SandboxCdpProvider(endpoint=None),

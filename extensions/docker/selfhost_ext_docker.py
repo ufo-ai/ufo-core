@@ -10,18 +10,26 @@ attributes each metered request to the turn; the proxy refuses any host its rule
 swaps the sentinel for the real key on the wire, so the raw credential never enters the sandbox."""
 
 import asyncio
+import shlex
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from selfhost.sdk.manifest import Manifest
 from selfhost.sdk.sandbox import (
+    AWS_CREDENTIALS_PATH,
+    MOUNT_HEALTH_CHECK_TIMEOUT_SECONDS,
+    MOUNT_TIMEOUT_SECONDS,
     SENTINEL_MODEL_KEY,
     WORKSPACE_DIR,
     BlobStore,
     CarrierSpec,
     ExecResult,
+    MountSpec,
     SandboxHandle,
     SandboxSpec,
+    aws_credentials_file,
+    mount_scripts,
+    s3fs_command,
 )
 
 CARRIER_NAME = "docker"
@@ -30,6 +38,17 @@ CREATE_TIMEOUT_SECONDS = 120
 DEFAULT_NETWORK = "selfhost-sandbox"
 HOST_GATEWAY_NAME = "host.docker.internal"
 HOST_GATEWAY_MAPPING = f"{HOST_GATEWAY_NAME}:host-gateway"
+# s3fs mounts the workspace prefix over FUSE, which needs the fuse device plus CAP_SYS_ADMIN and an
+# unconfined apparmor profile to mount inside the container. Added only for an s3 mount — a
+# filesystem bind mount (local dev) needs no FUSE and keeps the tighter default isolation.
+FUSE_RUN_ARGS = (
+    "--device",
+    "/dev/fuse",
+    "--cap-add",
+    "SYS_ADMIN",
+    "--security-opt",
+    "apparmor=unconfined",
+)
 
 
 async def _docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60) -> tuple[int, bytes, bytes]:
@@ -57,9 +76,11 @@ class DockerCarrier:
         name = f"{CONTAINER_NAME_PREFIX}{spec.conversation_id}"
         running = await self._running_id(name)
         if running is not None:
-            return SandboxHandle(
+            handle = SandboxHandle(
                 conversation_id=spec.conversation_id, container_id=running, mount=spec.mount
             )
+            await self._mount_s3(handle, spec.mount)
+            return handle
         await self._ensure_network()
         proxy_url = f"http://{spec.run_token}:@{HOST_GATEWAY_NAME}:{spec.proxy.port}"
         argv = [
@@ -72,6 +93,7 @@ class DockerCarrier:
             self.network,
             "--add-host",
             HOST_GATEWAY_MAPPING,
+            *(FUSE_RUN_ARGS if spec.mount.kind == "s3" else ()),
             "--env",
             f"HTTP_PROXY={proxy_url}",
             "--env",
@@ -93,9 +115,11 @@ class DockerCarrier:
             raise RuntimeError(f"docker run failed: {stderr.decode().strip()}")
         container_id = stdout.decode().strip()
         await self._install_ca(container_id, spec.proxy.ca_cert)
-        return SandboxHandle(
+        handle = SandboxHandle(
             conversation_id=spec.conversation_id, container_id=container_id, mount=spec.mount
         )
+        await self._mount_s3(handle, spec.mount)
+        return handle
 
     async def exec(
         self, handle: SandboxHandle, argv: tuple[str, ...], stdin: bytes, timeout_s: int
@@ -110,15 +134,95 @@ class DockerCarrier:
         )
 
     async def export(self, handle: SandboxHandle, path: str, blob: BlobStore, key: str) -> None:
-        """The workspace is a host bind mount, so the produced file already lives at
-        `host_path/<rel>` — hand that path to the blob store, which streams it in (a filesystem
-        copy, an S3 multipart upload) without the host process ever holding the bytes whole. No
-        read cap applies: this is the large-attachment path, distinct from the bounded read."""
+        """Copy a produced workspace file to `key` without the host process ever holding the bytes
+        whole — the large-attachment path, distinct from the bounded read. A filesystem bind mount
+        already has the file at `host_path/<rel>`, streamed in by the blob store. An s3 mount wrote
+        it through s3fs to `<key_prefix>/<rel>` in the same bucket, so it streams object→object in
+        bounded chunks."""
         mount = handle.mount
-        if mount is None or mount.kind != "filesystem" or mount.host_path is None:
-            raise RuntimeError("docker export requires a filesystem workspace mount")
+        if mount is None:
+            raise RuntimeError("docker export requires a workspace mount")
         rel = PurePosixPath(path).relative_to(WORKSPACE_DIR)
+        if mount.kind == "s3":
+            if mount.key_prefix is None:
+                raise RuntimeError("s3 workspace mount is missing its key prefix")
+            await blob.put_stream(key, blob.get_stream(f"{mount.key_prefix}/{rel}"))
+            return
+        if mount.kind != "filesystem" or mount.host_path is None:
+            raise RuntimeError("docker export requires a filesystem or s3 workspace mount")
         await blob.put_file(key, Path(mount.host_path) / rel)
+
+    async def _mount_s3(self, handle: SandboxHandle, mount: MountSpec) -> None:
+        """Bring the conversation's workspace S3 prefix up at /workspace over s3fs. Idempotent:
+        skips a healthy mount so a subagent sharing the sandbox never remounts under an in-flight
+        dispatch. Writes the prefix-scoped credential, then runs the root `prepare` (open /dev/fuse,
+        enable user_allow_other, detach any stale mount) and the agent `mount` (s3fs) through the
+        two docker-exec users — the privileged prepare never runs as the agent."""
+        if mount.kind != "s3":
+            return
+        if await self._mount_healthy(handle):
+            return
+        if (
+            mount.credentials is None
+            or mount.bucket is None
+            or mount.key_prefix is None
+            or mount.s3_url is None
+            or mount.region is None
+        ):
+            raise RuntimeError("s3 workspace mount is missing its scoped credential or endpoint")
+        creds = aws_credentials_file(mount.credentials).encode()
+        parent = shlex.quote(str(PurePosixPath(AWS_CREDENTIALS_PATH).parent))
+        write = f"mkdir -p {parent} && cat > {shlex.quote(AWS_CREDENTIALS_PATH)}"
+        code, _, stderr = await _docker(
+            "exec", "-i", handle.container_id, "sh", "-c", write, stdin=creds
+        )
+        if code != 0:
+            raise RuntimeError(f"sandbox-fs credential write failed: {stderr.decode().strip()}")
+        s3fs = s3fs_command(
+            mount.bucket,
+            mount.key_prefix,
+            WORKSPACE_DIR,
+            mount.s3_url,
+            mount.region,
+            mount.path_style,
+        )
+        prepare, mount_cmd = mount_scripts(WORKSPACE_DIR, s3fs)
+        code, _, stderr = await _docker(
+            "exec",
+            "-i",
+            "-u",
+            "root",
+            handle.container_id,
+            "sh",
+            "-c",
+            prepare,
+            timeout_s=MOUNT_TIMEOUT_SECONDS,
+        )
+        if code != 0:
+            raise RuntimeError(f"sandbox-fs mount prepare failed: {stderr.decode().strip()}")
+        code, _, stderr = await _docker(
+            "exec",
+            "-i",
+            handle.container_id,
+            "sh",
+            "-c",
+            mount_cmd,
+            timeout_s=MOUNT_TIMEOUT_SECONDS,
+        )
+        if code != 0:
+            raise RuntimeError(f"sandbox-fs mount failed: {stderr.decode().strip()}")
+
+    async def _mount_healthy(self, handle: SandboxHandle) -> bool:
+        code, _, _ = await _docker(
+            "exec",
+            "-i",
+            handle.container_id,
+            "sh",
+            "-c",
+            f"mountpoint -q {shlex.quote(WORKSPACE_DIR)}",
+            timeout_s=MOUNT_HEALTH_CHECK_TIMEOUT_SECONDS,
+        )
+        return code == 0
 
     async def destroy(self, handle: SandboxHandle) -> None:
         """Reap by the conversation's container name, the same key `create` derives — the durable

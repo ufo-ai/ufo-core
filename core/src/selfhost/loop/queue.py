@@ -8,7 +8,7 @@ from uuid import UUID
 import sqlalchemy as sa
 from dbos import DBOS, DBOSClient, Queue
 
-from selfhost.blob import BlobStore, FilesystemBlobStore
+from selfhost.blob import BlobStore, FilesystemBlobStore, S3BlobStore
 from selfhost.browser import CdpProvider
 from selfhost.config import Config
 from selfhost.credentials import CredentialStore
@@ -25,6 +25,7 @@ from selfhost.loop.subagents import SubagentRegistry, Subagents, subagent_system
 from selfhost.loop.transcript import Transcript
 from selfhost.models.registry import ModelRegistry
 from selfhost.o11y import log
+from selfhost.sandbox.fs_creds import SandboxFsCredentialMinter, workspace_key_prefix
 from selfhost.sandbox.session import (
     SANDBOX_GID,
     SANDBOX_UID,
@@ -63,6 +64,7 @@ TURN_QUEUE = Queue(
 class Runtime:
     config: Config
     blob: BlobStore
+    workspace_fs: SandboxFsCredentialMinter | None
     hub: Hub
     carrier: Carrier
     cdp_provider: CdpProvider
@@ -138,7 +140,9 @@ async def _execute_turn(turn_id: str) -> str:
             SandboxSpec(
                 conversation_id=turn.conversation_id,
                 image_ref=SANDBOX_IMAGE_REF,
-                mount=await _workspace_mount(runtime.blob, turn.conversation_id),
+                mount=await _workspace_mount(
+                    runtime.blob, runtime.workspace_fs, turn.conversation_id
+                ),
                 proxy=runtime.proxy,
                 run_token=RunToken(workspace_id=turn.workspace_id, turn_id=turn.id).encode(),
             )
@@ -261,22 +265,49 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, UUID | None]:
     return turn, Agent(prompt=row.prompt, model=row.model), row.member_id
 
 
-async def _workspace_mount(blob: BlobStore, conversation_id: UUID) -> MountSpec:
+async def _workspace_mount(
+    blob: BlobStore, workspace_fs: SandboxFsCredentialMinter | None, conversation_id: UUID
+) -> MountSpec:
     """The workspace is only the conversation's `workspace/` subtree — a sibling of the transcript
-    under `conversations/<id>/`, never the transcript itself. A host-path carrier (the core `local`
-    carrier's cwd, the Docker carrier's bind mount) reaches it as a host path, so it requires the
-    filesystem blob backend, and the source is absolute: Docker reads a relative `-v` source as a
-    named volume, not a host directory, and a relative blob root (the default config's `./blobs`)
-    would otherwise fail at container create.
+    under `conversations/<id>/`, never the transcript itself. The filesystem backend reaches it as a
+    host bind mount; the S3 backend mounts it over s3fs with an STS credential scoped to the
+    `workspace/` prefix. Neither backend lets the sandbox reach the transcript above it.
 
-    A container runs as the non-root `sandbox` user, so the mount must be owned by it or the file
-    tools cannot write. serve creates the dir under its own uid; when serve runs as root (the bundle
-    default) it holds CAP_CHOWN and hands the dir to the sandbox user. Off root — dev, where the
-    mount is not uid-enforced — the chown is skipped."""
-    if not isinstance(blob, FilesystemBlobStore):
-        raise RuntimeError("the sandbox workspace requires a filesystem blob store")
-    host_path = (blob.root / "conversations" / str(conversation_id) / "workspace").resolve()
-    await asyncio.to_thread(host_path.mkdir, parents=True, exist_ok=True)
-    if os.geteuid() == 0:
-        await asyncio.to_thread(os.chown, host_path, SANDBOX_UID, SANDBOX_GID)
-    return MountSpec(kind="filesystem", host_path=str(host_path))
+    filesystem: a host-path carrier (the core `local` carrier's cwd, the Docker carrier's bind
+    mount) reaches the subtree as an absolute host path — Docker reads a relative `-v` source as a
+    named volume, not a host directory, and a relative blob root (the default `./blobs`) would fail
+    at container create. A container runs as the non-root `sandbox` user, so the mount must be owned
+    by it or the file tools cannot write: serve creates the dir under its own uid, and when it runs
+    as root (the bundle default) it holds CAP_CHOWN and hands the dir to the sandbox user. Off root
+    — dev, where the mount is not uid-enforced — the chown is skipped.
+
+    s3: mint a fresh credential scoped to `conversations/<id>/workspace/*` and carry it, with the
+    prefix and the sandbox-reachable endpoint, into the MountSpec the carrier writes as the
+    sandbox's AWS credentials before running s3fs."""
+    match blob:
+        case FilesystemBlobStore():
+            host_path = (blob.root / "conversations" / str(conversation_id) / "workspace").resolve()
+            await asyncio.to_thread(host_path.mkdir, parents=True, exist_ok=True)
+            if os.geteuid() == 0:
+                await asyncio.to_thread(os.chown, host_path, SANDBOX_UID, SANDBOX_GID)
+            return MountSpec(kind="filesystem", host_path=str(host_path))
+        case S3BlobStore():
+            if workspace_fs is None:
+                raise RuntimeError(
+                    "the s3 blob backend requires the sandbox-fs credential minter "
+                    "(set blob.sts_role_arn, blob.s3_url)"
+                )
+            credentials = await workspace_fs.mint(conversation_id)
+            return MountSpec(
+                kind="s3",
+                bucket=workspace_fs.bucket,
+                key_prefix=workspace_key_prefix(conversation_id),
+                credentials=credentials,
+                s3_url=workspace_fs.s3_url,
+                region=workspace_fs.region,
+                path_style=workspace_fs.path_style,
+            )
+        case _:
+            raise RuntimeError(
+                f"unsupported blob backend for the sandbox workspace: {type(blob).__name__}"
+            )

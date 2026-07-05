@@ -31,12 +31,24 @@ class DatabaseConfig(BaseModel):
 
 
 class BlobConfig(BaseModel):
+    """The blob store — transcripts, compaction records, sandbox workspaces, shared artifacts.
+    `endpoint_url`/`region` are the host-reachable S3 the serve process talks to. To mount a
+    conversation's `workspace/` prefix into its sandbox over s3fs, the S3 backend additionally
+    needs `sts_role_arn` (the role the mint assumes), `s3_url` (the sandbox-reachable S3 endpoint
+    s3fs dials — may differ from `endpoint_url`), `sts_endpoint` (AWS or a MinIO STS endpoint), and
+    `path_style` (MinIO addressing); their absence is caught loud at the mount seam, not here, so a
+    blob-only S3 deploy (transcripts/artifacts, no sandbox mount) needs only `bucket`."""
+
     model_config = ConfigDict(extra="forbid")
     backend: Literal["filesystem", "s3"]
     root: Path | None = None
     bucket: str | None = None
     endpoint_url: str | None = None
     region: str | None = None
+    s3_url: str | None = None
+    sts_role_arn: str | None = None
+    sts_endpoint: str | None = None
+    path_style: bool = False
 
     @model_validator(mode="after")
     def _backend_complete(self) -> "BlobConfig":

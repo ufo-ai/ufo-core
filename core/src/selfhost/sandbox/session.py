@@ -14,6 +14,7 @@ from typing import Protocol
 from uuid import UUID
 
 from selfhost.blob import BlobStore
+from selfhost.sandbox.fs_creds import SandboxFsCredentials
 
 WORKSPACE_DIR = "/workspace"
 DEFAULT_EXEC_TIMEOUT_SECONDS = 120
@@ -55,12 +56,24 @@ class RunToken:
 
 @dataclass(frozen=True)
 class MountSpec:
-    """How the conversation's `workspace/` subtree reaches the container: the carrier bind-mounts
-    the host directory at `host_path` into `/workspace`, so the container sees only `workspace/`,
-    never the transcript above it."""
+    """How the conversation's `workspace/` subtree reaches the container, one field set per `kind`:
+
+    - `filesystem`: the carrier bind-mounts the host directory at `host_path` into `/workspace`.
+    - `s3`: the carrier mounts the `bucket`/`key_prefix` S3 prefix over s3fs at `/workspace`,
+      writing the prefix-scoped `credentials` as the sandbox's AWS credentials and reaching S3 at
+      `s3_url` (`region`, `path_style` shape the s3fs request).
+
+    Either way the container sees only the conversation's `workspace/`, never the transcript above
+    it — the bind mount is a sibling directory, the S3 credential is scoped to `workspace/*`."""
 
     kind: str
     host_path: str | None = None
+    bucket: str | None = None
+    key_prefix: str | None = None
+    credentials: SandboxFsCredentials | None = None
+    s3_url: str | None = None
+    region: str | None = None
+    path_style: bool = False
 
 
 @dataclass(frozen=True)

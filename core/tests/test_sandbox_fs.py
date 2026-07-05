@@ -1,0 +1,161 @@
+"""The S3-backed sandbox workspace mount, offline: the STS inline policy that confines the mount
+credential to the conversation's `workspace/` prefix (and so denies its transcript), the s3fs
+command the carrier runs, and `_workspace_mount` minting on the S3 backend instead of raising.
+
+The live mount (real MinIO/S3 + STS + FUSE in a container) is infra-gated; these prove the policy,
+the command construction, and the wiring that a live mount then executes. The STS client is a
+stand-in dependency — every assertion is the minter's and the mount-builder's own output, never the
+stand-in's canned response."""
+
+import json
+from fnmatch import fnmatchcase
+from uuid import uuid4
+
+import pytest
+
+from selfhost.blob import S3BlobStore
+from selfhost.loop.queue import _workspace_mount
+from selfhost.sandbox.fs_creds import (
+    SandboxFsCredentialMinter,
+    SandboxFsCredentials,
+    workspace_key_prefix,
+    workspace_prefix_policy,
+)
+from selfhost.sandbox.fs_mount import (
+    AWS_CREDENTIALS_PATH,
+    aws_credentials_file,
+    mount_scripts,
+    s3fs_command,
+)
+from selfhost.sandbox.session import MountSpec
+from selfhost.transcript import transcript_key
+
+BUCKET = "selfhost-blobs"
+
+
+class _StubSts:
+    """Stands in for STS: records the inline policy it was handed and returns canned credentials in
+    the AssumeRole response shape, so a test can assert the minter scoped the session correctly
+    without reaching a real STS."""
+
+    def __init__(self) -> None:
+        self.seen_policy: str | None = None
+
+    async def assume_role(
+        self, *, RoleArn: str, RoleSessionName: str, Policy: str, DurationSeconds: int
+    ) -> dict[str, dict[str, str]]:
+        self.seen_policy = Policy
+        return {
+            "Credentials": {
+                "AccessKeyId": "AKIASBX",
+                "SecretAccessKey": "sbx-secret",
+                "SessionToken": "sbx-token",
+            }
+        }
+
+
+def _object_resource(policy: dict) -> str:
+    for statement in policy["Statement"]:
+        if "s3:GetObject" in statement["Action"]:
+            return statement["Resource"]
+    raise AssertionError("policy has no object-access statement")
+
+
+def test_policy_confines_object_access_to_the_workspace_and_denies_the_transcript() -> None:
+    conversation = uuid4()
+    policy = json.loads(workspace_prefix_policy(BUCKET, workspace_key_prefix(conversation)))
+    resource = _object_resource(policy).removeprefix("arn:aws:s3:::")
+
+    assert resource == f"{BUCKET}/conversations/{conversation}/workspace/*"
+    # A workspace file (any depth) is reachable; the transcript sibling and another conversation's
+    # workspace are outside the granted prefix, so the Allow-only policy leaves them denied.
+    assert fnmatchcase(f"{BUCKET}/conversations/{conversation}/workspace/report.md", resource)
+    assert fnmatchcase(f"{BUCKET}/conversations/{conversation}/workspace/a/b/c.txt", resource)
+    assert not fnmatchcase(f"{BUCKET}/{transcript_key(conversation)}", resource)
+    assert not fnmatchcase(f"{BUCKET}/conversations/{conversation}/compactions/0.lz4", resource)
+    assert not fnmatchcase(f"{BUCKET}/conversations/{uuid4()}/workspace/x", resource)
+
+
+def test_policy_list_condition_scopes_enumeration_to_the_workspace_prefix() -> None:
+    conversation = uuid4()
+    prefix = workspace_key_prefix(conversation)
+    policy = json.loads(workspace_prefix_policy(BUCKET, prefix))
+    statement = next(s for s in policy["Statement"] if s["Action"] == "s3:ListBucket")
+
+    assert statement["Resource"] == f"arn:aws:s3:::{BUCKET}"
+    prefixes = statement["Condition"]["StringLike"]["s3:prefix"]
+    assert prefixes == [f"{prefix}/*", prefix]
+    # Listing the conversation dir (which would reveal messages.json.lz4) matches no allowed prefix.
+    assert not any(fnmatchcase(f"conversations/{conversation}/", pattern) for pattern in prefixes)
+    assert not any(fnmatchcase(transcript_key(conversation), pattern) for pattern in prefixes)
+
+
+def test_s3fs_command_construction() -> None:
+    command = s3fs_command(
+        BUCKET,
+        "conversations/c1/workspace",
+        "/workspace",
+        "https://s3.example:9000",
+        "us-east-1",
+        False,
+    )
+    assert command == (
+        "s3fs selfhost-blobs:/conversations/c1/workspace /workspace "
+        "-o profile=default -o url=https://s3.example:9000 -o endpoint=us-east-1 "
+        "-o compat_dir -o allow_other"
+    )
+
+
+def test_s3fs_command_adds_path_style_for_minio() -> None:
+    command = s3fs_command(
+        BUCKET, "conversations/c1/workspace", "/workspace", "https://minio:9000", "us-east-1", True
+    )
+    assert command.endswith("-o compat_dir -o allow_other -o use_path_request_style")
+
+
+def test_aws_credentials_file_is_the_default_profile() -> None:
+    rendered = aws_credentials_file(SandboxFsCredentials("AKIA", "secret", "token"))
+    assert rendered == (
+        "[default]\naws_access_key_id=AKIA\naws_secret_access_key=secret\naws_session_token=token\n"
+    )
+
+
+def test_mount_scripts_prepare_and_mount() -> None:
+    prepare, mount = mount_scripts("/workspace", "s3fs bucket:/p /workspace -o x")
+    assert "chmod 666 /dev/fuse" in prepare
+    assert "user_allow_other" in prepare
+    assert "umount -l /workspace" in prepare
+    assert mount == (
+        f"mkdir -p /workspace && chmod 600 {AWS_CREDENTIALS_PATH} && s3fs bucket:/p /workspace -o x"
+    )
+
+
+async def test_workspace_mount_mints_a_scoped_s3_mount() -> None:
+    sts = _StubSts()
+    conversation = uuid4()
+    minter = SandboxFsCredentialMinter(
+        sts=sts,
+        role_arn="arn:aws:iam::0:role/sbxfs",
+        bucket=BUCKET,
+        s3_url="https://s3.example:9000",
+        region="us-east-1",
+        path_style=True,
+    )
+    mount = await _workspace_mount(S3BlobStore(bucket=BUCKET), minter, conversation)
+
+    assert mount == MountSpec(
+        kind="s3",
+        bucket=BUCKET,
+        key_prefix=f"conversations/{conversation}/workspace",
+        credentials=SandboxFsCredentials("AKIASBX", "sbx-secret", "sbx-token"),
+        s3_url="https://s3.example:9000",
+        region="us-east-1",
+        path_style=True,
+    )
+    # The session it minted was scoped to this conversation's workspace prefix, nothing wider.
+    assert sts.seen_policy == workspace_prefix_policy(BUCKET, workspace_key_prefix(conversation))
+
+
+async def test_workspace_mount_on_s3_without_a_minter_fails_loud() -> None:
+    with pytest.raises(RuntimeError, match="minter"):
+        await _workspace_mount(S3BlobStore(bucket=BUCKET), None, uuid4())

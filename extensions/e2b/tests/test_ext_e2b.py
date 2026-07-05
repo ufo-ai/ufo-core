@@ -30,6 +30,7 @@ from selfhost_ext_e2b import (
 
 from selfhost.blob import FilesystemBlobStore
 from selfhost.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
+from selfhost.sandbox.fs_creds import SandboxFsCredentials
 from selfhost.sandbox.session import (
     WORKSPACE_DIR,
     ExecResult,
@@ -38,6 +39,7 @@ from selfhost.sandbox.session import (
     SandboxHandle,
     SandboxSpec,
 )
+from selfhost.sdk.sandbox import AWS_CREDENTIALS_PATH, aws_credentials_file
 from selfhost.serve import _select_carrier
 
 
@@ -51,8 +53,10 @@ class _Result:
 @dataclass
 class _Commands:
     runs: list[tuple[str, str | None, float | None]] = field(default_factory=list)
+    users: list[str | None] = field(default_factory=list)
     result: _Result = field(default_factory=lambda: _Result("out", "", 0))
     raises: Exception | None = None
+    fail_on: tuple[str, ...] = ()
 
     def run(
         self,
@@ -64,6 +68,9 @@ class _Commands:
         timeout: float | None = None,
     ) -> _Result:
         self.runs.append((cmd, cwd, timeout))
+        self.users.append(user)
+        if any(token in cmd for token in self.fail_on):
+            raise CommandExitException(stderr="", stdout="", exit_code=1, error="not mounted")
         if self.raises is not None:
             raise self.raises
         return self.result
@@ -73,6 +80,7 @@ class _Commands:
 class _Files:
     contents: bytes = b""
     made_dirs: list[str] = field(default_factory=list)
+    written: list[tuple[str, str | bytes]] = field(default_factory=list)
 
     def read(self, path: str, format: str) -> bytes:
         return self.contents
@@ -80,6 +88,10 @@ class _Files:
     def make_dir(self, path: str, *, user: str | None = None) -> bool:
         self.made_dirs.append(path)
         return True
+
+    def write(self, path: str, data: str | bytes) -> object:
+        self.written.append((path, data))
+        return None
 
 
 @dataclass
@@ -100,6 +112,7 @@ class _Sdk:
     connected: list[str] = field(default_factory=list)
     sandboxes: dict[str, _Sandbox] = field(default_factory=dict)
     counter: int = 0
+    command_fail_on: tuple[str, ...] = ()
 
     def create(
         self,
@@ -112,7 +125,7 @@ class _Sdk:
     ) -> _Sandbox:
         self.counter += 1
         sandbox_id = f"sbx-{self.counter}"
-        sandbox = _Sandbox(sandbox_id=sandbox_id)
+        sandbox = _Sandbox(sandbox_id=sandbox_id, commands=_Commands(fail_on=self.command_fail_on))
         self.sandboxes[sandbox_id] = sandbox
         self.created.append(
             {
@@ -138,6 +151,68 @@ def _spec(conversation: UUID) -> SandboxSpec:
         proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem"),
         run_token="run-token",
     )
+
+
+_S3_CREDS = SandboxFsCredentials("AKIASBX", "sbx-secret", "sbx-token")
+
+
+def _s3_spec(conversation: UUID) -> SandboxSpec:
+    return SandboxSpec(
+        conversation_id=conversation,
+        image_ref="selfhost-sandbox:latest",
+        mount=MountSpec(
+            kind="s3",
+            bucket="selfhost-blobs",
+            key_prefix=f"conversations/{conversation}/workspace",
+            credentials=_S3_CREDS,
+            s3_url="https://minio:9000",
+            region="us-east-1",
+            path_style=True,
+        ),
+        proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem"),
+        run_token="run-token",
+    )
+
+
+async def test_create_mounts_the_s3_workspace_prefix_over_s3fs() -> None:
+    """On an s3 mount the carrier writes the prefix-scoped credential, then runs the root `prepare`
+    and the agent `mount` — the privileged FUSE prep never runs as the agent, and s3fs mounts this
+    conversation's prefix at /workspace with the config's endpoint and path-style."""
+    sdk = _Sdk(command_fail_on=("mountpoint",))  # fresh sandbox: /workspace not yet mounted
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    conversation = uuid4()
+
+    handle = await carrier.create(_s3_spec(conversation))
+
+    sandbox = sdk.sandboxes["sbx-1"]
+    assert sandbox.files.written == [(AWS_CREDENTIALS_PATH, aws_credentials_file(_S3_CREDS))]
+    commands = [cmd for cmd, _, _ in sandbox.commands.runs]
+    assert commands[0] == f"mountpoint -q {WORKSPACE_DIR}"
+    assert "chmod 666 /dev/fuse" in commands[1]
+    assert commands[2].startswith(
+        f"mkdir -p {WORKSPACE_DIR} && chmod 600 {AWS_CREDENTIALS_PATH} && "
+    )
+    assert (
+        f"s3fs selfhost-blobs:/conversations/{conversation}/workspace {WORKSPACE_DIR}"
+        in commands[2]
+    )
+    assert "-o url=https://minio:9000" in commands[2]
+    assert "-o use_path_request_style" in commands[2]
+    assert sandbox.commands.users == [None, "root", None]
+    assert handle.mount is not None and handle.mount.kind == "s3"
+
+
+async def test_create_skips_the_s3_mount_when_already_healthy() -> None:
+    """Idempotent-if-healthy: a subagent's create over a live mount health-checks and returns
+    without remounting, so it never yanks the mount out from under an in-flight dispatch."""
+    sdk = _Sdk()  # mountpoint succeeds → already mounted
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+
+    await carrier.create(_s3_spec(uuid4()))
+
+    sandbox = sdk.sandboxes["sbx-1"]
+    assert sandbox.files.written == []
+    assert [cmd for cmd, _, _ in sandbox.commands.runs] == [f"mountpoint -q {WORKSPACE_DIR}"]
 
 
 async def test_create_opens_a_sandbox_on_the_template_and_returns_its_handle() -> None:

@@ -29,12 +29,19 @@ from e2b.sandbox.sandbox_api import SandboxLifecycle
 
 from selfhost.sdk.manifest import Manifest
 from selfhost.sdk.sandbox import (
+    AWS_CREDENTIALS_PATH,
+    MOUNT_HEALTH_CHECK_TIMEOUT_SECONDS,
+    MOUNT_TIMEOUT_SECONDS,
     WORKSPACE_DIR,
     BlobStore,
     CarrierSpec,
     ExecResult,
+    MountSpec,
     SandboxHandle,
     SandboxSpec,
+    aws_credentials_file,
+    mount_scripts,
+    s3fs_command,
 )
 
 CARRIER_NAME = "e2b"
@@ -69,6 +76,8 @@ class E2BFiles(Protocol):
     def read(self, path: str, format: Literal["bytes"]) -> bytes: ...
 
     def make_dir(self, path: str, *, user: str | None = None) -> bool: ...
+
+    def write(self, path: str, data: str | bytes) -> object: ...
 
 
 class E2BSandbox(Protocol):
@@ -124,9 +133,60 @@ class E2BCarrier:
             )
             await asyncio.to_thread(sandbox.files.make_dir, WORKSPACE_DIR)
         self._live[spec.conversation_id] = sandbox
+        await self._mount_s3(sandbox, spec.mount)
         return SandboxHandle(
             conversation_id=spec.conversation_id, container_id=sandbox.sandbox_id, mount=spec.mount
         )
+
+    async def _mount_s3(self, sandbox: E2BSandbox, mount: MountSpec) -> None:
+        """Bring the conversation's workspace S3 prefix up at /workspace over s3fs. Runs on every
+        create/resume and is idempotent: skips a healthy mount so a subagent sharing the sandbox
+        never remounts under an in-flight dispatch. Writes the prefix-scoped credential, then runs
+        the root `prepare` and the agent `mount` through the sync SDK off the loop — the privileged
+        prepare runs as root, the s3fs mount as the agent."""
+        if mount.kind != "s3":
+            return
+        if await self._mount_healthy(sandbox):
+            return
+        if (
+            mount.credentials is None
+            or mount.bucket is None
+            or mount.key_prefix is None
+            or mount.s3_url is None
+            or mount.region is None
+        ):
+            raise RuntimeError("s3 workspace mount is missing its scoped credential or endpoint")
+        s3fs = s3fs_command(
+            mount.bucket,
+            mount.key_prefix,
+            WORKSPACE_DIR,
+            mount.s3_url,
+            mount.region,
+            mount.path_style,
+        )
+        prepare, mount_cmd = mount_scripts(WORKSPACE_DIR, s3fs)
+        try:
+            await asyncio.to_thread(
+                sandbox.files.write, AWS_CREDENTIALS_PATH, aws_credentials_file(mount.credentials)
+            )
+            await asyncio.to_thread(
+                sandbox.commands.run, prepare, user="root", timeout=MOUNT_TIMEOUT_SECONDS
+            )
+            await asyncio.to_thread(sandbox.commands.run, mount_cmd, timeout=MOUNT_TIMEOUT_SECONDS)
+        except CommandExitException as error:
+            detail = (error.stderr or error.stdout or "").strip()
+            raise RuntimeError(f"sandbox-fs mount failed: {detail}") from error
+
+    async def _mount_healthy(self, sandbox: E2BSandbox) -> bool:
+        try:
+            await asyncio.to_thread(
+                sandbox.commands.run,
+                f"mountpoint -q {shlex.quote(WORKSPACE_DIR)}",
+                timeout=MOUNT_HEALTH_CHECK_TIMEOUT_SECONDS,
+            )
+            return True
+        except CommandExitException:
+            return False
 
     async def exec(
         self, handle: SandboxHandle, argv: tuple[str, ...], stdin: bytes, timeout_s: int
