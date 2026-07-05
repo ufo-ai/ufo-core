@@ -92,7 +92,7 @@ def test_general_purpose_tool_names_are_builtins_or_the_known_cross_extension_se
     """The queue projects a subagent's tool set by filtering the live tool set on these names — a
     name matching nothing silently vanishes. Core names must be real builtins; the rest are the
     documented cross-extension tools (web search/fetch, the connector trio, the spreadsheet REPL)
-    that match the source general_purpose's set and resolve only when their extension is installed."""
+    that match the source general_purpose set and resolve only when their extension is installed."""
     profile = SubagentRegistry(CORE_SUBAGENT_PROFILES).get(GENERAL_PURPOSE)
     builtin_names = {tool.name for tool in BUILTIN_TOOLS}
     cross_extension = {
