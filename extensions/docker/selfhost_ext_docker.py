@@ -30,6 +30,17 @@ CREATE_TIMEOUT_SECONDS = 120
 DEFAULT_NETWORK = "selfhost-sandbox"
 HOST_GATEWAY_NAME = "host.docker.internal"
 HOST_GATEWAY_MAPPING = f"{HOST_GATEWAY_NAME}:host-gateway"
+# s3fs mounts the workspace prefix over FUSE, which needs the fuse device plus CAP_SYS_ADMIN and an
+# unconfined apparmor profile to mount inside the container. Baked here beside the s3fs binary the
+# image installs; the mount itself is the follow-on workspace-fs unit.
+FUSE_RUN_ARGS = (
+    "--device",
+    "/dev/fuse",
+    "--cap-add",
+    "SYS_ADMIN",
+    "--security-opt",
+    "apparmor=unconfined",
+)
 
 
 async def _docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60) -> tuple[int, bytes, bytes]:
@@ -72,6 +83,7 @@ class DockerCarrier:
             self.network,
             "--add-host",
             HOST_GATEWAY_MAPPING,
+            *FUSE_RUN_ARGS,
             "--env",
             f"HTTP_PROXY={proxy_url}",
             "--env",

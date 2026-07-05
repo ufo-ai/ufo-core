@@ -36,7 +36,6 @@ from selfhost.loop.engine import (
 from selfhost.loop.prompts.render import rendered_prompt
 from selfhost.loop.transcript import Transcript
 from selfhost.models.interface import ModelEvent, ModelRequest, ToolUseBlock
-from selfhost.sandbox import session as session_module
 from selfhost.sandbox.session import (
     SANDBOX_GID,
     SANDBOX_UID,
@@ -119,9 +118,11 @@ class _StubMemory:
 def sandbox_image() -> str:
     if shutil.which("docker") is None:
         pytest.skip("docker is not available")
-    image_dir = Path(session_module.__file__).parent / "image"
+    from sandbox.build_template import ROOT, pod_dockerfile
+
     built = subprocess.run(
-        ["docker", "build", "-t", SANDBOX_TEST_IMAGE, str(image_dir)],
+        ["docker", "build", "-t", SANDBOX_TEST_IMAGE, "-f", "-", str(ROOT)],
+        input=pod_dockerfile(),
         capture_output=True,
         text=True,
         check=False,

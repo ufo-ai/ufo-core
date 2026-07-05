@@ -5,8 +5,9 @@ a real host directory (the same bind-mount the Docker carrier would use), comman
 subprocesses with cwd set there, and the `/workspace` paths tools pass are rewritten to it. Egress
 still routes through the sandbox proxy: each command inherits `HTTP(S)_PROXY` pointing at the proxy
 on localhost, carrying the turn's run token, plus the sentinel model keys and the proxy CA, so
-sentinel-swap and metering hold exactly as they do in a container. The in-sandbox `sbxfs` helper is
-installed onto the command PATH so the file tools work with only a Python interpreter present.
+sentinel-swap and metering hold exactly as they do in a container. The in-sandbox `sbx` and `sbxfs`
+helpers are installed onto the command PATH — the same binaries the image bakes — so the file tools
+and the egress CLI work with only a Python interpreter present.
 
 This is a development default, not an isolation boundary: a subprocess is confined to the workspace
 only through the `workspace_path` guard on tool arguments, not by the kernel. Docker and E2B are the
@@ -33,20 +34,22 @@ LOCAL_CONTAINER_ID = "local"
 LOCAL_PROXY_HOST = "127.0.0.1"
 CA_FILENAME = "egress-ca.pem"
 EXEC_TIMEOUT_CODE = 124
-SBXFS = "sbxfs"
+SANDBOX_BINARIES = ("sbx", "sbxfs")
 
 
 def _provision_scratch() -> Path:
-    """A process-lifetime scratch dir holding the command PATH's `sbxfs` and a home for tools that
-    write under `$HOME` — created once per carrier, off the event loop at construction. The
+    """A process-lifetime scratch dir holding the command PATH's `sbx`/`sbxfs` and a home for tools
+    that write under `$HOME` — created once per carrier, off the event loop at construction. The
     workspace itself is never here: it is the durable bind-mount, kept clear of scaffolding."""
     root = Path(tempfile.mkdtemp(prefix="selfhost-local-"))
     (root / "home").mkdir()
     bin_dir = root / "bin"
     bin_dir.mkdir()
-    target = bin_dir / SBXFS
-    target.write_bytes((Path(__file__).parent / "image" / SBXFS).read_bytes())
-    target.chmod(0o755)
+    source = Path(__file__).parent / "image"
+    for name in SANDBOX_BINARIES:
+        target = bin_dir / name
+        target.write_bytes((source / name).read_bytes())
+        target.chmod(0o755)
     return root
 
 

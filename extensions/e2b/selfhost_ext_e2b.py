@@ -185,8 +185,10 @@ class E2BCarrier:
 def build_e2b_carrier() -> E2BCarrier:
     """Build the carrier the `[sandbox] backend = "e2b"` deploy selects: the template and API key
     come from the environment (`SELFHOST_E2B_TEMPLATE`, and `E2B_API_KEY` / `SELFHOST_E2B_API_KEY`).
-    An e2b backend with either unset fails loud at boot rather than on the first turn. `serve` calls
-    this once, only when the deploy selects `e2b`."""
+    The template is the one `sandbox/build_template.py` publishes from the single image definition
+    (`selfhost-sbx`), so the E2B image and the Docker image never drift. An e2b backend with either
+    unset fails loud at boot rather than on the first turn. `serve` calls this once, only when the
+    deploy selects `e2b`."""
     template = os.environ.get(E2B_TEMPLATE_ENV)
     if not template:
         raise RuntimeError(f"e2b carrier selected but {E2B_TEMPLATE_ENV} is not set")

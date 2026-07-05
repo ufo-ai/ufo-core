@@ -1,0 +1,138 @@
+"""Drift guard for the single sandbox build definition (`sandbox/build_template.py`).
+
+The ported office/pdf/media skills assume the exact toolchain the image bakes; a dropped or altered
+package silently breaks a skill at runtime, so the three package tuples are pinned here against the
+expected sets and the rendered Dockerfile is asserted to carry the whole install sequence. The two
+render targets (E2B template, Docker image) share `apply_layers`, so this offline check over the
+Dockerfile render also covers what the E2B template bakes."""
+
+from sandbox.build_template import (
+    APT_PACKAGES,
+    NPM_PACKAGES,
+    PIP_PACKAGES,
+    RUNTIME_USER,
+    SANDBOX_ENV,
+    SANDBOX_SCRIPTS,
+    SANDBOX_TEMPLATE_READY_COMMAND,
+    build_definition_digest,
+    pod_dockerfile,
+)
+
+EXPECTED_APT = (
+    "python3",
+    "ca-certificates",
+    "git",
+    "curl",
+    "jq",
+    "ripgrep",
+    "s3fs",
+    "poppler-utils",
+    "chromium",
+    "libreoffice-writer",
+    "libreoffice-calc",
+    "libreoffice-impress",
+    "pandoc",
+    "qpdf",
+    "tesseract-ocr",
+)
+EXPECTED_PIP = (
+    "markitdown[pptx]",
+    "openpyxl",
+    "lxml",
+    "PyMuPDF",
+    "Pillow",
+    "reportlab",
+    "pdfplumber",
+    "pypdfium2",
+    "pypdf",
+    "pdf2image",
+    "pdf2docx",
+    "pytesseract",
+)
+EXPECTED_NPM = (
+    "pptxgenjs",
+    "react",
+    "react-dom",
+    "react-icons",
+    "sharp",
+    "docx",
+    "pdf-lib",
+    "playwright",
+)
+
+
+def test_apt_packages_match_the_expected_toolchain() -> None:
+    assert APT_PACKAGES == EXPECTED_APT
+
+
+def test_pip_packages_match_the_expected_toolchain() -> None:
+    """markitdown[pptx] carries the pptx extra the office skills need — the bare package would drop
+    it silently."""
+    assert PIP_PACKAGES == EXPECTED_PIP
+
+
+def test_npm_packages_match_the_expected_toolchain() -> None:
+    assert NPM_PACKAGES == EXPECTED_NPM
+
+
+def test_no_kubernetes_toolchain_baked() -> None:
+    """The k8s bits (kubectl, kubeconfig, KUBECONFIG) are dropped — selfhost's sandbox has no
+    control-plane egress, so a kubectl reappearing is drift."""
+    for name in ("kubectl", "ufo-tool", "kubeconfig"):
+        assert name not in SANDBOX_TEMPLATE_READY_COMMAND
+    assert "KUBECONFIG" not in SANDBOX_ENV
+    dockerfile = pod_dockerfile()
+    for token in ("kubectl", "kubeconfig", "ufo-tool", "KUBECONFIG"):
+        assert token not in dockerfile
+
+
+def test_ready_probe_checks_every_baked_entrypoint() -> None:
+    for tool in (
+        "python3",
+        "node",
+        "sbx",
+        "sbxfs",
+        "rg",
+        "s3fs",
+        "pdftotext",
+        "pdftoppm",
+        "soffice",
+    ):
+        assert f"command -v {tool}" in SANDBOX_TEMPLATE_READY_COMMAND
+    assert "chromium" in SANDBOX_TEMPLATE_READY_COMMAND
+
+
+def test_scripts_are_sbx_and_sbxfs() -> None:
+    assert tuple(name for name, _ in SANDBOX_SCRIPTS) == ("sbx", "sbxfs")
+
+
+def test_rendered_dockerfile_carries_the_full_install_sequence() -> None:
+    """The Docker image and the E2B template render from one `apply_layers`, so this over the
+    Dockerfile covers both: the apt line with --no-install-recommends and the lists cleanup, the
+    sudo strip, the pip --no-cache-dir install, the npm global install, the separate playwright
+    browser install, and both scripts copied to the bin dir."""
+    dockerfile = pod_dockerfile()
+    assert "--no-install-recommends" in dockerfile
+    assert "rm -rf /var/lib/apt/lists/*" in dockerfile
+    assert "apt-get remove -y sudo" in dockerfile
+    assert "pip install --no-cache-dir" in dockerfile
+    assert "npm install -g --prefix /usr/local --no-fund --no-audit" in dockerfile
+    assert "playwright install chromium" in dockerfile
+    for package in EXPECTED_APT + EXPECTED_PIP + EXPECTED_NPM:
+        assert package in dockerfile
+    assert "/usr/local/bin/sbx" in dockerfile
+    assert "/usr/local/bin/sbxfs" in dockerfile
+
+
+def test_rendered_dockerfile_runs_as_the_non_root_user() -> None:
+    """A sandbox that ran as root after sudo is stripped would be a regression; the render must end
+    switched to the non-root runtime user, and serve chowns the workspace to that user's uid."""
+    dockerfile = pod_dockerfile()
+    assert f"USER {RUNTIME_USER}" in dockerfile
+    assert dockerfile.rstrip().rfind(f"USER {RUNTIME_USER}") > dockerfile.rfind("USER root")
+
+
+def test_build_definition_digest_is_stable_and_prefixed() -> None:
+    digest = build_definition_digest()
+    assert digest.startswith("sha256:")
+    assert digest == build_definition_digest()
