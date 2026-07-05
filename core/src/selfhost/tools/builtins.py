@@ -578,7 +578,7 @@ MAX_SKILL_FILES = 50
 MAX_SKILL_TOTAL_BYTES = 1_048_576
 
 SKILL_READ_PROG = """
-import base64, json, os, sys
+import base64, json, os, stat, sys
 root, max_files, max_bytes = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 if not os.path.isdir(root):
     print(json.dumps({"error": "not a directory: " + root}))
@@ -589,6 +589,8 @@ for dirpath, dirnames, filenames in os.walk(root):
     dirnames.sort()
     for filename in sorted(filenames):
         full = os.path.join(dirpath, filename)
+        if not stat.S_ISREG(os.lstat(full).st_mode):
+            continue
         total += os.path.getsize(full)
         if len(files) >= max_files or total > max_bytes:
             capped = "skill exceeds %d files or %d bytes" % (max_files, max_bytes)

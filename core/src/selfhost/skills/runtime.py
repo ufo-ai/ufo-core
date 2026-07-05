@@ -181,12 +181,17 @@ class SkillRegistry:
     def tree(self, name: str) -> tuple[RuntimeSkill, ...]:
         """The skill plus the skills it pulls in — its parent (and the parent's closure) first, then
         its transitive `depends`, then the skill itself, each once. The set `load_skill` mounts for
-        one request: loading a child brings its parent's shared files along."""
+        one request: loading a child brings its parent's shared files along. `depends` is
+        member-authored (a saved user-skill can name any other), so the walk is cycle-safe — an
+        in-progress skill re-entered through a dependency cycle (A↔B, or a self-dep) is skipped
+        rather than recursed, yielding each skill once instead of a RecursionError."""
         loaded: dict[str, RuntimeSkill] = {}
+        visiting: set[str] = set()
 
         def add(skill: RuntimeSkill) -> None:
-            if skill.name in loaded:
+            if skill.name in loaded or skill.name in visiting:
                 return
+            visiting.add(skill.name)
             if skill.parent is not None:
                 add(self.named(skill.parent))
             for dependency in skill.depends:

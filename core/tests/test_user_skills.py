@@ -23,8 +23,12 @@ from selfhost.sandbox.session import (
 )
 from selfhost.schema import tables
 from selfhost.schema.records import Agent, Turn
-from selfhost.skills.runtime import CORE_SKILL_NAMES, CORE_SKILL_REGISTRY
-from selfhost.skills.store import SkillCollidesWithCoreSkill, UserSkillStore
+from selfhost.skills.runtime import CORE_SKILL_NAMES, CORE_SKILL_REGISTRY, RuntimeSkill
+from selfhost.skills.store import (
+    InvalidSkillName,
+    SkillCollidesWithCoreSkill,
+    UserSkillStore,
+)
 from selfhost.tools.builtins import SaveCustomSkillInput, save_custom_skill_handler
 from selfhost.tools.context import SpawnResult, ToolContext
 
@@ -111,6 +115,37 @@ async def test_save_refuses_a_name_that_shadows_a_core_skill(db: None, tmp_path)
     assert await store.load_all(workspace_id) == ()
 
 
+@pytest.mark.parametrize(
+    "bad_name", ["../../etc", "..", ".", "a/b", "sandbox/child", "Sandbox", "my skill", "", "-x"]
+)
+async def test_save_refuses_an_unsafe_skill_name(db: None, tmp_path, bad_name: str) -> None:
+    workspace_id = await _workspace()
+    store = UserSkillStore(blob=FilesystemBlobStore(root=tmp_path))
+    with pytest.raises(InvalidSkillName):
+        await store.save(
+            workspace_id, bad_name, {"SKILL.md": _skill_md(bad_name, "d")}, frozenset()
+        )
+    assert await store.load_all(workspace_id) == ()
+
+
+async def test_save_accepts_a_valid_slug_name(db: None, tmp_path) -> None:
+    workspace_id = await _workspace()
+    store = UserSkillStore(blob=FilesystemBlobStore(root=tmp_path))
+    saved = await store.save(
+        workspace_id, "weekly-report", {"SKILL.md": _skill_md("weekly-report", "d")}, frozenset()
+    )
+    assert saved.name == "weekly-report"
+
+
+def test_mutually_dependent_user_skills_resolve_without_recursing() -> None:
+    alpha = RuntimeSkill(name="alpha", description="A", instructions="a", depends=("beta",))
+    beta = RuntimeSkill(name="beta", description="B", instructions="b", depends=("alpha",))
+    merged = CORE_SKILL_REGISTRY.merged_with((alpha, beta))
+    resolved = [skill.name for skill in merged.tree("alpha")]
+    assert sorted(resolved) == ["alpha", "beta"]
+    assert len(resolved) == 2
+
+
 async def test_resaving_an_owned_skill_replaces_it_in_place(db: None, tmp_path) -> None:
     workspace_id = await _workspace()
     store = UserSkillStore(blob=FilesystemBlobStore(root=tmp_path))
@@ -168,3 +203,48 @@ async def test_save_custom_skill_tool_round_trips_through_the_sandbox(db: None, 
     merged = CORE_SKILL_REGISTRY.merged_with(await UserSkillStore(blob=blob).load_all(workspace_id))
     assert [skill.name for skill in merged.tree("greet")] == ["greet"]
     assert ("references/tone.md", b"warm") in merged.named("greet").files
+
+
+async def test_save_custom_skill_tool_skips_a_non_regular_file(db: None, tmp_path) -> None:
+    """A skill-dir entry that is not a regular file — here a symlink to the unbounded /dev/zero — is
+    skipped by the in-sandbox reader, so it neither reads unbounded nor lands in the saved skill."""
+    workspace_id = await _workspace()
+    carrier = LocalCarrier()
+    handle = await carrier.create(
+        SandboxSpec(
+            conversation_id=uuid4(),
+            image_ref="selfhost-sandbox:latest",
+            mount=MountSpec(kind="filesystem", host_path=str(tmp_path / "workspace")),
+            proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM"),
+            run_token="run-token",
+        )
+    )
+    session = SandboxSession(carrier=carrier, handle=handle)
+    await session.write_file("greet/SKILL.md", _skill_md("greet", "greets people"))
+    linked = await session.bash("ln -s /dev/zero /workspace/greet/evil")
+    assert linked.exit_code == 0
+    blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    turn = Turn(
+        id=uuid4(),
+        workspace_id=workspace_id,
+        conversation_id=uuid4(),
+        agent_id=uuid4(),
+        seq=1,
+        status="running",
+        inbound="save it",
+    )
+    ctx = ToolContext(
+        sandbox=session,
+        blob=blob,
+        turn=turn,
+        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        spawn=_unavailable_spawn,
+        member_id=None,
+        artifact_token_secret="secret",
+    )
+
+    result = await save_custom_skill_handler(ctx, SaveCustomSkillInput(path="greet"))
+    payload = json.loads(result.content[0].text)
+    assert payload["files"] == 1
+    loaded = await UserSkillStore(blob=blob).load_all(workspace_id)
+    assert [path for path, _ in loaded[0].files] == []

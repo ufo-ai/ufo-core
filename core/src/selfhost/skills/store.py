@@ -12,6 +12,7 @@ never be seen by another, nor shadow a core or pack skill."""
 
 import base64
 import hashlib
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from uuid import UUID
@@ -26,11 +27,20 @@ from selfhost.skills.runtime import RuntimeSkill, parse_skill_content
 
 USER_SKILL_KEY_PREFIX = "user-skills/"
 DIGEST_PREFIX = "sha256:"
+SKILL_NAME_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?")
 
 
 class SkillCollidesWithCoreSkill(ValueError):
     """A save named a skill that a core or pack skill already owns. A user-skill may never shadow
     one, so the save is refused rather than persisted — surfaced to the model as a tool error."""
+
+
+class InvalidSkillName(ValueError):
+    """A save named a skill with something that is not a safe slug. The name is both the blob key
+    segment and the registry key, so it is validated up front: a traversing name (`../../etc`), a
+    dot-segment (`.`, `..`), a slash (a user-skill is one directory, never a `parent/child` tree),
+    uppercase, whitespace, or other punctuation is refused rather than left to a downstream guard —
+    surfaced to the model as a tool error."""
 
 
 class StoredSkill(BaseModel):
@@ -60,6 +70,11 @@ class UserSkillStore:
         workspace's own user-skill belongs to a core or pack skill and is refused, so a user-skill
         never shadows one. The content is stored content-addressed by digest; the index row is
         upserted so re-saving the same name replaces it in place."""
+        if not SKILL_NAME_PATTERN.fullmatch(name):
+            raise InvalidSkillName(
+                f"skill name {name!r} must be a lowercase slug — letters and digits with internal "
+                f"hyphens (no slashes, dots, uppercase, or spaces)"
+            )
         skill = parse_skill_content(name, files)
         already_owned = await self._owns(workspace_id, name)
         if name in registry_names and not already_owned:
