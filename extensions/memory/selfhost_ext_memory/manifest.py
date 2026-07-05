@@ -10,6 +10,7 @@ swallows every error, returning None rather than ever denying the turn.
 import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
+from itertools import zip_longest
 from pathlib import Path
 from uuid import UUID
 
@@ -92,45 +93,46 @@ def _date_bound(value: str | None, *, end: bool) -> datetime | None:
 
 async def memory_search_handler(ctx: ToolContext, args: MemorySearchInput) -> ToolResult:
     """Fan the queries out concurrently over recall and source search, then merge each kind by
-    keeping every item's best score across the queries that surfaced it and bounding the merged set
-    to MEMORY_SEARCH_LIMIT. start_date/end_date, when given, restrict recalled facts to a
-    `created_at` window."""
+    interleaving the per-query results round-robin — each query's top hit, then each query's
+    second, and so on — deduped and bounded to MEMORY_SEARCH_LIMIT, so every query gets fair
+    representation rather than one high-scoring query crowding the others out. start_date/end_date,
+    when given, restrict recalled facts to a `created_at` window."""
     if ctx.ext is None:
         raise RuntimeError("memory_search dispatched without its ExtensionContext")
     store = store_for(ctx.ext)
     subjects = recall_subjects(ctx.member_id)
     start = _date_bound(args.start_date, end=False)
     end = _date_bound(args.end_date, end=True)
-    recalled_legs, source_legs = await asyncio.gather(
-        asyncio.gather(
-            *(
-                store.recall(query, subjects, MEMORY_SEARCH_LIMIT, start, end)
-                for query in args.queries
-            )
-        ),
-        asyncio.gather(
-            *(
-                store.search_sources(query, subjects, MEMORY_SEARCH_LIMIT, start, end)
-                for query in args.queries
-            )
-        ),
+    recall_batch = asyncio.gather(
+        *(store.recall(query, subjects, MEMORY_SEARCH_LIMIT, start, end) for query in args.queries)
     )
+    source_batch = asyncio.gather(
+        *(
+            store.search_sources(query, subjects, MEMORY_SEARCH_LIMIT, start, end)
+            for query in args.queries
+        )
+    )
+    recalled_legs: list[tuple[Recalled, ...]] = await recall_batch
+    source_legs: list[tuple[SourceMatch, ...]] = await source_batch
     recalled: dict[UUID, Recalled] = {}
-    for recall_leg in recalled_legs:
-        for item in recall_leg:
-            if item.memory_id not in recalled or item.score > recalled[item.memory_id].score:
+    for recall_tier in zip_longest(*recalled_legs):
+        for item in recall_tier:
+            if item is not None and item.memory_id not in recalled:
                 recalled[item.memory_id] = item
     sources: dict[UUID, SourceMatch] = {}
-    for source_leg in source_legs:
-        for match in source_leg:
-            if match.page_id not in sources or match.score > sources[match.page_id].score:
+    for source_tier in zip_longest(*source_legs):
+        for match in source_tier:
+            if match is not None and match.page_id not in sources:
                 sources[match.page_id] = match
     if not recalled and not sources:
         return ToolResult(content=(TextContent(text="No matching memory."),))
-    top_recalled = sorted(recalled.values(), key=lambda item: item.score, reverse=True)
-    top_sources = sorted(sources.values(), key=lambda match: match.score, reverse=True)
-    lines = [f"- [{item.item_class}] {item.body}" for item in top_recalled[:MEMORY_SEARCH_LIMIT]]
-    lines.extend(f"- [source] {match.text}" for match in top_sources[:MEMORY_SEARCH_LIMIT])
+    lines = [
+        f"- [{item.item_class}] {item.body}"
+        for item in list(recalled.values())[:MEMORY_SEARCH_LIMIT]
+    ]
+    lines.extend(
+        f"- [source] {match.text}" for match in list(sources.values())[:MEMORY_SEARCH_LIMIT]
+    )
     return ToolResult(content=(TextContent(text="\n".join(lines)),))
 
 

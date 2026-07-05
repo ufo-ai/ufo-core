@@ -337,6 +337,49 @@ async def test_memory_search_bounds_the_merged_result_across_queries(
     assert len(found.content[0].text.splitlines()) == memory.MEMORY_SEARCH_LIMIT
 
 
+async def test_memory_search_interleaves_per_query_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The merge interleaves the per-query legs round-robin — query-1's top, query-2's top, then
+    query-1's second — so a sparse query's hit precedes a dense query's tail. A global best-score
+    top-N would order the low-scoring b-one behind the higher-scoring a-two; interleave keeps each
+    query represented, which is what the merge is for. The store is faked to fix the per-query legs;
+    the assertion is on the handler's merge order, not the store."""
+    from selfhost_ext_memory.store import Recalled
+
+    def _recalled(body: str, score: float) -> Recalled:
+        return Recalled(
+            memory_id=uuid4(),
+            subject="s",
+            item_class="fact",
+            body=body,
+            source_ref=None,
+            score=score,
+        )
+
+    legs = {
+        "alpha": (_recalled("a-one", 0.9), _recalled("a-two", 0.8)),
+        "beta": (_recalled("b-one", 0.1),),
+    }
+
+    class _Store:
+        async def recall(
+            self, query: str, subjects: object, limit: int, start: object, end: object
+        ):
+            return legs[query]
+
+        async def search_sources(
+            self, query: str, subjects: object, limit: int, start: object, end: object
+        ):
+            return ()
+
+    monkeypatch.setattr(memory, "store_for", lambda ext: _Store())
+    ctx = _tool_ctx(_ext(object(), object(), uuid4()), uuid4(), tmp_path)
+    found = await _run("memory_search", ctx, queries=["alpha", "beta"])
+    bodies = [line.split("] ", 1)[1] for line in found.content[0].text.splitlines()]
+    assert bodies == ["a-one", "b-one", "a-two"]
+
+
 async def _load_sessions(ctx: ToolContext, **args: object) -> ToolResult:
     tool = BUILTIN_REGISTRY.get("load_sessions")
     return await tool.handler(ctx, tool.input_model.model_validate(args))
