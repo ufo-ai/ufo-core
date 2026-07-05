@@ -12,7 +12,7 @@ import json
 import shlex
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from selfhost.sdk.manifest import Manifest, SkillSpec
 from selfhost.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
@@ -57,15 +57,30 @@ XLSX_REPL_DESCRIPTION = (
 
 
 class JsReplInput(BaseModel):
-    code: str
-    reset: bool | None = None
-    user_description: str
+    code: str = Field(
+        description="JavaScript code to execute. Variables and imports persist across calls."
+    )
+    reset: bool | None = Field(
+        default=None,
+        description="Reset the REPL context and start fresh. Any code provided runs after the "
+        "reset.",
+    )
+    user_description: str = Field(
+        description="Brief plain-language description shown in the activity timeline."
+    )
 
 
 class XlsxReplInput(BaseModel):
-    code: str
-    reset: bool | None = None
-    user_description: str | None = None
+    code: str = Field(
+        description="Python code to execute. Use openpyxl directly for spreadsheet operations. "
+        "Variables persist across calls. Set result = ... to return data."
+    )
+    reset: bool | None = Field(
+        default=None, description="Reset REPL state — clears all variables and loaded workbooks."
+    )
+    user_description: str | None = Field(
+        default=None, description="Brief plain-language description shown in the activity timeline."
+    )
 
 
 async def _accumulate(ctx: ToolContext, path: str, code: str, reset: bool) -> None:

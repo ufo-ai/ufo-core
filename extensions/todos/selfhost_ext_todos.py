@@ -43,24 +43,32 @@ SECTION_BODY = (Path(__file__).parent / "todo_list_section.md").read_text().stri
 
 
 class TodoTask(BaseModel):
-    description: str
-    status: TodoStatus = "pending"
+    description: str = Field(description="The task text.")
+    status: TodoStatus = Field(default="pending", description="The task's current status.")
 
 
 class UpdateTodoListInput(BaseModel):
-    title: str
-    tasks: tuple[TodoTask, ...]
-    user_description: str
+    title: str = Field(description="Title of the todo list.")
+    tasks: tuple[TodoTask, ...] = Field(
+        description="Complete list of tasks — this REPLACES the existing list entirely."
+    )
+    user_description: str = Field(
+        description="Brief plain-language description shown in the activity timeline."
+    )
 
 
 class TodoStatusUpdate(BaseModel):
-    index: int
-    status: TodoStatus
+    index: int = Field(description="1-based index of the task in the list.")
+    status: TodoStatus = Field(description="New status for the task.")
 
 
 class UpdateTodoStatusInput(BaseModel):
-    updates: tuple[TodoStatusUpdate, ...] = Field(min_length=1)
-    user_description: str
+    updates: tuple[TodoStatusUpdate, ...] = Field(
+        min_length=1, description="List of status updates to apply."
+    )
+    user_description: str = Field(
+        description="Brief plain-language description shown in the activity timeline."
+    )
 
 
 class TodoBoard(BaseModel):
