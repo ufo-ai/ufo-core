@@ -63,18 +63,51 @@ logger = logging.getLogger(__name__)
 
 
 class MemorySearchInput(BaseModel):
-    queries: tuple[str, ...] = Field(min_length=1, max_length=MAX_MEMORY_QUERIES)
-    start_date: str | None = None
-    end_date: str | None = None
+    queries: tuple[str, ...] = Field(
+        min_length=1,
+        max_length=MAX_MEMORY_QUERIES,
+        description="Up to 3 distinct queries, each targeting ONE topic — multiple focused queries "
+        "beat one vague catch-all. They run in parallel and their results are merged.",
+    )
+    start_date: str | None = Field(
+        default=None,
+        description="Optional ISO-8601 start of a created-at window to restrict results, e.g. "
+        "'2026-01-31'.",
+    )
+    end_date: str | None = Field(
+        default=None,
+        description="Optional ISO-8601 end of the window; a bare date covers its whole day.",
+    )
 
 
 class MemoryUpdateInput(BaseModel):
-    body: str
-    item_class: ItemClass = FACT
-    memory_kind: MemoryKind = KIND_FACT
-    confidence: int = Field(default=DEFAULT_CONFIDENCE, ge=1, le=MAX_CONFIDENCE)
-    shared: bool = False
-    source_ref: str | None = None
+    body: str = Field(
+        description="A durable fact to remember about the user, written from their perspective "
+        "(e.g. 'I prefer concise summaries'). Store persistent facts — role, company, team, "
+        "preferences, projects, key people — never ephemeral instructions like 'make it shorter'."
+    )
+    item_class: ItemClass = Field(
+        default=FACT, description="The memory item class; defaults to a fact."
+    )
+    memory_kind: MemoryKind = Field(
+        default=KIND_FACT,
+        description="Memory kind (fact/preference/decision/event/task), which sets the "
+        "recency-decay half-life; defaults to fact.",
+    )
+    confidence: int = Field(
+        default=DEFAULT_CONFIDENCE,
+        ge=1,
+        le=MAX_CONFIDENCE,
+        description="Confidence 1-10 in the fact; scales its recall score.",
+    )
+    shared: bool = Field(
+        default=False,
+        description="Store as shared workspace memory rather than the speaking member's private "
+        "memory.",
+    )
+    source_ref: str | None = Field(
+        default=None, description="Optional reference to the source this fact came from."
+    )
 
 
 def _date_bound(value: str | None, *, end: bool) -> datetime | None:
