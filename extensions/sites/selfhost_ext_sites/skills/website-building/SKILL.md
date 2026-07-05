@@ -6,11 +6,11 @@ description: Load when building any website, web app, web game, or web experienc
 
 Build distinctive, production-grade websites that avoid generic "AI slop" aesthetics. Every choice — type, color, motion, layout — must be intentional. Build the site in the sandbox workspace, then serve it with `deploy_website` at a reachable `http://localhost:8000` URL inside the sandbox.
 
-**This skill covers everything for web projects.** When loaded via `load_skill(name="website-building")`, all files mount under `.skills/website-building/`. Read sub-files as needed based on your project type. For web applications, load the child skill: `load_skill(name="website-building-webapp")`. For browser games, load `load_skill(name="website-building-game")`.
+**This skill covers everything for web projects.** When loaded via `load_skill(name="website-building")`, all files mount under `.skills/website-building/`. Read sub-files as needed based on your project type. For web applications, load the child skill: `load_skill(name="website-building/webapp")`.
 
 **Universal design principles** (color philosophy, default palette, font selection) are shared with other skills via `design-foundations`. This skill's shared files extend those foundations with web-specific implementation (CSS variables, responsive tokens, base stylesheets). You don't need to load `design-foundations` separately — the web-specific versions in `shared/` are comprehensive.
 
-Use `read` with the mounted path, e.g. `.skills/website-building/shared/01-design-tokens.md`
+Use `read` with the path relative to this skill, e.g. `shared/01-design-tokens.md`
 
 ---
 
@@ -18,11 +18,11 @@ Use `read` with the mounted path, e.g. `.skills/website-building/shared/01-desig
 
 **Step 1: Identify project type and load domain-specific guidance:**
 
-| Project Type        | Action                                       | Examples                                                                   |
-| ------------------- | -------------------------------------------- | -------------------------------------------------------------------------- |
-| Informational sites | `read` `informational/informational.md`      | Personal sites, portfolios, editorial/blogs, small business, landing pages |
-| Web applications    | `load_skill(name="website-building-webapp")` | SaaS products, dashboards, admin panels, e-commerce, brand experiences     |
-| Browser games       | `load_skill(name="website-building-game")`   | 2D Canvas games, Three.js/WebGL, HTML5 games, interactive 3D experiences   |
+| Project Type        | Action                                          | Examples                                                                   |
+| ------------------- | ----------------------------------------------- | -------------------------------------------------------------------------- |
+| Informational sites | `read` `informational/informational.md`         | Personal sites, portfolios, editorial/blogs, small business, landing pages |
+| Web applications    | `load_skill(name="website-building/webapp")`    | SaaS products, dashboards, admin panels, e-commerce, brand experiences     |
+| Browser games       | `read` `game/game.md` + `game/game-testing.md`  | 2D Canvas games, Three.js/WebGL, HTML5 games, interactive 3D experiences   |
 
 **Step 2: Read shared files** — read `shared/01-design-tokens.md` and `shared/02-typography.md` first (mandatory for ALL project types, including webapp). These establish the Nexus design system defaults and typography rules that apply universally. For web applications and dashboards, skip files marked with `†` below — those contain implementation details pre-configured in the fullstack template.
 
@@ -63,14 +63,14 @@ All paths above are relative to this skill's mounted directory (`.skills/website
 
 ### Domain-Specific — Load or read one
 
-| Target                                          | When to use                                                                                |
-| ----------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| `load_skill(name="website-building-webapp")`    | SaaS, dashboard, admin, e-commerce, brand experience (child skill with fullstack template) |
-| `.skills/website-building-webapp/dashboards.md` | Dashboard or data-dense interface (companion to the webapp skill)                          |
-| `informational/informational.md`                | Personal site, portfolio, editorial, small business, landing                               |
-| `load_skill(name="website-building-game")`      | Browser game, Three.js, WebGL, interactive 3D, or 2D Canvas                                |
-
-After loading the game skill, read `.skills/website-building-game/game-testing.md` (mandatory for any game) and `.skills/website-building-game/2d-canvas.md` (for 2D Canvas games).
+| Target                                       | When to use                                                                                |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `load_skill(name="website-building/webapp")` | SaaS, dashboard, admin, e-commerce, brand experience (child skill with fullstack template) |
+| `webapp/dashboards.md`                       | Dashboard or data-dense interface (companion to the webapp skill)                          |
+| `informational/informational.md`            | Personal site, portfolio, editorial, small business, landing                               |
+| `game/game.md`                               | Browser game, Three.js, WebGL, interactive 3D                                              |
+| `game/2d-canvas.md`                          | 2D Canvas game (companion to game.md)                                                      |
+| `game/game-testing.md`                       | Any browser game — read alongside game.md                                                  |
 
 **Interactive QA:** Read `shared/12-playwright-interactive.md` for persistent browser automation with Playwright via `js_repl` (screenshots, functional testing, visual QA). Required for game testing, useful for any complex site.
 
@@ -145,7 +145,7 @@ After building each page:
 Every site should have a visual identity derived from its content. **Do not skip to the Nexus fallback palette.** The Nexus palette is a last resort for when both inference and asking have failed — not a convenient default.
 
 1. **Infer from the subject.** A coffee roaster site → earthy browns, warm cream, hand-drawn feel. A fintech dashboard → cool slate, sharp sans-serif, data-dense. A children's learning app → bright primaries, rounded type, playful motion. The content itself tells you the palette, typography, and spacing before the user says a word.
-2. **Check the Art Direction tables.** Each domain file (`informational/informational.md`, the webapp skill's `SKILL.md`, the game skill's `SKILL.md`) has an Art Direction table mapping site/product types to concept-driven directions and token starting points. Use these as a springboard.
+2. **Check the Art Direction tables.** Each domain file (`informational/informational.md`, `webapp/SKILL.md`, `game/game.md`) has an Art Direction table mapping site/product types to concept-driven directions and token starting points. Use these as a springboard.
 3. **Derive the five pillars:** Color (warm/cool, accent from subject), Typography (serif/sans, display personality), Spacing (dense/generous), Motion (minimal/expressive), Imagery (photo/illustration/type-only).
 4. **If the subject is genuinely ambiguous, ask** — "What mood are you going for?" and "Any reference sites?" One question is enough.
 5. **Nexus fallback — only when inference AND asking yield nothing.** If the user has been asked and gave no direction, AND the subject matter gives no clear signal, then fall back to Nexus/Swiss defaults.

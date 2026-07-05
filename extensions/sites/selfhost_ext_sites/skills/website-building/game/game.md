@@ -1,16 +1,8 @@
----
-name: website-building-game
-description: Load when building a browser game — 3D (Three.js/WebGL) or 2D (Canvas). Covers sandbox constraints, art direction, game UI design systems, typography, music, renderer setup, ECS architecture, Rapier physics, asset loading, post-processing, and performance.
-metadata:
-  depends:
-  - website-building
----
-
 # Three.js Game Development Skill
 
 Build 3D browser games using Three.js. Use WebGL 2 rendering, Rapier for physics, ECS for architecture, and GLTF/GLB for assets. Games are static HTML/CSS/JS served at a `http://localhost:8000` URL inside the sandbox.
 
-**Mandatory shared files (read if not already loaded):** `.skills/website-building/shared/01-design-tokens.md`, `.skills/website-building/shared/02-typography.md`.
+**Mandatory shared files (read if not already loaded):** `shared/01-design-tokens.md`, `shared/02-typography.md`.
 
 ---
 
@@ -62,7 +54,7 @@ Author cohesive game art directly — do NOT use placeholder rectangles or skip 
 
 - Skybox/environment art (CC0 HDRIs from Poly Haven, or a CSS/canvas gradient sky)
 - Character/enemy art (CC0 models, or 2D sprite overlays)
-- UI background textures or patterns (SVG patterns/filters — see `.skills/website-building/shared/07-toolkit.md`)
+- UI background textures or patterns (SVG patterns/filters — see `shared/07-toolkit.md`)
 
 Derive every choice from the established art direction for consistency — style ("low-poly stylized", "dark cyberpunk"), mood, and palette.
 
@@ -70,7 +62,7 @@ Derive every choice from the established art direction for consistency — style
 
 ## Game UI Typography
 
-**Read `.skills/website-building/shared/02-typography.md` for font selection, pairing rules, loading, and the blacklist.** All rules apply to games. Below adapts them to game-specific contexts.
+**Read `shared/02-typography.md` for font selection, pairing rules, loading, and the blacklist.** All rules apply to games. Below adapts them to game-specific contexts.
 
 ### Rules
 
@@ -124,11 +116,11 @@ For in-world 3D text (damage numbers, name tags), use `THREE.CanvasTexture` with
 
 ## Game Design System
 
-Every game screen (HUD, menus, loading, dialogs, settings, game-over, title) must share a unified token system. **Read `.skills/website-building/shared/01-design-tokens.md` for token architecture.**
+Every game screen (HUD, menus, loading, dialogs, settings, game-over, title) must share a unified token system. **Read `shared/01-design-tokens.md` for token architecture.**
 
 ### Building the System
 
-**1. Define tokens** adapted from `.skills/website-building/shared/01-design-tokens.md`:
+**1. Define tokens** adapted from `shared/01-design-tokens.md`:
 
 ```css
 :root {
@@ -156,7 +148,7 @@ Every game screen (HUD, menus, loading, dialogs, settings, game-over, title) mus
   --space-8: 32px;
   --panel-blur: 12px;
   --panel-radius: 8px;
-  --transition-ui: 180ms cubic-bezier(0.16, 1, 0.3, 1); /* matches --transition-interactive from .skills/website-building/shared/03-motion.md */
+  --transition-ui: 180ms cubic-bezier(0.16, 1, 0.3, 1); /* matches --transition-interactive from shared/03-motion.md */
 }
 ```
 
@@ -518,7 +510,7 @@ composer.addPass(new SMAAPass(innerWidth, innerHeight));
 
 ## Testing & Debugging
 
-**Read `game-testing.md` for the complete testing guide.** It covers:
+**Read `game/game-testing.md` for the complete testing guide.** It covers:
 
 - **Debug overlay** (required for every game) — FPS, frame time, draw calls, triangle count, memory. Visible in screenshots for evaluation.
 - **Screenshot-based evaluation** — what to screenshot, when, and how to evaluate each capture.
@@ -528,4 +520,4 @@ composer.addPass(new SMAAPass(innerWidth, innerHeight));
 - **Common bug prevention** — Three.js resource disposal, animation frame leaks, event listener cleanup, z-fighting, audio context, GC stutter avoidance.
 - **Sandbox testing** — defensive API usage, asset loading verification, pre-ship quality checklist.
 
-**Shared files reference:** See the parent `website-building` skill's `SKILL.md` for the full shared file table. Key files for games: `game-testing.md` (mandatory), `.skills/website-building/shared/07-toolkit.md` (CDN/Three.js imports), `2d-canvas.md` (2D Canvas games).
+**Shared files reference:** See `SKILL.md` for the full shared file table. Key files for games: `game/game-testing.md` (mandatory), `shared/07-toolkit.md` (CDN/Three.js imports), `game/2d-canvas.md` (2D Canvas games).

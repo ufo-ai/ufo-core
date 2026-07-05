@@ -23,6 +23,7 @@ from selfhost.blob import FilesystemBlobStore
 from selfhost.ext.loader import skill_registry
 from selfhost.sandbox.session import ExecResult
 from selfhost.schema.records import Agent, Turn
+from selfhost.skills.runtime import mount_skill
 from selfhost.tools.context import SpawnResult, ToolContext
 
 
@@ -93,19 +94,47 @@ def test_manifest_declares_the_four_tools_the_profile_and_the_section() -> None:
     assert section.name == "sites" and "<sites>" in section.body
 
 
-def test_website_building_skills_parse_index_and_resolve_flat_depends() -> None:
+def test_website_building_indexes_the_parent_and_hides_the_nested_child() -> None:
     registry = skill_registry((sites_manifest.manifest(),))
     index = dict(registry.index())
-    for name in ("website-building", "website-building-webapp", "website-building-game"):
-        assert name in index
-    assert {skill.name for skill in registry.tree("website-building-webapp")} == {
+    assert "website-building" in index
+    assert "website-building/webapp" not in index
+
+
+def test_website_building_parent_keeps_its_own_subdirs_but_not_the_child_subtree() -> None:
+    registry = skill_registry((sites_manifest.manifest(),))
+    parent_files = {path for path, _ in registry.named("website-building").files}
+    assert any(path.startswith("game/") for path in parent_files)
+    assert any(path.startswith("shared/") for path in parent_files)
+    assert any(path.startswith("informational/") for path in parent_files)
+    assert not any(path.startswith("webapp/") for path in parent_files)
+
+
+async def test_loading_the_webapp_child_resolves_it_and_pulls_the_parent_nested() -> None:
+    registry = skill_registry((sites_manifest.manifest(),))
+
+    child = registry.named("website-building/webapp")
+    assert child.name == "website-building/webapp"
+    assert child.parent == "website-building"
+
+    assert [skill.name for skill in registry.tree("website-building/webapp")] == [
         "website-building",
-        "website-building-webapp",
-    }
-    assert {skill.name for skill in registry.tree("website-building-game")} == {
-        "website-building",
-        "website-building-game",
-    }
+        "website-building/webapp",
+    ]
+
+    written: dict[str, bytes] = {}
+
+    class _Sandbox:
+        async def write_file(self, path: str, content: bytes) -> None:
+            written[path] = content
+
+    for skill in registry.tree("website-building/webapp"):
+        await mount_skill(_Sandbox(), skill)
+
+    assert "/workspace/.skills/website-building/SKILL.md" in written
+    assert "/workspace/.skills/website-building/webapp/SKILL.md" in written
+    assert "/workspace/.skills/website-building/shared/01-design-tokens.md" in written
+    assert not any(path.startswith("/workspace/.skills/website-building-") for path in written)
 
 
 def test_the_website_building_profile_names_only_meaningful_tools() -> None:

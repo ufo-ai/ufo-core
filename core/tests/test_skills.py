@@ -8,9 +8,17 @@ from selfhost.skills.runtime import (
     CORE_SKILLS,
     RuntimeSkill,
     SkillRegistry,
+    discover_skills,
     mount_skill,
     parse_skill,
 )
+
+
+def _write_nested_child(parent_dir: Path, name: str, description: str, body: str) -> Path:
+    child_dir = parent_dir / name
+    child_dir.mkdir()
+    (child_dir / "SKILL.md").write_text(_skill_md(name, description, body))
+    return child_dir
 
 
 def _skill_md(name: str, description: str, body: str, depends: tuple[str, ...] = ()) -> str:
@@ -78,6 +86,55 @@ def test_skill_tree_resolves_dependencies_before_the_skill_that_names_them(
 
 def test_skill_tree_of_a_core_skill_returns_it() -> None:
     assert [skill.name for skill in CORE_SKILL_REGISTRY.tree("delegation")] == ["delegation"]
+
+
+def test_discover_registers_a_parent_and_its_nested_child_by_path_form(tmp_path: Path) -> None:
+    parent_dir = _write_skill(tmp_path, "site", "a parent skill", "parent body")
+    (parent_dir / "shared").mkdir()
+    (parent_dir / "shared" / "tokens.md").write_text("design tokens")
+    child_dir = _write_nested_child(parent_dir, "app", "a child skill", "child body")
+    (child_dir / "template.txt").write_text("scaffold")
+
+    discovered = discover_skills(parent_dir)
+
+    assert set(discovered) == {"site", "site/app"}
+    assert discovered["site"].parent is None
+    assert discovered["site/app"].parent == "site"
+    parent_files = {path for path, _ in discovered["site"].files}
+    assert "shared/tokens.md" in parent_files
+    assert not any(path.startswith("app/") for path in parent_files)
+    assert ("template.txt", b"scaffold") in discovered["site/app"].files
+
+
+def test_child_frontmatter_name_must_match_its_own_directory(tmp_path: Path) -> None:
+    parent_dir = _write_skill(tmp_path, "site", "parent", "p")
+    child_dir = _write_nested_child(parent_dir, "app", "child", "c")
+    (child_dir / "SKILL.md").write_text(_skill_md("wrong", "child", "c"))
+    with pytest.raises(ValueError, match="must match its directory"):
+        discover_skills(parent_dir)
+
+
+def test_tree_of_a_nested_child_pulls_its_parent_first_and_index_hides_it(tmp_path: Path) -> None:
+    parent_dir = _write_skill(tmp_path, "site", "a parent skill", "p")
+    _write_nested_child(parent_dir, "app", "a child skill", "c")
+    registry = SkillRegistry(discover_skills(parent_dir))
+    assert [skill.name for skill in registry.tree("site/app")] == ["site", "site/app"]
+    assert registry.index() == (("site", "a parent skill"),)
+
+
+async def test_mount_writes_a_nested_child_under_its_parent_path(tmp_path: Path) -> None:
+    parent_dir = _write_skill(tmp_path, "site", "parent", "p")
+    _write_nested_child(parent_dir, "app", "child", "c")
+    child = discover_skills(parent_dir)["site/app"]
+
+    written: dict[str, bytes] = {}
+
+    class _Sandbox:
+        async def write_file(self, path: str, content: bytes) -> None:
+            written[path] = content
+
+    await mount_skill(_Sandbox(), child)
+    assert "/workspace/.skills/site/app/SKILL.md" in written
 
 
 def test_registry_index_lists_every_skills_name_and_description() -> None:

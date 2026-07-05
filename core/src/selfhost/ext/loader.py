@@ -46,7 +46,12 @@ from selfhost.ext.manifest import (
 from selfhost.indexing import EmbedClient, IndexBackend
 from selfhost.o11y import log
 from selfhost.schema.records import Agent, Turn
-from selfhost.skills.runtime import CORE_SKILLS_BY_NAME, RuntimeSkill, SkillRegistry, parse_skill
+from selfhost.skills.runtime import (
+    CORE_SKILLS_BY_NAME,
+    RuntimeSkill,
+    SkillRegistry,
+    discover_skills,
+)
 from selfhost.tools.builtins import BUILTIN_TOOLS
 from selfhost.tools.registry import ToolDef, ToolRegistry
 
@@ -288,20 +293,21 @@ def turn_tools(
 
 
 def skill_registry(manifests: tuple[Manifest, ...]) -> SkillRegistry:
-    """The loadable-skill set for the deploy: the core three plus every active pack's contributed
-    skills, parsed from disk once at boot (sync file I/O, off the loop). A pack skill whose name
-    collides with a core skill or another pack's is refused loud here, so no reader downstream — the
-    `load_skill` resolver or the `{{skill_index}}` render — has to disambiguate."""
+    """The loadable-skill set for the deploy: core's skills plus every active pack's contributed
+    skills — each spec's parent and its nested children — parsed from disk once at boot (sync file
+    I/O, off the loop). A pack skill whose name collides with a core skill or another pack's is
+    refused loud here, so no reader downstream — the `load_skill` resolver or the `{{skill_index}}`
+    render — has to disambiguate."""
     by_name: dict[str, RuntimeSkill] = dict(CORE_SKILLS_BY_NAME)
     for manifest in manifests:
         for spec in manifest.skills:
-            skill = parse_skill(spec.path)
-            if skill.name in by_name:
-                raise ValueError(
-                    f"extension {manifest.name!r} contributes skill {skill.name!r}, "
-                    f"which is already registered"
-                )
-            by_name[skill.name] = skill
+            for skill in discover_skills(spec.path).values():
+                if skill.name in by_name:
+                    raise ValueError(
+                        f"extension {manifest.name!r} contributes skill {skill.name!r}, "
+                        f"which is already registered"
+                    )
+                by_name[skill.name] = skill
     return SkillRegistry(by_name)
 
 

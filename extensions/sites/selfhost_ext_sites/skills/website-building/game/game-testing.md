@@ -1,6 +1,6 @@
 # Game Testing & Development
 
-**Prerequisite:** Read `.skills/website-building/shared/12-playwright-interactive.md` for persistent browser automation via `js_repl`.
+**Prerequisite:** Read `shared/12-playwright-interactive.md` for persistent browser automation via `js_repl`.
 
 Build games in small steps and validate every change. Treat each iteration as: implement → act → pause → observe → adjust.
 
@@ -12,8 +12,8 @@ Build games in small steps and validate every change. Treat each iteration as: i
 4. **Add `window.advanceTime(ms)`.** Strongly prefer a deterministic step hook so the Playwright script can advance frames reliably; without it, automated tests can be flaky.
 5. **Initialize progress.md.** If `progress.md` exists, read it first and confirm the original user prompt is recorded at the top (prefix with `Original prompt:`). Also note any TODOs and suggestions left by the previous agent. If missing, create it and write `Original prompt: <prompt>` at the top before appending updates.
 6. **Verify Playwright availability.** Ensure `playwright` is available (local dependency or global install). If unsure, check `npx` first.
-7. **Run the Playwright test script.** You must run `scripts/web_game_playwright_client.js` after each meaningful change; do not invent a new client unless required.
-8. **Use the payload reference.** Base actions on `references/action_payloads.json` to avoid guessing keys.
+7. **Run the Playwright test script.** You must run `game/scripts/web_game_playwright_client.js` after each meaningful change; do not invent a new client unless required.
+8. **Use the payload reference.** Base actions on `game/references/action_payloads.json` to avoid guessing keys.
 9. **Inspect state.** Capture screenshots and text state after each burst.
 10. **Inspect screenshots.** Open the latest screenshot, verify expected visuals, fix any issues, and rerun the script. Repeat until correct.
 11. **Verify controls and state (multi-step focus).** Exhaustively exercise all important interactions. For each, think through the full multi-step sequence it implies (cause → intermediate states → outcome) and verify the entire chain works end-to-end. Confirm `render_game_to_text` reflects the same state shown on screen. If anything is off, fix and rerun.
@@ -25,7 +25,7 @@ Build games in small steps and validate every change. Treat each iteration as: i
 Example command (actions required):
 
 ```
-node "scripts/web_game_playwright_client.js" --url http://localhost:5173 --actions-file "references/action_payloads.json" --click-selector "#start-btn" --iterations 3 --pause-ms 250
+node "game/scripts/web_game_playwright_client.js" --url http://localhost:5173 --actions-file "game/references/action_payloads.json" --click-selector "#start-btn" --iterations 3 --pause-ms 250
 ```
 
 Example actions (inline JSON):
@@ -256,7 +256,7 @@ Checklist per screenshot:
 - Rendering correct — all elements present and positioned
 - FPS 50+ (below 30 = failure)
 - No visual glitches (z-fighting, clipping, pop-in)
-- UI text readable over scene (contrast safety from `SKILL.md`)
+- UI text readable over scene (contrast safety from `game.md`)
 - Design tokens applied consistently
 - Memory stable (not growing between screenshots)
 
@@ -387,8 +387,8 @@ At the end of your work, leave TODOs and suggestions for the next agent in `prog
 
 ## Scripts
 
-- `scripts/web_game_playwright_client.js` — Playwright-based action loop with virtual-time stepping, screenshot capture, and console error buffering. You must pass an action burst via `--actions-file`, `--actions-json`, or `--click`.
+- `game/scripts/web_game_playwright_client.js` — Playwright-based action loop with virtual-time stepping, screenshot capture, and console error buffering. You must pass an action burst via `--actions-file`, `--actions-json`, or `--click`.
 
 ## References
 
-- `references/action_payloads.json` — example action payloads (keyboard + mouse, per-frame capture). Use these to build your burst.
+- `game/references/action_payloads.json` — example action payloads (keyboard + mouse, per-frame capture). Use these to build your burst.
