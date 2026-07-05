@@ -53,6 +53,10 @@ class CallExternalToolInput(BaseModel):
         description="Arguments for the connector tool as a dict. Pass {} for tools that take no "
         "parameters."
     )
+    user_description: str | None = Field(
+        default=None,
+        description="Brief plain-language description shown in the activity timeline.",
+    )
 
 
 class SearchConnectorToolsInput(BaseModel):

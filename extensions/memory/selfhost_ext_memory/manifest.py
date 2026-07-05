@@ -78,6 +78,10 @@ class MemorySearchInput(BaseModel):
         default=None,
         description="Optional ISO-8601 end of the window; a bare date covers its whole day.",
     )
+    user_description: str | None = Field(
+        default=None,
+        description="Brief plain-language description shown in the activity timeline.",
+    )
 
 
 class MemoryUpdateInput(BaseModel):
@@ -107,6 +111,10 @@ class MemoryUpdateInput(BaseModel):
     )
     source_ref: str | None = Field(
         default=None, description="Optional reference to the source this fact came from."
+    )
+    user_description: str | None = Field(
+        default=None,
+        description="Brief plain-language description shown in the activity timeline.",
     )
 
 

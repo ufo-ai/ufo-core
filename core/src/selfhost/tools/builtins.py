@@ -92,6 +92,11 @@ class BashInput(BaseModel):
     timeout: int | None = Field(
         default=None, description="Optional timeout in milliseconds. Max 600000 (10 minutes)."
     )
+    user_description: str | None = Field(
+        default=None,
+        description="Brief plain-language description for non-technical users, shown in the "
+        "activity timeline. Never include raw commands or file paths.",
+    )
 
 
 class ReadInput(BaseModel):
@@ -195,6 +200,10 @@ class LoadSessionsInput(BaseModel):
         max_length=MAX_LOAD_SESSIONS,
         description="List of session IDs (full conversation UUIDs) to load. Up to 25 per call; "
         "per-ID failures are reported and do not abort the call.",
+    )
+    user_description: str | None = Field(
+        default=None,
+        description="Brief plain-language description shown in the activity timeline.",
     )
 
 
