@@ -120,10 +120,13 @@ class SandboxConfig(BaseModel):
     zero-dependency `local` carrier ships with core, an extension registers more (`docker`, `e2b`, a
     remote runner) through its `carriers` Manifest point — and `serve` fails loud on a name no
     carrier registers. Each carrier sources its own parameters (template, keys); core config knows
-    only the selected name."""
+    only the selected name. `exec_timeout_seconds` is the ceiling for an agent `bash` command that
+    names no timeout of its own — raise it for a deploy whose agents run long builds or test suites."""
 
     model_config = ConfigDict(extra="forbid")
     backend: str = "local"
+    # Mirrors sandbox.session.DEFAULT_EXEC_TIMEOUT_SECONDS (imported there would cycle via blob).
+    exec_timeout_seconds: int = 120
 
 
 class ExtConfig(BaseModel):

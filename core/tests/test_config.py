@@ -179,3 +179,11 @@ def test_postgres_system_url_uses_sync_driver(tmp_path: Path) -> None:
         )
     )
     assert load_config(path).database.system_url == "postgresql+psycopg://u:p@db:5432/selfhost_dbos"
+
+
+def test_sandbox_exec_timeout_defaults_and_parses(tmp_path: Path) -> None:
+    path = tmp_path / "selfhost.toml"
+    path.write_text(VALID)
+    assert load_config(path).sandbox.exec_timeout_seconds == 120
+    path.write_text(VALID + "\n[sandbox]\nexec_timeout_seconds = 600\n")
+    assert load_config(path).sandbox.exec_timeout_seconds == 600

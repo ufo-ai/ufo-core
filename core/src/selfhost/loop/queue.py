@@ -162,7 +162,11 @@ async def _execute_turn(turn_id: str) -> str:
                 conversation_id=turn.conversation_id,
             ),
             hub=runtime.hub,
-            sandbox=SandboxSession(carrier=runtime.carrier, handle=handle),
+            sandbox=SandboxSession(
+                carrier=runtime.carrier,
+                handle=handle,
+                exec_timeout=runtime.config.sandbox.exec_timeout_seconds,
+            ),
             cdp_provider=runtime.cdp_provider,
             search_provider=runtime.search_provider,
             tools=tools,
