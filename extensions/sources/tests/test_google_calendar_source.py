@@ -1,8 +1,9 @@
 """Google Calendar connector over a mock transport: the bootstrap events walk that captures a
 `nextSyncToken` cursor, the delta run that threads the stored `syncToken` and tombstones cancelled
 events, `CursorExpired` on a 410 stale token, the `render` override that lifts an event's title,
-time range, location, attendees, and description, and `StreamSkipped` on a scope refusal. Offline —
-a canned transport, no DB, no token, no broker."""
+time range, location, attendees, and description, the `event_attendees` stream that explodes each
+event into one per-attendee row, and `StreamSkipped` on a scope refusal. Offline — a canned
+transport, no DB, no token, no broker."""
 
 from collections.abc import Callable
 from uuid import UUID, uuid4
@@ -30,9 +31,13 @@ def _auth(handler: Callable[[httpx.Request], httpx.Response]) -> SourceAuth:
     return SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler))
 
 
-async def _fetch(handler: Callable[[httpx.Request], httpx.Response], cursor: str | None = None):
+async def _fetch(
+    handler: Callable[[httpx.Request], httpx.Response],
+    cursor: str | None = None,
+    stream: str = "calendar_events",
+):
     return await ConnectorBackend(connector=GoogleCalendarConnector()).fetch(
-        ConnectorSourceConfig(account=ACCOUNT, stream="calendar_events"), cursor, _auth(handler)
+        ConnectorSourceConfig(account=ACCOUNT, stream=stream), cursor, _auth(handler)
     )
 
 
@@ -69,6 +74,7 @@ async def test_bootstrap_lists_events_captures_sync_token_and_renders() -> None:
     assert result.snapshot is False
     assert seen and "timeMin" in seen[0] and seen[0].get("showDeleted") == "true"
     assert "syncToken" not in seen[0]
+    assert "singleEvents" not in seen[0]
 
     body = result.pages[0].body
     assert "Sprint review" in body
@@ -76,6 +82,32 @@ async def test_bootstrap_lists_events_captures_sync_token_and_renders() -> None:
     assert "location: Room 4" in body
     assert "attendees: a@example.com, b@example.com" in body
     assert "Demo the build." in body
+
+
+async def test_event_attendees_stream_explodes_events_into_per_attendee_rows() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "www.googleapis.com" and request.url.path == EVENTS_PATH
+        return httpx.Response(200, json={"items": [EVENT, CANCELLED], "nextSyncToken": "sync-1"})
+
+    result = await _fetch(handle, stream="event_attendees")
+
+    assert {page.source_ref for page in result.pages} == {
+        "event_attendees/e1:a@example.com",
+        "event_attendees/e1:b@example.com",
+    }
+    # a cancelled event carries no attendees list, so it emits neither rows nor tombstones
+    assert result.deletes == ()
+    assert result.next_cursor == "sync-1"
+    assert result.snapshot is False
+
+    body = next(
+        page.body for page in result.pages if page.source_ref == "event_attendees/e1:a@example.com"
+    )
+    assert '"handle": "a@example.com"' in body
+    assert '"event_id": "e1"' in body
+    assert '"response": "accepted"' in body
+    assert '"role": "required"' in body
+    assert '"is_self": false' in body
 
 
 async def test_delta_run_threads_the_sync_token_and_advances_it() -> None:

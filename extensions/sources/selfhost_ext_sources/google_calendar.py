@@ -1,15 +1,19 @@
-"""The Google Calendar connector — the primary calendar's events synced as recallable content.
+"""The Google Calendar connector — the primary calendar's events synced as recallable content, plus
+a per-attendee stream.
 
-Reads walk `GET /calendar/v3/calendars/primary/events`. The stream is a delta over Google's
-`syncToken`, carried opaquely as the run cursor: the first run has no token, so it bootstraps from
-`timeMin` (a lookback window) with `showDeleted` and captures the `nextSyncToken`; a subsequent run
-passes the stored token, upserts changed events, and tombstones cancelled ones. A `410` means the
-token expired, so the connector raises `CursorExpired` and core refetches fresh; a grant that lacks
-the scope (`401`/`403`) yields `StreamSkipped` so the run records a skip, not a failure. An event's
-attendees are folded onto its record, and `render` lifts the title, time range, location, attendees,
-and description into a readable body. The credential is resolved through the auth proxy the runner
-threads — this connector holds no token. The write path is intentionally absent — the source seam
-only reads."""
+Both streams walk `GET /calendar/v3/calendars/primary/events` as a delta over Google's `syncToken`,
+carried opaquely as the run cursor: the first run has no token, so it bootstraps from `timeMin` (a
+lookback window) with `showDeleted` and captures the `nextSyncToken`; a subsequent run passes the
+stored token, upserts changed events, and tombstones cancelled ones. A `410` means the token
+expired, so the connector raises `CursorExpired` and core refetches fresh; a grant that lacks the
+scope (`401`/`403`) yields `StreamSkipped` so the run records a skip, not a failure.
+
+`calendar_events` folds an event's attendees onto its record and `render` lifts the title, time
+range, location, attendees, and description into a readable body. `event_attendees` explodes each
+event into one row per attendee (keyed `{event_id}:{handle}`), carrying the invitee's role,
+response, and self flag. The credential is resolved through the auth proxy the runner threads —
+this connector holds no token. The write path is intentionally absent — the source seam only
+reads."""
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -32,6 +36,9 @@ _RESPONSE_MAP = {
 
 GOOGLE_CALENDAR_STREAMS: list[StreamSpec] = [
     StreamSpec(name="calendar_events", source_object="events", primary_key="id"),
+    StreamSpec(
+        name="event_attendees", source_object="event_attendees", primary_key="id", canonical=False
+    ),
 ]
 
 
@@ -43,11 +50,12 @@ class GoogleCalendarConnector(RestConnector):
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
     ) -> AsyncIterator[StreamPage]:
-        if stream.name != "calendar_events":
+        if stream.name not in ("calendar_events", "event_attendees"):
             raise NotImplementedError(
                 f"google_calendar: stream {stream.name!r} has no paginate dispatch"
             )
-        params: dict[str, Any] = {"maxResults": LIST_PAGE_SIZE, "singleEvents": "true"}
+        attendees_stream = stream.name == "event_attendees"
+        params: dict[str, Any] = {"maxResults": LIST_PAGE_SIZE}
         if cursor:
             params["syncToken"] = cursor
         else:
@@ -69,7 +77,12 @@ class GoogleCalendarConnector(RestConnector):
                     event_id = raw.get("id")
                     if not isinstance(event_id, str) or not event_id:
                         continue
-                    if raw.get("status") == "cancelled":
+                    cancelled = raw.get("status") == "cancelled"
+                    if attendees_stream:
+                        if not cancelled:
+                            records.extend(_flatten_attendees(raw))
+                        continue
+                    if cancelled:
                         deletes.append(event_id)
                         continue
                     records.append(_flatten_event(raw))
@@ -157,6 +170,43 @@ def _attendee(attendee: dict[str, Any]) -> dict[str, Any]:
         "display_name": attendee.get("displayName"),
         "response": _RESPONSE_MAP.get(response) if isinstance(response, str) else None,
     }
+
+
+def _flatten_attendees(raw: dict[str, Any]) -> list[dict[str, Any]]:
+    """Explode one `events.list` item into one row per attendee, keyed `{event_id}:{handle}`, so an
+    event's invitees sync as their own relational rows carrying role, response, and self flag."""
+    event_id = raw["id"]
+    organizer = raw.get("organizer") or {}
+    organizer_email = organizer.get("email")
+    organizer_handle = organizer_email.lower() if isinstance(organizer_email, str) else None
+    rows: list[dict[str, Any]] = []
+    for attendee in raw.get("attendees") or []:
+        if not isinstance(attendee, dict) or not isinstance(attendee.get("email"), str):
+            continue
+        handle = attendee["email"].lower()
+        response = attendee.get("responseStatus")
+        rows.append(
+            {
+                "id": f"{event_id}:{handle}",
+                "event_id": event_id,
+                "role": _attendee_role(attendee, is_organizer=handle == organizer_handle),
+                "handle": handle,
+                "display_name": attendee.get("displayName"),
+                "response": _RESPONSE_MAP.get(response) if isinstance(response, str) else None,
+                "is_self": bool(attendee.get("self")),
+            }
+        )
+    return rows
+
+
+def _attendee_role(attendee: dict[str, Any], *, is_organizer: bool) -> str:
+    if is_organizer or attendee.get("organizer"):
+        return "organizer"
+    if attendee.get("resource"):
+        return "resource"
+    if attendee.get("optional"):
+        return "optional"
+    return "required"
 
 
 def _parse_when(when: Any) -> str | None:
