@@ -29,6 +29,14 @@ jobs:
           --health-retries 15
     steps:
       - uses: actions/checkout@v4
+      # The sandbox image (e2b base + libreoffice + chromium + playwright + pip/npm) is ~6-7 GB and
+      # its build peaks near the runner's ~14 GB free disk. Reclaim the large preinstalled toolchains
+      # this build never touches so the docker-gated tests can build instead of stalling on space.
+      - name: Reclaim runner disk for the sandbox image build
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          docker image prune -af || true
+          df -h /
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
