@@ -14,7 +14,14 @@ from typing import Any
 
 import httpx
 
-from selfhost.sdk.sources import RestConnector, StreamSkipped, StreamSpec, records_at, with_context
+from selfhost.sdk.sources import (
+    RestConnector,
+    StreamSkipped,
+    StreamSpec,
+    dict_or_empty,
+    records_at,
+    with_context,
+)
 
 CLICKUP_STREAMS: list[StreamSpec] = [
     StreamSpec(name="teams", source_object="team", primary_key="id"),
@@ -187,3 +194,39 @@ class ClickUpConnector(RestConnector):
                 yield out
             return
         raise StreamSkipped(f"clickup stream {stream.name!r} is not implemented")
+
+    def flatten(self, record: dict[str, Any], stream: StreamSpec) -> dict[str, Any]:
+        if stream.name == "users":
+            return {
+                **record,
+                "name": record.get("username") or record.get("name"),
+                "email": record.get("email"),
+                "created_at": record.get("date_joined"),
+            }
+        if stream.name in {"spaces", "folders", "lists"}:
+            return {
+                **record,
+                "name": record.get("name"),
+                "api_url": record.get("url")
+                or f"https://api.clickup.com/api/v2/{stream.source_object}/{record.get('id')}",
+            }
+        if stream.name == "tasks":
+            return {
+                **record,
+                "name": record.get("name"),
+                "status": (record.get("status") or {}).get("status")
+                if isinstance(record.get("status"), dict)
+                else record.get("status"),
+                "due_date": record.get("due_date"),
+                "created_at": record.get("date_created"),
+            }
+        if stream.name == "list_comments":
+            user = dict_or_empty(record.get("user"))
+            return {
+                **record,
+                "body": record.get("comment_text") or record.get("comment"),
+                "author": user.get("username") or user.get("email") or user.get("id"),
+                "created_at": record.get("date"),
+                "parent_external_id": record.get("list_id"),
+            }
+        return record

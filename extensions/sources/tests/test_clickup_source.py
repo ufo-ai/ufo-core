@@ -3,6 +3,7 @@
 the per-list task fan-out paged by an integer `?page`, and the `date_updated` watermark advancing.
 Offline — a canned transport, no DB, no token, no broker."""
 
+import json
 from collections.abc import Callable
 from uuid import UUID, uuid4
 
@@ -21,6 +22,11 @@ TEAM = {
     "name": "Acme",
     "members": [{"user": {"id": "u1", "username": "Ada", "email": "ada@example.com"}}],
 }
+
+
+def _flat(result: SyncResult, ref: str) -> dict:
+    body = next(page.body for page in result.pages if page.source_ref == ref)
+    return json.loads(body.split("\n\n", 1)[1])
 
 
 class _MockProxy:
@@ -80,6 +86,80 @@ async def test_tasks_fan_out_per_list_and_advance_the_watermark() -> None:
     result = await _fetch("tasks", _hierarchy_handler())
     assert {page.source_ref for page in result.pages} == {"tasks/tk1"}
     assert result.next_cursor == "200"
+
+
+def _shaped_handler() -> Callable[[httpx.Request], httpx.Response]:
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/team"):
+            return httpx.Response(200, json={"teams": [TEAM]})
+        if path.endswith("/team/t1/space"):
+            return httpx.Response(200, json={"spaces": [{"id": "s1", "name": "Space"}]})
+        if path.endswith("/space/s1/folder"):
+            return httpx.Response(200, json={"folders": []})
+        if path.endswith("/space/s1/list"):
+            return httpx.Response(200, json={"lists": [{"id": "l1", "name": "List"}]})
+        if path.endswith("/list/l1/task"):
+            if request.url.params.get("page") == "0":
+                return httpx.Response(
+                    200,
+                    json={
+                        "tasks": [
+                            {
+                                "id": "tk1",
+                                "name": "Do",
+                                "status": {"status": "in progress"},
+                                "due_date": "1700",
+                                "date_created": "1600",
+                                "date_updated": "200",
+                            }
+                        ]
+                    },
+                )
+            return httpx.Response(200, json={"tasks": []})
+        if path.endswith("/list/l1/comment"):
+            return httpx.Response(
+                200,
+                json={
+                    "comments": [
+                        {
+                            "id": "cm1",
+                            "comment_text": "nice work",
+                            "user": {"id": "u2", "username": "Bo"},
+                            "date": "300",
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(404, json={"path": path})
+
+    return handle
+
+
+async def test_users_flatten_derives_name_from_username() -> None:
+    record = _flat(await _fetch("users", _hierarchy_handler()), "users/u1")
+    assert record["name"] == "Ada"
+    assert record["email"] == "ada@example.com"
+
+
+async def test_tasks_flatten_stringifies_status_dict_and_lifts_created_at() -> None:
+    record = _flat(await _fetch("tasks", _shaped_handler()), "tasks/tk1")
+    assert record["status"] == "in progress"
+    assert record["due_date"] == "1700"
+    assert record["created_at"] == "1600"
+
+
+async def test_spaces_flatten_derives_api_url() -> None:
+    record = _flat(await _fetch("spaces", _shaped_handler()), "spaces/s1")
+    assert record["name"] == "Space"
+    assert record["api_url"] == "https://api.clickup.com/api/v2/space/s1"
+
+
+async def test_list_comments_flatten_derive_body_author_and_parent() -> None:
+    record = _flat(await _fetch("list_comments", _shaped_handler()), "list_comments/cm1")
+    assert record["body"] == "nice work"
+    assert record["author"] == "Bo"
+    assert record["parent_external_id"] == "l1"
 
 
 async def test_a_forbidden_team_listing_fails_the_run() -> None:

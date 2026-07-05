@@ -317,3 +317,46 @@ class MondayConnector(RestConnector):
                     "the grant lacks scope or the token is invalid"
                 ) from error
             raise
+
+    def flatten(self, record: dict[str, Any], stream: StreamSpec) -> dict[str, Any]:
+        if stream.name == "users":
+            return {
+                **record,
+                "name": record.get("name"),
+                "email": record.get("email"),
+                "created_at": record.get("created_at"),
+            }
+        if stream.name in {"workspaces", "boards"}:
+            return {
+                **record,
+                "name": record.get("name"),
+                "api_url": record.get("url")
+                or f"https://api.monday.com/v2/{stream.source_object}/{record.get('id')}",
+                "created_at": record.get("created_at"),
+            }
+        if stream.name == "items":
+            return {
+                **record,
+                "name": record.get("name"),
+                "status": record.get("state"),
+                "created_at": record.get("created_at"),
+            }
+        if stream.name == "updates":
+            creator = dict_or_empty(record.get("creator"))
+            return {
+                **record,
+                "body": record.get("text_body") or record.get("body"),
+                "author": creator.get("email") or creator.get("name") or creator.get("id"),
+                "created_at": record.get("created_at"),
+                "parent_external_id": record.get("item_id"),
+            }
+        if stream.name == "activity_logs":
+            return {
+                **record,
+                "subject": record.get("event"),
+                "body": record.get("data"),
+                "author": record.get("user_id"),
+                "created_at": record.get("created_at"),
+                "parent_external_id": record.get("board_id"),
+            }
+        return record

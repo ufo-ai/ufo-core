@@ -14,6 +14,7 @@ not a failure. The credential is resolved through the auth proxy the runner thre
 holds no token. The write path is intentionally absent — the source seam only reads."""
 
 import json
+import re
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -21,11 +22,43 @@ from urllib.parse import quote
 
 import httpx
 
-from selfhost.sdk.sources import RestConnector, StreamPage, StreamSkipped, StreamSpec
+from selfhost.sdk.sources import RestConnector, StreamPage, StreamSkipped, StreamSpec, get_path
 
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
 _EVENT_DELTA_LOOKBACK = timedelta(days=365)
 _EVENT_DELTA_LOOKAHEAD = timedelta(days=730)
 _REFUSAL_STATUS = frozenset({401, 403})
+
+
+def _strip_html(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    return _HTML_TAG_RE.sub(" ", value).strip()
+
+
+def _first_email(record: dict[str, Any]) -> str | None:
+    addresses = record.get("emailAddresses")
+    if not isinstance(addresses, list):
+        return None
+    for address in addresses:
+        value = get_path(address, "emailAddress.address") if isinstance(address, dict) else None
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _phone(record: dict[str, Any]) -> str | None:
+    mobile = record.get("mobilePhone")
+    if isinstance(mobile, str) and mobile:
+        return mobile
+    phones = record.get("businessPhones")
+    if not isinstance(phones, list):
+        return None
+    for phone in phones:
+        if isinstance(phone, str) and phone:
+            return phone
+    return None
+
 
 CONTACTS = StreamSpec(
     name="contacts",
@@ -252,6 +285,38 @@ class OutlookConnector(RestConnector):
                 if isinstance(folder_id, str) and folder_id:
                     folder_ids.append(folder_id)
         return folder_ids
+
+    def flatten(self, record: dict[str, Any], stream: StreamSpec) -> dict[str, Any]:
+        if stream.name == "contacts":
+            return {
+                **record,
+                "first_name": record.get("givenName"),
+                "last_name": record.get("surname"),
+                "name": record.get("displayName"),
+                "email": _first_email(record),
+                "phone": _phone(record),
+                "created_at": record.get("createdDateTime"),
+            }
+        if stream.name == "messages":
+            return {
+                **record,
+                "subject": record.get("subject"),
+                "snippet": record.get("bodyPreview"),
+                "from_handle": get_path(record, "from.emailAddress.address"),
+                "sent_at": record.get("sentDateTime") or record.get("createdDateTime"),
+                "conversation_id": record.get("conversationId"),
+                "thread_id": record.get("conversationId"),
+            }
+        if stream.name == "events":
+            return {
+                **record,
+                "title": record.get("subject"),
+                "description": _strip_html(get_path(record, "body.content")),
+                "start_at": get_path(record, "start.dateTime"),
+                "end_at": get_path(record, "end.dateTime"),
+                "location": get_path(record, "location.displayName"),
+            }
+        return record
 
 
 def _decode_cursor_map(raw: str | None) -> dict[str, str]:

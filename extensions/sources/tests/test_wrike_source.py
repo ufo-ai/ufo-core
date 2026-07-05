@@ -2,6 +2,7 @@
 `updatedDate` filter past the stored watermark, and a refusal as `StreamSkipped`. Offline —
 a canned transport, no DB, no token."""
 
+import json
 from collections.abc import Callable
 from uuid import UUID, uuid4
 
@@ -14,6 +15,11 @@ from selfhost.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 from selfhost.sources.sync import SourceAuth, StreamSkipped, SyncResult
 
 ACCOUNT = "acct-1"
+
+
+def _flat(result: SyncResult, ref: str) -> dict:
+    body = next(page.body for page in result.pages if page.source_ref == ref)
+    return json.loads(body.split("\n\n", 1)[1])
 
 
 class _MockProxy:
@@ -63,6 +69,88 @@ async def test_tasks_walk_and_advance_watermark() -> None:
 async def test_tasks_incremental_filters_past_watermark() -> None:
     result = await _fetch("tasks", _handler(), cursor="2026-01-15T00:00:00Z")
     assert _refs(result) == {"tasks/t2"}
+
+
+async def test_tasks_flatten_derives_name_status_due_date_and_created_at() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v4/tasks"
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": "t1",
+                        "title": "Ship",
+                        "status": "Completed",
+                        "dates": {"due": "2026-03-01"},
+                        "createdDate": "2026-01-01T00:00:00Z",
+                        "updatedDate": "2026-02-02T00:00:00Z",
+                    }
+                ]
+            },
+        )
+
+    record = _flat(await _fetch("tasks", handle), "tasks/t1")
+    assert record["name"] == "Ship"
+    assert record["status"] == "Completed"
+    assert record["due_date"] == "2026-03-01"
+    assert record["created_at"] == "2026-01-01T00:00:00Z"
+
+
+async def test_contacts_folders_and_comments_flatten_derive_their_fields() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/v4/contacts":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": "c1",
+                            "firstName": "Ada",
+                            "lastName": "Lovelace",
+                            "profiles": [{"email": "ada@example.com"}],
+                            "createdDate": "2026-01-01T00:00:00Z",
+                        }
+                    ]
+                },
+            )
+        if path == "/api/v4/folders":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [{"id": "f1", "title": "Docs", "createdDate": "2026-01-02T00:00:00Z"}]
+                },
+            )
+        if path == "/api/v4/comments":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": "cm1",
+                            "text": "LGTM",
+                            "authorId": "u9",
+                            "taskId": "t1",
+                            "createdDate": "2026-01-03T00:00:00Z",
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(404, json={"path": path})
+
+    contact = _flat(await _fetch("contacts", handle), "contacts/c1")
+    assert contact["name"] == "Ada Lovelace"
+    assert contact["email"] == "ada@example.com"
+
+    folder = _flat(await _fetch("folders", handle), "folders/f1")
+    assert folder["name"] == "Docs"
+    assert folder["api_url"] == "https://www.wrike.com/api/v4/folders/f1"
+
+    comment = _flat(await _fetch("comments", handle), "comments/cm1")
+    assert comment["body"] == "LGTM"
+    assert comment["author"] == "u9"
+    assert comment["parent_external_id"] == "t1"
 
 
 async def test_stream_skipped_on_refusal() -> None:

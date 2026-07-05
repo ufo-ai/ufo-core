@@ -13,7 +13,7 @@ from typing import Any
 
 import httpx
 
-from selfhost.sdk.sources import RestConnector, StreamSkipped, StreamSpec
+from selfhost.sdk.sources import RestConnector, StreamSkipped, StreamSpec, dict_or_empty
 
 _REFUSAL_STATUS = frozenset({401, 403})
 _RUNNABLE_STREAMS = frozenset(
@@ -38,6 +38,19 @@ WRIKE_STREAMS: list[StreamSpec] = [
         name="customfields", source_object="customfields", primary_key="id", canonical=False
     ),
 ]
+
+
+def _profile_email(record: dict[str, Any]) -> str | None:
+    profiles = record.get("profiles")
+    if not isinstance(profiles, list):
+        return None
+    for profile in profiles:
+        if not isinstance(profile, dict):
+            continue
+        email = profile.get("email")
+        if isinstance(email, str) and email:
+            return email
+    return None
 
 
 class WrikeConnector(RestConnector):
@@ -70,3 +83,43 @@ class WrikeConnector(RestConnector):
                     "lacks scope or the key is invalid"
                 ) from error
             raise
+
+    def flatten(self, record: dict[str, Any], stream: StreamSpec) -> dict[str, Any]:
+        if stream.name == "contacts":
+            return {
+                **record,
+                "name": " ".join(
+                    part
+                    for part in [record.get("firstName"), record.get("lastName")]
+                    if isinstance(part, str) and part
+                )
+                or record.get("me")
+                or record.get("id"),
+                "email": _profile_email(record),
+                "created_at": record.get("createdDate"),
+            }
+        if stream.name == "folders":
+            return {
+                **record,
+                "name": record.get("title"),
+                "api_url": f"https://www.wrike.com/api/v4/folders/{record.get('id')}",
+                "created_at": record.get("createdDate"),
+            }
+        if stream.name == "tasks":
+            dates = dict_or_empty(record.get("dates"))
+            return {
+                **record,
+                "name": record.get("title"),
+                "status": record.get("status") or record.get("customStatusId"),
+                "due_date": dates.get("due") or record.get("dueDate"),
+                "created_at": record.get("createdDate"),
+            }
+        if stream.name == "comments":
+            return {
+                **record,
+                "body": record.get("text"),
+                "author": record.get("authorId"),
+                "created_at": record.get("createdDate"),
+                "parent_external_id": record.get("taskId"),
+            }
+        return record

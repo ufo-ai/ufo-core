@@ -4,6 +4,7 @@
 `StreamSkipped` raised when the account exposes no organization. Offline — a canned transport, no
 DB, no token, no broker."""
 
+import json
 from collections.abc import Callable
 from uuid import UUID, uuid4
 
@@ -17,6 +18,11 @@ from selfhost.sources.sync import SourceAuth, StreamSkipped, SyncResult
 
 ACCOUNT = "acct-1"
 ORG = "https://api.calendly.com/organizations/ORG1"
+
+
+def _flat(result: SyncResult, ref: str) -> dict:
+    body = next(page.body for page in result.pages if page.source_ref == ref)
+    return json.loads(body.split("\n\n", 1)[1])
 
 
 class _MockProxy:
@@ -73,6 +79,76 @@ async def test_event_types_scope_to_org_thread_updated_since_and_advance_waterma
     assert {page.source_ref for page in result.pages} == {"event_types/et1"}
     assert result.snapshot is False
     assert result.next_cursor == "2026-02-05"
+
+
+async def test_scheduled_events_flatten_derives_title_times_and_location() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/users/me":
+            return httpx.Response(200, json=_me())
+        assert request.url.path == "/scheduled_events"
+        return httpx.Response(
+            200,
+            json={
+                "collection": [
+                    {
+                        "uri": "ev1",
+                        "name": "Standup",
+                        "description": "Daily sync",
+                        "start_time": "2026-02-05T09:00:00Z",
+                        "end_time": "2026-02-05T09:15:00Z",
+                        "location": {"type": "zoom", "location": "https://zoom.us/j/1"},
+                    }
+                ],
+                "pagination": {"next_page_token": None},
+            },
+        )
+
+    record = _flat(await _fetch("scheduled_events", handle), "scheduled_events/ev1")
+    assert record["title"] == "Standup"
+    assert record["start_at"] == "2026-02-05T09:00:00Z"
+    assert record["end_at"] == "2026-02-05T09:15:00Z"
+    assert record["location"] == "https://zoom.us/j/1"
+
+
+async def test_event_types_flatten_derives_api_url() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/users/me":
+            return httpx.Response(200, json=_me())
+        return httpx.Response(
+            200,
+            json={
+                "collection": [{"uri": "et1", "name": "Intro", "created_at": "2026-01-01"}],
+                "pagination": {"next_page_token": None},
+            },
+        )
+
+    record = _flat(await _fetch("event_types", handle), "event_types/et1")
+    assert record["api_url"] == "et1"
+    assert record["name"] == "Intro"
+
+
+async def test_organization_memberships_flatten_lifts_name_and_email_from_user() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/users/me":
+            return httpx.Response(200, json=_me())
+        assert request.url.path == "/organization_memberships"
+        return httpx.Response(
+            200,
+            json={
+                "collection": [
+                    {
+                        "uri": "om1",
+                        "created_at": "2026-01-03",
+                        "user": {"name": "Ada Lovelace", "email": "ada@example.com"},
+                    }
+                ],
+                "pagination": {"next_page_token": None},
+            },
+        )
+
+    record = _flat(await _fetch("organization_memberships", handle), "organization_memberships/om1")
+    assert record["name"] == "Ada Lovelace"
+    assert record["email"] == "ada@example.com"
 
 
 async def test_missing_organization_skips_the_stream() -> None:

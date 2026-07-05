@@ -15,7 +15,13 @@ from typing import Any
 
 import httpx
 
-from selfhost.sdk.sources import RestConnector, StreamSkipped, StreamSpec, with_context
+from selfhost.sdk.sources import (
+    RestConnector,
+    StreamSkipped,
+    StreamSpec,
+    dict_or_empty,
+    with_context,
+)
 
 PAGE_SIZE = 100
 
@@ -152,3 +158,45 @@ class CalendlyConnector(RestConnector):
                 yield page
             return
         raise StreamSkipped(f"calendly stream {stream.name!r} is not implemented")
+
+    def flatten(self, record: dict[str, Any], stream: StreamSpec) -> dict[str, Any]:
+        if stream.name == "api_user":
+            return {
+                **record,
+                "name": record.get("name"),
+                "email": record.get("email"),
+                "created_at": record.get("created_at"),
+            }
+        if stream.name == "organization_memberships":
+            user = dict_or_empty(record.get("user"))
+            return {
+                **record,
+                "name": user.get("name"),
+                "email": user.get("email"),
+                "created_at": record.get("created_at"),
+            }
+        if stream.name == "event_invitees":
+            return {
+                **record,
+                "name": record.get("name"),
+                "email": record.get("email"),
+                "created_at": record.get("created_at"),
+            }
+        if stream.name == "scheduled_events":
+            location = record.get("location")
+            return {
+                **record,
+                "title": record.get("name"),
+                "description": record.get("description"),
+                "start_at": record.get("start_time"),
+                "end_at": record.get("end_time"),
+                "location": location.get("location") if isinstance(location, dict) else location,
+            }
+        if stream.name == "event_types":
+            return {
+                **record,
+                "name": record.get("name"),
+                "api_url": record.get("uri"),
+                "created_at": record.get("created_at"),
+            }
+        return record

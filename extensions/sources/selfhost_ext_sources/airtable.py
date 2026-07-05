@@ -99,3 +99,27 @@ class AirtableConnector(RestConnector):
                         yield records
             return
         raise StreamSkipped(f"airtable stream {stream.name!r} is not implemented")
+
+    def flatten(self, record: dict[str, Any], stream: StreamSpec) -> dict[str, Any]:
+        if stream.name == "bases":
+            return {
+                **record,
+                "name": record.get("name"),
+                "api_url": f"https://api.airtable.com/v0/meta/bases/{record.get('id')}",
+            }
+        if stream.name == "tables":
+            return {
+                **record,
+                "api_url": (
+                    f"https://api.airtable.com/v0/{record.get('base_id')}/{record.get('id')}"
+                ),
+            }
+        if stream.name == "records":
+            fields = record.get("fields") if isinstance(record.get("fields"), dict) else {}
+            return {
+                **record,
+                "id": record.get("id"),
+                "created_at": record.get("createdTime"),
+                "fields": fields,
+            }
+        return record

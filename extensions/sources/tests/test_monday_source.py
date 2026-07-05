@@ -44,6 +44,11 @@ def _graphql(request: httpx.Request) -> dict:
     return json.loads(request.content)
 
 
+def _flat(result, ref: str) -> dict:
+    body = next(page.body for page in result.pages if page.source_ref == ref)
+    return json.loads(body.split("\n\n", 1)[1])
+
+
 def _users_handler() -> Callable[[httpx.Request], httpx.Response]:
     def handle(request: httpx.Request) -> httpx.Response:
         body = _graphql(request)
@@ -99,6 +104,90 @@ async def test_boards_incremental_advances_watermark() -> None:
     result = await _fetch("boards", _boards_handler())
     assert {page.source_ref for page in result.pages} == {"boards/b1"}
     assert result.next_cursor == "2026-02-01T00:00:00Z"
+
+
+async def test_boards_flatten_derives_api_url() -> None:
+    record = _flat(await _fetch("boards", _boards_handler()), "boards/b1")
+    assert record["name"] == "Roadmap"
+    assert record["api_url"] == "https://api.monday.com/v2/boards/b1"
+
+
+def _items_handler() -> Callable[[httpx.Request], httpx.Response]:
+    def handle(request: httpx.Request) -> httpx.Response:
+        variables = _graphql(request)["variables"]
+        if "page" in variables:
+            if variables["page"] == 1:
+                return httpx.Response(
+                    200, json={"data": {"boards": [{"id": "b1", "name": "Board"}]}}
+                )
+            return httpx.Response(200, json={"data": {"boards": []}})
+        if "board_ids" in variables:
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "boards": [
+                            {
+                                "items_page": {
+                                    "cursor": None,
+                                    "items": [
+                                        {
+                                            "id": "it1",
+                                            "name": "Task A",
+                                            "state": "done",
+                                            "created_at": "2026-01-01T00:00:00Z",
+                                            "column_values": [],
+                                        }
+                                    ],
+                                }
+                            }
+                        ]
+                    }
+                },
+            )
+        return httpx.Response(200, json={"data": {}})
+
+    return handle
+
+
+async def test_items_flatten_derives_name_and_status_from_state() -> None:
+    record = _flat(await _fetch("items", _items_handler()), "items/it1")
+    assert record["name"] == "Task A"
+    assert record["status"] == "done"
+    assert record["created_at"] == "2026-01-01T00:00:00Z"
+
+
+def _updates_handler() -> Callable[[httpx.Request], httpx.Response]:
+    def handle(request: httpx.Request) -> httpx.Response:
+        body = _graphql(request)
+        if "updates(" in body["query"] and body["variables"].get("page") == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "updates": [
+                            {
+                                "id": "up1",
+                                "text_body": "hello there",
+                                "body": "<p>hello there</p>",
+                                "creator": {"email": "bo@example.com", "name": "Bo", "id": "u2"},
+                                "item_id": "it1",
+                                "created_at": "2026-02-01T00:00:00Z",
+                            }
+                        ]
+                    }
+                },
+            )
+        return httpx.Response(200, json={"data": {"updates": []}})
+
+    return handle
+
+
+async def test_updates_flatten_derive_body_author_and_parent() -> None:
+    record = _flat(await _fetch("updates", _updates_handler()), "updates/up1")
+    assert record["body"] == "hello there"
+    assert record["author"] == "bo@example.com"
+    assert record["parent_external_id"] == "it1"
 
 
 async def test_graphql_error_maps_to_stream_skipped() -> None:

@@ -3,6 +3,7 @@ the account-scoped fan-out paged by the body's `paging.next`, the `updated_time`
 advancing, and the default titled-JSON render. Offline — a canned transport, no DB, no token, no
 broker."""
 
+import json
 from collections.abc import Callable
 from uuid import UUID, uuid4
 
@@ -15,6 +16,11 @@ from selfhost.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 from selfhost.sources.sync import SourceAuth, SyncResult
 
 ACCOUNT = "acct-1"
+
+
+def _flat(result: SyncResult, ref: str) -> dict:
+    body = next(page.body for page in result.pages if page.source_ref == ref)
+    return json.loads(body.split("\n\n", 1)[1])
 
 
 class _MockProxy:
@@ -91,6 +97,33 @@ async def test_campaigns_filter_past_the_stored_watermark() -> None:
 
     result = await _fetch("campaigns", handle, cursor="2026-02-01")
     assert {page.source_ref for page in result.pages} == {"campaigns/new"}
+
+
+async def test_campaigns_flatten_derives_status_name_and_created_at() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/me/adaccounts"):
+            return httpx.Response(200, json={"data": [{"id": "act_1"}], "paging": {}})
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": "c1",
+                        "name": "Launch",
+                        "status": "PAUSED",
+                        "effective_status": "ACTIVE",
+                        "created_time": "2026-01-01T00:00:00+0000",
+                        "updated_time": "2026-02-05T00:00:00+0000",
+                    }
+                ],
+                "paging": {"next": None},
+            },
+        )
+
+    record = _flat(await _fetch("campaigns", handle), "campaigns/c1")
+    assert record["status"] == "ACTIVE"
+    assert record["name"] == "Launch"
+    assert record["created_at"] == "2026-01-01T00:00:00+0000"
 
 
 async def test_a_forbidden_account_listing_fails_the_run() -> None:

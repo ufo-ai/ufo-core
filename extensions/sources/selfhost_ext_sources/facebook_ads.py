@@ -166,3 +166,13 @@ class FacebookAdsConnector(RestConnector):
                 yield page
             return
         raise StreamSkipped(f"facebook_ads stream {stream.name!r} is not implemented")
+
+    def flatten(self, record: dict[str, Any], stream: StreamSpec) -> dict[str, Any]:
+        if stream.name == "campaigns":
+            return {
+                **record,
+                "name": record.get("name"),
+                "status": record.get("effective_status") or record.get("status"),
+                "created_at": record.get("created_time"),
+            }
+        return record
