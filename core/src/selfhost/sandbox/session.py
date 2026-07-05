@@ -166,14 +166,10 @@ class SandboxSession:
 
     carrier: Carrier
     handle: SandboxHandle
-    exec_timeout: int = DEFAULT_EXEC_TIMEOUT_SECONDS
 
-    async def bash(self, command: str, timeout_s: int | None = None) -> ExecResult:
+    async def bash(self, command: str, timeout_s: int = DEFAULT_EXEC_TIMEOUT_SECONDS) -> ExecResult:
         return await self.carrier.exec(
-            self.handle,
-            ("bash", "-lc", command),
-            stdin=b"",
-            timeout_s=self.exec_timeout if timeout_s is None else timeout_s,
+            self.handle, ("bash", "-lc", command), stdin=b"", timeout_s=timeout_s
         )
 
     async def write_file(self, path: str, content: bytes) -> None:
