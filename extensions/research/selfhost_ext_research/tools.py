@@ -43,23 +43,64 @@ SEARCH_VERTICAL_DESCRIPTION = (
 
 
 class SearchWebInput(BaseModel):
-    queries: tuple[str, ...] = Field(max_length=MAX_SEARCH_QUERIES)
-    recency_filter: Literal["day", "week", "month"] | None = None
-    allowed_domains: tuple[str, ...] | None = None
+    queries: tuple[str, ...] = Field(
+        max_length=MAX_SEARCH_QUERIES,
+        description="Array of short keyword-based search queries. Max 5. Each query should cover a "
+        "single topic. Do not use quotes — the engine performs fuzzy matching.",
+    )
+    recency_filter: Literal["day", "week", "month"] | None = Field(
+        default=None,
+        description="Restrict results by recency. 'day' for breaking news, 'week' for recent "
+        "developments, 'month' for broader context.",
+    )
+    allowed_domains: tuple[str, ...] | None = Field(
+        default=None,
+        description="Only return results from these domains, e.g. ['nytimes.com', 'reuters.com']. "
+        "Leave unset for all domains. Use this instead of site: syntax in queries.",
+    )
 
 
 class FetchUrlInput(BaseModel):
-    url: str
-    prompt: str | None = None
-    max_length: int | None = None
-    force_fetch: bool | None = None
-    user_description: str
+    url: str = Field(
+        description="The public URL to fetch. Must start with http:// or https://. Never pass "
+        "local file paths or internal storage paths."
+    )
+    prompt: str | None = Field(
+        default=None,
+        description="Optional LLM prompt to extract specific information. If omitted, returns raw "
+        "page content. May summarize or truncate long documents.",
+    )
+    max_length: int | None = Field(
+        default=None,
+        description="Maximum characters of raw content to return (~10k tokens). Increase for "
+        "longer documents.",
+    )
+    force_fetch: bool | None = Field(
+        default=None,
+        description="Bypass cache and force a real-time fetch. Costly — only use when cached "
+        "content appears outdated or incorrect.",
+    )
+    user_description: str = Field(
+        description="Brief plain-language description of what you're doing, shown in the activity "
+        "timeline."
+    )
 
 
 class SearchVerticalInput(BaseModel):
-    vertical: Literal["image", "people", "academic", "video", "shopping"]
-    query: str
-    user_description: str
+    vertical: Literal["image", "people", "academic", "video", "shopping"] = Field(
+        description="'image' for photos/illustrations, 'people' for finding professionals by "
+        "name/role/company/location (NOT for company lookups), 'academic' for research "
+        "papers/publications, 'video' for video content, 'shopping' for product listings with "
+        "prices."
+    )
+    query: str = Field(
+        description="Short keyword search, 2-5 words. E.g. 'golden retriever puppy', 'machine "
+        "learning transformer', 'John Smith Acme CTO'."
+    )
+    user_description: str = Field(
+        description="Brief plain-language description of what you're doing, shown in the activity "
+        "timeline."
+    )
 
 
 def _provider(ctx: ToolContext) -> SearchProvider:
