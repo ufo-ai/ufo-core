@@ -46,6 +46,7 @@ from selfhost.schema.records import (
 )
 from selfhost.search import SearchProvider
 from selfhost.skills.runtime import SkillRegistry
+from selfhost.skills.store import UserSkillStore
 from selfhost.tools.registry import ToolRegistry
 
 SANDBOX_IMAGE_REF = "selfhost-sandbox:latest"
@@ -113,6 +114,9 @@ async def _execute_turn(turn_id: str) -> str:
         hooks = turn_hooks(
             runtime.manifests, turn.workspace_id, runtime.credentials, runtime.index, runtime.embed
         )
+        skills = runtime.skills.merged_with(
+            await UserSkillStore(runtime.blob).load_all(turn.workspace_id)
+        )
         sections = tuple(
             (section.name, section.body)
             for manifest in runtime.manifests
@@ -120,9 +124,7 @@ async def _execute_turn(turn_id: str) -> str:
         )
         if turn.subagent_profile is None:
             resolved, tools = agent, ToolRegistry(all_tools)
-            system_prompt = render_system_prompt(
-                agent.prompt, sections, skills=runtime.skills.index()
-            )
+            system_prompt = render_system_prompt(agent.prompt, sections, skills=skills.index())
             max_rounds = MAIN_ROUND_LIMIT
         else:
             profile = runtime.subagents.get(turn.subagent_profile)
@@ -176,7 +178,7 @@ async def _execute_turn(turn_id: str) -> str:
             reasoning=runtime.config.models.reasoning_effort,
             attempt=DBOS.workflow_id or turn_id,
             max_rounds=max_rounds,
-            skills=runtime.skills,
+            skills=skills,
         )
         frame = await engine.run()
         return "superseded" if frame is None else frame.status

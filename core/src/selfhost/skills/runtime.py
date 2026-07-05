@@ -14,11 +14,13 @@ framework paths above it — so the agent reads the mounted `SKILL.md` and follo
 instructions ride the tool result too, so the workflow is in front of the model the moment it
 loads."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import yaml
 
+from selfhost.o11y import log
 from selfhost.sandbox.session import WORKSPACE_DIR, SandboxSession
 
 SKILL_MD = "SKILL.md"
@@ -75,23 +77,30 @@ def _child_skill_dirs(skill_dir: Path) -> list[Path]:
     )
 
 
-def parse_skill(
-    skill_dir: Path, registry_name: str | None = None, parent: str | None = None
+def parse_skill_content(
+    dir_name: str,
+    files: Mapping[str, bytes],
+    registry_name: str | None = None,
+    parent: str | None = None,
 ) -> RuntimeSkill:
-    raw = (skill_dir / SKILL_MD).read_text()
+    """Parse a skill from its files in memory — the `SKILL.md` text (keyed `SKILL.md`) plus any
+    bundled assets — so a skill read out of the sandbox and persisted as bytes validates the same
+    way a skill on disk does. `dir_name` is the folder the skill claims: the frontmatter `name` must
+    match it, as the disk parser requires. Fails loud on a missing or malformed `SKILL.md`."""
+    raw_bytes = files.get(SKILL_MD)
+    if raw_bytes is None:
+        raise ValueError(f"skill {dir_name!r} has no {SKILL_MD}")
+    raw = raw_bytes.decode()
     metadata, body = _split_frontmatter(raw)
     front = yaml.safe_load(metadata) or {}
     name = front["name"]
-    if name != skill_dir.name:
-        raise ValueError(f"skill name {name!r} must match its directory {skill_dir.name!r}")
+    if name != dir_name:
+        raise ValueError(f"skill name {name!r} must match its directory {dir_name!r}")
     depends = tuple(front.get("metadata", {}).get("depends", ()))
-    child_dirs = {child.name for child in _child_skill_dirs(skill_dir)}
-    files = tuple(
-        (str(path.relative_to(skill_dir)), path.read_bytes())
-        for path in sorted(skill_dir.rglob("*"))
-        if path.is_file()
-        and path.name != SKILL_MD
-        and path.relative_to(skill_dir).parts[0] not in child_dirs
+    assets = tuple(
+        (path, content)
+        for path, content in sorted(files.items())
+        if PurePosixPath(path).name != SKILL_MD
     )
     return RuntimeSkill(
         name=registry_name or name,
@@ -99,9 +108,21 @@ def parse_skill(
         instructions=body.strip(),
         depends=depends,
         parent=parent,
-        files=files,
+        files=assets,
         raw_skill_md=raw,
     )
+
+
+def parse_skill(
+    skill_dir: Path, registry_name: str | None = None, parent: str | None = None
+) -> RuntimeSkill:
+    child_dirs = {child.name for child in _child_skill_dirs(skill_dir)}
+    files = {
+        str(path.relative_to(skill_dir)): path.read_bytes()
+        for path in sorted(skill_dir.rglob("*"))
+        if path.is_file() and path.relative_to(skill_dir).parts[0] not in child_dirs
+    }
+    return parse_skill_content(skill_dir.name, files, registry_name, parent)
 
 
 def discover_skills(
@@ -184,6 +205,20 @@ class SkillRegistry:
             for skill in self.by_name.values()
             if skill.parent is None
         )
+
+    def merged_with(self, user_skills: tuple[RuntimeSkill, ...]) -> "SkillRegistry":
+        """This registry (core + active packs) plus a workspace's saved user-skills, appended last.
+        A user-skill is user-controlled text mounted into the agent's own context, so it may never
+        shadow a core or pack skill: the base always wins on a name collision and the user-skill is
+        dropped with a log. The save path refuses a colliding name up front, so this guard is the
+        structural backstop that makes the no-shadow invariant hold even against a stale row."""
+        by_name = dict(self.by_name)
+        for skill in user_skills:
+            if skill.name in by_name:
+                log("skill.user_shadow_refused", skill=skill.name)
+                continue
+            by_name[skill.name] = skill
+        return SkillRegistry(by_name)
 
 
 CORE_SKILL_REGISTRY = SkillRegistry(dict(CORE_SKILLS_BY_NAME))

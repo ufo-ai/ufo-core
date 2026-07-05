@@ -33,6 +33,7 @@ members = [
     "selfhost-ext-scheduled-tasks",
     "selfhost-ext-self-improvement",
     "selfhost-ext-sites",
+    "selfhost-ext-skills",
     "selfhost-ext-slack",
     "selfhost-ext-sources",
     "selfhost-ext-todos",
@@ -2966,6 +2967,17 @@ requires-dist = [
 name = "selfhost-ext-sites"
 version = "0.1.0"
 source = { editable = "extensions/sites" }
+dependencies = [
+    { name = "selfhost" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "selfhost", editable = "core" }]
+
+[[package]]
+name = "selfhost-ext-skills"
+version = "0.1.0"
+source = { editable = "extensions/skills" }
 dependencies = [
     { name = "selfhost" },
 ]

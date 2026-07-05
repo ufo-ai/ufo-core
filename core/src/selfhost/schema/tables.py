@@ -223,6 +223,16 @@ ext_store = sa.Table(
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
 )
 
+user_skill = sa.Table(
+    "user_skill",
+    metadata,
+    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), primary_key=True),
+    sa.Column("name", sa.Text, primary_key=True),
+    sa.Column("digest", sa.Text, nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+)
+
 runtime_instance = sa.Table(
     "runtime_instance",
     metadata,

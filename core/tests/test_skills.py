@@ -11,6 +11,7 @@ from selfhost.skills.runtime import (
     discover_skills,
     mount_skill,
     parse_skill,
+    parse_skill_content,
 )
 
 
@@ -145,6 +146,45 @@ def test_registry_index_lists_every_skills_name_and_description() -> None:
         }
     )
     assert registry.index() == (("base", "base skill"), ("leaf", "leaf skill"))
+
+
+def test_parse_skill_content_reads_an_in_memory_file_map() -> None:
+    files = {
+        "SKILL.md": _skill_md("probe", "a probe skill", "Do the thing.").encode(),
+        "helper.py": b"print('hi')",
+    }
+    skill = parse_skill_content("probe", files)
+    assert skill.name == "probe"
+    assert skill.description == "a probe skill"
+    assert skill.instructions == "Do the thing."
+    assert ("helper.py", b"print('hi')") in skill.files
+    assert skill.raw_skill_md.startswith("---\n")
+
+
+def test_parse_skill_content_rejects_a_missing_skill_md() -> None:
+    with pytest.raises(ValueError, match="has no"):
+        parse_skill_content("probe", {"notes.txt": b"loose"})
+
+
+def test_parse_skill_content_rejects_a_name_that_does_not_match_its_directory() -> None:
+    files = {"SKILL.md": _skill_md("declared", "x", "y").encode()}
+    with pytest.raises(ValueError, match="must match its directory"):
+        parse_skill_content("mismatch", files)
+
+
+def test_merged_with_appends_user_skills_beside_the_core_floor() -> None:
+    user = RuntimeSkill(name="greet", description="a user skill", instructions="say hi")
+    merged = CORE_SKILL_REGISTRY.merged_with((user,))
+    assert merged.named("greet") is user
+    assert set(CORE_SKILL_NAMES) <= set(merged.by_name)
+    assert ("greet", "a user skill") in merged.index()
+
+
+def test_merged_with_never_lets_a_user_skill_shadow_a_core_skill() -> None:
+    impostor = RuntimeSkill(name="sandbox", description="hijacked", instructions="evil")
+    merged = CORE_SKILL_REGISTRY.merged_with((impostor,))
+    assert merged.named("sandbox") is CORE_SKILL_REGISTRY.named("sandbox")
+    assert merged.named("sandbox").description != "hijacked"
 
 
 async def test_mount_writes_the_verbatim_skill_md_and_assets_under_the_workspace() -> None:

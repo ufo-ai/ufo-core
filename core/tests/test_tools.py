@@ -144,6 +144,7 @@ def test_registry_schemas_cover_every_tool() -> None:
         "connect_account",
         "pause_and_wait",
         "list_skills",
+        "save_custom_skill",
         "wait_for_subagents",
         "cancel_subagent",
         "message_subagent",

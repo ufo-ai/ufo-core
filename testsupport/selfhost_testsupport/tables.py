@@ -18,6 +18,7 @@ DELETE_ORDER = (
     tables.surface_identity,
     tables.agent,
     tables.ext_store,
+    tables.user_skill,
     tables.credential,
     tables.page,
     tables.source,
