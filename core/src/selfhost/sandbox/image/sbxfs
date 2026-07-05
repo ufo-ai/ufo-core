@@ -11,7 +11,8 @@ result on success, or {"error": "..."} (exit 1) on a handled failure. grep shell
 to `rg --json` when ripgrep is on PATH and falls back to a stdlib walk with identical
 semantics otherwise; a .pdf read shells out to poppler-utils (pdfinfo/pdftotext/pdftoppm)
 to return extracted text plus page images, degrading to text-only when poppler is absent;
-everything else is pure stdlib.
+a .pptx read converts to pdf with libreoffice (soffice) and reuses that path so slides come
+back as images; everything else is pure stdlib.
 """
 
 from __future__ import annotations
@@ -363,6 +364,45 @@ def _read_pdf(path: Path, offset: int, limit: int) -> dict:
     }
 
 
+def _read_pptx(path: Path, offset: int, limit: int) -> dict:
+    """Render a presentation as slide images: convert it to pdf with LibreOffice into a temp dir,
+    then reuse the pdf page-render path so the read returns extracted text plus one image per
+    slide — the same shape as a pdf read, relabelled to slides. Absent soffice leaves a text-free
+    note, mirroring the poppler-absent pdf branch."""
+    if shutil.which("soffice") is None:
+        return {
+            "path": str(path),
+            "type": "pptx",
+            "pages": [],
+            "total_pages": None,
+            "render_unavailable": True,
+            "note": "slide rendering requires libreoffice (soffice)",
+        }
+    with tempfile.TemporaryDirectory() as tmp:
+        proc = subprocess.run(
+            [
+                "soffice",
+                "--headless",
+                f"-env:UserInstallation=file://{tmp}/profile",
+                "--convert-to",
+                "pdf",
+                "--outdir",
+                tmp,
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        pdf = Path(tmp) / f"{path.stem}.pdf"
+        if proc.returncode != 0 or not pdf.exists():
+            raise FsError(proc.stderr.strip() or f"soffice could not render {path}")
+        result = _read_pdf(pdf, offset, limit)
+    result["path"] = str(path)
+    result["type"] = "pptx"
+    return result
+
+
 def op_read(params: dict) -> dict:
     path = Path(params["path"])
     offset = max(int(params.get("offset") or 1), 1)
@@ -376,6 +416,8 @@ def op_read(params: dict) -> dict:
         return _read_image(path)
     if suffix == ".pdf":
         return _read_pdf(path, offset, limit)
+    if suffix == ".pptx":
+        return _read_pptx(path, offset, limit)
     if path.stat().st_size == 0:
         return {
             "path": str(path),

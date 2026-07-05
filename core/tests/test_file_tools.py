@@ -310,6 +310,29 @@ async def test_read_pdf_returns_text_then_page_image_blocks(
     assert base64.b64decode(pages[0].data).startswith(b"\x89PNG")
 
 
+async def test_read_pptx_renders_slides_as_image_blocks(
+    file_ctx: tuple[ToolContext, Path],
+) -> None:
+    ctx, _ = file_ctx
+    built = await ctx.sandbox.bash(
+        "python3 - <<'PY'\n"
+        "from pptx import Presentation\n"
+        "p = Presentation()\n"
+        "slide = p.slides.add_slide(p.slide_layouts[5])\n"
+        "slide.shapes.title.text = 'Hello sbxfs PPTX'\n"
+        "p.save('/workspace/deck.pptx')\n"
+        "PY\n"
+    )
+    assert built.exit_code == 0, built.stderr
+    result = await _run("read", ctx, file_path="deck.pptx")
+    text_block = result.content[0]
+    assert isinstance(text_block, TextContent)
+    assert "pptx slides 1-1 of 1]" in text_block.text
+    slides = [block for block in result.content if isinstance(block, ImageContent)]
+    assert slides and slides[0].media_type == "image/png"
+    assert base64.b64decode(slides[0].data).startswith(b"\x89PNG")
+
+
 async def test_read_refuses_a_binary_file(file_ctx: tuple[ToolContext, Path]) -> None:
     ctx, _ = file_ctx
     await ctx.sandbox.write_file("data.bin", bytes(range(256)))

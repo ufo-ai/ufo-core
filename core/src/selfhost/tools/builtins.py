@@ -329,9 +329,10 @@ def _require_str(value: object, field: str) -> str:
 
 
 def _pdf_result(result: dict[str, object]) -> ToolResult:
-    """A PDF read as model content: a text block (extracted text, the page window, any poppler note)
-    then one image block per rendered page. Page renders are absent when poppler is unavailable in
-    the sandbox, leaving a text-only result."""
+    """A paginated render as model content — PDF pages or the PPTX slides converted through it: a
+    text block (extracted text, the page window, any render note) then one image block per rendered
+    page or slide. Renders are absent when poppler/libreoffice is unavailable in the sandbox,
+    leaving a text-only result."""
     lines: list[str] = []
     text = result.get("text")
     if isinstance(text, str) and text.strip():
@@ -345,10 +346,12 @@ def _pdf_result(result: dict[str, object]) -> ToolResult:
         and isinstance(returned, int)
         and returned > 0
     ):
-        footer = f"[pdf pages {start}-{start + returned - 1} of {total}]"
+        unit = "slides" if result.get("type") == "pptx" else "pages"
+        kind = "pptx" if result.get("type") == "pptx" else "pdf"
+        footer = f"[{kind} {unit} {start}-{start + returned - 1} of {total}]"
         next_page = result.get("next_page")
         if isinstance(next_page, int):
-            footer += f"; more pages - read with offset={next_page}"
+            footer += f"; more {unit} - read with offset={next_page}"
         lines.append(footer)
     for key in ("note", "quality_reminder"):
         value = result.get(key)
@@ -390,7 +393,7 @@ async def read_handler(ctx: ToolContext, args: ReadInput) -> ToolResult:
                 ),
             )
         )
-    if result.get("type") == "pdf":
+    if result.get("type") in ("pdf", "pptx"):
         return _pdf_result(result)
     if result.get("is_empty"):
         return ToolResult(content=(TextContent(text="(file is empty)"),))
@@ -817,7 +820,8 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
             "Reads a file from the workspace. Returns up to 2000 lines by default; use "
             "offset/limit for large files. Lines longer than 2000 chars are truncated. For "
             "images: returns visual content for analysis. For PDFs: extracts text and renders "
-            "page images (default 20 pages). Cannot read binary files."
+            "page images (default 20 pages). For PPTX: renders slides as images (default 20 "
+            "slides). Cannot read binary files."
         ),
         input_model=ReadInput,
         handler=read_handler,
