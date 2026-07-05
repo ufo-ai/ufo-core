@@ -557,16 +557,24 @@ class TurnEngine:
 
     async def _publish_activity(self, call: ToolUseBlock) -> None:
         """Announce a tool call as it enters dispatch so a surface shows live activity on a long
-        multi-tool turn: load_skill as the skill it mounts, every other tool as its name and a
-        bounded args preview. Rides the live leg, so a publish failure never fails the turn."""
+        multi-tool turn: load_skill as the skill it mounts, every other tool as its name plus the
+        model's plain-language `user_description` when it gave one, else a bounded args preview.
+        Rides the live leg, so a publish failure never fails the turn."""
         if call.name == SKILL_LOAD_TOOL:
             name = call.input.get("name")
             await self._publish(SkillLoad(skill=name if isinstance(name, str) else ""))
             return
+        description = call.input.get("user_description")
         preview = json.dumps(call.input, separators=(",", ":"))
         if len(preview) > TOOL_CALL_PREVIEW_CHARS:
             preview = preview[:TOOL_CALL_PREVIEW_CHARS] + "…"
-        await self._publish(ToolCall(tool=call.name, preview=preview))
+        await self._publish(
+            ToolCall(
+                tool=call.name,
+                preview=preview,
+                description=description if isinstance(description, str) else "",
+            )
+        )
 
     async def _commit(
         self,

@@ -228,9 +228,9 @@ async def _stream_turn(
                             display.activity(f"loading skill: {frame['skill']}")
                             continue
                         if "tool" in frame:
-                            preview = frame["preview"]
+                            note = frame.get("description") or frame["preview"]
                             display.activity(
-                                f"running {frame['tool']}" + (f": {preview}" if preview else "")
+                                f"running {frame['tool']}" + (f": {note}" if note else "")
                             )
                             continue
                         display.text(frame["text"])

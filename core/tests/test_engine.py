@@ -452,6 +452,43 @@ async def test_multi_tool_round_publishes_skill_then_tool_activity_frames_in_ord
     ]
 
 
+@dataclass(frozen=True)
+class NarratedToolModel:
+    """Emits a bash call carrying a `user_description`, then answers — so a test reads back the
+    plain-language narration the engine surfaces on the activity frame."""
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        answered = any(
+            isinstance(message.content, tuple)
+            and any(isinstance(block, ToolResultBlock) for block in message.content)
+            for message in request.messages
+        )
+        if answered:
+            yield TextDelta(text="done")
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        yield ToolCallStart(id="c1", name="bash")
+        yield ToolCallDelta(
+            id="c1",
+            partial_json=json.dumps(
+                {"command": "echo hi", "user_description": "greeting the shell"}
+            ),
+        )
+        yield Usage(input_tokens=2, output_tokens=2)
+
+
+async def test_tool_activity_frame_carries_the_models_user_description(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    carrier = RecordingCarrier(result=ExecResult(stdout="hi\n", stderr="", exit_code=0))
+    hub = RecordingHub()
+    engine = replace(_engine(turn, NarratedToolModel(), tmp_path, carrier=carrier), hub=hub)
+    await engine.run()
+    tool_frames = [frame for frame in hub.frames if isinstance(frame, ToolCall)]
+    assert tool_frames and tool_frames[0].description == "greeting the shell"
+
+
 async def test_round_budget_exhaustion_forces_a_final_answer_instead_of_failing(
     db: None, tmp_path: Path
 ) -> None:

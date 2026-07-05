@@ -44,10 +44,13 @@ class CostTick(BaseModel):
 class ToolCall(BaseModel):
     """A tool call entering dispatch, pushed so a surface shows live activity — 'running bash' — on
     a long multi-tool turn instead of an idle bubble carrying only a cost meter. Non-terminal, and
-    distinguished from the other frames by its `tool` name and bounded args `preview`."""
+    distinguished from the other frames by its `tool` name and bounded args `preview`. `description`
+    is the model's plain-language `user_description` when the tool takes one — the activity-timeline
+    narration a surface shows in place of the raw args preview."""
 
     tool: str
     preview: str
+    description: str = ""
 
 
 class SkillLoad(BaseModel):

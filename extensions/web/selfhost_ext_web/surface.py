@@ -255,7 +255,8 @@ form.addEventListener('submit', async (event) => {
   };
   source.addEventListener('tool', (event) => {
     const frame = JSON.parse(event.data);
-    note('running ' + frame.tool + (frame.preview ? ': ' + frame.preview : ''));
+    const detail = frame.description || frame.preview;
+    note('running ' + frame.tool + (detail ? ': ' + detail : ''));
   });
   source.addEventListener('skill', (event) => {
     note('loading skill: ' + JSON.parse(event.data).skill);

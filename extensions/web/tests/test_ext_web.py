@@ -44,6 +44,7 @@ def test_sse_tags_tool_and_skill_activity_frames() -> None:
     assert json.loads(tool.split(b"data: ", 1)[1]) == {
         "tool": "bash",
         "preview": '{"command":"ls"}',
+        "description": "",
     }
     skill = _sse("", SkillLoad(skill="demo"))
     assert skill.startswith(b"event: skill\ndata: ")
