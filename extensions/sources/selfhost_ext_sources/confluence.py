@@ -18,7 +18,7 @@ lacks the scope or was not shared the space (`401`/`403`) yields `StreamSkipped`
 a skip, not a failure. The credential is resolved through the auth proxy the runner threads — this
 connector holds no token. The write path is intentionally absent — the source seam only reads."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from html.parser import HTMLParser
 from typing import Any
 
@@ -100,6 +100,11 @@ CONFLUENCE_STREAMS: list[StreamSpec] = [
 ]
 
 
+def _body_text(record: Mapping[str, Any]) -> str | None:
+    value = get_path(record, "body.storage.value") or get_path(record, "body.view.value")
+    return value if isinstance(value, str) and value else None
+
+
 class ConfluenceConnector(RestConnector):
     name = "confluence"
     base_url = "https://api.atlassian.com"
@@ -166,11 +171,43 @@ class ConfluenceConnector(RestConnector):
             start += len(records)
 
     def flatten(self, record: dict[str, Any], stream: StreamSpec) -> dict[str, Any]:
-        """Site-scope the record id (`{cloud_id}:{id}`) so two sites never collide on one ref, and
-        lift a nested `version.createdAt` cursor to the flat key the sync advances a watermark over.
-        A stream whose id IS its cursor (`audit` keys on `creationDate`) keeps the raw id — scoping
-        it would corrupt the watermark comparison."""
-        flat = dict(record)
+        """Shape each stream onto its canonical recall fields (name/title/kind/url/body/author/
+        created_at/parent_external_id), then site-scope the record id (`{cloud_id}:{id}`) so two
+        sites never collide on one ref, and lift a nested `version.createdAt` cursor to the flat key
+        the sync advances a watermark over. A stream whose id IS its cursor (`audit` keys on
+        `creationDate`) keeps the raw id — scoping it would corrupt the watermark comparison."""
+        webui = get_path(record, "_links.webui")
+        url = f"{record.get('site_url')}{webui}" if isinstance(webui, str) else None
+        if stream.name == "spaces":
+            flat = {
+                **record,
+                "name": record.get("name"),
+                "api_url": record.get("_links", {}).get("self")
+                if isinstance(record.get("_links"), dict)
+                else None,
+                "created_at": record.get("createdAt"),
+            }
+        elif stream.name in {"pages", "blog_posts"}:
+            flat = {
+                **record,
+                "title": record.get("title"),
+                "kind": "blog_post" if stream.name == "blog_posts" else "page",
+                "url": url,
+                "body": _body_text(record),
+                "created_at": get_path(record, "version.createdAt"),
+                "updated_at": get_path(record, "version.createdAt"),
+            }
+        elif stream.name == "comments":
+            flat = {
+                **record,
+                "body": _body_text(record),
+                "author": get_path(record, "version.authorId"),
+                "url": url,
+                "created_at": get_path(record, "version.createdAt"),
+                "parent_external_id": record.get("pageId") or record.get("blogPostId"),
+            }
+        else:
+            flat = dict(record)
         cloud_id = record.get("cloud_id")
         external_id = record.get(stream.primary_key)
         if (
@@ -187,9 +224,7 @@ class ConfluenceConnector(RestConnector):
         match stream.name:
             case "pages" | "blog_posts" | "comments":
                 title = _str(record.get("title"))
-                body = _StorageTextExtractor.extract(
-                    get_path(record, "body.storage.value") or get_path(record, "body.view.value")
-                )
+                body = _StorageTextExtractor.extract(record.get("body"))
             case "spaces":
                 title = _str(record.get("name")) or _str(record.get("key"))
                 body = _StorageTextExtractor.extract(

@@ -11,14 +11,18 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from selfhost_ext_sources.confluence import ConfluenceConnector
+from selfhost_ext_sources.confluence import CONFLUENCE_STREAMS, ConfluenceConnector
 
 from selfhost.connectors import Credential
-from selfhost.sdk.sources import ConnectorBackend, ConnectorSourceConfig
+from selfhost.sdk.sources import ConnectorBackend, ConnectorSourceConfig, StreamSpec
 from selfhost.sources.sync import SourceAuth, StreamSkipped, SyncResult
 
 ACCOUNT = "acct-1"
 RESOURCES = "/oauth/token/accessible-resources"
+
+
+def _stream(name: str) -> StreamSpec:
+    return next(spec for spec in CONFLUENCE_STREAMS if spec.name == name)
 
 
 @dataclass(frozen=True)
@@ -205,6 +209,61 @@ async def test_groups_and_audit_streams_are_runnable() -> None:
     audit = await _fetch("audit", handle)
     assert audit.snapshot is False
     assert _refs(audit) == {"audit/20260201"}
+
+
+def test_pages_flatten_carries_canonical_fields_and_preserves_scoping_and_cursor_lift() -> None:
+    record = {
+        "id": "p1",
+        "cloud_id": "cloud-1",
+        "site_url": "https://x.atlassian.net",
+        "title": "Release Plan",
+        "version": {"createdAt": "2026-02-01T00:00:00.000Z", "authorId": "u1"},
+        "body": {"storage": {"value": "<p>hi</p>"}},
+        "_links": {"webui": "/pages/p1"},
+    }
+    flat = ConfluenceConnector().flatten(record, _stream("pages"))
+    assert flat["title"] == "Release Plan"
+    assert flat["kind"] == "page"
+    assert flat["url"] == "https://x.atlassian.net/pages/p1"
+    assert flat["body"] == "<p>hi</p>"
+    assert flat["created_at"] == "2026-02-01T00:00:00.000Z"
+    assert flat["updated_at"] == "2026-02-01T00:00:00.000Z"
+    assert flat["id"] == "cloud-1:p1"
+    assert flat["version.createdAt"] == "2026-02-01T00:00:00.000Z"
+
+
+def test_spaces_flatten_derive_name_and_api_url() -> None:
+    record = {
+        "id": "sp1",
+        "cloud_id": "cloud-1",
+        "name": "Engineering",
+        "createdAt": "2026-01-01T00:00:00.000Z",
+        "_links": {"self": "https://x.atlassian.net/wiki/api/v2/spaces/sp1"},
+    }
+    flat = ConfluenceConnector().flatten(record, _stream("spaces"))
+    assert flat["name"] == "Engineering"
+    assert flat["api_url"] == "https://x.atlassian.net/wiki/api/v2/spaces/sp1"
+    assert flat["created_at"] == "2026-01-01T00:00:00.000Z"
+    assert flat["id"] == "cloud-1:sp1"
+
+
+def test_comments_flatten_derive_body_author_and_parent() -> None:
+    record = {
+        "id": "cm1",
+        "cloud_id": "cloud-1",
+        "site_url": "https://x.atlassian.net",
+        "pageId": "p1",
+        "version": {"createdAt": "2026-02-02T00:00:00.000Z", "authorId": "u9"},
+        "body": {"storage": {"value": "<p>ok</p>"}},
+        "_links": {"webui": "/pages/p1?focusedCommentId=cm1"},
+    }
+    flat = ConfluenceConnector().flatten(record, _stream("comments"))
+    assert flat["body"] == "<p>ok</p>"
+    assert flat["author"] == "u9"
+    assert flat["parent_external_id"] == "p1"
+    assert flat["url"] == "https://x.atlassian.net/pages/p1?focusedCommentId=cm1"
+    assert flat["id"] == "cloud-1:cm1"
+    assert flat["version.createdAt"] == "2026-02-02T00:00:00.000Z"
 
 
 async def test_stream_skipped_on_permission_refusal() -> None:

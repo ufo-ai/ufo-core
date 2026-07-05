@@ -52,6 +52,11 @@ async def _fetch(
     )
 
 
+def _flat(result, ref: str) -> dict:
+    body = next(page.body for page in result.pages if page.source_ref == ref)
+    return json.loads(body.split("\n\n", 1)[1])
+
+
 def _conversations_handler(
     seen_values: list[object],
 ) -> Callable[[httpx.Request], httpx.Response]:
@@ -112,6 +117,77 @@ async def test_companies_scroll_walks_scroll_param() -> None:
     assert {page.source_ref for page in result.pages} == {"companies/co1"}
     assert result.next_cursor == "1700000000"
     assert result.snapshot is False
+
+
+async def test_conversations_flatten_lifts_source_and_requester_and_keeps_cursor_stringify() -> (
+    None
+):
+    conv = {
+        "id": "c9",
+        "updated_at": 1700000200,
+        "source": {"type": "email", "subject": "Bug", "body": "<p>broken</p>"},
+        "contacts": {"contacts": [{"id": "ct1"}]},
+    }
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/conversations/search":
+            return httpx.Response(200, json={"conversations": [conv], "pages": {}})
+        return httpx.Response(404, json={"path": request.url.path})
+
+    record = _flat(await _fetch("conversations", handle), "conversations/c9")
+    assert record["source__type"] == "email"
+    assert record["source__subject"] == "Bug"
+    assert record["source__body"] == "<p>broken</p>"
+    assert record["requester_id"] == "ct1"
+    assert record["updated_at"] == "1700000200"
+
+
+async def test_conversation_parts_flatten_surface_author_type_and_id() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/conversations/search":
+            return httpx.Response(
+                200, json={"conversations": [{"id": "c1", "updated_at": 1700000000}], "pages": {}}
+            )
+        if request.method == "GET" and request.url.path == "/conversations/c1":
+            return httpx.Response(
+                200,
+                json={
+                    "conversation_parts": {
+                        "conversation_parts": [
+                            {"id": "p1", "author": {"type": "admin", "id": "a1"}}
+                        ]
+                    }
+                },
+            )
+        return httpx.Response(404, json={"path": request.url.path})
+
+    record = _flat(await _fetch("conversation_parts", handle), "conversation_parts/p1")
+    assert record["author_type"] == "admin"
+    assert record["author_id"] == "a1"
+    assert record["conversation_id"] == "c1"
+
+
+async def test_contacts_flatten_lifts_org_id() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/contacts/search":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": "ct1",
+                            "updated_at": 1700000000,
+                            "companies": {"companies": [{"id": "co1"}]},
+                        }
+                    ],
+                    "pages": {},
+                },
+            )
+        return httpx.Response(404, json={"path": request.url.path})
+
+    record = _flat(await _fetch("contacts", handle), "contacts/ct1")
+    assert record["org_id"] == "co1"
+    assert record["updated_at"] == "1700000000"
 
 
 async def test_stream_skipped_on_refusal() -> None:

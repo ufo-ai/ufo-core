@@ -138,9 +138,67 @@ class IntercomConnector(RestConnector):
             }
         return body
 
+    @staticmethod
+    def _first(value: Any) -> dict[str, Any] | None:
+        """Pick the first dict out of `{ <key>.<key>: [ {...}, ... ] }`."""
+        if isinstance(value, list) and value:
+            head = value[0]
+            return head if isinstance(head, dict) else None
+        return None
+
+    @classmethod
+    def _flatten_conversation(cls, record: dict[str, Any]) -> dict[str, Any]:
+        """Lift `source.{type,subject,body}` and the first associated
+        contact id so SQL transforms can reach them as flat keys."""
+        flat = dict(record)
+        source = record.get("source")
+        if isinstance(source, dict):
+            flat["source__type"] = source.get("type")
+            flat["source__subject"] = source.get("subject")
+            flat["source__body"] = source.get("body")
+        contacts = record.get("contacts")
+        if isinstance(contacts, dict):
+            first = cls._first(contacts.get("contacts"))
+            if first is not None:
+                flat["requester_id"] = first.get("id")
+        # Some Intercom inboxes nest the `team_assignee_id` inside a
+        # `teammates`/`assignee` envelope; the search API also returns
+        # it at the top level as `team_assignee_id`. Don't overwrite.
+        return flat
+
+    @classmethod
+    def _flatten_conversation_part(cls, record: dict[str, Any]) -> dict[str, Any]:
+        """Surface `author.{type,id}` as flat `author_type` / `author_id`.
+        `conversation_id` is stamped by the substream paginator before
+        records reach flatten — keep it untouched."""
+        flat = dict(record)
+        author = record.get("author")
+        if isinstance(author, dict):
+            flat["author_type"] = author.get("type")
+            flat["author_id"] = author.get("id")
+        return flat
+
+    @classmethod
+    def _flatten_contact(cls, record: dict[str, Any]) -> dict[str, Any]:
+        """Lift the first associated company id to `org_id`."""
+        flat = dict(record)
+        companies = record.get("companies")
+        if isinstance(companies, dict):
+            first = cls._first(companies.get("companies"))
+            if first is not None:
+                flat["org_id"] = first.get("id") or first.get("company_id")
+        return flat
+
     def flatten(self, record: dict[str, Any], stream: StreamSpec) -> dict[str, Any]:
-        """Render the integer `cursor_field` as its decimal string so the watermark (string-only in
-        the adapter) advances; the search filter parses it back with `int(...)`."""
+        """Lift each stream's envelope fields onto flat keys, then render the integer `cursor_field`
+        as its decimal string so the watermark (string-only in the adapter) advances; the search
+        filter parses it back with `int(...)`."""
+        if stream.name == "conversations":
+            record = self._flatten_conversation(record)
+        elif stream.name == "conversation_parts":
+            record = self._flatten_conversation_part(record)
+        elif stream.name == "contacts":
+            record = self._flatten_contact(record)
         if stream.cursor_field:
             value = record.get(stream.cursor_field)
             if isinstance(value, int):
