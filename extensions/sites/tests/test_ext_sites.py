@@ -152,10 +152,10 @@ async def test_website_builds_and_lists_the_output(tmp_path: Path) -> None:
     )
     ctx = _context(sandbox, tmp_path)
     result = await website(
-        ctx, WebsiteInput(runCommand="npm run build", projectPath="/workspace/site")
+        ctx, WebsiteInput(run_command="npm run build", project_path="/workspace/site")
     )
     payload = json.loads(result.content[0].text)
-    assert payload["projectPath"] == "/workspace/site"
+    assert payload["project_path"] == "/workspace/site"
     assert payload["files"] == ["index.html", "style.css"]
     assert any("npm run build" in command for command in sandbox.commands)
 
@@ -166,7 +166,7 @@ async def test_website_build_failure_fails_loud(tmp_path: Path) -> None:
     )
     ctx = _context(sandbox, tmp_path)
     with pytest.raises(RuntimeError, match="build broke"):
-        await website(ctx, WebsiteInput(runCommand="npm run build"))
+        await website(ctx, WebsiteInput(run_command="npm run build"))
 
 
 async def test_deploy_website_serves_static_output_and_returns_the_route(tmp_path: Path) -> None:

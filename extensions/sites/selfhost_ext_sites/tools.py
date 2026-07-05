@@ -12,7 +12,7 @@ only through `share_file`."""
 import json
 import shlex
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from selfhost.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 
@@ -43,15 +43,21 @@ PUBLISH_WEBSITE_DESCRIPTION = (
 
 
 class WebsiteInput(BaseModel):
-    runCommand: str
-    projectPath: str | None = None
+    run_command: str = Field(description="The build command to run in the project directory.")
+    project_path: str | None = Field(
+        default=None, description="Project directory to build in. Defaults to the workspace root."
+    )
 
 
 class StartServerInput(BaseModel):
-    command: str
-    project_path: str
-    port: int | None = None
-    log_file: str | None = None
+    command: str = Field(description="The server command to run in the background.")
+    project_path: str = Field(description="The project directory to run the command in.")
+    port: int | None = Field(
+        default=None, description="Port the server listens on; polled until it is reachable."
+    )
+    log_file: str | None = Field(
+        default=None, description="File to capture the server's stdout/stderr."
+    )
 
     @model_validator(mode="after")
     def validate_port(self) -> "StartServerInput":
@@ -61,18 +67,23 @@ class StartServerInput(BaseModel):
 
 
 class DeployWebsiteInput(BaseModel):
-    project_path: str
-    site_name: str
-    entry_point: str
-    should_validate: bool | None = None
+    project_path: str = Field(
+        description="Directory containing the built static output (index.html)."
+    )
+    site_name: str = Field(description="A name for the served site.")
+    entry_point: str = Field(description="The entry file to serve, e.g. index.html.")
 
 
 class PublishWebsiteInput(BaseModel):
-    project_path: str
-    dist_path: str
-    app_name: str
-    run_command: str | None = None
-    install_command: str | None = None
+    project_path: str = Field(description="The web app project directory.")
+    dist_path: str = Field(description="Directory of the built static output to serve.")
+    app_name: str = Field(description="A name for the published app.")
+    run_command: str | None = Field(
+        default=None, description="Optional backend command to run alongside the static files."
+    )
+    install_command: str | None = Field(
+        default=None, description="Optional command to install dependencies before serving."
+    )
 
 
 def _json_result(payload: dict[str, object]) -> ToolResult:
@@ -120,22 +131,22 @@ async def _serve(
 
 
 async def website(ctx: ToolContext, args: WebsiteInput) -> ToolResult:
-    project = args.projectPath or WORKSPACE_DIR
+    project = args.project_path or WORKSPACE_DIR
     result = await ctx.sandbox.bash(
-        f"cd {shlex.quote(project)} && {args.runCommand}", timeout_s=BUILD_TIMEOUT_SECONDS
+        f"cd {shlex.quote(project)} && {args.run_command}", timeout_s=BUILD_TIMEOUT_SECONDS
     )
     if result.exit_code != 0:
         raise RuntimeError(result.stderr or result.stdout)
     listing = await ctx.sandbox.bash(f"ls -1A {shlex.quote(project)}")
     files = [name for name in listing.stdout.splitlines() if name]
-    return _json_result({"projectPath": project, "files": files})
+    return _json_result({"project_path": project, "files": files})
 
 
 async def start_server(ctx: ToolContext, args: StartServerInput) -> ToolResult:
     port = args.port or START_SERVER_PORT
     log = args.log_file or f"/tmp/server-{port}.log"
     served = await _serve(ctx, args.command, args.project_path, port, log)
-    return _json_result({**served, "projectPath": args.project_path})
+    return _json_result({**served, "project_path": args.project_path})
 
 
 async def deploy_website(ctx: ToolContext, args: DeployWebsiteInput) -> ToolResult:
