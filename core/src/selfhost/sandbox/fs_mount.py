@@ -55,8 +55,9 @@ def s3fs_command(
 def mount_scripts(mountpoint: str, s3fs: str) -> tuple[str, str]:
     """The two shell commands a carrier runs to mount: a root `prepare` and the agent `mount`. Both
     are idempotent, so a carrier re-runs them on every create — and skips them when the mount is
-    already healthy, so subagents sharing one sandbox never yank the mount out from under an
-    in-flight dispatch.
+    already healthy, so a later turn that attaches to a still-running container skips a redundant
+    teardown+remount (same-conversation turns serialize under the queue's per-partition
+    concurrency, so no dispatch races another's in-flight file reads).
 
     prepare: open /dev/fuse to the agent user (root-only in the image); enable `user_allow_other` so
     a non-root mount may pass `allow_other` (needed so a root daemon can serve the agent's file

@@ -49,6 +49,21 @@ FUSE_RUN_ARGS = (
     "--security-opt",
     "apparmor=unconfined",
 )
+# The s3fs daemon is framework infrastructure, not agent egress: it talks straight to the object
+# store with the mount's prefix-scoped credential. The container-wide HTTP(S)_PROXY (set for the
+# agent's metered egress) is default-deny and does not allow the S3 host, and libcurl — which s3fs
+# uses — would honor it and fail the mount at CONNECT. So the mount exec clears the proxy env for
+# the s3fs process; the scoped credential, not the proxy, confines it to the conversation workspace.
+PROXY_CLEAR_ARGS = (
+    "--env",
+    "HTTP_PROXY=",
+    "--env",
+    "HTTPS_PROXY=",
+    "--env",
+    "http_proxy=",
+    "--env",
+    "https_proxy=",
+)
 
 
 async def _docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60) -> tuple[int, bytes, bytes]:
@@ -154,10 +169,12 @@ class DockerCarrier:
 
     async def _mount_s3(self, handle: SandboxHandle, mount: MountSpec) -> None:
         """Bring the conversation's workspace S3 prefix up at /workspace over s3fs. Idempotent:
-        skips a healthy mount so a subagent sharing the sandbox never remounts under an in-flight
-        dispatch. Writes the prefix-scoped credential, then runs the root `prepare` (open /dev/fuse,
-        enable user_allow_other, detach any stale mount) and the agent `mount` (s3fs) through the
-        two docker-exec users — the privileged prepare never runs as the agent."""
+        skips a healthy mount, so a later turn attaching to a still-running container skips a
+        redundant remount (same-conversation turns serialize under the queue partition, so no
+        dispatch races another's in-flight reads). Writes the prefix-scoped credential, then runs
+        the root `prepare` (open /dev/fuse, enable user_allow_other, detach any stale mount) and the
+        agent `mount` (s3fs, with the proxy env cleared) through the two docker-exec users — the
+        privileged prepare never runs as the agent."""
         if mount.kind != "s3":
             return
         if await self._mount_healthy(handle):
@@ -203,6 +220,7 @@ class DockerCarrier:
         code, _, stderr = await _docker(
             "exec",
             "-i",
+            *PROXY_CLEAR_ARGS,
             handle.container_id,
             "sh",
             "-c",
