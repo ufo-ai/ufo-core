@@ -27,6 +27,7 @@ from selfhost.artifact_token import verify_artifact_token
 from selfhost.blob import BlobNotFound, FilesystemBlobStore
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
+from selfhost.ext.loader import skill_registry
 from selfhost.ext.surface import WRITEBACK_DELIVERED, WRITEBACK_PENDING, workspace_key
 from selfhost.hub import InProcessHub
 from selfhost.schema import tables
@@ -200,6 +201,21 @@ def test_thread_keying_and_gating() -> None:
     assert slack.slack_message_gated(
         {"type": "message", "text": f"<@{BOT_USER_ID}> hi"}, BOT_USER_ID, False
     )
+
+
+def test_slack_app_setup_skill_parses_indexes_and_names_the_real_route_and_slots() -> None:
+    registry = skill_registry((slack_manifest(),))
+    index = dict(registry.index())
+    assert "slack-app-setup" in index
+    body = registry.named("slack-app-setup").instructions
+    assert "/surface/slack" in body
+    for slot in (
+        slack.SLACK_BOT_TOKEN_SLOT,
+        slack.SLACK_SIGNING_SECRET_SLOT,
+        slack.SLACK_BOT_USER_ID_SLOT,
+        slack.SLACK_TEAM_ID_SLOT,
+    ):
+        assert slot in body
 
 
 async def test_bad_signature_is_rejected(db: None, tmp_path, monkeypatch) -> None:
