@@ -84,8 +84,14 @@ print(json.dumps(stat))
 """
 
 
+MAX_BASH_TIMEOUT_MS = 600_000
+
+
 class BashInput(BaseModel):
-    command: str
+    command: str = Field(description="The shell command to execute.")
+    timeout: int | None = Field(
+        default=None, description="Optional timeout in milliseconds. Max 600000 (10 minutes)."
+    )
 
 
 class ReadInput(BaseModel):
@@ -204,7 +210,8 @@ class MessageSubagentInput(BaseModel):
 
 
 async def bash_handler(ctx: ToolContext, args: BashInput) -> ToolResult:
-    result = await ctx.sandbox.bash(args.command)
+    timeout_s = int(min(args.timeout, MAX_BASH_TIMEOUT_MS) / 1000) if args.timeout else None
+    result = await ctx.sandbox.bash(args.command, timeout_s=timeout_s)
     return ToolResult(
         content=(TextContent(text=result.stdout + result.stderr),),
         is_error=result.exit_code != 0,
@@ -691,7 +698,12 @@ async def message_subagent_handler(ctx: ToolContext, args: MessageSubagentInput)
 BUILTIN_TOOLS: tuple[ToolDef, ...] = (
     ToolDef(
         name="bash",
-        description="Run a shell command in the workspace and return its combined output.",
+        description=(
+            "Execute shell commands in the secure sandboxed workspace container. Pre-installed: "
+            "Python 3, Node.js, ripgrep, poppler, tesseract, libreoffice, pandoc, chromium, and "
+            "standard Unix tools. Working directory: /workspace. Use absolute paths. Do NOT use "
+            "for file reads/edits/searches — use the dedicated read/edit/glob/grep tools instead."
+        ),
         input_model=BashInput,
         handler=bash_handler,
     ),
