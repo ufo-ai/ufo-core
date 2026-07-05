@@ -39,6 +39,7 @@ RESEARCH_TOOL_NAMES = (
     "list_skills",
     "share_file",
     "memory_search",
+    "xlsx_repl",
 )
 RESEARCH_PROMPT = (Path(__file__).parent / "subagent_research.md").read_text()
 DEEP_RESEARCH_PROMPT = (Path(__file__).parent / "subagent_deep_research.md").read_text()

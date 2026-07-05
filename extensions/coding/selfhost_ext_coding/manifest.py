@@ -31,6 +31,8 @@ CODING_TOOL_NAMES = (
     "list_skills",
     "share_file",
     "js_repl",
+    "search_web",
+    "fetch_url",
 )
 CODING_PROMPT = (Path(__file__).parent / "subagent_coding.md").read_text()
 

@@ -392,7 +392,9 @@ def test_browser_profile_registers_and_is_spawnable() -> None:
     registry = SubagentRegistry(turn_subagents((browser_manifest.manifest(),)))
     profile = registry.get(BROWSER_SUBAGENT_NAME)
     assert profile.tool_names == BROWSER_SUBAGENT_TOOL_NAMES
-    available = set(BROWSER_TOOL_NAMES) | {tool.name for tool in BUILTIN_TOOLS}
+    # Browser primitives + core builtins + the cross-extension search_web the prompt tells the agent
+    # to prefer over navigating to a search engine (resolves only when research/exa is installed).
+    available = set(BROWSER_TOOL_NAMES) | {tool.name for tool in BUILTIN_TOOLS} | {"search_web"}
     assert set(profile.tool_names) <= available
     assert "web automation subagent" in profile.prompt
 

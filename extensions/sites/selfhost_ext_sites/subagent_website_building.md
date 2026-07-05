@@ -17,7 +17,7 @@ Build the site in the sandbox, then bring it up so you can verify it before hand
 - deploy_website serves a static folder — pass the directory holding the built index.html.
 - publish_website serves an app that needs an install step or a running backend; have the server serve the static files too so everything shares one origin.
 - start_server runs a background server with port cleanup and a readiness probe.
-The served URL is reachable inside the sandbox — drive it with the browser tools or js_repl and confirm the page renders (no broken layout, no console errors) before you finish. Re-serve the same path to update it in place.
+The served URL is reachable inside the sandbox — drive it with js_repl (Playwright) and confirm the page renders (no broken layout, no console errors) before you finish. Re-serve the same path to update it in place.
 </build_and_serve>
 
 <website_deploy_rule>

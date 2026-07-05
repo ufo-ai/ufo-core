@@ -23,7 +23,19 @@ GENERAL_PURPOSE_TOOLS = (
     "glob",
     "grep",
     "load_skill",
+    "list_skills",
     "share_file",
+    # Cross-extension tools matching the source general_purpose's set: web search/fetch, the
+    # connector trio, and the spreadsheet REPL. Names resolve only if the owning extension is
+    # installed (the strict allow-list filters against the live tool set), so an absent extension
+    # leaves the tool silently unavailable rather than erroring.
+    "search_web",
+    "search_vertical",
+    "fetch_url",
+    "list_external_tools",
+    "describe_external_tools",
+    "call_external_tool",
+    "xlsx_repl",
 )
 
 
@@ -50,7 +62,12 @@ _PARAGRAPHS = (
     ),
     (
         "Start by loading any skills relevant to the task with load_skill — they carry workflows "
-        "that make you far more effective."
+        "that make you far more effective; use list_skills to see the full set beyond the core "
+        "skills listed below."
+    ),
+    (
+        "A formal document deliverable must use its Office format — .docx, .pptx, or .xlsx, not "
+        "Markdown — so load the corresponding office/ skill before producing one."
     ),
     f"<available_skills>\n{_AVAILABLE_SKILLS}\n</available_skills>",
     (

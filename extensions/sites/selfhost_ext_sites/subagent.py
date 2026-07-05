@@ -20,10 +20,16 @@ WEBSITE_BUILDING_TOOL_NAMES = (
     "read",
     "write",
     "edit",
+    "glob",
+    "grep",
     "share_file",
     "load_skill",
     *SITES_TOOL_NAMES,
     "js_repl",
+    # Web reference-gathering (source website_building set); resolves if research is installed.
+    "search_web",
+    "search_vertical",
+    "fetch_url",
 )
 
 

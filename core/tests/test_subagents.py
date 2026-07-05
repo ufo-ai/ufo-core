@@ -88,12 +88,23 @@ def test_general_purpose_tool_subset_excludes_the_tools_a_subagent_must_not_hold
     assert {"ask_user", "spawn_subagent", "connect_account"}.isdisjoint(profile.tool_names)
 
 
-def test_general_purpose_tool_names_all_resolve_to_real_builtins() -> None:
-    """The queue projects a subagent's tool set by filtering the builtins on these names — a name
-    with no builtin would silently vanish, leaving the subagent short a tool."""
+def test_general_purpose_tool_names_are_builtins_or_the_known_cross_extension_set() -> None:
+    """The queue projects a subagent's tool set by filtering the live tool set on these names — a
+    name matching nothing silently vanishes. Core names must be real builtins; the rest are the
+    documented cross-extension tools (web search/fetch, the connector trio, the spreadsheet REPL)
+    that match the source general_purpose's set and resolve only when their extension is installed."""
     profile = SubagentRegistry(CORE_SUBAGENT_PROFILES).get(GENERAL_PURPOSE)
     builtin_names = {tool.name for tool in BUILTIN_TOOLS}
-    assert set(profile.tool_names) <= builtin_names
+    cross_extension = {
+        "search_web",
+        "search_vertical",
+        "fetch_url",
+        "list_external_tools",
+        "describe_external_tools",
+        "call_external_tool",
+        "xlsx_repl",
+    }
+    assert set(profile.tool_names) <= builtin_names | cross_extension
 
 
 def test_general_purpose_prompt_lists_the_loadable_skills_and_binds_its_output() -> None:
