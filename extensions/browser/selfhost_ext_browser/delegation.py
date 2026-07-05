@@ -9,7 +9,7 @@ browser run is scoped to the browser profile's tools, never a raw browser handle
 import asyncio
 import json
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from selfhost.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 
@@ -32,18 +32,42 @@ WIDE_BROWSE_DESCRIPTION = (
 
 
 class BrowserTaskInput(BaseModel):
-    url: str
-    task: str
-    task_name: str
-    timeout_minutes: int | None = None
-    user_description: str
+    url: str = Field(description="The starting URL for the browser session.")
+    task: str = Field(
+        description="Detailed description of what to do. Must be self-contained — include all "
+        "relevant context, preferences, and step-by-step instructions. The browser agent has no "
+        "conversation history."
+    )
+    task_name: str = Field(
+        description="Short, user-friendly name for this task, e.g. 'Search flights' or 'Extract "
+        "pricing'."
+    )
+    timeout_minutes: int | None = Field(
+        default=None, description="Timeout in minutes. Minimum and default is 20."
+    )
+    user_description: str = Field(
+        description="Brief plain-language description shown in the activity timeline."
+    )
 
 
 class WideBrowseInput(BaseModel):
-    entities_file: str
-    prompt_template: str
-    output_schema_file: str
-    user_description: str
+    entities_file: str = Field(
+        description="Path to a workspace file containing URLs or site names to browse, one per "
+        "line. Duplicates are ignored."
+    )
+    prompt_template: str = Field(
+        description="Prompt template for each browser task. Use {entity} as the placeholder for "
+        "each URL/site name."
+    )
+    output_schema_file: str = Field(
+        description="Path to a workspace JSON file containing the output JSON Schema. Write the "
+        "schema to a file first with the write tool, then pass the path here. The file must be a "
+        "JSON object defining the output structure with snake_case property keys and 'title' on "
+        "each property."
+    )
+    user_description: str = Field(
+        description="Brief plain-language description shown in the activity timeline."
+    )
 
 
 async def _browser_task(ctx: ToolContext, args: BrowserTaskInput) -> ToolResult:

@@ -12,7 +12,7 @@ egress proxy — it reaches only Composio's own API."""
 import json
 import re
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from selfhost.sdk.context import JsonValue
 from selfhost.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
@@ -24,25 +24,40 @@ NOT_FOUND = 404
 
 
 class ListExternalToolsInput(BaseModel):
-    queries: tuple[str, ...]
-    user_description: str
+    queries: tuple[str, ...] = Field(
+        description="Search keywords. Use single-word queries — split multi-word searches into "
+        "separate keywords, e.g. ['Microsoft', 'email'] not ['Microsoft email']. Multiple queries "
+        "searched in parallel. Use 'select:<source_id>' to fetch a specific connector by exact ID."
+    )
+    user_description: str = Field(
+        description="Brief plain-language description shown in the activity timeline."
+    )
 
 
 class DescribeExternalToolsInput(BaseModel):
-    source_id: str
-    tool_names: tuple[str, ...] = ()
-    query: str = ""
+    source_id: str = Field(description="The connector source ID, e.g. 'github', 'slack', 'gcal'.")
+    tool_names: tuple[str, ...] = Field(
+        default=(),
+        description="Exact tool names to get schemas for, from list_external_tools results. Omit "
+        "to discover the connector's tools via `query`.",
+    )
+    query: str = Field(
+        default="", description="Discovery query to find matching tools when tool_names is omitted."
+    )
 
 
 class CallExternalToolInput(BaseModel):
-    tool_name: str
-    source_id: str
-    arguments: dict[str, JsonValue]
+    tool_name: str = Field(description="Exact tool name from list_external_tools results.")
+    source_id: str = Field(description="The connector source ID, e.g. 'github', 'gcal'.")
+    arguments: dict[str, JsonValue] = Field(
+        description="Arguments for the connector tool as a dict. Pass {} for tools that take no "
+        "parameters."
+    )
 
 
 class SearchConnectorToolsInput(BaseModel):
-    source_id: str
-    query: str
+    source_id: str = Field(description="The connector source ID to search within.")
+    query: str = Field(description="Search query to find matching tools in the connector.")
 
 
 async def list_external_tools(ctx: ToolContext, args: ListExternalToolsInput) -> ToolResult:
