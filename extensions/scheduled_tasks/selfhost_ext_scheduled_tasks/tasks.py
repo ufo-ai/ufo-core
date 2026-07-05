@@ -9,7 +9,7 @@ name updates it in place."""
 import re
 from datetime import UTC, datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from selfhost.sdk.scheduling import ScheduleStore
 from selfhost.sdk.tools import TextContent, ToolContext, ToolResult
@@ -20,14 +20,21 @@ MAX_NAME = 52
 
 
 class ScheduleTaskInput(BaseModel):
-    schedule: str
-    prompt: str
-    name: str | None = None
-    description: str | None = None
+    schedule: str = Field(
+        description="A 5-field cron schedule (e.g. '0 9 * * 1' for 9am Mondays) on which the task "
+        "runs."
+    )
+    prompt: str = Field(description="The task prompt the platform sends to you on each run.")
+    name: str | None = Field(
+        default=None, description="Optional name for the task; defaults to a slug of the prompt."
+    )
+    description: str | None = Field(
+        default=None, description="Optional human-readable description shown in the task list."
+    )
 
 
 class CancelScheduledTaskInput(BaseModel):
-    name: str
+    name: str = Field(description="Name of the scheduled task to cancel.")
 
 
 class ListScheduledTasksInput(BaseModel):

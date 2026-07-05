@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from uuid import uuid4
 
 import httpx
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from selfhost.sdk.context import JsonValue
 from selfhost.sdk.manifest import CredentialSlot, Manifest
@@ -82,13 +82,15 @@ class McpServersConfig(BaseModel):
 
 
 class ListMcpToolsInput(BaseModel):
-    server: str
+    server: str = Field(description="The name of an MCP server configured for this workspace.")
 
 
 class CallMcpToolInput(BaseModel):
-    server: str
-    tool_name: str
-    arguments: dict[str, JsonValue]
+    server: str = Field(description="The configured MCP server's name.")
+    tool_name: str = Field(description="The tool's exact name, from list_mcp_tools.")
+    arguments: dict[str, JsonValue] = Field(
+        description="The tool's parameters as a JSON object matching its input schema."
+    )
 
 
 @dataclass(frozen=True)
