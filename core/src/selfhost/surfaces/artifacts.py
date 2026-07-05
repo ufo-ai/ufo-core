@@ -10,20 +10,24 @@ from datetime import UTC, datetime
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import Response
+from fastapi.responses import StreamingResponse
 
 from selfhost.artifact_token import (
     ARTIFACT_DOWNLOAD_PATH,
     ArtifactTokenError,
     verify_artifact_token,
 )
-from selfhost.blob import BlobNotFound, BlobStore
+from selfhost.blob import BlobStore
 
 router = APIRouter()
 
 
 @router.get(ARTIFACT_DOWNLOAD_PATH)
-async def download(request: Request, token: str = "") -> Response:
+async def download(request: Request, token: str = "") -> StreamingResponse:
+    """Stream the token's blob out in bounded chunks — the bytes never buffer whole in this one
+    event-loop process, so a large or concurrent download can't spike its memory (an oversize
+    export streams in the same way it streamed in). A missing blob is a 404 up front, before the
+    stream opens."""
     blob: BlobStore = request.app.state.blob
     secret: str = request.app.state.artifact_token_secret
     if not token:
@@ -32,10 +36,8 @@ async def download(request: Request, token: str = "") -> Response:
         claims = verify_artifact_token(token, secret, datetime.now(UTC))
     except ArtifactTokenError as error:
         raise HTTPException(403, str(error)) from error
-    try:
-        data = await blob.get(claims.blob_key)
-    except BlobNotFound as error:
-        raise HTTPException(404, "artifact not found") from error
+    if not await blob.exists(claims.blob_key):
+        raise HTTPException(404, "artifact not found")
     headers: dict[str, str] = {}
     if claims.filename:
         encoded = quote(claims.filename, safe="")
@@ -44,4 +46,8 @@ async def download(request: Request, token: str = "") -> Response:
             if encoded == claims.filename
             else f"attachment; filename*=UTF-8''{encoded}"
         )
-    return Response(data, media_type="application/octet-stream", headers=headers)
+    return StreamingResponse(
+        blob.get_stream(claims.blob_key),
+        media_type="application/octet-stream",
+        headers=headers,
+    )

@@ -136,6 +136,18 @@ async def test_artifact_download_rejects_missing_tampered_expired_and_out_of_nam
     assert outside.status_code == 403
 
 
+async def test_artifact_download_with_a_valid_token_but_absent_blob_is_a_404(
+    artifact_client: tuple[AsyncClient, FilesystemBlobStore],
+) -> None:
+    """A well-formed token whose blob is gone (e.g. reaped) is a 404 decided up front, before the
+    stream opens — not a 200 with a broken body once delivery moved from a buffered read to a
+    streamed one."""
+    client, _ = artifact_client
+    token = mint_artifact_token(SECRET, f"artifacts/{uuid4()}", "gone.txt", _future())
+    response = await client.get(DOWNLOAD_PATH, params={"token": token})
+    assert response.status_code == 404
+
+
 async def test_download_endpoint_serves_a_minted_artifact(
     artifact_client: tuple[AsyncClient, FilesystemBlobStore],
 ) -> None:
