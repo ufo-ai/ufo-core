@@ -8,6 +8,7 @@ the running loop's default executor at DBOS's shared pool, so a short-lived boot
 shut that pool down. One durable workflow fires each handler with the extension's scoped
 ExtensionContext, so a core job and an extension job run the identical path."""
 
+import functools
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -15,13 +16,14 @@ from uuid import UUID, uuid4
 import sqlalchemy as sa
 from dbos import DBOS, DBOSClient, EnqueueOptions, Queue, ScheduleInput
 
-from selfhost.accounting import ALLOW, SpendEvaluator
+from selfhost.accounting import ALLOW, CORE_PRICING, SpendEvaluator
 from selfhost.blob import BlobStore
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.ext.context import ExtensionContext, TurnInvoker, context_for
 from selfhost.ext.manifest import JobSpec, Manifest
 from selfhost.indexing import EmbedClient, IndexBackend
+from selfhost.models.registry import ModelRegistry
 from selfhost.o11y import log
 from selfhost.sandbox.session import Carrier, SandboxHandle
 from selfhost.schema import tables
@@ -271,6 +273,7 @@ class JobRunner:
     pages: PageFeed | None = None
     blob: BlobStore | None = None
     invoker: TurnInvoker | None = None
+    registry: ModelRegistry | None = None
 
     def launch(self) -> None:
         global _firing
@@ -298,6 +301,7 @@ class JobRunner:
         binding = next((b for b in self.bindings if b.key == key), None)
         if binding is None:
             raise RuntimeError(f"no job registered for key {key!r}")
+        registry = self.registry
         context = context_for(
             self.workspace_id,
             binding.extension,
@@ -308,6 +312,11 @@ class JobRunner:
             self.pages,
             self.blob,
             self.invoker,
+            None
+            if registry is None
+            else functools.partial(registry.client_for, registry.auto_model),
+            "" if registry is None else registry.auto_model,
+            CORE_PRICING if registry is None else registry.pricing,
         )
         await binding.spec.handler(context)
 

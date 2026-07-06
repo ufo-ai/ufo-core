@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -224,6 +224,45 @@ async def read_turn_cost(connection: AsyncConnection, turn_id: UUID) -> tuple[in
     if row[0] is None:
         return None
     return int(row[0]), int(row[1]), row[2]
+
+
+async def record_workspace_usage(
+    connection: AsyncConnection,
+    workspace_id: UUID,
+    model: str,
+    usage: Usage,
+    pricing: Pricing = CORE_PRICING,
+) -> None:
+    """Bill a background job's metered model call to the workspace, not a turn: one priced `tokens`
+    row with `turn_id` NULL, stamped with the model and price digest exactly as a turn's tokens are.
+    The row carries a fresh id, so each genuine completion is billed once — there is no DBOS step
+    checkpoint around a job's model call, so a workflow replay re-invokes the provider (a real
+    charge) and bills that invocation, never a phantom double or a lost burn. It lands in the
+    workspace spend total and every workspace-scoped cap window (which sum by `workspace_id`), and
+    is excluded from per-member and per-agent attribution (which join through `turn` — a NULL FK
+    drops out), because a job's spend belongs to no member or agent."""
+    total = (
+        usage.input_tokens
+        + usage.output_tokens
+        + usage.cache_read_tokens
+        + usage.cache_write_tokens
+    )
+    if total == 0:
+        return
+    await connection.execute(
+        sa.insert(tables.ledger).values(
+            id=uuid4(),
+            workspace_id=workspace_id,
+            turn_id=None,
+            dimension=TOKENS_DIMENSION,
+            amount=total,
+            priced_micro_usd=pricing.micro_usd(model, usage),
+            model=model,
+            price_digest=pricing.digest,
+            created_at=sa.func.now(),
+            updated_at=sa.func.now(),
+        )
+    )
 
 
 async def record_egress_request(

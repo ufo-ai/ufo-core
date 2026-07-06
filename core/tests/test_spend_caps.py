@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from selfhost.accounting import SpendEvaluator, record_sandbox_tokens
+from selfhost.accounting import SpendEvaluator, record_sandbox_tokens, record_workspace_usage
 from selfhost.db import workspace_tx
 from selfhost.jobs import RESUME_ENQUEUE_GRACE_SECONDS, SpendResume
 from selfhost.schema import tables
@@ -179,6 +179,32 @@ async def test_no_caps_allow(db: None) -> None:
         decision = await SpendEvaluator(workspace_id, member_id, agent_id).decide(connection, 0)
     assert decision.outcome == "allow"
     assert decision.message == ""
+
+
+async def test_workspace_cap_counts_extension_spend(db: None) -> None:
+    """A background job's workspace-anchored spend (turn_id NULL) moves a workspace-scope cap, which
+    sums every ledger row for the workspace."""
+    async with workspace_tx() as connection:
+        workspace_id, member_id, agent_id, _ = await _seed(connection)
+        await record_workspace_usage(
+            connection, workspace_id, "claude-opus-4-8", Usage(input_tokens=1000)
+        )
+        await _set_cap(connection, workspace_id, "workspace", None, 3600, 1000, "park")
+        decision = await SpendEvaluator(workspace_id, member_id, agent_id).decide(connection, 0)
+    assert decision.outcome == "park"
+
+
+async def test_member_cap_ignores_extension_spend(db: None) -> None:
+    """The same workspace-anchored spend is attributed to no member, so a member-scope cap — which
+    joins through the turn — never sees it."""
+    async with workspace_tx() as connection:
+        workspace_id, member_id, agent_id, _ = await _seed(connection)
+        await record_workspace_usage(
+            connection, workspace_id, "claude-opus-4-8", Usage(input_tokens=1000)
+        )
+        await _set_cap(connection, workspace_id, "member", member_id, 3600, 1000, "reject")
+        decision = await SpendEvaluator(workspace_id, member_id, agent_id).decide(connection, 0)
+    assert decision.outcome == "allow"
 
 
 async def test_member_cap_parks_when_over(db: None) -> None:

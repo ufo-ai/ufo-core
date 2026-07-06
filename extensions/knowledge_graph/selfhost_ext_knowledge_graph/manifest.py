@@ -120,6 +120,7 @@ async def extract_graph(ctx: ExtensionContext) -> None:
         transaction=ctx.transaction,
         cursor_store=ctx.store,
         workspace_id=ctx.store.workspace_id,
+        model=ctx.model,
     ).run()
 
 

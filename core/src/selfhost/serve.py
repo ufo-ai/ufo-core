@@ -199,8 +199,9 @@ def _launch_jobs(
     launch so the system store is live. Registration is the synchronous DBOS API (off the loop, at
     startup); a handler may read a declared credential or the deploy index/embed backends or the
     page feed, so once any job is registered the credential key must be set."""
+    manifests = load_manifests(config.pack.name)
     bindings = bindings_from(
-        load_manifests(config.pack.name),
+        manifests,
         core_jobs(sync_driver, SpendResume(client=dbos_client), SandboxReaper(carrier=carrier)),
     )
     if not bindings:
@@ -220,6 +221,7 @@ def _launch_jobs(
         pages=page_feed,
         blob=blob,
         invoker=AdmissionInvoker(admission=Admission(dbos=dbos_client), workspace_id=workspace_id),
+        registry=model_registry(config, manifests),
     ).launch()
 
 

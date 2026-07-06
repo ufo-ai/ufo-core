@@ -95,7 +95,7 @@ ledger = sa.Table(
     metadata,
     sa.Column("id", sa.Uuid, primary_key=True),
     sa.Column("workspace_id", sa.Uuid, nullable=False),
-    sa.Column("turn_id", sa.Uuid, sa.ForeignKey("turn.id"), nullable=False),
+    sa.Column("turn_id", sa.Uuid, sa.ForeignKey("turn.id"), nullable=True),
     sa.Column("dimension", sa.Text, nullable=False),
     sa.Column("amount", sa.BigInteger, nullable=False),
     sa.Column("priced_micro_usd", sa.BigInteger, nullable=False),

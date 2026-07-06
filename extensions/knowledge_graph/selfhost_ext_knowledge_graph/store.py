@@ -11,18 +11,17 @@ its content changes and a tombstoned page soft-deletes the edges it sourced. `Gr
 read side: it resolves a name to its node(s) and expands a bounded neighbourhood over the edges,
 following relationships rather than scoring them.
 
-Two extraction tiers are specified. Tier A — this module — is the deterministic backbone: markdown
-wikilinks (`[[Name]]`), typed-link syntax (`[[works_at::Acme]]`), `@mentions`, `#tags`, and bare
-URLs all resolve to nodes and typed edges with no model call, and the typed-link form produces the
-full bounded edge vocabulary directly. Tier B — a model pass that reads typed relations out of free
-prose — is not wired: an extension job reaches a model only by admitting a whole turn through
-`ExtensionContext.invoker`, which returns a turn id rather than a structured extraction, and no
-metered model client is threaded onto a job's context. Driving a per-page structured extraction from
-a background job therefore awaits the extension-job model-access decision (the same seam the page
-condenser waits on); bringing an unmetered provider client into the job is the documented egress
-anti-pattern and is not done. Until that decision lands the deterministic backbone stands alone, and
-because typed-link syntax already exercises every edge type, the graph substrate, the bounded
-vocabulary, and traversal are complete without it."""
+Two extraction tiers run per page. Tier A — deterministic backbone — resolves markdown wikilinks
+(`[[Name]]`), typed-link syntax (`[[works_at::Acme]]`), `@mentions`, `#tags`, and bare URLs to
+nodes and typed edges with no model call, the typed-link form producing the full bounded edge
+vocabulary directly. Tier B — a metered model pass — reads typed relations out of the page's free
+prose through `ctx.model`, the deploy's default model whose tokens are priced onto the workspace
+ledger, and adds edges from the page anchor to each extracted entity, carrying the model's
+confidence rather than the deterministic 1.0. Tier B augments the backbone: Tier A runs first, and
+Tier B is skipped when no model is wired, so the backbone always stands. An extracted edge type
+outside the bounded vocabulary is rejected (`UnknownEdgeType`), never persisted as a silent
+no-op; the model call and its metering happen before the write transaction, never holding the
+transaction open across the provider round-trip."""
 
 import re
 from collections.abc import Callable
@@ -32,11 +31,13 @@ from typing import Literal, cast
 from uuid import UUID, uuid5
 
 import sqlalchemy as sa
+from pydantic import BaseModel, Field
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from selfhost.sdk.context import ScopedStore
+from selfhost.sdk.context import ModelAccess, ScopedStore
+from selfhost.sdk.models import Message, ModelRequest
 from selfhost.sdk.sources import SHARED_SUBJECT, PageChange, PageFeed, member_subject
 
 EdgeType = Literal[
@@ -85,6 +86,19 @@ DETERMINISTIC_CONFIDENCE = 1.0
 PAGE_EXTRACT_BATCH = 50
 PAGE_CURSOR_KEY = "graph_extract_cursor"
 PAGE_ANCHOR_PREFIX = "page:"
+
+TIER_B_MAX_BODY_CHARS = 8_000
+TIER_B_MAX_TOKENS = 1_024
+TIER_B_REASONING: Literal["off"] = "off"
+TIER_B_SYSTEM = (
+    "You extract typed relationships about a document's main subject. Reply with ONLY a JSON "
+    'object of the form {"relations": [{"edge_type": "<type>", "target": "<entity name>", '
+    '"confidence": <number 0..1>}]}. Each relation runs from the document\'s subject to the named '
+    "target entity. Use ONLY these edge types: "
+    + ", ".join(sorted(EDGE_TYPES))
+    + ". Omit any relationship you are unsure of rather than inventing an edge type, and return an "
+    "empty list when the prose asserts no such relationship."
+)
 
 MAX_HOPS = 3
 DEFAULT_HOPS = 2
@@ -148,6 +162,23 @@ def to_edge_type(raw: str) -> EdgeType:
     if raw not in EDGE_TYPES:
         raise UnknownEdgeType(raw)
     return cast(EdgeType, raw)
+
+
+class ExtractedRelation(BaseModel):
+    """One typed relation the Tier-B model read out of a page's prose: the edge type, the target
+    entity name, and the model's confidence (validated into 0..1 at construction). The edge type is
+    checked against the bounded vocabulary by `to_edge_type` before the edge is written."""
+
+    edge_type: str
+    target: str
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
+class ExtractedGraph(BaseModel):
+    """The Tier-B model's whole response — untrusted model output parsed and validated at this
+    boundary before any of it reaches the graph tables."""
+
+    relations: tuple[ExtractedRelation, ...] = ()
 
 
 def normalize_name(name: str) -> str:
@@ -278,6 +309,7 @@ class GraphExtractor:
     transaction: Transaction
     cursor_store: ScopedStore
     workspace_id: UUID
+    model: ModelAccess | None = None
 
     async def run(self) -> None:
         stored = await self.cursor_store.get(PAGE_CURSOR_KEY)
@@ -326,6 +358,7 @@ class GraphExtractor:
         return row is not None
 
     async def _materialize(self, change: PageChange, parsed: ParsedPage) -> None:
+        typed = () if self.model is None else await self._tier_b(self.model, change.body)
         title = parsed.title or f"{PAGE_ANCHOR_PREFIX}{change.page_id}"
         async with self.transaction() as connection:
             anchor = await self._upsert_entity(connection, change.subject, title, TOPIC, fill=True)
@@ -334,6 +367,17 @@ class GraphExtractor:
                     connection, change.subject, ref.name, ref.entity_type, fill=False
                 )
                 await self._record_edge(connection, change, anchor, target, ref.edge_type)
+            for relation in typed:
+                target = await self._upsert_entity(
+                    connection,
+                    change.subject,
+                    relation.target,
+                    EDGE_TARGET_TYPE[relation.edge_type],
+                    fill=False,
+                )
+                await self._record_edge(
+                    connection, change, anchor, target, relation.edge_type, relation.confidence
+                )
             await connection.execute(
                 sa.delete(graph_edge).where(
                     graph_edge.c.workspace_id == self.workspace_id,
@@ -341,6 +385,26 @@ class GraphExtractor:
                     graph_edge.c.extracted_digest != change.digest,
                 )
             )
+
+    async def _tier_b(self, model: ModelAccess, body: str) -> tuple[ExtractedRelation, ...]:
+        """Read typed relations out of the page's prose with one metered model call — bounded body
+        in, bounded tokens out. Every extracted edge type is validated against the closed vocabulary
+        (`to_edge_type` raises on an unknown type rather than persisting a silent no-op), and an
+        empty-target relation is dropped."""
+        request = ModelRequest(
+            model=model.model,
+            system=TIER_B_SYSTEM,
+            messages=(Message(role="user", content=body[:TIER_B_MAX_BODY_CHARS]),),
+            max_tokens=TIER_B_MAX_TOKENS,
+            reasoning=TIER_B_REASONING,
+        )
+        extraction = ExtractedGraph.model_validate_json(await model.complete(request))
+        relations: list[ExtractedRelation] = []
+        for relation in extraction.relations:
+            to_edge_type(relation.edge_type)
+            if relation.target.strip():
+                relations.append(relation)
+        return tuple(relations)
 
     async def _upsert_entity(
         self, connection: AsyncConnection, subject: str, name: str, entity_type: str, fill: bool
@@ -390,6 +454,7 @@ class GraphExtractor:
         from_entity: UUID,
         to_entity: UUID,
         raw_edge_type: str,
+        confidence: float = DETERMINISTIC_CONFIDENCE,
     ) -> None:
         edge_type = to_edge_type(raw_edge_type)
         edge_id = uuid5(
@@ -413,7 +478,7 @@ class GraphExtractor:
             from_entity=from_entity,
             to_entity=to_entity,
             source_page_id=change.page_id,
-            confidence=DETERMINISTIC_CONFIDENCE,
+            confidence=confidence,
             extracted_digest=change.digest,
             tombstone=False,
             created_at=sa.func.now(),
@@ -424,7 +489,7 @@ class GraphExtractor:
                 index_elements=[graph_edge.c.id],
                 set_={
                     graph_edge.c.extracted_digest: change.digest,
-                    graph_edge.c.confidence: DETERMINISTIC_CONFIDENCE,
+                    graph_edge.c.confidence: confidence,
                     graph_edge.c.tombstone: False,
                     graph_edge.c.updated_at: sa.func.now(),
                 },

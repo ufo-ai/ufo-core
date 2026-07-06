@@ -9,7 +9,7 @@ path an extension does. The `ExtensionContext` shape is open: it carries the sel
 backends, a transaction over the extension's own tables, governed proposals, and invoke, without
 reshaping what handlers already hold."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -20,16 +20,17 @@ import sqlalchemy as sa
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from selfhost.accounting import CORE_PRICING, Pricing, record_workspace_usage
 from selfhost.blob import BlobNotFound, BlobStore
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.governance import Governance, prompt_digest
 from selfhost.indexing import EmbedClient, IndexBackend
-from selfhost.models.interface import Message
+from selfhost.models.interface import Message, ModelClient, ModelRequest, TextDelta
 from selfhost.o11y import log
 from selfhost.scheduling import ScheduleStore
 from selfhost.schema import tables
-from selfhost.schema.records import AgentChange, ProposalRef
+from selfhost.schema.records import AgentChange, ProposalRef, Usage
 from selfhost.sources.sync import PageFeed, source_row_id
 from selfhost.transcript import TranscriptDecodeError, decode, transcript_key
 
@@ -199,6 +200,49 @@ class TurnInvoker(Protocol):
 
 
 @dataclass(frozen=True)
+class ModelAccess:
+    """The metered LLM a background handler reaches: one completion against the deploy's default
+    model, its token usage priced and written to the workspace ledger under `ctx.store.workspace_id`
+    (turn_id NULL, workspace-anchored) on every call — so extension model spend is visible in
+    `selfhost spend` and moves workspace-scoped spend caps, never an unmetered direct egress. The
+    underlying client is built lazily through `_client_factory` on first use, so a deploy with no
+    model key only fails when a handler actually calls the model, mirroring the other optional
+    accessors. `complete` fixes the request's model to the deploy default (`model`), so the model
+    billed is always the model called."""
+
+    workspace_id: UUID
+    model: str
+    pricing: Pricing
+    _client_factory: Callable[[], ModelClient]
+
+    async def complete(self, request: ModelRequest) -> str:
+        """Stream one completion, accumulate its text and token usage, meter the usage to the
+        workspace ledger, and return the assembled text. Bound `request.max_tokens` and the input
+        payload at the call site — this seam prices whatever the provider returns."""
+        parts: list[str] = []
+        usages: list[Usage] = []
+        async for event in self._client_factory().complete(
+            request.model_copy(update={"model": self.model})
+        ):
+            match event:
+                case TextDelta(text=text):
+                    parts.append(text)
+                case Usage():
+                    usages.append(event)
+        usage = Usage(
+            input_tokens=sum(u.input_tokens for u in usages),
+            output_tokens=sum(u.output_tokens for u in usages),
+            cache_read_tokens=sum(u.cache_read_tokens for u in usages),
+            cache_write_tokens=sum(u.cache_write_tokens for u in usages),
+        )
+        async with workspace_tx() as connection:
+            await record_workspace_usage(
+                connection, self.workspace_id, self.model, usage, self.pricing
+            )
+        return "".join(parts)
+
+
+@dataclass(frozen=True)
 class ExtensionContext:
     store: ScopedStore
     credentials: CredentialAccess
@@ -208,6 +252,7 @@ class ExtensionContext:
     corpus: TrajectoryCorpus | None = None
     scheduler: ScheduleStore | None = None
     invoker: TurnInvoker | None = None
+    model: ModelAccess | None = None
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[AsyncConnection]:
@@ -288,12 +333,20 @@ def context_for(
     pages: PageFeed | None = None,
     blob: BlobStore | None = None,
     invoker: TurnInvoker | None = None,
+    model_client_factory: Callable[[], ModelClient] | None = None,
+    model_name: str = "",
+    pricing: Pricing = CORE_PRICING,
 ) -> ExtensionContext:
     store = ScopedStore(workspace_id=workspace_id, extension=extension)
     credentials = CredentialAccess(
         workspace_id=workspace_id, declared=declared, _store=credential_store
     )
     corpus = None if blob is None else TrajectoryCorpus(workspace_id, blob)
+    model = (
+        None
+        if model_client_factory is None
+        else ModelAccess(workspace_id, model_name, pricing, model_client_factory)
+    )
     return ExtensionContext(
         store=store,
         credentials=credentials,
@@ -303,4 +356,5 @@ def context_for(
         corpus=corpus,
         scheduler=ScheduleStore(workspace_id=workspace_id),
         invoker=invoker,
+        model=model,
     )

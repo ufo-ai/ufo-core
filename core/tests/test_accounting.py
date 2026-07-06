@@ -13,6 +13,7 @@ from selfhost.accounting import (
     record_egress_request,
     record_sandbox_tokens,
     record_turn_usage,
+    record_workspace_usage,
     usage_priced_micro_usd,
 )
 from selfhost.db import workspace_tx
@@ -355,6 +356,50 @@ async def test_spend_rollup_matches_ledger_sums(db: None) -> None:
     assert [(s.label, s.priced_micro_usd) for s in report.by_agent] == [("assistant", 81_500)]
     assert [(p.price_digest, p.priced_micro_usd) for p in report.by_price_digest] == [
         (accounting.PRICE_DIGEST, 81_500)
+    ]
+
+
+async def test_workspace_usage_is_anchorless_priced_and_stamped(db: None) -> None:
+    workspace_id = uuid4()
+    async with workspace_tx() as connection:
+        await record_workspace_usage(connection, workspace_id, "claude-opus-4-8", FULL_USAGE)
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.ledger.c.turn_id,
+                    tables.ledger.c.dimension,
+                    tables.ledger.c.amount,
+                    tables.ledger.c.priced_micro_usd,
+                    tables.ledger.c.model,
+                    tables.ledger.c.price_digest,
+                ).where(tables.ledger.c.workspace_id == workspace_id)
+            )
+        ).one()
+    assert row.turn_id is None
+    assert (row.dimension, int(row.amount), int(row.priced_micro_usd)) == ("tokens", 10_000, 81_500)
+    assert row.model == "claude-opus-4-8"
+    assert row.price_digest == accounting.PRICE_DIGEST
+
+
+async def test_workspace_usage_counts_in_total_not_member_or_agent(db: None) -> None:
+    """A background job's metered spend lands in the workspace total and the per-dimension token
+    total, but is attributed to no member or agent — those breakdowns join through the turn a
+    workspace-anchored row lacks."""
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await record_turn_usage(connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE)
+        await record_workspace_usage(connection, workspace_id, "claude-opus-4-8", FULL_USAGE)
+    async with workspace_tx() as connection:
+        report = await SpendRollup(workspace_id).read(connection, 3600)
+    assert report.total_micro_usd == 81_500 * 2
+    assert {d.dimension: (d.amount, d.priced_micro_usd) for d in report.by_dimension} == {
+        "tokens": (20_000, 81_500 * 2)
+    }
+    assert [(s.label, s.priced_micro_usd) for s in report.by_member] == [("a@b.c", 81_500)]
+    assert [(s.label, s.priced_micro_usd) for s in report.by_agent] == [("assistant", 81_500)]
+    assert [(p.price_digest, p.priced_micro_usd) for p in report.by_price_digest] == [
+        (accounting.PRICE_DIGEST, 81_500 * 2)
     ]
 
 

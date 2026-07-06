@@ -13,6 +13,9 @@ from selfhost.ext.context import (
     JsonValue as JsonValue,
 )
 from selfhost.ext.context import (
+    ModelAccess as ModelAccess,
+)
+from selfhost.ext.context import (
     ScopedStore as ScopedStore,
 )
 from selfhost.ext.context import (
