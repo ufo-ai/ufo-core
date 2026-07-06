@@ -1,3 +1,10 @@
+---
+rfc: 0008
+title: "RFC — durable recovery without redoing completed work"
+status: proposed
+date: 2026-07-06
+---
+
 # RFC — durable recovery without redoing completed work
 
 **Status:** proposal, not adopted. **Scope:** crash recovery at three linked granularities — sub-turn

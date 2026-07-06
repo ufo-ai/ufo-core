@@ -1,9 +1,16 @@
+---
+rfc: 0004
+title: "`selfhost deploy` on the `selfhost-k8s` backend"
+status: proposed
+date: 2026-07-06
+---
+
 # `selfhost deploy` on the `selfhost-k8s` backend
 
-Status: **proposal, not adopted.** Nothing here is built. It extends `docs/rfc/deploy-service.md`
+Status: **proposal, not adopted.** Nothing here is built. It extends `0002-deploy-service.md`
 (which spec'd `selfhost deploy` as a recipe generator with a single-box compose target and a
 "missing control-plane ledger") by naming the **managed backend that fills that ledger**: the
-closed-source Kubernetes control plane `selfhost-k8s` (`docs/rfc/k8s-layer.md`). It changes no core
+closed-source Kubernetes control plane `selfhost-k8s` (`0003-k8s-layer.md`). It changes no core
 code — `selfhost deploy` still mirrors `selfhost bundle` (`bundle.py`), generating a recipe and
 importing no orchestrator; the k8s backend is one more recipe target.
 

@@ -1,3 +1,10 @@
+---
+rfc: 0006
+title: "RFC — gbrain graph extraction from pages"
+status: implemented
+date: 2026-07-06
+---
+
 # RFC — gbrain graph extraction from pages
 
 **Status:** proposal. **Scope:** a source-page → knowledge-graph derivation, delivered as an

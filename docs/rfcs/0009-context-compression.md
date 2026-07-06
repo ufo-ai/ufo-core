@@ -1,3 +1,10 @@
+---
+rfc: 0009
+title: "RFC — structured context compression, a pipeline not a summarize call"
+status: proposed
+date: 2026-07-06
+---
+
 # RFC — structured context compression, a pipeline not a summarize call
 
 **Status:** proposal, not adopted. **Scope:** the turn loop's window compaction
@@ -12,7 +19,7 @@ one call with a bounded, deterministic pipeline of the same shape, reusing seams
 has (the tool-result offload files, the before/after records, the usage metering).
 
 Not in scope: the memory **condenser** (memory-item summarization, deferred — a different subject),
-and durable sub-turn recovery (separate RFC, `docs/rfc/durable-recovery.md`).
+and durable sub-turn recovery (separate RFC, `0008-durable-recovery.md`).
 
 ---
 

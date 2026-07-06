@@ -1,3 +1,10 @@
+---
+rfc: 0001
+title: "Capability model (proposal): core capabilities, gated on backends"
+status: proposed
+date: 2026-07-06
+---
+
 # Capability model (proposal): core capabilities, gated on backends
 
 Status: **proposal, not adopted.** This revises the core/extension boundary in `spec.md` (§Principles,

@@ -1,3 +1,10 @@
+---
+rfc: 0007
+title: "GitHub extension sources (proposal): install extensions from git URLs, public and private"
+status: proposed
+date: 2026-07-06
+---
+
 # GitHub extension sources (proposal): install extensions from git URLs, public and private
 
 Status: **proposal, not adopted.** Nothing here is built. It extends `spec.md` (§Extension system,

@@ -1,8 +1,15 @@
+---
+rfc: 0003
+title: "selfhost-core as the backend runtime for the `selfhost-k8s` control plane"
+status: proposed
+date: 2026-07-06
+---
+
 # selfhost-core as the backend runtime for the `selfhost-k8s` control plane
 
 Status: **proposal, not adopted.** Nothing here is built. It fixes the shape of the enterprise
 Kubernetes offering principle 3 promises (`spec.md:16` — "Kubernetes is the enterprise upgrade,
-wrapping this core") so `selfhost deploy` (`docs/rfc/deploy-service.md`) can name a real backend.
+wrapping this core") so `selfhost deploy` (`0002-deploy-service.md`) can name a real backend.
 It touches no core doctrine: `spec.md §Kubernetes` ("Absent from core by construction … nothing in
 core may assume or import it"), the `no k8s imports anywhere` standing gate (`docs/plan.md:141`),
 and the enterprise-layer entry on the post-U10 backlog (`docs/plan.md:137`) all stand. Reference
@@ -27,7 +34,7 @@ through core's published seams.
 This **inverts** the earlier framing of this RFC. metalcraft's control plane is not a thing selfhost
 partially reimplements to make one CLI work; it is the deploy **backend** for the whole runtime.
 `selfhost deploy --backend k8s` provisions and scales a selfhost-core instance *through*
-`selfhost-k8s` — spec'd in `docs/rfc/deploy-via-k8s.md`. ufo/m8t compatibility falls out for free
+`selfhost-k8s` — spec'd in `0004-deploy-via-k8s.md`. ufo/m8t compatibility falls out for free
 (§6); it is a consequence, not the goal.
 
 The load-bearing enabler is unchanged from the prior analysis: **core is already backend-agnostic at
@@ -264,7 +271,7 @@ boot, importable only via `selfhost.sdk`:
 
 **The two big missing pieces are both outside core:** (1) the pod carrier — ~1 extension on an
 existing seam; (2) the control plane itself — `selfhost-k8s` (operator, tenant provisioning,
-ingress/TLS, HPA), spec'd as the deploy backend in `docs/rfc/deploy-via-k8s.md`. **Two small
+ingress/TLS, HPA), spec'd as the deploy backend in `0004-deploy-via-k8s.md`. **Two small
 core-side seam additions are optional, not blocking:** (a) the `--role` selector knob for per-role
 autoscaling (§2 — without it a replica runs all four roles, still correct); (b) a `proxy_rules`
 Manifest point if in-sandbox `kubectl` token-mint is ever wanted (§3.3 — not needed for the runtime).

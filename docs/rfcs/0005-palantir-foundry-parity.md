@@ -1,3 +1,10 @@
+---
+rfc: 0005
+title: "Palantir AIP / Foundry parity (proposal)"
+status: proposed
+date: 2026-07-06
+---
+
 # Palantir AIP / Foundry parity (proposal)
 
 Status: **proposal, not adopted.** Gap-analysis + spec against Palantir's three developer surfaces
@@ -104,7 +111,7 @@ retrieval-only, keyed by `owner_kind`+`subject`, injected via the `on_inbound` h
 a tool) and connector calls (freeform third-party APIs, marked `untrusted`). Cites: `tables.py:239`
 (`source`), `tables.py:277` (`page`), `indexing.py:67` (`IndexBackend`), `manifest.py:262`
 (`InjectContext` recall hook). The `knowledge-graph` (gbrain) extension now in build
-(`docs/rfc/gbrain-graph-extraction.md`; §3a) adds the first typed object/relation layer over this
+(`0006-gbrain-graph-extraction.md`; §3a) adds the first typed object/relation layer over this
 pipeline — extracted and read-side; see G5.
 
 ### 2c. Developer-app / auth surface — inbound is human-only
@@ -149,14 +156,14 @@ for BYOK, grant hosts tunnelled opaquely and metered (`sandbox/proxy/rules.py:63
 | G2 | No **agent-as-a-function** external entry (blocking/streaming invoke of a named agent) | Yes — an `api` surface on the `surfaces` seam over `TurnInvoker`, once G1 lands | **P0** |
 | G3 | No **typed I/O / app-state** for a top-level invoke | Yes — lift the subagent `input_model`/`output_model` pattern to the invoke boundary | **P1** |
 | G4 | No **multi-agent authoring in chat**; `agent` record under-built vs spec | Yes — owner-gated `create_agent`/`configure_agent` tools through the governed proposal flow; enrich the `agent` migration | **P1** |
-| G5 | No **ontology / typed object-query / governed action** data layer | **Partly — the read-side substrate ships as the `knowledge-graph` (gbrain) extension** (`docs/rfc/gbrain-graph-extraction.md`, in build); residual delta is a scoped authoring+Action layer on top (§3a) | **extension (substrate exists); delta scoped, not net-new** |
+| G5 | No **ontology / typed object-query / governed action** data layer | **Partly — the read-side substrate ships as the `knowledge-graph` (gbrain) extension** (`0006-gbrain-graph-extraction.md`, in build); residual delta is a scoped authoring+Action layer on top (§3a) | **extension (substrate exists); delta scoped, not net-new** |
 | G6 | No **OAuth2 authorization-server** (client registration, 3-legged on-behalf-of, refresh rotation) | No — big net-new | **non-goal (core); enterprise/ext** |
 
 ---
 
 ### 3a. G5 in relation to the gbrain `knowledge-graph` extension
 
-G5 is no longer purely net-new. The `knowledge-graph` extension (`docs/rfc/gbrain-graph-extraction.md`,
+G5 is no longer purely net-new. The `knowledge-graph` extension (`0006-gbrain-graph-extraction.md`,
 in build) is exactly the "extension owning typed tables + object-query tool + retrieval on the
 sources/pages seam" §6 named as the ontology path — it delivers the **read-side** of an ontology,
 *derived* from the pages pipeline:
@@ -236,7 +243,7 @@ service-principal is the correct, least-privilege shape and is recommended.
 
 | Item | Why not core | Path if wanted |
 |---|---|---|
-| **Ontology / typed object-query / governed Action layer** | selfhost core is an *agent runtime*, not a data platform; doctrine: "if a capability can be an extension, it is not core." Foundry's Ontology is its whole differentiator and a large subsystem. | **The read-side already ships** as the `knowledge-graph` (gbrain) extension — typed `graph_entity`/`graph_edge` + `graph_search` traversal, derived from pages (`docs/rfc/gbrain-graph-extraction.md`; §3a). Full parity is an **authoring + Action** layer *on top*: declared object-type schemas, object-set (filter/aggregate) queries, and governed typed-write Actions (the `untrusted`+`ask_user`/proposal flow is the confirmation half) — a layer on the substrate, not a net-new store. |
+| **Ontology / typed object-query / governed Action layer** | selfhost core is an *agent runtime*, not a data platform; doctrine: "if a capability can be an extension, it is not core." Foundry's Ontology is its whole differentiator and a large subsystem. | **The read-side already ships** as the `knowledge-graph` (gbrain) extension — typed `graph_entity`/`graph_edge` + `graph_search` traversal, derived from pages (`0006-gbrain-graph-extraction.md`; §3a). Full parity is an **authoring + Action** layer *on top*: declared object-type schemas, object-set (filter/aggregate) queries, and governed typed-write Actions (the `untrusted`+`ask_user`/proposal flow is the confirmation half) — a layer on the substrate, not a net-new store. |
 | **Full OAuth2 authorization server** (client registration console, 3-legged auth-code+PKCE on-behalf-of a member, refresh-token rotation) | Big net-new; P0 scoped tokens cover the machine-to-machine 80%. The 3-legged "external app acts as a selfhost member" case is rare for a self-hosted single-workspace deploy. | Enterprise/k8s layer (`spec.md` principle 3), or a dedicated extension mounting `/surface/oauth/…`. |
 | **Agent-builder GUI, generated client SDKs, marketplace** | Authoring is a chat/CLI act (doctrine); SDK-gen + marketplace are ecosystem, not runtime. | The invoke surface's OpenAPI + `selfhost ext search/install` are the analogs; a web builder is an extension surface. |
 

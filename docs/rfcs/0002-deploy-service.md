@@ -1,3 +1,10 @@
+---
+rfc: 0002
+title: "Deploy service (proposal): `selfhost deploy` + a hosted layer"
+status: proposed
+date: 2026-07-06
+---
+
 # Deploy service (proposal): `selfhost deploy` + a hosted layer
 
 Status: **proposal, not adopted.** Nothing here is built. It extends `spec.md` (§Deploy config
