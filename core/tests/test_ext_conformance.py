@@ -1181,13 +1181,9 @@ async def test_sample_source_syncs_a_page_recallable_through_memory(
         blob=blob,
         postgres=postgres,
     )
+    page_feed = CorePageFeed(blob=blob)
     page_indexer = PageIndexer(
-        pages=CorePageFeed(blob=blob),
-        index=index,
-        embed=embed,
-        transaction=workspace_tx,
-        chunker=TextChunker(),
-        cursor_store=ScopedStore(workspace_id=workspace_id, extension="memory"),
+        index=index, embed=embed, transaction=workspace_tx, chunker=TextChunker()
     )
     service = MemoryStore(
         index=index, embed=embed, transaction=workspace_tx, workspace_id=workspace_id
@@ -1204,7 +1200,7 @@ async def test_sample_source_syncs_a_page_recallable_through_memory(
     assert page.subject == SHARED_SUBJECT
     assert chunks == 0
 
-    await page_indexer.run()
+    await page_indexer.apply((await page_feed.pages_changed_since(None, 50)).changes)
     matches = await service.search_sources(
         "migrating orbital widget fleet", frozenset({SHARED_SUBJECT}), 5
     )

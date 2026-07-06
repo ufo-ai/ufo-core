@@ -47,7 +47,7 @@ as part of closing this out.
 
 ## FLAG — real gaps needing an owner call
 
-- **`triggers` Manifest point does not exist** (`ext/manifest.py`); `spec.md:131/317`, `plan.md:48/66` list it as a live seam. Data-plane half ≈ `sources`+`jobs`+`PageFeed`; the trigger→invocation (platform event fires a turn) half has no equivalent. Build it or delete the prose.
+- **RESOLVED — `triggers` deleted, replaced by the `page_change` hook.** The prose seam never existed as a Manifest point. Its data-plane half is now the `page_change` hook event, fired by a core batched cursor-runner that replays each changed source page to a consumer's hook off that extension's own cursor (the memory indexer and knowledge-graph extractor ride it). The trigger→invocation half (a platform event that fires a turn) stays a non-goal — that is `invoke` from a route or job, not a distinct seam. The `triggers` prose is gone from `spec.md`, `plan.md`, and `contracts.md`.
 - **`superseded_by` + `episodic`/`semantic` memory tiers are consumers with no producer** — recall filters/decays on them (`extensions/memory/.../store.py:426,470,223,253`), nothing ever writes them (the condenser would). Dead until #26.
 - **Durable attachment delivery is best-effort-once, not at-least-once** — `ext/surface.py:483-495`: `attach` sits inside the `reply_ref is None` guard, so a retry after `post` succeeds skips `attach` and marks delivered; shared files drop permanently on first attach failure.
 - **Writeback registration is not atomic with turn enqueue** — `ext/surface.py:302-320` (same class as the admission-orphan hardening item).
@@ -59,7 +59,7 @@ as part of closing this out.
 
 ## Doc integrity — stale prose to correct (both-ends)
 
-`salvage.md:38` (condenser "becomes the core Condenser"), `:44` (pause_and_wait "deferred to extensions"), `:62/64` (serve_url, e2b dropped-connection); `plan.md:48/64/66` (pipeline/Condenser + trigger seam + sample condenser/trigger); `spec.md:131/317` (`triggers`), §Model abstraction (`auto` routing, per-agent reasoning, keys-from-slots), §Accounting (per-tool metering), §Workspace (spend_cap dimension), §Extension (propose_change skills/grants). Also the inverse drift: `BUILTIN_TOOLS` ships 17 tools vs the spec's 8 — `glob`/`grep`/`list_skills`/`load_sessions`/`connect_account`/`pause_and_wait` each contradict a `salvage.md` drop/fold/defer decision.
+`salvage.md:38` (condenser "becomes the core Condenser"), `:44` (pause_and_wait "deferred to extensions"), `:62/64` (serve_url, e2b dropped-connection); `plan.md:48/64/66` (pipeline/Condenser + sample condenser); `spec.md` §Model abstraction (`auto` routing, per-agent reasoning, keys-from-slots), §Accounting (per-tool metering), §Workspace (spend_cap dimension), §Extension (propose_change skills/grants). Also the inverse drift: `BUILTIN_TOOLS` ships 17 tools vs the spec's 8 — `glob`/`grep`/`list_skills`/`load_sessions`/`connect_account`/`pause_and_wait` each contradict a `salvage.md` drop/fold/defer decision.
 
 ## Verified SOUND (checked, not cripples — so we don't re-flag)
 
@@ -69,7 +69,7 @@ Compaction (real summarize, fail-loud), background subagents (real child turns),
 
 1. **Now / safety + money:** #1 (e2b — fail-loud-disable immediately, wire later), #2 + #12 + the metering FLAGs (sandbox billing holes), #14 (eval green-washing — our evidence is overstated until fixed).
 2. **In flight:** the metered `ModelClient` (#25) → the condenser (#3/#26) → confirm gbrain Tier-B (#5) works on prose.
-3. **Spec-vs-impl reductions (build or amend spec):** #4 auto-routing, #6 spend_cap dimension, #7 per-tool metering, #8 propose_change, #9 pause_and_wait, the `triggers` seam.
+3. **Spec-vs-impl reductions (build or amend spec):** #4 auto-routing, #6 spend_cap dimension, #7 per-tool metering, #8 propose_change, #9 pause_and_wait. (The `triggers` seam is RESOLVED — deleted for the `page_change` hook.)
 4. **Extension fixes:** #10 mcp transport, #11 sites URLs, #13 coding PR-review grant, and the Tier-2 flags.
 5. **Doc corrections** (small, do alongside each fix, or upfront to stop the bleeding).
 </content>

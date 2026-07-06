@@ -26,7 +26,6 @@ from selfhost.accounting import SpendEvaluator, record_sandbox_tokens
 from selfhost.blob import FilesystemBlobStore
 from selfhost.config import SourceConfig, SourceEntry
 from selfhost.db import workspace_tx
-from selfhost.ext.context import ScopedStore
 from selfhost.indexing import TextChunker
 from selfhost.schema import tables
 from selfhost.schema.records import Usage
@@ -188,13 +187,9 @@ async def test_folder_source_syncs_indexes_and_is_recalled(
     blob = FilesystemBlobStore(root=tmp_path / "blobs")
     postgres = database_url.startswith("postgresql")
     driver = SyncDriver(backends={FOLDER_BACKEND: FolderSource()}, blob=blob, postgres=postgres)
+    page_feed = CorePageFeed(blob=blob)
     page_indexer = PageIndexer(
-        pages=CorePageFeed(blob=blob),
-        index=index,
-        embed=embed,
-        transaction=workspace_tx,
-        chunker=TextChunker(),
-        cursor_store=ScopedStore(workspace_id=workspace_id, extension="memory"),
+        index=index, embed=embed, transaction=workspace_tx, chunker=TextChunker()
     )
     service = MemoryStore(
         index=index, embed=embed, transaction=workspace_tx, workspace_id=workspace_id
@@ -211,7 +206,7 @@ async def test_folder_source_syncs_indexes_and_is_recalled(
     assert page_count == 1
     assert await _chunk_count() == 0  # embedding is a job, never inline on the sync write
 
-    await page_indexer.run()
+    await page_indexer.apply((await page_feed.pages_changed_since(None, 50)).changes)
     assert await _chunk_count() >= 1
 
     pages = await service.search_sources(

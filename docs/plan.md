@@ -45,7 +45,7 @@ services: SQLite + filesystem blobs + in-process hub.
 - `sdk/` (public re-exports), `ext/loader.py` (entry points → Manifest, validation, rule
   derivation), `credentials.py` (encrypted BYOK slots), onboarding-step registry (engine in U6).
 - CI gates: extensions import `selfhost.sdk` only; no k8s anywhere; no vendor o11y SDKs.
-- `extensions/sample/`: registers one of each — tool, subagent, connector stub, source, trigger,
+- `extensions/sample/`: registers one of each — tool, subagent, connector stub, source, hook,
   job, route, credential slot, onboarding step, condenser — the conformance harness for the API.
   It records every call it receives via its own `ExtensionContext` (durable, no mock call-logs);
   `tests/ext_conformance/` drives each point through public surfaces and reads the records back.
@@ -63,7 +63,7 @@ services: SQLite + filesystem blobs + in-process hub.
   pgvector — selected by engine dialect, fail-loud), `service.py` (recall fusion,
   `{member:<id>, shared}` filter), `pipeline.py` (Condenser seam + default condenser as jobs,
   batch-at-interval).
-- `sources.py`: SourceBackend + `folder` + sync driver job; trigger seam (pages → condense).
+- `sources.py`: SourceBackend + `folder` + sync driver job; page_change hook seam (pages → derive).
 - Builtins `memory_search` (absorbs store_search/load_sessions modes), `memory_update`; auto-inject
   recall at turn load (bounded, best-effort).
 - **Proof**: a fact stated in one conversation recalls in a new one; member A's memory invisible to

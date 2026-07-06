@@ -1,10 +1,10 @@
 """The memory extension's tools and recall hook, driven through the real scoped context.
 
-`memory_update`/`memory_search` are the extension's tools and `recall_hook` its `on_inbound` hook;
-each is driven here over an `ExtensionContext` carrying the deploy index/embed backends, exactly as
-core threads them onto a turn. The headline: a fact committed in one context is recalled in a fresh
-one — both by the search tool and, unprompted, by the on_inbound hook. `load_sessions` stays a core
-builtin and keeps its proof here, driven with a memory-free context."""
+`memory_update`/`memory_search` are the extension's tools and `recall_hook` its `user_prompt_submit`
+hook; each is driven here over an `ExtensionContext` carrying the deploy index/embed backends,
+exactly as core threads them onto a turn. The headline: a fact committed in one context is recalled
+in a fresh one — both by the search tool and, unprompted, by the user_prompt_submit hook.
+`load_sessions` stays a core builtin and keeps its proof here, driven with a memory-free context."""
 
 import json
 from collections.abc import AsyncIterator
@@ -26,7 +26,7 @@ from selfhost.indexing import TextChunker
 from selfhost.models.interface import Message, TextBlock, ToolUseBlock
 from selfhost.schema import tables
 from selfhost.schema.records import Agent, Turn
-from selfhost.sdk.manifest import HookContext, InjectContext, OnInbound
+from selfhost.sdk.manifest import HookContext, InjectContext, UserPromptSubmit
 from selfhost.subjects import member_subject
 from selfhost.tools.builtins import BUILTIN_TOOLS
 from selfhost.tools.context import SpawnResult, ToolContext, ToolResult
@@ -150,9 +150,9 @@ async def test_memory_update_then_search_recalls_in_a_new_conversation(
     assert "hunter2" in found.content[0].text
 
 
-async def test_on_inbound_hook_injects_a_recalled_fact(clean: None) -> None:
+async def test_user_prompt_submit_hook_injects_a_recalled_fact(clean: None) -> None:
     """The headline: a fact committed in one context is auto-injected into a fresh turn by the
-    on_inbound recall hook — no tool call, the recall path is the hook itself."""
+    user_prompt_submit recall hook — no tool call, the recall path is the hook itself."""
     workspace_id = await _workspace()
     member = uuid4()
     embed = StubEmbed(vec((7, 1.0)))
@@ -194,7 +194,7 @@ async def test_on_inbound_hook_injects_a_recalled_fact(clean: None) -> None:
             ),
             agent=Agent(prompt="p", model="claude-opus-4-8"),
             member_id=member,
-            payload=OnInbound(text="what is the vault code"),
+            payload=UserPromptSubmit(text="what is the vault code"),
         )
     )
     assert isinstance(outcome, InjectContext)
@@ -204,7 +204,7 @@ async def test_on_inbound_hook_injects_a_recalled_fact(clean: None) -> None:
 async def test_recall_hook_excludes_episodic_topic_pointers(clean: None, tmp_path: Path) -> None:
     """An episodic hit is rewritten to a topic pointer and dropped from the auto-injected context;
     a durable fact is injected verbatim — the episodic→topic exclusion, end to end through the
-    on_inbound hook."""
+    user_prompt_submit hook."""
     workspace_id = await _workspace()
     member = uuid4()
     embed = StubEmbed(vec((9, 1.0)))
@@ -234,7 +234,7 @@ async def test_recall_hook_excludes_episodic_topic_pointers(clean: None, tmp_pat
             ),
             agent=Agent(prompt="p", model="claude-opus-4-8"),
             member_id=member,
-            payload=OnInbound(text="api key pricing"),
+            payload=UserPromptSubmit(text="api key pricing"),
         )
     )
     assert isinstance(outcome, InjectContext)
@@ -242,7 +242,7 @@ async def test_recall_hook_excludes_episodic_topic_pointers(clean: None, tmp_pat
     assert "browsed the pricing page once" not in outcome.text
 
 
-async def test_recall_hook_ignores_a_non_inbound_payload(clean: None) -> None:
+async def test_recall_hook_ignores_a_non_prompt_payload(clean: None) -> None:
     workspace_id = await _workspace()
     embed = StubEmbed(vec((0, 1.0)))
     ext = _ext(DefaultIndex(embed=embed, transaction=workspace_tx), embed, workspace_id)

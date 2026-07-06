@@ -1,10 +1,11 @@
 """The knowledge-graph derivation, driven end to end over real source pages and a real database.
 
-`GraphExtractor` is the extension's producer; it rides the core `CorePageFeed` off its own
-ScopedStore cursor exactly as core threads them onto the job's context, and every assertion reads
-the resulting `graph_entity`/`graph_edge` rows back — never a fake. The pages are real `page` rows
-with real blob bodies the feed inlines, so the cursor, digest gate, and tombstone signal are all
-exercised as the sync driver produces them. Parsing is pure and asserted directly.
+`GraphExtractor` is the extension's producer; it applies the batch of page changes the core
+page-change runner replays off `CorePageFeed`, and every assertion reads the resulting
+`graph_entity`/`graph_edge` rows back — never a fake. The pages are real `page` rows with real blob
+bodies the feed inlines, so the digest gate and tombstone signal are exercised as the sync driver
+produces them; the runner's cursor loop is proven in the core runner's own test. Parsing is pure
+and asserted directly.
 """
 
 import hashlib
@@ -14,7 +15,6 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 from selfhost_ext_knowledge_graph.store import (
-    PAGE_CURSOR_KEY,
     GraphExtractor,
     GraphStore,
     UnknownEdgeType,
@@ -26,10 +26,11 @@ from selfhost_ext_knowledge_graph.store import (
 
 from selfhost.blob import FilesystemBlobStore
 from selfhost.db import workspace_tx
-from selfhost.ext.context import ScopedStore
 from selfhost.schema import tables
 from selfhost.sources.sync import CorePageFeed
 from selfhost.subjects import SHARED_SUBJECT
+
+PAGE_BATCH = 50
 
 BASE = datetime(2026, 1, 1, tzinfo=UTC)
 EXTENSION = "knowledge_graph"
@@ -108,13 +109,13 @@ async def _revise_page(
         )
 
 
-def _extractor(workspace_id: UUID, blob: FilesystemBlobStore) -> GraphExtractor:
-    return GraphExtractor(
-        pages=CorePageFeed(blob=blob),
-        transaction=workspace_tx,
-        cursor_store=ScopedStore(workspace_id=workspace_id, extension=EXTENSION),
-        workspace_id=workspace_id,
-    )
+async def _extract(workspace_id: UUID, blob: FilesystemBlobStore) -> None:
+    """Drive the derivation over every current page change, exactly as the core page-change runner
+    hands the extractor a batch. The derivation is idempotent (digest-gated), so replaying the whole
+    feed each call settles on the same graph — the cursor loop itself is proven in the core runner's
+    own test."""
+    batch = await CorePageFeed(blob=blob).pages_changed_since(None, PAGE_BATCH)
+    await GraphExtractor(transaction=workspace_tx, workspace_id=workspace_id).apply(batch.changes)
 
 
 async def _entity(workspace_id: UUID, normalized_name: str, entity_type: str) -> sa.Row | None:
@@ -158,7 +159,7 @@ async def test_reference_creates_a_stub_then_a_page_fills_it(db: None, tmp_path)
     await _seed_page(
         blob, workspace_id, source_id, "# Meeting Notes\nfollow up on [[Widget]]", BASE
     )
-    await _extractor(workspace_id, blob).run()
+    await _extract(workspace_id, blob)
 
     stub = await _entity(workspace_id, "widget", "topic")
     assert stub is not None and stub.is_stub
@@ -168,7 +169,7 @@ async def test_reference_creates_a_stub_then_a_page_fills_it(db: None, tmp_path)
     await _seed_page(
         blob, workspace_id, source_id, "# Widget\nthe widget spec", BASE + timedelta(seconds=1)
     )
-    await _extractor(workspace_id, blob).run()
+    await _extract(workspace_id, blob)
 
     filled = await _entity(workspace_id, "widget", "topic")
     assert filled is not None and not filled.is_stub
@@ -188,7 +189,7 @@ async def test_typed_links_produce_the_bounded_vocabulary_and_typed_nodes(
         "# Sam Altman\n[[founded::OpenAI]] and [[works_at::Y Combinator]] with @greg on #ai",
         BASE,
     )
-    await _extractor(workspace_id, blob).run()
+    await _extract(workspace_id, blob)
 
     edge_types = {row.edge_type for row in await _edges(workspace_id)}
     assert {"founded", "works_at", "mentions"} <= edge_types
@@ -205,14 +206,13 @@ async def test_reextract_on_unchanged_digest_is_idempotent(db: None, tmp_path) -
     workspace_id = await _workspace()
     source_id = await _source(workspace_id)
     await _seed_page(blob, workspace_id, source_id, "# Notes\nabout [[Acme]]", BASE)
-    await _extractor(workspace_id, blob).run()
+    await _extract(workspace_id, blob)
 
     first = await _edges(workspace_id)
     assert len(first) == 1
     stamped = first[0].updated_at
 
-    await ScopedStore(workspace_id=workspace_id, extension=EXTENSION).put(PAGE_CURSOR_KEY, None)
-    await _extractor(workspace_id, blob).run()
+    await _extract(workspace_id, blob)
 
     second = await _edges(workspace_id)
     assert len(second) == 1
@@ -227,11 +227,11 @@ async def test_digest_change_reextracts_and_prunes_removed_refs(db: None, tmp_pa
     page_id = await _seed_page(
         blob, workspace_id, source_id, "# Notes\n[[Acme]] and [[Beta]]", BASE
     )
-    await _extractor(workspace_id, blob).run()
+    await _extract(workspace_id, blob)
     assert len(await _edges(workspace_id)) == 2
 
     await _revise_page(blob, page_id, "# Notes\n[[Acme]]", BASE + timedelta(seconds=1))
-    await _extractor(workspace_id, blob).run()
+    await _extract(workspace_id, blob)
 
     remaining = await _edges(workspace_id)
     acme = await _entity(workspace_id, "acme", "topic")
@@ -244,11 +244,11 @@ async def test_page_tombstone_soft_deletes_its_edges(db: None, tmp_path) -> None
     workspace_id = await _workspace()
     source_id = await _source(workspace_id)
     page_id = await _seed_page(blob, workspace_id, source_id, "# Notes\nabout [[Acme]]", BASE)
-    await _extractor(workspace_id, blob).run()
+    await _extract(workspace_id, blob)
     assert len(await _edges(workspace_id)) == 1
 
     await _revise_page(blob, page_id, "", BASE + timedelta(seconds=1), tombstone=True)
-    await _extractor(workspace_id, blob).run()
+    await _extract(workspace_id, blob)
 
     assert await _edges(workspace_id) == []
     async with workspace_tx() as connection:
@@ -281,7 +281,7 @@ async def test_traverse_follows_multiple_hops_with_citations(db: None, tmp_path)
         "# Project Apollo\nsee also [[Beta Initiative]]",
         BASE + timedelta(seconds=1),
     )
-    await _extractor(workspace_id, blob).run()
+    await _extract(workspace_id, blob)
     store = GraphStore(workspace_tx, workspace_id)
 
     two = await store.traverse("Alice", frozenset({SHARED_SUBJECT}), 2, frozenset())
@@ -309,7 +309,7 @@ async def test_member_page_graph_is_invisible_to_another_member(db: None, tmp_pa
         BASE,
         subject=f"member:{alice}",
     )
-    await _extractor(workspace_id, blob).run()
+    await _extract(workspace_id, blob)
     store = GraphStore(workspace_tx, workspace_id)
 
     mine = await store.traverse(

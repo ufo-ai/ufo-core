@@ -191,7 +191,7 @@ file* rather than clearing in-context. The compaction pipeline should build on i
 |---|---|---|
 | **Threshold detection** — per-model window − summary reserve − buffer (`autoCompact.ts`) | Partial — flat `120_000`, no reserve, no per-model (`compaction.py:32`) | Derive from the model's real window; reserve the summary's `max_tokens`; keep `force` |
 | **Circuit breaker** on repeated compaction failure | No | Bound retries; a repeatedly-failing compaction fails the turn loud, never loops |
-| **Pre-compact hook** (`compact.ts`) | No (`HookChain` has `pre/post_tool_use`, `on_inbound` only — `engine.py:24-25`) | Out of scope — not core value; note only |
+| **Pre-compact hook** (`compact.ts`) | Yes — `pre_compact`/`post_compact` observe hooks fire when compaction occurs (`compaction.py`); `HookChain` is a generalized per-event map over the CC hook taxonomy (`loader.py`) | Done — landed with the generalized hook taxonomy |
 | **Message prep** — image→marker, attachment strip, boundary exclude (`compact.ts`) | Partial — `_text` drops images from input; single before/after boundary (`compaction.py:170-184`) | Explicit prep step: image markers, block-structure-preserving render |
 | **Group-aware selection** by API round (`grouping.ts`) | Partial — walk back to one assistant msg (`compaction.py:82-83`) | Group by assistant-id boundary; select/keep whole rounds |
 | **Structured multi-section summary** (`prompt.ts`, 9 sections) | No — one freeform sentence (`compaction.md:1`) | Typed `CompactionSummary` schema + sectioned prompt (§3) |

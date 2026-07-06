@@ -61,13 +61,22 @@ from selfhost.ext.manifest import (
     OnboardingStep as OnboardingStep,
 )
 from selfhost.ext.manifest import (
-    OnInbound as OnInbound,
-)
-from selfhost.ext.manifest import (
     Pack as Pack,
 )
 from selfhost.ext.manifest import (
+    PageChangeBatch as PageChangeBatch,
+)
+from selfhost.ext.manifest import (
+    PostCompact as PostCompact,
+)
+from selfhost.ext.manifest import (
     PostToolUse as PostToolUse,
+)
+from selfhost.ext.manifest import (
+    PostToolUseFailure as PostToolUseFailure,
+)
+from selfhost.ext.manifest import (
+    PreCompact as PreCompact,
 )
 from selfhost.ext.manifest import (
     PreToolUse as PreToolUse,
@@ -88,8 +97,14 @@ from selfhost.ext.manifest import (
     SourceProvider as SourceProvider,
 )
 from selfhost.ext.manifest import (
+    Stop as Stop,
+)
+from selfhost.ext.manifest import (
     SubagentProfile as SubagentProfile,
 )
 from selfhost.ext.manifest import (
     SubagentToolGrant as SubagentToolGrant,
+)
+from selfhost.ext.manifest import (
+    UserPromptSubmit as UserPromptSubmit,
 )

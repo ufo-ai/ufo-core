@@ -18,7 +18,7 @@ import asyncio
 import hashlib
 import importlib.util
 import os
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from importlib.machinery import ModuleSpec
 from importlib.metadata import EntryPoint, entry_points
 from pathlib import Path
@@ -40,6 +40,7 @@ from selfhost.ext.manifest import (
     ModifyOutput,
     Pack,
     PostToolUse,
+    PostToolUseFailure,
     PreToolUse,
     SubagentProfile,
 )
@@ -62,11 +63,25 @@ DEFAULT_LOCKFILE_PATH = Path("selfhost.lock")
 DIGEST_PREFIX = "sha256:"
 MIGRATIONS_DIRNAME = "migrations"
 HOOK_TIMEOUT_SECONDS = 5.0
-GATING_EVENTS: frozenset[HookEvent] = frozenset({"pre_tool_use", "on_inbound"})
+TURN_HOOK_EVENTS: tuple[HookEvent, ...] = (
+    "pre_tool_use",
+    "post_tool_use",
+    "post_tool_use_failure",
+    "user_prompt_submit",
+    "stop",
+    "pre_compact",
+    "post_compact",
+)
+GATING_EVENTS: frozenset[HookEvent] = frozenset({"pre_tool_use", "user_prompt_submit"})
 ALLOWED_OUTCOMES: dict[HookEvent, tuple[type, ...]] = {
     "pre_tool_use": (Deny, ModifyInput),
     "post_tool_use": (ModifyOutput, InjectContext),
-    "on_inbound": (Deny, InjectContext),
+    "post_tool_use_failure": (),
+    "user_prompt_submit": (Deny, InjectContext),
+    "stop": (),
+    "pre_compact": (),
+    "post_compact": (),
+    "page_change": (),
 }
 
 
@@ -423,7 +438,8 @@ def validate_ext_tools(
 
 class HookOutcomeNotAllowed(TypeError):
     """A hook returned an outcome its event does not permit (a Deny from post_tool_use, a
-    ModifyInput from on_inbound); treated as the hook malfunctioning under the failure policy."""
+    ModifyInput from user_prompt_submit); treated as the hook malfunctioning under the failure
+    policy."""
 
 
 @dataclass(frozen=True)
@@ -447,31 +463,28 @@ class HookResolution:
 @dataclass(frozen=True)
 class HookChain:
     """The turn's reactive hooks, grouped by event in lockfile pin order. `fire` runs one event's
-    hooks and folds their outcomes into a HookResolution the engine applies at the fire point."""
+    hooks and folds their outcomes into a HookResolution the engine applies at the fire point. Only
+    turn-lifecycle events live here; the data-plane page_change event is driven by the core
+    page-change runner in the jobs role, never the turn chain."""
 
-    pre_tool_use: tuple[BoundHook, ...] = ()
-    post_tool_use: tuple[BoundHook, ...] = ()
-    on_inbound: tuple[BoundHook, ...] = ()
+    hooks: dict[HookEvent, tuple[BoundHook, ...]] = field(default_factory=dict)
 
     async def fire(
         self,
         event: HookEvent,
         payload: HookPayload,
-        turn: Turn,
-        agent: Agent,
+        turn: Turn | None,
+        agent: Agent | None,
         member_id: UUID | None,
     ) -> HookResolution:
         """Run every hook bound to `event` in order and fold their outcomes. Any Deny denies and
         short-circuits (later hooks skip); ModifyInput/ModifyOutput fold left-to-right so each hook
         sees the prior's result; InjectContext concatenates in order. Composition trust is the pin
-        alone — no hook can admit a tool grants withheld. A gating hook (pre_tool_use, on_inbound)
-        that raises or exceeds the timeout fails closed to a Deny (fail loud); an observe hook
-        (post_tool_use) that raises is swallowed with a log, never failing the turn."""
-        bound = {
-            "pre_tool_use": self.pre_tool_use,
-            "post_tool_use": self.post_tool_use,
-            "on_inbound": self.on_inbound,
-        }[event]
+        alone — no hook can admit a tool grants withheld. A gating hook (pre_tool_use,
+        user_prompt_submit) that raises or exceeds the timeout fails closed to a Deny (fail loud); a
+        non-gating hook (post_tool_use and every observe event) that raises — or returns an outcome
+        its event does not permit — is swallowed with a log, never failing the turn."""
+        bound = self.hooks.get(event, ())
         gating = event in GATING_EVENTS
         tool_input = payload.tool_input if isinstance(payload, PreToolUse) else None
         output = payload.output if isinstance(payload, PostToolUse) else None
@@ -479,7 +492,7 @@ class HookChain:
         for hook in bound:
             current: HookPayload
             match payload:
-                case PreToolUse() | PostToolUse() if hook.spec.tools and (
+                case PreToolUse() | PostToolUse() | PostToolUseFailure() if hook.spec.tools and (
                     payload.tool_name not in hook.spec.tools
                 ):
                     continue
@@ -492,7 +505,7 @@ class HookChain:
                 case _:
                     current = payload
             context = HookContext(
-                ext=hook.ext, turn=turn, agent=agent, member_id=member_id, payload=current
+                ext=hook.ext, payload=current, turn=turn, agent=agent, member_id=member_id
             )
             try:
                 async with asyncio.timeout(HOOK_TIMEOUT_SECONDS):
@@ -535,15 +548,13 @@ def turn_hooks(
     index: IndexBackend | None = None,
     embed: EmbedClient | None = None,
 ) -> HookChain:
-    """The turn's reactive hook chain — every declared hook bound to its extension's
+    """The turn's reactive hook chain — every declared turn-lifecycle hook bound to its extension's
     workspace-scoped ExtensionContext (the same handle its tools and jobs receive), grouped by
-    event in the order `load_manifests` returns (lockfile pin order). An extension that declares
-    hooks without a credential key set fails loud, since its context needs the credential store."""
-    grouped: dict[HookEvent, list[BoundHook]] = {
-        "pre_tool_use": [],
-        "post_tool_use": [],
-        "on_inbound": [],
-    }
+    event in the order `load_manifests` returns (lockfile pin order). The data-plane page_change
+    event is deliberately excluded — the core page-change runner binds and drives it in the jobs
+    role with the model wired, never here. An extension that declares hooks without a credential key
+    set fails loud, since its context needs the credential store."""
+    grouped: dict[HookEvent, list[BoundHook]] = {event: [] for event in TURN_HOOK_EVENTS}
     for manifest in manifests:
         if not manifest.hooks:
             continue
@@ -554,9 +565,7 @@ def turn_hooks(
         declared = frozenset(slot.name for slot in manifest.credentials)
         context = context_for(workspace_id, manifest.name, declared, credential_store, index, embed)
         for spec in manifest.hooks:
+            if spec.event == "page_change":
+                continue
             grouped[spec.event].append(BoundHook(spec=spec, ext=context))
-    return HookChain(
-        pre_tool_use=tuple(grouped["pre_tool_use"]),
-        post_tool_use=tuple(grouped["post_tool_use"]),
-        on_inbound=tuple(grouped["on_inbound"]),
-    )
+    return HookChain(hooks={event: tuple(bound) for event, bound in grouped.items()})

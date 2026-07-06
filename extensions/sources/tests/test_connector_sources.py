@@ -31,7 +31,7 @@ from selfhost.blob import FilesystemBlobStore
 from selfhost.connectors import Credential
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
-from selfhost.ext.context import CredentialAccess, ScopedStore, context_for
+from selfhost.ext.context import CredentialAccess, context_for
 from selfhost.indexing import TextChunker
 from selfhost.schema import tables
 from selfhost.sdk.sources import (
@@ -599,13 +599,9 @@ async def test_asana_source_syncs_through_the_driver_into_recallable_memory(
         postgres=postgres,
         auth_proxy=_MockProxy(handler=handler),
     )
+    page_feed = CorePageFeed(blob=blob)
     page_indexer = PageIndexer(
-        pages=CorePageFeed(blob=blob),
-        index=index,
-        embed=embed,
-        transaction=workspace_tx,
-        chunker=TextChunker(),
-        cursor_store=ScopedStore(workspace_id=workspace_id, extension="memory"),
+        index=index, embed=embed, transaction=workspace_tx, chunker=TextChunker()
     )
     service = MemoryStore(
         index=index, embed=embed, transaction=workspace_tx, workspace_id=workspace_id
@@ -616,6 +612,6 @@ async def test_asana_source_syncs_through_the_driver_into_recallable_memory(
         chunks = (await connection.execute(sa.text("select count(*) from chunk"))).scalar_one()
     assert chunks == 0
 
-    await page_indexer.run()
+    await page_indexer.apply((await page_feed.pages_changed_since(None, 50)).changes)
     matches = await service.search_sources("Acme HQ workspace", frozenset({SHARED_SUBJECT}), 5)
     assert matches and "Acme HQ workspace" in matches[0].text

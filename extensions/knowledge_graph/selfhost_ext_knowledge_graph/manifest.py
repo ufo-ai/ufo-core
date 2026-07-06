@@ -1,12 +1,13 @@
-"""The knowledge-graph extension's declared points: the graph_search tool, the inbound graph-context
-hook, and the graph_extract derivation job.
+"""The knowledge-graph extension's declared points: the graph_search tool, the graph-context hook,
+and the graph-extract page-change hook.
 
 `graph_search` traverses the typed-edge graph a bounded number of hops out from a named entity and
-returns the relations it finds, each citing the source page it was derived from. The `on_inbound`
-hook injects the subgraph relevant to a member's message before the model runs — best-effort under
-the hook deadline, mirroring memory's recall hook, so a slow or failing graph read never denies the
-turn. `graph_extract` is the derivation: it rides the core `PageFeed` on its own cursor and turns
-each changed source page into nodes and typed edges on an interval, never inline on a write.
+returns the relations it finds, each citing the source page it was derived from. The
+`user_prompt_submit` hook injects the subgraph relevant to a member's message before the model runs
+— best-effort under the hook deadline, mirroring memory's recall hook, so a slow or failing graph
+read never denies the turn. `extract_graph` is the derivation: a `page_change` hook the core
+page-change runner drives off this extension's own cursor, turning each changed source page into
+nodes and typed edges, never inline on a write.
 """
 
 import asyncio
@@ -14,15 +15,14 @@ import logging
 
 from pydantic import BaseModel, Field
 
-from selfhost.sdk.context import ExtensionContext
-from selfhost.sdk.jobs import JobSpec
 from selfhost.sdk.manifest import (
     HookContext,
     HookOutcome,
     HookSpec,
     InjectContext,
     Manifest,
-    OnInbound,
+    PageChangeBatch,
+    UserPromptSubmit,
 )
 from selfhost.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from selfhost_ext_knowledge_graph.store import (
@@ -38,8 +38,6 @@ from selfhost_ext_knowledge_graph.store import (
 
 NAME = "knowledge_graph"
 VERSION = "0.1.0"
-GRAPH_EXTRACT_JOB = "graph_extract"
-GRAPH_EXTRACT_SCHEDULE = "0 * * * * *"
 GRAPH_HOOK_TIMEOUT_SECONDS = 4.0
 GRAPH_CONTEXT_PREFIX = "Relevant graph relations:\n"
 EDGE_TYPE_HELP = ", ".join(sorted(EDGE_TYPES))
@@ -91,11 +89,11 @@ async def graph_search_handler(ctx: ToolContext, args: GraphSearchInput) -> Tool
 
 
 async def graph_context_hook(ctx: HookContext) -> HookOutcome:
-    """Inject the subgraph relevant to the inbound message. on_inbound is gating — a raising or slow
-    handler denies the turn — so this stays strictly best-effort: it runs under a soft timeout below
-    the hook deadline and swallows every error, returning None on any failure or empty result rather
-    than ever failing the turn."""
-    if not isinstance(ctx.payload, OnInbound):
+    """Inject the subgraph relevant to the inbound message. user_prompt_submit is gating — a raising
+    or slow handler denies the turn — so this stays strictly best-effort: it runs under a soft
+    timeout below the hook deadline and swallows every error, returning None on any failure or empty
+    result rather than ever failing the turn."""
+    if not isinstance(ctx.payload, UserPromptSubmit):
         return None
     try:
         async with asyncio.timeout(GRAPH_HOOK_TIMEOUT_SECONDS):
@@ -112,16 +110,19 @@ async def graph_context_hook(ctx: HookContext) -> HookOutcome:
     return InjectContext(GRAPH_CONTEXT_PREFIX + "\n".join(lines)) if lines else None
 
 
-async def extract_graph(ctx: ExtensionContext) -> None:
-    if ctx.pages is None:
-        raise RuntimeError("graph_extract requires the page feed; none is wired")
+async def extract_graph(ctx: HookContext) -> HookOutcome:
+    """The `page_change` consumer: materialize graph nodes and typed edges from each replayed
+    source-page change the core runner delivers. The runner owns the cursor and batch loop; this
+    applies one delivered batch through the extension's jobs-way context, so Tier-B reaches
+    ctx.ext.model."""
+    if not isinstance(ctx.payload, PageChangeBatch):
+        return None
     await GraphExtractor(
-        pages=ctx.pages,
-        transaction=ctx.transaction,
-        cursor_store=ctx.store,
-        workspace_id=ctx.store.workspace_id,
-        model=ctx.model,
-    ).run()
+        transaction=ctx.ext.transaction,
+        workspace_id=ctx.ext.store.workspace_id,
+        model=ctx.ext.model,
+    ).apply(ctx.payload.changes)
+    return None
 
 
 def manifest() -> Manifest:
@@ -144,8 +145,8 @@ def manifest() -> Manifest:
                 handler=graph_search_handler,
             ),
         ),
-        hooks=(HookSpec(event="on_inbound", handler=graph_context_hook),),
-        jobs=(
-            JobSpec(name=GRAPH_EXTRACT_JOB, schedule=GRAPH_EXTRACT_SCHEDULE, handler=extract_graph),
+        hooks=(
+            HookSpec(event="user_prompt_submit", handler=graph_context_hook),
+            HookSpec(event="page_change", handler=extract_graph),
         ),
     )

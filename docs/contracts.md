@@ -180,7 +180,7 @@ class Manifest:
     name: str; version: str
     tools: tuple[ToolDef, ...] = ();            subagents: tuple[SubagentProfile, ...] = ()
     connectors: tuple[ConnectorSpec, ...] = (); sources: tuple[SourceSpec, ...] = ()
-    triggers: tuple[TriggerSpec, ...] = ();     jobs: tuple[JobSpec, ...] = ()
+    hooks: tuple[HookSpec, ...] = ();           jobs: tuple[JobSpec, ...] = ()
     routes: tuple[RouteSpec, ...] = ();         credentials: tuple[CredentialSlot, ...] = ()
     onboarding: tuple[OnboardingStep, ...] = ();packs: tuple[PackRef, ...] = ()
     models: tuple[ModelProviderSpec, ...] = (); carriers: tuple[CarrierSpec, ...] = ()

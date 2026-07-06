@@ -22,7 +22,13 @@ from selfhost.browser import CdpProvider
 from selfhost.db import workspace_tx
 from selfhost.ext.context import ExtensionContext
 from selfhost.ext.loader import HookChain
-from selfhost.ext.manifest import OnInbound, PostToolUse, PreToolUse
+from selfhost.ext.manifest import (
+    PostToolUse,
+    PostToolUseFailure,
+    PreToolUse,
+    Stop,
+    UserPromptSubmit,
+)
 from selfhost.grants import GrantStore
 from selfhost.hub import CostTick, Hub, LiveFrame, Parked, SkillLoad, Terminal, ToolCall
 from selfhost.loop.compaction import Compaction
@@ -209,8 +215,8 @@ class TurnEngine:
                     return await self._resolve_unclaimed()
                 system = self.system_prompt.content
                 inbound = await self.hooks.fire(
-                    "on_inbound",
-                    OnInbound(text=self.turn.inbound),
+                    "user_prompt_submit",
+                    UserPromptSubmit(text=self.turn.inbound),
                     self.turn,
                     self.agent,
                     self.member_id,
@@ -223,6 +229,9 @@ class TurnEngine:
                     system = f"{system}\n\n{inbound.injected}"
                 final_messages, answer = await self._model_round(
                     context, await self._load_messages(), usage_events, system
+                )
+                await self.hooks.fire(
+                    "stop", Stop(answer=answer), self.turn, self.agent, self.member_id
                 )
                 frame = await self._commit("done", usage_events, answer=answer)
                 if frame.status == "done":
@@ -480,12 +489,14 @@ class TurnEngine:
         data-only span so the model reads it as data, not instructions — the offload/bound and the
         wall both before post_tool_use, so any InjectContext guidance stays trusted outside the wall
         and the wall's close tag survives.
-        post_tool_use may ModifyOutput (replace the result) or InjectContext (append to it), and
-        fires on the error path too. An extension tool gets its owning ExtensionContext; a builtin
-        runs ext=None. A tool's image content (a read of an image/PDF, a browser screenshot)
-        bypasses the text bound, wall, and hooks and rides a successful result as image blocks
-        the model sees; an error result stays plain text so error-content consumers stay
-        str-typed."""
+        A tool that dispatched and succeeded fires post_tool_use, which may ModifyOutput (replace
+        the result) or InjectContext (append to it); a tool that dispatched and errored fires
+        post_tool_use_failure instead, observe-only, so the error content the model recovers from is
+        never rewritten. The pre-dispatch is_error result (a bad name or bad arguments) fires
+        neither — it never ran. An extension tool gets its owning ExtensionContext; a builtin runs
+        ext=None. A tool's image content (a read of an image/PDF, a browser screenshot) bypasses the
+        text bound, wall, and hooks and rides a successful result as image blocks the model sees; an
+        error result stays plain text so error-content consumers stay str-typed."""
         await self._publish_activity(call)
         try:
             tool = self.tools.get(call.name)
@@ -536,17 +547,26 @@ class TurnEngine:
                 + walled
                 + UNTRUSTED_RESULT_CLOSE
             )
-        post = await self.hooks.fire(
-            "post_tool_use",
-            PostToolUse(tool_name=call.name, tool_input=args, output=content, is_error=is_error),
-            self.turn,
-            self.agent,
-            self.member_id,
-        )
-        if post.output is not None:
-            content = post.output
-        if post.injected:
-            content = f"{content}\n{post.injected}"
+        if is_error:
+            await self.hooks.fire(
+                "post_tool_use_failure",
+                PostToolUseFailure(tool_name=call.name, tool_input=args, output=content),
+                self.turn,
+                self.agent,
+                self.member_id,
+            )
+        else:
+            post = await self.hooks.fire(
+                "post_tool_use",
+                PostToolUse(tool_name=call.name, tool_input=args, output=content),
+                self.turn,
+                self.agent,
+                self.member_id,
+            )
+            if post.output is not None:
+                content = post.output
+            if post.injected:
+                content = f"{content}\n{post.injected}"
         if images and not is_error:
             blocks: tuple[TextBlock | ImageBlock, ...] = (
                 *((TextBlock(text=content),) if content else ()),

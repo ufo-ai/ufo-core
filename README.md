@@ -2,7 +2,7 @@
 
 An agent runtime you can run, read, and extend: a hard-to-vary core — sandboxed agent loop, memory,
 Slack/CLI/web surfaces, accounting, Anthropic/OpenAI model abstraction — plus an extension system
-for everything else (connectors, data sources, triggers, tools, subagents, onboarding).
+for everything else (connectors, data sources, tools, subagents, onboarding).
 
 - `spec.md` — source of truth: doctrine, fixed decisions, workspace model, non-goals.
 - `docs/contracts.md` — core contracts per unit (sections delete as code lands).

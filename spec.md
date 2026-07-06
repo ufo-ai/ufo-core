@@ -3,7 +3,7 @@
 Selfhost is an agent runtime a developer can run, read, and extend: a hard-to-vary **core**
 (sandboxed agent loop, memory, surfaces, accounting, model abstraction, the extension system) plus
 **extensions** through which nearly every easy-to-vary capability is built — connectors, data
-sources, triggers, tools, subagents, onboarding. A **workspace** hosts one team and its agents.
+sources, tools, subagents, onboarding. A **workspace** hosts one team and its agents.
 Agents accumulate capabilities through **grants made in chat** — never borrowed from whoever is
 speaking.
 
@@ -52,7 +52,7 @@ Tables (all keyed by `workspace_id`, `created_at`, `updated_at`):
 | `memory_item` (memory extension) | Memory: subject = member or `shared`. The memory extension owns this table via its own migration; the index backend owns `chunk`. |
 | `ledger` | Metered usage: every model and tool call, priced. |
 | `spend_cap` | Caps by scope (`workspace` \| `member` \| `agent`), dimension, window; `reject` or `park` on breach. |
-| `job` | Recurring/one-time background work (source sync, triggers, extension jobs). |
+| `job` | Recurring/one-time background work (source sync, page-change fan-out, extension jobs). |
 
 ## Agent loop
 
@@ -74,7 +74,7 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   history compacts as it approaches the model window so a long turn never exceeds it.
 - **Memory** — an extension, not core: it owns the `memory_item` table, the `memory_search`/
   `memory_update` tools, and recall (lexical + vector RRF fusion, subject ∈ {member, shared}),
-  auto-injected each turn through an `on_inbound` hook — no core memory seam. Recall carries the
+  auto-injected each turn through a `user_prompt_submit` hook — no core memory seam. Recall carries the
   gbrain richness: per-kind recency decay (fact/preference/decision/event/task half-lives, fact
   items only), a type-diversity cap so no class dominates, supersession suppression, and an
   episodic→topic pointer excluded from auto-injection. It rides two core selection seams: the
@@ -128,8 +128,7 @@ Manifest registers (each optional):
 | `skills` | Skill folders (SKILL.md + bundled scripts/assets) contributed to the loadable set; the loader parses each into the registry `load_skill` and the `{{skill_index}}` consult, mounted into the sandbox under `.skills/<name>/` beside core's own three. A skill script imports nothing from selfhost (it runs in the sandbox) — a CI gate holds that boundary. |
 | `connectors` | Provider actions behind the connector framework; OAuth via the grant flow. **Composio brokers auth by PROXY: every call goes through Composio (`/tools/execute` for tools; a proxying transport → `/tools/execute/proxy` for feed-sync source HTTP, carried by the `composio` auth-proxy backend) carrying `(user_id, connected_account_id)` — Composio holds the provider token and injects it server-side; the token is NEVER exposed to us. A connector grant stores only `connected_account_id`; the confused-deputy check reads the account's `user_id` metadata, never a token. Composio grants derive NO egress InjectionRule — the sentinel→key swap (§Sandboxing) is ONLY for user-supplied BYOK `credentials` keys.** |
 | `sources` | Data-feed backends: `sync(cursor) -> pages` run as jobs; pages land in memory/knowledge via the derivation pipeline. Each backend is pluggable — S3, connector/provider APIs, webhooks; core ships only `folder` (local files). Connector source providers live in `extensions/sources`, built on the read-only REST connector framework core exposes through `selfhost.sdk.sources` (so any extension can provide a source); each resolves a provider `Credential` through the pluggable **auth-proxy** seam, never importing a broker. |
-| `triggers` | Data → memory (and → invocation): hooks on source pages and platform events. |
-| `hooks` | Turn-lifecycle policy filters — `pre_tool_use`/`post_tool_use`/`on_inbound` handlers, scoped like a job, that observe, deny, modify, or inject over the tools grants already admit; a runtime filter on top of grants, never a second grant path. Distinct axis from `triggers` (data-plane). |
+| `hooks` | Reactive lifecycle handlers on Claude Code's taxonomy, scoped like a job. Seven fire on the turn loop — `pre_tool_use`/`post_tool_use`/`post_tool_use_failure`, `user_prompt_submit`, `stop`, `pre_compact`/`post_compact` — as a runtime policy filter over the tools grants already admit (observe, deny, modify, or inject), never a second grant path. The eighth, `page_change`, is the data-plane seam (data → memory): a core batched cursor-runner replays each changed source page to a consumer's hook off that extension's own cursor — the path the memory indexer and knowledge-graph extractor ride. (Claude Code's session/permission/subagent-stop/notification events have no producer here and are not members until one lands with a consumer.) |
 | `jobs` | Recurring/one-time background work. |
 | `routes` | HTTP endpoints under `/ext/<name>/` (webhooks, OAuth callbacks, plugin UIs). |
 | `surfaces` | A chat surface on the one privileged surface seam: its `SurfaceRoute`s mounted under `/surface/<name>`. A **durable** surface (Slack) admits with writeback and declares two-phase delivery (`post` then `attach`) the poller drives; a **live** surface (web) admits without writeback and tails the hub over SSE in its own route. Core's CLI is the built-in live twin. |
@@ -314,8 +313,8 @@ bundle installs OSS, on-prem, or hosted.
 | GH code review on PR + auto-merge | routes (webhook), credentials, invoke, tools |
 | Service self-improvement / bug-fixing from o11y | sources (o11y), jobs, trajectories.read, invoke (evals), agents.propose_change |
 | Security review | tools, subagents |
-| gbrain-style memory (source → condense to markdown + graph) | memory, sources, triggers |
-| CRM / ATS | connectors, sources, triggers, tools |
+| gbrain-style memory (source → condense to markdown + graph) | memory, sources, hooks (page_change) |
+| CRM / ATS | connectors, sources, hooks (page_change), tools |
 | Websites | tools (sandbox serving), routes |
 
 Packs (activation bundles, not code — see Packs): **assistant** bundles memory, the browser pack

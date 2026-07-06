@@ -48,12 +48,17 @@ from selfhost.sdk.manifest import (
     Manifest,
     ModelProviderSpec,
     OnboardingStep,
+    PageChangeBatch,
+    PostCompact,
     PostToolUse,
+    PostToolUseFailure,
+    PreCompact,
     PromptSection,
     RouteSpec,
     SearchProviderSpec,
     SkillSpec,
     SourceProvider,
+    Stop,
     SubagentProfile,
     SubagentToolGrant,
 )
@@ -104,6 +109,11 @@ ROUTE_KEY = "route:hit"
 ONBOARDING_KEY = "onboarding:done"
 CONNECTOR_EXECUTE_KEY = "connector:executed"
 HOOK_POST_KEY = "hook:post"
+HOOK_POST_FAILURE_KEY = "hook:post_failure"
+HOOK_STOP_KEY = "hook:stop"
+HOOK_PRE_COMPACT_KEY = "hook:pre_compact"
+HOOK_POST_COMPACT_KEY = "hook:post_compact"
+HOOK_PAGE_CHANGE_KEY = "hook:page_change"
 PROPOSAL_SUFFIX = "\nBe concise."
 HOOK_DENY_REASON = "the sample pre_tool_use hook refuses its sentinel tool"
 SECTION_NAME = "sample_capability"
@@ -362,12 +372,72 @@ async def _deny_echo(ctx: HookContext) -> HookOutcome:
 
 
 async def _record_post(ctx: HookContext) -> HookOutcome:
-    """A post_tool_use observer over every dispatched call: it records the payload through the
-    extension's own scoped store, so the test reads back through a public surface that the
-    post payload arrived. The probe that a call which was not denied reaches the post point."""
+    """A post_tool_use observer over every dispatched call that SUCCEEDED: it records the payload
+    through the extension's own scoped store, so the test reads back through a public surface that
+    the post payload arrived. The probe that a non-denied, non-erroring call reaches the post
+    point — an errored call reaches post_tool_use_failure instead."""
     match ctx.payload:
-        case PostToolUse(tool_name=tool_name, is_error=is_error):
-            await ctx.ext.store.put(HOOK_POST_KEY, {"tool": tool_name, "is_error": is_error})
+        case PostToolUse(tool_name=tool_name):
+            await ctx.ext.store.put(HOOK_POST_KEY, {"tool": tool_name})
+    return None
+
+
+async def _record_post_failure(ctx: HookContext) -> HookOutcome:
+    """A post_tool_use_failure observer: a dispatched call whose result was an error records here,
+    never at post_tool_use. The probe that the success/failure split reaches distinct events."""
+    match ctx.payload:
+        case PostToolUseFailure(tool_name=tool_name):
+            await ctx.ext.store.put(HOOK_POST_FAILURE_KEY, {"tool": tool_name})
+    return None
+
+
+async def _record_stop(ctx: HookContext) -> HookOutcome:
+    """A stop observer: records the final answer the turn is about to commit, so the test reads back
+    that the turn-end event fired with its answer."""
+    match ctx.payload:
+        case Stop(answer=answer):
+            await ctx.ext.store.put(HOOK_STOP_KEY, {"answer": answer})
+    return None
+
+
+async def _record_pre_compact(ctx: HookContext) -> HookOutcome:
+    """A pre_compact observer: records the reason and the pre-compaction token estimate."""
+    match ctx.payload:
+        case PreCompact(reason=reason, before_tokens=before_tokens):
+            await ctx.ext.store.put(
+                HOOK_PRE_COMPACT_KEY, {"reason": reason, "before_tokens": before_tokens}
+            )
+    return None
+
+
+async def _record_post_compact(ctx: HookContext) -> HookOutcome:
+    """A post_compact observer: records the summary and the tokens bracketing the compaction."""
+    match ctx.payload:
+        case PostCompact(summary=summary, before_tokens=before_tokens, after_tokens=after_tokens):
+            await ctx.ext.store.put(
+                HOOK_POST_COMPACT_KEY,
+                {
+                    "summary": summary,
+                    "before_tokens": before_tokens,
+                    "after_tokens": after_tokens,
+                },
+            )
+    return None
+
+
+async def _record_page_change(ctx: HookContext) -> HookOutcome:
+    """The data-plane page_change probe: records the delivered page ids and whether the core
+    page-change runner wired the model into the off-turn context, so the runner's delivery, cursor
+    advance, and jobs-way context are read back through the scoped store."""
+    match ctx.payload:
+        case PageChangeBatch(changes=changes):
+            await ctx.ext.store.put(
+                HOOK_PAGE_CHANGE_KEY,
+                {
+                    "page_ids": [str(change.page_id) for change in changes],
+                    "model_wired": ctx.ext.model is not None,
+                },
+            )
     return None
 
 
@@ -644,6 +714,11 @@ def manifest() -> Manifest:
         hooks=(
             HookSpec(event="pre_tool_use", handler=_deny_echo, tools=(TOOL_NAME,)),
             HookSpec(event="post_tool_use", handler=_record_post),
+            HookSpec(event="post_tool_use_failure", handler=_record_post_failure),
+            HookSpec(event="stop", handler=_record_stop),
+            HookSpec(event="pre_compact", handler=_record_pre_compact),
+            HookSpec(event="post_compact", handler=_record_post_compact),
+            HookSpec(event="page_change", handler=_record_page_change),
         ),
         surfaces=(
             SurfaceSpec(

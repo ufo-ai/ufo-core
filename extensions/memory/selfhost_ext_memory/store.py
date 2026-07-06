@@ -30,7 +30,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.sql.elements import ColumnElement
 
-from selfhost.sdk.context import ExtensionContext, ScopedStore
+from selfhost.sdk.context import ExtensionContext
 from selfhost.sdk.index import (
     OWNER_KIND_MEMORY_ITEM,
     OWNER_KIND_PAGE,
@@ -41,7 +41,7 @@ from selfhost.sdk.index import (
     TextChunker,
     chunk_embed_upsert,
 )
-from selfhost.sdk.sources import SHARED_SUBJECT, PageChange, PageFeed, member_subject
+from selfhost.sdk.sources import SHARED_SUBJECT, PageChange, member_subject
 
 RRF_K = 60
 RRF_WEIGHT = 0.7
@@ -50,8 +50,6 @@ TAIL_SCAN_MAX = 200
 MEMORY_ITEM_NAMESPACE = UUID("32492d08-3cb7-59ac-8962-b2e384f024fc")
 DUE_BATCH_MAX_ITEMS = 200
 EMBED_CLAIM_LEASE_SECONDS = 300
-PAGE_INDEX_BATCH = 50
-PAGE_CURSOR_KEY = "page_index_cursor"
 
 TYPE_DIVERSITY_RATIO = 0.6
 MAX_CONFIDENCE = 10
@@ -599,34 +597,21 @@ class MemoryIndexer:
 
 @dataclass(frozen=True)
 class PageIndexer:
-    """The page derivation job: replay source-page changes off the core `PageFeed` and turn each
-    into index chunks + a `mem_page` mirror row, off the write path. A single-owner `(changed_at,
-    id)` cursor lives in the extension's ScopedStore — no lease, no double-embed: the cursor only
-    advances, so a restart resumes exactly where it left off and a page re-appears only when its
-    `updated_at` bumps. A tombstoned change drops the page's chunks and mirror row; every other
-    change chunks and embeds the inlined body and upserts the mirror (subject + created_at for
-    search's date window)."""
+    """The page derivation the memory extension's `page_change` hook drives: turn each replayed
+    source-page change into index chunks + a `mem_page` mirror row, off the write path. The core
+    page-change runner owns the cursor and the batch loop and hands this one delivered batch to
+    apply; the derivation stays idempotent so a replayed change re-upserts the same rows. A
+    tombstoned change drops the page's chunks and mirror row; every other change chunks and embeds
+    the inlined body and upserts the mirror (subject + created_at for search's date window)."""
 
-    pages: PageFeed
     index: IndexBackend
     embed: EmbedClient
     transaction: Transaction
     chunker: TextChunker
-    cursor_store: ScopedStore
 
-    async def run(self) -> None:
-        stored = await self.cursor_store.get(PAGE_CURSOR_KEY)
-        cursor = stored if isinstance(stored, str) else None
-        while True:
-            batch = await self.pages.pages_changed_since(cursor, PAGE_INDEX_BATCH)
-            if not batch.changes:
-                return
-            for change in batch.changes:
-                await self._apply(change)
-            cursor = batch.next_cursor
-            await self.cursor_store.put(PAGE_CURSOR_KEY, cursor)
-            if len(batch.changes) < PAGE_INDEX_BATCH:
-                return
+    async def apply(self, changes: tuple[PageChange, ...]) -> None:
+        for change in changes:
+            await self._apply(change)
 
     async def _apply(self, change: PageChange) -> None:
         if change.tombstone:

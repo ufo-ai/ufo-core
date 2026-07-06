@@ -1,11 +1,11 @@
-"""The knowledge-graph query surface — the graph_search tool and the on_inbound context hook — and
-its loader discovery.
+"""The knowledge-graph query surface — the graph_search tool and the user_prompt_submit context
+hook — and its loader discovery.
 
 Both consumers are driven over a real `ExtensionContext` against a real graph the extractor built
 from real pages: the tool through its handler, the hook through a real `HookContext`. The producer
-(the extract job) and these consumers land together and are proven together — extracted graph in,
-cited traversal out — and the discovery test confirms the extension registers under its name with
-its extract job in its own namespace.
+(the extract page_change hook) and these consumers land together and are proven together —
+extracted graph in, cited traversal out — and the discovery test confirms the extension registers
+under its name with its page_change derivation hook and no background job of its own.
 """
 
 import hashlib
@@ -19,12 +19,11 @@ from selfhost_ext_knowledge_graph.store import GraphExtractor, UnknownEdgeType
 
 from selfhost.blob import FilesystemBlobStore
 from selfhost.db import workspace_tx
-from selfhost.ext.context import ExtensionContext, ScopedStore, context_for
+from selfhost.ext.context import ExtensionContext, context_for
 from selfhost.ext.loader import discovered
-from selfhost.jobs import CORE_EXTENSION, bindings_from
 from selfhost.schema import tables
 from selfhost.schema.records import Agent, Turn
-from selfhost.sdk.manifest import HookContext, InjectContext, OnInbound
+from selfhost.sdk.manifest import HookContext, InjectContext, UserPromptSubmit
 from selfhost.sources.sync import CorePageFeed
 from selfhost.subjects import SHARED_SUBJECT
 from selfhost.tools.context import SpawnResult, ToolContext
@@ -79,12 +78,8 @@ async def _seed(blob: FilesystemBlobStore, workspace_id: UUID, body: str) -> Non
                 updated_at=WHEN,
             )
         )
-    await GraphExtractor(
-        pages=CorePageFeed(blob=blob),
-        transaction=workspace_tx,
-        cursor_store=ScopedStore(workspace_id=workspace_id, extension=EXTENSION),
-        workspace_id=workspace_id,
-    ).run()
+    batch = await CorePageFeed(blob=blob).pages_changed_since(None, 50)
+    await GraphExtractor(transaction=workspace_tx, workspace_id=workspace_id).apply(batch.changes)
 
 
 def _tool_ctx(ext: ExtensionContext) -> ToolContext:
@@ -126,12 +121,11 @@ def _hook_ctx(ext: ExtensionContext, text: str, payload: object) -> HookContext:
     )
 
 
-def test_extension_is_discovered_and_registers_its_extract_job() -> None:
+def test_extension_is_discovered_and_registers_its_page_change_hook() -> None:
     assert EXTENSION in discovered()
     manifest = kg.manifest()
-    keys = {binding.key for binding in bindings_from((manifest,), ())}
-    assert f"{manifest.name}:{kg.GRAPH_EXTRACT_JOB}" in keys
-    assert f"{CORE_EXTENSION}:{kg.GRAPH_EXTRACT_JOB}" not in keys
+    assert "page_change" in {hook.event for hook in manifest.hooks}
+    assert manifest.jobs == ()
 
 
 async def test_graph_search_returns_cited_relations(db: None, tmp_path) -> None:
@@ -181,7 +175,7 @@ async def test_graph_search_reports_no_relations_on_an_empty_graph(db: None, tmp
     assert "No graph relations" in result.content[0].text
 
 
-async def test_on_inbound_hook_injects_the_relevant_subgraph(db: None, tmp_path) -> None:
+async def test_user_prompt_submit_hook_injects_the_relevant_subgraph(db: None, tmp_path) -> None:
     workspace_id = await _workspace()
     await _seed(
         FilesystemBlobStore(root=tmp_path), workspace_id, "# Sam Altman\n[[founded::OpenAI]]"
@@ -189,13 +183,15 @@ async def test_on_inbound_hook_injects_the_relevant_subgraph(db: None, tmp_path)
     ext = context_for(workspace_id, EXTENSION, frozenset(), None)
 
     outcome = await kg.graph_context_hook(
-        _hook_ctx(ext, "tell me about Sam Altman", OnInbound(text="tell me about Sam Altman"))
+        _hook_ctx(
+            ext, "tell me about Sam Altman", UserPromptSubmit(text="tell me about Sam Altman")
+        )
     )
     assert isinstance(outcome, InjectContext)
     assert "OpenAI" in outcome.text
 
 
-async def test_on_inbound_hook_ignores_a_non_inbound_payload(db: None, tmp_path) -> None:
+async def test_user_prompt_submit_hook_ignores_a_non_prompt_payload(db: None, tmp_path) -> None:
     workspace_id = await _workspace()
     ext = context_for(workspace_id, EXTENSION, frozenset(), None)
     assert await kg.graph_context_hook(_hook_ctx(ext, "hi", None)) is None

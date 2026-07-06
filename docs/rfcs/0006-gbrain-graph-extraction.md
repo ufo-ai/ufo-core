@@ -107,9 +107,9 @@ graph substrate, and neither system built the parts of gbrain that make a graph 
 4. **No traversal / gap-analysis** — the query shape gbrain sells; metalcraft used edges only as a
    ranking nudge; selfhost has no edges to nudge with.
 
-spec.md already names the target as an **acceptance-test extension**: line 317 — *"gbrain-style
-memory (source → condense to markdown + graph) | memory, sources, triggers"*. It is declared, not
-built.
+spec.md already names the target as an **acceptance-test extension**: *"gbrain-style memory (source
+→ condense to markdown + graph) | memory, sources, hooks (page_change)"*. Graph extraction is built
+and rides the `page_change` hook the core cursor-runner drives.
 
 ## 5. Proposed implementation — a `knowledge-graph` extension
 
@@ -125,11 +125,12 @@ built.
   recall-time graph *boost* is later wanted — metalcraft's `fusion.py` model — that needs a memory
   ranking-contribution seam and is out of scope here; gbrain's value is **traversal**, a query the
   extension owns directly.)
-- **Batch-at-interval, never inline.** Derived state is produced by jobs, never on a write
-  (CLAUDE.md hot-paths; "event-fired work must be unable to fire on events it caused"). The job
-  polls the `PageFeed` cursor exactly as `PageIndexer` does — it never fires on page writes. This is
-  what spec.md's `triggers` ("pages → derive") means operationally; selfhost has **no** trigger
-  abstraction (it is `jobs` + `PageFeed`), so we use that concrete seam, not invent one.
+- **Batch-at-interval, never inline.** Derived state is produced by a background sweep, never on a
+  write (CLAUDE.md hot-paths; "event-fired work must be unable to fire on events it caused"). The
+  extractor registers a `page_change` hook; the core batched cursor-runner replays the `PageFeed`
+  off this extension's own cursor exactly as it does for `PageIndexer` — it never fires on page
+  writes. `page_change` is the concrete data → memory seam (the runner over `PageFeed`); there is
+  no separate "trigger" abstraction to invent.
 
 ### 5.2 Tables (extension-owned migration, all `workspace_id`-scoped, `subject ∈ {shared, member:*}`)
 
@@ -185,12 +186,12 @@ body chars per page, cap model output tokens.
   **no graph-DB backend seam** (doctrine: generic only where a real matrix demands it; add a
   `graph_backends` seam only when a second backend exists, not before). Returns nodes+edges with
   `source_page_id` citations.
-- **`on_inbound` hook** (hooks manifest point, spec.md:132) optionally injects the query-relevant
-  subgraph into the turn — mirroring memory's `recall_hook` (`manifest.py:199-214`) — so graph
-  context reaches the agent automatically, the memory extension's recall path untouched.
+- **`user_prompt_submit` hook** (hooks manifest point, spec.md:132) optionally injects the
+  query-relevant subgraph into the turn — mirroring memory's `recall_hook` (`manifest.py:199-214`) —
+  so graph context reaches the agent automatically, the memory extension's recall path untouched.
 
-**Both-ends discipline:** the migration adds only what this unit wires; the extract job (producer)
-and `graph_search`/hook (consumer) land together; the sample-extension-style proof exercises both —
+**Both-ends discipline:** the migration adds only what this unit wires; the extract `page_change`
+hook (producer) and `graph_search`/hook (consumer) land together; the proof exercises both —
 realistic source pages → extracted nodes+edges (durable) → `graph_search` returns a cited
 multi-hop answer, and an unknown edge type raises.
 
@@ -204,7 +205,7 @@ multi-hop answer, and an unknown edge type raises.
 | LLM extraction pass | `ctx.invoker` (or a `ModelClient`) | `context.py:210, 224-231` |
 | Batch scheduling | `Manifest.jobs = [JobSpec(name, schedule, handler)]` → DBOS cron | `ext/manifest.py:60`; `jobs.py:275-295` |
 | Entity-embedding dedup (phase 2) | `ctx.index` / `ctx.embed` | `context.py:205-206` |
-| Query tool + auto-inject | `tools` + `hooks` (`on_inbound`) manifest points | `spec.md:125,132` |
+| Query tool + auto-inject | `tools` + `hooks` (`user_prompt_submit`) manifest points | `spec.md:125,132` |
 
 Conclusion: the whole feature is a manifest + a migration + one job + one tool + one hook. It
 proves the extension seam (spec.md:317) rather than extending core.
@@ -213,8 +214,8 @@ proves the extension seam (spec.md:317) rather than extending core.
 
 | Phase | Delivers |
 |---|---|
-| **1** | tables + `graph_extract` job (Tier A + Tier B) + `graph_search` tool + tombstone soft-delete + level-trigger. End-to-end proof. |
-| **2** | `on_inbound` subgraph injection; embedding-based entity dedup over `ctx.index`. |
+| **1** | tables + `graph_extract` page_change hook (Tier A + Tier B) + `graph_search` tool + tombstone soft-delete + level-trigger digest gate. End-to-end proof. |
+| **2** | `user_prompt_submit` subgraph injection; embedding-based entity dedup over `ctx.index`. |
 | **3** | cron enrichment job (entity merge, alias consolidation, stale-edge supersession) — gbrain's overnight loop (research lines 122-132), batch-at-interval. |
 
 ## 6. Open questions

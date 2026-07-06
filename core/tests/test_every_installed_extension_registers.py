@@ -266,13 +266,11 @@ def _check_hooks(manifest: Manifest, store: CredentialStore) -> None:
     if not manifest.hooks:
         return
     chain = turn_hooks((manifest,), WORKSPACE_ID, store)
-    grouped = {
-        "pre_tool_use": chain.pre_tool_use,
-        "post_tool_use": chain.post_tool_use,
-        "on_inbound": chain.on_inbound,
-    }
     for spec in manifest.hooks:
-        assert any(bound.spec is spec for bound in grouped[spec.event])
+        if spec.event == "page_change":
+            assert "page_change" not in chain.hooks
+            continue
+        assert any(bound.spec is spec for bound in chain.hooks[spec.event])
 
 
 def _check_jobs(manifest: Manifest) -> None:

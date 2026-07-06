@@ -44,7 +44,14 @@ from selfhost.ext.surface import SurfaceContext, SurfaceSpec, WritebackPoller
 from selfhost.grants import ConnectFlow, GrantStore, OAuthProvider, install_connect_flow
 from selfhost.hub import Hub, InProcessHub
 from selfhost.indexing import EmbedClient, IndexBackend
-from selfhost.jobs import JobRunner, SandboxReaper, SpendResume, bindings_from, core_jobs
+from selfhost.jobs import (
+    JobRunner,
+    PageChangeRunner,
+    SandboxReaper,
+    SpendResume,
+    bindings_from,
+    core_jobs,
+)
 from selfhost.loop.profiles import CORE_SUBAGENT_PROFILES
 from selfhost.loop.queue import Runtime, init_runtime
 from selfhost.loop.subagents import SubagentRegistry
@@ -200,28 +207,45 @@ def _launch_jobs(
     startup); a handler may read a declared credential or the deploy index/embed backends or the
     page feed, so once any job is registered the credential key must be set."""
     manifests = load_manifests(config.pack.name)
-    bindings = bindings_from(
-        manifests,
-        core_jobs(sync_driver, SpendResume(client=dbos_client), SandboxReaper(carrier=carrier)),
-    )
-    if not bindings:
-        return
     key = os.environ.get(config.credentials.key_env)
     if not key:
         raise RuntimeError(
             f"credential key env {config.credentials.key_env!r} is unset but jobs are registered"
         )
     workspace_id = asyncio.run(_sole_workspace_id())
+    credential_store = CredentialStore(fernet=Fernet(key.encode()))
+    invoker = AdmissionInvoker(admission=Admission(dbos=dbos_client), workspace_id=workspace_id)
+    registry = model_registry(config, manifests)
+    page_change_runner = PageChangeRunner(
+        workspace_id=workspace_id,
+        credential_store=credential_store,
+        manifests=manifests,
+        pages=page_feed,
+        index=index,
+        embed=embed,
+        blob=blob,
+        invoker=invoker,
+        registry=registry,
+    )
+    bindings = bindings_from(
+        manifests,
+        core_jobs(
+            sync_driver,
+            SpendResume(client=dbos_client),
+            SandboxReaper(carrier=carrier),
+            page_change_runner,
+        ),
+    )
     JobRunner(
         workspace_id=workspace_id,
-        credential_store=CredentialStore(fernet=Fernet(key.encode())),
+        credential_store=credential_store,
         bindings=bindings,
         index=index,
         embed=embed,
         pages=page_feed,
         blob=blob,
-        invoker=AdmissionInvoker(admission=Admission(dbos=dbos_client), workspace_id=workspace_id),
-        registry=model_registry(config, manifests),
+        invoker=invoker,
+        registry=registry,
     ).launch()
 
 

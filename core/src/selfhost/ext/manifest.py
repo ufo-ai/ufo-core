@@ -31,7 +31,7 @@ from selfhost.sandbox.session import Carrier
 from selfhost.schema.records import Agent, Turn
 from selfhost.search import SearchProvider
 from selfhost.skills.runtime import RuntimeSkill
-from selfhost.sources.sync import SourceBackend
+from selfhost.sources.sync import PageChange, SourceBackend
 from selfhost.tools.registry import ToolDef
 
 
@@ -235,7 +235,23 @@ class OnboardingStep:
     handler: Callable[[ExtensionContext], Awaitable[None]]
 
 
-HookEvent = Literal["pre_tool_use", "post_tool_use", "on_inbound"]
+HookEvent = Literal[
+    "pre_tool_use",
+    "post_tool_use",
+    "post_tool_use_failure",
+    "user_prompt_submit",
+    "stop",
+    "pre_compact",
+    "post_compact",
+    "page_change",
+]
+"""The lifecycle events a hook binds to, named after Claude Code's taxonomy. Seven fire on the turn
+loop; `page_change` is the data-plane event the core page-change runner fires off the source-page
+feed. Claude Code names further events (`session_start`, `session_end`, `permission_request`,
+`subagent_stop`, `notification`) that this system has no producer for — no session, interactive
+permission prompt, or parent-side subagent boundary — so they are deliberately not members here: a
+declared event with no fire-point is exactly the crippling this taxonomy avoids. Each gains a member
+the change that lands its real fire-point and a consumer together."""
 
 
 @dataclass(frozen=True)
@@ -249,31 +265,94 @@ class PreToolUse:
 
 @dataclass(frozen=True)
 class PostToolUse:
-    """A tool call that dispatched, including the error path (`is_error`). A hook may ModifyOutput
-    (replace the result the model sees) or InjectContext (append guidance to it)."""
+    """A tool call that dispatched successfully. A hook may ModifyOutput (replace the result the
+    model sees) or InjectContext (append guidance to it). A call that errored fires
+    post_tool_use_failure instead, never this."""
 
     tool_name: str
     tool_input: BaseModel
     output: str
-    is_error: bool
 
 
 @dataclass(frozen=True)
-class OnInbound:
+class PostToolUseFailure:
+    """A dispatched tool call that failed — the observe counterpart to post_tool_use. Fires only for
+    a tool that actually ran and errored (its handler raised, or returned an error result); a bad
+    tool name or an argument-validation failure is caught before dispatch and becomes an is_error
+    result with no hook, so this never fires for a call that never ran. `output` is the error
+    content the model will see; the event takes no outcome, it only notifies."""
+
+    tool_name: str
+    tool_input: BaseModel
+    output: str
+
+
+@dataclass(frozen=True)
+class UserPromptSubmit:
     """A member message opening a turn. A hook may Deny it (the turn refuses) or InjectContext
     (append to the turn's system context — the generalized recall-injection point)."""
 
     text: str
 
 
-HookPayload = PreToolUse | PostToolUse | OnInbound
+@dataclass(frozen=True)
+class Stop:
+    """The agent has produced its final answer and the turn is about to commit. Observe-only — a
+    hook sees the answer but cannot alter the terminal outcome."""
+
+    answer: str
+
+
+@dataclass(frozen=True)
+class PreCompact:
+    """The turn's context window is about to be compacted (its head summarized). `reason` is `auto`
+    when the window crossed the trigger or `force` when a provider overflow forced it;
+    `before_tokens` is the pre-compaction window estimate. Observe-only, fired only when compaction
+    will occur."""
+
+    reason: Literal["auto", "force"]
+    before_tokens: int
+
+
+@dataclass(frozen=True)
+class PostCompact:
+    """The turn's context window has just been compacted. `summary` is the condensed history that
+    replaced the head; `before_tokens`/`after_tokens` bracket the window it shrank. Observe-only."""
+
+    summary: str
+    before_tokens: int
+    after_tokens: int
+
+
+@dataclass(frozen=True)
+class PageChangeBatch:
+    """A batch of source-page changes the core page-change runner replays to a data-plane hook off
+    that extension's own cursor — the generalized data → memory seam. `changes` are the pages
+    changed since the extension's cursor (a tombstone carries an empty body); the handler derives
+    from each and the runner advances the cursor. Off-turn, so its HookContext carries no turn,
+    agent, or member. Observe-only."""
+
+    changes: tuple[PageChange, ...]
+
+
+HookPayload = (
+    PreToolUse
+    | PostToolUse
+    | PostToolUseFailure
+    | UserPromptSubmit
+    | Stop
+    | PreCompact
+    | PostCompact
+    | PageChangeBatch
+)
 
 
 @dataclass(frozen=True)
 class Deny:
-    """Refuse the pending act — a pre_tool_use call or an on_inbound turn. The reason surfaces to
-    the member as the terminal frame; a tool Deny is the is_error result the model recovers from.
-    Narrow-only: Deny cannot admit a tool grants withheld, it only refuses one already admitted."""
+    """Refuse the pending act — a pre_tool_use call or a user_prompt_submit turn. The reason
+    surfaces to the member as the terminal frame; a tool Deny is the is_error result the model
+    recovers from. Narrow-only: Deny cannot admit a tool grants withheld, it only refuses one
+    already admitted."""
 
     reason: str
 
@@ -294,8 +373,8 @@ class ModifyOutput:
 
 @dataclass(frozen=True)
 class InjectContext:
-    """Append text to the turn's context — the system prompt on on_inbound, the tool result on
-    post_tool_use (on_inbound and post_tool_use only)."""
+    """Append text to the turn's context — the system prompt on user_prompt_submit, the tool result
+    on post_tool_use (user_prompt_submit and post_tool_use only)."""
 
     text: str
 
@@ -306,16 +385,18 @@ HookOutcome = Deny | ModifyInput | ModifyOutput | InjectContext | None
 @dataclass(frozen=True)
 class HookContext:
     """What a hook handler receives: the same workspace-scoped `ExtensionContext` a job or route
-    gets (its store, declared credential slots, memory), the frozen turn and agent it fires under,
-    the conversation's member, and the per-event payload. Deliberately no raw SandboxSession,
+    gets (its store, declared credential slots, memory) and the per-event payload. A turn-lifecycle
+    event carries the frozen turn and agent it fires under and the conversation's member; a
+    data-plane event (page_change) fires outside any turn, so `turn`, `agent`, and `member_id` are
+    None and the payload alone carries the event's arguments. Deliberately no raw SandboxSession,
     ToolContext, DB handle, spawn, admit, or invoke — a hook observes and filters, it cannot act
     outside its scope or fire work that would re-enter the loop it runs inside."""
 
     ext: ExtensionContext
-    turn: Turn
-    agent: Agent
-    member_id: UUID | None
     payload: HookPayload
+    turn: Turn | None = None
+    agent: Agent | None = None
+    member_id: UUID | None = None
 
 
 @dataclass(frozen=True)

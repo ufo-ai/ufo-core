@@ -25,7 +25,7 @@ from selfhost_ext_knowledge_graph.store import (
 from selfhost.accounting import CORE_PRICING
 from selfhost.blob import FilesystemBlobStore
 from selfhost.db import workspace_tx
-from selfhost.ext.context import ModelAccess, ScopedStore
+from selfhost.ext.context import ModelAccess
 from selfhost.models.interface import ModelEvent, ModelRequest, TextDelta
 from selfhost.schema import tables
 from selfhost.schema.records import Usage
@@ -98,13 +98,10 @@ async def _seed_page(blob: FilesystemBlobStore, workspace_id: UUID, body: str) -
 
 
 async def _run(blob: FilesystemBlobStore, workspace_id: UUID, model: ModelAccess) -> None:
-    await GraphExtractor(
-        pages=CorePageFeed(blob=blob),
-        transaction=workspace_tx,
-        cursor_store=ScopedStore(workspace_id=workspace_id, extension=EXTENSION),
-        workspace_id=workspace_id,
-        model=model,
-    ).run()
+    batch = await CorePageFeed(blob=blob).pages_changed_since(None, 50)
+    await GraphExtractor(transaction=workspace_tx, workspace_id=workspace_id, model=model).apply(
+        batch.changes
+    )
 
 
 async def test_tier_b_lands_typed_edges_and_meters_the_call(db: None, tmp_path) -> None:

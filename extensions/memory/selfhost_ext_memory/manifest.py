@@ -1,10 +1,12 @@
-"""The memory extension's declared points: the two tools, the recall hook, the index job, the skill.
+"""The memory extension's declared points: the two tools, the recall hook, the page-change indexer,
+the memory-index job, the skill.
 
-`memory_search` and `memory_update` are the agent's durable-memory tools; the `on_inbound` hook
-auto-injects relevant memory into the turn's context before the model runs; the `memory_index`
-JobSpec is the derivation that turns committed items into index chunks on an interval. Recall stays
-best-effort under a gating hook: the handler owns a soft timeout below the hook deadline and
-swallows every error, returning None rather than ever denying the turn.
+`memory_search` and `memory_update` are the agent's durable-memory tools; the `user_prompt_submit`
+hook auto-injects relevant memory into the turn's context before the model runs; the `page_change`
+hook turns each replayed source-page change into index chunks + a mirror row off the core runner's
+cursor; the `memory_index` JobSpec is the derivation that turns committed items into index chunks on
+an interval. Recall stays best-effort under a gating hook: the handler owns a soft timeout below the
+hook deadline and swallows every error, returning None rather than ever denying the turn.
 """
 
 import asyncio
@@ -25,8 +27,9 @@ from selfhost.sdk.manifest import (
     HookSpec,
     InjectContext,
     Manifest,
-    OnInbound,
+    PageChangeBatch,
     SkillSpec,
+    UserPromptSubmit,
 )
 from selfhost.sdk.sources import SHARED_SUBJECT, member_subject
 from selfhost.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
@@ -55,8 +58,6 @@ RECALL_SOFT_TIMEOUT_SECONDS = 4.0
 RECALL_CONTEXT_PREFIX = "Relevant memory:\n"
 MEMORY_INDEX_JOB = "memory_index"
 MEMORY_INDEX_SCHEDULE = "0 * * * * *"
-PAGE_INDEX_JOB = "page_index"
-PAGE_INDEX_SCHEDULE = "0 * * * * *"
 SKILL_DIR = Path(__file__).parent / "skills" / "memory"
 
 logger = logging.getLogger(__name__)
@@ -197,11 +198,11 @@ async def memory_update_handler(ctx: ToolContext, args: MemoryUpdateInput) -> To
 
 
 async def recall_hook(ctx: HookContext) -> HookOutcome:
-    """Auto-inject memory relevant to the inbound into the turn's system context. on_inbound is
-    gating — a raising or slow handler denies the turn — so recall stays strictly best-effort: it
+    """Auto-inject memory relevant to the inbound into the turn's system context. user_prompt_submit
+    is gating — a raising or slow handler denies the turn — so recall stays strictly best-effort: it
     runs under its own soft timeout below the hook deadline and swallows every error, returning None
     on any failure or empty result rather than ever failing the turn."""
-    if not isinstance(ctx.payload, OnInbound):
+    if not isinstance(ctx.payload, UserPromptSubmit):
         return None
     subjects = recall_subjects(ctx.member_id)
     try:
@@ -222,17 +223,21 @@ async def index_memory(ctx: ExtensionContext) -> None:
     ).run()
 
 
-async def index_pages(ctx: ExtensionContext) -> None:
-    if ctx.index is None or ctx.embed is None or ctx.pages is None:
-        raise RuntimeError("page_index requires the index, embed, and page backends; none wired")
+async def index_pages(ctx: HookContext) -> HookOutcome:
+    """The `page_change` consumer: derive index chunks + a `mem_page` mirror from each replayed
+    source-page change the core runner delivers. The runner owns the cursor and batch loop; this
+    applies one delivered batch through the extension's jobs-way context (index + embed wired)."""
+    if not isinstance(ctx.payload, PageChangeBatch):
+        return None
+    if ctx.ext.index is None or ctx.ext.embed is None:
+        raise RuntimeError("page_change indexing requires the index and embed backends; none wired")
     await PageIndexer(
-        pages=ctx.pages,
-        index=ctx.index,
-        embed=ctx.embed,
-        transaction=ctx.transaction,
+        index=ctx.ext.index,
+        embed=ctx.ext.embed,
+        transaction=ctx.ext.transaction,
         chunker=TextChunker(),
-        cursor_store=ctx.store,
-    ).run()
+    ).apply(ctx.payload.changes)
+    return None
 
 
 def manifest() -> Manifest:
@@ -270,10 +275,12 @@ def manifest() -> Manifest:
                 handler=memory_update_handler,
             ),
         ),
-        hooks=(HookSpec(event="on_inbound", handler=recall_hook),),
+        hooks=(
+            HookSpec(event="user_prompt_submit", handler=recall_hook),
+            HookSpec(event="page_change", handler=index_pages),
+        ),
         jobs=(
             JobSpec(name=MEMORY_INDEX_JOB, schedule=MEMORY_INDEX_SCHEDULE, handler=index_memory),
-            JobSpec(name=PAGE_INDEX_JOB, schedule=PAGE_INDEX_SCHEDULE, handler=index_pages),
         ),
         skills=(SkillSpec(path=SKILL_DIR),),
     )

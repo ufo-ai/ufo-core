@@ -1,12 +1,15 @@
-"""The reactive-hook seam: the HookChain's composition/failure model directly, and the three fire
-points wired in the engine — proven end to end through the installed sample's two hooks.
+"""The reactive-hook seam: the HookChain's composition/failure model directly, and every
+turn-lifecycle fire point wired in the engine — proven end to end through the installed sample's
+hooks.
 
 `fire` is pure control flow, so its folding, deny-wins ordering, matcher, timeout, and fail
 policies are asserted directly against the resolution it returns (a closure list observes which
 real handlers ran — the fire logic under test, never a stand-in dependency). The engine wiring is
-proven through the sample extension registering a pre_tool_use gate and a post_tool_use recorder:
-the sample records what its hooks received through its own scoped store, and the tests read those
-rows back through the public ScopedStore — no mock call-log."""
+proven through the sample extension registering a hook per turn event — a pre_tool_use gate, a
+post_tool_use recorder, a post_tool_use_failure recorder, a stop recorder, and pre/post_compact
+recorders: the sample records what each hook received through its own scoped store, and the tests
+read those rows back through the public ScopedStore — no mock call-log. The data-plane page_change
+seam and its runner are proven in test_page_change."""
 
 import json
 from collections.abc import AsyncIterator
@@ -34,14 +37,18 @@ from selfhost.ext.manifest import (
     InjectContext,
     ModifyInput,
     ModifyOutput,
-    OnInbound,
     PostToolUse,
     PreToolUse,
+    UserPromptSubmit,
 )
 from selfhost.hub import InProcessHub
-from selfhost.loop.compaction import Compaction
+from selfhost.loop.compaction import (
+    COMPACTION_KEEP_MESSAGES,
+    COMPACTION_TRIGGER_TOKENS,
+    Compaction,
+)
 from selfhost.loop.engine import TurnEngine
-from selfhost.loop.prompts.render import rendered_prompt
+from selfhost.loop.prompts.render import COMPACTION_SYSTEM_PROMPT, rendered_prompt
 from selfhost.loop.transcript import Transcript
 from selfhost.models.interface import (
     Message,
@@ -75,7 +82,7 @@ def _ext(workspace_id: UUID) -> ExtensionContext:
 
 def _chain(event: str, ext: ExtensionContext, *specs: HookSpec) -> HookChain:
     bound = tuple(BoundHook(spec=spec, ext=ext) for spec in specs)
-    return HookChain(**{event: bound})
+    return HookChain(hooks={event: bound})
 
 
 async def _fire(chain: HookChain, event: str, payload: object) -> loader.HookResolution:
@@ -126,7 +133,7 @@ async def test_modify_input_folds_left_to_right_each_seeing_the_prior() -> None:
     assert resolution.tool_input.value == "xAB"
 
 
-async def test_inject_context_on_inbound_concatenates_in_order() -> None:
+async def test_inject_context_user_prompt_submit_concatenates_in_order() -> None:
     async def first(ctx: HookContext) -> HookOutcome:
         return InjectContext(text="first")
 
@@ -135,12 +142,12 @@ async def test_inject_context_on_inbound_concatenates_in_order() -> None:
 
     ext = _ext(uuid4())
     chain = _chain(
-        "on_inbound",
+        "user_prompt_submit",
         ext,
-        HookSpec(event="on_inbound", handler=first),
-        HookSpec(event="on_inbound", handler=second),
+        HookSpec(event="user_prompt_submit", handler=first),
+        HookSpec(event="user_prompt_submit", handler=second),
     )
-    resolution = await _fire(chain, "on_inbound", OnInbound(text="hi"))
+    resolution = await _fire(chain, "user_prompt_submit", UserPromptSubmit(text="hi"))
     assert resolution.denied is None
     assert resolution.injected == "first\nsecond"
 
@@ -206,8 +213,8 @@ async def test_gating_hook_exceeding_the_timeout_fails_closed(monkeypatch: objec
 
     monkeypatch.setattr(loader, "HOOK_TIMEOUT_SECONDS", 0.05)
     ext = _ext(uuid4())
-    chain = _chain("on_inbound", ext, HookSpec(event="on_inbound", handler=slow))
-    resolution = await _fire(chain, "on_inbound", OnInbound(text="hi"))
+    chain = _chain("user_prompt_submit", ext, HookSpec(event="user_prompt_submit", handler=slow))
+    resolution = await _fire(chain, "user_prompt_submit", UserPromptSubmit(text="hi"))
     assert resolution.denied is not None
     assert "failed closed" in resolution.denied
 
@@ -221,7 +228,7 @@ async def test_raising_observe_hook_is_swallowed_leaving_the_output_unchanged() 
     resolution = await _fire(
         chain,
         "post_tool_use",
-        PostToolUse(tool_name="t", tool_input=Args(value="x"), output="original", is_error=False),
+        PostToolUse(tool_name="t", tool_input=Args(value="x"), output="original"),
     )
     assert resolution.denied is None
     assert resolution.output == "original"
@@ -236,7 +243,7 @@ async def test_a_disallowed_outcome_on_an_observe_event_is_ignored() -> None:
     resolution = await _fire(
         chain,
         "post_tool_use",
-        PostToolUse(tool_name="t", tool_input=Args(value="x"), output="original", is_error=False),
+        PostToolUse(tool_name="t", tool_input=Args(value="x"), output="original"),
     )
     assert resolution.denied is None
     assert resolution.output == "original"
@@ -305,6 +312,27 @@ def _answered(request: ModelRequest) -> bool:
         and any(isinstance(block, ToolResultBlock) for block in message.content)
         for message in request.messages
     )
+
+
+@dataclass(frozen=True)
+class CompactingModel:
+    """Round 1: one bash call, which grows the window past keep_messages; round 2: answer. On the
+    compaction summarize request (identified by its COMPACTION_SYSTEM_PROMPT system prompt) it
+    returns fixed summary text, so a proactive compaction mid-turn yields a real summary and fires
+    the pre_compact/post_compact hooks."""
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        if request.system == COMPACTION_SYSTEM_PROMPT:
+            yield TextDelta(text="condensed history")
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        if _answered(request):
+            yield TextDelta(text="done")
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        yield ToolCallStart(id="c1", name="bash")
+        yield ToolCallDelta(id="c1", partial_json=json.dumps({"command": "echo hi"}))
+        yield Usage(input_tokens=2, output_tokens=2)
 
 
 @dataclass
@@ -403,17 +431,29 @@ def _engine(
     tools: tuple = BUILTIN_TOOLS,
     tool_ext: dict | None = None,
     carrier: RecordingCarrier | None = None,
+    compaction_trigger: int = COMPACTION_TRIGGER_TOKENS,
+    compaction_keep: int = COMPACTION_KEEP_MESSAGES,
 ) -> TurnEngine:
     blob = FilesystemBlobStore(root=tmp_path)
     handle = SandboxHandle(conversation_id=turn.conversation_id, container_id="test")
+    agent = Agent(prompt="p", model="claude-opus-4-8")
     return TurnEngine(
         turn=turn,
-        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        agent=agent,
         system_prompt=rendered_prompt("p"),
         model=model,
         transcript=Transcript(blob=blob, conversation_id=turn.conversation_id),
         compaction=Compaction(
-            client=model, model="claude-opus-4-8", blob=blob, conversation_id=turn.conversation_id
+            client=model,
+            model="claude-opus-4-8",
+            blob=blob,
+            conversation_id=turn.conversation_id,
+            trigger_tokens=compaction_trigger,
+            keep_messages=compaction_keep,
+            hooks=hooks,
+            turn=turn,
+            agent=agent,
+            member_id=None,
         ),
         hub=InProcessHub(),
         sandbox=SandboxSession(carrier=carrier or RecordingCarrier(), handle=handle),
@@ -450,7 +490,8 @@ async def test_sample_pre_deny_short_circuits_and_post_captures_the_other(
 
     scoped = ScopedStore(workspace_id=turn.workspace_id, extension=sample.NAME)
     assert await scoped.get(sample.TOOL_KEY) is None
-    assert await scoped.get(sample.HOOK_POST_KEY) == {"tool": "bash", "is_error": False}
+    assert await scoped.get(sample.HOOK_POST_KEY) == {"tool": "bash"}
+    assert await scoped.get(sample.HOOK_POST_FAILURE_KEY) is None
 
     stored = await engine.transcript.read()
     assert stored is not None
@@ -460,14 +501,82 @@ async def test_sample_pre_deny_short_circuits_and_post_captures_the_other(
     assert results[1].is_error is False
 
 
-async def test_on_inbound_inject_reaches_the_system_context(db: None, tmp_path: Path) -> None:
+async def test_stop_fires_with_the_final_answer(db: None, tmp_path: Path) -> None:
+    turn = await _seed_turn(uuid4())
+    manifest = _sample_manifest()
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    tools, tool_ext = turn_tools((manifest,), turn.workspace_id, store)
+    hooks = turn_hooks((manifest,), turn.workspace_id, store)
+    frame = await _engine(
+        turn, CapturingModel(), tmp_path, hooks, tools=tools, tool_ext=tool_ext
+    ).run()
+    assert frame.status == "done"
+    scoped = ScopedStore(workspace_id=turn.workspace_id, extension=sample.NAME)
+    assert await scoped.get(sample.HOOK_STOP_KEY) == {"answer": "ok"}
+
+
+async def test_tool_failure_reaches_post_tool_use_failure_not_post_tool_use(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn(uuid4())
+    manifest = _sample_manifest()
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    tools, tool_ext = turn_tools((manifest,), turn.workspace_id, store)
+    hooks = turn_hooks((manifest,), turn.workspace_id, store)
+    carrier = RecordingCarrier(result=ExecResult(stdout="", stderr="boom", exit_code=1))
+    frame = await _engine(
+        turn,
+        BashThenAnswerModel(),
+        tmp_path,
+        hooks,
+        tools=tools,
+        tool_ext=tool_ext,
+        carrier=carrier,
+    ).run()
+    assert frame.status == "done"
+    scoped = ScopedStore(workspace_id=turn.workspace_id, extension=sample.NAME)
+    assert await scoped.get(sample.HOOK_POST_FAILURE_KEY) == {"tool": "bash"}
+    assert await scoped.get(sample.HOOK_POST_KEY) is None
+
+
+async def test_compaction_fires_pre_and_post_compact(db: None, tmp_path: Path) -> None:
+    turn = await _seed_turn(uuid4())
+    manifest = _sample_manifest()
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    tools, tool_ext = turn_tools((manifest,), turn.workspace_id, store)
+    hooks = turn_hooks((manifest,), turn.workspace_id, store)
+    frame = await _engine(
+        turn,
+        CompactingModel(),
+        tmp_path,
+        hooks,
+        tools=tools,
+        tool_ext=tool_ext,
+        compaction_trigger=1,
+        compaction_keep=2,
+    ).run()
+    assert frame.status == "done"
+    scoped = ScopedStore(workspace_id=turn.workspace_id, extension=sample.NAME)
+    pre = await scoped.get(sample.HOOK_PRE_COMPACT_KEY)
+    post = await scoped.get(sample.HOOK_POST_COMPACT_KEY)
+    assert pre is not None and pre["reason"] == "auto" and pre["before_tokens"] > 0
+    assert post is not None and post["summary"] == "condensed history"
+    assert post["before_tokens"] == pre["before_tokens"]
+    assert post["after_tokens"] > 0
+
+
+async def test_user_prompt_submit_inject_reaches_the_system_context(
+    db: None, tmp_path: Path
+) -> None:
     turn = await _seed_turn(uuid4())
 
     async def inject(ctx: HookContext) -> HookOutcome:
         return InjectContext(text="INJECTED-GUIDANCE")
 
     chain = _chain(
-        "on_inbound", _ext(turn.workspace_id), HookSpec(event="on_inbound", handler=inject)
+        "user_prompt_submit",
+        _ext(turn.workspace_id),
+        HookSpec(event="user_prompt_submit", handler=inject),
     )
     model = CapturingModel()
     frame = await _engine(turn, model, tmp_path, chain).run()
@@ -475,14 +584,18 @@ async def test_on_inbound_inject_reaches_the_system_context(db: None, tmp_path: 
     assert "INJECTED-GUIDANCE" in model.seen_system[0]
 
 
-async def test_on_inbound_deny_refuses_the_turn_before_the_model(db: None, tmp_path: Path) -> None:
+async def test_user_prompt_submit_deny_refuses_the_turn_before_the_model(
+    db: None, tmp_path: Path
+) -> None:
     turn = await _seed_turn(uuid4())
 
     async def deny(ctx: HookContext) -> HookOutcome:
         return Deny(reason="inbound refused by policy")
 
     chain = _chain(
-        "on_inbound", _ext(turn.workspace_id), HookSpec(event="on_inbound", handler=deny)
+        "user_prompt_submit",
+        _ext(turn.workspace_id),
+        HookSpec(event="user_prompt_submit", handler=deny),
     )
     model = CapturingModel()
     frame = await _engine(turn, model, tmp_path, chain).run()

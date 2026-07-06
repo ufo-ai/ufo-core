@@ -36,9 +36,9 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from selfhost.sdk.context import ModelAccess, ScopedStore
+from selfhost.sdk.context import ModelAccess
 from selfhost.sdk.models import Message, ModelRequest
-from selfhost.sdk.sources import SHARED_SUBJECT, PageChange, PageFeed, member_subject
+from selfhost.sdk.sources import SHARED_SUBJECT, PageChange, member_subject
 
 EdgeType = Literal[
     "mentions",
@@ -83,8 +83,6 @@ GRAPH_ENTITY_NAMESPACE = UUID("1d9d0b1e-3a2c-5e4f-8a7b-6c5d4e3f2a1b")
 GRAPH_EDGE_NAMESPACE = UUID("2e8c1a2b-4b3d-5f6e-9b8a-7d6c5e4f3a2b")
 DETERMINISTIC_CONFIDENCE = 1.0
 
-PAGE_EXTRACT_BATCH = 50
-PAGE_CURSOR_KEY = "graph_extract_cursor"
 PAGE_ANCHOR_PREFIX = "page:"
 
 TIER_B_MAX_BODY_CHARS = 8_000
@@ -296,34 +294,22 @@ def render_subgraph(subgraph: Subgraph) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class GraphExtractor:
-    """The derivation job: replay source-page changes off the core `PageFeed` and materialize each
-    into graph nodes and typed edges, off the write path. A single-owner `(changed_at, id)` cursor
-    lives in the extension's ScopedStore, independent of the memory indexer's — it only advances, so
-    a page re-appears only when its `updated_at` bumps and the job can never fire on the graph rows
-    it wrote. A tombstoned change soft-deletes the edges the page sourced; every other change,
-    unless its digest was already extracted, upserts the page's anchor node, resolves each reference
-    to a node (stub-on-reference), writes the typed edges, and prunes edges from a prior digest.
-    """
+    """The graph derivation the knowledge-graph extension's `page_change` hook drives: materialize
+    each replayed source-page change into graph nodes and typed edges, off the write path. The core
+    page-change runner owns the cursor and the batch loop, on a cursor independent of the memory
+    indexer's, and hands this one delivered batch to apply. A tombstoned change soft-deletes the
+    edges the page sourced; every other change, unless its digest was already extracted, upserts the
+    page's anchor node, resolves each reference to a node (stub-on-reference), writes the typed
+    edges, and prunes edges from a prior digest — so a replayed change with an unchanged digest is a
+    no-op."""
 
-    pages: PageFeed
     transaction: Transaction
-    cursor_store: ScopedStore
     workspace_id: UUID
     model: ModelAccess | None = None
 
-    async def run(self) -> None:
-        stored = await self.cursor_store.get(PAGE_CURSOR_KEY)
-        cursor = stored if isinstance(stored, str) else None
-        while True:
-            batch = await self.pages.pages_changed_since(cursor, PAGE_EXTRACT_BATCH)
-            if not batch.changes:
-                return
-            for change in batch.changes:
-                await self._apply(change)
-            cursor = batch.next_cursor
-            await self.cursor_store.put(PAGE_CURSOR_KEY, cursor)
-            if len(batch.changes) < PAGE_EXTRACT_BATCH:
-                return
+    async def apply(self, changes: tuple[PageChange, ...]) -> None:
+        for change in changes:
+            await self._apply(change)
 
     async def _apply(self, change: PageChange) -> None:
         if change.tombstone:

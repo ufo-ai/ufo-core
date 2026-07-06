@@ -7,13 +7,16 @@ window that replaces it (`after`) persist above the live transcript at
 verbatim even after the live window is swapped for the summary."""
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Literal
 from uuid import UUID
 
 import lz4.frame
 from pydantic import BaseModel
 
 from selfhost.blob import BlobNotFound, BlobStore
+from selfhost.ext.loader import HookChain
+from selfhost.ext.manifest import PostCompact, PreCompact
 from selfhost.loop.prompts.render import COMPACTION_SYSTEM_PROMPT
 from selfhost.models.interface import (
     ImageBlock,
@@ -25,7 +28,7 @@ from selfhost.models.interface import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from selfhost.schema.records import Usage
+from selfhost.schema.records import Agent, Turn, Usage
 
 CHARS_PER_TOKEN = 4
 IMAGE_TOKEN_ESTIMATE = 1_600
@@ -53,7 +56,10 @@ class CompactionRecord:
 @dataclass(frozen=True)
 class Compaction:
     """The compaction workflow: decide on the window, summarize the head, persist before/after,
-    and hand back the window the turn should actually send to the model."""
+    and hand back the window the turn should actually send to the model. When compaction actually
+    occurs it fires the observe-only `pre_compact` (before the summarize call) and `post_compact`
+    (after) turn hooks off the turn's chain — fired here, not in the engine, because only this flow
+    knows past every compactibility guard that compaction will truly happen."""
 
     client: ModelClient
     model: str
@@ -61,6 +67,10 @@ class Compaction:
     conversation_id: UUID
     trigger_tokens: int = COMPACTION_TRIGGER_TOKENS
     keep_messages: int = COMPACTION_KEEP_MESSAGES
+    hooks: HookChain = field(default_factory=HookChain)
+    turn: Turn | None = None
+    agent: Agent | None = None
+    member_id: UUID | None = None
 
     async def maybe_compact(
         self, messages: tuple[Message, ...], force: bool = False
@@ -73,16 +83,24 @@ class Compaction:
             return messages, ()
         if not force and self._tokens(messages) <= self.trigger_tokens:
             return messages, ()
-        return await self._compact(messages)
+        return await self._compact(messages, "force" if force else "auto")
 
     async def _compact(
-        self, messages: tuple[Message, ...]
+        self, messages: tuple[Message, ...], reason: Literal["auto", "force"]
     ) -> tuple[tuple[Message, ...], tuple[Usage, ...]]:
         split = len(messages) - self.keep_messages
         while split > 0 and messages[split].role != "assistant":
             split -= 1
         if split == 0:
             return messages, ()
+        before_tokens = self._tokens(messages)
+        await self.hooks.fire(
+            "pre_compact",
+            PreCompact(reason=reason, before_tokens=before_tokens),
+            self.turn,
+            self.agent,
+            self.member_id,
+        )
         index = await self._next_index()
         head = messages[:split]
         tail = messages[split:]
@@ -90,6 +108,15 @@ class Compaction:
         after = (Message(role="user", content=f"{COMPACTED_CONTEXT_PREFIX}{summary}"), *tail)
         await self._write(index, "before", messages)
         await self._write(index, "after", after)
+        await self.hooks.fire(
+            "post_compact",
+            PostCompact(
+                summary=summary, before_tokens=before_tokens, after_tokens=self._tokens(after)
+            ),
+            self.turn,
+            self.agent,
+            self.member_id,
+        )
         return after, (usage,)
 
     async def _summarize(self, head: tuple[Message, ...]) -> tuple[str, Usage]:

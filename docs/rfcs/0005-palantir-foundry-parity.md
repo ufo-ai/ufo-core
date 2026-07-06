@@ -137,7 +137,7 @@ The "developer app" unit is an **Extension**: a pinned Python package returning 
 (`ext/manifest.py:392`), loaded in-process at boot, digest-verified against a lockfile
 (`ext/loader.py:198`), isolated by the static `selfhost.sdk` import gate (`gates.py:132`) + the
 capability-scoped `ExtensionContext` (`ext/context.py:201`). Manifest points: `tools, subagents,
-prompt_sections, skills, connectors, sources, triggers, hooks, jobs, routes, surfaces, credentials,
+prompt_sections, skills, connectors, sources, hooks, jobs, routes, surfaces, credentials,
 onboarding, models, carriers, indexes, embeds, hubs, auth_proxies, search_providers` (`spec.md`
 §Extension system).
 
