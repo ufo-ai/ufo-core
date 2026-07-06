@@ -1,6 +1,6 @@
 """The builtin tool set: bash, read, write, edit, glob, grep, share_file, spawn_subagent,
 load_sessions, ask_user, load_skill, connect_account, pause_and_wait, list_skills,
-save_custom_skill, wait_for_subagents, cancel_subagent, message_subagent.
+wait_for_subagents, cancel_subagent, message_subagent.
 
 Each file/shell handler reaches the workspace only through `ctx.sandbox`, so the carrier's scoping
 and egress rules apply whether a byte arrives via a shell command or a file op. `read`, `edit`, and
@@ -19,17 +19,13 @@ member's own conversations. `ask_user` is chat-native: it
 structures a question or confirmation the agent poses in its reply, whose answer rides the member's
 next message — no out-of-band prompt. `load_skill` mounts a skill's `SKILL.md` and assets into the
 workspace and returns its workflow instructions. `list_skills` reports the loadable skills so the
-agent can discover a workflow before starting. `save_custom_skill` validates a skill directory the
-agent authored in the workspace and persists it workspace-scoped, so a member-authored skill joins
-that workspace's loadable set on later turns without ever crossing to another workspace or shadowing
-a core skill. `pause_and_wait` is chat-native like `ask_user`: it
+agent can discover a workflow before starting. `pause_and_wait` is chat-native like `ask_user`: it
 structures a wait the agent poses in its reply and ends the turn, resuming on the next inbound.
 `wait_for_subagents`, `cancel_subagent`, and `message_subagent` reach `ctx.subagents`, the same
 Subagents workflow that backs `spawn`, to await a background child's terminal, cancel a running one,
 or queue it a follow-up message that runs as its next turn — scoped to the children this turn
 spawned."""
 
-import base64
 import json
 import mimetypes
 import shlex
@@ -54,7 +50,6 @@ from selfhost.models.interface import TextBlock
 from selfhost.sandbox.session import WORKSPACE_DIR, workspace_path
 from selfhost.schema import tables
 from selfhost.skills.runtime import mount_skill
-from selfhost.skills.store import UserSkillStore
 from selfhost.tools.context import ImageContent, TextContent, ToolContext, ToolResult
 from selfhost.tools.registry import ToolDef
 from selfhost.transcript import TranscriptDecodeError, decode, transcript_key
@@ -276,15 +271,6 @@ class PauseAndWaitInput(BaseModel):
 
 class ListSkillsInput(BaseModel):
     pass
-
-
-class SaveCustomSkillInput(BaseModel):
-    path: str = Field(
-        description="Path to the skill directory in the workspace; it must contain a SKILL.md."
-    )
-    name: str | None = Field(
-        default=None, description="Skill name; defaults to the directory name."
-    )
 
 
 class WaitForSubagentsInput(BaseModel):
@@ -680,82 +666,11 @@ async def pause_and_wait_handler(ctx: ToolContext, args: PauseAndWaitInput) -> T
 async def list_skills_handler(ctx: ToolContext, args: ListSkillsInput) -> ToolResult:
     """List the loadable skills, each with its one-line description, so the agent can discover a
     workflow to load_skill before starting a domain task. The workspace's own saved user-skills are
-    merged into this set, so a skill authored with save_custom_skill shows up here on later turns.
-    """
+    merged into this set, so a skill authored in this workspace shows up here on later turns."""
     skills = [
         {"name": name, "description": description} for name, description in ctx.skills.index()
     ]
     return ToolResult(content=(TextContent(text=json.dumps({"skills": skills})),))
-
-
-MAX_SKILL_FILES = 50
-MAX_SKILL_TOTAL_BYTES = 1_048_576
-
-SKILL_READ_PROG = """
-import base64, json, os, stat, sys
-root, max_files, max_bytes = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
-if not os.path.isdir(root):
-    print(json.dumps({"error": "not a directory: " + root}))
-    sys.exit(1)
-files = {}
-total = 0
-for dirpath, dirnames, filenames in os.walk(root):
-    dirnames.sort()
-    for filename in sorted(filenames):
-        full = os.path.join(dirpath, filename)
-        if not stat.S_ISREG(os.lstat(full).st_mode):
-            continue
-        total += os.path.getsize(full)
-        if len(files) >= max_files or total > max_bytes:
-            capped = "skill exceeds %d files or %d bytes" % (max_files, max_bytes)
-            print(json.dumps({"error": capped}))
-            sys.exit(1)
-        with open(full, "rb") as handle:
-            files[os.path.relpath(full, root)] = base64.b64encode(handle.read()).decode()
-print(json.dumps({"files": files}))
-"""
-
-
-async def save_custom_skill_handler(ctx: ToolContext, args: SaveCustomSkillInput) -> ToolResult:
-    """Read the authored skill directory out of the sandbox, validate it with the skill parser (a
-    bad or missing SKILL.md fails loud as a recoverable tool error), and persist it for this
-    workspace so it survives across turns and sandboxes. The saved skill joins this workspace's
-    loadable set on later turns — resolvable by `load_skill`, listed by `list_skills`, indexed in
-    the prompt — but is scoped to this workspace alone and may not shadow a core or pack skill."""
-    scoped = workspace_path(args.path)
-    result = await ctx.sandbox.bash(
-        f"python3 -c {shlex.quote(SKILL_READ_PROG)} {shlex.quote(scoped)} "
-        f"{MAX_SKILL_FILES} {MAX_SKILL_TOTAL_BYTES}"
-    )
-    parsed = json.loads(result.stdout) if result.stdout.strip() else {}
-    error = parsed.get("error") if isinstance(parsed, dict) else None
-    if result.exit_code != 0 or isinstance(error, str):
-        raise ValueError(
-            error
-            if isinstance(error, str)
-            else (result.stderr.strip() or "could not read the skill directory")
-        )
-    raw_files = parsed.get("files") if isinstance(parsed, dict) else None
-    if not isinstance(raw_files, dict):
-        raise RuntimeError("skill reader returned no files")
-    files = {path: base64.b64decode(content) for path, content in raw_files.items()}
-    name = args.name or PurePosixPath(scoped).name
-    skill = await UserSkillStore(ctx.blob).save(
-        ctx.turn.workspace_id, name, files, frozenset(ctx.skills.by_name)
-    )
-    return ToolResult(
-        content=(
-            TextContent(
-                text=json.dumps(
-                    {
-                        "skill": skill.name,
-                        "description": skill.description,
-                        "files": len(skill.files) + 1,
-                    }
-                )
-            ),
-        )
-    )
 
 
 async def wait_for_subagents_handler(ctx: ToolContext, args: WaitForSubagentsInput) -> ToolResult:
@@ -954,19 +869,6 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         description="List the Skills this turn can load.",
         input_model=ListSkillsInput,
         handler=list_skills_handler,
-    ),
-    ToolDef(
-        name="save_custom_skill",
-        description=(
-            "Save a skill you authored in the workspace so it persists and can be loaded on later "
-            "turns. Point `path` at the skill directory (it must contain a SKILL.md with YAML "
-            "frontmatter — a name matching the directory and a description); any bundled files are "
-            "saved with it. The skill is validated before saving and a bad SKILL.md is reported as "
-            "an error. Load the create-skill skill first for the authoring workflow. The saved "
-            "skill is scoped to this workspace and cannot replace a built-in skill."
-        ),
-        input_model=SaveCustomSkillInput,
-        handler=save_custom_skill_handler,
     ),
     ToolDef(
         name="wait_for_subagents",

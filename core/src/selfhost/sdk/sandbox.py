@@ -21,3 +21,4 @@ from selfhost.sandbox.session import ExecResult as ExecResult
 from selfhost.sandbox.session import MountSpec as MountSpec
 from selfhost.sandbox.session import SandboxHandle as SandboxHandle
 from selfhost.sandbox.session import SandboxSpec as SandboxSpec
+from selfhost.sandbox.session import workspace_path as workspace_path

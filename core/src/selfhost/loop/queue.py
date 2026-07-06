@@ -13,7 +13,7 @@ from selfhost.browser import CdpProvider
 from selfhost.config import Config
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
-from selfhost.ext.loader import turn_hooks, turn_tools
+from selfhost.ext.loader import turn_hooks, turn_runtime_skills, turn_tools
 from selfhost.ext.manifest import Manifest
 from selfhost.grants import GrantStore
 from selfhost.hub import Hub, Terminal
@@ -46,7 +46,6 @@ from selfhost.schema.records import (
 )
 from selfhost.search import SearchProvider
 from selfhost.skills.runtime import SkillRegistry
-from selfhost.skills.store import UserSkillStore
 from selfhost.tools.registry import ToolRegistry
 
 SANDBOX_IMAGE_REF = "selfhost-sandbox:latest"
@@ -116,7 +115,13 @@ async def _execute_turn(turn_id: str) -> str:
             runtime.manifests, turn.workspace_id, runtime.credentials, runtime.index, runtime.embed
         )
         skills = runtime.skills.merged_with(
-            await UserSkillStore(runtime.blob).load_all(turn.workspace_id)
+            await turn_runtime_skills(
+                runtime.manifests,
+                turn.workspace_id,
+                runtime.credentials,
+                runtime.index,
+                runtime.embed,
+            )
         )
         sections = tuple(
             (section.name, section.body)

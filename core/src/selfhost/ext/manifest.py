@@ -30,6 +30,7 @@ from selfhost.models.interface import ModelClient
 from selfhost.sandbox.session import Carrier
 from selfhost.schema.records import Agent, Turn
 from selfhost.search import SearchProvider
+from selfhost.skills.runtime import RuntimeSkill
 from selfhost.sources.sync import SourceBackend
 from selfhost.tools.registry import ToolDef
 
@@ -381,6 +382,13 @@ class SkillSpec:
     path: Path
 
 
+RuntimeSkillProvider = Callable[[ExtensionContext], Awaitable[tuple[RuntimeSkill, ...]]]
+"""A per-turn source of a workspace's runtime skills. Core calls it with the extension's
+workspace-scoped ExtensionContext each turn and merges the result into that turn's SkillRegistry,
+so an extension can feed member-authored skills into the loadable set beside core's and the packs'
+own — never a boot-time registration, since the skills are per-workspace state."""
+
+
 @dataclass(frozen=True)
 class Manifest:
     """What one extension declares, returned by its `selfhost.extension` entry point. `requires`
@@ -404,6 +412,7 @@ class Manifest:
     hooks: tuple[HookSpec, ...] = ()
     prompt_sections: tuple[PromptSection, ...] = ()
     subagents: tuple[SubagentProfile, ...] = ()
+    runtime_skills: RuntimeSkillProvider | None = None
     subagent_tool_grants: tuple[SubagentToolGrant, ...] = ()
     surfaces: tuple[SurfaceSpec, ...] = ()
     models: tuple[ModelProviderSpec, ...] = ()

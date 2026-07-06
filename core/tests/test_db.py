@@ -21,7 +21,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
     over core's — `apply_migrations` ran clean in the fixture — and the graph has exactly one head
     per owner (core's chain plus each extension branch), so `upgrade heads` is deterministic,
     core-first. The base-pinned index-default and memory extensions own their chunk and memory_item
-    tables, and the sample probe owns its note table."""
+    tables, the sample probe owns its note table, and skill_create owns the user_skill table."""
     config = Config()
     config.set_main_option("script_location", str(MIGRATIONS_DIR))
     config.set_main_option(
@@ -30,8 +30,13 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
     )
     config.set_main_option("path_separator", "os")
     heads = set(ScriptDirectory.from_config(config).get_heads())
-    assert {"index_default_0001", "memory_0003", "sample_ext_note_0001"} <= heads
-    assert len(heads) == 4
+    assert {
+        "index_default_0001",
+        "memory_0003",
+        "sample_ext_note_0001",
+        "skill_create_0001",
+    } <= heads
+    assert len(heads) == 5
 
 
 def test_migrate_command_brings_the_schema_to_head(

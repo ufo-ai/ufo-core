@@ -331,6 +331,32 @@ def turn_subagent_grants(manifests: tuple[Manifest, ...]) -> dict[str, frozenset
     return {profile: frozenset(names) for profile, names in grants.items()}
 
 
+async def turn_runtime_skills(
+    manifests: tuple[Manifest, ...],
+    workspace_id: UUID,
+    credential_store: CredentialStore | None,
+    index: IndexBackend | None = None,
+    embed: EmbedClient | None = None,
+) -> tuple[RuntimeSkill, ...]:
+    """Every runtime skill the active extensions provide for this workspace, flattened in load order
+    — the per-turn set the loop merges into the turn's SkillRegistry beside core's and the packs'
+    own. Each provider runs with its extension's workspace-scoped ExtensionContext (the same handle
+    its tools and jobs receive). An extension providing runtime skills without a credential key set
+    fails loud, since its context needs the credential store."""
+    skills: list[RuntimeSkill] = []
+    for manifest in manifests:
+        if manifest.runtime_skills is None:
+            continue
+        if credential_store is None:
+            raise RuntimeError(
+                f"extension {manifest.name!r} provides runtime skills but no credential key is set"
+            )
+        declared = frozenset(slot.name for slot in manifest.credentials)
+        context = context_for(workspace_id, manifest.name, declared, credential_store, index, embed)
+        skills.extend(await manifest.runtime_skills(context))
+    return tuple(skills)
+
+
 DEFAULT_BACKEND = "default"
 
 

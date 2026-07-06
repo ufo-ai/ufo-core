@@ -3,10 +3,10 @@
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0023"
-down_revision: str | None = "0022"
-branch_labels: str | None = None
-depends_on: str | None = None
+revision: str = "skill_create_0001"
+down_revision: str | None = None
+branch_labels: tuple[str, ...] | None = ("skill_create",)
+depends_on: str | None = "0001"
 
 
 def upgrade() -> None:
@@ -15,9 +15,10 @@ def upgrade() -> None:
         sa.Column("workspace_id", sa.Uuid(), nullable=False),
         sa.Column("name", sa.Text(), nullable=False),
         sa.Column("digest", sa.Text(), nullable=False),
+        sa.Column("content", sa.Text(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(["workspace_id"], ["workspace.id"]),
+        sa.ForeignKeyConstraint(["workspace_id"], ["workspace.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("workspace_id", "name"),
     )
 

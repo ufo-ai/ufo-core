@@ -33,7 +33,7 @@ members = [
     "selfhost-ext-scheduled-tasks",
     "selfhost-ext-self-improvement",
     "selfhost-ext-sites",
-    "selfhost-ext-skills",
+    "selfhost-ext-skill-create",
     "selfhost-ext-slack",
     "selfhost-ext-sources",
     "selfhost-ext-todos",
@@ -2976,15 +2976,21 @@ dependencies = [
 requires-dist = [{ name = "selfhost", editable = "core" }]
 
 [[package]]
-name = "selfhost-ext-skills"
+name = "selfhost-ext-skill-create"
 version = "0.1.0"
-source = { editable = "extensions/skills" }
+source = { editable = "extensions/skill_create" }
 dependencies = [
+    { name = "pydantic" },
     { name = "selfhost" },
+    { name = "sqlalchemy" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "selfhost", editable = "core" }]
+requires-dist = [
+    { name = "pydantic", specifier = ">=2" },
+    { name = "selfhost", editable = "core" },
+    { name = "sqlalchemy", specifier = ">=2" },
+]
 
 [[package]]
 name = "selfhost-ext-slack"
