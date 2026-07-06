@@ -10,6 +10,7 @@ collision cases stub discovery — the real dependency — to drive the real nar
 
 import pytest
 import selfhost_pack_assistant as assistant
+import selfhost_pack_assistant_hosted as assistant_hosted
 
 import selfhost.ext.loader as loader
 from selfhost.ext.loader import discovered_packs, load_manifests
@@ -27,6 +28,19 @@ def test_activating_the_assistant_pack_makes_exactly_its_bundle_active() -> None
     followed by the pack's own (here empty) manifest — the coherent config a serve brings up."""
     names = [manifest.name for manifest in load_manifests(assistant.NAME)]
     assert names == [*assistant.EXTENSIONS, assistant.NAME]
+
+
+def test_assistant_hosted_pack_is_discovered_with_its_bundle() -> None:
+    packs = discovered_packs()
+    assert assistant_hosted.NAME in packs
+    assert packs[assistant_hosted.NAME].extensions == assistant_hosted.EXTENSIONS
+
+
+def test_activating_the_assistant_hosted_pack_makes_exactly_its_bundle_active() -> None:
+    """The hosted variant narrows to its managed-infra bundle (Turbopuffer, Slack, Redis, E2B on top
+    of the assistant capabilities) in declared order, followed by the pack's own manifest."""
+    names = [manifest.name for manifest in load_manifests(assistant_hosted.NAME)]
+    assert names == [*assistant_hosted.EXTENSIONS, assistant_hosted.NAME]
 
 
 def test_no_pack_selected_leaves_the_unnarrowed_extension_set() -> None:

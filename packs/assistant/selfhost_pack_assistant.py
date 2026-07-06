@@ -1,25 +1,36 @@
-"""The assistant pack: a coherent assistant config activated as one named pack.
+"""The assistant pack: a full self-contained assistant config activated as one named pack.
 
 Activating it (config `[pack] name = "assistant"`) narrows the deploy to exactly the extensions it
-names — durable memory and recall, the sandbox browser/computer-use tools driving core's default
-BUA backend, Composio-brokered connectors, and web research (the research tools over the Exa search
-backend) — together with the base-pinned index and embed backends memory retrieves through. It
-bundles only extensions and adds no pack-level skills or onboarding of its own: each capability's
-tools, skills, and onboarding ride that extension's own manifest, so the pack is nothing but the set
-that comes up together."""
+names — durable memory and recall over the base-pinned local index and OpenAI embeddings, web
+research (the research tools over the Exa search backend), Composio-brokered connectors and MCP,
+the sandbox browser/computer-use tools, website building and the code REPL, document generation,
+todos, scheduled tasks, the web chat surface, an extra OpenRouter model provider, and the coding
+subagent. It runs on core's own local carrier and index with no managed infrastructure — that is
+what distinguishes it from `assistant_hosted`. It bundles only extensions and adds no pack-level
+skills or onboarding of its own: each capability's tools, skills, and onboarding ride that
+extension's own manifest, so the pack is nothing but the set that comes up together."""
 
 from selfhost.sdk.manifest import Pack
 
 NAME = "assistant"
 VERSION = "0.1.0"
 EXTENSIONS = (
+    "exa",
+    "todos",
+    "web",
+    "sites",
+    "scheduled_tasks",
+    "research",
+    "repl",
+    "openrouter",
     "memory",
+    "mcp",
+    "documents",
+    "connectors",
+    "coding",
+    "browser",
     "index-default",
     "embed-openai",
-    "browser",
-    "connectors",
-    "exa",
-    "research",
 )
 
 

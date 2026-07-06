@@ -1,7 +1,7 @@
 [project]
 name = "selfhost-pack-assistant"
 version = "0.1.0"
-description = "Assistant pack: memory, the sandbox browser over core's default BUA backend, Composio connectors, and Exa research — a coherent assistant config that comes up together"
+description = "Assistant pack: a full self-contained assistant (memory over the local index, research, connectors, browser, sites, repl, documents, todos, scheduled tasks, web surface, coding) on core's own carrier — no managed infra"
 requires-python = ">=3.12"
 dependencies = ["selfhost"]
 

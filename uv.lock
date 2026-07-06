@@ -40,6 +40,7 @@ members = [
     "selfhost-ext-turbopuffer",
     "selfhost-ext-web",
     "selfhost-pack-assistant",
+    "selfhost-pack-assistant-hosted",
     "selfhost-pack-sample",
     "selfhost-testsupport",
 ]
@@ -3056,6 +3057,17 @@ requires-dist = [{ name = "selfhost", editable = "core" }]
 name = "selfhost-pack-assistant"
 version = "0.1.0"
 source = { editable = "packs/assistant" }
+dependencies = [
+    { name = "selfhost" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "selfhost", editable = "core" }]
+
+[[package]]
+name = "selfhost-pack-assistant-hosted"
+version = "0.1.0"
+source = { editable = "packs/assistant_hosted" }
 dependencies = [
     { name = "selfhost" },
 ]
