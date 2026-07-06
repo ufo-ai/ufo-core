@@ -103,7 +103,9 @@ surfaces are the memory/RAG pipeline (`source`→`page`→`chunk`→`IndexBacken
 retrieval-only, keyed by `owner_kind`+`subject`, injected via the `on_inbound` hook — not queried by
 a tool) and connector calls (freeform third-party APIs, marked `untrusted`). Cites: `tables.py:239`
 (`source`), `tables.py:277` (`page`), `indexing.py:67` (`IndexBackend`), `manifest.py:262`
-(`InjectContext` recall hook).
+(`InjectContext` recall hook). The `knowledge-graph` (gbrain) extension now in build
+(`docs/rfc/gbrain-graph-extraction.md`; §3a) adds the first typed object/relation layer over this
+pipeline — extracted and read-side; see G5.
 
 ### 2c. Developer-app / auth surface — inbound is human-only
 
@@ -147,10 +149,34 @@ for BYOK, grant hosts tunnelled opaquely and metered (`sandbox/proxy/rules.py:63
 | G2 | No **agent-as-a-function** external entry (blocking/streaming invoke of a named agent) | Yes — an `api` surface on the `surfaces` seam over `TurnInvoker`, once G1 lands | **P0** |
 | G3 | No **typed I/O / app-state** for a top-level invoke | Yes — lift the subagent `input_model`/`output_model` pattern to the invoke boundary | **P1** |
 | G4 | No **multi-agent authoring in chat**; `agent` record under-built vs spec | Yes — owner-gated `create_agent`/`configure_agent` tools through the governed proposal flow; enrich the `agent` migration | **P1** |
-| G5 | No **ontology / typed object-query / governed action** data layer | No — genuine net-new subsystem | **non-goal (core); extension** |
+| G5 | No **ontology / typed object-query / governed action** data layer | **Partly — the read-side substrate ships as the `knowledge-graph` (gbrain) extension** (`docs/rfc/gbrain-graph-extraction.md`, in build); residual delta is a scoped authoring+Action layer on top (§3a) | **extension (substrate exists); delta scoped, not net-new** |
 | G6 | No **OAuth2 authorization-server** (client registration, 3-legged on-behalf-of, refresh rotation) | No — big net-new | **non-goal (core); enterprise/ext** |
 
 ---
+
+### 3a. G5 in relation to the gbrain `knowledge-graph` extension
+
+G5 is no longer purely net-new. The `knowledge-graph` extension (`docs/rfc/gbrain-graph-extraction.md`,
+in build) is exactly the "extension owning typed tables + object-query tool + retrieval on the
+sources/pages seam" §6 named as the ontology path — it delivers the **read-side** of an ontology,
+*derived* from the pages pipeline:
+
+| Foundry Ontology capability | gbrain `knowledge-graph` provides | Remaining delta for Foundry-parity |
+|---|---|---|
+| Typed **object types** | `graph_entity.entity_type` — but *extracted* into a bounded vocab, not a declared property schema | user-**declared** object-type schemas with typed properties |
+| Typed **links** between objects | `graph_edge` — typed (bounded vocab), node→node, `source_page_id` provenance | covered |
+| **Object-set queries** (filter/aggregate/join) | `graph_search` — bounded k-hop **traversal** with citations | property filter / aggregate / join over object sets |
+| **Governed Actions** (typed writes + confirmation) | none — the graph is *derived* (read-only); agent writes go through `memory_update`, not typed objects | a typed-write Action primitive (the `untrusted`+`ask_user`/proposal flow is the confirmation half) |
+| **Lineage / provenance** | `source_page_id` citation on every edge | covered |
+
+So the ontology gap **narrows**: the typed entity/relation graph + traversal + provenance is delivered
+by gbrain as a derived read-side substrate; the residual Foundry-parity work is a smaller
+**ontology-authoring + Action** layer (declared object schemas, object-set queries, governed typed
+writes) built **on top of** the gbrain graph tables — a follow-on extension, not a net-new subsystem.
+The load-bearing axis difference: Foundry's ontology is an **authored system-of-record**; gbrain's is
+**extracted from pages** — closing the gap means adding the authoring/write side, not rebuilding the
+store. (Palantir also *derives* ontology objects from unstructured data via pipelines, so the
+extracted-graph substrate is on the same trajectory, approached from the read end first.)
 
 ## 4. P0 — scoped inbound API: machine principal + token + invoke surface
 
@@ -210,7 +236,7 @@ service-principal is the correct, least-privilege shape and is recommended.
 
 | Item | Why not core | Path if wanted |
 |---|---|---|
-| **Ontology / typed object-query / governed Action layer** | selfhost core is an *agent runtime*, not a data platform; doctrine: "if a capability can be an extension, it is not core." Foundry's Ontology is its whole differentiator and a large subsystem. | An **extension**: owns typed tables via its own migration, exposes Object-query / Action tools via `Manifest.tools`, backs retrieval on the existing `indexes`/`sources` seams. The `untrusted` flag + `ask_user`/governed-proposal already give the "Action with confirmation" primitive. |
+| **Ontology / typed object-query / governed Action layer** | selfhost core is an *agent runtime*, not a data platform; doctrine: "if a capability can be an extension, it is not core." Foundry's Ontology is its whole differentiator and a large subsystem. | **The read-side already ships** as the `knowledge-graph` (gbrain) extension — typed `graph_entity`/`graph_edge` + `graph_search` traversal, derived from pages (`docs/rfc/gbrain-graph-extraction.md`; §3a). Full parity is an **authoring + Action** layer *on top*: declared object-type schemas, object-set (filter/aggregate) queries, and governed typed-write Actions (the `untrusted`+`ask_user`/proposal flow is the confirmation half) — a layer on the substrate, not a net-new store. |
 | **Full OAuth2 authorization server** (client registration console, 3-legged auth-code+PKCE on-behalf-of a member, refresh-token rotation) | Big net-new; P0 scoped tokens cover the machine-to-machine 80%. The 3-legged "external app acts as a selfhost member" case is rare for a self-hosted single-workspace deploy. | Enterprise/k8s layer (`spec.md` principle 3), or a dedicated extension mounting `/surface/oauth/…`. |
 | **Agent-builder GUI, generated client SDKs, marketplace** | Authoring is a chat/CLI act (doctrine); SDK-gen + marketplace are ecosystem, not runtime. | The invoke surface's OpenAPI + `selfhost ext search/install` are the analogs; a web builder is an extension surface. |
 
