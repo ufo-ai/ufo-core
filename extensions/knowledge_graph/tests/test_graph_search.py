@@ -29,7 +29,7 @@ from selfhost.sources.sync import CorePageFeed
 from selfhost.subjects import SHARED_SUBJECT
 from selfhost.tools.context import SpawnResult, ToolContext
 
-EXTENSION = "knowledge-graph"
+EXTENSION = "knowledge_graph"
 WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 
 

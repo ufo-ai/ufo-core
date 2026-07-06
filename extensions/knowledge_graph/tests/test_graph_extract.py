@@ -32,7 +32,7 @@ from selfhost.sources.sync import CorePageFeed
 from selfhost.subjects import SHARED_SUBJECT
 
 BASE = datetime(2026, 1, 1, tzinfo=UTC)
-EXTENSION = "knowledge-graph"
+EXTENSION = "knowledge_graph"
 
 
 async def _workspace() -> UUID:

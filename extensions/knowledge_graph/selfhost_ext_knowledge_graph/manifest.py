@@ -36,7 +36,7 @@ from selfhost_ext_knowledge_graph.store import (
     to_edge_type,
 )
 
-NAME = "knowledge-graph"
+NAME = "knowledge_graph"
 VERSION = "0.1.0"
 GRAPH_EXTRACT_JOB = "graph_extract"
 GRAPH_EXTRACT_SCHEDULE = "0 * * * * *"

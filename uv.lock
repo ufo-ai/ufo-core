@@ -2839,7 +2839,7 @@ requires-dist = [
 [[package]]
 name = "selfhost-ext-knowledge-graph"
 version = "0.1.0"
-source = { editable = "extensions/knowledge-graph" }
+source = { editable = "extensions/knowledge_graph" }
 dependencies = [
     { name = "pydantic" },
     { name = "selfhost" },
