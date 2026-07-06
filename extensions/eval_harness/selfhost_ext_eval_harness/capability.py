@@ -55,9 +55,9 @@ type Grader = Callable[[CapabilityOutput], Awaitable[CapabilityVerdict]]
 @dataclass(frozen=True)
 class CapabilityCase:
     """A message and a grader over the answer + trajectory it produces. `web_dependent` marks a case
-    that reaches the live web, so a tool failure from an external outage is infra-excluded rather
-    than counted a capability failure; `samples` re-runs the case and passes if any sample passes;
-    `digest_tag` stabilizes the suite digest."""
+    that reaches the live web, so a tool failure from an external outage is infra-excluded — neither
+    pass nor fail, out of scoring — rather than counted a capability failure; `samples` re-runs the
+    case and passes if any sample passes; `digest_tag` stabilizes the suite digest."""
 
     name: str
     message: str
@@ -85,9 +85,10 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
         if broke:
             return EvalCaseResult(
                 case.name,
-                True,
+                False,
                 f"infra-excluded (web unavailable): {broke[:120]}",
                 {"response": output.response, "tools": list(output.tools), "infraExcluded": True},
+                excluded=True,
             )
     passed = bool(won)
     reason = (

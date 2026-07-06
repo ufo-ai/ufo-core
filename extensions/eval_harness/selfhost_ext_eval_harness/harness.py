@@ -19,6 +19,7 @@ class EvalCaseResult:
     passed: bool
     reason: str
     evidence: JsonObject
+    excluded: bool = False
 
 
 @dataclass(frozen=True)
@@ -29,14 +30,28 @@ class EvalReport:
     cases: tuple[EvalCaseResult, ...]
 
     @property
+    def scored(self) -> tuple[EvalCaseResult, ...]:
+        """The cases that count toward the verdict. An infra-excluded case (its external service was
+        down, so capability could not be tested) is neither pass nor fail, so it drops out of both
+        the suite verdict and the pass rate."""
+        return tuple(case for case in self.cases if not case.excluded)
+
+    @property
+    def excluded_count(self) -> int:
+        return len(self.cases) - len(self.scored)
+
+    @property
     def passed(self) -> bool:
-        return all(case.passed for case in self.cases)
+        """True iff every scorable case passed. A suite with no scorable case — all excluded, or
+        empty — demonstrated no capability, so it is not a pass."""
+        return bool(self.scored) and all(case.passed for case in self.scored)
 
     @property
     def pass_rate(self) -> float:
-        if not self.cases:
+        scored = self.scored
+        if not scored:
             return 0.0
-        return sum(1 for case in self.cases if case.passed) / len(self.cases)
+        return sum(1 for case in scored if case.passed) / len(scored)
 
     def to_json(self) -> JsonObject:
         return {
@@ -45,10 +60,12 @@ class EvalReport:
             "digest": self.digest,
             "passed": self.passed,
             "passRate": self.pass_rate,
+            "excludedCount": self.excluded_count,
             "cases": [
                 {
                     "name": case.name,
                     "passed": case.passed,
+                    "excluded": case.excluded,
                     "reason": case.reason,
                     "evidence": case.evidence,
                 }
@@ -64,7 +81,8 @@ def digest_payload(payload: Mapping[str, Json]) -> str:
 
 # Substrings in a tool error that mean the EXTERNAL service failed (quota, rate limit, 5xx, network)
 # rather than the agent's mistake. A web-dependent case that fails behind one of these is
-# infra-excluded — reported passed, not a capability failure.
+# infra-excluded — counted as NEITHER pass nor fail, out of both the suite verdict
+# and the pass rate (never a pass).
 INFRA_ERROR_MARKERS = (
     "402",
     "429",
@@ -83,7 +101,9 @@ INFRA_ERROR_MARKERS = (
 
 
 def infra_error(errors: Sequence[str]) -> str:
-    """The first tool error that signals an external-service failure, or "" if none."""
+    """The first tool error that signals an external-service failure, or "" if none. A
+    false-positive match now UNDER-counts (drops a real capability failure from scoring) rather
+    than green-washing it into a pass; excluded cases stay visible in the report for audit."""
     for message in errors:
         lowered = message.lower()
         if any(marker in lowered for marker in INFRA_ERROR_MARKERS):

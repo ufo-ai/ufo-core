@@ -45,10 +45,10 @@ def main(argv: list[str] | None = None) -> None:
     failed = False
     for report in reports:
         (args.out / f"{report.name}.html").write_bytes(render_report_html(report))
-        passed = sum(1 for case in report.cases if case.passed)
+        passed = sum(1 for case in report.scored if case.passed)
         print(
-            f"{report.name} {passed}/{len(report.cases)} "
-            f"(rate {report.pass_rate:.0%}) {report.digest}"
+            f"{report.name} {passed}/{len(report.scored)} passed, "
+            f"{report.excluded_count} excluded (rate {report.pass_rate:.0%}) {report.digest}"
         )
         failed = failed or not report.passed
     if failed:

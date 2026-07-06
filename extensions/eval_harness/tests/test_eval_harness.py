@@ -221,6 +221,53 @@ async def test_capability_case_fails_when_a_required_tool_is_absent(db: None, tm
     assert "fetch_url" in result.reason
 
 
+async def test_web_dependent_case_behind_an_infra_outage_is_excluded_not_passed(
+    db: None, tmp_path
+) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    transcript = (
+        Message(role="user", content="search the web for the record"),
+        Message(
+            role="assistant",
+            content=(ToolUseBlock(id="s1", name="search_web", input={"query": "record"}),),
+        ),
+        Message(
+            role="user",
+            content=(
+                ToolResultBlock(
+                    tool_use_id="s1",
+                    content="upstream 429 rate limit from the search provider",
+                    is_error=True,
+                ),
+            ),
+        ),
+        Message(role="assistant", content="I could not reach the web."),
+    )
+    worker = StubWorker(blob, workspace_id, transcript)
+    ctx = _context(workspace_id, blob, worker)
+    target = InProcessTarget(
+        ctx=ctx,
+        agent_id=agent_id,
+        conversations=DbConversations(workspace_id),
+        outcome=CorpusOutcome(ctx),
+    )
+    case = CapabilityCase(
+        "web-record",
+        "search the web for the record",
+        required_tools_scorer(("fetch_url",)),
+        web_dependent=True,
+    )
+
+    result = await run_capability_case(case, target)
+
+    assert result.excluded
+    assert not result.passed
+    assert result.evidence["infraExcluded"] is True
+    assert "infra-excluded" in result.reason
+
+
 async def test_required_tools_scorer_enforces_order() -> None:
     output = CapabilityOutput(
         "answer",
@@ -287,7 +334,7 @@ async def test_rubric_pass_uses_the_injected_judge() -> None:
     assert not bad
 
 
-def test_report_html_renders_pass_and_fail() -> None:
+def test_report_html_renders_pass_fail_and_excluded() -> None:
     report = EvalReport(
         "tool_calling",
         "capability",
@@ -295,12 +342,64 @@ def test_report_html_renders_pass_and_fail() -> None:
         (
             EvalCaseResult("won", True, "ok", {"response": "hi", "tools": ["search_web"]}),
             EvalCaseResult("lost", False, "did not call: fetch_url", {"response": "", "tools": []}),
+            EvalCaseResult(
+                "web", False, "infra-excluded (web unavailable): 429", {}, excluded=True
+            ),
         ),
     )
     html = render_report_html(report).decode()
     assert "tool_calling" in html
     assert "did not call: fetch_url" in html
     assert "PASS" in html and "FAIL" in html
+    assert "EXCLUDED" in html
+    assert "1 excluded" in html
+
+
+def test_report_pass_rate_ignores_excluded_and_suite_fails_on_a_real_failure() -> None:
+    report = EvalReport(
+        "s",
+        "capability",
+        "sha256:abc",
+        (
+            EvalCaseResult("won", True, "ok", {}),
+            EvalCaseResult("lost", False, "bad", {}),
+            EvalCaseResult("web", False, "infra-excluded", {"infraExcluded": True}, excluded=True),
+        ),
+    )
+    assert report.pass_rate == 0.5
+    assert report.passed is False
+    payload = report.to_json()
+    assert payload["passRate"] == 0.5
+    assert payload["passed"] is False
+    assert payload["excludedCount"] == 1
+    assert [case["excluded"] for case in payload["cases"]] == [False, False, True]
+
+
+def test_report_of_all_scored_passing_with_an_excluded_case_passes() -> None:
+    report = EvalReport(
+        "s",
+        "capability",
+        "sha256:abc",
+        (
+            EvalCaseResult("won", True, "ok", {}),
+            EvalCaseResult("web", False, "infra-excluded", {"infraExcluded": True}, excluded=True),
+        ),
+    )
+    assert report.pass_rate == 1.0
+    assert report.passed is True
+    assert report.to_json()["excludedCount"] == 1
+
+
+def test_report_of_only_excluded_cases_is_not_a_pass() -> None:
+    report = EvalReport(
+        "s",
+        "capability",
+        "sha256:abc",
+        (EvalCaseResult("web", False, "infra-excluded", {}, excluded=True),),
+    )
+    assert report.pass_rate == 0.0
+    assert report.passed is False
+    assert report.to_json()["excludedCount"] == 1
 
 
 def test_manifest_is_discovered() -> None:
