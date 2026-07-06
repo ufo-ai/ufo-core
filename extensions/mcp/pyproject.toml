@@ -1,9 +1,9 @@
 [project]
 name = "selfhost-ext-mcp"
 version = "0.1.0"
-description = "MCP tool pack: discover and call the tools a workspace's configured MCP servers expose, over JSON-RPC"
+description = "MCP tool pack: discover and call the tools a workspace's configured MCP servers expose, over Streamable-HTTP"
 requires-python = ">=3.12"
-dependencies = ["selfhost", "httpx>=0.27"]
+dependencies = ["selfhost", "fastmcp>=3.4.2"]
 
 [project.entry-points."selfhost.extension"]
 mcp = "selfhost_ext_mcp:manifest"

@@ -1,15 +1,18 @@
-"""The MCP tool pack: `list_mcp_tools` and `call_mcp_tool` over JSON-RPC to a configured server.
+"""The MCP tool pack: `list_mcp_tools` and `call_mcp_tool` over a fastmcp Streamable-HTTP client.
 
-The extension imports only `selfhost.sdk`. These tests drive its JSON-RPC client against an
-`httpx.MockTransport` MCP server — no live server or network — so the real request-shaping, caps,
-id check, and result parse run against canned responses; and they drive the two tools the way core
-does (a real `ToolContext` whose `ext` comes from the loader's `turn_tools`, reading the server URL
-and Bearer token back out of the stored `mcp_servers` credential). The mock records each request, so
-a test reads the exact JSON-RPC frame the tool put on the wire and the Authorization header it
-carried. A server error surfaces as an is_error result; the 1 MiB request/response bounds raise."""
+The extension imports only `selfhost.sdk`. These tests drive its two tools against a real in-process
+FastMCP server — a spec-compliant MCP server reached over the real Streamable-HTTP transport (the
+`initialize` handshake, `Mcp-Session-Id`, and SSE framing that the earlier bare JSON-RPC POST could
+not speak), carried by an in-process ASGI client so there is no network or port. The `mcp_client`
+seam is overridden to point at that server, mirroring how the connectors pack stubs its `Client`.
+The tools run the way core does (a real `ToolContext` whose `ext` comes from the loader's
+`turn_tools`, reading the server URL and Bearer token back out of the stored `mcp_servers`
+credential). A tool raising surfaces as an is_error result; the 1 MiB request/response bounds
+raise."""
 
+import contextlib
 import json
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from uuid import uuid4
 
 import httpx
@@ -17,6 +20,11 @@ import pytest
 import selfhost_ext_mcp as mcp
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
+from fastmcp import Client, FastMCP
+from fastmcp.client.transports import StreamableHttpTransport
+from fastmcp.exceptions import ToolError
+from fastmcp.server.dependencies import get_http_headers
+from mcp.types import TextContent
 
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
@@ -25,10 +33,9 @@ from selfhost.schema import tables
 from selfhost.schema.records import Agent, Turn
 from selfhost.tools.context import ToolContext
 
-ENDPOINT = "https://mcp.example.test/rpc"
+ENDPOINT = "http://mcp.test/mcp"
 SERVER_NAME = "docs"
 AUTH_TOKEN = "mcp-secret-0xdeadbeef"
-SEARCH_SCHEMA = {"type": "object", "properties": {"query": {"type": "string"}}}
 
 LIST_MCP_TOOLS_DESCRIPTION = (
     "List the tools a configured MCP server exposes, via the MCP `tools/list` JSON-RPC method. "
@@ -47,40 +54,67 @@ CALL_MCP_TOOL_DESCRIPTION = (
 )
 
 
-def _responder(
-    result: dict[str, object] | None = None,
-    error: dict[str, object] | None = None,
-    status: int = 200,
-    id_override: str | None = None,
-    body: bytes | None = None,
-    recorded: list[httpx.Request] | None = None,
-) -> Callable[[httpx.Request], httpx.Response]:
-    """A canned MCP server: echoes the request's JSON-RPC id (unless `id_override` forces a
-    mismatch), answering with `result` or `error`. `body`/`status` override the whole response for
-    the HTTP-error and oversized-body probes; `recorded` captures each request the tool sent."""
+def _build_server() -> FastMCP:
+    server: FastMCP = FastMCP("docs")
 
-    def handle(request: httpx.Request) -> httpx.Response:
-        if recorded is not None:
-            recorded.append(request)
-        if body is not None:
-            return httpx.Response(status, content=body)
-        request_id = id_override or json.loads(request.content)["id"]
-        payload: dict[str, object] = {"jsonrpc": "2.0", "id": request_id}
-        if error is not None:
-            payload["error"] = error
-        else:
-            payload["result"] = result or {}
-        return httpx.Response(status, json=payload)
+    @server.tool(annotations={"idempotentHint": True})
+    def search(query: str) -> dict[str, list[str]]:
+        """Search the docs."""
+        return {"hits": [query]}
 
-    return handle
+    @server.tool
+    def write_note(body: str) -> str:
+        """Write a note."""
+        return f"wrote: {body}"
+
+    @server.tool
+    def whoami() -> dict[str, str]:
+        """Echo the incoming Authorization header."""
+        header = get_http_headers(include={"authorization"}).get("authorization", "")
+        return {"authorization": header}
+
+    @server.tool
+    def two_lines() -> list[TextContent]:
+        """Return raw text content blocks with no structured content."""
+        return [TextContent(type="text", text="line one"), TextContent(type="text", text="two")]
+
+    @server.tool
+    def boom() -> str:
+        """Always fails."""
+        raise ToolError("no such record")
+
+    return server
 
 
-def _client(**kwargs: object) -> mcp.McpClient:
-    return mcp.McpClient(transport=httpx.MockTransport(_responder(**kwargs)))
+@contextlib.asynccontextmanager
+async def _serving() -> AsyncIterator[Callable[[mcp.McpServer], Client]]:
+    """Run the FastMCP server over its ASGI app in-process and yield a `mcp_client` replacement that
+    reaches it — a real Streamable-HTTP session with no network."""
+    app = _build_server().http_app()
+    async with app.router.lifespan_context(app):
 
+        def client_for(server: mcp.McpServer) -> Client:
+            def factory(
+                headers: dict[str, str] | None = None,
+                timeout: httpx.Timeout | None = None,
+                auth: httpx.Auth | None = None,
+                **kwargs: object,
+            ) -> httpx.AsyncClient:
+                return httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app),
+                    base_url="http://mcp.test",
+                    headers=headers or {},
+                    timeout=timeout,
+                    follow_redirects=True,
+                )
 
-def _server() -> mcp.McpServer:
-    return mcp.McpServer(url=ENDPOINT, auth=AUTH_TOKEN)
+            headers = {"authorization": f"Bearer {server.auth}"} if server.auth is not None else {}
+            return Client(
+                StreamableHttpTransport(server.url, headers=headers, httpx_client_factory=factory),
+                timeout=mcp.MCP_TIMEOUT_SECONDS,
+            )
+
+        yield client_for
 
 
 def test_manifest_declares_the_two_dynamic_tools_and_the_server_slot() -> None:
@@ -104,66 +138,6 @@ def test_server_config_rejects_a_non_http_url() -> None:
         mcp.McpServer(url="ftp://mcp.example.test")
 
 
-async def test_rpc_lists_tools_and_echoes_the_frame_it_sent() -> None:
-    recorded: list[httpx.Request] = []
-    client = mcp.McpClient(
-        transport=httpx.MockTransport(
-            _responder(
-                result={"tools": [{"name": "search", "inputSchema": SEARCH_SCHEMA}]},
-                recorded=recorded,
-            )
-        )
-    )
-    result = await client.rpc(_server(), "tools/list", {})
-    assert result.error is None
-    assert result.result == {"tools": [{"name": "search", "inputSchema": SEARCH_SCHEMA}]}
-    sent = json.loads(recorded[0].content)
-    assert (sent["jsonrpc"], sent["method"], sent["params"]) == ("2.0", "tools/list", {})
-    assert recorded[0].headers["authorization"] == f"Bearer {AUTH_TOKEN}"
-
-
-async def test_rpc_parses_structured_content() -> None:
-    client = _client(result={"structuredContent": {"answer": 42}})
-    result = await client.rpc(_server(), "tools/call", {"name": "compute", "arguments": {}})
-    assert result.result == {"structuredContent": {"answer": 42}}
-
-
-async def test_rpc_surfaces_a_jsonrpc_error_as_an_error_outcome() -> None:
-    client = _client(error={"code": -32000, "message": "tool exploded"})
-    result = await client.rpc(_server(), "tools/call", {"name": "boom", "arguments": {}})
-    assert result.result is None
-    assert result.error == "tool exploded"
-
-
-async def test_rpc_surfaces_an_http_error_as_an_error_outcome() -> None:
-    client = _client(status=500, body=b"upstream is down")
-    result = await client.rpc(_server(), "tools/call", {"name": "x", "arguments": {}})
-    assert result.result is None
-    assert result.error == "MCP endpoint returned HTTP 500"
-
-
-async def test_rpc_rejects_an_oversized_request_before_sending() -> None:
-    client = _client()
-    with pytest.raises(mcp.McpError, match="request too large"):
-        await client.rpc(
-            _server(),
-            "tools/call",
-            {"name": "x", "arguments": {"blob": "z" * (mcp.MAX_MCP_REQUEST_BYTES + 1)}},
-        )
-
-
-async def test_rpc_rejects_an_oversized_response() -> None:
-    client = _client(body=b"x" * (mcp.MAX_MCP_RESPONSE_BYTES + 1))
-    with pytest.raises(mcp.McpError, match="response too large"):
-        await client.rpc(_server(), "tools/list", {})
-
-
-async def test_rpc_rejects_a_response_id_mismatch() -> None:
-    client = _client(result={"tools": []}, id_override="not-the-request-id")
-    with pytest.raises(mcp.McpError, match="id mismatch"):
-        await client.rpc(_server(), "tools/list", {})
-
-
 def test_turn_tools_registers_both_dynamic_mcp_tools() -> None:
     tools, ext_by_tool = turn_tools((mcp.manifest(),), uuid4(), _credentials())
     names = {tool.name for tool in tools}
@@ -175,85 +149,102 @@ async def test_list_mcp_tools_discovers_and_projects_the_configured_server(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """End to end through the loader path core uses: the tool reads the server out of the stored
-    `mcp_servers` credential, discovers via `tools/list`, and projects each tool's name, schema, and
-    idempotence (from the `idempotentHint` annotation)."""
-    handler = _responder(
-        result={
-            "tools": [
-                {
-                    "name": "search",
-                    "description": "Search the docs",
-                    "inputSchema": SEARCH_SCHEMA,
-                    "annotations": {"idempotentHint": True},
-                },
-                {"name": "write_note", "inputSchema": {"type": "object"}},
-            ]
-        }
-    )
-    monkeypatch.setattr(
-        mcp, "mcp_client", lambda: mcp.McpClient(transport=httpx.MockTransport(handler))
-    )
-    ctx = await _tool_context()
-    result = await mcp._list_mcp_tools(ctx, mcp.ListMcpToolsInput(server=SERVER_NAME))
+    `mcp_servers` credential, completes the MCP handshake, discovers via `tools/list`, and projects
+    each tool's name, schema, and idempotence (from the `idempotentHint` annotation)."""
+    async with _serving() as client_for:
+        monkeypatch.setattr(mcp, "mcp_client", client_for)
+        ctx = await _tool_context()
+        result = await mcp._list_mcp_tools(ctx, mcp.ListMcpToolsInput(server=SERVER_NAME))
     assert result.is_error is False
     payload = json.loads(result.content[0].text)
     assert payload["server"] == SERVER_NAME
     by_name = {tool["name"]: tool for tool in payload["tools"]}
-    assert by_name["search"]["inputSchema"] == SEARCH_SCHEMA
+    assert by_name["search"]["description"] == "Search the docs."
+    assert by_name["search"]["inputSchema"]["type"] == "object"
+    assert "query" in by_name["search"]["inputSchema"]["properties"]
     assert by_name["search"]["idempotent"] is True
     assert by_name["write_note"]["idempotent"] is False
 
 
-async def test_call_mcp_tool_invokes_the_named_tool_with_bearer_auth(
+async def test_call_mcp_tool_parses_structured_content(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    recorded: list[httpx.Request] = []
-    handler = _responder(
-        result={"content": [{"type": "text", "text": "line one"}, {"type": "text", "text": "two"}]},
-        recorded=recorded,
-    )
-    monkeypatch.setattr(
-        mcp, "mcp_client", lambda: mcp.McpClient(transport=httpx.MockTransport(handler))
-    )
-    ctx = await _tool_context()
-    result = await mcp._call_mcp_tool(
-        ctx,
-        mcp.CallMcpToolInput(
-            server=SERVER_NAME, tool_name="search", arguments={"query": "auth flow"}
-        ),
-    )
+    async with _serving() as client_for:
+        monkeypatch.setattr(mcp, "mcp_client", client_for)
+        ctx = await _tool_context()
+        result = await mcp._call_mcp_tool(
+            ctx,
+            mcp.CallMcpToolInput(
+                server=SERVER_NAME, tool_name="search", arguments={"query": "auth flow"}
+            ),
+        )
+    assert result.is_error is False
+    assert json.loads(result.content[0].text) == {"hits": ["auth flow"]}
+
+
+async def test_call_mcp_tool_joins_text_content_when_unstructured(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with _serving() as client_for:
+        monkeypatch.setattr(mcp, "mcp_client", client_for)
+        ctx = await _tool_context()
+        result = await mcp._call_mcp_tool(
+            ctx, mcp.CallMcpToolInput(server=SERVER_NAME, tool_name="two_lines", arguments={})
+        )
     assert result.is_error is False
     assert json.loads(result.content[0].text) == {"text": "line one\ntwo"}
-    sent = json.loads(recorded[0].content)
-    assert sent["method"] == "tools/call"
-    assert sent["params"] == {"name": "search", "arguments": {"query": "auth flow"}}
-    assert recorded[0].headers["authorization"] == f"Bearer {AUTH_TOKEN}"
 
 
-async def test_call_mcp_tool_surfaces_a_server_error_as_is_error(
+async def test_call_mcp_tool_sends_the_configured_bearer_token(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    handler = _responder(error={"code": -32000, "message": "no such record"})
-    monkeypatch.setattr(
-        mcp, "mcp_client", lambda: mcp.McpClient(transport=httpx.MockTransport(handler))
-    )
-    ctx = await _tool_context()
-    result = await mcp._call_mcp_tool(
-        ctx, mcp.CallMcpToolInput(server=SERVER_NAME, tool_name="fetch", arguments={})
-    )
+    async with _serving() as client_for:
+        monkeypatch.setattr(mcp, "mcp_client", client_for)
+        ctx = await _tool_context()
+        result = await mcp._call_mcp_tool(
+            ctx, mcp.CallMcpToolInput(server=SERVER_NAME, tool_name="whoami", arguments={})
+        )
+    assert result.is_error is False
+    assert json.loads(result.content[0].text) == {"authorization": f"Bearer {AUTH_TOKEN}"}
+
+
+async def test_call_mcp_tool_surfaces_a_tool_error_as_is_error(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with _serving() as client_for:
+        monkeypatch.setattr(mcp, "mcp_client", client_for)
+        ctx = await _tool_context()
+        result = await mcp._call_mcp_tool(
+            ctx, mcp.CallMcpToolInput(server=SERVER_NAME, tool_name="boom", arguments={})
+        )
     assert result.is_error is True
     assert result.content[0].text == "no such record"
 
 
-async def test_an_unconfigured_server_name_fails_loud(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(mcp, "mcp_client", lambda: _client(result={"tools": []}))
+async def test_an_unconfigured_server_name_fails_loud(db: None) -> None:
     ctx = await _tool_context()
     with pytest.raises(ValueError, match="no MCP server named 'other'"):
         await mcp._call_mcp_tool(
             ctx, mcp.CallMcpToolInput(server="other", tool_name="x", arguments={})
         )
+
+
+async def test_call_mcp_tool_rejects_oversized_arguments(db: None) -> None:
+    ctx = await _tool_context()
+    with pytest.raises(mcp.McpError, match="arguments exceed"):
+        await mcp._call_mcp_tool(
+            ctx,
+            mcp.CallMcpToolInput(
+                server=SERVER_NAME,
+                tool_name="search",
+                arguments={"blob": "z" * (mcp.MAX_MCP_REQUEST_BYTES + 1)},
+            ),
+        )
+
+
+def test_json_result_rejects_an_oversized_result() -> None:
+    with pytest.raises(mcp.McpError, match="result exceeds"):
+        mcp._json_result({"blob": "z" * (mcp.MAX_MCP_RESPONSE_BYTES + 1)})
 
 
 def _credentials() -> CredentialStore:
