@@ -34,7 +34,13 @@ from uuid import UUID
 
 import sqlalchemy as sa
 
-from selfhost.accounting import TOKENS_DIMENSION, record_egress_request, record_sandbox_tokens
+from selfhost.accounting import (
+    CORE_PRICING,
+    TOKENS_DIMENSION,
+    Pricing,
+    record_egress_request,
+    record_sandbox_tokens,
+)
 from selfhost.db import workspace_tx
 from selfhost.grants import GrantStore
 from selfhost.o11y import emit_metric, log
@@ -159,6 +165,7 @@ class EgressProxy:
     authorize: TurnAuthorizer
     ca_cert: str
     ca_key: str
+    pricing: Pricing = CORE_PRICING
     _server: asyncio.Server | None = field(default=None, init=False)
     _workdir: tempfile.TemporaryDirectory | None = field(default=None, init=False)
     _contexts: dict[str, ssl.SSLContext] = field(default_factory=dict, init=False)
@@ -401,7 +408,9 @@ class EgressProxy:
         try:
             run = RunToken.from_proxy_auth(proxy_auth)
             async with workspace_tx() as connection:
-                await record_sandbox_tokens(connection, run.workspace_id, run.turn_id, model, usage)
+                await record_sandbox_tokens(
+                    connection, run.workspace_id, run.turn_id, model, usage, self.pricing
+                )
         except Exception as error:
             log("egress.tokens_meter_failed", error_class=type(error).__name__)
 
@@ -526,13 +535,17 @@ def _int_field(usage: dict[str, object], name: str) -> int:
 
 @dataclass
 class SseTokenUsage:
-    """Recover a model host's token usage from its teed SSE response without buffering the whole
-    stream: forwarded chunks are fed here line by line, so only one partial line is ever held
-    (bounded by MAX_SSE_BUFFER_BYTES; a line past the bound stops parsing, never the relay).
-    Anthropic reports input/cache on `message_start` and the final `output_tokens` on
-    `message_delta`; OpenAI (with `stream_options.include_usage`) reports both on a terminal usage
-    chunk. A stream that carried no usage yields None, so the relay is metered only when the model
-    actually reported it."""
+    """Recover a model host's token usage from its teed response without buffering the whole stream:
+    forwarded chunks are fed here line by line, so only one partial line is ever held (bounded by
+    MAX_SSE_BUFFER_BYTES; a line past the bound stops parsing, never the relay). A streamed SSE
+    response reports usage in `data:` events — Anthropic input/cache on `message_start` and the
+    final `output_tokens` on `message_delta`; OpenAI (with `stream_options.include_usage`) both on a
+    terminal usage chunk. A non-streaming response is instead one JSON body whose top-level `usage`
+    block is recovered the same way (its shape is the SSE payload without the `data:` frame), so a
+    single-JSON in-sandbox completion is metered too. The two are mutually exclusive per response —
+    an SSE stream sets usage before the body branch runs — so the JSON path never re-meters a
+    stream. A response that carried no usage yields None, so the relay is metered only when the
+    model actually reported it."""
 
     host: str
     _buffer: bytearray = field(default_factory=bytearray, init=False)
@@ -558,6 +571,8 @@ class SseTokenUsage:
 
     def usage(self) -> tuple[str, Usage] | None:
         if not self._seen:
+            self._maybe_json_body(bytes(self._buffer).strip())
+        if not self._seen:
             return None
         return self._model, Usage(
             input_tokens=self._input,
@@ -569,6 +584,7 @@ class SseTokenUsage:
     def _consume(self, line: bytes) -> None:
         payload = line.strip()
         if not payload.startswith(b"data:"):
+            self._maybe_json_body(payload)
             return
         payload = payload[len(b"data:") :].strip()
         if not payload.startswith(b"{"):
@@ -581,6 +597,29 @@ class SseTokenUsage:
             return
         if self.host == ANTHROPIC_HOST:
             self._anthropic(event)
+        elif self.host == OPENAI_HOST:
+            self._openai(event)
+
+    def _maybe_json_body(self, payload: bytes) -> None:
+        """A non-streaming completion's whole response body is a single JSON object, not `data:`
+        events: parse its top-level usage when the SSE path saw none. Guarded on `_seen`, so once a
+        stream has reported usage this never fires — the working SSE path is never re-metered.
+        Called for each non-`data:` line (a newline-terminated body) and for the un-terminated
+        trailing buffer at `usage()` (the common compact body), so either framing is recovered
+        exactly once."""
+        if self._seen or not payload.startswith(b"{"):
+            return
+        try:
+            event = json.loads(payload)
+        except (ValueError, UnicodeDecodeError):
+            return
+        if not isinstance(event, dict):
+            return
+        if self.host == ANTHROPIC_HOST:
+            model = event.get("model")
+            if isinstance(model, str):
+                self._model = model
+            self._absorb_anthropic(event.get("usage"), initial=True)
         elif self.host == OPENAI_HOST:
             self._openai(event)
 

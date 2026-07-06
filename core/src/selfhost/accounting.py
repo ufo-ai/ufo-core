@@ -303,14 +303,18 @@ async def record_sandbox_tokens(
     turn_id: UUID,
     model: str,
     usage: Usage,
+    pricing: Pricing = CORE_PRICING,
 ) -> None:
     """Meter a model call the sandbox made through the egress proxy as a `sandbox_tokens` ledger row
     per turn, its tokens and priced cost accumulated atomically so several in-sandbox calls on one
     turn never lose a burn. Disjoint from the host turn loop's `tokens` bill: that path runs the
     model host-side and never touches the proxy, so the two sources never overlap and metering here
-    is additive, not a double-count. Priced through the one price table (never a second) and stamped
-    with its digest, and keyed with an empty attempt under a dimension distinct from `tokens`, so
-    its id can never collide with the host row `record_turn_usage` writes for the same turn."""
+    is additive, not a double-count. Priced through the deploy's merged `pricing` (core plus every
+    provider-contributed rate, `CORE_PRICING` when none) and stamped with its digest — the same
+    table and stamp the host turn's `tokens` bill uses, so a contributed slug is billed at its real
+    rate and sandbox rows reconcile with turn rows by digest. Keyed with an empty attempt under a
+    dimension distinct from `tokens`, so its id can never collide with the host row
+    `record_turn_usage` writes for the same turn."""
     total = (
         usage.input_tokens
         + usage.output_tokens
@@ -319,7 +323,7 @@ async def record_sandbox_tokens(
     )
     if total == 0:
         return
-    priced = usage_priced_micro_usd(model, usage)
+    priced = pricing.micro_usd(model, usage)
     ledger_id = ledger_id_for(workspace_id, turn_id, SANDBOX_TOKENS_DIMENSION)
     insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
     await connection.execute(
@@ -332,7 +336,7 @@ async def record_sandbox_tokens(
             amount=total,
             priced_micro_usd=priced,
             model=model,
-            price_digest=PRICE_DIGEST,
+            price_digest=pricing.digest,
             created_at=sa.func.now(),
             updated_at=sa.func.now(),
         )

@@ -317,6 +317,35 @@ async def test_sandbox_tokens_accumulate_into_one_row(db: None) -> None:
     )
 
 
+async def test_sandbox_tokens_priced_and_stamped_by_the_merged_pricing(db: None) -> None:
+    """An in-sandbox call on a contributed slug is priced against the deploy's merged table and
+    stamped with its digest — never the core rate (which lacks the slug → $0) or the core digest —
+    so it bills at the real rate and reconciles with the turn path's rows by digest."""
+    pricing = accounting.pricing_with(
+        {"vendor/model-x": accounting.ModelPrice(1_000_000, 2_000_000, 0, 0)}
+    )
+    usage = Usage(input_tokens=1_000_000, output_tokens=1_000_000)
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await record_sandbox_tokens(
+            connection, workspace_id, turn_id, "vendor/model-x", usage, pricing=pricing
+        )
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.ledger.c.priced_micro_usd,
+                    tables.ledger.c.price_digest,
+                    tables.ledger.c.model,
+                ).where(tables.ledger.c.turn_id == turn_id)
+            )
+        ).one()
+    assert int(row.priced_micro_usd) == 3_000_000
+    assert row.price_digest == pricing.digest
+    assert row.price_digest != accounting.PRICE_DIGEST
+    assert row.model == "vendor/model-x"
+
+
 async def test_spend_rollup_surfaces_sandbox_tokens(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)

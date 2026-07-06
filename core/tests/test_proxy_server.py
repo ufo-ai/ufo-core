@@ -50,6 +50,23 @@ OPENAI_SSE = (
     b'"usage":{"prompt_tokens":1000000,"completion_tokens":1000000,"total_tokens":2000000}}\n\n'
     b"data: [DONE]\n\n"
 )
+ANTHROPIC_JSON_BODY = (
+    b"HTTP/1.1 200 OK\r\n"
+    b"content-type: application/json\r\n"
+    b"\r\n"
+    b'{"id":"msg","type":"message","role":"assistant","model":"claude-opus-4-8",'
+    b'"content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn",'
+    b'"usage":{"input_tokens":1000,"cache_read_input_tokens":3000,'
+    b'"cache_creation_input_tokens":4000,"output_tokens":2000}}'
+)
+OPENAI_JSON_BODY = (
+    b"HTTP/1.1 200 OK\r\n"
+    b"content-type: application/json\r\n"
+    b"\r\n"
+    b'{"id":"c","object":"chat.completion","model":"gpt-5.4",'
+    b'"choices":[{"message":{"role":"assistant","content":"hi"}}],'
+    b'"usage":{"prompt_tokens":1000000,"completion_tokens":1000000,"total_tokens":2000000}}'
+)
 
 
 def _fixed(rules: tuple = ()) -> PerAgentRules:
@@ -398,6 +415,30 @@ def test_sse_usage_without_a_usage_event_is_none() -> None:
     assert accumulator.usage() is None
 
 
+def test_json_body_usage_parses_an_anthropic_response() -> None:
+    """A non-streaming Anthropic response is one JSON body with a top-level `usage` block, not
+    `data:` SSE events; its usage is recovered so a single-JSON in-sandbox completion is metered."""
+    accumulator = SseTokenUsage(MODEL_HOST)
+    accumulator.feed(ANTHROPIC_JSON_BODY)
+    assert accumulator.usage() == ("claude-opus-4-8", FULL_TOKEN_USAGE)
+
+
+def test_json_body_usage_parses_an_openai_response() -> None:
+    accumulator = SseTokenUsage(OPENAI_HOST)
+    accumulator.feed(OPENAI_JSON_BODY)
+    assert accumulator.usage() == (
+        "gpt-5.4",
+        Usage(input_tokens=1_000_000, output_tokens=1_000_000),
+    )
+
+
+def test_json_body_usage_reassembles_across_chunk_boundaries() -> None:
+    accumulator = SseTokenUsage(MODEL_HOST)
+    for start in range(0, len(ANTHROPIC_JSON_BODY), 7):
+        accumulator.feed(ANTHROPIC_JSON_BODY[start : start + 7])
+    assert accumulator.usage() == ("claude-opus-4-8", FULL_TOKEN_USAGE)
+
+
 async def _stream_pair() -> tuple[
     tuple[asyncio.StreamReader, asyncio.StreamWriter],
     tuple[asyncio.StreamReader, asyncio.StreamWriter],
@@ -434,6 +475,36 @@ async def test_model_host_relay_meters_sandbox_tokens_to_the_turn(db: None) -> N
     proxy = _egress(_fixed())
     accumulator = SseTokenUsage(MODEL_HOST)
     accumulator.feed(ANTHROPIC_SSE)
+    proxy._meter_tokens(_basic(RunToken(workspace_id, turn_id).encode()), accumulator)
+    assert len(proxy._meter_tasks) == 1
+    await proxy.stop()
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.ledger.c.dimension,
+                    tables.ledger.c.amount,
+                    tables.ledger.c.priced_micro_usd,
+                    tables.ledger.c.model,
+                ).where(tables.ledger.c.turn_id == turn_id)
+            )
+        ).one()
+    assert (row.dimension, int(row.amount), int(row.priced_micro_usd), row.model) == (
+        "sandbox_tokens",
+        10_000,
+        81_500,
+        "claude-opus-4-8",
+    )
+
+
+async def test_model_host_relay_meters_a_non_streaming_json_body(db: None) -> None:
+    """A non-streaming single-JSON completion is metered through the same path as an SSE stream: the
+    teed body's top-level usage is parsed and written under `sandbox_tokens`, so it is not free."""
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+    proxy = _egress(_fixed())
+    accumulator = SseTokenUsage(MODEL_HOST)
+    accumulator.feed(ANTHROPIC_JSON_BODY)
     proxy._meter_tokens(_basic(RunToken(workspace_id, turn_id).encode()), accumulator)
     assert len(proxy._meter_tasks) == 1
     await proxy.stop()

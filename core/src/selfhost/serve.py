@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from starlette.requests import Request
 from starlette.responses import Response
 
+from selfhost.accounting import Pricing
 from selfhost.blob import BlobStore, blob_store_for
 from selfhost.browser import BROWSER_CDP_URL_ENV, CdpProvider, SandboxCdpProvider
 from selfhost.config import (
@@ -117,6 +118,7 @@ def run() -> None:
     hub = _select_hub(config, manifests)
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
     carrier = _select_carrier(config, manifests)
+    registry = model_registry(config, manifests)
     init_runtime(
         Runtime(
             config=config,
@@ -126,12 +128,12 @@ def run() -> None:
             carrier=carrier,
             cdp_provider=_select_cdp_provider(config, manifests, workspace_id, credentials),
             search_provider=_select_search_provider(config, manifests, workspace_id, credentials),
-            proxy=_egress_proxy(asyncio.run(_resolver(config, credentials))),
+            proxy=_egress_proxy(asyncio.run(_resolver(config, credentials)), registry.pricing),
             dbos=dbos_client,
             subagents=SubagentRegistry((*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests))),
             subagent_grants=turn_subagent_grants(manifests),
             manifests=manifests,
-            registry=model_registry(config, manifests),
+            registry=registry,
             skills=skill_registry(manifests),
             credentials=credentials,
             index=index,
@@ -628,19 +630,25 @@ async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]:
         await heartbeat.retire()
 
 
-def _egress_proxy(resolver: PerAgentRules) -> ProxyEndpoint:
+def _egress_proxy(resolver: PerAgentRules, pricing: Pricing) -> ProxyEndpoint:
     """The sandbox's sole route out runs on its own event loop: a standalone network service, not
     part of the turn loop, that outlives every turn for the life of the process. The proxy resolves
     each request's rules through `resolver`, which reads the turn's agent and grants per turn, and
     authorizes each keyed-host CONNECT through `resolver.turn_live`, which reads the turn's status
-    fresh so a real key is injected only while the turn is running."""
+    fresh so a real key is injected only while the turn is running. `pricing` is the deploy's merged
+    model price table, so an in-sandbox model call is billed and stamped exactly as the host turn's
+    tokens are — a contributed slug at its real rate, under the same digest."""
     loop = asyncio.new_event_loop()
     threading.Thread(target=loop.run_forever, daemon=True).start()
 
     async def _boot() -> ProxyEndpoint:
         cert, key = await generate_ca()
         return await EgressProxy(
-            resolve=resolver.resolve, authorize=resolver.turn_live, ca_cert=cert, ca_key=key
+            resolve=resolver.resolve,
+            authorize=resolver.turn_live,
+            ca_cert=cert,
+            ca_key=key,
+            pricing=pricing,
         ).start()
 
     return asyncio.run_coroutine_threadsafe(_boot(), loop).result(PROXY_STARTUP_TIMEOUT_SECONDS)
