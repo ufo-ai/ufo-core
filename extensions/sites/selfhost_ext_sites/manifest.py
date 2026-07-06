@@ -19,7 +19,7 @@ NAME = "sites"
 VERSION = "0.1.0"
 
 SECTION_NAME = "sites"
-SECTION_BODY = (Path(__file__).parent / "sites_section.md").read_text().strip()
+SECTION_BODY = (Path(__file__).parent / "prompts" / "sites_section.md").read_text().strip()
 SKILLS_ROOT = Path(__file__).parent / "skills"
 SKILL_NAME = "website-building"
 

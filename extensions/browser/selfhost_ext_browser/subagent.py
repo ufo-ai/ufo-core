@@ -13,7 +13,7 @@ from selfhost.sdk.manifest import SubagentProfile
 from selfhost_ext_browser.tools import BROWSER_TOOL_NAMES
 
 BROWSER_SUBAGENT_NAME = "browser"
-BROWSER_SUBAGENT_PROMPT = (Path(__file__).parent / "subagent_browser.md").read_text()
+BROWSER_SUBAGENT_PROMPT = (Path(__file__).parent / "prompts" / "subagent_browser.md").read_text()
 BROWSER_SUBAGENT_TOOL_NAMES = (*BROWSER_TOOL_NAMES, "read", "write", "edit", "search_web")
 
 

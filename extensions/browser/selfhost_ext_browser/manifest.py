@@ -17,7 +17,7 @@ NAME = "browser"
 VERSION = "0.1.0"
 
 SECTION_NAME = "browser"
-SECTION_BODY = (Path(__file__).parent / "browser_section.md").read_text().strip()
+SECTION_BODY = (Path(__file__).parent / "prompts" / "browser_section.md").read_text().strip()
 SKILLS_ROOT = Path(__file__).parent / "skills"
 SKILL_NAMES = ("browser-operator",)
 

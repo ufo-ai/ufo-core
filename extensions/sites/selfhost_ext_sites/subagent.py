@@ -13,7 +13,9 @@ from selfhost.sdk.manifest import SubagentProfile
 from selfhost_ext_sites.tools import SITES_TOOL_NAMES
 
 WEBSITE_BUILDING_NAME = "website_building"
-WEBSITE_BUILDING_PROMPT = (Path(__file__).parent / "subagent_website_building.md").read_text()
+WEBSITE_BUILDING_PROMPT = (
+    Path(__file__).parent / "prompts" / "subagent_website_building.md"
+).read_text()
 WEBSITE_BUILDING_ROUND_LIMIT = 100
 WEBSITE_BUILDING_TOOL_NAMES = (
     "bash",

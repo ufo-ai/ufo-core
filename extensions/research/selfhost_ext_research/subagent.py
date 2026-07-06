@@ -41,8 +41,8 @@ RESEARCH_TOOL_NAMES = (
     "memory_search",
     "xlsx_repl",
 )
-RESEARCH_PROMPT = (Path(__file__).parent / "subagent_research.md").read_text()
-DEEP_RESEARCH_PROMPT = (Path(__file__).parent / "subagent_deep_research.md").read_text()
+RESEARCH_PROMPT = (Path(__file__).parent / "prompts" / "subagent_research.md").read_text()
+DEEP_RESEARCH_PROMPT = (Path(__file__).parent / "prompts" / "subagent_deep_research.md").read_text()
 
 
 class ResearchInput(BaseModel):

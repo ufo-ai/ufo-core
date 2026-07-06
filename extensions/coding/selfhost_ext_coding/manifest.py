@@ -34,7 +34,7 @@ CODING_TOOL_NAMES = (
     "search_web",
     "fetch_url",
 )
-CODING_PROMPT = (Path(__file__).parent / "subagent_coding.md").read_text()
+CODING_PROMPT = (Path(__file__).parent / "prompts" / "subagent_coding.md").read_text()
 
 
 class CodingInput(BaseModel):

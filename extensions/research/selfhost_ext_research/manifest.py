@@ -19,7 +19,7 @@ NAME = "research"
 VERSION = "0.1.0"
 
 SECTION_NAME = "web"
-SECTION_BODY = (Path(__file__).parent / "web_section.md").read_text().strip()
+SECTION_BODY = (Path(__file__).parent / "prompts" / "web_section.md").read_text().strip()
 SKILLS_ROOT = Path(__file__).parent / "skills"
 SKILL_NAMES = ("research-assistant", "research-report")
 

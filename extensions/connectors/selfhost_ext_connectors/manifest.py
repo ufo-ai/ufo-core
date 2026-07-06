@@ -32,7 +32,7 @@ VERSION = "0.1.0"
 COMPOSIO_BACKEND = "composio"
 
 SECTION_NAME = "external_tools"
-SECTION_BODY = (Path(__file__).parent / "connectors_section.md").read_text().strip()
+SECTION_BODY = (Path(__file__).parent / "prompts" / "connectors_section.md").read_text().strip()
 
 
 def manifest() -> Manifest:
