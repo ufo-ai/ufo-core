@@ -52,6 +52,7 @@ from selfhost.ext.loader import (
     index_backend,
     load_manifests,
     skill_registry,
+    turn_subagent_grants,
     turn_subagents,
     turn_tools,
 )
@@ -496,6 +497,30 @@ def test_sample_subagent_profile_flows_through_the_loader_into_the_registry() ->
     profile = registry.get(sample.SUBAGENT_NAME)
     assert profile.tool_names == (sample.TOOL_NAME,)
     assert "JSON" in subagent_system_prompt(profile)
+
+
+async def test_subagent_tool_grant_and_default_widen_a_child_beyond_its_named_tools(
+    db: None,
+) -> None:
+    """subagent_tool_grants + ToolDef.subagent_default end to end: the sample grants its note tool
+    to its own profile and flags its connector tool a subagent default, so a child resolves both
+    though its profile names neither — the seam that attaches a capability's tools to the profiles
+    the research docs list, cross-extension, without the profile hard-coding a foreign name.
+    Resolved here exactly as the turn loop does (own names plus grants, plus any subagent-default
+    tool) over the real tool pool."""
+    workspace_id = await _workspace()
+    manifest = _sample_manifest()
+    all_tools, _ = turn_tools((manifest,), workspace_id, _credential_store())
+    profile = SubagentRegistry(turn_subagents((manifest,))).get(sample.SUBAGENT_NAME)
+    grants = turn_subagent_grants((manifest,))
+    assert grants[sample.SUBAGENT_NAME] == frozenset({sample.NOTE_TOOL_NAME})
+    allowed = set(profile.tool_names) | grants.get(sample.SUBAGENT_NAME, frozenset())
+    child = {tool.name for tool in all_tools if tool.name in allowed or tool.subagent_default}
+    assert sample.TOOL_NAME in child  # its own named tool
+    assert sample.NOTE_TOOL_NAME in child  # arrived via the grant
+    assert sample.CONNECTOR_EXECUTE_TOOL_NAME in child  # arrived via subagent_default
+    assert sample.NOTE_TOOL_NAME not in profile.tool_names
+    assert sample.CONNECTOR_EXECUTE_TOOL_NAME not in profile.tool_names
 
 
 async def test_sample_model_provider_is_selected_priced_and_streams(tmp_path: Path) -> None:

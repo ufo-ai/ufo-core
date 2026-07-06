@@ -73,6 +73,7 @@ class Runtime:
     proxy: ProxyEndpoint
     dbos: DBOSClient
     subagents: SubagentRegistry
+    subagent_grants: dict[str, frozenset[str]]
     manifests: tuple[Manifest, ...]
     registry: ModelRegistry
     skills: SkillRegistry
@@ -131,8 +132,11 @@ async def _execute_turn(turn_id: str) -> str:
             resolved = Agent(
                 prompt=subagent_system_prompt(profile), model=profile.model or agent.model
             )
+            allowed = set(profile.tool_names) | runtime.subagent_grants.get(
+                profile.name, frozenset()
+            )
             tools = ToolRegistry(
-                tuple(tool for tool in all_tools if tool.name in profile.tool_names)
+                tuple(tool for tool in all_tools if tool.name in allowed or tool.subagent_default)
             )
             system_prompt = rendered_prompt(resolved.prompt)
             max_rounds = profile.max_rounds

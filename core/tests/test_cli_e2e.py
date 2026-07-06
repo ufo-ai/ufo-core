@@ -342,6 +342,7 @@ def chat_server(
             proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
             dbos=dbos_client,
             subagents=SubagentRegistry(()),
+            subagent_grants={},
             manifests=(),
             registry=STANDIN_REGISTRY,
             skills=skill_registry(()),

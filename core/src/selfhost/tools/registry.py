@@ -24,6 +24,7 @@ class ToolDef[ModelT: BaseModel]:
     input_model: type[ModelT]
     handler: Callable[[ToolContext, ModelT], Awaitable[ToolResult]]
     untrusted: bool = False
+    subagent_default: bool = False
 
     def schema(self) -> ToolSchema:
         return ToolSchema(

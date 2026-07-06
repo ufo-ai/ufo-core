@@ -90,3 +90,6 @@ from selfhost.ext.manifest import (
 from selfhost.ext.manifest import (
     SubagentProfile as SubagentProfile,
 )
+from selfhost.ext.manifest import (
+    SubagentToolGrant as SubagentToolGrant,
+)

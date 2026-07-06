@@ -88,6 +88,7 @@ async def live_surface(
             proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
             dbos=runtime_dbos,
             subagents=SubagentRegistry(()),
+            subagent_grants={},
             manifests=(),
             credentials=None,
             index=None,

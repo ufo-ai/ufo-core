@@ -353,6 +353,23 @@ class SubagentProfile:
 
 
 @dataclass(frozen=True)
+class SubagentToolGrant:
+    """An extension exposing one of its own tools to a subagent profile it does not own. The tool's
+    owning extension declares where the tool should appear rather than the profile hard-coding a
+    foreign tool name, so a capability attaches its tools to the profiles the research docs list.
+    The loader unions every grant onto the target profile's own `tool_names`; a grant only ever
+    widens a profile and is add-only. A grant naming a profile or tool that is not installed is
+    silently ignored — cross-extension exposure degrades exactly like an absent tool name in
+    `tool_names` does, never a boot error, so grantor and target need not ship together. Grants
+    affect subagents only; the main agent already dispatches the whole tool set unfiltered. For a
+    tool that every subagent should hold, set `ToolDef.subagent_default` instead of granting it to
+    each profile by name."""
+
+    profile: str
+    tool_names: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class SkillSpec:
     """A skill a pack contributes: the directory holding its `SKILL.md` and any bundled scripts and
     assets. The loader parses each into the skill registry `load_skill` and the `{{skill_index}}`
@@ -387,6 +404,7 @@ class Manifest:
     hooks: tuple[HookSpec, ...] = ()
     prompt_sections: tuple[PromptSection, ...] = ()
     subagents: tuple[SubagentProfile, ...] = ()
+    subagent_tool_grants: tuple[SubagentToolGrant, ...] = ()
     surfaces: tuple[SurfaceSpec, ...] = ()
     models: tuple[ModelProviderSpec, ...] = ()
     hubs: tuple[HubSpec, ...] = ()

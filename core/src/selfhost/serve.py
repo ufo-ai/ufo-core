@@ -35,6 +35,7 @@ from selfhost.ext.loader import (
     index_backend,
     load_manifests,
     skill_registry,
+    turn_subagent_grants,
     turn_subagents,
     validate_ext_tools,
 )
@@ -121,6 +122,7 @@ def run() -> None:
             proxy=_egress_proxy(asyncio.run(_resolver(config, credentials))),
             dbos=dbos_client,
             subagents=SubagentRegistry((*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests))),
+            subagent_grants=turn_subagent_grants(manifests),
             manifests=manifests,
             registry=model_registry(config, manifests),
             skills=skill_registry(manifests),

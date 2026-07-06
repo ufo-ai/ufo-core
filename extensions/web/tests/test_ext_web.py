@@ -163,6 +163,7 @@ def dbos_runtime(
             proxy=proxy,
             dbos=dbos_client,
             subagents=SubagentRegistry(()),
+            subagent_grants={},
             manifests=(),
             registry=STANDIN_REGISTRY,
             skills=skill_registry(()),

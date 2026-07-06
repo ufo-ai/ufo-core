@@ -55,6 +55,7 @@ from selfhost.sdk.manifest import (
     SkillSpec,
     SourceProvider,
     SubagentProfile,
+    SubagentToolGrant,
 )
 from selfhost.sdk.models import ModelEvent, ModelPrice, ModelRequest, TextDelta, Usage
 from selfhost.sdk.sandbox import (
@@ -611,6 +612,9 @@ def manifest() -> Manifest:
                 output_model=ProbeFinding,
             ),
         ),
+        subagent_tool_grants=(
+            SubagentToolGrant(profile=SUBAGENT_NAME, tool_names=(NOTE_TOOL_NAME,)),
+        ),
         credentials=(
             CredentialSlot(
                 name=API_SLOT,
@@ -632,6 +636,7 @@ def manifest() -> Manifest:
                         description="Resolve the bound connected-account id for server-side exec.",
                         input_model=ConnectorExecuteInput,
                         handler=_connector_execute,
+                        subagent_default=True,
                     ),
                 ),
             ),

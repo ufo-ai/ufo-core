@@ -318,6 +318,19 @@ def turn_subagents(manifests: tuple[Manifest, ...]) -> tuple[SubagentProfile, ..
     return tuple(profile for manifest in manifests for profile in manifest.subagents)
 
 
+def turn_subagent_grants(manifests: tuple[Manifest, ...]) -> dict[str, frozenset[str]]:
+    """The tools each extension exposes to a subagent profile it does not own, unioned by target
+    profile across every manifest — the map the turn loop folds onto a profile's own `tool_names`
+    before intersecting with the live tool set. A grant only widens; an unknown profile or an
+    uninstalled tool degrades silently at the intersection, so a capability attaches its tools to
+    the profiles the research docs list without the profile hard-coding foreign names."""
+    grants: dict[str, set[str]] = {}
+    for manifest in manifests:
+        for grant in manifest.subagent_tool_grants:
+            grants.setdefault(grant.profile, set()).update(grant.tool_names)
+    return {profile: frozenset(names) for profile, names in grants.items()}
+
+
 DEFAULT_BACKEND = "default"
 
 
