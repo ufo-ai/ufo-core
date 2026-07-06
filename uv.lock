@@ -23,6 +23,7 @@ members = [
     "selfhost-ext-eval-harness",
     "selfhost-ext-exa",
     "selfhost-ext-index-default",
+    "selfhost-ext-knowledge-graph",
     "selfhost-ext-mcp",
     "selfhost-ext-memory",
     "selfhost-ext-openrouter",
@@ -2831,6 +2832,23 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "selfhost", editable = "core" },
+    { name = "sqlalchemy", specifier = ">=2" },
+]
+
+[[package]]
+name = "selfhost-ext-knowledge-graph"
+version = "0.1.0"
+source = { editable = "extensions/knowledge-graph" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "selfhost" },
+    { name = "sqlalchemy" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pydantic", specifier = ">=2" },
     { name = "selfhost", editable = "core" },
     { name = "sqlalchemy", specifier = ">=2" },
 ]
