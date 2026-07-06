@@ -5,8 +5,9 @@ each delivered batch carried and whether the runner wired the model into its off
 core test seeds a real page, drives the runner, and reads those rows back through the public
 ScopedStore: the runner delivers changed pages, advances each consumer's own cursor (a second drive
 over the same window delivers only the newly-changed page), and builds the jobs-way context with
-the model wired. `core_jobs` registers one `page_change:<ext>` job per consumer, so a consumer that
-raises fails only its own workflow — proven by driving one consumer that raises and confirming its
+the model wired. `core_jobs` registers one `page_change:<ext>:<hook>` job per consumer, so a
+consumer that raises fails only its own workflow — proven by driving one consumer that raises and
+confirming its
 cursor did not advance while a second consumer still makes progress. No mock call-log — a real
 consumer records through its capability APIs."""
 
@@ -150,9 +151,10 @@ async def _raise(ctx: HookContext) -> HookOutcome:
 
 
 def test_each_page_change_consumer_registers_as_its_own_job(tmp_path: object) -> None:
-    """core_jobs fans a `page_change:<ext>` job out per registered consumer, so the memory page
-    indexer and the graph extractor are independent DBOS workflows again — each keyed in the core
-    namespace under its own consumer name."""
+    """core_jobs fans a `page_change:<ext>:<hook>` job out per registered consumer, so the memory
+    page indexer and the graph extractor are independent DBOS workflows again — each keyed in the
+    core namespace under its extension and its handler-name discriminator, so two hooks in one
+    extension get two jobs rather than colliding on one name."""
     blob = FilesystemBlobStore(root=tmp_path)
     boom = Manifest(
         name="boom_ext", version="0", hooks=(HookSpec(event="page_change", handler=_raise),)
@@ -170,10 +172,13 @@ def test_each_page_change_consumer_registers_as_its_own_job(tmp_path: object) ->
         runner,
     )
     page_change = [spec.name for spec in specs if spec.name.startswith(f"{PAGE_CHANGE_JOB}:")]
-    assert page_change == [f"{PAGE_CHANGE_JOB}:{sample.NAME}", f"{PAGE_CHANGE_JOB}:boom_ext"]
+    assert page_change == [
+        f"{PAGE_CHANGE_JOB}:{sample.NAME}:_record_page_change",
+        f"{PAGE_CHANGE_JOB}:boom_ext:_raise",
+    ]
     keys = {binding.key for binding in bindings_from((), specs)}
-    assert f"{CORE_EXTENSION}:{PAGE_CHANGE_JOB}:{sample.NAME}" in keys
-    assert f"{CORE_EXTENSION}:{PAGE_CHANGE_JOB}:boom_ext" in keys
+    assert f"{CORE_EXTENSION}:{PAGE_CHANGE_JOB}:{sample.NAME}:_record_page_change" in keys
+    assert f"{CORE_EXTENSION}:{PAGE_CHANGE_JOB}:boom_ext:_raise" in keys
 
 
 async def test_a_failing_consumer_neither_advances_its_cursor_nor_blocks_another(
@@ -187,17 +192,18 @@ async def test_a_failing_consumer_neither_advances_its_cursor_nor_blocks_another
     )
     runner = _runner(workspace_id, blob, manifests=(boom, _sample_manifest()))
     consumers = {consumer.extension: consumer for consumer in runner.consumers()}
+    boom_consumer, sample_consumer = consumers["boom_ext"], consumers[sample.NAME]
 
     with pytest.raises(RuntimeError):
-        await runner.drive(consumers["boom_ext"])
+        await runner.drive(boom_consumer)
     boom_cursor = await ScopedStore(workspace_id=workspace_id, extension="boom_ext").get(
-        PAGE_CHANGE_CURSOR_KEY
+        f"{PAGE_CHANGE_CURSOR_KEY}:{boom_consumer.discriminator}"
     )
     assert boom_cursor is None
 
-    await runner.drive(consumers[sample.NAME])
+    await runner.drive(sample_consumer)
     scoped = ScopedStore(workspace_id=workspace_id, extension=sample.NAME)
     record = await scoped.get(sample.HOOK_PAGE_CHANGE_KEY)
     assert record == {"page_ids": [str(page)], "model_wired": False}
-    sample_cursor = await scoped.get(PAGE_CHANGE_CURSOR_KEY)
+    sample_cursor = await scoped.get(f"{PAGE_CHANGE_CURSOR_KEY}:{sample_consumer.discriminator}")
     assert isinstance(sample_cursor, str) and sample_cursor != boom_cursor

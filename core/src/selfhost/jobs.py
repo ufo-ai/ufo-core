@@ -204,13 +204,19 @@ class SandboxReaper:
 @dataclass(frozen=True)
 class PageChangeConsumer:
     """One registered `page_change` hook and where its cursor and context are scoped: the declaring
-    extension's name, the credential slots it declared, and the hook spec. `core_jobs` registers one
-    JobSpec per consumer, so each drives as its own DBOS workflow — a backlogged or wedged consumer
-    delays only itself."""
+    extension's name, the credential slots it declared, the hook spec, and the discriminator that
+    keeps two hooks in one extension independent — the handler's own `__name__`, since page_change
+    handlers are plain module-level functions. `core_jobs` names one JobSpec
+    `page_change:{extension}:{discriminator}` per consumer and `drive` rides a
+    `{PAGE_CHANGE_CURSOR_KEY}:{discriminator}` cursor, so each drives as its own DBOS workflow off
+    its own cursor — a backlogged or wedged consumer delays only itself, and an extension that
+    registers two page_change hooks (the memory indexer and its fact deriver) never collides on
+    JobSpec name or cursor key."""
 
     extension: str
     declared: frozenset[str]
     spec: HookSpec
+    discriminator: str
 
 
 @dataclass(frozen=True)
@@ -222,10 +228,12 @@ class PageChangeRunner:
     one never delaying or blocking the other. `drive` is the one home for the cursor loop every page
     consumer shares: it replays each source page changed since that consumer's own cursor and hands
     the batch to its handler, then advances and persists the cursor. Each cursor lives in that
-    extension's own ScopedStore, so a single constant key is naturally per-consumer and a restart
-    resumes exactly where it left off; the handlers stay idempotent, so a replayed batch settles on
-    the same state. Each handler runs with the extension's scoped ExtensionContext built the jobs
-    way — the model wired — so a consumer like graph extraction's Tier-B pass reaches ctx.model. A
+    extension's own ScopedStore under a per-consumer key
+    (`{PAGE_CHANGE_CURSOR_KEY}:{discriminator}`), so two hooks in one extension keep independent
+    cursors and a restart resumes each exactly where it left off; the handlers stay idempotent, so a
+    replayed batch settles on the same state. Each handler runs with the extension's scoped
+    ExtensionContext built the jobs way — the model wired — so a consumer like graph extraction's
+    Tier-B pass reaches ctx.model. A
     handler that raises propagates out of `drive` (failing that one workflow) before its cursor
     advances, so the tick makes no progress and the next tick retries from the same place.
     Batch-at-interval and fed only by the source pipeline, so it can never fire on the derived rows
@@ -242,20 +250,35 @@ class PageChangeRunner:
     registry: ModelRegistry | None = None
 
     def consumers(self) -> tuple[PageChangeConsumer, ...]:
-        return tuple(
-            PageChangeConsumer(
-                extension=manifest.name,
-                declared=frozenset(slot.name for slot in manifest.credentials),
-                spec=spec,
-            )
-            for manifest in self.manifests
-            for spec in manifest.hooks
-            if spec.event == "page_change"
-        )
+        consumers: list[PageChangeConsumer] = []
+        seen: set[tuple[str, str]] = set()
+        for manifest in self.manifests:
+            declared = frozenset(slot.name for slot in manifest.credentials)
+            for spec in manifest.hooks:
+                if spec.event != "page_change":
+                    continue
+                discriminator = spec.handler.__name__
+                if (manifest.name, discriminator) in seen:
+                    raise RuntimeError(
+                        f"two page_change hooks in extension {manifest.name!r} share the "
+                        f"discriminator {discriminator!r} (handler __name__); give the handlers "
+                        "distinct function names so each keys its own JobSpec and cursor"
+                    )
+                seen.add((manifest.name, discriminator))
+                consumers.append(
+                    PageChangeConsumer(
+                        extension=manifest.name,
+                        declared=declared,
+                        spec=spec,
+                        discriminator=discriminator,
+                    )
+                )
+        return tuple(consumers)
 
     async def drive(self, consumer: PageChangeConsumer) -> None:
         context = self._context_for(consumer.extension, consumer.declared)
-        stored = await context.store.get(PAGE_CHANGE_CURSOR_KEY)
+        cursor_key = f"{PAGE_CHANGE_CURSOR_KEY}:{consumer.discriminator}"
+        stored = await context.store.get(cursor_key)
         cursor = stored if isinstance(stored, str) else None
         while True:
             batch = await self.pages.pages_changed_since(cursor, PAGE_CHANGE_BATCH)
@@ -265,7 +288,7 @@ class PageChangeRunner:
                 HookContext(ext=context, payload=PageChangeBatch(changes=batch.changes))
             )
             cursor = batch.next_cursor
-            await context.store.put(PAGE_CHANGE_CURSOR_KEY, cursor)
+            await context.store.put(cursor_key, cursor)
             if len(batch.changes) < PAGE_CHANGE_BATCH:
                 return
 
@@ -298,9 +321,10 @@ def core_jobs(
     """The jobs a deploy always runs, before any extension's — all core because the source pipeline,
     spend enforcement, sandbox lifecycle, and the page-change fan-out are core. The sync driver
     polls each source and lands its pages; the page-change runner contributes one
-    `page_change:<ext>` job per registered consumer, each replaying those pages to that consumer's
-    hook off its own cursor as its own workflow (the memory page indexer and the graph extractor
-    among them); the spend-resume sweep re-admits parked turns their caps now allow; the sandbox
+    `page_change:<ext>:<hook>` job per registered consumer, each replaying those pages to that
+    consumer's hook off its own cursor as its own workflow (the memory page indexer, the memory
+    fact deriver, and the graph extractor among them); the spend-resume sweep re-admits parked
+    turns their caps now allow; the sandbox
     reaper destroys the disposable container behind each idle conversation through the carrier seam.
     None fires on its own writes. (Memory-item indexing stays the memory extension's own job; page
     derivation is a page_change hook this runner drives.)"""
@@ -324,7 +348,7 @@ def core_jobs(
 
     page_change = tuple(
         JobSpec(
-            name=f"{PAGE_CHANGE_JOB}:{consumer.extension}",
+            name=f"{PAGE_CHANGE_JOB}:{consumer.extension}:{consumer.discriminator}",
             schedule=PAGE_CHANGE_SCHEDULE,
             handler=_drive_consumer(consumer),
         )

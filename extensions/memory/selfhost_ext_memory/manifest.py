@@ -1,12 +1,15 @@
-"""The memory extension's declared points: the two tools, the recall hook, the page-change indexer,
-the memory-index job, the skill.
+"""The memory extension's declared points: the two tools, the recall hook, two page-change
+consumers, two derivation jobs, the skill.
 
 `memory_search` and `memory_update` are the agent's durable-memory tools; the `user_prompt_submit`
-hook auto-injects relevant memory into the turn's context before the model runs; the `page_change`
-hook turns each replayed source-page change into index chunks + a mirror row off the core runner's
-cursor; the `memory_index` JobSpec is the derivation that turns committed items into index chunks on
-an interval. Recall stays best-effort under a gating hook: the handler owns a soft timeout below the
-hook deadline and swallows every error, returning None rather than ever denying the turn.
+hook auto-injects relevant memory into the turn's context before the model runs. Two `page_change`
+hooks ride independent core-runner cursors: `index_pages` turns each replayed source-page change
+into index chunks + a mirror row, and `derive_facts` distills each into durable `fact`
+memory_items with a bounded metered model pass. Two JobSpecs run the interval derivations:
+`memory_index` turns committed items into index chunks, and `memory_consolidate` clusters aged
+facts into `semantic` summaries that supersede their originals. Recall stays best-effort under a
+gating hook: the handler owns a soft timeout below the hook deadline and swallows every error,
+returning None rather than ever denying the turn.
 """
 
 import asyncio
@@ -33,6 +36,7 @@ from selfhost.sdk.manifest import (
 )
 from selfhost.sdk.sources import SHARED_SUBJECT, member_subject
 from selfhost.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
+from selfhost_ext_memory.condenser import FactDeriver, MemoryConsolidator
 from selfhost_ext_memory.store import (
     DEFAULT_CONFIDENCE,
     FACT,
@@ -58,6 +62,8 @@ RECALL_SOFT_TIMEOUT_SECONDS = 4.0
 RECALL_CONTEXT_PREFIX = "Relevant memory:\n"
 MEMORY_INDEX_JOB = "memory_index"
 MEMORY_INDEX_SCHEDULE = "0 * * * * *"
+CONSOLIDATE_JOB = "memory_consolidate"
+CONSOLIDATE_SCHEDULE = "0 0 * * * *"
 SKILL_DIR = Path(__file__).parent / "skills" / "memory"
 
 logger = logging.getLogger(__name__)
@@ -240,6 +246,28 @@ async def index_pages(ctx: HookContext) -> HookOutcome:
     return None
 
 
+async def derive_facts(ctx: HookContext) -> HookOutcome:
+    """The second `page_change` consumer: distill each replayed source-page change into durable
+    `fact` memory_items with one bounded metered model pass per batch. Rides its own cursor,
+    independent of the indexer's; fail-soft when no model is wired (the batch is skipped, the
+    cursor still advances)."""
+    if not isinstance(ctx.payload, PageChangeBatch):
+        return None
+    await FactDeriver(store=store_for(ctx.ext), model=ctx.ext.model).apply(ctx.payload.changes)
+    return None
+
+
+async def consolidate_memory(ctx: ExtensionContext) -> None:
+    if ctx.embed is None:
+        raise RuntimeError("memory_consolidate requires the embed backend; none is wired")
+    await MemoryConsolidator(
+        embed=ctx.embed,
+        transaction=ctx.transaction,
+        workspace_id=ctx.store.workspace_id,
+        model=ctx.model,
+    ).run()
+
+
 def manifest() -> Manifest:
     return Manifest(
         name=NAME,
@@ -278,9 +306,13 @@ def manifest() -> Manifest:
         hooks=(
             HookSpec(event="user_prompt_submit", handler=recall_hook),
             HookSpec(event="page_change", handler=index_pages),
+            HookSpec(event="page_change", handler=derive_facts),
         ),
         jobs=(
             JobSpec(name=MEMORY_INDEX_JOB, schedule=MEMORY_INDEX_SCHEDULE, handler=index_memory),
+            JobSpec(
+                name=CONSOLIDATE_JOB, schedule=CONSOLIDATE_SCHEDULE, handler=consolidate_memory
+            ),
         ),
         skills=(SkillSpec(path=SKILL_DIR),),
     )

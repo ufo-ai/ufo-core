@@ -364,8 +364,9 @@ async def test_page_change_runner_cursor_resumes_across_ticks(
 ) -> None:
     """The core page-change runner rides each consumer's own cursor, so a later tick re-embeds
     nothing already indexed and picks up only the pages changed since — the embed call count is the
-    witness. Driven with the real memory page_change consumer over the real feed, proving the
-    runner's producer and the consumer end to end."""
+    witness. Driven with the real memory page-indexer consumer over the real feed (the memory
+    manifest registers two page_change hooks; this selects the indexer by its discriminator),
+    proving the runner's producer and the consumer end to end."""
     workspace_id = await _workspace()
     root = tmp_path / "src"
     root.mkdir()
@@ -382,7 +383,7 @@ async def test_page_change_runner_cursor_resumes_across_ticks(
         index=DefaultIndex(embed=embed, transaction=workspace_tx),
         embed=embed,
     )
-    (consumer,) = runner.consumers()
+    consumer = next(c for c in runner.consumers() if c.discriminator == "index_pages")
 
     await _register_folder(root)
     await driver.run()
