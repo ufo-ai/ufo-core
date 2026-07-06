@@ -159,14 +159,19 @@ def test_cold_start_init_creates_durable_state_and_then_fails_loud(
 def test_cold_start_without_credential_key_fails_cleanly_then_recovers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """O1: on a clean machine, init without SELFHOST_CREDENTIAL_KEY (the installed sample adds an
-    onboarding step) must fail loud BEFORE creating anything, leaving no wedged half-onboarded
-    workspace — setting the key and re-running then succeeds, not hitting AlreadyInitialized."""
+    """O1: init without SELFHOST_CREDENTIAL_KEY, when an active extension's onboarding step needs it
+    (the sample adds one, activated here via an unpinned config that runs the full discovered set),
+    must fail loud BEFORE creating anything, leaving no wedged half-onboarded workspace — setting
+    the key and re-running then succeeds, not hitting AlreadyInitialized."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-onboard")
     monkeypatch.delenv("SELFHOST_CREDENTIAL_KEY", raising=False)
     monkeypatch.setattr(cli, "SELFHOST_DIR", tmp_path / ".selfhost")
     runner = CliRunner()
     with runner.isolated_filesystem():
+        Path("selfhost.toml").write_text(
+            '[database]\nurl = "sqlite+aiosqlite:///selfhost.db"\n\n'
+            '[blob]\nbackend = "filesystem"\nroot = "./blobs"\n'
+        )
         first = runner.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
         assert first.exit_code != 0
         assert "SELFHOST_CREDENTIAL_KEY" in first.output

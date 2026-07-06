@@ -10,42 +10,6 @@ resolution-markers = [
     "python_full_version < '3.14' and sys_platform != 'win32'",
 ]
 
-[manifest]
-members = [
-    "selfhost",
-    "selfhost-ext-browser",
-    "selfhost-ext-coding",
-    "selfhost-ext-connectors",
-    "selfhost-ext-docker",
-    "selfhost-ext-documents",
-    "selfhost-ext-e2b",
-    "selfhost-ext-embed-openai",
-    "selfhost-ext-eval-harness",
-    "selfhost-ext-exa",
-    "selfhost-ext-index-default",
-    "selfhost-ext-knowledge-graph",
-    "selfhost-ext-mcp",
-    "selfhost-ext-memory",
-    "selfhost-ext-openrouter",
-    "selfhost-ext-redis-hub",
-    "selfhost-ext-repl",
-    "selfhost-ext-research",
-    "selfhost-ext-sample",
-    "selfhost-ext-scheduled-tasks",
-    "selfhost-ext-self-improvement",
-    "selfhost-ext-sites",
-    "selfhost-ext-skill-create",
-    "selfhost-ext-slack",
-    "selfhost-ext-sources",
-    "selfhost-ext-todos",
-    "selfhost-ext-turbopuffer",
-    "selfhost-ext-web",
-    "selfhost-pack-assistant",
-    "selfhost-pack-assistant-hosted",
-    "selfhost-pack-sample",
-    "selfhost-testsupport",
-]
-
 [[package]]
 name = "aiobotocore"
 version = "3.7.0"
@@ -2620,7 +2584,7 @@ wheels = [
 [[package]]
 name = "selfhost"
 version = "0.1.0"
-source = { editable = "core" }
+source = { editable = "." }
 dependencies = [
     { name = "aiobotocore" },
     { name = "aiosqlite" },
@@ -2628,9 +2592,12 @@ dependencies = [
     { name = "anthropic" },
     { name = "asyncpg" },
     { name = "click" },
+    { name = "croniter" },
     { name = "cryptography" },
     { name = "dbos" },
+    { name = "e2b" },
     { name = "fastapi" },
+    { name = "fastmcp" },
     { name = "httpx" },
     { name = "lz4" },
     { name = "openai" },
@@ -2640,6 +2607,7 @@ dependencies = [
     { name = "pillow" },
     { name = "pydantic" },
     { name = "pyyaml" },
+    { name = "redis" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "uvicorn" },
     { name = "websockets" },
@@ -2663,9 +2631,12 @@ requires-dist = [
     { name = "anthropic", specifier = ">=0.40" },
     { name = "asyncpg", specifier = ">=0.31.0" },
     { name = "click", specifier = ">=8.1" },
+    { name = "croniter", specifier = ">=2.0" },
     { name = "cryptography", specifier = ">=49.0.0" },
     { name = "dbos", specifier = ">=2.24" },
+    { name = "e2b", specifier = ">=2.29" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "fastmcp", specifier = ">=3.4.2" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "lz4", specifier = ">=4.3" },
     { name = "openai", specifier = ">=1.50" },
@@ -2675,6 +2646,7 @@ requires-dist = [
     { name = "pillow", specifier = ">=10.4" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "redis", specifier = ">=5" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0" },
     { name = "uvicorn", specifier = ">=0.30" },
     { name = "websockets", specifier = ">=13.0" },
@@ -2689,437 +2661,6 @@ dev = [
     { name = "types-croniter", specifier = ">=6.2" },
     { name = "types-pyyaml", specifier = ">=6.0" },
 ]
-
-[[package]]
-name = "selfhost-ext-browser"
-version = "0.1.0"
-source = { editable = "extensions/browser" }
-dependencies = [
-    { name = "httpx" },
-    { name = "pillow" },
-    { name = "pydantic" },
-    { name = "selfhost" },
-    { name = "websockets" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "httpx", specifier = ">=0.27" },
-    { name = "pillow", specifier = ">=10.4" },
-    { name = "pydantic", specifier = ">=2.9" },
-    { name = "selfhost", editable = "core" },
-    { name = "websockets", specifier = ">=13.0" },
-]
-
-[[package]]
-name = "selfhost-ext-coding"
-version = "0.1.0"
-source = { editable = "extensions/coding" }
-dependencies = [
-    { name = "selfhost" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "selfhost", editable = "core" }]
-
-[[package]]
-name = "selfhost-ext-connectors"
-version = "0.1.0"
-source = { editable = "extensions/connectors" }
-dependencies = [
-    { name = "fastmcp" },
-    { name = "httpx" },
-    { name = "selfhost" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "fastmcp", specifier = ">=3.4.2" },
-    { name = "httpx", specifier = ">=0.27" },
-    { name = "selfhost", editable = "core" },
-]
-
-[[package]]
-name = "selfhost-ext-docker"
-version = "0.1.0"
-source = { editable = "extensions/docker" }
-dependencies = [
-    { name = "selfhost" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "selfhost", editable = "core" }]
-
-[[package]]
-name = "selfhost-ext-documents"
-version = "0.1.0"
-source = { editable = "extensions/documents" }
-dependencies = [
-    { name = "selfhost" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "selfhost", editable = "core" }]
-
-[[package]]
-name = "selfhost-ext-e2b"
-version = "0.1.0"
-source = { editable = "extensions/e2b" }
-dependencies = [
-    { name = "e2b" },
-    { name = "selfhost" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "e2b", specifier = ">=2.29" },
-    { name = "selfhost", editable = "core" },
-]
-
-[[package]]
-name = "selfhost-ext-embed-openai"
-version = "0.1.0"
-source = { editable = "extensions/embed_openai" }
-dependencies = [
-    { name = "openai" },
-    { name = "selfhost" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "openai", specifier = ">=1.0" },
-    { name = "selfhost", editable = "core" },
-]
-
-[[package]]
-name = "selfhost-ext-eval-harness"
-version = "0.1.0"
-source = { editable = "extensions/eval_harness" }
-dependencies = [
-    { name = "anthropic" },
-    { name = "selfhost" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "anthropic", specifier = ">=0.40" },
-    { name = "selfhost", editable = "core" },
-]
-
-[[package]]
-name = "selfhost-ext-exa"
-version = "0.1.0"
-source = { editable = "extensions/exa" }
-dependencies = [
-    { name = "httpx" },
-    { name = "selfhost" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "httpx", specifier = ">=0.27" },
-    { name = "selfhost", editable = "core" },
-]
-
-[[package]]
-name = "selfhost-ext-index-default"
-version = "0.1.0"
-source = { editable = "extensions/index_default" }
-dependencies = [
-    { name = "selfhost" },
-    { name = "sqlalchemy" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "selfhost", editable = "core" },
-    { name = "sqlalchemy", specifier = ">=2" },
-]
-
-[[package]]
-name = "selfhost-ext-knowledge-graph"
-version = "0.1.0"
-source = { editable = "extensions/knowledge_graph" }
-dependencies = [
-    { name = "pydantic" },
-    { name = "selfhost" },
-    { name = "sqlalchemy" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "pydantic", specifier = ">=2" },
-    { name = "selfhost", editable = "core" },
-    { name = "sqlalchemy", specifier = ">=2" },
-]
-
-[[package]]
-name = "selfhost-ext-mcp"
-version = "0.1.0"
-source = { editable = "extensions/mcp" }
-dependencies = [
-    { name = "fastmcp" },
-    { name = "selfhost" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "fastmcp", specifier = ">=3.4.2" },
-    { name = "selfhost", editable = "core" },
-]
-
-[[package]]
-name = "selfhost-ext-memory"
-version = "0.1.0"
-source = { editable = "extensions/memory" }
-dependencies = [
-    { name = "pydantic" },
-    { name = "selfhost" },
-    { name = "sqlalchemy" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "pydantic", specifier = ">=2" },
-    { name = "selfhost", editable = "core" },
-    { name = "sqlalchemy", specifier = ">=2" },
-]
-
-[[package]]
-name = "selfhost-ext-openrouter"
-version = "0.1.0"
-source = { editable = "extensions/openrouter" }
-dependencies = [
-    { name = "openai" },
-    { name = "selfhost" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "openai", specifier = ">=1.0" },
-    { name = "selfhost", editable = "core" },
-]
-
-[[package]]
-name = "selfhost-ext-redis-hub"
-version = "0.1.0"
-source = { editable = "extensions/redis_hub" }
-dependencies = [
-    { name = "redis" },
-    { name = "selfhost" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "redis", specifier = ">=5" },
-    { name = "selfhost", editable = "core" },
-]
-
-[[package]]
-name = "selfhost-ext-repl"
-version = "0.1.0"
-source = { editable = "extensions/repl" }
-dependencies = [
-    { name = "selfhost" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "selfhost", editable = "core" }]
-
-[[package]]
-name = "selfhost-ext-research"
-version = "0.1.0"
-source = { editable = "extensions/research" }
-dependencies = [
-    { name = "pydantic" },
-    { name = "selfhost" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "pydantic", specifier = ">=2.9" },
-    { name = "selfhost", editable = "core" },
-]
-
-[[package]]
-name = "selfhost-ext-sample"
-version = "0.1.0"
-source = { editable = "extensions/sample" }
-dependencies = [
-    { name = "selfhost" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "selfhost", editable = "core" }]
-
-[[package]]
-name = "selfhost-ext-scheduled-tasks"
-version = "0.1.0"
-source = { editable = "extensions/scheduled_tasks" }
-dependencies = [
-    { name = "croniter" },
-    { name = "selfhost" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "croniter", specifier = ">=2.0" },
-    { name = "selfhost", editable = "core" },
-]
-
-[[package]]
-name = "selfhost-ext-self-improvement"
-version = "0.1.0"
-source = { editable = "extensions/self_improvement" }
-dependencies = [
-    { name = "anthropic" },
-    { name = "selfhost" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "anthropic", specifier = ">=0.40" },
-    { name = "selfhost", editable = "core" },
-]
-
-[[package]]
-name = "selfhost-ext-sites"
-version = "0.1.0"
-source = { editable = "extensions/sites" }
-dependencies = [
-    { name = "selfhost" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "selfhost", editable = "core" }]
-
-[[package]]
-name = "selfhost-ext-skill-create"
-version = "0.1.0"
-source = { editable = "extensions/skill_create" }
-dependencies = [
-    { name = "pydantic" },
-    { name = "selfhost" },
-    { name = "sqlalchemy" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "pydantic", specifier = ">=2" },
-    { name = "selfhost", editable = "core" },
-    { name = "sqlalchemy", specifier = ">=2" },
-]
-
-[[package]]
-name = "selfhost-ext-slack"
-version = "0.1.0"
-source = { editable = "extensions/slack" }
-dependencies = [
-    { name = "httpx" },
-    { name = "selfhost" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "httpx", specifier = ">=0.27" },
-    { name = "selfhost", editable = "core" },
-]
-
-[[package]]
-name = "selfhost-ext-sources"
-version = "0.1.0"
-source = { editable = "extensions/sources" }
-dependencies = [
-    { name = "httpx" },
-    { name = "selfhost" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "httpx", specifier = ">=0.27" },
-    { name = "selfhost", editable = "core" },
-]
-
-[[package]]
-name = "selfhost-ext-todos"
-version = "0.1.0"
-source = { editable = "extensions/todos" }
-dependencies = [
-    { name = "selfhost" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "selfhost", editable = "core" }]
-
-[[package]]
-name = "selfhost-ext-turbopuffer"
-version = "0.1.0"
-source = { editable = "extensions/turbopuffer" }
-dependencies = [
-    { name = "httpx" },
-    { name = "selfhost" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "httpx", specifier = ">=0.27" },
-    { name = "selfhost", editable = "core" },
-]
-
-[[package]]
-name = "selfhost-ext-web"
-version = "0.1.0"
-source = { editable = "extensions/web" }
-dependencies = [
-    { name = "selfhost" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "selfhost", editable = "core" }]
-
-[[package]]
-name = "selfhost-pack-assistant"
-version = "0.1.0"
-source = { editable = "packs/assistant" }
-dependencies = [
-    { name = "selfhost" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "selfhost", editable = "core" }]
-
-[[package]]
-name = "selfhost-pack-assistant-hosted"
-version = "0.1.0"
-source = { editable = "packs/assistant_hosted" }
-dependencies = [
-    { name = "selfhost" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "selfhost", editable = "core" }]
-
-[[package]]
-name = "selfhost-pack-sample"
-version = "0.1.0"
-source = { editable = "packs/sample_pack" }
-dependencies = [
-    { name = "selfhost" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "selfhost", editable = "core" }]
-
-[[package]]
-name = "selfhost-testsupport"
-version = "0.1.0"
-source = { editable = "testsupport" }
-dependencies = [
-    { name = "selfhost" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "selfhost", editable = "core" }]
 
 [[package]]
 name = "shellingham"

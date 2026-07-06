@@ -33,8 +33,8 @@ The system reasons only about the *installed environment*:
 | Lockfile | `Lockfile(selfhost_version, extensions=(ExtensionPin,…))`, JSON file | `loader.py:90-97`, `read/write` `104-109` |
 | Boot | lockfile present → only pinned load, **each re-verified against pinned digest** (missing/drifted fails loud); none → dev, all discovered active | `loader.py:198-223` (drift refuse `216-219`) |
 | Install | pins an **already-installed** package: `pin_for(name)` fails loud if `discovered()` lacks it — the store **does not fetch or install a package**, only records its digest | `store.py:56-63`, `86-96` |
-| Bundle | freezes pins into a Dockerfile: `RUN pip install "{dist}=={version}"` from the index (version-only, no digest at build; digest is the *boot* refuse) + `COPY selfhost.toml selfhost.lock` | `bundle.py:73-91` |
-| Dev | packages are uv **workspace members**, present in the venv without an install step | root `pyproject.toml` `[tool.uv.workspace]` |
+| Bundle | freezes pins into a Dockerfile: `RUN pip install "selfhost=={version}"` (the one distribution ships every first-party extension; the lockfile narrows the active set, boot re-verifies each pinned digest) + `COPY selfhost.toml selfhost.lock` | `bundle.py` `_dockerfile` |
+| Dev | one `selfhost` distribution bundles core + every first-party extension + pack; `pip install -e .` / `uv sync` makes them all present without a per-package install | root `pyproject.toml` (`[tool.hatch.build.targets.wheel]`) |
 
 Two load-bearing facts the target builds on:
 

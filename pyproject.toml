@@ -1,5 +1,139 @@
-[tool.uv.workspace]
-members = ["core", "extensions/*", "packs/*", "testsupport"]
+[project]
+name = "selfhost"
+version = "0.1.0"
+description = "An agent runtime a developer can run, read, and extend — core, every first-party extension, and every pack in one install"
+requires-python = ">=3.12"
+dependencies = [
+    "aiobotocore>=3.7.0",
+    "aiosqlite>=0.22.1",
+    "alembic>=1.18.5",
+    "anthropic>=0.40",
+    "asyncpg>=0.31.0",
+    "click>=8.1",
+    "croniter>=2.0",
+    "cryptography>=49.0.0",
+    "dbos>=2.24",
+    "e2b>=2.29",
+    "fastapi>=0.115",
+    "fastmcp>=3.4.2",
+    "httpx>=0.27",
+    "lz4>=4.3",
+    "openai>=1.50",
+    "opentelemetry-api>=1.27",
+    "opentelemetry-exporter-otlp-proto-http>=1.27",
+    "opentelemetry-sdk>=1.27",
+    "pillow>=10.4",
+    "pydantic>=2.9",
+    "redis>=5",
+    "websockets>=13.0",
+    "pyyaml>=6.0",
+    "sqlalchemy[asyncio]>=2.0",
+    "uvicorn>=0.30",
+]
+
+[project.scripts]
+selfhost = "selfhost.cli:main"
+
+[project.entry-points."selfhost.extension"]
+browser = "selfhost_ext_browser.manifest:manifest"
+coding = "selfhost_ext_coding.manifest:manifest"
+connectors = "selfhost_ext_connectors.manifest:manifest"
+docker = "selfhost_ext_docker:manifest"
+documents = "selfhost_ext_documents.manifest:manifest"
+e2b = "selfhost_ext_e2b:manifest"
+embed-openai = "selfhost_ext_embed_openai:manifest"
+eval_harness = "selfhost_ext_eval_harness.manifest:manifest"
+exa = "selfhost_ext_exa:manifest"
+index-default = "selfhost_ext_index_default:manifest"
+knowledge_graph = "selfhost_ext_knowledge_graph.manifest:manifest"
+mcp = "selfhost_ext_mcp:manifest"
+memory = "selfhost_ext_memory.manifest:manifest"
+openrouter = "selfhost_ext_openrouter:manifest"
+redis_hub = "selfhost_ext_redis_hub.manifest:manifest"
+repl = "selfhost_ext_repl.manifest:manifest"
+research = "selfhost_ext_research.manifest:manifest"
+sample = "selfhost_ext_sample:manifest"
+scheduled_tasks = "selfhost_ext_scheduled_tasks.manifest:manifest"
+self_improvement = "selfhost_ext_self_improvement.manifest:manifest"
+sites = "selfhost_ext_sites.manifest:manifest"
+skill_create = "selfhost_ext_skill_create.manifest:manifest"
+slack = "selfhost_ext_slack.manifest:manifest"
+sources = "selfhost_ext_sources.manifest:manifest"
+todos = "selfhost_ext_todos:manifest"
+turbopuffer = "selfhost_ext_turbopuffer:manifest"
+web = "selfhost_ext_web.manifest:manifest"
+
+[project.entry-points."selfhost.pack"]
+assistant = "selfhost_pack_assistant:pack"
+assistant_hosted = "selfhost_pack_assistant_hosted:pack"
+sample_pack = "selfhost_pack_sample:pack"
+
+[project.entry-points.pytest11]
+selfhost_testsupport = "selfhost_testsupport.plugin"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.13",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.7",
+    "types-croniter>=6.2",
+    "types-pyyaml>=6.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# One wheel bundles core, every first-party extension, and every pack. Package extensions and packs
+# (a source directory whose basename is the import name) map 1:1 through `packages`; the source tree
+# stays in core/, extensions/*, packs/*, testsupport/ exactly as it lives.
+[tool.hatch.build.targets.wheel]
+packages = [
+    "core/src/selfhost",
+    "extensions/browser/selfhost_ext_browser",
+    "extensions/coding/selfhost_ext_coding",
+    "extensions/connectors/selfhost_ext_connectors",
+    "extensions/documents/selfhost_ext_documents",
+    "extensions/eval_harness/selfhost_ext_eval_harness",
+    "extensions/knowledge_graph/selfhost_ext_knowledge_graph",
+    "extensions/memory/selfhost_ext_memory",
+    "extensions/redis_hub/selfhost_ext_redis_hub",
+    "extensions/repl/selfhost_ext_repl",
+    "extensions/research/selfhost_ext_research",
+    "extensions/scheduled_tasks/selfhost_ext_scheduled_tasks",
+    "extensions/self_improvement/selfhost_ext_self_improvement",
+    "extensions/sites/selfhost_ext_sites",
+    "extensions/skill_create/selfhost_ext_skill_create",
+    "extensions/slack/selfhost_ext_slack",
+    "extensions/sources/selfhost_ext_sources",
+    "extensions/web/selfhost_ext_web",
+    "testsupport/selfhost_testsupport",
+]
+exclude = ["**/__pycache__", "**/*.pyc"]
+
+# Single-file extensions and packs. The ones that ship sibling data (a `migrations/`, `skills/`, or
+# a data file) map into a package directory so the runtime's `_package_dir` / `Path(__file__).parent`
+# resolve that data uniquely per extension; the dataless ones map to a flat top-level module.
+[tool.hatch.build.targets.wheel.force-include]
+"extensions/docker/selfhost_ext_docker.py" = "selfhost_ext_docker.py"
+"extensions/e2b/selfhost_ext_e2b.py" = "selfhost_ext_e2b.py"
+"extensions/embed_openai/selfhost_ext_embed_openai.py" = "selfhost_ext_embed_openai.py"
+"extensions/exa/selfhost_ext_exa.py" = "selfhost_ext_exa.py"
+"extensions/mcp/selfhost_ext_mcp.py" = "selfhost_ext_mcp.py"
+"extensions/openrouter/selfhost_ext_openrouter.py" = "selfhost_ext_openrouter.py"
+"extensions/turbopuffer/selfhost_ext_turbopuffer.py" = "selfhost_ext_turbopuffer.py"
+"extensions/index_default/selfhost_ext_index_default.py" = "selfhost_ext_index_default/__init__.py"
+"extensions/index_default/migrations" = "selfhost_ext_index_default/migrations"
+"extensions/sample/selfhost_ext_sample.py" = "selfhost_ext_sample/__init__.py"
+"extensions/sample/skills" = "selfhost_ext_sample/skills"
+"extensions/sample/migrations" = "selfhost_ext_sample/migrations"
+"extensions/todos/selfhost_ext_todos.py" = "selfhost_ext_todos/__init__.py"
+"extensions/todos/todo_list_section.md" = "selfhost_ext_todos/todo_list_section.md"
+"packs/assistant/selfhost_pack_assistant.py" = "selfhost_pack_assistant.py"
+"packs/assistant_hosted/selfhost_pack_assistant_hosted.py" = "selfhost_pack_assistant_hosted.py"
+"packs/sample_pack/selfhost_pack_sample.py" = "selfhost_pack_sample/__init__.py"
+"packs/sample_pack/skills" = "selfhost_pack_sample/skills"
 
 [tool.ruff]
 line-length = 100

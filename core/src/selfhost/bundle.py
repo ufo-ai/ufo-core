@@ -5,8 +5,10 @@ The bundle pins every extension the deploy already runs (the current lockfile, o
 extension when none is pinned yet) plus every catalog entry marked bundle-only — those disabled in
 the store install here, at bundle time, and never at runtime. Each pin re-checks the installed
 digest, so a bundle cannot freeze an extension the environment lacks. The output directory is a
-`docker build` context: the Dockerfile installs the pinned components and copies the pinned config
-and lockfile, so the same artifact boots identically on any machine."""
+`docker build` context: the Dockerfile installs the one `selfhost` distribution (core and every
+first-party extension and pack ship in it) and copies the pinned config and lockfile, whose pins
+narrow the active set and verify each digest at boot — so the same artifact boots identically on
+any machine."""
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,7 +51,7 @@ class Bundle:
             + "\n"
         )
         dockerfile = self.out / BUNDLE_DOCKERFILE_NAME
-        dockerfile.write_text(self._dockerfile(pins))
+        dockerfile.write_text(self._dockerfile())
         return BundleResult(
             out=self.out, dockerfile=dockerfile, config=config, lockfile=lockfile, pins=pins
         )
@@ -70,20 +72,14 @@ class Bundle:
         names = list(dict.fromkeys((*base, *bundle_only)))
         return tuple(pin_for(name) for name in names)
 
-    def _dockerfile(self, pins: tuple[ExtensionPin, ...]) -> str:
-        installed = discovered()
-        installs = [f'RUN pip install --no-cache-dir "selfhost=={selfhost_version()}"']
-        for pin in pins:
-            _, entry = installed[pin.name]
-            dist = entry.dist.name if entry.dist is not None else pin.name
-            installs.append(f'RUN pip install --no-cache-dir "{dist}=={pin.version}"')
+    def _dockerfile(self) -> str:
         return "\n".join(
             (
                 f"FROM {DOCKERFILE_BASE}",
                 "WORKDIR /app",
                 f"ENV SELFHOST_CONFIG=/app/{BUNDLE_CONFIG_NAME} "
                 f"SELFHOST_LOCKFILE=/app/{BUNDLE_LOCKFILE_NAME}",
-                *installs,
+                f'RUN pip install --no-cache-dir "selfhost=={selfhost_version()}"',
                 f"COPY {BUNDLE_CONFIG_NAME} {BUNDLE_LOCKFILE_NAME} /app/",
                 'ENTRYPOINT ["selfhost", "serve"]',
                 "",

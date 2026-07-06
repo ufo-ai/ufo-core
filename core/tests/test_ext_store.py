@@ -209,7 +209,7 @@ def test_bundle_pins_a_bundle_only_extension_and_writes_a_build_context(
     dockerfile = result.dockerfile.read_text()
     assert dockerfile.startswith("FROM python:3.12-slim")
     assert 'RUN pip install --no-cache-dir "selfhost==' in dockerfile
-    assert f'"selfhost-ext-sample=={sample.VERSION}"' in dockerfile
+    assert "selfhost-ext-" not in dockerfile
     assert dockerfile.rstrip().endswith('ENTRYPOINT ["selfhost", "serve"]')
 
 

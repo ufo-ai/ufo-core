@@ -25,7 +25,7 @@ one seam metalcraft had and selfhost dropped: a per-tool `idempotency_key`.
 
 ## 0. What DBOS actually gives (verified against the vendored SDK)
 
-`dbos>=2.24` (`core/pyproject.toml:14`). The memoization contract, read from source, not docs:
+`dbos>=2.24` (`pyproject.toml`). The memoization contract, read from source, not docs:
 
 - A `@DBOS.workflow` **may contain many `@DBOS.step`s**. On entering a workflow the context's
   `function_id` is set to 0 (`dbos/_context.py:235`); every step, transaction, or child-workflow
