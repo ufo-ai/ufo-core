@@ -30,6 +30,14 @@ def test_coding_tools_are_core_builtins_plus_the_repl_and_exclude_the_forbidden_
     )
 
 
+def test_coding_profile_excludes_the_connector_tools_pr_review_uses() -> None:
+    """`code-review` reaches GitHub through the connector trio (`call_external_tool` +
+    `describe_external_tools`); by design the main agent runs that skill directly, never the coding
+    subagent — whose profile therefore names none of them, so it cannot review a PR itself."""
+    profile = coding.CODING_PROFILE
+    assert {"call_external_tool", "describe_external_tools"}.isdisjoint(profile.tool_names)
+
+
 def test_coding_skills_parse_and_index() -> None:
     index = dict(skill_registry((coding.manifest(),)).index())
     for name in ("coding", "code-review"):
