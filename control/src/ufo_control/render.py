@@ -25,6 +25,9 @@ from ufo_control.postgres import TenantPostgres
 
 CONFIG_FILE = "ufo.toml"
 SECRET_CREDENTIAL_KEY, SECRET_ARTIFACT_TOKEN = MINTED_SECRETS
+# The sandbox carriers that pull the digest-pinned sandbox image; the e2b carrier runs from its own
+# template and needs none, so its deploy request carries no sandbox_image.
+IMAGE_BACKED_SANDBOX_BACKENDS = frozenset({"docker", "pod"})
 
 
 def _image_ref(image: DeployImage) -> str:
@@ -85,6 +88,12 @@ def render_tenant(
     request: DeployRequest, platform: PlatformConfig, postgres: TenantPostgres
 ) -> TenantRender:
     config_toml = _overlay_config(request, platform, postgres)
+    backend = tomllib.loads(config_toml).get("sandbox", {}).get("backend", "local")
+    if request.sandbox_image is None and backend in IMAGE_BACKED_SANDBOX_BACKENDS:
+        raise RuntimeError(
+            f"[sandbox] backend {backend!r} pulls a sandbox image but the deploy request for "
+            f"tenant {request.tenant.name!r} carries no sandbox_image — pin it"
+        )
     secret = TenantSecret(
         config_toml=config_toml,
         credential_key=mint_fernet_key(),
@@ -97,7 +106,7 @@ def render_tenant(
         host=request.tenant.host,
         owner_email=request.tenant.owner_email,
         bundle_image=_image_ref(request.bundle_image),
-        sandbox_image=_image_ref(request.sandbox_image),
+        sandbox_image=_image_ref(request.sandbox_image) if request.sandbox_image else "",
         tenant_secret="ufo-tenant",
         platform_secret=platform.platform_secret,
         ingress_class=platform.ingress_class,

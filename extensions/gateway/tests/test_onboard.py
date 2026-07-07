@@ -22,8 +22,7 @@ from ufo.ext.context import context_for
 from ufo.schema import tables
 
 BUNDLE = "ghcr.io/metalcraftai/ufo@sha256:" + "a" * 64
-SANDBOX = "ghcr.io/metalcraftai/ufo-sandbox@sha256:" + "b" * 64
-TARGET = DeployTarget(base_domain="flyingobject.ai", bundle_image=BUNDLE, sandbox_image=SANDBOX)
+TARGET = DeployTarget(base_domain="flyingobject.ai", bundle_image=BUNDLE)
 SECRET = "s3cret"
 
 

@@ -48,7 +48,9 @@ def org_domain(owner_email: str) -> str:
 def tenant_body(request: DeployRequest) -> dict[str, Any]:
     """The ``Tenant`` custom resource — its ``.spec`` is the deploy request verbatim (snake_case,
     the same JSON the OSS producer posts), so the operator round-trips spec → ``DeployRequest``. The
-    org-domain label is set at admission so join-or-provision can count tenants for a domain."""
+    org-domain label is set at admission so join-or-provision can count tenants for a domain.
+    ``exclude_none`` drops an absent ``sandbox_image``: the CRD property is a non-nullable object,
+    so a ``null`` would be rejected 422 — omitting it lets the optional simply be absent."""
     return {
         "apiVersion": API_GROUP_VERSION,
         "kind": TENANT_KIND,
@@ -61,7 +63,7 @@ def tenant_body(request: DeployRequest) -> dict[str, Any]:
                 ORG_DOMAIN_LABEL: org_domain(request.tenant.owner_email),
             },
         },
-        "spec": request.model_dump(mode="json"),
+        "spec": request.model_dump(mode="json", exclude_none=True),
     }
 
 

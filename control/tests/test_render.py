@@ -1,6 +1,7 @@
 import base64
 import tomllib
 
+import pytest
 from ufo.deploy import DeployRequest
 
 from ufo_control.platform import PlatformConfig
@@ -22,18 +23,19 @@ url = "sqlite+aiosqlite:///dev.db"
 [sandbox]
 backend = "docker"
 """
+E2B_CONFIG = '[pack]\nname = "assistant"\n\n[sandbox]\nbackend = "e2b"\n'
 
 
-def _request() -> DeployRequest:
-    return DeployRequest.model_validate(
-        {
-            "tenant": {"name": "acme", "host": "acme.ufo.app", "owner_email": "you@acme.com"},
-            "bundle_image": {"repository": "ghcr.io/acme/ufo", "digest": DIGEST},
-            "sandbox_image": {"repository": "ghcr.io/acme/sandbox", "digest": DIGEST},
-            "config_toml": OPERATOR_CONFIG,
-            "pack": "assistant",
-        }
-    )
+def _request(**overrides: object) -> DeployRequest:
+    base: dict[str, object] = {
+        "tenant": {"name": "acme", "host": "acme.ufo.app", "owner_email": "you@acme.com"},
+        "bundle_image": {"repository": "ghcr.io/acme/ufo", "digest": DIGEST},
+        "sandbox_image": {"repository": "ghcr.io/acme/sandbox", "digest": DIGEST},
+        "config_toml": OPERATOR_CONFIG,
+        "pack": "assistant",
+    }
+    base.update(overrides)
+    return DeployRequest.model_validate(base)
 
 
 def _platform() -> PlatformConfig:
@@ -107,4 +109,20 @@ def test_values_carry_digest_pinned_refs() -> None:
     render = render_tenant(_request(), _platform(), _database_postgres())
     assert render.values.namespace == "ufo-acme"
     assert render.values.bundle_image == f"ghcr.io/acme/ufo@{DIGEST}"
+    assert render.values.sandbox_image == f"ghcr.io/acme/sandbox@{DIGEST}"
     assert render.values.cluster_issuer == "letsencrypt"
+
+
+def test_e2b_backend_renders_an_empty_sandbox_image() -> None:
+    # The e2b carrier pulls no image: the request omits sandbox_image and the chart value is "".
+    render = render_tenant(
+        _request(config_toml=E2B_CONFIG, sandbox_image=None), _platform(), _database_postgres()
+    )
+    assert render.values.sandbox_image == ""
+
+
+def test_image_backed_backend_without_sandbox_image_fails_loud() -> None:
+    # OPERATOR_CONFIG selects the docker carrier, which pulls the sandbox image, so a request
+    # missing sandbox_image cannot render.
+    with pytest.raises(RuntimeError, match="sandbox_image"):
+        render_tenant(_request(sandbox_image=None), _platform(), _database_postgres())

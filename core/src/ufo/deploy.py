@@ -26,7 +26,6 @@ MINTED_SECRETS = ("UFO_CREDENTIAL_KEY", "UFO_ARTIFACT_TOKEN_SECRET")
 DIGEST_PREFIX = "sha256:"
 DIGEST_HEX_LEN = 64
 DEFAULT_BUNDLE_REPOSITORY = "ghcr.io/metalcraftai/ufo"
-DEFAULT_SANDBOX_REPOSITORY = "ghcr.io/metalcraftai/ufo-sandbox"
 
 
 class DeployImage(BaseModel):
@@ -85,12 +84,15 @@ class SecretInventory(BaseModel):
 class DeployRequest(BaseModel):
     """The contract the control plane consumes. `config_toml` is this deploy's `ufo.toml`
     verbatim; the control plane overlays the infra knobs (database, blob, hub, connect) it
-    provisions. `pack` is the activation set label, denormalized from `[pack] name`."""
+    provisions. `pack` is the activation set label, denormalized from `[pack] name`. `sandbox_image`
+    is absent unless the deploy's carrier pulls one (the `docker`/`pod` carriers do; the `e2b`
+    carrier runs from its own template) — the control plane fails loud if an image-backed carrier is
+    selected without it."""
 
     model_config = ConfigDict(extra="forbid")
     tenant: TenantIdentity
     bundle_image: DeployImage
-    sandbox_image: DeployImage
+    sandbox_image: DeployImage | None = None
     config_toml: str
     pack: str
     postgres: Literal["database", "rls"] = "database"
@@ -139,15 +141,11 @@ def resolve_request(
         missing.append(
             f"[deploy].bundle_image (digest-pinned, e.g. {DEFAULT_BUNDLE_REPOSITORY}@sha256:…)"
         )
-    if deploy.sandbox_image is None:
-        missing.append(
-            f"[deploy].sandbox_image (digest-pinned, e.g. {DEFAULT_SANDBOX_REPOSITORY}@sha256:…)"
-        )
     if config.pack.name is None:
         missing.append("[pack].name (the activation set the tenant runs)")
     if missing:
         raise DeployResolutionError("deploy needs " + "; ".join(missing))
-    assert deploy.bundle_image is not None and deploy.sandbox_image is not None
+    assert deploy.bundle_image is not None
     assert config.pack.name is not None
     name = deploy.name or _slug(workspace.default_name)
     host = deploy.host or (f"{name}.{deploy.base_domain}" if deploy.base_domain else "localhost")
@@ -155,7 +153,9 @@ def resolve_request(
         return DeployRequest(
             tenant=TenantIdentity(name=name, host=host, owner_email=workspace.owner_email),
             bundle_image=DeployImage.parse(deploy.bundle_image),
-            sandbox_image=DeployImage.parse(deploy.sandbox_image),
+            sandbox_image=(
+                DeployImage.parse(deploy.sandbox_image) if deploy.sandbox_image else None
+            ),
             config_toml=config_path.read_text(),
             pack=config.pack.name,
             # Backend-determined, never a user knob: k8s provisions a database per tenant, compose a

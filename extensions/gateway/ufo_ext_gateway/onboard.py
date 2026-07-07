@@ -35,7 +35,6 @@ logger = logging.getLogger(__name__)
 CONTROL_API_URL_ENV = "UFO_CONTROL_API_URL"
 BASE_DOMAIN_ENV = "UFO_BASE_DOMAIN"
 BUNDLE_IMAGE_ENV = "UFO_BUNDLE_IMAGE"
-SANDBOX_IMAGE_ENV = "UFO_SANDBOX_IMAGE"
 PUBLIC_BASE_URL_ENV = "UFO_PUBLIC_BASE_URL"
 DEFAULT_PUBLIC_BASE_URL = "https://flyingobject.ai"
 SCRIPT_URL_DEFAULT = 'UFO_URL="${UFO_URL:-https://flyingobject.ai}"'
@@ -89,7 +88,6 @@ async def onboard(ctx: ExtensionContext, request: Request) -> Response:
                 target=DeployTarget(
                     base_domain=base_domain,
                     bundle_image=_require_env(BUNDLE_IMAGE_ENV),
-                    sandbox_image=_require_env(SANDBOX_IMAGE_ENV),
                 ),
             ),
             token_secret=_require_env(TOKEN_SECRET_ENV),

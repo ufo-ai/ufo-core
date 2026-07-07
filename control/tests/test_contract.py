@@ -26,6 +26,15 @@ def test_request_round_trips_through_the_tenant_object() -> None:
     assert restored == request
 
 
+def test_absent_sandbox_image_is_omitted_from_the_spec_and_round_trips() -> None:
+    # The CRD's sandbox_image is a non-nullable object; an e2b deploy carries none, so the spec must
+    # omit the field (never emit `null`) and still round-trip to sandbox_image=None.
+    request = _request(sandbox_image=None)
+    body = tenant_body(request)
+    assert "sandbox_image" not in body["spec"]
+    assert request_from_tenant(body) == request
+
+
 def test_image_ref_requires_a_pinned_digest() -> None:
     with pytest.raises(ValidationError):
         DeployImage(repository="ghcr.io/acme/ufo", digest="latest")
