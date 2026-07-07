@@ -1188,7 +1188,11 @@ async def test_sample_source_syncs_a_page_recallable_through_memory(
     )
     page_feed = CorePageFeed(blob=blob)
     page_indexer = PageIndexer(
-        index=index, embed=embed, transaction=workspace_tx, chunker=TextChunker()
+        index=index,
+        embed=embed,
+        transaction=workspace_tx,
+        chunker=TextChunker(),
+        workspace_id=workspace_id,
     )
     service = MemoryStore(
         index=index, embed=embed, transaction=workspace_tx, workspace_id=workspace_id
@@ -1216,7 +1220,7 @@ async def test_core_selects_a_manifest_index_backend_by_name(db: None, database_
     """The `indexes` seam end to end through the probe: with `memory.index_backend` naming the
     sample's backend, core builds the manifest-contributed IndexBackend (not the base-pinned
     default) and it is driven through the protocol — upsert then retrieve. Unset resolves the
-    base-pinned `index-default` extension's `"default"` backend; an unknown name and a missing
+    base-pinned `index_default` extension's `"default"` backend; an unknown name and a missing
     credential key each fail loud."""
     workspace_id = await _workspace()
     manifest = _sample_manifest()
@@ -1243,7 +1247,7 @@ async def test_core_selects_a_manifest_index_backend_by_name(db: None, database_
 async def test_core_selects_a_manifest_embed_backend_by_name(db: None, database_url: str) -> None:
     """The `embeds` seam end to end through the probe: with `memory.embed_backend` naming the
     sample's backend, core builds the manifest-contributed EmbedClient and it is driven through the
-    protocol. Unset resolves the base-pinned `embed-openai` extension's `"default"` backend; an
+    protocol. Unset resolves the base-pinned `embed_openai` extension's `"default"` backend; an
     unknown name fails loud."""
     workspace_id = await _workspace()
     manifest = _sample_manifest()

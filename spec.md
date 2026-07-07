@@ -83,8 +83,8 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   episodic→topic pointer excluded from auto-injection. It rides two core selection seams: the
   **index backend** behind one lexical/vector/reindex interface and the **embed backend** behind
   one batched-embed interface. The dialect-native index (SQLite FTS5 + local cosine, Postgres
-  tsvector + pgvector) ships as the base-pinned `index-default` extension and OpenAI embedding as
-  the base-pinned `embed-openai` extension; turbopuffer is a drop-in index alternative. Source
+  tsvector + pgvector) ships as the base-pinned `index_default` extension and OpenAI embedding as
+  the base-pinned `embed_openai` extension; turbopuffer is a drop-in index alternative. Source
   pages reach recall through the memory extension's own page-index job over the core `PageFeed`.
 - **Minimal built-in tools** — `bash`, `read`, `write`, `edit`,
   `ask_user`, `spawn_subagent`, `load_skill`, `share_file`. Everything else arrives via extensions.
@@ -139,8 +139,8 @@ Manifest registers (each optional):
 | `onboarding` | Steps contributed to the workspace/pack onboarding flow. |
 | `models` | Model providers behind `ModelClient` (OpenRouter, local runtimes). |
 | `carriers` | Sandbox carriers — Docker, E2B, remote runners; core's default is a local temp-dir carrier. |
-| `indexes` | Index backends for memory/source retrieval (turbopuffer); the dialect-native default (SQLite FTS5 + local cosine, Postgres tsvector + pgvector) ships as the base-pinned `index-default` extension registering name `"default"`, which core resolves when `memory.index_backend` is unset. |
-| `embeds` | Embedding backends behind `EmbedClient`, selected by `memory.embed_backend`; OpenAI text-embedding-3-large ships as the base-pinned `embed-openai` extension registering name `"default"`. |
+| `indexes` | Index backends for memory/source retrieval (turbopuffer); the dialect-native default (SQLite FTS5 + local cosine, Postgres tsvector + pgvector) ships as the base-pinned `index_default` extension registering name `"default"`, which core resolves when `memory.index_backend` is unset. |
+| `embeds` | Embedding backends behind `EmbedClient`, selected by `memory.embed_backend`; OpenAI text-embedding-3-large ships as the base-pinned `embed_openai` extension registering name `"default"`. |
 | `hubs` | Stream hubs for multi-instance deploys (Redis). |
 | `cdp_providers` | CDP transport backends the one BUA browser engine (an extension, not core) connects, selected by `[browser] cdp_provider` (default `sandbox-cdp`): core's `sandbox-cdp` wraps the `BROWSER_CDP_URL` endpoint in a static lease; browserbase mints a fresh hosted session per turn. A provider mints a per-turn `CdpLease` the loop releases at turn end. The BUA engine is the browser extension, so only the transport is a core seam, never the engine. |
 | `auth_proxies` | Credential backends a feed-sync connector source resolves a provider `Credential` through, selected by `[connectors] auth_backend` (default `composio`): the Composio broker (a proxying transport, token stays server-side) or `direct` BYOK (a member-added key read host-side from the credential store, never reaching the sandbox). No backend installed → connector sources are inert; folder sources need none. |

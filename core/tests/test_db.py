@@ -20,7 +20,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
     """The migration seam's schema invariant: each table-owning extension's version location layers
     over core's — `apply_migrations` ran clean in the fixture — and the graph has exactly one head
     per owner (core's chain plus each extension branch), so `upgrade heads` is deterministic,
-    core-first. The base-pinned index-default and memory extensions own their chunk and memory_item
+    core-first. The base-pinned index_default and memory extensions own their chunk and memory_item
     tables, the sample probe owns its note table, skill_create owns the user_skill table, and
     knowledge-graph owns the graph_entity and graph_edge tables."""
     config = Config()

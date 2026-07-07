@@ -392,7 +392,7 @@ def index_backend(
     credential_store: CredentialStore | None,
 ) -> IndexBackend:
     """The workspace's index backend: the named backend an extension contributes through its
-    `indexes` Manifest point, or — the config knob unset — the base-pinned `index-default`
+    `indexes` Manifest point, or — the config knob unset — the base-pinned `index_default`
     extension registering name `"default"` (SQLite FTS5 + local cosine, Postgres tsvector +
     pgvector). No extension registering the selected name fails loud; a backend declaring credential
     slots with no credential key set fails loud, since its factory reads its BYOK key in-process."""
@@ -416,7 +416,7 @@ def embed_backend(
     credential_store: CredentialStore | None,
 ) -> EmbedClient:
     """The deploy's embed client: the named backend an extension contributes through its `embeds`
-    Manifest point, or — the config knob unset — the base-pinned `embed-openai` extension
+    Manifest point, or — the config knob unset — the base-pinned `embed_openai` extension
     registering name `"default"`. Resolved once at boot and threaded onto the contexts the index,
     the memory tools, and the derivation jobs receive. No extension registering the selected name
     fails loud; a backend declaring credential slots with no credential key set fails loud."""

@@ -135,7 +135,7 @@ class IndexBackendSpec:
     `ExtensionContext` — from which it opens transactions for a table-owning backend or reads a BYOK
     key through `context.credentials`. The index runs in the jobs/serve role, never in the sandbox,
     so a BYOK backend reads its key in-process rather than through the egress proxy. Every deploy
-    ships the base-pinned `index-default` extension registering name `"default"` (SQLite FTS5 +
+    ships the base-pinned `index_default` extension registering name `"default"` (SQLite FTS5 +
     local cosine, Postgres tsvector + pgvector), which core resolves when the knob is unset."""
 
     name: str
@@ -149,7 +149,7 @@ class EmbedBackendSpec:
     calls once at boot to build the `EmbedClient`, given the extension's workspace-scoped
     `ExtensionContext` (from which it reads its provider key through `context.credentials`). The
     embed client runs in the jobs/serve role on the deploy key, never through the sandbox proxy.
-    Every deploy ships the base-pinned `embed-openai` extension registering name `"default"`, which
+    Every deploy ships the base-pinned `embed_openai` extension registering name `"default"`, which
     core resolves when the config knob is unset."""
 
     name: str

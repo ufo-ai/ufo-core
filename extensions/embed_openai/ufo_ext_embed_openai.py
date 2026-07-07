@@ -16,7 +16,7 @@ from ufo.sdk.context import ExtensionContext
 from ufo.sdk.index import EmbedClient
 from ufo.sdk.manifest import EmbedBackendSpec, Manifest
 
-NAME = "embed-openai"
+NAME = "embed_openai"
 VERSION = "0.1.0"
 EMBED_BACKEND = "default"
 API_KEY_ENV = "OPENAI_API_KEY"
