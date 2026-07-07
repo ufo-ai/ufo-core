@@ -35,6 +35,7 @@ dependencies = [
 selfhost = "selfhost.cli:main"
 
 [project.entry-points."selfhost.extension"]
+brief_pipeline = "selfhost_ext_brief_pipeline.manifest:manifest"
 browser = "selfhost_ext_browser.manifest:manifest"
 coding = "selfhost_ext_coding.manifest:manifest"
 connectors = "selfhost_ext_connectors.manifest:manifest"
@@ -93,6 +94,7 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = [
     "core/src/selfhost",
+    "extensions/brief_pipeline/selfhost_ext_brief_pipeline",
     "extensions/browser/selfhost_ext_browser",
     "extensions/coding/selfhost_ext_coding",
     "extensions/connectors/selfhost_ext_connectors",

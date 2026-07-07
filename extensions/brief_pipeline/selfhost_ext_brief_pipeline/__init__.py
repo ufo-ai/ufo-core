@@ -1,0 +1,1 @@
+"""Brief pipeline extension."""
