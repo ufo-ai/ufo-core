@@ -17,20 +17,20 @@ VERSION = "0.1.0"
 EXTENSIONS = (
     "exa",
     "todos",
-    "web",
     "sites",
     "scheduled_tasks",
     "research",
     "repl",
-    "openrouter",
     "memory",
     "mcp",
     "documents",
     "connectors",
     "coding",
     "browser",
-    "index-default",
-    "embed-openai",
+    "index_default",
+    "knowledge_graph",
+    "ufo",
+    "gateway",
 )
 
 

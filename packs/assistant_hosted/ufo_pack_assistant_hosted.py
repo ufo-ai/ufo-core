@@ -18,7 +18,6 @@ EXTENSIONS = (
     "turbopuffer",
     "exa",
     "todos",
-    "web",
     "ufo",
     "slack",
     "sites",
@@ -34,7 +33,8 @@ EXTENSIONS = (
     "connectors",
     "coding",
     "browser",
-    "embed-openai",
+    "embed_openai",
+    "knowledge_graph",
 )
 
 
