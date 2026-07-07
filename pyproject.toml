@@ -63,6 +63,7 @@ slack = "ufo_ext_slack.manifest:manifest"
 sources = "ufo_ext_sources.manifest:manifest"
 todos = "ufo_ext_todos:manifest"
 turbopuffer = "ufo_ext_turbopuffer:manifest"
+ufo = "ufo_ext_ufo.manifest:manifest"
 web = "ufo_ext_web.manifest:manifest"
 
 [project.entry-points."ufo.pack"]
@@ -113,6 +114,7 @@ packages = [
     "extensions/skill_create/ufo_ext_skill_create",
     "extensions/slack/ufo_ext_slack",
     "extensions/sources/ufo_ext_sources",
+    "extensions/ufo/ufo_ext_ufo",
     "extensions/web/ufo_ext_web",
     "testsupport/ufo_testsupport",
 ]

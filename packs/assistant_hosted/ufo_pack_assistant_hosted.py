@@ -3,7 +3,8 @@
 Activating it (config `[pack] name = "assistant_hosted"`) brings up the assistant capabilities —
 memory and recall, Exa research, Composio connectors and MCP, the browser/computer-use tools,
 website building and the code REPL, document generation, todos, scheduled tasks, the web chat
-surface, the OpenRouter model provider, and the coding subagent — but over managed backends instead
+surface and the ufo terminal surface, the OpenRouter model provider, and the coding subagent — but
+over managed backends instead
 of core's own: the Turbopuffer index (in place of the local index), the Slack surface, the Redis
 live-frame hub, and the E2B sandbox carrier. Memory still retrieves through OpenAI embeddings
 (Turbopuffer is the index seam, embeddings are separate). It bundles only extensions and adds no
@@ -18,6 +19,7 @@ EXTENSIONS = (
     "exa",
     "todos",
     "web",
+    "ufo",
     "slack",
     "sites",
     "scheduled_tasks",
