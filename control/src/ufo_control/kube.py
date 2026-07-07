@@ -25,6 +25,7 @@ from ufo.deploy import DeployRequest, DeployStatus
 from ufo_control.platform import (
     API_GROUP_VERSION,
     FIELD_MANAGER,
+    ORG_DOMAIN_LABEL,
     PACK_LABEL,
     PLATFORM_NAMESPACE,
     TENANT_KIND,
@@ -38,16 +39,27 @@ APPLY_CONTENT_TYPE = "application/apply-patch+yaml"
 LEASE_API_VERSION = "coordination.k8s.io/v1"
 
 
+def org_domain(owner_email: str) -> str:
+    """The owner email's domain — the label a tenant is discovered by when a second member of the
+    same organization onboards (one tenant per work-email domain)."""
+    return owner_email.rsplit("@", 1)[-1].lower()
+
+
 def tenant_body(request: DeployRequest) -> dict[str, Any]:
     """The ``Tenant`` custom resource — its ``.spec`` is the deploy request verbatim (snake_case,
-    the same JSON the OSS producer posts), so the operator round-trips spec → ``DeployRequest``."""
+    the same JSON the OSS producer posts), so the operator round-trips spec → ``DeployRequest``. The
+    org-domain label is set at admission so join-or-provision can count tenants for a domain."""
     return {
         "apiVersion": API_GROUP_VERSION,
         "kind": TENANT_KIND,
         "metadata": {
             "name": request.tenant.name,
             "namespace": PLATFORM_NAMESPACE,
-            "labels": {TENANT_NAME_LABEL: request.tenant.name, PACK_LABEL: request.pack},
+            "labels": {
+                TENANT_NAME_LABEL: request.tenant.name,
+                PACK_LABEL: request.pack,
+                ORG_DOMAIN_LABEL: org_domain(request.tenant.owner_email),
+            },
         },
         "spec": request.model_dump(mode="json"),
     }
@@ -55,6 +67,24 @@ def tenant_body(request: DeployRequest) -> dict[str, Any]:
 
 def request_from_tenant(obj: dict[str, Any]) -> DeployRequest:
     return DeployRequest.model_validate(obj["spec"])
+
+
+def status_from_tenant(obj: dict[str, Any]) -> DeployStatus:
+    """Build the poll response from a Tenant CR, mapping the CR's camelCase ``status.workspaceId``
+    onto ``DeployStatus.workspace_id`` and reading it defensively (absent until the tenant is
+    Ready)."""
+    name = obj["metadata"]["name"]
+    status = obj.get("status") or {}
+    phase = status.get("phase")
+    if not phase:
+        return DeployStatus(tenant=name, phase="Pending", message="not yet reconciled")
+    return DeployStatus(
+        tenant=name,
+        phase=phase,
+        url=status.get("url"),
+        message=status.get("message", ""),
+        workspace_id=status.get("workspaceId"),
+    )
 
 
 @dataclass(frozen=True)
@@ -97,10 +127,11 @@ class KubeClient:
         response.raise_for_status()
         return response.json()
 
-    async def list_tenants(self) -> list[dict[str, Any]]:
-        listing = await self.get(
-            f"/apis/{API_GROUP_VERSION}/namespaces/{PLATFORM_NAMESPACE}/{TENANT_PLURAL}"
-        )
+    async def list_tenants(self, org_domain: str | None = None) -> list[dict[str, Any]]:
+        path = f"/apis/{API_GROUP_VERSION}/namespaces/{PLATFORM_NAMESPACE}/{TENANT_PLURAL}"
+        if org_domain is not None:
+            path += f"?labelSelector={ORG_DOMAIN_LABEL}={org_domain}"
+        listing = await self.get(path)
         if listing is None:
             return []
         items = listing.get("items", [])

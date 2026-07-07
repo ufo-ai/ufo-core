@@ -68,7 +68,6 @@ ufo/
   control/                                    ← selfhost-k8s, subtree with history
     src/ufo_control/                          ← + the rls arm, the members endpoint (below)
     charts/ufo-tenant/
-  clients/ufo                                 ← the POSIX client, copied verbatim from metalcraft
   extensions/ufo/ extensions/gateway/         ← the member surface + the onboarding backend (§4)
   infra/                                      ← metalcraft Terraform, copy-adapted (prod env only)
 ```
@@ -209,7 +208,7 @@ Two producers of the same `DeployRequest` contract: the `ufoctl deploy` CLI (ope
 **gateway extension** (members, below). Both end at `POST /v1/deploy` → Tenant CR → operator
 reconcile.
 
-**The client** (`clients/ufo`): metalcraft's script copied verbatim, then two mechanical adapts —
+**The client** (`extensions/gateway/ufo_ext_gateway/client/ufo` — packaged in the wheel so the gateway serves it at runtime): metalcraft's script copied verbatim, then two mechanical adapts —
 (a) the `workspace` directive's value becomes the tenant's base URL
 (`https://<name>.flyingobject.ai`), written to `~/.ufo/workspace`; chat posts go to
 `{WORKSPACE_URL}/surface/ufo/{channel}`; (b) onboarding stays at the apex

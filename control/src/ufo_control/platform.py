@@ -29,6 +29,7 @@ TENANT_NAMESPACE_PREFIX = "ufo-"
 TENANT_NAMESPACE_LABEL = f"{API_GROUP}/tenant"
 TENANT_NAME_LABEL = f"{API_GROUP}/tenant-name"
 PACK_LABEL = f"{API_GROUP}/pack"
+ORG_DOMAIN_LABEL = f"{API_GROUP}/org-domain"
 
 # The control-plane-minted workspace uuid, persisted on the Tenant CR's status so re-reconciles
 # reuse it (idempotency). Kept off core's DeployStatus (extra="forbid"); the operator threads it and

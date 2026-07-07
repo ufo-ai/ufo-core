@@ -98,13 +98,16 @@ class DeployRequest(BaseModel):
 
 
 class DeployStatus(BaseModel):
-    """The control plane's poll response — the tenant's reconciled phase and workspace URL."""
+    """The control plane's poll response — the tenant's reconciled phase and workspace URL.
+    `workspace_id` is the tenant's minted workspace uuid, surfaced once the tenant is Ready so a
+    caller (the onboarding backend) can mint a member bearer against it."""
 
     model_config = ConfigDict(extra="forbid")
     tenant: str
     phase: Literal["Pending", "Provisioning", "Ready", "Failed"]
     url: str | None = None
     message: str = ""
+    workspace_id: str | None = None
 
 
 @dataclass(frozen=True)
