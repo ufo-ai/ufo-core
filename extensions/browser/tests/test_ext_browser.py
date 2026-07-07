@@ -17,31 +17,31 @@ from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
-import selfhost_ext_browser.manifest as browser_manifest
-import selfhost_ext_browser.tools as browser_tools
 import sqlalchemy as sa
+import ufo_ext_browser.manifest as browser_manifest
+import ufo_ext_browser.tools as browser_tools
 from pydantic import JsonValue
-from selfhost_ext_browser.bua.backend import CDP_TOKEN_KEY, BuaSurface
-from selfhost_ext_browser.subagent import (
+from ufo_ext_browser.bua.backend import CDP_TOKEN_KEY, BuaSurface
+from ufo_ext_browser.subagent import (
     BROWSER_PROFILE,
     BROWSER_SUBAGENT_NAME,
     BROWSER_SUBAGENT_PROMPT,
     BROWSER_SUBAGENT_TOOL_NAMES,
 )
-from selfhost_ext_browser.tools import BROWSER_TOOL_NAMES, BROWSER_TOOLS
+from ufo_ext_browser.tools import BROWSER_TOOL_NAMES, BROWSER_TOOLS
 
-from selfhost.blob import FilesystemBlobStore
-from selfhost.browser import CdpEndpoint, CdpLease, CdpProvider, SessionGone
-from selfhost.db import workspace_tx
-from selfhost.ext.context import ScopedStore
-from selfhost.ext.loader import skill_registry, turn_subagents
-from selfhost.loop.prompts.render import render_system_prompt
-from selfhost.loop.subagents import SubagentRegistry, subagent_system_prompt
-from selfhost.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
-from selfhost.schema import tables
-from selfhost.schema.records import Agent, Turn
-from selfhost.tools.builtins import BUILTIN_TOOLS
-from selfhost.tools.context import ImageContent, SpawnResult, ToolContext, TurnCleanup
+from ufo.blob import FilesystemBlobStore
+from ufo.browser import CdpEndpoint, CdpLease, CdpProvider, SessionGone
+from ufo.db import workspace_tx
+from ufo.ext.context import ScopedStore
+from ufo.ext.loader import skill_registry, turn_subagents
+from ufo.loop.prompts.render import render_system_prompt
+from ufo.loop.subagents import SubagentRegistry, subagent_system_prompt
+from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
+from ufo.schema import tables
+from ufo.schema.records import Agent, Turn
+from ufo.tools.builtins import BUILTIN_TOOLS
+from ufo.tools.context import ImageContent, SpawnResult, ToolContext, TurnCleanup
 
 
 @dataclass

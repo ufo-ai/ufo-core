@@ -3,9 +3,9 @@ from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 
-from selfhost.db import workspace_tx
-from selfhost.schema import tables
-from selfhost.surfaces.admission import Admission
+from ufo.db import workspace_tx
+from ufo.schema import tables
+from ufo.surfaces.admission import Admission
 
 
 @dataclass

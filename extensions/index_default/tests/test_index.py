@@ -2,11 +2,11 @@ from collections.abc import AsyncIterator
 
 import pytest
 import sqlalchemy as sa
-from selfhost_ext_embed_openai import EMBED_DIM
-from selfhost_ext_index_default import DefaultIndex, pack_embedding, unpack_embedding
+from ufo_ext_embed_openai import EMBED_DIM
+from ufo_ext_index_default import DefaultIndex, pack_embedding, unpack_embedding
 
-from selfhost.db import workspace_tx
-from selfhost.indexing import Chunk, IndexScope
+from ufo.db import workspace_tx
+from ufo.indexing import Chunk, IndexScope
 
 SUBJECT = "member:me"
 FOREIGN = "member:other"

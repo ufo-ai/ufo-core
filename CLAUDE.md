@@ -1,4 +1,4 @@
-# selfhost — agent guidelines
+# ufo — agent guidelines
 
 ## Where to look first
 
@@ -15,7 +15,7 @@ change — a member expresses it in natural conversation and the agent drives it
 surfacing any link in its reply); never a slash-command, keyword, or bespoke end-user HTTP
 endpoint. The only endpoints are the chat transport itself and unavoidable third-party plumbing
 (e.g. an OAuth callback). The speaker gates the granting act; subsequent use is the wire's job.
-(`selfhost` CLI verbs are the operator surface — a different audience, not member actions.)
+(`ufoctl` CLI verbs are the operator surface — a different audience, not member actions.)
 
 ## One shape
 
@@ -32,7 +32,7 @@ past; salvaged code arrives as if written here.
 If a constraint can be made true by code — a required argument, a type, a test, a CI gate — encode
 it there and delete the prose. A cross-cutting precondition (workspace scoping, credential access,
 sandbox egress) is established once at the boundary and threaded down; the unsafe primitive stays
-module-private behind a factory, backed by a gate. Extensions import only `selfhost.sdk` — a CI
+module-private behind a factory, backed by a gate. Extensions import only `ufo.sdk` — a CI
 gate forbids `core` internals in `extensions/`.
 
 ## Succinctness
@@ -70,7 +70,7 @@ hard-to-vary decision; cut the words around it. Prefer a table to prose. One exa
   point → steps → types, one file, top to bottom. More than two file-hops to trace a flow means
   the seams are wrong — fix the seams.
 - **Fail loud** — raise on missing config or unexpected values; no silent fallbacks.
-- **Async-native, one event loop** — `selfhost serve` is one process: a blocking call stalls
+- **Async-native, one event loop** — `ufoctl serve` is one process: a blocking call stalls
   every surface, stream, and turn at once. Async DB driver, async HTTP, `async def` DBOS
   workflows/steps; never `time.sleep`, `subprocess.run`, sync `open()`, or a sync client inside
   `async def` (ruff `ASYNC` rules gate this; `requests`/`psycopg2` are banned imports). A sync

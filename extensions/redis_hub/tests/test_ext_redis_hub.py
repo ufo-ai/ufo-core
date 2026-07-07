@@ -4,17 +4,17 @@ XADD/XREAD path against a real Redis — every frame kind round-tripped, cursor 
 trimming — is `core/tests/integration/test_redis_hub.py`, not here."""
 
 import pytest
-import selfhost_ext_redis_hub.manifest as ext
+import ufo_ext_redis_hub.manifest as ext
 from redis.asyncio import Redis
-from selfhost_ext_redis_hub.stream_hub import (
+from ufo_ext_redis_hub.stream_hub import (
     RedisStreamHub,
     frame_from_payload,
     frame_payload,
 )
 
-from selfhost.hub import CostTick, LiveFrame, Parked, SkillLoad, Terminal, ToolCall
-from selfhost.models.interface import TextDelta
-from selfhost.schema.records import TerminalFrame
+from ufo.hub import CostTick, LiveFrame, Parked, SkillLoad, Terminal, ToolCall
+from ufo.models.interface import TextDelta
+from ufo.schema.records import TerminalFrame
 
 FRAMES: tuple[LiveFrame, ...] = (
     TextDelta(text="hello"),

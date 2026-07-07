@@ -19,9 +19,9 @@ from urllib.parse import quote
 
 import httpx
 import pytest
-from selfhost_ext_browser.bua.backend import BuaSurface
+from ufo_ext_browser.bua.backend import BuaSurface
 
-from selfhost.browser import SandboxCdpProvider
+from ufo.browser import SandboxCdpProvider
 
 CHROME_CANDIDATES = (
     "google-chrome",

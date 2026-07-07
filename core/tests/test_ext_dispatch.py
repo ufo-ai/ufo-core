@@ -8,19 +8,19 @@ import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from pydantic import BaseModel
 
-from selfhost.blob import FilesystemBlobStore
-from selfhost.browser import SandboxCdpProvider
-from selfhost.credentials import CredentialStore
-from selfhost.db import workspace_tx
-from selfhost.ext.context import ExtensionContext, ScopedStore, context_for
-from selfhost.ext.loader import HookChain, turn_tools, validate_ext_tools
-from selfhost.ext.manifest import CredentialSlot, Manifest
-from selfhost.hub import InProcessHub
-from selfhost.loop.compaction import Compaction
-from selfhost.loop.engine import TurnEngine
-from selfhost.loop.prompts.render import rendered_prompt
-from selfhost.loop.transcript import Transcript
-from selfhost.models.interface import (
+from ufo.blob import FilesystemBlobStore
+from ufo.browser import SandboxCdpProvider
+from ufo.credentials import CredentialStore
+from ufo.db import workspace_tx
+from ufo.ext.context import ExtensionContext, ScopedStore, context_for
+from ufo.ext.loader import HookChain, turn_tools, validate_ext_tools
+from ufo.ext.manifest import CredentialSlot, Manifest
+from ufo.hub import InProcessHub
+from ufo.loop.compaction import Compaction
+from ufo.loop.engine import TurnEngine
+from ufo.loop.prompts.render import rendered_prompt
+from ufo.loop.transcript import Transcript
+from ufo.models.interface import (
     ModelEvent,
     ModelRequest,
     TextDelta,
@@ -29,12 +29,12 @@ from selfhost.models.interface import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from selfhost.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
-from selfhost.schema import tables
-from selfhost.schema.records import Agent, Turn, Usage
-from selfhost.tools.builtins import BUILTIN_TOOLS
-from selfhost.tools.context import SpawnResult, TextContent, ToolContext, ToolResult
-from selfhost.tools.registry import ToolDef, ToolRegistry
+from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
+from ufo.schema import tables
+from ufo.schema.records import Agent, Turn, Usage
+from ufo.tools.builtins import BUILTIN_TOOLS
+from ufo.tools.context import SpawnResult, TextContent, ToolContext, ToolResult
+from ufo.tools.registry import ToolDef, ToolRegistry
 
 EXTENSION = "sample"
 

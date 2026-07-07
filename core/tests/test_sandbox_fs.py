@@ -13,24 +13,24 @@ from uuid import uuid4
 
 import pytest
 
-from selfhost.blob import S3BlobStore
-from selfhost.loop.queue import _workspace_mount
-from selfhost.sandbox.fs_creds import (
+from ufo.blob import S3BlobStore
+from ufo.loop.queue import _workspace_mount
+from ufo.sandbox.fs_creds import (
     SandboxFsCredentialMinter,
     SandboxFsCredentials,
     workspace_key_prefix,
     workspace_prefix_policy,
 )
-from selfhost.sandbox.fs_mount import (
+from ufo.sandbox.fs_mount import (
     AWS_CREDENTIALS_PATH,
     aws_credentials_file,
     mount_scripts,
     s3fs_command,
 )
-from selfhost.sandbox.session import MountSpec
-from selfhost.transcript import transcript_key
+from ufo.sandbox.session import MountSpec
+from ufo.transcript import transcript_key
 
-BUCKET = "selfhost-blobs"
+BUCKET = "ufo-blobs"
 
 
 class _StubSts:
@@ -100,7 +100,7 @@ def test_s3fs_command_construction() -> None:
         False,
     )
     assert command == (
-        "s3fs selfhost-blobs:/conversations/c1/workspace /workspace "
+        "s3fs ufo-blobs:/conversations/c1/workspace /workspace "
         "-o profile=default -o url=https://s3.example:9000 -o endpoint=us-east-1 "
         "-o compat_dir -o allow_other"
     )

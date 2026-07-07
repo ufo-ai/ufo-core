@@ -1,6 +1,6 @@
 """The extension seam's conformance probe: drive the installed sample through each public entry.
 
-The sample is a real workspace member discovered via its `selfhost.extension` entry point, so this
+The sample is a real workspace member discovered via its `ufo.extension` entry point, so this
 file first proves discovery (`load_manifests` finds it) and then exercises every declared point —
 tool, credential slot, job, route — through the narrowest public surface core uses, reading the
 sample's own recorded rows back through `ScopedStore`. The negative cases ride along: an undeclared
@@ -14,20 +14,20 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
-import selfhost_ext_index_default as index_default
-import selfhost_ext_sample as sample
-import selfhost_pack_sample as sample_pack
 import sqlalchemy as sa
+import ufo_ext_index_default as index_default
+import ufo_ext_sample as sample
+import ufo_pack_sample as sample_pack
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from selfhost_ext_embed_openai import EMBED_DIM
-from selfhost_ext_index_default import DefaultIndex
-from selfhost_ext_memory.store import MemoryStore, PageIndexer
+from ufo_ext_embed_openai import EMBED_DIM
+from ufo_ext_index_default import DefaultIndex
+from ufo_ext_memory.store import MemoryStore, PageIndexer
 
-from selfhost.blob import FilesystemBlobStore
-from selfhost.browser import SandboxCdpProvider
-from selfhost.config import (
+from ufo.blob import FilesystemBlobStore
+from ufo.browser import SandboxCdpProvider
+from ufo.config import (
     BlobConfig,
     BrowserConfig,
     Config,
@@ -37,16 +37,16 @@ from selfhost.config import (
     ResearchConfig,
     SandboxConfig,
 )
-from selfhost.credentials import CredentialSlotUnset, CredentialStore
-from selfhost.db import workspace_tx
-from selfhost.ext.context import (
+from ufo.credentials import CredentialSlotUnset, CredentialStore
+from ufo.db import workspace_tx
+from ufo.ext.context import (
     ExtensionContext,
     ScopedStore,
     TrajectoryCorpus,
     UndeclaredCredentialSlot,
     context_for,
 )
-from selfhost.ext.loader import (
+from ufo.ext.loader import (
     discovered_packs,
     embed_backend,
     index_backend,
@@ -56,26 +56,26 @@ from selfhost.ext.loader import (
     turn_subagents,
     turn_tools,
 )
-from selfhost.ext.manifest import CarrierSpec, Manifest
-from selfhost.ext.surface import WRITEBACK_DELIVERED, workspace_key
-from selfhost.governance import prompt_digest
-from selfhost.grants import GrantStore
-from selfhost.hub import InProcessHub
-from selfhost.indexing import OWNER_KIND_MEMORY_ITEM, Chunk, TextChunker
-from selfhost.jobs import JobRunner, bindings_from
-from selfhost.loop.prompts.render import render_system_prompt
-from selfhost.loop.subagents import SubagentRegistry, subagent_system_prompt
-from selfhost.loop.transcript import Transcript
-from selfhost.models.interface import Message, ModelRequest, TextDelta
-from selfhost.models.registry import model_registry
-from selfhost.onboarding import run_onboarding_steps
-from selfhost.sandbox.local import LocalCarrier
-from selfhost.sandbox.proxy.rules import InjectionRule, MeterRule, derive_credential_rules
-from selfhost.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
-from selfhost.schema import tables
-from selfhost.schema.records import WRITEBACK_PENDING, Agent, Turn, Usage
-from selfhost.search import FetchRequest, SearchQuery
-from selfhost.serve import (
+from ufo.ext.manifest import CarrierSpec, Manifest
+from ufo.ext.surface import WRITEBACK_DELIVERED, workspace_key
+from ufo.governance import prompt_digest
+from ufo.grants import GrantStore
+from ufo.hub import InProcessHub
+from ufo.indexing import OWNER_KIND_MEMORY_ITEM, Chunk, TextChunker
+from ufo.jobs import JobRunner, bindings_from
+from ufo.loop.prompts.render import render_system_prompt
+from ufo.loop.subagents import SubagentRegistry, subagent_system_prompt
+from ufo.loop.transcript import Transcript
+from ufo.models.interface import Message, ModelRequest, TextDelta
+from ufo.models.registry import model_registry
+from ufo.onboarding import run_onboarding_steps
+from ufo.sandbox.local import LocalCarrier
+from ufo.sandbox.proxy.rules import InjectionRule, MeterRule, derive_credential_rules
+from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
+from ufo.schema import tables
+from ufo.schema.records import WRITEBACK_PENDING, Agent, Turn, Usage
+from ufo.search import FetchRequest, SearchQuery
+from ufo.serve import (
     _mount_ext_routes,
     _mount_surfaces,
     _select_auth_proxy,
@@ -85,11 +85,11 @@ from selfhost.serve import (
     _select_search_provider,
     _validate_requires,
 )
-from selfhost.skills.runtime import mount_skill
-from selfhost.sources.sync import CorePageFeed, SyncDriver
-from selfhost.subjects import SHARED_SUBJECT
-from selfhost.tools.context import SpawnResult, ToolContext
-from selfhost.transcript import Conversation, transcript_key
+from ufo.skills.runtime import mount_skill
+from ufo.sources.sync import CorePageFeed, SyncDriver
+from ufo.subjects import SHARED_SUBJECT
+from ufo.tools.context import SpawnResult, ToolContext
+from ufo.transcript import Conversation, transcript_key
 
 SANDBOX_UNTOUCHED = "the sample tool records through its store and must not reach the sandbox"
 
@@ -1260,7 +1260,7 @@ async def test_core_selects_a_manifest_embed_backend_by_name(db: None, database_
 
 def test_sample_pack_activates_its_bundled_extension_and_own_contributions() -> None:
     """The packs seam end to end through the probe: the sample pack is discovered through its
-    `selfhost.pack` entry point, and activating it by name narrows the active set to exactly the
+    `ufo.pack` entry point, and activating it by name narrows the active set to exactly the
     sample extension's real manifest (its tools present) plus a manifest carrying the pack's own
     pack-level skill and onboarding step — the shape `load_manifests` returns for a serve or init
     that names the pack."""

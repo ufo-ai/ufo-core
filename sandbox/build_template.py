@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the selfhost sandbox image — one definition, two targets that stay in sync.
+"""Build the ufo sandbox image — one definition, two targets that stay in sync.
 
 The E2B sandbox template and the Docker carrier's container image share the same layers
 (``apply_layers``: apt packages, the pip/npm toolchain, the ``sbx``/``sbxfs`` scripts, the start
@@ -38,17 +38,17 @@ ROOT = Path(__file__).resolve().parents[1]
 SBX_BIN_DIR = "/usr/local/bin"
 NODE_GLOBAL_MODULES = "/usr/local/lib/node_modules"
 PLAYWRIGHT_BROWSERS_DIR = "/usr/local/lib/playwright"
-SELFHOST_DIR = "/etc/selfhost"
+UFO_DIR = "/etc/ufo"
 # The in-sandbox binaries live in core beside the local carrier, which installs them onto its
 # command PATH; the image bakes the same files, so a script behaves identically under every carrier.
-IMAGE_SOURCE_DIR = ROOT / "core" / "src" / "selfhost" / "sandbox" / "image"
+IMAGE_SOURCE_DIR = ROOT / "core" / "src" / "ufo" / "sandbox" / "image"
 
 E2B_BASE_TEMPLATE = "code-interpreter-v1"
 DOCKER_BASE_IMAGE = "e2bdev/code-interpreter:latest"
-# The name the E2B carrier resolves through SELFHOST_E2B_TEMPLATE, and the tag the Docker carrier
-# runs (selfhost.loop.queue.SANDBOX_IMAGE_REF). Kept here because this is where both are produced.
-E2B_TEMPLATE_NAME = "selfhost-sbx"
-DOCKER_IMAGE_TAG = "selfhost-sandbox:latest"
+# The name the E2B carrier resolves through UFO_E2B_TEMPLATE, and the tag the Docker carrier
+# runs (ufo.loop.queue.SANDBOX_IMAGE_REF). Kept here because this is where both are produced.
+E2B_TEMPLATE_NAME = "ufo-sbx"
+DOCKER_IMAGE_TAG = "ufo-sandbox:latest"
 START_COMMAND = "tail -f /dev/null"
 # Build as root, run as the base image's non-root user. set_user brackets the layers because
 # to_dockerfile drops the per-step run_cmd/copy user, and a sandbox that runs as root after sudo is
@@ -60,7 +60,7 @@ RUNTIME_USER = "user"
 READY_VERIFY_TIMEOUT_SECONDS = 120
 # The build-definition digest is baked here so --check can read it off the live template and compare
 # to source — the drift gate that keeps publishing opt-in without letting a stale template pass.
-BUILD_DIGEST_PATH = f"{SELFHOST_DIR}/template-digest"
+BUILD_DIGEST_PATH = f"{UFO_DIR}/template-digest"
 
 # s3fs → mounts the conversation's per-thread sandbox-fs prefix at the workspace (the follow-on
 # mount unit); poppler-utils → pdftotext/pdftoppm/pdfimages (pdf + media skills); chromium → the
@@ -182,7 +182,7 @@ def apply_layers(builder: object) -> object:
     builder.run_cmd(
         f"PLAYWRIGHT_BROWSERS_PATH={PLAYWRIGHT_BROWSERS_DIR} playwright install chromium"
     )
-    builder.run_cmd(f"mkdir -p {SELFHOST_DIR} && chmod 0777 {SELFHOST_DIR}")
+    builder.run_cmd(f"mkdir -p {UFO_DIR} && chmod 0777 {UFO_DIR}")
     builder.run_cmd(f"printf '%s' '{build_definition_digest()}' > {BUILD_DIGEST_PATH}")
     builder.set_envs(SANDBOX_ENV)
     targets = []

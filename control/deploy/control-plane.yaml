@@ -1,34 +1,34 @@
-# The control plane's own install: the selfhost-system namespace, the operator ServiceAccount + a
+# The control plane's own install: the ufo-system namespace, the operator ServiceAccount + a
 # broad ClusterRole (it manages tenant namespaces and every resource the tenant chart applies via
 # helm), the deploy API Deployment/Service, and the leader-elected operator Deployment.
 #
 # Apply after deploy/crds/tenant.yaml. Set the image, the platform ConfigMap, the
-# selfhost-k8s-secrets Secret (Postgres admin DSN + role seed), and the selfhost-platform-secrets
+# ufo-control-secrets Secret (Postgres admin DSN + role seed), and the ufo-platform-secrets
 # Secret (model API keys + cloud credentials the tenant pods read from env — the operator replicates
 # it from this namespace into each tenant namespace during provisioning) for your cluster first.
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: selfhost-system
+  name: ufo-system
   labels:
-    app.kubernetes.io/managed-by: selfhost-k8s
+    app.kubernetes.io/managed-by: ufo-control
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: selfhost-operator
-  namespace: selfhost-system
+  name: ufo-operator
+  namespace: ufo-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: selfhost-operator
+  name: ufo-operator
 rules:
   # The Tenant kind + its status.
-  - apiGroups: [selfhost.sh]
+  - apiGroups: [flyingobject.ai]
     resources: [tenants]
     verbs: [get, list, watch, create, update, patch]
-  - apiGroups: [selfhost.sh]
+  - apiGroups: [flyingobject.ai]
     resources: [tenants/status]
     verbs: [get, update, patch]
   # Tenant namespaces and the per-tenant Secret (config + minted keys).
@@ -53,7 +53,7 @@ rules:
   - apiGroups: [networking.k8s.io]
     resources: [ingresses, networkpolicies]
     verbs: [get, list, create, update, patch, delete]
-  # The sandbox-manager Role (charts/selfhost-tenant/templates/rbac.yaml) grants the pod carrier
+  # The sandbox-manager Role (charts/ufo-tenant/templates/rbac.yaml) grants the pod carrier
   # pods, pods/exec, and PVCs; K8s escalation-prevention rejects Role creation unless the operator
   # already holds every verb the Role grants. (services/networkpolicies/statefulsets are covered by
   # the rules above; these three are added here to complete the set.)
@@ -77,34 +77,34 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: selfhost-operator
+  name: ufo-operator
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: selfhost-operator
+  name: ufo-operator
 subjects:
   - kind: ServiceAccount
-    name: selfhost-operator
-    namespace: selfhost-system
+    name: ufo-operator
+    namespace: ufo-system
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: selfhost-api
-  namespace: selfhost-system
-  labels: {app: selfhost-api}
+  name: ufo-api
+  namespace: ufo-system
+  labels: {app: ufo-api}
 spec:
   replicas: 2
   selector:
-    matchLabels: {app: selfhost-api}
+    matchLabels: {app: ufo-api}
   template:
     metadata:
-      labels: {app: selfhost-api}
+      labels: {app: ufo-api}
     spec:
-      serviceAccountName: selfhost-operator
+      serviceAccountName: ufo-operator
       containers:
         - name: api
-          image: ghcr.io/metalcraftai/selfhost-k8s:latest
+          image: ghcr.io/metalcraftai/ufo-control:latest
           args: [api]
           ports:
             - {name: http, containerPort: 8080}
@@ -116,33 +116,33 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: selfhost-api
-  namespace: selfhost-system
+  name: ufo-api
+  namespace: ufo-system
 spec:
-  selector: {app: selfhost-api}
+  selector: {app: ufo-api}
   ports:
     - {name: http, port: 80, targetPort: http}
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: selfhost-operator
-  namespace: selfhost-system
-  labels: {app: selfhost-operator}
+  name: ufo-operator
+  namespace: ufo-system
+  labels: {app: ufo-operator}
 spec:
   # One replica + Recreate is the mutual-exclusion guarantee; the Lease coordinates the rollout gap.
   replicas: 1
   strategy: {type: Recreate}
   selector:
-    matchLabels: {app: selfhost-operator}
+    matchLabels: {app: ufo-operator}
   template:
     metadata:
-      labels: {app: selfhost-operator}
+      labels: {app: ufo-operator}
     spec:
-      serviceAccountName: selfhost-operator
+      serviceAccountName: ufo-operator
       containers:
         - name: operator
-          image: ghcr.io/metalcraftai/selfhost-k8s:latest
+          image: ghcr.io/metalcraftai/ufo-control:latest
           args: [operator]
           ports:
             - {name: http, containerPort: 8080}
@@ -150,14 +150,14 @@ spec:
             - name: POD_NAME
               valueFrom:
                 fieldRef: {fieldPath: metadata.name}
-            - name: SELFHOST_K8S_CONFIG
+            - name: UFO_CONTROL_CONFIG
               value: /config/platform.toml
-            - name: SELFHOST_K8S_POSTGRES_ADMIN_DSN
+            - name: UFO_CONTROL_POSTGRES_ADMIN_DSN
               valueFrom:
-                secretKeyRef: {name: selfhost-k8s-secrets, key: postgres-admin-dsn}
-            - name: SELFHOST_K8S_PG_ROLE_SEED
+                secretKeyRef: {name: ufo-control-secrets, key: postgres-admin-dsn}
+            - name: UFO_CONTROL_PG_ROLE_SEED
               valueFrom:
-                secretKeyRef: {name: selfhost-k8s-secrets, key: pg-role-seed}
+                secretKeyRef: {name: ufo-control-secrets, key: pg-role-seed}
           readinessProbe:
             httpGet: {path: /healthz, port: http}
           livenessProbe:
@@ -166,4 +166,4 @@ spec:
             - {name: config, mountPath: /config}
       volumes:
         - name: config
-          configMap: {name: selfhost-k8s-platform}
+          configMap: {name: ufo-control-platform}

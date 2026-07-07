@@ -3,9 +3,9 @@ import threading
 from collections.abc import AsyncIterator
 from uuid import uuid4
 
-from selfhost.hub import SUBSCRIBER_QUEUE_FRAMES, InProcessHub, LiveFrame, Terminal
-from selfhost.models.interface import TextDelta
-from selfhost.schema.records import TerminalFrame
+from ufo.hub import SUBSCRIBER_QUEUE_FRAMES, InProcessHub, LiveFrame, Terminal
+from ufo.models.interface import TextDelta
+from ufo.schema.records import TerminalFrame
 
 
 async def _pending_first(

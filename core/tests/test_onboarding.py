@@ -2,27 +2,27 @@
 requires the chosen model's key, refuses a second run, and runs each installed extension's steps.
 
 The engine tests drive `Onboarding.run` against a fresh db (both dialects) and assert the rows the
-turn path consumes. The cold-start test drives the real `selfhost init` command through Click: a
+turn path consumes. The cold-start test drives the real `ufoctl init` command through Click: a
 first run writes the token and durable state, a second run fails loud."""
 
 from pathlib import Path
 
 import pytest
-import selfhost_ext_sample as sample
 import sqlalchemy as sa
+import ufo_ext_sample as sample
 from click.testing import CliRunner
 from cryptography.fernet import Fernet
 
-from selfhost import cli
-from selfhost.config import BlobConfig, Config, DatabaseConfig
-from selfhost.credentials import CredentialSlotUnset, CredentialStore
-from selfhost.db import workspace_tx
-from selfhost.ext.context import ExtensionContext, ScopedStore
-from selfhost.ext.loader import load_manifests
-from selfhost.ext.manifest import CredentialSlot, Manifest, OnboardingStep
-from selfhost.onboarding import DEFAULT_AGENT_PROMPT, AlreadyInitialized, Onboarding
-from selfhost.schema import tables
-from selfhost.schema.records import DEFAULT_AGENT_NAME
+from ufo import cli
+from ufo.config import BlobConfig, Config, DatabaseConfig
+from ufo.credentials import CredentialSlotUnset, CredentialStore
+from ufo.db import workspace_tx
+from ufo.ext.context import ExtensionContext, ScopedStore
+from ufo.ext.loader import load_manifests
+from ufo.ext.manifest import CredentialSlot, Manifest, OnboardingStep
+from ufo.onboarding import DEFAULT_AGENT_PROMPT, AlreadyInitialized, Onboarding
+from ufo.schema import tables
+from ufo.schema.records import DEFAULT_AGENT_NAME
 
 OWNER_EMAIL = "owner@example.com"
 DEFAULT_MODEL = "claude-opus-4-8"
@@ -143,7 +143,7 @@ async def test_an_environment_credential_without_a_key_fails_before_the_db(
         version="0.1.0",
         credentials=(CredentialSlot(name="seeded_api_key", description="seeded from env"),),
     )
-    with pytest.raises(RuntimeError, match="SELFHOST_CREDENTIAL_KEY"):
+    with pytest.raises(RuntimeError, match="UFO_CREDENTIAL_KEY"):
         await _onboarding(database_url, tmp_path, credentials=None, manifests=(manifest,)).run()
     async with workspace_tx() as connection:
         workspaces = (
@@ -185,14 +185,14 @@ def test_cold_start_init_creates_durable_state_and_then_fails_loud(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-onboard")
-    monkeypatch.setenv("SELFHOST_CREDENTIAL_KEY", Fernet.generate_key().decode())
-    monkeypatch.setattr(cli, "SELFHOST_DIR", tmp_path / ".selfhost")
+    monkeypatch.setenv("UFO_CREDENTIAL_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(cli, "UFOCTL_DIR", tmp_path / ".ufoctl")
     runner = CliRunner()
     with runner.isolated_filesystem():
         first = runner.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
         assert first.exit_code == 0, first.output
         assert "workspace ready" in first.output
-        assert (tmp_path / ".selfhost" / "token").read_text()
+        assert (tmp_path / ".ufoctl" / "token").read_text()
         second = runner.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
         assert second.exit_code != 0
         assert "already initialized" in second.output
@@ -201,24 +201,24 @@ def test_cold_start_init_creates_durable_state_and_then_fails_loud(
 def test_cold_start_without_credential_key_fails_cleanly_then_recovers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """O1: init without SELFHOST_CREDENTIAL_KEY, when an active extension's onboarding step needs it
+    """O1: init without UFO_CREDENTIAL_KEY, when an active extension's onboarding step needs it
     (the sample adds one, activated here via an unpinned config that runs the full discovered set),
     must fail loud BEFORE creating anything, leaving no wedged half-onboarded workspace — setting
     the key and re-running then succeeds, not hitting AlreadyInitialized."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-onboard")
-    monkeypatch.delenv("SELFHOST_CREDENTIAL_KEY", raising=False)
-    monkeypatch.setattr(cli, "SELFHOST_DIR", tmp_path / ".selfhost")
+    monkeypatch.delenv("UFO_CREDENTIAL_KEY", raising=False)
+    monkeypatch.setattr(cli, "UFOCTL_DIR", tmp_path / ".ufoctl")
     runner = CliRunner()
     with runner.isolated_filesystem():
-        Path("selfhost.toml").write_text(
-            '[database]\nurl = "sqlite+aiosqlite:///selfhost.db"\n\n'
+        Path("ufo.toml").write_text(
+            '[database]\nurl = "sqlite+aiosqlite:///ufo.db"\n\n'
             '[blob]\nbackend = "filesystem"\nroot = "./blobs"\n'
         )
         first = runner.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
         assert first.exit_code != 0
-        assert "SELFHOST_CREDENTIAL_KEY" in first.output
-        assert not (tmp_path / ".selfhost" / "token").exists()
-        monkeypatch.setenv("SELFHOST_CREDENTIAL_KEY", Fernet.generate_key().decode())
+        assert "UFO_CREDENTIAL_KEY" in first.output
+        assert not (tmp_path / ".ufoctl" / "token").exists()
+        monkeypatch.setenv("UFO_CREDENTIAL_KEY", Fernet.generate_key().decode())
         recovered = runner.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
         assert recovered.exit_code == 0, recovered.output
-        assert (tmp_path / ".selfhost" / "token").read_text()
+        assert (tmp_path / ".ufoctl" / "token").read_text()

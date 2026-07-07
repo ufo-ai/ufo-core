@@ -11,14 +11,14 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from selfhost_ext_sources.google_ads import GoogleAdsConnector
+from ufo_ext_sources.google_ads import GoogleAdsConnector
 
-from selfhost.connectors import Credential
-from selfhost.sdk.sources import ConnectorBackend, ConnectorSourceConfig
-from selfhost.sources.sync import SourceAuth, StreamSkipped
+from ufo.connectors import Credential
+from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
+from ufo.sources.sync import SourceAuth, StreamSkipped
 
 ACCOUNT = "acct-1"
-_DEV_TOKEN_VARS = ("SELFHOST_GOOGLE_ADS_DEVELOPER_TOKEN", "GOOGLE_ADS_DEVELOPER_TOKEN")
+_DEV_TOKEN_VARS = ("UFO_GOOGLE_ADS_DEVELOPER_TOKEN", "GOOGLE_ADS_DEVELOPER_TOKEN")
 
 
 @dataclass(frozen=True)
@@ -47,7 +47,7 @@ def _dev_token(value: str | None) -> Iterator[None]:
     for name in _DEV_TOKEN_VARS:
         os.environ.pop(name, None)
     if value is not None:
-        os.environ["SELFHOST_GOOGLE_ADS_DEVELOPER_TOKEN"] = value
+        os.environ["UFO_GOOGLE_ADS_DEVELOPER_TOKEN"] = value
     try:
         yield
     finally:

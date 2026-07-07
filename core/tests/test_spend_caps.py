@@ -5,12 +5,12 @@ from uuid import UUID, uuid4
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from selfhost.accounting import SpendEvaluator, record_sandbox_tokens, record_workspace_usage
-from selfhost.db import workspace_tx
-from selfhost.jobs import RESUME_ENQUEUE_GRACE_SECONDS, SpendResume
-from selfhost.schema import tables
-from selfhost.schema.records import TerminalFrame, Usage
-from selfhost.surfaces.admission import Admission
+from ufo.accounting import SpendEvaluator, record_sandbox_tokens, record_workspace_usage
+from ufo.db import workspace_tx
+from ufo.jobs import RESUME_ENQUEUE_GRACE_SECONDS, SpendResume
+from ufo.schema import tables
+from ufo.schema.records import TerminalFrame, Usage
+from ufo.surfaces.admission import Admission
 
 
 @dataclass

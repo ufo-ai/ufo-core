@@ -1,7 +1,7 @@
 """The packs seam at the loader: a named pack narrows the deploy to a coherent extension bundle.
 
-Packs are discovered through `selfhost.pack` entry points exactly as extensions are through
-`selfhost.extension`; activating one by name makes exactly its bundled extensions' manifests active
+Packs are discovered through `ufo.pack` entry points exactly as extensions are through
+`ufo.extension`; activating one by name makes exactly its bundled extensions' manifests active
 plus a manifest of the pack's own pack-level skills and onboarding. The assistant pack is the
 flagship — memory with its index and embed backends, the browser tools, connectors, and Exa come up
 together. The fail-loud cases ride along: an unknown pack name, a pack naming an uninstalled
@@ -9,12 +9,12 @@ extension, and a pack whose name collides with a bundled extension each raise (t
 collision cases stub discovery — the real dependency — to drive the real narrowing)."""
 
 import pytest
-import selfhost_pack_assistant as assistant
-import selfhost_pack_assistant_hosted as assistant_hosted
+import ufo_pack_assistant as assistant
+import ufo_pack_assistant_hosted as assistant_hosted
 
-import selfhost.ext.loader as loader
-from selfhost.ext.loader import discovered_packs, load_manifests
-from selfhost.ext.manifest import Pack
+import ufo.ext.loader as loader
+from ufo.ext.loader import discovered_packs, load_manifests
+from ufo.ext.manifest import Pack
 
 
 def test_assistant_pack_is_discovered_with_its_bundle() -> None:

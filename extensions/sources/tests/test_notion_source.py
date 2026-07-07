@@ -1,7 +1,7 @@
 """Notion connector over a mock transport: the `/search` envelope, the recursive block walk, the
 per-page comment fan-out, the `Notion-Version` header, and — the point of this provider — the
 `render` override that lifts page/block/comment/user content into readable prose rather than the
-default JSON dump. No conftest: the shared `selfhost_testsupport` plugin covers fixtures, and these
+default JSON dump. No conftest: the shared `ufo_testsupport` plugin covers fixtures, and these
 tests are offline (a canned transport, no DB, no token, no broker)."""
 
 import json
@@ -11,11 +11,11 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from selfhost_ext_sources.notion import NOTION_VERSION, NotionConnector
+from ufo_ext_sources.notion import NOTION_VERSION, NotionConnector
 
-from selfhost.connectors import Credential
-from selfhost.sdk.sources import ConnectorBackend, ConnectorSourceConfig
-from selfhost.sources.sync import SourceAuth, StreamSkipped
+from ufo.connectors import Credential
+from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
+from ufo.sources.sync import SourceAuth, StreamSkipped
 
 ACCOUNT = "acct-1"
 

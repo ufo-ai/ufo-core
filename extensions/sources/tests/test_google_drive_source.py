@@ -8,11 +8,11 @@ from collections.abc import Callable
 from uuid import UUID, uuid4
 
 import httpx
-from selfhost_ext_sources.google_drive import GoogleDriveConnector
+from ufo_ext_sources.google_drive import GoogleDriveConnector
 
-from selfhost.connectors import Credential
-from selfhost.sdk.sources import ConnectorBackend, ConnectorSourceConfig
-from selfhost.sources.sync import SourceAuth, StreamSkipped
+from ufo.connectors import Credential
+from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
+from ufo.sources.sync import SourceAuth, StreamSkipped
 
 ACCOUNT = "acct-1"
 

@@ -18,46 +18,46 @@ from uuid import uuid4
 import pytest
 import sqlalchemy as sa
 from pydantic import BaseModel
-from selfhost_ext_docker import DockerCarrier
+from ufo_ext_docker import DockerCarrier
 
-from selfhost.artifact_token import verify_artifact_token
-from selfhost.blob import FilesystemBlobStore
-from selfhost.browser import SandboxCdpProvider
-from selfhost.db import workspace_tx
-from selfhost.ext.loader import HookChain
-from selfhost.hub import InProcessHub
-from selfhost.loop.compaction import Compaction
-from selfhost.loop.engine import (
+from ufo.artifact_token import verify_artifact_token
+from ufo.blob import FilesystemBlobStore
+from ufo.browser import SandboxCdpProvider
+from ufo.db import workspace_tx
+from ufo.ext.loader import HookChain
+from ufo.hub import InProcessHub
+from ufo.loop.compaction import Compaction
+from ufo.loop.engine import (
     MAX_TOOL_RESULT_CHARS,
     TOOL_OUTPUT_DIR,
     TOOL_RESULT_PREVIEW_CHARS,
     TurnEngine,
 )
-from selfhost.loop.prompts.render import rendered_prompt
-from selfhost.loop.transcript import Transcript
-from selfhost.models.interface import ModelEvent, ModelRequest, ToolUseBlock
-from selfhost.sandbox.session import (
+from ufo.loop.prompts.render import rendered_prompt
+from ufo.loop.transcript import Transcript
+from ufo.models.interface import ModelEvent, ModelRequest, ToolUseBlock
+from ufo.sandbox.session import (
     SANDBOX_GID,
     SANDBOX_UID,
     MountSpec,
     SandboxHandle,
     SandboxSession,
 )
-from selfhost.schema import tables
-from selfhost.schema.records import Agent, Turn, Usage
-from selfhost.tools.builtins import BUILTIN_TOOLS
-from selfhost.tools.context import (
+from ufo.schema import tables
+from ufo.schema.records import Agent, Turn, Usage
+from ufo.tools.builtins import BUILTIN_TOOLS
+from ufo.tools.context import (
     ImageContent,
     SpawnResult,
     TextContent,
     ToolContext,
     ToolResult,
 )
-from selfhost.tools.registry import ToolDef, ToolRegistry
+from ufo.tools.registry import ToolDef, ToolRegistry
 
 pytestmark = pytest.mark.docker
 
-SANDBOX_TEST_IMAGE = "selfhost-sandbox:test"
+SANDBOX_TEST_IMAGE = "ufo-sandbox:test"
 OVER_INMEMORY_BYTES = 25 * 1024 * 1024
 ARTIFACT_SECRET = "file-tools-secret"
 REGISTRY = ToolRegistry(BUILTIN_TOOLS)

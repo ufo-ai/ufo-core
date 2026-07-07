@@ -4,9 +4,9 @@ from pathlib import Path
 import httpx
 import pytest
 
-from selfhost.cli import _drive_deploy
-from selfhost.config import Config, load_config
-from selfhost.deploy import (
+from ufo.cli import _drive_deploy
+from ufo.config import Config, load_config
+from ufo.deploy import (
     Deploy,
     DeployImage,
     DeployRequest,
@@ -16,13 +16,13 @@ from selfhost.deploy import (
 )
 
 DIGEST = "sha256:" + "a" * 64
-BUNDLE = f"ghcr.io/acme/selfhost@{DIGEST}"
+BUNDLE = f"ghcr.io/acme/ufo@{DIGEST}"
 SANDBOX = f"ghcr.io/acme/sandbox@{DIGEST}"
 WORKSPACE = WorkspaceIdentity(owner_email="you@acme.com", default_name="assistant")
 
 BASE_CONFIG = """\
 [database]
-url = "sqlite+aiosqlite:///selfhost.db"
+url = "sqlite+aiosqlite:///ufo.db"
 
 [blob]
 backend = "filesystem"
@@ -34,7 +34,7 @@ name = "assistant"
 
 
 def _config(tmp_path: Path, deploy: str = "") -> tuple[Config, Path]:
-    path = tmp_path / "selfhost.toml"
+    path = tmp_path / "ufo.toml"
     path.write_text(BASE_CONFIG + deploy)
     return load_config(path), path
 
@@ -42,12 +42,12 @@ def _config(tmp_path: Path, deploy: str = "") -> tuple[Config, Path]:
 def test_resolve_derives_host_name_and_owner(tmp_path: Path) -> None:
     config, path = _config(
         tmp_path,
-        f'\n[deploy]\nbackend = "k8s"\nbase_domain = "selfhost.app"\n'
+        f'\n[deploy]\nbackend = "k8s"\nbase_domain = "ufo.app"\n'
         f'bundle_image = "{BUNDLE}"\nsandbox_image = "{SANDBOX}"\n',
     )
     request = resolve_request(config.deploy, config, path, WORKSPACE)
     assert request.tenant.name == "assistant"  # from the workspace agent
-    assert request.tenant.host == "assistant.selfhost.app"  # <name>.<base_domain>
+    assert request.tenant.host == "assistant.ufo.app"  # <name>.<base_domain>
     assert request.tenant.owner_email == "you@acme.com"  # from the workspace owner
     assert request.postgres == "database"  # backend-determined, not asked
     assert "ANTHROPIC_API_KEY" in request.secrets.platform
@@ -86,7 +86,7 @@ def test_resolve_fails_loud_naming_every_missing_field(tmp_path: Path) -> None:
 def test_image_parse_requires_a_digest() -> None:
     assert DeployImage.parse(BUNDLE).digest == DIGEST
     with pytest.raises(ValueError):
-        DeployImage.parse("ghcr.io/acme/selfhost:latest")
+        DeployImage.parse("ghcr.io/acme/ufo:latest")
 
 
 def test_request_round_trips_through_json(tmp_path: Path) -> None:
@@ -125,7 +125,7 @@ def test_build_without_a_request_writes_only_the_bundle(tmp_path: Path) -> None:
 async def test_drive_deploy_posts_then_polls_to_ready(tmp_path: Path) -> None:
     config, path = _config(
         tmp_path,
-        f'\n[deploy]\nbackend = "k8s"\nhost = "acme.selfhost.app"\n'
+        f'\n[deploy]\nbackend = "k8s"\nhost = "acme.ufo.app"\n'
         f'bundle_image = "{BUNDLE}"\nsandbox_image = "{SANDBOX}"\n',
     )
     request = resolve_request(config.deploy, config, path, WORKSPACE)
@@ -139,17 +139,17 @@ async def test_drive_deploy_posts_then_polls_to_ready(tmp_path: Path) -> None:
         polls["count"] += 1
         phase = "Ready" if polls["count"] >= 2 else "Provisioning"
         return httpx.Response(
-            200, json={"tenant": "assistant", "phase": phase, "url": "https://acme.selfhost.app"}
+            200, json={"tenant": "assistant", "phase": phase, "url": "https://acme.ufo.app"}
         )
 
-    import selfhost.cli as cli
+    import ufo.cli as cli
 
     cli.DEPLOY_POLL_SECONDS = 0.0
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport, base_url="http://cp") as client:
         status = await _drive_deploy(client, request)
 
-    assert posted["body"]["tenant"]["host"] == "acme.selfhost.app"  # type: ignore[index]
+    assert posted["body"]["tenant"]["host"] == "acme.ufo.app"  # type: ignore[index]
     assert status.phase == "Ready"
-    assert status.url == "https://acme.selfhost.app"
+    assert status.url == "https://acme.ufo.app"
     assert polls["count"] == 2

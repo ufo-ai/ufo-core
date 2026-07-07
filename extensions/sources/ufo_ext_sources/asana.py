@@ -1,0 +1,78 @@
+"""The Asana connector — work-tracking objects (projects, tasks, stories, users) and workspace
+taxonomy synced into recallable memory pages.
+
+Asana's REST API wraps every list response in `{data: [...], next_page: {offset, ...} | null}` and
+paginates by cursor-token offsets: `?limit=100&offset=<token>`, followed until `next_page.offset`
+goes null. Records arrive flat under `data`, keyed by Asana's `gid`. `tasks` and `projects` accept
+`?modified_since=<iso>` for incremental sync (watermarked on `modified_at`); `stories` watermarks on
+`created_at`; every other stream full-refreshes each run. The credential is resolved through the
+auth proxy the runner threads (a broker's proxying transport, or a member-added key host-side) —
+this connector holds no token. The write path is intentionally absent — the source seam only
+reads."""
+
+from collections.abc import AsyncIterator
+from typing import Any
+
+import httpx
+
+from ufo.sdk.sources import RestConnector, StreamSpec, list_or_empty
+
+PAGE_SIZE = 100
+_MODIFIED_SINCE_STREAMS = frozenset({"tasks", "projects"})
+
+
+def _stream(name: str, *, cursor_field: str | None = None, canonical: bool = False) -> StreamSpec:
+    return StreamSpec(
+        name=name,
+        source_object=name,
+        primary_key="gid",
+        cursor_field=cursor_field,
+        canonical=canonical,
+    )
+
+
+# Stream set mirrors Airbyte's source-asana catalog (16 streams): the four canonical work-tracking
+# streams (projects, tasks, stories, users) plus the workspace-taxonomy and metadata collections.
+# Asana documents `?modified_since` on tasks + projects only; every other stream full-refreshes.
+ASANA_STREAMS: list[StreamSpec] = [
+    _stream("projects", cursor_field="modified_at", canonical=True),
+    _stream("tasks", cursor_field="modified_at", canonical=True),
+    _stream("stories", cursor_field="created_at", canonical=True),
+    _stream("users", canonical=True),
+    _stream("attachments"),
+    _stream("attachments_compact"),
+    _stream("organization_exports"),
+    _stream("portfolio_items"),
+    _stream("portfolios"),
+    _stream("sections"),
+    _stream("sections_compact"),
+    _stream("stories_compact"),
+    _stream("tags"),
+    _stream("team_memberships"),
+    _stream("teams"),
+    _stream("workspaces"),
+]
+
+
+class AsanaConnector(RestConnector):
+    name = "asana"
+    base_url = "https://app.asana.com/api/1.0"
+    streams_list = ASANA_STREAMS
+
+    async def paginate(
+        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        path = f"/{stream.source_object}"
+        params: dict[str, Any] = {"limit": PAGE_SIZE}
+        if cursor and stream.name in _MODIFIED_SINCE_STREAMS:
+            params["modified_since"] = cursor
+        while True:
+            data = await self._get(client, path, params=params)
+            records = list_or_empty(data.get("data"))
+            if records:
+                yield records
+            next_page = data.get("next_page")
+            offset = next_page.get("offset") if isinstance(next_page, dict) else None
+            if not isinstance(offset, str) or not offset:
+                return
+            params = {**params, "offset": offset}

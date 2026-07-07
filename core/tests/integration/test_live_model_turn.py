@@ -22,16 +22,16 @@ from dbos import DBOSClient
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from selfhost.blob import FilesystemBlobStore
-from selfhost.browser import SandboxCdpProvider
-from selfhost.config import Config
-from selfhost.db import workspace_tx
-from selfhost.hub import InProcessHub
-from selfhost.loop import queue as loop_queue
-from selfhost.loop.subagents import SubagentRegistry
-from selfhost.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
-from selfhost.schema import tables
-from selfhost.surfaces.cli import router
+from ufo.blob import FilesystemBlobStore
+from ufo.browser import SandboxCdpProvider
+from ufo.config import Config
+from ufo.db import workspace_tx
+from ufo.hub import InProcessHub
+from ufo.loop import queue as loop_queue
+from ufo.loop.subagents import SubagentRegistry
+from ufo.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
+from ufo.schema import tables
+from ufo.surfaces.cli import router
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("ANTHROPIC_API_KEY"), reason="needs ANTHROPIC_API_KEY for a live model turn"
@@ -147,7 +147,7 @@ async def _bootstrap() -> dict[str, str]:
                 updated_at=sa.func.now(),
             )
         )
-    return {"authorization": f"Bearer {token}", "x-selfhost-session": uuid4().hex}
+    return {"authorization": f"Bearer {token}", "x-ufo-session": uuid4().hex}
 
 
 async def _consume(

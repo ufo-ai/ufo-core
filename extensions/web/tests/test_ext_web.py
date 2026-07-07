@@ -11,30 +11,30 @@ import sqlalchemy as sa
 from dbos import DBOSClient
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from selfhost_ext_index_default import DefaultIndex
-from selfhost_ext_memory.store import recall_subjects
-from selfhost_ext_web.manifest import manifest as web_manifest
-from selfhost_ext_web.surface import CHAT_PAGE, SESSION_COOKIE, _sse
-from selfhost_testsupport.stream_gate import GatingHub, StreamGate, release_when_running
+from ufo_ext_index_default import DefaultIndex
+from ufo_ext_memory.store import recall_subjects
+from ufo_ext_web.manifest import manifest as web_manifest
+from ufo_ext_web.surface import CHAT_PAGE, SESSION_COOKIE, _sse
+from ufo_testsupport.stream_gate import GatingHub, StreamGate, release_when_running
 
-from selfhost.accounting import CORE_PRICING, record_egress_request, record_turn_usage
-from selfhost.blob import FilesystemBlobStore
-from selfhost.browser import SandboxCdpProvider
-from selfhost.config import Config
-from selfhost.db import workspace_tx
-from selfhost.ext.loader import skill_registry
-from selfhost.ext.manifest import ModelProviderSpec
-from selfhost.hub import InProcessHub, SkillLoad, ToolCall
-from selfhost.loop import queue as loop_queue
-from selfhost.loop.subagents import SubagentRegistry
-from selfhost.models.interface import ModelEvent, ModelRequest, TextDelta
-from selfhost.models.registry import ModelRegistry
-from selfhost.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
-from selfhost.schema import tables
-from selfhost.schema.records import TerminalFrame, Usage
-from selfhost.serve import _mount_surfaces
-from selfhost.subjects import SHARED_SUBJECT, member_subject
-from selfhost.surfaces import hub_tail
+from ufo.accounting import CORE_PRICING, record_egress_request, record_turn_usage
+from ufo.blob import FilesystemBlobStore
+from ufo.browser import SandboxCdpProvider
+from ufo.config import Config
+from ufo.db import workspace_tx
+from ufo.ext.loader import skill_registry
+from ufo.ext.manifest import ModelProviderSpec
+from ufo.hub import InProcessHub, SkillLoad, ToolCall
+from ufo.loop import queue as loop_queue
+from ufo.loop.subagents import SubagentRegistry
+from ufo.models.interface import ModelEvent, ModelRequest, TextDelta
+from ufo.models.registry import ModelRegistry
+from ufo.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
+from ufo.schema import tables
+from ufo.schema.records import TerminalFrame, Usage
+from ufo.serve import _mount_surfaces
+from ufo.subjects import SHARED_SUBJECT, member_subject
+from ufo.surfaces import hub_tail
 
 SECRET = "artifact-signing-secret"
 STREAM_TIMEOUT_SECONDS = 30

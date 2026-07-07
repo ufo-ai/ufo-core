@@ -8,11 +8,11 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from selfhost_ext_sources.deel import PAGE_SIZE, DeelConnector
+from ufo_ext_sources.deel import PAGE_SIZE, DeelConnector
 
-from selfhost.connectors import Credential
-from selfhost.sdk.sources import ConnectorBackend, ConnectorSourceConfig
-from selfhost.sources.sync import SourceAuth, SyncResult
+from ufo.connectors import Credential
+from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
+from ufo.sources.sync import SourceAuth, SyncResult
 
 ACCOUNT = "acct-1"
 

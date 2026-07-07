@@ -15,10 +15,10 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
-import selfhost_ext_e2b as e2b_ext
+import ufo_ext_e2b as e2b_ext
 from e2b.exceptions import TimeoutException
 from e2b.sandbox.commands.command_handle import CommandExitException
-from selfhost_ext_e2b import (
+from ufo_ext_e2b import (
     CONVERSATION_METADATA_KEY,
     E2B_API_KEY_ENVS,
     E2B_LIFECYCLE,
@@ -28,10 +28,10 @@ from selfhost_ext_e2b import (
     build_e2b_carrier,
 )
 
-from selfhost.blob import FilesystemBlobStore
-from selfhost.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
-from selfhost.sandbox.fs_creds import SandboxFsCredentials
-from selfhost.sandbox.session import (
+from ufo.blob import FilesystemBlobStore
+from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
+from ufo.sandbox.fs_creds import SandboxFsCredentials
+from ufo.sandbox.session import (
     WORKSPACE_DIR,
     ExecResult,
     MountSpec,
@@ -39,8 +39,8 @@ from selfhost.sandbox.session import (
     SandboxHandle,
     SandboxSpec,
 )
-from selfhost.sdk.sandbox import AWS_CREDENTIALS_PATH, aws_credentials_file
-from selfhost.serve import _select_carrier
+from ufo.sdk.sandbox import AWS_CREDENTIALS_PATH, aws_credentials_file
+from ufo.serve import _select_carrier
 
 
 @dataclass
@@ -146,7 +146,7 @@ class _Sdk:
 def _spec(conversation: UUID) -> SandboxSpec:
     return SandboxSpec(
         conversation_id=conversation,
-        image_ref="selfhost-sandbox:latest",
+        image_ref="ufo-sandbox:latest",
         mount=MountSpec(kind="filesystem", host_path="/tmp/ws"),
         proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem"),
         run_token="run-token",
@@ -159,10 +159,10 @@ _S3_CREDS = SandboxFsCredentials("AKIASBX", "sbx-secret", "sbx-token")
 def _s3_spec(conversation: UUID) -> SandboxSpec:
     return SandboxSpec(
         conversation_id=conversation,
-        image_ref="selfhost-sandbox:latest",
+        image_ref="ufo-sandbox:latest",
         mount=MountSpec(
             kind="s3",
-            bucket="selfhost-blobs",
+            bucket="ufo-blobs",
             key_prefix=f"conversations/{conversation}/workspace",
             credentials=_S3_CREDS,
             s3_url="https://minio:9000",
@@ -192,10 +192,7 @@ async def test_create_mounts_the_s3_workspace_prefix_over_s3fs() -> None:
     assert commands[2].startswith(
         f"mkdir -p {WORKSPACE_DIR} && chmod 600 {AWS_CREDENTIALS_PATH} && "
     )
-    assert (
-        f"s3fs selfhost-blobs:/conversations/{conversation}/workspace {WORKSPACE_DIR}"
-        in commands[2]
-    )
+    assert f"s3fs ufo-blobs:/conversations/{conversation}/workspace {WORKSPACE_DIR}" in commands[2]
     assert "-o url=https://minio:9000" in commands[2]
     assert "-o use_path_request_style" in commands[2]
     assert sandbox.commands.users == [None, "root", None]

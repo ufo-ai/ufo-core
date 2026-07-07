@@ -20,7 +20,7 @@ repos:
         pass_filenames: false
       - id: mypy
         name: mypy
-        entry: uv run mypy core/src/selfhost extensions gates.py
+        entry: uv run mypy core/src/ufo extensions gates.py
         language: system
         types: [python]
         pass_filenames: false

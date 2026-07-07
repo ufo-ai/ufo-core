@@ -7,11 +7,11 @@ import sqlalchemy as sa
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from selfhost.db import workspace_tx
-from selfhost.governance import Governance, prompt_digest
-from selfhost.schema import tables
-from selfhost.schema.records import AgentChange
-from selfhost.surfaces.cli import router
+from ufo.db import workspace_tx
+from ufo.governance import Governance, prompt_digest
+from ufo.schema import tables
+from ufo.schema.records import AgentChange
+from ufo.surfaces.cli import router
 
 BASE_PROMPT = "you are base"
 SHARPER_PROMPT = "you are sharper"

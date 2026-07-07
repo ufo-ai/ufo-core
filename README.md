@@ -1,4 +1,4 @@
-# selfhost
+# ufo
 
 An agent runtime you can run, read, and extend: a hard-to-vary core — sandboxed agent loop, memory,
 Slack/CLI/web surfaces, accounting, Anthropic/OpenAI model abstraction — plus an extension system
@@ -11,9 +11,9 @@ for everything else (connectors, data sources, tools, subagents, onboarding).
 
 ```bash
 export ANTHROPIC_API_KEY=...
-uv run selfhost init --email you@example.com  # writes selfhost.toml; SQLite — zero services
-uv run selfhost serve                         # one process: surfaces + workers
-uv run selfhost chat                          # second terminal; sessions persist across runs
+uv run ufoctl init --email you@example.com  # writes ufo.toml; SQLite — zero services
+uv run ufoctl serve                         # one process: surfaces + workers
+uv run ufoctl chat                          # second terminal; sessions persist across runs
 ```
 
 Dev is zero-services: SQLite + filesystem blobs + in-process hub. Postgres (the checked-in

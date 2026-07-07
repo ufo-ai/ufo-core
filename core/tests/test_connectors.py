@@ -16,26 +16,26 @@ from urllib.parse import parse_qs, urlparse
 from uuid import UUID, uuid4
 
 import pytest
-import selfhost_ext_sample as sample
 import sqlalchemy as sa
+import ufo_ext_sample as sample
 from cryptography.fernet import Fernet
 
-from selfhost.config import Config
-from selfhost.credentials import CredentialStore
-from selfhost.db import workspace_tx
-from selfhost.grants import GrantStore, install_connect_flow
-from selfhost.sandbox.proxy.rules import GRANT_METER_DIMENSION, MeterRule, ScopeRule
-from selfhost.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
-from selfhost.sandbox.session import RunToken
-from selfhost.schema import tables
-from selfhost.schema.records import Agent, Turn
-from selfhost.serve import _connect_flow, _connect_redirect_uri
-from selfhost.tools.builtins import ConnectAccountInput, connect_account_handler
-from selfhost.tools.context import ToolContext
+from ufo.config import Config
+from ufo.credentials import CredentialStore
+from ufo.db import workspace_tx
+from ufo.grants import GrantStore, install_connect_flow
+from ufo.sandbox.proxy.rules import GRANT_METER_DIMENSION, MeterRule, ScopeRule
+from ufo.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
+from ufo.sandbox.session import RunToken
+from ufo.schema import tables
+from ufo.schema.records import Agent, Turn
+from ufo.serve import _connect_flow, _connect_redirect_uri
+from ufo.tools.builtins import ConnectAccountInput, connect_account_handler
+from ufo.tools.context import ToolContext
 
 UNGRANTED_HOST = "api.ungranted.test"
-PUBLIC_BASE_URL = "https://selfhost.example.com"
-EXPECTED_REDIRECT_URI = "https://selfhost.example.com/v1/connect/callback"
+PUBLIC_BASE_URL = "https://ufo.example.com"
+EXPECTED_REDIRECT_URI = "https://ufo.example.com/v1/connect/callback"
 
 
 @pytest.fixture(autouse=True)
@@ -94,7 +94,7 @@ def test_redirect_uri_rejects_a_bind_address_when_a_connector_is_registered(base
 def test_redirect_uri_rejects_a_scheme_less_callback() -> None:
     providers = {c.oauth.provider: c.oauth for c in sample.manifest().connectors}
     with pytest.raises(RuntimeError, match="scheme and host"):
-        _connect_redirect_uri(_config("selfhost.example.com"), providers)
+        _connect_redirect_uri(_config("ufo.example.com"), providers)
 
 
 def test_redirect_uri_requires_config_once_a_connector_is_registered() -> None:

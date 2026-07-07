@@ -3,7 +3,7 @@ from uuid import uuid4
 
 import pytest
 from openai.resources.embeddings import AsyncEmbeddings
-from selfhost_ext_embed_openai import (
+from ufo_ext_embed_openai import (
     API_KEY_ENV,
     EMBED_BATCH_MAX_CHARS,
     EMBED_BATCH_MAX_ITEMS,
@@ -14,7 +14,7 @@ from selfhost_ext_embed_openai import (
     plan_embed_batches,
 )
 
-from selfhost.ext.context import CredentialAccess, ExtensionContext, ScopedStore
+from ufo.ext.context import CredentialAccess, ExtensionContext, ScopedStore
 
 
 def _ctx() -> ExtensionContext:

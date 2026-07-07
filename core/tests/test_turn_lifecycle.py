@@ -13,23 +13,23 @@ from dbos import DBOSClient
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from pydantic import BaseModel
-from selfhost_ext_index_default import DefaultIndex
-from selfhost_testsupport.stream_gate import GatingHub, StreamGate, release_when_running
+from ufo_ext_index_default import DefaultIndex
+from ufo_testsupport.stream_gate import GatingHub, StreamGate, release_when_running
 
-from selfhost.accounting import CORE_PRICING
-from selfhost.blob import FilesystemBlobStore
-from selfhost.browser import SandboxCdpProvider
-from selfhost.config import Config
-from selfhost.db import workspace_tx
-from selfhost.ext.loader import skill_registry
-from selfhost.ext.manifest import ModelProviderSpec
-from selfhost.hub import Hub, InProcessHub
-from selfhost.jobs import SpendResume
-from selfhost.loop import queue as loop_queue
-from selfhost.loop.engine import EMPTY_RESPONSE_NUDGE, FORCE_FINAL_PROMPT
-from selfhost.loop.subagents import SubagentProfile, SubagentRegistry
-from selfhost.loop.transcript import Transcript
-from selfhost.models.interface import (
+from ufo.accounting import CORE_PRICING
+from ufo.blob import FilesystemBlobStore
+from ufo.browser import SandboxCdpProvider
+from ufo.config import Config
+from ufo.db import workspace_tx
+from ufo.ext.loader import skill_registry
+from ufo.ext.manifest import ModelProviderSpec
+from ufo.hub import Hub, InProcessHub
+from ufo.jobs import SpendResume
+from ufo.loop import queue as loop_queue
+from ufo.loop.engine import EMPTY_RESPONSE_NUDGE, FORCE_FINAL_PROMPT
+from ufo.loop.subagents import SubagentProfile, SubagentRegistry
+from ufo.loop.transcript import Transcript
+from ufo.models.interface import (
     ModelEvent,
     ModelRequest,
     TextDelta,
@@ -37,13 +37,13 @@ from selfhost.models.interface import (
     ToolCallStart,
     ToolResultBlock,
 )
-from selfhost.models.registry import ModelRegistry
-from selfhost.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
-from selfhost.schema import tables
-from selfhost.schema.records import TerminalFrame, Usage
-from selfhost.surfaces import hub_tail
-from selfhost.surfaces.cli import router
-from selfhost.transcript import Conversation
+from ufo.models.registry import ModelRegistry
+from ufo.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
+from ufo.schema import tables
+from ufo.schema.records import TerminalFrame, Usage
+from ufo.surfaces import hub_tail
+from ufo.surfaces.cli import router
+from ufo.transcript import Conversation
 
 STREAM_TIMEOUT_SECONDS = 30
 STREAM_GATE = StreamGate()
@@ -280,7 +280,7 @@ async def _bootstrap(model: str = "claude-opus-4-8") -> dict[str, str]:
                 updated_at=sa.func.now(),
             )
         )
-    return {"authorization": f"Bearer {token}", "x-selfhost-session": uuid4().hex}
+    return {"authorization": f"Bearer {token}", "x-ufo-session": uuid4().hex}
 
 
 async def _consume(

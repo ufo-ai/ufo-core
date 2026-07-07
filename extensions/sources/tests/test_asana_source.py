@@ -2,7 +2,7 @@
 the end, the `?modified_since` incremental filter threaded onto `tasks` (and not onto a
 full-refresh stream), the `modified_at` watermark advancing, and the default titled-JSON render —
 Asana is a structured provider, not a content one, so it takes no `render` override. No conftest:
-the shared `selfhost_testsupport` plugin covers fixtures, and these tests are offline (a canned
+the shared `ufo_testsupport` plugin covers fixtures, and these tests are offline (a canned
 transport, no DB, no token, no broker)."""
 
 from collections.abc import Callable
@@ -10,11 +10,11 @@ from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 import httpx
-from selfhost_ext_sources.asana import AsanaConnector
+from ufo_ext_sources.asana import AsanaConnector
 
-from selfhost.connectors import Credential
-from selfhost.sdk.sources import ConnectorBackend, ConnectorSourceConfig
-from selfhost.sources.sync import SourceAuth, SyncResult
+from ufo.connectors import Credential
+from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
+from ufo.sources.sync import SourceAuth, SyncResult
 
 ACCOUNT = "acct-1"
 

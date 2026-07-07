@@ -11,8 +11,8 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from selfhost.db import workspace_tx
-from selfhost.grants import (
+from ufo.db import workspace_tx
+from ufo.grants import (
     ConnectFlow,
     ConnectStateInvalid,
     ConnectUnavailable,
@@ -23,20 +23,20 @@ from selfhost.grants import (
     grant_summaries,
     install_connect_flow,
 )
-from selfhost.sandbox.proxy.rules import (
+from ufo.sandbox.proxy.rules import (
     GRANT_METER_DIMENSION,
     InjectionRule,
     MeterRule,
     ScopeRule,
     derive_grant_rules,
 )
-from selfhost.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
-from selfhost.sandbox.session import RunToken
-from selfhost.schema import tables
-from selfhost.schema.records import Agent, Turn
-from selfhost.surfaces.cli import router
-from selfhost.tools.builtins import ConnectAccountInput, connect_account_handler
-from selfhost.tools.context import ToolContext
+from ufo.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
+from ufo.sandbox.session import RunToken
+from ufo.schema import tables
+from ufo.schema.records import Agent, Turn
+from ufo.surfaces.cli import router
+from ufo.tools.builtins import ConnectAccountInput, connect_account_handler
+from ufo.tools.context import ToolContext
 
 GRANTED_HOST = "api.granted.test"
 UNGRANTED_HOST = "api.ungranted.test"

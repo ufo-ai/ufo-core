@@ -1,0 +1,6 @@
+apiVersion: v2
+name: ufo-tenant
+description: One tenant namespace running a whole ufo workspace (surfaces + workers + jobs + proxy)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

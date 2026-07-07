@@ -20,21 +20,21 @@ import httpx
 import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
-from selfhost_ext_embed_openai import EMBED_DIM
-from selfhost_ext_index_default import DefaultIndex
-from selfhost_ext_memory.store import MemoryStore, PageIndexer
-from selfhost_ext_sources.asana import AsanaConnector
-from selfhost_ext_sources.direct import DirectAuthProxy
-from selfhost_ext_sources.github import GitHubConnector
+from ufo_ext_embed_openai import EMBED_DIM
+from ufo_ext_index_default import DefaultIndex
+from ufo_ext_memory.store import MemoryStore, PageIndexer
+from ufo_ext_sources.asana import AsanaConnector
+from ufo_ext_sources.direct import DirectAuthProxy
+from ufo_ext_sources.github import GitHubConnector
 
-from selfhost.blob import FilesystemBlobStore
-from selfhost.connectors import Credential
-from selfhost.credentials import CredentialStore
-from selfhost.db import workspace_tx
-from selfhost.ext.context import CredentialAccess, context_for
-from selfhost.indexing import TextChunker
-from selfhost.schema import tables
-from selfhost.sdk.sources import (
+from ufo.blob import FilesystemBlobStore
+from ufo.connectors import Credential
+from ufo.credentials import CredentialStore
+from ufo.db import workspace_tx
+from ufo.ext.context import CredentialAccess, context_for
+from ufo.indexing import TextChunker
+from ufo.schema import tables
+from ufo.sdk.sources import (
     Connector,
     ConnectorBackend,
     ConnectorSourceConfig,
@@ -44,8 +44,8 @@ from selfhost.sdk.sources import (
     StreamPage,
     StreamSpec,
 )
-from selfhost.sources.sync import CorePageFeed, SourceAuth, StreamSkipped, SyncDriver
-from selfhost.subjects import SHARED_SUBJECT
+from ufo.sources.sync import CorePageFeed, SourceAuth, StreamSkipped, SyncDriver
+from ufo.subjects import SHARED_SUBJECT
 
 ACCOUNT = "acct-1"
 
@@ -509,7 +509,7 @@ async def test_direct_backend_returns_a_bearer_read_from_the_credential_store(db
 
 
 async def test_direct_backend_refuses_a_provider_slot_it_never_declared() -> None:
-    from selfhost.ext.context import UndeclaredCredentialSlot
+    from ufo.ext.context import UndeclaredCredentialSlot
 
     access = CredentialAccess(workspace_id=uuid4(), declared=frozenset(), _store=None)
     with pytest.raises(UndeclaredCredentialSlot):

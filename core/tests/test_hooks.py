@@ -17,19 +17,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import UUID, uuid4
 
-import selfhost_ext_sample as sample
 import sqlalchemy as sa
+import ufo_ext_sample as sample
 from cryptography.fernet import Fernet
 from pydantic import BaseModel
 
-import selfhost.ext.loader as loader
-from selfhost.blob import FilesystemBlobStore
-from selfhost.browser import SandboxCdpProvider
-from selfhost.credentials import CredentialStore
-from selfhost.db import workspace_tx
-from selfhost.ext.context import ExtensionContext, ScopedStore, context_for
-from selfhost.ext.loader import BoundHook, HookChain, load_manifests, turn_hooks, turn_tools
-from selfhost.ext.manifest import (
+import ufo.ext.loader as loader
+from ufo.blob import FilesystemBlobStore
+from ufo.browser import SandboxCdpProvider
+from ufo.credentials import CredentialStore
+from ufo.db import workspace_tx
+from ufo.ext.context import ExtensionContext, ScopedStore, context_for
+from ufo.ext.loader import BoundHook, HookChain, load_manifests, turn_hooks, turn_tools
+from ufo.ext.manifest import (
     Deny,
     HookContext,
     HookOutcome,
@@ -41,17 +41,17 @@ from selfhost.ext.manifest import (
     PreToolUse,
     UserPromptSubmit,
 )
-from selfhost.hub import InProcessHub
-from selfhost.loop.compaction import (
+from ufo.hub import InProcessHub
+from ufo.loop.compaction import (
     COMPACTED_CONTEXT_PREFIX,
     COMPACTION_KEEP_MESSAGES,
     Compaction,
     CompactionSummary,
 )
-from selfhost.loop.engine import TurnEngine
-from selfhost.loop.prompts.render import COMPACTION_SYSTEM_PROMPT, rendered_prompt
-from selfhost.loop.transcript import Transcript
-from selfhost.models.interface import (
+from ufo.loop.engine import TurnEngine
+from ufo.loop.prompts.render import COMPACTION_SYSTEM_PROMPT, rendered_prompt
+from ufo.loop.transcript import Transcript
+from ufo.models.interface import (
     Message,
     ModelEvent,
     ModelRequest,
@@ -61,12 +61,12 @@ from selfhost.models.interface import (
     ToolResultBlock,
     Usage,
 )
-from selfhost.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
-from selfhost.schema import tables
-from selfhost.schema.records import Agent, Turn
-from selfhost.tools.builtins import BUILTIN_TOOLS
-from selfhost.tools.context import SpawnResult
-from selfhost.tools.registry import ToolRegistry
+from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
+from ufo.schema import tables
+from ufo.schema.records import Agent, Turn
+from ufo.tools.builtins import BUILTIN_TOOLS
+from ufo.tools.context import SpawnResult
+from ufo.tools.registry import ToolRegistry
 
 REWRITTEN_COMMAND = "echo modified"
 

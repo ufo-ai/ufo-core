@@ -6,8 +6,8 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from selfhost import accounting
-from selfhost.accounting import (
+from ufo import accounting
+from ufo.accounting import (
     SpendRollup,
     read_turn_cost,
     record_egress_request,
@@ -16,9 +16,9 @@ from selfhost.accounting import (
     record_workspace_usage,
     usage_priced_micro_usd,
 )
-from selfhost.db import workspace_tx
-from selfhost.schema import tables
-from selfhost.schema.records import Usage
+from ufo.db import workspace_tx
+from ufo.schema import tables
+from ufo.schema.records import Usage
 
 FULL_USAGE = Usage(
     input_tokens=1000, output_tokens=2000, cache_read_tokens=3000, cache_write_tokens=4000

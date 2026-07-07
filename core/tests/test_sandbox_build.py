@@ -76,7 +76,7 @@ def test_npm_packages_match_the_expected_toolchain() -> None:
 
 
 def test_no_kubernetes_toolchain_baked() -> None:
-    """The k8s bits (kubectl, kubeconfig, KUBECONFIG) are dropped — selfhost's sandbox has no
+    """The k8s bits (kubectl, kubeconfig, KUBECONFIG) are dropped — ufo's sandbox has no
     control-plane egress, so a kubectl reappearing is drift."""
     for name in ("kubectl", "ufo-tool", "kubeconfig"):
         assert name not in SANDBOX_TEMPLATE_READY_COMMAND

@@ -5,16 +5,16 @@ from typing import Any
 import httpx
 import pytest
 
-from selfhost_k8s.contract import DeployRequest
-from selfhost_k8s.kube import KubeClient
-from selfhost_k8s.platform import PlatformConfig
-from selfhost_k8s.provision import TenantReconciler, _is_failed_first_install
+from ufo_control.contract import DeployRequest
+from ufo_control.kube import KubeClient
+from ufo_control.platform import PlatformConfig
+from ufo_control.provision import TenantReconciler, _is_failed_first_install
 
 DIGEST = "sha256:" + "f" * 64
 PLATFORM_SECRET_DATA = {"ANTHROPIC_API_KEY": base64.b64encode(b"sk-test").decode()}
 SOURCE_SECRET = {
     "kind": "Secret",
-    "metadata": {"name": "selfhost-platform-secrets", "namespace": "selfhost-system"},
+    "metadata": {"name": "ufo-platform-secrets", "namespace": "ufo-system"},
     "type": "Opaque",
     "data": PLATFORM_SECRET_DATA,
 }
@@ -27,7 +27,7 @@ def _kube(handler: httpx.MockTransport) -> KubeClient:
 def _platform() -> PlatformConfig:
     return PlatformConfig.model_validate(
         {
-            "chart_path": "/charts/selfhost-tenant",
+            "chart_path": "/charts/ufo-tenant",
             "registry": "ghcr.io/acme",
             "tenant_postgres_host": "pg.svc:5432",
             "redis_url": "redis://redis.svc:6379",
@@ -39,8 +39,8 @@ def _platform() -> PlatformConfig:
 def _request() -> DeployRequest:
     return DeployRequest.model_validate(
         {
-            "tenant": {"name": "acme", "host": "acme.selfhost.app", "owner_email": "you@acme.com"},
-            "bundle_image": {"repository": "ghcr.io/acme/selfhost", "digest": DIGEST},
+            "tenant": {"name": "acme", "host": "acme.ufo.app", "owner_email": "you@acme.com"},
+            "bundle_image": {"repository": "ghcr.io/acme/ufo", "digest": DIGEST},
             "sandbox_image": {"repository": "ghcr.io/acme/sandbox", "digest": DIGEST},
             "config_toml": "[pack]\nname='assistant'\n",
             "pack": "assistant",
@@ -69,7 +69,7 @@ async def test_platform_secret_is_replicated_into_the_tenant_namespace() -> None
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "GET":
-            assert request.url.path.endswith("/selfhost-system/secrets/selfhost-platform-secrets")
+            assert request.url.path.endswith("/ufo-system/secrets/ufo-platform-secrets")
             return httpx.Response(200, json=SOURCE_SECRET)
         applied["path"] = request.url.path
         applied["body"] = json.loads(request.content)
@@ -78,7 +78,7 @@ async def test_platform_secret_is_replicated_into_the_tenant_namespace() -> None
     reconciler = TenantReconciler(kube=_kube(httpx.MockTransport(handler)), platform=_platform())
     await reconciler._ensure_platform_secret(_request())
 
-    assert applied["path"].endswith("/selfhost-acme/secrets/selfhost-platform-secrets")
+    assert applied["path"].endswith("/ufo-acme/secrets/ufo-platform-secrets")
     assert applied["body"]["data"] == PLATFORM_SECRET_DATA
 
 

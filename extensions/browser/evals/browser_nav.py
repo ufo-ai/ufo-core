@@ -4,13 +4,13 @@ STABLE, well-known page whose content will not drift. A restraint case checks th
 reach for the browser on a question it can answer from its own knowledge. `web_dependent` marks the
 navigation cases: a real outage infra-excludes them rather than counting a capability failure."""
 
-from selfhost_ext_eval_harness.capability import (
+from ufo_ext_eval_harness.capability import (
     CapabilityCase,
     CapabilityOutput,
     CapabilityVerdict,
     Grader,
 )
-from selfhost_ext_eval_harness.scorers import combine, exact_scorer, restraint_scorer
+from ufo_ext_eval_harness.scorers import combine, exact_scorer, restraint_scorer
 
 BROWSER_TOOLS = (
     "navigate",

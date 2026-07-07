@@ -10,21 +10,21 @@ import json
 from uuid import uuid4
 
 import pytest
-import selfhost_ext_research.manifest as research_manifest
-import selfhost_ext_research.tools as research_tools
-from selfhost_ext_research.subagent import (
+import ufo_ext_research.manifest as research_manifest
+import ufo_ext_research.tools as research_tools
+from ufo_ext_research.subagent import (
     DEEP_RESEARCH_PROFILE,
     DEEP_RESEARCH_ROUND_LIMIT,
     RESEARCH_PROFILE,
     RESEARCH_TOOL_NAMES,
 )
-from selfhost_ext_research.tools import RESEARCH_TOOLS
+from ufo_ext_research.tools import RESEARCH_TOOLS
 
-from selfhost.ext.loader import skill_registry
-from selfhost.loop.prompts.render import render_system_prompt
-from selfhost.loop.subagents import subagent_system_prompt
-from selfhost.schema.records import Agent, Turn
-from selfhost.search import (
+from ufo.ext.loader import skill_registry
+from ufo.loop.prompts.render import render_system_prompt
+from ufo.loop.subagents import subagent_system_prompt
+from ufo.schema.records import Agent, Turn
+from ufo.search import (
     FetchedPage,
     FetchRequest,
     SearchHit,
@@ -33,7 +33,7 @@ from selfhost.search import (
     SearchResults,
     SearchUnsupported,
 )
-from selfhost.tools.context import ToolContext
+from ufo.tools.context import ToolContext
 
 SEARCH_WEB_DESCRIPTION = (
     "Searches the web for current and factual information. Returns results with titles, "

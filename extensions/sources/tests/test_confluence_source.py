@@ -11,11 +11,11 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from selfhost_ext_sources.confluence import CONFLUENCE_STREAMS, ConfluenceConnector
+from ufo_ext_sources.confluence import CONFLUENCE_STREAMS, ConfluenceConnector
 
-from selfhost.connectors import Credential
-from selfhost.sdk.sources import ConnectorBackend, ConnectorSourceConfig, StreamSpec
-from selfhost.sources.sync import SourceAuth, StreamSkipped, SyncResult
+from ufo.connectors import Credential
+from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig, StreamSpec
+from ufo.sources.sync import SourceAuth, StreamSkipped, SyncResult
 
 ACCOUNT = "acct-1"
 RESOURCES = "/oauth/token/accessible-resources"

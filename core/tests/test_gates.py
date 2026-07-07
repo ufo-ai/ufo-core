@@ -8,54 +8,54 @@ import importlib.util
 from pathlib import Path
 
 _GATES_PATH = Path(__file__).resolve().parents[2] / "gates.py"
-_spec = importlib.util.spec_from_file_location("selfhost_gates", _GATES_PATH)
+_spec = importlib.util.spec_from_file_location("ufo_gates", _GATES_PATH)
 gates = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(gates)
 
 ROGUE = Path("extensions/rogue/rogue.py")
-CORE_FILE = Path("core/src/selfhost/db.py")
+CORE_FILE = Path("core/src/ufo/db.py")
 EXT_TEST = Path("extensions/exa/tests/test_ext_exa.py")
 EXT_EVAL = Path("extensions/research/evals/web_research.py")
-EXT_SHIPPED_MODULE = Path("extensions/exa/selfhost_ext_exa.py")
-EXT_SHIPPED_PACKAGE = Path("extensions/memory/selfhost_ext_memory/store.py")
+EXT_SHIPPED_MODULE = Path("extensions/exa/ufo_ext_exa.py")
+EXT_SHIPPED_PACKAGE = Path("extensions/memory/ufo_ext_memory/store.py")
 
 
 def test_sdk_only_gate_rejects_core_internal_import_from_extensions() -> None:
-    trees = {ROGUE: ast.parse("from selfhost.db import workspace_tx\n")}
+    trees = {ROGUE: ast.parse("from ufo.db import workspace_tx\n")}
     failures = gates._sdk_import_failures(trees)
-    assert failures and "selfhost.db" in failures[0]
+    assert failures and "ufo.db" in failures[0]
 
 
-def test_sdk_only_gate_rejects_bare_selfhost_import_from_extensions() -> None:
-    trees = {ROGUE: ast.parse("import selfhost\n")}
+def test_sdk_only_gate_rejects_bare_ufo_import_from_extensions() -> None:
+    trees = {ROGUE: ast.parse("import ufo\n")}
     assert gates._sdk_import_failures(trees)
 
 
 def test_sdk_only_gate_allows_sdk_import_from_extensions() -> None:
-    trees = {ROGUE: ast.parse("from selfhost.sdk.tools import ToolDef\nimport selfhost.sdk.jobs\n")}
+    trees = {ROGUE: ast.parse("from ufo.sdk.tools import ToolDef\nimport ufo.sdk.jobs\n")}
     assert gates._sdk_import_failures(trees) == []
 
 
 def test_sdk_only_gate_ignores_core_internal_imports() -> None:
-    trees = {CORE_FILE: ast.parse("from selfhost.db import workspace_tx\n")}
+    trees = {CORE_FILE: ast.parse("from ufo.db import workspace_tx\n")}
     assert gates._sdk_import_failures(trees) == []
 
 
 def test_sdk_only_gate_exempts_extension_test_and_eval_scaffold() -> None:
     trees = {
-        EXT_TEST: ast.parse("from selfhost.db import workspace_tx\n"),
-        EXT_EVAL: ast.parse("from selfhost.config import Config\n"),
+        EXT_TEST: ast.parse("from ufo.db import workspace_tx\n"),
+        EXT_EVAL: ast.parse("from ufo.config import Config\n"),
     }
     assert gates._sdk_import_failures(trees) == []
 
 
 def test_sdk_only_gate_still_binds_the_shipped_extension_package() -> None:
     trees = {
-        EXT_SHIPPED_MODULE: ast.parse("from selfhost.db import workspace_tx\n"),
-        EXT_SHIPPED_PACKAGE: ast.parse("from selfhost.db import workspace_tx\n"),
+        EXT_SHIPPED_MODULE: ast.parse("from ufo.db import workspace_tx\n"),
+        EXT_SHIPPED_PACKAGE: ast.parse("from ufo.db import workspace_tx\n"),
     }
     failures = gates._sdk_import_failures(trees)
-    assert len(failures) == 2 and all("selfhost.db" in failure for failure in failures)
+    assert len(failures) == 2 and all("ufo.db" in failure for failure in failures)
 
 
 def test_conformance_gate_flags_a_manifest_point_the_sample_drops() -> None:
@@ -89,12 +89,10 @@ def test_skills_gate_flags_a_missing_core_skill() -> None:
     assert any("sandbox" in failure for failure in failures)
 
 
-def test_skill_boundary_gate_flags_a_script_importing_selfhost() -> None:
-    trees = {
-        Path("extensions/x/skills/y/s.py"): ast.parse("from selfhost.sdk.tools import ToolDef\n")
-    }
+def test_skill_boundary_gate_flags_a_script_importing_ufo() -> None:
+    trees = {Path("extensions/x/skills/y/s.py"): ast.parse("from ufo.sdk.tools import ToolDef\n")}
     failures = gates._skill_boundary_failures(trees)
-    assert failures and "selfhost.sdk" in failures[0]
+    assert failures and "ufo.sdk" in failures[0]
 
 
 def test_skill_boundary_gate_allows_stdlib_and_third_party_imports() -> None:

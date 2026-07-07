@@ -6,7 +6,7 @@ from opentelemetry import metrics, trace
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.trace import TracerProvider
 
-from selfhost import o11y
+from ufo import o11y
 
 
 def test_redact_payload_drops_sensitive_keys_at_depth():
@@ -33,11 +33,11 @@ def test_redact_value_stringifies_non_json_scalars():
 
 
 def test_log_carries_redacted_fields(caplog):
-    with caplog.at_level(logging.INFO, logger="selfhost"):
+    with caplog.at_level(logging.INFO, logger="ufo"):
         o11y.log("turn.started", turn_id="abc", prompt="leak")
     record = caplog.records[-1]
     assert record.getMessage() == "turn.started"
-    assert record.selfhost == {"turn_id": "abc"}
+    assert record.ufo == {"turn_id": "abc"}
 
 
 def test_emit_metric_rejects_unregistered_names():

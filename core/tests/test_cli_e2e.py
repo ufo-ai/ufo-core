@@ -1,6 +1,6 @@
 """The operator CLI end to end through its real Click verbs, keyless.
 
-Every verb runs through `CliRunner` against `selfhost.cli`, a real SQLite database, and the real
+Every verb runs through `CliRunner` against `ufo.cli`, a real SQLite database, and the real
 filesystem — no mocks of the CLI, the loader, the database, or the ledger. The paid dependency, the
 model, is the only double: the chat turn runs against a StandIn model client (mirroring
 `test_turn_lifecycle`'s registry) served by a real in-process uvicorn server, so a `ping` streams a
@@ -27,27 +27,27 @@ from click.testing import CliRunner
 from cryptography.fernet import Fernet
 from dbos import DBOSClient
 from fastapi import FastAPI
-from selfhost_ext_index_default import DefaultIndex
-from selfhost_testsupport.tables import DELETE_ORDER
+from ufo_ext_index_default import DefaultIndex
+from ufo_testsupport.tables import DELETE_ORDER
 
-from selfhost import cli
-from selfhost.accounting import CORE_PRICING
-from selfhost.blob import FilesystemBlobStore
-from selfhost.browser import SandboxCdpProvider
-from selfhost.config import Config, load_config
-from selfhost.credentials import CredentialStore
-from selfhost.db import dispose_db, init_db, workspace_tx
-from selfhost.ext.loader import skill_registry
-from selfhost.ext.manifest import ModelProviderSpec
-from selfhost.hub import InProcessHub
-from selfhost.loop import queue as loop_queue
-from selfhost.loop.subagents import SubagentRegistry
-from selfhost.models.interface import ModelEvent, ModelRequest, TextDelta
-from selfhost.models.registry import ModelRegistry
-from selfhost.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
-from selfhost.schema import tables
-from selfhost.schema.records import DEFAULT_AGENT_NAME, Usage
-from selfhost.surfaces.cli import router
+from ufo import cli
+from ufo.accounting import CORE_PRICING
+from ufo.blob import FilesystemBlobStore
+from ufo.browser import SandboxCdpProvider
+from ufo.config import Config, load_config
+from ufo.credentials import CredentialStore
+from ufo.db import dispose_db, init_db, workspace_tx
+from ufo.ext.loader import skill_registry
+from ufo.ext.manifest import ModelProviderSpec
+from ufo.hub import InProcessHub
+from ufo.loop import queue as loop_queue
+from ufo.loop.subagents import SubagentRegistry
+from ufo.models.interface import ModelEvent, ModelRequest, TextDelta
+from ufo.models.registry import ModelRegistry
+from ufo.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
+from ufo.schema import tables
+from ufo.schema.records import DEFAULT_AGENT_NAME, Usage
+from ufo.surfaces.cli import router
 
 OWNER_EMAIL = "owner@example.com"
 SERVER_START_TIMEOUT_SECONDS = 10.0
@@ -63,7 +63,7 @@ version = "0.1.0"
 """
 EXT_STORE_CONFIG = """\
 [database]
-url = "sqlite+aiosqlite:///selfhost.db"
+url = "sqlite+aiosqlite:///ufo.db"
 
 [blob]
 backend = "filesystem"
@@ -78,11 +78,11 @@ store = "catalog.toml"
 def cli_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[CliRunner]:
     """A CliRunner in an isolated filesystem with the presence-only env the verbs require: a dummy
     Anthropic key (the StandIn never calls it) and a real Fernet credential key (the installed
-    sample's onboarding step needs one). `SELFHOST_DIR` is redirected into the tmp tree so the token
+    sample's onboarding step needs one). `UFOCTL_DIR` is redirected into the tmp tree so the token
     and session files never touch the developer's home."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-cli")
-    monkeypatch.setenv("SELFHOST_CREDENTIAL_KEY", Fernet.generate_key().decode())
-    monkeypatch.setattr(cli, "SELFHOST_DIR", tmp_path / ".selfhost")
+    monkeypatch.setenv("UFO_CREDENTIAL_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(cli, "UFOCTL_DIR", tmp_path / ".ufoctl")
     runner = CliRunner()
     with runner.isolated_filesystem():
         yield runner
@@ -99,10 +99,10 @@ def test_init_writes_config_and_token_then_fails_loud_on_rerun(
     first = cli_home.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
     assert first.exit_code == 0, first.output
     assert "workspace ready" in first.output
-    config = Path("selfhost.toml").read_text()
-    assert 'url = "sqlite+aiosqlite:///selfhost.db"' in config
+    config = Path("ufo.toml").read_text()
+    assert 'url = "sqlite+aiosqlite:///ufo.db"' in config
     assert 'backend = "filesystem"' in config
-    assert (tmp_path / ".selfhost" / "token").read_text()
+    assert (tmp_path / ".ufoctl" / "token").read_text()
 
     second = cli_home.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
     assert second.exit_code != 0
@@ -154,7 +154,7 @@ async def _read_credential(slot: str) -> str:
     try:
         async with workspace_tx() as connection:
             workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
-        key = os.environ["SELFHOST_CREDENTIAL_KEY"]
+        key = os.environ["UFO_CREDENTIAL_KEY"]
         return await CredentialStore(fernet=Fernet(key.encode())).get(workspace_id, slot)
     finally:
         await dispose_db()
@@ -204,17 +204,17 @@ def test_bundle_writes_a_runnable_artifact(cli_home: CliRunner) -> None:
     assert "extension(s) pinned" in result.output
     out = Path("bundle")
     dockerfile = (out / "Dockerfile").read_text()
-    assert "selfhost" in dockerfile
-    assert 'ENTRYPOINT ["selfhost"]' in dockerfile
+    assert "ufo" in dockerfile
+    assert 'ENTRYPOINT ["ufoctl"]' in dockerfile
     assert 'CMD ["serve"]' in dockerfile
-    assert (out / "selfhost.toml").read_text()
-    lockfile = (out / "selfhost.lock").read_text()
-    assert "selfhost_version" in lockfile
+    assert (out / "ufo.toml").read_text()
+    lockfile = (out / "ufo.lock").read_text()
+    assert "ufo_version" in lockfile
     assert "memory" in lockfile
 
 
 def test_ext_search_lists_the_catalog(cli_home: CliRunner) -> None:
-    Path("selfhost.toml").write_text(EXT_STORE_CONFIG)
+    Path("ufo.toml").write_text(EXT_STORE_CONFIG)
     Path("catalog.toml").write_text(CATALOG)
     result = cli_home.invoke(cli.main, ["ext", "search"])
     assert result.exit_code == 0, result.output
@@ -224,16 +224,16 @@ def test_ext_search_lists_the_catalog(cli_home: CliRunner) -> None:
 
 
 def test_ext_install_then_remove_round_trips_the_lockfile(cli_home: CliRunner) -> None:
-    """`ext install`/`remove` write only the deploy's cwd-local `selfhost.lock` (never the venv):
+    """`ext install`/`remove` write only the deploy's cwd-local `ufo.lock` (never the venv):
     install pins the installed extension's real digest and search then marks it installed; remove
     drops the pin. The isolated filesystem keeps the lockfile out of the developer's tree."""
-    Path("selfhost.toml").write_text(EXT_STORE_CONFIG)
+    Path("ufo.toml").write_text(EXT_STORE_CONFIG)
     Path("catalog.toml").write_text(CATALOG)
 
     installed = cli_home.invoke(cli.main, ["ext", "install", "memory"])
     assert installed.exit_code == 0, installed.output
     assert "installed memory" in installed.output
-    assert "sha256:" in Path("selfhost.lock").read_text()
+    assert "sha256:" in Path("ufo.lock").read_text()
 
     searched = cli_home.invoke(cli.main, ["ext", "search"])
     assert "installed" in searched.output
@@ -241,7 +241,7 @@ def test_ext_install_then_remove_round_trips_the_lockfile(cli_home: CliRunner) -
     removed = cli_home.invoke(cli.main, ["ext", "remove", "memory"])
     assert removed.exit_code == 0, removed.output
     assert "removed memory" in removed.output
-    assert "memory" not in Path("selfhost.lock").read_text()
+    assert "memory" not in Path("ufo.lock").read_text()
 
 
 @pytest.fixture(scope="session")
@@ -414,16 +414,16 @@ def chat_server(
     server = _ThreadedServer(app, port)
     server.start()
 
-    config_path = tmp_path / "selfhost.toml"
+    config_path = tmp_path / "ufo.toml"
     config_path.write_text(
         f'[database]\nurl = "{config.database.url}"\n\n'
         f'[blob]\nbackend = "filesystem"\nroot = "{config.blob.root}"\n\n'
         f'[serve]\nhost = "127.0.0.1"\nport = {port}\n'
     )
-    monkeypatch.setenv("SELFHOST_CONFIG", str(config_path))
-    monkeypatch.setattr(cli, "SELFHOST_DIR", tmp_path / ".selfhost")
-    (tmp_path / ".selfhost").mkdir(mode=0o700, exist_ok=True)
-    (tmp_path / ".selfhost" / "token").write_text(token)
+    monkeypatch.setenv("UFO_CONFIG", str(config_path))
+    monkeypatch.setattr(cli, "UFOCTL_DIR", tmp_path / ".ufoctl")
+    (tmp_path / ".ufoctl").mkdir(mode=0o700, exist_ok=True)
+    (tmp_path / ".ufoctl" / "token").write_text(token)
 
     try:
         yield CliRunner(), str(config_path)

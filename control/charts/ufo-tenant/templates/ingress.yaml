@@ -1,0 +1,29 @@
+# Terminating ingress at the tenant host: cert-manager issues the TLS cert, ExternalDNS publishes the
+# record (RFC 0004 decision 6). `[connect] public_base_url = https://<host>` in the rendered config
+# matches this host, so provider OAuth callbacks reach /v1/connect/callback.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ufo
+  labels:
+    {{- include "ufo-tenant.labels" . | nindent 4 }}
+  annotations:
+    cert-manager.io/cluster-issuer: {{ .Values.cluster_issuer | quote }}
+    external-dns.alpha.kubernetes.io/hostname: {{ .Values.host | quote }}
+spec:
+  ingressClassName: {{ .Values.ingress_class | quote }}
+  tls:
+    - hosts:
+        - {{ .Values.host | quote }}
+      secretName: {{ .Values.tls_secret | quote }}
+  rules:
+    - host: {{ .Values.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ufo-serve
+                port:
+                  number: {{ .Values.serve_port }}

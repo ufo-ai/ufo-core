@@ -10,12 +10,12 @@ from pathlib import Path
 from uuid import uuid4
 
 from pydantic import BaseModel
-from selfhost_ext_browser.delegation import DELEGATION_TOOLS, MAX_WIDE_BROWSE_ENTITIES
+from ufo_ext_browser.delegation import DELEGATION_TOOLS, MAX_WIDE_BROWSE_ENTITIES
 
-from selfhost.blob import FilesystemBlobStore
-from selfhost.sandbox.session import ExecResult
-from selfhost.schema.records import Agent, Turn
-from selfhost.tools.context import SpawnResult, ToolContext
+from ufo.blob import FilesystemBlobStore
+from ufo.sandbox.session import ExecResult
+from ufo.schema.records import Agent, Turn
+from ufo.tools.context import SpawnResult, ToolContext
 
 
 class _Result(BaseModel):

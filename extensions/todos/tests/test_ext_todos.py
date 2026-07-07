@@ -4,17 +4,17 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
-import selfhost_ext_todos as todos
 import sqlalchemy as sa
+import ufo_ext_todos as todos
 from cryptography.fernet import Fernet
 
-from selfhost.blob import FilesystemBlobStore
-from selfhost.credentials import CredentialStore
-from selfhost.db import workspace_tx
-from selfhost.ext.context import ScopedStore, context_for
-from selfhost.schema import tables
-from selfhost.schema.records import Agent, Turn
-from selfhost.tools.context import SpawnResult, ToolContext
+from ufo.blob import FilesystemBlobStore
+from ufo.credentials import CredentialStore
+from ufo.db import workspace_tx
+from ufo.ext.context import ScopedStore, context_for
+from ufo.schema import tables
+from ufo.schema.records import Agent, Turn
+from ufo.tools.context import SpawnResult, ToolContext
 
 
 @dataclass

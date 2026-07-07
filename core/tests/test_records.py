@@ -3,7 +3,7 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from selfhost.schema.records import TerminalFrame, Turn, ledger_id_for, turn_id_for
+from ufo.schema.records import TerminalFrame, Turn, ledger_id_for, turn_id_for
 
 
 def test_turn_id_deterministic() -> None:

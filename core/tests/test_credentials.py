@@ -4,16 +4,16 @@ import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 
-from selfhost.credentials import CredentialSlotUnset, CredentialStore
-from selfhost.db import workspace_tx
-from selfhost.ext.manifest import CredentialSlot, InjectionTarget, Manifest
-from selfhost.sandbox.proxy.rules import (
+from ufo.credentials import CredentialSlotUnset, CredentialStore
+from ufo.db import workspace_tx
+from ufo.ext.manifest import CredentialSlot, InjectionTarget, Manifest
+from ufo.sandbox.proxy.rules import (
     InjectionRule,
     MeterRule,
     ScopeRule,
     derive_credential_rules,
 )
-from selfhost.schema import tables
+from ufo.schema import tables
 
 
 def _store() -> CredentialStore:

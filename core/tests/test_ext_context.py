@@ -4,15 +4,15 @@ import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 
-from selfhost.credentials import CredentialStore
-from selfhost.db import workspace_tx
-from selfhost.ext.context import (
+from ufo.credentials import CredentialStore
+from ufo.db import workspace_tx
+from ufo.ext.context import (
     CredentialAccess,
     ScopedStore,
     UndeclaredCredentialSlot,
     context_for,
 )
-from selfhost.schema import tables
+from ufo.schema import tables
 
 
 async def _workspace() -> UUID:

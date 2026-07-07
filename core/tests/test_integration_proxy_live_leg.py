@@ -32,11 +32,11 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from selfhost.db import workspace_tx
-from selfhost.sandbox.proxy.rules import ANTHROPIC_HOST, InjectionRule, MeterRule, ScopeRule
-from selfhost.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
-from selfhost.sandbox.session import RunToken
-from selfhost.schema import tables
+from ufo.db import workspace_tx
+from ufo.sandbox.proxy.rules import ANTHROPIC_HOST, InjectionRule, MeterRule, ScopeRule
+from ufo.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
+from ufo.sandbox.session import RunToken
+from ufo.schema import tables
 
 pytestmark = [pytest.mark.integration, pytest.mark.serial]
 

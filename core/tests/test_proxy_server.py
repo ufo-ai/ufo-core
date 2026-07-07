@@ -9,9 +9,9 @@ import sqlalchemy as sa
 from cryptography import x509
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from selfhost.db import workspace_tx
-from selfhost.sandbox.proxy.rules import OPENAI_HOST, InjectionRule, MeterRule, ScopeRule
-from selfhost.sandbox.proxy.server import (
+from ufo.db import workspace_tx
+from ufo.sandbox.proxy.rules import OPENAI_HOST, InjectionRule, MeterRule, ScopeRule
+from ufo.sandbox.proxy.server import (
     EgressProxy,
     PerAgentRules,
     SseTokenUsage,
@@ -19,9 +19,9 @@ from selfhost.sandbox.proxy.server import (
     _relay,
     generate_ca,
 )
-from selfhost.sandbox.session import RunToken
-from selfhost.schema import tables
-from selfhost.schema.records import Usage
+from ufo.sandbox.session import RunToken
+from ufo.schema import tables
+from ufo.schema.records import Usage
 
 SEARCH_HOST = "api.search.test"
 MODEL_HOST = "api.anthropic.com"

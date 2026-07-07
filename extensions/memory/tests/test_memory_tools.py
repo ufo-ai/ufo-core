@@ -13,25 +13,25 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
-import selfhost_ext_memory.manifest as memory
 import sqlalchemy as sa
-from selfhost_ext_embed_openai import EMBED_DIM
-from selfhost_ext_index_default import DefaultIndex
-from selfhost_ext_memory.store import MemoryIndexer, memory_item
+import ufo_ext_memory.manifest as memory
+from ufo_ext_embed_openai import EMBED_DIM
+from ufo_ext_index_default import DefaultIndex
+from ufo_ext_memory.store import MemoryIndexer, memory_item
 
-from selfhost.blob import FilesystemBlobStore
-from selfhost.db import workspace_tx
-from selfhost.ext.context import ExtensionContext, context_for
-from selfhost.indexing import TextChunker
-from selfhost.models.interface import Message, TextBlock, ToolUseBlock
-from selfhost.schema import tables
-from selfhost.schema.records import Agent, Turn
-from selfhost.sdk.manifest import HookContext, InjectContext, UserPromptSubmit
-from selfhost.subjects import member_subject
-from selfhost.tools.builtins import BUILTIN_TOOLS
-from selfhost.tools.context import SpawnResult, ToolContext, ToolResult
-from selfhost.tools.registry import ToolRegistry
-from selfhost.transcript import Conversation, encode, transcript_key
+from ufo.blob import FilesystemBlobStore
+from ufo.db import workspace_tx
+from ufo.ext.context import ExtensionContext, context_for
+from ufo.indexing import TextChunker
+from ufo.models.interface import Message, TextBlock, ToolUseBlock
+from ufo.schema import tables
+from ufo.schema.records import Agent, Turn
+from ufo.sdk.manifest import HookContext, InjectContext, UserPromptSubmit
+from ufo.subjects import member_subject
+from ufo.tools.builtins import BUILTIN_TOOLS
+from ufo.tools.context import SpawnResult, ToolContext, ToolResult
+from ufo.tools.registry import ToolRegistry
+from ufo.transcript import Conversation, encode, transcript_key
 
 BUILTIN_REGISTRY = ToolRegistry(BUILTIN_TOOLS)
 MEMORY_TOOLS = {tool.name: tool for tool in memory.manifest().tools}
@@ -345,7 +345,7 @@ async def test_memory_search_interleaves_per_query_results(
     top-N would order the low-scoring b-one behind the higher-scoring a-two; interleave keeps each
     query represented, which is what the merge is for. The store is faked to fix the per-query legs;
     the assertion is on the handler's merge order, not the store."""
-    from selfhost_ext_memory.store import Recalled
+    from ufo_ext_memory.store import Recalled
 
     def _recalled(body: str, score: float) -> Recalled:
         return Recalled(

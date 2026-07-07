@@ -1,9 +1,9 @@
-"""Any extension can build a source from the framework alone, reached only through `selfhost.sdk`.
+"""Any extension can build a source from the framework alone, reached only through `ufo.sdk`.
 
 This proof imports the whole source-building surface — `RestConnector`, `StreamSpec`, `Pagination`,
 `PaginationStrategy`, `ConnectorBackend`, `ConnectorSourceConfig`, `SourceAuth` — from
-`selfhost.sdk.sources`, and `Credential` from `selfhost.sdk.authproxy`, and nothing else from
-selfhost. It defines a throwaway REST connector no shipped provider knows about, drives it through
+`ufo.sdk.sources`, and `Credential` from `ufo.sdk.authproxy`, and nothing else from
+ufo. It defines a throwaway REST connector no shipped provider knows about, drives it through
 `ConnectorBackend` over an `httpx.MockTransport` (no live API, no token), and asserts the collapsed
 `SyncResult`: a declared `next_cursor` strategy paginates two mock pages, and a `delete_missing`
 stream returns as an authoritative snapshot. If the framework were still private to the sources
@@ -16,8 +16,8 @@ from uuid import UUID, uuid4
 
 import httpx
 
-from selfhost.sdk.authproxy import Credential
-from selfhost.sdk.sources import (
+from ufo.sdk.authproxy import Credential
+from ufo.sdk.sources import (
     ConnectorBackend,
     ConnectorSourceConfig,
     Pagination,

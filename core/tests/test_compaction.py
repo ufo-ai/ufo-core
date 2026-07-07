@@ -6,16 +6,16 @@ from uuid import uuid4
 
 import pytest
 
-from selfhost.blob import FilesystemBlobStore
-from selfhost.loop.compaction import (
+from ufo.blob import FilesystemBlobStore
+from ufo.loop.compaction import (
     COMPACTED_CONTEXT_PREFIX,
     DEFAULT_CONTEXT_WINDOW_TOKENS,
     Compaction,
     CompactionSummary,
     FileRef,
 )
-from selfhost.loop.engine import OFFLOAD_NOTICE
-from selfhost.models.interface import (
+from ufo.loop.engine import OFFLOAD_NOTICE
+from ufo.models.interface import (
     ImageBlock,
     ImageSource,
     Message,
@@ -26,7 +26,7 @@ from selfhost.models.interface import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from selfhost.schema.records import Usage
+from ufo.schema.records import Usage
 
 HEAD_FACT = "the deploy key is rotated every 30 days HEADSECRET"
 TAIL_FACT = "the customer prefers Tuesday demos TAILSECRET"

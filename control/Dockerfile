@@ -1,4 +1,4 @@
-# The control-plane image — one image, two roles (`selfhost-k8s api` / `selfhost-k8s operator`).
+# The control-plane image — one image, two roles (`ufo-control api` / `ufo-control operator`).
 # It bakes the helm binary and the tenant chart the operator applies.
 FROM python:3.12-slim
 
@@ -20,4 +20,4 @@ RUN pip install --no-cache-dir .
 # The chart the operator renders + applies; platform.toml points chart_path here.
 COPY charts /charts
 
-ENTRYPOINT ["selfhost-k8s"]
+ENTRYPOINT ["ufo-control"]

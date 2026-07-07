@@ -6,16 +6,16 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 
-from selfhost import runtime_instance
-from selfhost.config import BlobConfig, Config, DatabaseConfig, HubConfig
-from selfhost.db import workspace_tx
-from selfhost.runtime_instance import (
+from ufo import runtime_instance
+from ufo.config import BlobConfig, Config, DatabaseConfig, HubConfig
+from ufo.db import workspace_tx
+from ufo.runtime_instance import (
     STALE_AFTER_SECONDS,
     BootGuard,
     Heartbeat,
     fingerprint_of,
 )
-from selfhost.schema import tables
+from ufo.schema import tables
 
 PRODUCTION_FINGERPRINT = "db=postgres;blob=s3;hub=in_process"
 

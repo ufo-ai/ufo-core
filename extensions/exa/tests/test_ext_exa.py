@@ -13,15 +13,15 @@ from uuid import uuid4
 
 import httpx
 import pytest
-import selfhost_ext_exa as exa
 import sqlalchemy as sa
+import ufo_ext_exa as exa
 from cryptography.fernet import Fernet
 
-from selfhost.credentials import CredentialStore
-from selfhost.db import workspace_tx
-from selfhost.ext.context import context_for
-from selfhost.schema import tables
-from selfhost.sdk.search import FetchRequest, SearchQuery
+from ufo.credentials import CredentialStore
+from ufo.db import workspace_tx
+from ufo.ext.context import context_for
+from ufo.schema import tables
+from ufo.sdk.search import FetchRequest, SearchQuery
 
 EXA_KEY = "exa-live-secret-0xdeadbeef"
 

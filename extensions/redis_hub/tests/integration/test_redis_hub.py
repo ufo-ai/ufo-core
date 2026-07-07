@@ -18,15 +18,15 @@ from collections.abc import Iterator
 from uuid import uuid4
 
 import pytest
-import selfhost_ext_redis_hub.manifest as ext
-import selfhost_ext_redis_hub.stream_hub as stream_hub
+import ufo_ext_redis_hub.manifest as ext
+import ufo_ext_redis_hub.stream_hub as stream_hub
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
-from selfhost_ext_redis_hub.stream_hub import STREAM_PREFIX, RedisStreamHub
+from ufo_ext_redis_hub.stream_hub import STREAM_PREFIX, RedisStreamHub
 
-from selfhost.hub import CostTick, LiveFrame, Parked, SkillLoad, Terminal, ToolCall
-from selfhost.models.interface import TextDelta
-from selfhost.schema.records import TerminalFrame
+from ufo.hub import CostTick, LiveFrame, Parked, SkillLoad, Terminal, ToolCall
+from ufo.models.interface import TextDelta
+from ufo.schema.records import TerminalFrame
 
 pytestmark = pytest.mark.docker
 

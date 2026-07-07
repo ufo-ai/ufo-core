@@ -13,20 +13,20 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
-import selfhost_ext_knowledge_graph.manifest as kg
 import sqlalchemy as sa
-from selfhost_ext_knowledge_graph.store import GraphExtractor, UnknownEdgeType
+import ufo_ext_knowledge_graph.manifest as kg
+from ufo_ext_knowledge_graph.store import GraphExtractor, UnknownEdgeType
 
-from selfhost.blob import FilesystemBlobStore
-from selfhost.db import workspace_tx
-from selfhost.ext.context import ExtensionContext, context_for
-from selfhost.ext.loader import discovered
-from selfhost.schema import tables
-from selfhost.schema.records import Agent, Turn
-from selfhost.sdk.manifest import HookContext, InjectContext, UserPromptSubmit
-from selfhost.sources.sync import CorePageFeed
-from selfhost.subjects import SHARED_SUBJECT
-from selfhost.tools.context import SpawnResult, ToolContext
+from ufo.blob import FilesystemBlobStore
+from ufo.db import workspace_tx
+from ufo.ext.context import ExtensionContext, context_for
+from ufo.ext.loader import discovered
+from ufo.schema import tables
+from ufo.schema.records import Agent, Turn
+from ufo.sdk.manifest import HookContext, InjectContext, UserPromptSubmit
+from ufo.sources.sync import CorePageFeed
+from ufo.subjects import SHARED_SUBJECT
+from ufo.tools.context import SpawnResult, ToolContext
 
 EXTENSION = "knowledge_graph"
 WHEN = datetime(2026, 1, 1, tzinfo=UTC)

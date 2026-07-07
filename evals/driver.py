@@ -1,5 +1,5 @@
 """The live workspace driver: what the operator runner hands the harness so a case runs as a real
-turn against a running `selfhost serve`. It fills the two steps the scoped ExtensionContext cannot —
+turn against a running `ufoctl serve`. It fills the two steps the scoped ExtensionContext cannot —
 opening a fresh conversation per case and awaiting an admitted turn's terminal transcript — by
 reaching the workspace's own rows and blob store, and it builds the ExtensionContext bound to the
 shared admission invoker (the same producer every surface and job admits through). Enqueuing needs a
@@ -15,15 +15,15 @@ import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from dbos import DBOSClient
 
-from selfhost.blob import BlobNotFound, BlobStore
-from selfhost.config import Config
-from selfhost.credentials import CredentialStore
-from selfhost.db import workspace_tx
-from selfhost.ext.context import ExtensionContext, Trajectory, context_for
-from selfhost.governance import prompt_digest
-from selfhost.schema import tables
-from selfhost.surfaces.admission import Admission, AdmissionInvoker
-from selfhost.transcript import TranscriptDecodeError, decode, transcript_key
+from ufo.blob import BlobNotFound, BlobStore
+from ufo.config import Config
+from ufo.credentials import CredentialStore
+from ufo.db import workspace_tx
+from ufo.ext.context import ExtensionContext, Trajectory, context_for
+from ufo.governance import prompt_digest
+from ufo.schema import tables
+from ufo.surfaces.admission import Admission, AdmissionInvoker
+from ufo.transcript import TranscriptDecodeError, decode, transcript_key
 
 EVAL_SURFACE = "eval"
 POLL_INTERVAL_SECONDS = 1.0

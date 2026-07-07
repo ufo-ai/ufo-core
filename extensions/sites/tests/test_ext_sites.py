@@ -5,10 +5,10 @@ from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
-from selfhost_ext_sites import manifest as sites_manifest
-from selfhost_ext_sites import tools as sites_tools
-from selfhost_ext_sites.subagent import WEBSITE_BUILDING_PROFILE
-from selfhost_ext_sites.tools import (
+from ufo_ext_sites import manifest as sites_manifest
+from ufo_ext_sites import tools as sites_tools
+from ufo_ext_sites.subagent import WEBSITE_BUILDING_PROFILE
+from ufo_ext_sites.tools import (
     DeployWebsiteInput,
     PublishWebsiteInput,
     StartServerInput,
@@ -19,12 +19,12 @@ from selfhost_ext_sites.tools import (
     website,
 )
 
-from selfhost.blob import FilesystemBlobStore
-from selfhost.ext.loader import skill_registry
-from selfhost.sandbox.session import ExecResult
-from selfhost.schema.records import Agent, Turn
-from selfhost.skills.runtime import mount_skill
-from selfhost.tools.context import SpawnResult, ToolContext
+from ufo.blob import FilesystemBlobStore
+from ufo.ext.loader import skill_registry
+from ufo.sandbox.session import ExecResult
+from ufo.schema.records import Agent, Turn
+from ufo.skills.runtime import mount_skill
+from ufo.tools.context import SpawnResult, ToolContext
 
 
 @dataclass

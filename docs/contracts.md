@@ -12,8 +12,8 @@ All persisted records carry `workspace_id`, `created_at`, `updated_at` (omitted 
 ## Module map
 
 ```text
-core/src/selfhost/
-  config.py      Config — selfhost.toml, fail-loud            blob.py     BlobStore + fs/S3
+core/src/ufo/
+  config.py      Config — ufo.toml, fail-loud            blob.py     BlobStore + fs/S3
   db.py          engine + workspace_tx() boundary             hub.py      Hub + in-process
   schema/        SQL migrations (single source)               o11y.py     OTel facade
   models/        ModelClient + anthropic/openai               jobs.py     JobSpec + runner
@@ -25,7 +25,7 @@ core/src/selfhost/
   credentials.py encrypted BYOK store                         accounting.py ledger, caps, prices
   surfaces/      slack, web, cli, onboarding                  ext/        loader, rule derivation
   sdk/           the ONLY public import surface for extensions
-  serve.py       single-process assembly                      cli.py      `selfhost` entrypoint
+  serve.py       single-process assembly                      cli.py      `ufoctl` entrypoint
 ```
 
 ## Records (`schema/`, Pydantic)
@@ -196,8 +196,8 @@ class ExtensionContext(Protocol):
     async def trajectories_read(self, query: TrajectoryQuery) -> tuple[TrajectoryRef, ...]: ...
     async def propose_change(self, proposal: AgentChange) -> ProposalRef: ...   # governed; never a direct write
 ```
-Entry point group: `selfhost.extension` → `() -> Manifest`. `selfhost.sdk` re-exports every name an
-extension may touch; a CI gate fails any `extensions/` import outside `selfhost.sdk`.
+Entry point group: `ufo.extension` → `() -> Manifest`. `ufo.sdk` re-exports every name an
+extension may touch; a CI gate fails any `extensions/` import outside `ufo.sdk`.
 
 ## Invariants (permanent residents of this file)
 
@@ -205,7 +205,7 @@ extension may touch; a CI gate fails any `extensions/` import outside `selfhost.
 - The sandbox proxy is the only egress route; rules derive from manifests + grants; no register API.
 - At most one running turn per conversation; every awaited turn ends in a committed terminal frame.
 - The sandbox reaches only `conversations/<cid>/workspace/`; the container is disposable cache.
-- Extensions import `selfhost.sdk` only; credentials resolve only for declared slots.
+- Extensions import `ufo.sdk` only; credentials resolve only for declared slots.
 - Derived state (embeddings, summaries, index rows) is produced by jobs, never inline.
 - Every model/tool/proxy call meters into the ledger in the turn's terminal commit — one write
   per turn per dimension, idempotent on the turn-keyed ledger id.

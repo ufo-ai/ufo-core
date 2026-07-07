@@ -6,12 +6,12 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import ValidationError
 
-from selfhost.blob import FilesystemBlobStore
-from selfhost.sandbox.session import ExecResult
-from selfhost.schema.records import Agent, Turn
-from selfhost.tools.builtins import BUILTIN_TOOLS
-from selfhost.tools.context import SpawnResult, SubagentStatus, ToolContext
-from selfhost.tools.registry import ToolRegistry
+from ufo.blob import FilesystemBlobStore
+from ufo.sandbox.session import ExecResult
+from ufo.schema.records import Agent, Turn
+from ufo.tools.builtins import BUILTIN_TOOLS
+from ufo.tools.context import SpawnResult, SubagentStatus, ToolContext
+from ufo.tools.registry import ToolRegistry
 
 REGISTRY = ToolRegistry(BUILTIN_TOOLS)
 ARTIFACT_SECRET = "tools-test-secret"

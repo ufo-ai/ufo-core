@@ -12,9 +12,9 @@ from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
-from selfhost_ext_self_improvement import manifest as si
-from selfhost_ext_self_improvement.corpus import task_classes
-from selfhost_ext_self_improvement.cron import (
+from ufo_ext_self_improvement import manifest as si
+from ufo_ext_self_improvement.corpus import task_classes
+from ufo_ext_self_improvement.cron import (
     CANDIDATE_KEY,
     EVALUATING,
     PROMOTED,
@@ -22,26 +22,26 @@ from selfhost_ext_self_improvement.cron import (
     CandidateState,
     ImproveCron,
 )
-from selfhost_ext_self_improvement.evaluation import CandidateEvaluation
-from selfhost_ext_self_improvement.gate import (
+from ufo_ext_self_improvement.evaluation import CandidateEvaluation
+from ufo_ext_self_improvement.gate import (
     OutcomeLabel,
     score_gate,
     two_stage_gate,
 )
-from selfhost_ext_self_improvement.model import ReplayTurn, ToolSchema
-from selfhost_ext_self_improvement.proposer import PromptProposer
-from selfhost_ext_self_improvement.replay import ReplayEvaluation
+from ufo_ext_self_improvement.model import ReplayTurn, ToolSchema
+from ufo_ext_self_improvement.proposer import PromptProposer
+from ufo_ext_self_improvement.replay import ReplayEvaluation
 
-from selfhost.blob import FilesystemBlobStore
-from selfhost.credentials import CredentialStore
-from selfhost.db import workspace_tx
-from selfhost.ext.context import Trajectory, context_for
-from selfhost.ext.loader import load_manifests
-from selfhost.governance import prompt_digest
-from selfhost.loop.transcript import Transcript
-from selfhost.models.interface import Message, TextBlock, ToolResultBlock, ToolUseBlock
-from selfhost.schema import tables
-from selfhost.transcript import Conversation
+from ufo.blob import FilesystemBlobStore
+from ufo.credentials import CredentialStore
+from ufo.db import workspace_tx
+from ufo.ext.context import Trajectory, context_for
+from ufo.ext.loader import load_manifests
+from ufo.governance import prompt_digest
+from ufo.loop.transcript import Transcript
+from ufo.models.interface import Message, TextBlock, ToolResultBlock, ToolUseBlock
+from ufo.schema import tables
+from ufo.transcript import Conversation
 
 SEED_PROMPT = "You are a helpful assistant."
 IMPROVED_MARKER = "IMPROVED"

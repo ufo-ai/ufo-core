@@ -12,32 +12,32 @@ from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
-from selfhost_ext_eval_harness import manifest as eh
-from selfhost_ext_eval_harness.capability import (
+from ufo_ext_eval_harness import manifest as eh
+from ufo_ext_eval_harness.capability import (
     CapabilityCase,
     CapabilityOutput,
     ToolInvocation,
     run_capability_case,
 )
-from selfhost_ext_eval_harness.harness import EvalCaseResult, EvalReport
-from selfhost_ext_eval_harness.judge import rubric_pass
-from selfhost_ext_eval_harness.report_html import render_report_html
-from selfhost_ext_eval_harness.scorers import (
+from ufo_ext_eval_harness.harness import EvalCaseResult, EvalReport
+from ufo_ext_eval_harness.judge import rubric_pass
+from ufo_ext_eval_harness.report_html import render_report_html
+from ufo_ext_eval_harness.scorers import (
     WEB_TOOLS,
     required_tools_scorer,
     restraint_scorer,
 )
-from selfhost_ext_eval_harness.target import InProcessTarget, capability_output
+from ufo_ext_eval_harness.target import InProcessTarget, capability_output
 
-from selfhost.blob import FilesystemBlobStore
-from selfhost.credentials import CredentialStore
-from selfhost.db import workspace_tx
-from selfhost.ext.context import Trajectory, context_for
-from selfhost.ext.loader import load_manifests
-from selfhost.loop.transcript import Transcript
-from selfhost.models.interface import Message, ToolResultBlock, ToolUseBlock
-from selfhost.schema import tables
-from selfhost.transcript import Conversation
+from ufo.blob import FilesystemBlobStore
+from ufo.credentials import CredentialStore
+from ufo.db import workspace_tx
+from ufo.ext.context import Trajectory, context_for
+from ufo.ext.loader import load_manifests
+from ufo.loop.transcript import Transcript
+from ufo.models.interface import Message, ToolResultBlock, ToolUseBlock
+from ufo.schema import tables
+from ufo.transcript import Conversation
 
 MODEL = "claude-opus-4-8"
 PROMPT = "You are a helpful assistant."

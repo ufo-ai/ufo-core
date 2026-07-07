@@ -9,11 +9,11 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from selfhost_ext_sources.mailchimp import MailchimpConnector
+from ufo_ext_sources.mailchimp import MailchimpConnector
 
-from selfhost.connectors import Credential
-from selfhost.sdk.sources import ConnectorBackend, ConnectorSourceConfig
-from selfhost.sources.sync import SourceAuth, StreamSkipped, SyncResult
+from ufo.connectors import Credential
+from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
+from ufo.sources.sync import SourceAuth, StreamSkipped, SyncResult
 
 ACCOUNT = "acct-1"
 BASE_URL = "https://us21.api.mailchimp.com"

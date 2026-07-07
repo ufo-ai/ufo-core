@@ -1,6 +1,6 @@
 """The MCP tool pack: `list_mcp_tools` and `call_mcp_tool` over a fastmcp Streamable-HTTP client.
 
-The extension imports only `selfhost.sdk`. These tests drive its two tools against a real in-process
+The extension imports only `ufo.sdk`. These tests drive its two tools against a real in-process
 FastMCP server — a spec-compliant MCP server reached over the real Streamable-HTTP transport (the
 `initialize` handshake, `Mcp-Session-Id`, and SSE framing that the earlier bare JSON-RPC POST could
 not speak), carried by an in-process ASGI client so there is no network or port. The `mcp_client`
@@ -17,8 +17,8 @@ from uuid import uuid4
 
 import httpx
 import pytest
-import selfhost_ext_mcp as mcp
 import sqlalchemy as sa
+import ufo_ext_mcp as mcp
 from cryptography.fernet import Fernet
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
@@ -26,12 +26,12 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.dependencies import get_http_headers
 from mcp.types import TextContent
 
-from selfhost.credentials import CredentialStore
-from selfhost.db import workspace_tx
-from selfhost.ext.loader import turn_tools
-from selfhost.schema import tables
-from selfhost.schema.records import Agent, Turn
-from selfhost.tools.context import ToolContext
+from ufo.credentials import CredentialStore
+from ufo.db import workspace_tx
+from ufo.ext.loader import turn_tools
+from ufo.schema import tables
+from ufo.schema.records import Agent, Turn
+from ufo.tools.context import ToolContext
 
 ENDPOINT = "http://mcp.test/mcp"
 SERVER_NAME = "docs"

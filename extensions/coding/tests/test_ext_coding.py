@@ -3,11 +3,11 @@ code builtins, and core's shell-wrap renders it with the shared citation discipl
 skill index. The profile names only tool names, so the pack is self-contained — nothing here
 imports a core internal."""
 
-import selfhost_ext_coding.manifest as coding
+import ufo_ext_coding.manifest as coding
 
-from selfhost.ext.loader import skill_registry
-from selfhost.loop.subagents import subagent_system_prompt
-from selfhost.tools.builtins import BUILTIN_TOOLS
+from ufo.ext.loader import skill_registry
+from ufo.loop.subagents import subagent_system_prompt
+from ufo.tools.builtins import BUILTIN_TOOLS
 
 
 def test_coding_manifest_registers_a_single_coding_profile() -> None:

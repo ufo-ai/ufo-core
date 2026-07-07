@@ -4,8 +4,8 @@ from uuid import uuid4
 
 import pytest
 
-from selfhost.blob import FilesystemBlobStore
-from selfhost.sandbox.session import (
+from ufo.blob import FilesystemBlobStore
+from ufo.sandbox.session import (
     DEFAULT_EXEC_TIMEOUT_SECONDS,
     ExecResult,
     RunToken,
@@ -13,9 +13,9 @@ from selfhost.sandbox.session import (
     SandboxSession,
     SandboxSpec,
 )
-from selfhost.schema.records import Agent, Turn
-from selfhost.tools.builtins import BashInput, bash_handler
-from selfhost.tools.context import SpawnResult, ToolContext
+from ufo.schema.records import Agent, Turn
+from ufo.tools.builtins import BashInput, bash_handler
+from ufo.tools.context import SpawnResult, ToolContext
 
 
 def _basic(username: str) -> str:
