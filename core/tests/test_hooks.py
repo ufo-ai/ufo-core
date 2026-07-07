@@ -43,9 +43,10 @@ from selfhost.ext.manifest import (
 )
 from selfhost.hub import InProcessHub
 from selfhost.loop.compaction import (
+    COMPACTED_CONTEXT_PREFIX,
     COMPACTION_KEEP_MESSAGES,
-    COMPACTION_TRIGGER_TOKENS,
     Compaction,
+    CompactionSummary,
 )
 from selfhost.loop.engine import TurnEngine
 from selfhost.loop.prompts.render import COMPACTION_SYSTEM_PROMPT, rendered_prompt
@@ -323,7 +324,10 @@ class CompactingModel:
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         if request.system == COMPACTION_SYSTEM_PROMPT:
-            yield TextDelta(text="condensed history")
+            summary = CompactionSummary(
+                intent="condensed history", current_work="mid-turn", next_step="answer"
+            )
+            yield TextDelta(text=summary.model_dump_json())
             yield Usage(input_tokens=1, output_tokens=1)
             return
         if _answered(request):
@@ -431,7 +435,7 @@ def _engine(
     tools: tuple = BUILTIN_TOOLS,
     tool_ext: dict | None = None,
     carrier: RecordingCarrier | None = None,
-    compaction_trigger: int = COMPACTION_TRIGGER_TOKENS,
+    compaction_trigger: int | None = None,
     compaction_keep: int = COMPACTION_KEEP_MESSAGES,
 ) -> TurnEngine:
     blob = FilesystemBlobStore(root=tmp_path)
@@ -560,7 +564,9 @@ async def test_compaction_fires_pre_and_post_compact(db: None, tmp_path: Path) -
     pre = await scoped.get(sample.HOOK_PRE_COMPACT_KEY)
     post = await scoped.get(sample.HOOK_POST_COMPACT_KEY)
     assert pre is not None and pre["reason"] == "auto" and pre["before_tokens"] > 0
-    assert post is not None and post["summary"] == "condensed history"
+    assert post is not None
+    assert post["summary"].startswith(COMPACTED_CONTEXT_PREFIX)
+    assert "condensed history" in post["summary"]
     assert post["before_tokens"] == pre["before_tokens"]
     assert post["after_tokens"] > 0
 

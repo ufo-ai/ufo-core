@@ -70,8 +70,11 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   spawn = child turn with parent linkage; foreground awaits, background returns an id. Extensions
   register profiles.
 - **Compaction** — full-conversation `messages.json.lz4` transcript with monotonic seq +
-  `compactions/<cid>/{before,after}` records in the blob store (port of the shipped design);
-  history compacts as it approaches the model window so a long turn never exceeds it.
+  `compactions/<cid>/{before,after,summary}` records in the blob store; a deterministic pipeline
+  groups the over-window head into API rounds, compresses it into a validated structured
+  `CompactionSummary` (one metered model call, bounded prompt-too-long retry), re-references the
+  durable `.tool-output` files it offloaded, and keeps the recent tail verbatim. The trigger derives
+  from the model's real window less the summary reserve, so a long turn never exceeds it.
 - **Memory** — an extension, not core: it owns the `memory_item` table, the `memory_search`/
   `memory_update` tools, and recall (lexical + vector RRF fusion, subject ∈ {member, shared}),
   auto-injected each turn through a `user_prompt_submit` hook — no core memory seam. Recall carries the

@@ -15,7 +15,11 @@ from selfhost.db import workspace_tx
 from selfhost.ext.loader import HookChain
 from selfhost.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
 from selfhost.hub import InProcessHub, LiveFrame, SkillLoad, ToolCall
-from selfhost.loop.compaction import COMPACTED_CONTEXT_PREFIX, Compaction
+from selfhost.loop.compaction import (
+    COMPACTED_CONTEXT_PREFIX,
+    Compaction,
+    CompactionSummary,
+)
 from selfhost.loop.engine import (
     FORCE_FINAL_PROMPT,
     MAX_TOOL_RESULT_CHARS,
@@ -30,7 +34,7 @@ from selfhost.loop.engine import (
     TurnParked,
     _bounded,
 )
-from selfhost.loop.prompts.render import rendered_prompt
+from selfhost.loop.prompts.render import COMPACTION_SYSTEM_PROMPT, rendered_prompt
 from selfhost.loop.transcript import Transcript
 from selfhost.models.interface import (
     ImageBlock,
@@ -77,6 +81,13 @@ class CapturingModel:
 @dataclass(frozen=True)
 class EchoModel:
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        if request.system == COMPACTION_SYSTEM_PROMPT:
+            summary = CompactionSummary(
+                intent="condensed history", current_work="mid-turn", next_step="answer"
+            )
+            yield TextDelta(text=summary.model_dump_json())
+            yield Usage(input_tokens=7, output_tokens=3)
+            return
         yield TextDelta(text="answer")
         yield Usage(input_tokens=7, output_tokens=3)
 

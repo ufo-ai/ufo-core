@@ -92,6 +92,7 @@ def test_rendered_prompt_wraps_a_raw_string_with_a_digest() -> None:
     assert wrapped.digest.startswith("sha256:")
 
 
-def test_compaction_prompt_is_ported_and_loaded() -> None:
-    assert "Compress the conversation for continuation." in COMPACTION_SYSTEM_PROMPT
-    assert "Return only the compacted context." in COMPACTION_SYSTEM_PROMPT
+def test_compaction_prompt_is_structured_and_loaded() -> None:
+    assert "SINGLE JSON object" in COMPACTION_SYSTEM_PROMPT
+    assert "`intent`" in COMPACTION_SYSTEM_PROMPT
+    assert "`next_step`" in COMPACTION_SYSTEM_PROMPT
