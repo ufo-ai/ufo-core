@@ -81,7 +81,8 @@ class Bundle:
                 f"SELFHOST_LOCKFILE=/app/{BUNDLE_LOCKFILE_NAME}",
                 f'RUN pip install --no-cache-dir "selfhost=={selfhost_version()}"',
                 f"COPY {BUNDLE_CONFIG_NAME} {BUNDLE_LOCKFILE_NAME} /app/",
-                'ENTRYPOINT ["selfhost", "serve"]',
+                'ENTRYPOINT ["selfhost"]',
+                'CMD ["serve"]',
                 "",
             )
         )
