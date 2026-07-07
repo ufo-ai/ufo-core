@@ -13,7 +13,8 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 
 from ufo_control.contract import DeployRequest, DeployStatus
-from ufo_control.kube import KubeClient
+from ufo_control.kube import KubeClient, status_from_tenant
+from ufo_control.members import MemberRequest, MemberResult, add_member
 
 
 def deploy_app() -> FastAPI:
@@ -40,15 +41,21 @@ def deploy_app() -> FastAPI:
             tenant=request.tenant.name, phase="Pending", message="tenant accepted; reconciling"
         )
 
+    @app.get("/v1/tenants")
+    async def list_tenants(orgDomain: str | None = None) -> list[DeployStatus]:
+        objs = await state["kube"].list_tenants(org_domain=orgDomain)
+        return [status_from_tenant(obj) for obj in objs]
+
     @app.get("/v1/tenants/{name}")
     async def tenant_status(name: str) -> DeployStatus:
         obj = await state["kube"].get_tenant(name)
         if obj is None:
             raise HTTPException(status_code=404, detail=f"no tenant {name!r}")
-        status = obj.get("status")
-        if not status:
-            return DeployStatus(tenant=name, phase="Pending", message="not yet reconciled")
-        return DeployStatus.model_validate({"tenant": name, **status})
+        return status_from_tenant(obj)
+
+    @app.post("/v1/tenants/{name}/members")
+    async def add_tenant_member(name: str, request: MemberRequest) -> MemberResult:
+        return await add_member(state["kube"], name, request)
 
     return app
 

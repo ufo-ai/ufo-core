@@ -107,10 +107,13 @@ class DeployRequest(BaseModel):
 
 class DeployStatus(BaseModel):
     """The poll response and the ``Tenant`` custom resource's ``.status``. ``phase`` walks
-    Pending → Provisioning → Ready (or Failed); ``url`` is set once the ingress is admitting."""
+    Pending → Provisioning → Ready (or Failed); ``url`` is set once the ingress is admitting.
+    ``workspace_id`` is the tenant's minted workspace uuid, read from the CR's
+    ``status.workspaceId`` and surfaced so the onboarding backend can mint a member bearer."""
 
     model_config = ConfigDict(extra="forbid")
     tenant: str
     phase: Literal["Pending", "Provisioning", "Ready", "Failed"]
     url: str | None = None
     message: str = ""
+    workspace_id: str | None = None

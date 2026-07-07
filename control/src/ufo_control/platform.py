@@ -27,6 +27,7 @@ TENANT_PLURAL = "tenants"
 TENANT_NAMESPACE_LABEL = f"{API_GROUP}/tenant"
 TENANT_NAME_LABEL = f"{API_GROUP}/tenant-name"
 PACK_LABEL = f"{API_GROUP}/pack"
+ORG_DOMAIN_LABEL = f"{API_GROUP}/org-domain"
 
 FIELD_MANAGER = f"{API_GROUP}/operator"
 OPERATOR_LEASE_NAME = "ufo-operator"
