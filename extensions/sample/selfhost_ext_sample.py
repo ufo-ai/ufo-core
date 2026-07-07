@@ -123,6 +123,7 @@ SECTION_BODY = (
     "</sample_capability>"
 )
 SURFACE_NAME = "sample_surface"
+SURFACE_LIVE_NAME = "sample_live"
 SURFACE_INBOX_REL = "sample-inbox/note.txt"
 SURFACE_DELIVERED_PREFIX = "sample-delivered"
 SURFACE_POST_REF = "sample-posted-ref"
@@ -521,18 +522,19 @@ async def _surface_attach(ctx: SurfaceContext, writeback: Writeback, reply_ref: 
 
 
 async def _surface_live_admit(ctx: SurfaceContext, request: Request) -> Response:
-    """Exercise the seam's LIVE mode on the one context: adopt a member from a peer surface's
-    identity, get-or-create the conversation, admit WITHOUT writeback (a live surface tails the hub
-    for its reply), then read back the turn's owner and the workspace spend rollup. The conformance
-    test asserts no writeback row exists for this turn — the live/durable contrast against
-    `_surface_ingest`, which admits with writeback."""
+    """Exercise the seam's LIVE mode on its own surface: adopt a member from a peer surface's
+    identity, get-or-create the conversation, admit (a live surface declares no `post`, so
+    admission registers nothing for the poller and the member tails the hub), then read back the
+    turn's owner and the workspace spend rollup. The conformance test asserts no writeback row
+    exists for this turn — the live/durable contrast against `_surface_ingest` on the durable
+    surface."""
     args = SurfaceIngestInput.model_validate_json(await request.body())
     member_id = await ctx.linked_member(args.external_id)
     if member_id is None:
         member_id = await ctx.adopt_identity(SURFACE_PEER, args.external_id)
     conversation_id = await ctx.conversation_for(args.external_id, member_id)
     agent_id = await ctx.default_agent()
-    turn_id = await ctx.admit(conversation_id, agent_id, args.message, writeback=False)
+    turn_id = await ctx.admit(conversation_id, agent_id, args.message)
     owner = await ctx.turn_owner(turn_id)
     report = await ctx.spend_rollup(SURFACE_SPEND_WINDOW_SECONDS)
     return JSONResponse(
@@ -723,8 +725,13 @@ def manifest() -> Manifest:
         surfaces=(
             SurfaceSpec(
                 name=SURFACE_NAME,
+                routes=(SurfaceRoute(method="POST", path="", handler=_surface_ingest),),
+                post=_surface_post,
+                attach=_surface_attach,
+            ),
+            SurfaceSpec(
+                name=SURFACE_LIVE_NAME,
                 routes=(
-                    SurfaceRoute(method="POST", path="", handler=_surface_ingest),
                     SurfaceRoute(
                         method="POST", path=SURFACE_LIVE_PATH, handler=_surface_live_admit
                     ),
@@ -734,8 +741,6 @@ def manifest() -> Manifest:
                         handler=_surface_live_stream,
                     ),
                 ),
-                post=_surface_post,
-                attach=_surface_attach,
             ),
         ),
         sources=(SourceProvider(backend=SOURCE_BACKEND, source=SampleSource()),),

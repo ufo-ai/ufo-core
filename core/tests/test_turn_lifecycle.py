@@ -234,6 +234,7 @@ async def surface(
     app = FastAPI()
     app.state.hub = hub
     app.state.dbos = DBOSClient(system_database_url=config.database.system_url)
+    app.state.durable_surfaces = frozenset()
     app.include_router(router)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://surface") as client:
         yield client

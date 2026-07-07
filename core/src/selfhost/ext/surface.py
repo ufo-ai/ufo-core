@@ -10,17 +10,19 @@ contact), and read the workspace's credential slots in-process.
 One `SurfaceSpec`/`SurfaceContext` expresses both shapes of surface, differing only in how the reply
 gets back and thus in how much of the one context each uses:
 
-- A **durable** surface (Slack) is delivered to — its member is elsewhere. It admits with writeback
-  and declares a two-phase delivery (`post` then best-effort `attach`); core runs the
+- A **durable** surface (Slack) is delivered to — its member is elsewhere. Declaring a two-phase
+  delivery (`post` then best-effort `attach`) is what marks it durable; core runs the
   `WritebackPoller` that delivers at-least-once from the durable terminal frame (the hub is lossy,
   so never from a live frame). It declares one route (its ingest) and never tails.
 - A **live** surface (web; core's built-in CLI is the twin) holds the member's connection open and
-  tails the turn's frames off the hub as they publish, so it admits with `writeback=False` and no
-  poller row is written. It declares its own routes (page, admit, SSE tail, spend) and reaches the
-  hub through the injected `TurnTailer`.
+  tails the turn's frames off the hub as they publish, so no poller row is written for its
+  conversations. It declares its own routes (page, admit, SSE tail, spend) and reaches the hub
+  through the injected `TurnTailer`.
 
-The poller only ever processes turns that registered a writeback, so it is a no-op for a live
-surface — the efficient downgrade, not a second seam."""
+The poller only ever processes turns that registered a writeback — admission registers one for
+every turn entering a durable-surface conversation, whoever admits it (a surface ingest, a
+scheduled fire, an extension invoke) — so it is a no-op for a live surface, the efficient
+downgrade, not a second seam."""
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -46,7 +48,15 @@ from selfhost.db import workspace_tx
 from selfhost.hub import LiveFrame
 from selfhost.o11y import log
 from selfhost.schema import tables
-from selfhost.schema.records import DEFAULT_AGENT_NAME, TerminalFrame, TerminalStatus
+from selfhost.schema.records import (
+    DEFAULT_AGENT_NAME,
+    WRITEBACK_CLAIMED,
+    WRITEBACK_DELIVERED,
+    WRITEBACK_FAILED,
+    WRITEBACK_PENDING,
+    TerminalFrame,
+    TerminalStatus,
+)
 
 WORKSPACE_SEGMENT = "workspace"
 
@@ -74,10 +84,6 @@ class TurnTailer(Protocol):
     def tail(self, turn_id: UUID, since: str = "") -> AsyncIterator[tuple[str, LiveFrame]]: ...
 
 
-WRITEBACK_PENDING = "pending"
-WRITEBACK_CLAIMED = "claimed"
-WRITEBACK_DELIVERED = "delivered"
-WRITEBACK_FAILED = "failed"
 TERMINAL_TURN_STATUSES: tuple[str, ...] = ("done", "failed", "cancelled")
 MAX_WRITEBACK_ERROR_CHARS = 2_048
 WRITEBACK_POLL_SECONDS = 1.0
@@ -129,9 +135,9 @@ class SurfaceContext:
     """The privileged handle a surface's route handlers receive — one context spanning both delivery
     modes. `blob` and the admit/identity reach are deliberately unscoped for a workspace's trusted
     surface (the distinction from a scoped extension context, which never admits a turn or asserts
-    identity). A **durable** surface (Slack) admits with writeback and delivers through the poller
-    and `artifact_link`; a **live** surface (web; core's CLI is the built-in twin) admits without
-    writeback and delivers by `tail`-ing the turn's frames off the hub in its own SSE route, reading
+    identity). A **durable** surface (Slack) delivers through the poller and `artifact_link`; a
+    **live** surface (web; core's CLI is the built-in twin) delivers by `tail`-ing the turn's
+    frames off the hub in its own SSE route, reading
     `turn_owner` to gate a tail and `spend_rollup` for a spend view. Each calls only what it needs.
     `credential` reads the surface workspace's slots in-process (never through the sandbox proxy); a
     surface declaring no slots holds no store and never calls it."""
@@ -289,35 +295,15 @@ class SurfaceContext:
         agent_id: UUID,
         body: str,
         idempotency_key: str | None = None,
-        writeback: bool = True,
     ) -> UUID:
-        """Admit an inbound message onto the durable turn queue and return its turn id. A durable
-        surface admits with `writeback=True` (the default) and registers the turn for the poller to
-        deliver; a live surface admits with `writeback=False` and delivers by tailing the hub in its
-        own route, so no poller row is written — the poller only ever processes turns that
-        registered one, which is the efficient downgrade, not a second delivery path. A redelivery
-        deduped to
-        the turn already admitted joins it; the writeback insert hits the primary key the poller
-        already owns, so the collision is dropped, not doubled."""
-        turn_id = await self._invoker.invoke(
+        """Admit an inbound message onto the durable turn queue and return its turn id. Delivery is
+        admission's concern, derived from the conversation's surface: a durable-surface turn
+        registers for the poller atomically with its row, a live surface's turn registers nothing
+        and its member tails the hub — the surface supplies only the message and its idempotency
+        key. A redelivery deduped to the turn already admitted joins it."""
+        return await self._invoker.invoke(
             conversation_id, agent_id, body, idempotency_key=idempotency_key
         )
-        if not writeback:
-            return turn_id
-        try:
-            async with workspace_tx() as connection:
-                await connection.execute(
-                    sa.insert(tables.writeback).values(
-                        turn_id=turn_id,
-                        workspace_id=self.workspace_id,
-                        status=WRITEBACK_PENDING,
-                        created_at=sa.func.now(),
-                        updated_at=sa.func.now(),
-                    )
-                )
-        except sa.exc.IntegrityError:
-            log("surface.writeback_exists", turn_id=str(turn_id))
-        return turn_id
 
     async def turn_owner(self, turn_id: UUID) -> UUID | None:
         """The member whose conversation owns a turn, or None when no such turn exists — the check a

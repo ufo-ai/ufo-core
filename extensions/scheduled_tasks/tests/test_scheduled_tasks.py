@@ -31,7 +31,7 @@ from selfhost.ext.loader import skill_registry
 from selfhost.jobs import JobRunner, bindings_from
 from selfhost.scheduling import ScheduleStore
 from selfhost.schema import tables
-from selfhost.schema.records import Agent, Turn
+from selfhost.schema.records import WRITEBACK_PENDING, Agent, Turn
 from selfhost.surfaces.admission import Admission, AdmissionInvoker
 from selfhost.tools.context import SpawnResult, ToolContext
 
@@ -49,7 +49,7 @@ class StubDbos:
         self.enqueued.append(workflow_id)
 
 
-async def _seed() -> tuple[UUID, UUID, UUID]:
+async def _seed(surface: str = "cli") -> tuple[UUID, UUID, UUID]:
     workspace_id, member_id, agent_id, conversation_id = uuid4(), uuid4(), uuid4(), uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -81,7 +81,7 @@ async def _seed() -> tuple[UUID, UUID, UUID]:
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
-                surface="cli",
+                surface=surface,
                 queue_key="session",
                 member_id=member_id,
                 created_at=sa.func.now(),
@@ -182,7 +182,9 @@ async def test_runner_fires_due_task_into_a_turn(db: None) -> None:
         due_at,
     )
     dbos = StubDbos()
-    invoker = AdmissionInvoker(admission=Admission(dbos=dbos), workspace_id=workspace_id)
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
+    )
 
     await ScheduledTaskRunner(ctx=_runner_ctx(workspace_id, invoker)).run()
 
@@ -194,6 +196,40 @@ async def test_runner_fires_due_task_into_a_turn(db: None) -> None:
     advanced = (await store.list())[0]
     assert advanced.last_run_at is not None
     assert await store.claim_due(datetime.now(UTC), 300) == ()
+
+
+async def test_fire_into_a_durable_surface_conversation_registers_delivery(db: None) -> None:
+    """The gap this guards: a scheduled fire admits through the same boundary as a surface ingest,
+    so a task scheduled in a Slack thread delivers its reply there — the writeback row rides the
+    turn insert, never a surface handler."""
+    workspace_id, agent_id, conversation_id = await _seed(surface="slack")
+    store = ScheduleStore(workspace_id=workspace_id)
+    due_at = datetime.now(UTC) - timedelta(minutes=1)
+    await store.create(
+        conversation_id,
+        agent_id,
+        "scheduled-daily",
+        DAILY_9AM,
+        "check inbox",
+        "check inbox",
+        due_at,
+    )
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=StubDbos(), durable_surfaces=frozenset({"slack"})),
+        workspace_id=workspace_id,
+    )
+    await ScheduledTaskRunner(ctx=_runner_ctx(workspace_id, invoker)).run()
+    turns = await _turns(conversation_id)
+    assert len(turns) == 1
+    async with workspace_tx() as connection:
+        status = (
+            await connection.execute(
+                sa.select(tables.writeback.c.status).where(
+                    tables.writeback.c.turn_id == turns[0]["id"]
+                )
+            )
+        ).scalar_one()
+    assert status == WRITEBACK_PENDING
 
 
 async def test_second_poll_does_not_refire_an_advanced_task(db: None) -> None:
@@ -211,7 +247,10 @@ async def test_second_poll_does_not_refire_an_advanced_task(db: None) -> None:
     )
     dbos = StubDbos()
     ctx = _runner_ctx(
-        workspace_id, AdmissionInvoker(admission=Admission(dbos=dbos), workspace_id=workspace_id)
+        workspace_id,
+        AdmissionInvoker(
+            admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
+        ),
     )
     await ScheduledTaskRunner(ctx=ctx).run()
     await ScheduledTaskRunner(ctx=ctx).run()
@@ -260,7 +299,9 @@ async def test_manifest_job_fires_through_job_runner(db: None) -> None:
         workspace_id=workspace_id,
         credential_store=_credentials(),
         bindings=bindings_from((manifest(),), ()),
-        invoker=AdmissionInvoker(admission=Admission(dbos=dbos), workspace_id=workspace_id),
+        invoker=AdmissionInvoker(
+            admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
+        ),
     )
     await runner.fire(f"{NAME}:{RUNNER_JOB}")
     assert len(await _turns(conversation_id)) == 1

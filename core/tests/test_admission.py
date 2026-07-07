@@ -75,7 +75,7 @@ async def _turn_count(conversation_id: UUID) -> int:
 async def test_repeated_delivery_dedups_to_one_turn(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     dbos = StubDbos()
-    admission = Admission(dbos=dbos)
+    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
     first = await admission.admit(workspace_id, conversation_id, agent_id, "hi", "C0000001:1.5")
     second = await admission.admit(
         workspace_id, conversation_id, agent_id, "hi again", "C0000001:1.5"
@@ -88,7 +88,7 @@ async def test_repeated_delivery_dedups_to_one_turn(db: None) -> None:
 async def test_distinct_keys_allocate_sequential_turns(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     dbos = StubDbos()
-    admission = Admission(dbos=dbos)
+    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
     first = await admission.admit(workspace_id, conversation_id, agent_id, "one", "C:1")
     second = await admission.admit(workspace_id, conversation_id, agent_id, "two", "C:2")
     assert first != second
@@ -107,7 +107,7 @@ async def test_distinct_keys_allocate_sequential_turns(db: None) -> None:
 async def test_keyless_admission_enqueues_each_turn(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     dbos = StubDbos()
-    admission = Admission(dbos=dbos)
+    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
     first = await admission.admit(workspace_id, conversation_id, agent_id, "one")
     second = await admission.admit(workspace_id, conversation_id, agent_id, "two")
     assert first != second

@@ -61,7 +61,7 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
         return Response(f"message exceeds {MAX_INBOUND_CHARS} characters", status_code=413)
     conversation_id = await ctx.conversation_for(digest, member_id)
     agent_id = await ctx.default_agent()
-    turn_id = await ctx.admit(conversation_id, agent_id, inbound, writeback=False)
+    turn_id = await ctx.admit(conversation_id, agent_id, inbound)
     return JSONResponse({"turn_id": str(turn_id)})
 
 

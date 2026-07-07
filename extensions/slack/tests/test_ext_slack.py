@@ -28,10 +28,10 @@ from selfhost.blob import BlobNotFound, FilesystemBlobStore
 from selfhost.credentials import CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.ext.loader import skill_registry
-from selfhost.ext.surface import WRITEBACK_DELIVERED, WRITEBACK_PENDING, workspace_key
+from selfhost.ext.surface import WRITEBACK_DELIVERED, workspace_key
 from selfhost.hub import InProcessHub
 from selfhost.schema import tables
-from selfhost.schema.records import TerminalFrame
+from selfhost.schema.records import WRITEBACK_PENDING, TerminalFrame
 from selfhost.serve import _mount_surfaces
 
 TEAM_ID = "T0000001"

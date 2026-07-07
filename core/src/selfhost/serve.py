@@ -32,6 +32,7 @@ from selfhost.db import init_db, workspace_tx
 from selfhost.ext.context import context_for
 from selfhost.ext.loader import (
     NotRegisteredError,
+    durable_surfaces,
     embed_backend,
     index_backend,
     load_manifests,
@@ -157,6 +158,7 @@ def run() -> None:
     app.state.dbos = dbos_client
     app.state.instance_id = instance_id
     app.state.workspace_id = workspace_id
+    app.state.durable_surfaces = durable_surfaces(manifests)
     app.state.writeback_poller = None
     app.state.blob = blob
     app.state.artifact_token_secret = artifact_secret
@@ -216,7 +218,10 @@ def _launch_jobs(
         )
     workspace_id = asyncio.run(_sole_workspace_id())
     credential_store = CredentialStore(fernet=Fernet(key.encode()))
-    invoker = AdmissionInvoker(admission=Admission(dbos=dbos_client), workspace_id=workspace_id)
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=dbos_client, durable_surfaces=durable_surfaces(manifests)),
+        workspace_id=workspace_id,
+    )
     registry = model_registry(config, manifests)
     page_change_runner = PageChangeRunner(
         workspace_id=workspace_id,
@@ -574,7 +579,10 @@ def _mount_surfaces(
     surface (declaring `post`/`attach`) joins the poller; a live surface admits without writeback
     and tails the hub in its own route, so the poller never sees its turns — the tailer is injected
     the same way the admission invoker is."""
-    invoker = AdmissionInvoker(workspace_id=workspace_id, admission=Admission(dbos=dbos_client))
+    invoker = AdmissionInvoker(
+        workspace_id=workspace_id,
+        admission=Admission(dbos=dbos_client, durable_surfaces=durable_surfaces(manifests)),
+    )
     tailer = HubTailer(hub=hub)
     registered: dict[str, tuple[SurfaceSpec, SurfaceContext]] = {}
     for manifest in manifests:

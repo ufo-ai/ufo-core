@@ -88,9 +88,9 @@ async def chat(
         ).one_or_none()
     if agent is None:
         raise HTTPException(404, f"no agent named {x_selfhost_agent!r}")
-    turn_id = await Admission(dbos=request.app.state.dbos).admit(
-        identity.workspace_id, conversation.id, agent.id, inbound
-    )
+    turn_id = await Admission(
+        dbos=request.app.state.dbos, durable_surfaces=request.app.state.durable_surfaces
+    ).admit(identity.workspace_id, conversation.id, agent.id, inbound)
     return {"turn_id": str(turn_id)}
 
 

@@ -20,7 +20,6 @@ from selfhost.ext.surface import (
     WRITEBACK_DELIVERED,
     WRITEBACK_FAILED,
     WRITEBACK_MAX_AGE_SECONDS,
-    WRITEBACK_PENDING,
     SharedArtifact,
     SurfaceContext,
     SurfaceRoute,
@@ -31,7 +30,7 @@ from selfhost.ext.surface import (
 )
 from selfhost.hub import InProcessHub
 from selfhost.schema import tables
-from selfhost.schema.records import TerminalFrame
+from selfhost.schema.records import WRITEBACK_PENDING, TerminalFrame
 from selfhost.surfaces.admission import Admission, AdmissionInvoker
 from selfhost.surfaces.hub_tail import HubTailer
 
@@ -110,7 +109,10 @@ def _context(workspace_id: UUID, dbos: StubDbos, blob: FilesystemBlobStore) -> S
         workspace_id=workspace_id,
         surface=SURFACE,
         blob=blob,
-        _invoker=AdmissionInvoker(workspace_id=workspace_id, admission=Admission(dbos=dbos)),
+        _invoker=AdmissionInvoker(
+            workspace_id=workspace_id,
+            admission=Admission(dbos=dbos, durable_surfaces=frozenset({SURFACE})),
+        ),
         _tailer=HubTailer(hub=InProcessHub()),
         _credentials=store,
         _artifact_token_secret="artifact-token-secret",

@@ -131,7 +131,7 @@ Manifest registers (each optional):
 | `hooks` | Reactive lifecycle handlers on Claude Code's taxonomy, scoped like a job. Seven fire on the turn loop — `pre_tool_use`/`post_tool_use`/`post_tool_use_failure`, `user_prompt_submit`, `stop`, `pre_compact`/`post_compact` — as a runtime policy filter over the tools grants already admit (observe, deny, modify, or inject), never a second grant path. The eighth, `page_change`, is the data-plane seam (data → memory): a core batched cursor-runner replays each changed source page to a consumer's hook off that extension's own cursor — the path the memory indexer and knowledge-graph extractor ride. (Claude Code's session/permission/subagent-stop/notification events have no producer here and are not members until one lands with a consumer.) |
 | `jobs` | Recurring/one-time background work. |
 | `routes` | HTTP endpoints under `/ext/<name>/` (webhooks, OAuth callbacks, plugin UIs). |
-| `surfaces` | A chat surface on the one privileged surface seam: its `SurfaceRoute`s mounted under `/surface/<name>`. A **durable** surface (Slack) admits with writeback and declares two-phase delivery (`post` then `attach`) the poller drives; a **live** surface (web) admits without writeback and tails the hub over SSE in its own route. Core's CLI is the built-in live twin. |
+| `surfaces` | A chat surface on the one privileged surface seam: its `SurfaceRoute`s mounted under `/surface/<name>`. A **durable** surface (Slack) declares two-phase delivery (`post` then `attach`) the poller drives — declaring `post` is what marks it durable, and admission registers every turn entering its conversations for delivery, whoever admits it; a **live** surface (web) tails the hub over SSE in its own route. Core's CLI is the built-in live twin. |
 | `credentials` | Named BYOK slots the workspace must fill (drives onboarding); `selfhost init` seeds a slot from its upper-cased env var (`SLACK_BOT_TOKEN` → `slack_bot_token`), and the operator fills or rotates one anytime with `selfhost credential set <slot>`. |
 | `onboarding` | Steps contributed to the workspace/pack onboarding flow. |
 | `models` | Model providers behind `ModelClient` (OpenRouter, local runtimes). |
@@ -192,12 +192,14 @@ surfaces), plus `tail`/`turn_owner`/`spend_rollup` for a live view. An extension
 `surfaces` Manifest point; core mounts its `SurfaceRoute`s under `/surface/<name>`, each bound to the
 one context. The seam supports two delivery modes; a surface uses only the subset it needs:
 
-- **Durable** (Slack) — the member is elsewhere, so admission registers a writeback and a
-  `WritebackPoller` delivers the terminal reply at-least-once (the hub is lossy), two-phase: `post`
-  returns the reply's durable reference (recorded before any upload), then `attach` streams the
-  turn's shared files into that reply, with rich rendering.
+- **Durable** (Slack) — the member is elsewhere; declaring `post` is what marks the surface
+  durable, and admission registers a writeback for every turn entering its conversations — a
+  surface ingest, a scheduled fire, an extension invoke alike. A `WritebackPoller` delivers the
+  terminal reply at-least-once (the hub is lossy), two-phase: `post` returns the reply's durable
+  reference (recorded before any upload), then `attach` streams the turn's shared files into that
+  reply, with rich rendering.
 - **Live** (web; core's CLI is the built-in twin) — the member's connection is held open, so
-  admission skips the writeback and the surface delivers by `tail`-ing the turn's frames off the hub
+  admission registers nothing and the surface delivers by `tail`-ing the turn's frames off the hub
   over SSE in its own route. The poller only processes turns that registered a writeback, so it is a
   no-op for a live surface — the efficient downgrade, not a second seam.
 

@@ -356,7 +356,9 @@ async def test_admission_parks_over_cap_member_without_enqueue(db: None) -> None
         await _bill(connection, workspace_id, conversation_id, agent_id, 100, seq=1)
         await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "park")
     dbos = StubDbos()
-    turn_id = await Admission(dbos=dbos).admit(workspace_id, conversation_id, agent_id, "hi")
+    turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset()).admit(
+        workspace_id, conversation_id, agent_id, "hi"
+    )
     assert dbos.enqueued == []
     assert await _status(turn_id) == "parked"
 
@@ -367,7 +369,9 @@ async def test_admission_rejects_over_cap_member_with_reason(db: None) -> None:
         await _bill(connection, workspace_id, conversation_id, agent_id, 100, seq=1)
         await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "reject")
     dbos = StubDbos()
-    turn_id = await Admission(dbos=dbos).admit(workspace_id, conversation_id, agent_id, "hi")
+    turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset()).admit(
+        workspace_id, conversation_id, agent_id, "hi"
+    )
     assert dbos.enqueued == []
     async with workspace_tx() as connection:
         row = (
@@ -387,7 +391,9 @@ async def test_admission_under_cap_enqueues(db: None) -> None:
         await _bill(connection, workspace_id, conversation_id, agent_id, 40, seq=1)
         await _set_cap(connection, workspace_id, "member", member_id, 3600, 100, "park")
     dbos = StubDbos()
-    turn_id = await Admission(dbos=dbos).admit(workspace_id, conversation_id, agent_id, "hi")
+    turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset()).admit(
+        workspace_id, conversation_id, agent_id, "hi"
+    )
     assert dbos.enqueued == [str(turn_id)]
     assert await _status(turn_id) == "queued"
 

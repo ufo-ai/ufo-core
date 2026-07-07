@@ -57,7 +57,7 @@ from selfhost.ext.loader import (
     turn_tools,
 )
 from selfhost.ext.manifest import CarrierSpec, Manifest
-from selfhost.ext.surface import WRITEBACK_DELIVERED, WRITEBACK_PENDING, workspace_key
+from selfhost.ext.surface import WRITEBACK_DELIVERED, workspace_key
 from selfhost.governance import prompt_digest
 from selfhost.grants import GrantStore
 from selfhost.hub import InProcessHub
@@ -73,7 +73,7 @@ from selfhost.sandbox.local import LocalCarrier
 from selfhost.sandbox.proxy.rules import InjectionRule, MeterRule, derive_credential_rules
 from selfhost.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from selfhost.schema import tables
-from selfhost.schema.records import Agent, Turn, Usage
+from selfhost.schema.records import WRITEBACK_PENDING, Agent, Turn, Usage
 from selfhost.search import FetchRequest, SearchQuery
 from selfhost.serve import (
     _mount_ext_routes,
@@ -212,7 +212,10 @@ async def test_sample_is_discovered_via_its_entry_point() -> None:
     }
     assert {section.name for section in manifest.prompt_sections} == {sample.SECTION_NAME}
     assert {profile.name for profile in manifest.subagents} == {sample.SUBAGENT_NAME}
-    assert {surface.name for surface in manifest.surfaces} == {sample.SURFACE_NAME}
+    assert {surface.name for surface in manifest.surfaces} == {
+        sample.SURFACE_NAME,
+        sample.SURFACE_LIVE_NAME,
+    }
     assert {source.backend for source in manifest.sources} == {sample.SOURCE_BACKEND}
     assert {spec.name for spec in manifest.indexes} == {sample.INDEX_BACKEND}
     assert {spec.backend for spec in manifest.hubs} == {sample.HUB_BACKEND}
@@ -1085,7 +1088,7 @@ async def test_sample_surface_live_admit_tails_and_stays_off_writeback(
     body = json.dumps({"external_id": "ext-live-1", "message": "hello"})
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://surface") as client:
         admitted = await client.post(
-            f"/surface/{sample.SURFACE_NAME}/{sample.SURFACE_LIVE_PATH}", content=body
+            f"/surface/{sample.SURFACE_LIVE_NAME}/{sample.SURFACE_LIVE_PATH}", content=body
         )
         assert admitted.status_code == 200
         result = admitted.json()
@@ -1103,7 +1106,7 @@ async def test_sample_surface_live_admit_tails_and_stays_off_writeback(
             adopted = (
                 await connection.execute(
                     sa.select(tables.surface_identity.c.member_id).where(
-                        tables.surface_identity.c.surface == sample.SURFACE_NAME,
+                        tables.surface_identity.c.surface == sample.SURFACE_LIVE_NAME,
                         tables.surface_identity.c.external_id == "ext-live-1",
                     )
                 )
@@ -1128,7 +1131,7 @@ async def test_sample_surface_live_admit_tails_and_stays_off_writeback(
         frames = []
         async with asyncio.timeout(30):
             async with client.stream(
-                "GET", f"/surface/{sample.SURFACE_NAME}/live/{turn_id}/stream"
+                "GET", f"/surface/{sample.SURFACE_LIVE_NAME}/live/{turn_id}/stream"
             ) as stream:
                 assert stream.status_code == 200
                 async for line in stream.aiter_lines():

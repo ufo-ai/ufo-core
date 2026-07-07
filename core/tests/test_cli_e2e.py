@@ -409,6 +409,7 @@ def chat_server(
     app = FastAPI()
     app.state.hub = hub
     app.state.dbos = dbos_client
+    app.state.durable_surfaces = frozenset()
     app.include_router(router)
     server = _ThreadedServer(app, port)
     server.start()

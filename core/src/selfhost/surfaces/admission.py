@@ -4,6 +4,11 @@ boundary, and no caller can bypass it. A conversation-row lock serializes seq al
 id is the DBOS workflow id, so a re-enqueue is idempotent. When an idempotency key is given, a
 redelivery of the same message joins the turn already admitted for it instead of spawning a second.
 
+Delivery is derived here too: a turn entering a conversation whose surface is durable registers a
+writeback row atomically with its turn row, so the poller delivers the reply no matter who admitted
+it — a surface ingest, a scheduled fire, or an extension invoke. A live surface's conversations
+register nothing; their members tail the hub.
+
 The inbound spend decision routes the turn before it is enqueued: allow queues it; a breached cap
 either parks it (held, not enqueued — the resume job re-admits it when the cap is raised) or, when
 the cap rejects, commits it cancelled with the reason, so a client's wait ends in-surface either
@@ -23,6 +28,7 @@ from selfhost.schema.records import (
     PARKED,
     TURN_QUEUE_NAME,
     TURN_WORKFLOW_NAME,
+    WRITEBACK_PENDING,
     TerminalFrame,
     TerminalStatus,
     TurnStatus,
@@ -36,6 +42,7 @@ CANCELLED: TerminalStatus = "cancelled"
 @dataclass(frozen=True)
 class Admission:
     dbos: DBOSClient
+    durable_surfaces: frozenset[str]
 
     async def admit(
         self,
@@ -48,7 +55,7 @@ class Admission:
         async with workspace_tx() as connection:
             conversation = (
                 await connection.execute(
-                    sa.select(tables.conversation.c.member_id)
+                    sa.select(tables.conversation.c.member_id, tables.conversation.c.surface)
                     .where(tables.conversation.c.id == conversation_id)
                     .with_for_update()
                 )
@@ -106,6 +113,16 @@ class Admission:
                         updated_at=sa.func.now(),
                     )
                 )
+                if conversation.surface in self.durable_surfaces:
+                    await connection.execute(
+                        sa.insert(tables.writeback).values(
+                            turn_id=turn_id,
+                            workspace_id=workspace_id,
+                            status=WRITEBACK_PENDING,
+                            created_at=sa.func.now(),
+                            updated_at=sa.func.now(),
+                        )
+                    )
         if status == QUEUED:
             await self._enqueue(conversation_id, turn_id)
         return turn_id

@@ -333,6 +333,15 @@ def turn_subagents(manifests: tuple[Manifest, ...]) -> tuple[SubagentProfile, ..
     return tuple(profile for manifest in manifests for profile in manifest.subagents)
 
 
+def durable_surfaces(manifests: tuple[Manifest, ...]) -> frozenset[str]:
+    """The surface names whose replies deliver through the writeback poller — a surface is durable
+    exactly when it declares a `post` handler. Admission registers a writeback row for every turn
+    entering one of these surfaces' conversations."""
+    return frozenset(
+        spec.name for manifest in manifests for spec in manifest.surfaces if spec.post is not None
+    )
+
+
 def turn_subagent_grants(manifests: tuple[Manifest, ...]) -> dict[str, frozenset[str]]:
     """The tools each extension exposes to a subagent profile it does not own, unioned by target
     profile across every manifest — the map the turn loop folds onto a profile's own `tool_names`
