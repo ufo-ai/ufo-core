@@ -75,6 +75,7 @@ selfhost_testsupport = "selfhost_testsupport.plugin"
 
 [dependency-groups]
 dev = [
+    "selfhost-k8s",
     "mypy>=1.13",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
@@ -179,3 +180,9 @@ markers = [
     "docker: needs a working Docker daemon (builds and runs a real container)",
     "serial: shares the process-singleton DBOS executor, a live container, or one database — must not run in parallel",
 ]
+
+[tool.uv.workspace]
+members = ["control"]
+
+[tool.uv.sources]
+selfhost-k8s = { workspace = true }
