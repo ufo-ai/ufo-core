@@ -2,8 +2,10 @@
 # broad ClusterRole (it manages tenant namespaces and every resource the tenant chart applies via
 # helm), the deploy API Deployment/Service, and the leader-elected operator Deployment.
 #
-# Apply after deploy/crds/tenant.yaml. Set the image, the platform ConfigMap, and the
-# selfhost-k8s-secrets Secret (Postgres admin DSN + role seed) for your cluster first.
+# Apply after deploy/crds/tenant.yaml. Set the image, the platform ConfigMap, the
+# selfhost-k8s-secrets Secret (Postgres admin DSN + role seed), and the selfhost-platform-secrets
+# Secret (model API keys + cloud credentials the tenant pods read from env — the operator replicates
+# it from this namespace into each tenant namespace during provisioning) for your cluster first.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -36,10 +38,12 @@ rules:
   - apiGroups: [""]
     resources: [secrets, services, serviceaccounts, resourcequotas, limitranges, configmaps]
     verbs: [get, list, create, update, patch, delete]
-  # The tenant workload the chart applies via helm.
+  # The tenant workload the chart applies via helm. statefulsets/watch is here (not just for the
+  # workload) because the sandbox-manager Role grants it and the operator must hold every verb it
+  # grants (RBAC escalation guard).
   - apiGroups: [apps]
     resources: [deployments, statefulsets]
-    verbs: [get, list, create, update, patch, delete]
+    verbs: [get, list, watch, create, update, patch, delete]
   - apiGroups: [batch]
     resources: [jobs]
     verbs: [get, list, create, update, patch, delete]
@@ -49,7 +53,20 @@ rules:
   - apiGroups: [networking.k8s.io]
     resources: [ingresses, networkpolicies]
     verbs: [get, list, create, update, patch, delete]
-  # It grants the sandbox-manager Role, so it must hold those verbs (RBAC escalation guard).
+  # The sandbox-manager Role (charts/selfhost-tenant/templates/rbac.yaml) grants the pod carrier
+  # pods, pods/exec, and PVCs; K8s escalation-prevention rejects Role creation unless the operator
+  # already holds every verb the Role grants. (services/networkpolicies/statefulsets are covered by
+  # the rules above; these three are added here to complete the set.)
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list]
+  - apiGroups: [""]
+    resources: [pods/exec]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [create, get, delete]
+  # The operator creates the sandbox-manager Role + RoleBinding in each tenant namespace.
   - apiGroups: [rbac.authorization.k8s.io]
     resources: [roles, rolebindings]
     verbs: [get, list, create, update, patch, delete]

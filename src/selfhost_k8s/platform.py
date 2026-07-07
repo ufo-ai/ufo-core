@@ -48,9 +48,10 @@ class PlatformConfig(BaseModel):
     shared Postgres; the reconciler mints a per-tenant role+database from it (database-per-tenant
     isolation). ``tenant_postgres_host`` is the ``host:port`` a tenant pod dials that database at.
     The blob and redis fields are the shared S3 bucket and Redis a tenant's core config points at —
-    core isolates by ``workspace_id`` on every row and key. ``platform_secret`` is a cluster Secret
-    (in each tenant namespace, synced by the operator or external-secrets) carrying the model API
-    keys and cloud credentials a tenant's ``serve`` reads from env.
+    core isolates by ``workspace_id`` on every row and key. ``platform_secret`` is the Secret name
+    carrying the model API keys and cloud credentials a tenant's ``serve`` reads from env; the owner
+    creates it once in ``selfhost-system`` and the reconciler replicates it into each tenant
+    namespace during provisioning.
     """
 
     model_config = ConfigDict(extra="forbid")

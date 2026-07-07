@@ -61,3 +61,7 @@ def test_chart_renders_the_tenant_workload(tmp_path: Path) -> None:
     # The init Job runs once, on install only.
     assert '"helm.sh/hook": post-install' in rendered
     assert "selfhost-sandbox-manager" in rendered
+    # Both the serve Deployment and the init Job envFrom the platform Secret (model + cloud creds)
+    # the operator replicates into the namespace — the consumer end of that Secret.
+    assert rendered.count("secretRef") >= 2
+    assert "selfhost-platform-secrets" in rendered

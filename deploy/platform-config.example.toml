@@ -24,8 +24,9 @@ blob_sts_role_arn = "arn:aws:iam::000000000000:role/selfhost-sandbox-fs"
 ingress_class = "nginx"
 cluster_issuer = "letsencrypt"
 
-# The cluster Secret (present in each tenant namespace, synced by external-secrets or the operator)
-# carrying model API keys + cloud credentials a tenant's serve reads from env.
+# The Secret carrying model API keys + cloud credentials a tenant's serve reads from env. Created
+# once in selfhost-system (see deploy/control-plane.yaml); the operator replicates it into each
+# tenant namespace during provisioning.
 platform_secret = "selfhost-platform-secrets"
 
 reconcile_interval_seconds = 15

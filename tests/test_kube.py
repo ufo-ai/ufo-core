@@ -3,7 +3,7 @@ import json
 import httpx
 import pytest
 
-from selfhost_k8s.contract import DeployRequest
+from selfhost_k8s.contract import DeployRequest, DeployStatus
 from selfhost_k8s.kube import APPLY_CONTENT_TYPE, KubeClient
 
 DIGEST = "sha256:" + "c" * 64
@@ -45,6 +45,25 @@ async def test_apply_tenant_is_a_forced_server_side_apply() -> None:
     assert isinstance(body, dict)
     assert body["kind"] == "Tenant"
     assert body["spec"]["tenant"]["name"] == "acme"
+    await client.close()
+
+
+async def test_status_patch_omits_absent_url() -> None:
+    # A Failed status has no url; the CRD's status.url is a non-nullable string, so the applied
+    # body must omit url rather than send `null` (which the apiserver rejects 422).
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"ok": True})
+
+    client = _client(httpx.MockTransport(handler))
+    status = DeployStatus(tenant="acme", phase="Failed", message="boom")
+    await client.patch_tenant_status("acme", status)
+    body = seen["body"]
+    assert isinstance(body, dict)
+    assert "url" not in body["status"]
+    assert body["status"]["phase"] == "Failed"
     await client.close()
 
 

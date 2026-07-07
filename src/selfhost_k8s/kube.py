@@ -112,11 +112,14 @@ class KubeClient:
         await self.apply(self._tenant_path(request.tenant.name), tenant_body(request))
 
     async def patch_tenant_status(self, name: str, status: DeployStatus) -> None:
+        # exclude_none: a Failed status carries no url, and the CRD's status.url is a non-nullable
+        # string — emitting `"url": null` is rejected 422, so an errored reconcile would never
+        # surface its phase. Omitting the absent optional lets the apply set exactly what is known.
         body = {
             "apiVersion": API_GROUP_VERSION,
             "kind": TENANT_KIND,
             "metadata": {"name": name, "namespace": PLATFORM_NAMESPACE},
-            "status": status.model_dump(mode="json"),
+            "status": status.model_dump(mode="json", exclude_none=True),
         }
         await self.apply(f"{self._tenant_path(name)}/status", body)
 
@@ -137,6 +140,9 @@ class KubeClient:
             "data": data,
         }
         await self.apply(f"/api/v1/namespaces/{namespace}/secrets/{name}", body)
+
+    async def read_secret(self, namespace: str, name: str) -> dict[str, Any] | None:
+        return await self.get(f"/api/v1/namespaces/{namespace}/secrets/{name}")
 
     async def get_lease(self, namespace: str, name: str) -> dict[str, Any] | None:
         return await self.get(self._lease_path(namespace, name))
