@@ -68,9 +68,12 @@ def main() -> None:
 @main.command()
 @click.option("--email", required=True)
 @click.option("--model", default=DEFAULT_AGENT_MODEL, show_default=True)
-def init(email: str, model: str) -> None:
+@click.option("--workspace-id", type=click.UUID, default=None)
+def init(email: str, model: str, workspace_id: UUID | None) -> None:
     """Write ufo.toml if absent, apply the schema, then onboard the workspace, owner, default
-    agent and model key (plus any extension onboarding steps) and bind this machine's CLI token."""
+    agent and model key (plus any extension onboarding steps) and bind this machine's CLI token.
+    `--workspace-id` pins the workspace row's id (the control plane mints it and pins the tenant's
+    RLS GUC to it); unset, one is minted."""
     config_path = Path("ufo.toml")
     if not config_path.exists():
         config_path.write_text(DEFAULT_CONFIG)
@@ -81,7 +84,7 @@ def init(email: str, model: str) -> None:
     apply_migrations(config.database.url, config.pack.name)
     token = secrets.token_hex(32)
     try:
-        asyncio.run(_onboard(config, email, model, token))
+        asyncio.run(_onboard(config, email, model, token, workspace_id))
     except (AlreadyInitialized, ValueError, RuntimeError) as error:
         raise click.ClickException(str(error)) from error
     UFOCTL_DIR.mkdir(mode=0o700, exist_ok=True)
@@ -92,7 +95,9 @@ def init(email: str, model: str) -> None:
     click.echo(f"cli token written to {token_path}")
 
 
-async def _onboard(config: Config, email: str, model: str, token: str) -> None:
+async def _onboard(
+    config: Config, email: str, model: str, token: str, workspace_id: UUID | None
+) -> None:
     """Open the db boundary once: create the core workspace, bind the CLI token to the new owner
     (the CLI surface's own identity, issued here not in the surface-agnostic engine), THEN run the
     extension onboarding steps — so core access lands before any add-on step that could fail."""
@@ -106,6 +111,7 @@ async def _onboard(config: Config, email: str, model: str, token: str) -> None:
             model=model,
             credentials=credentials,
             manifests=load_manifests(config.pack.name),
+            workspace_id=workspace_id,
         )
         onboarded = await onboarding.create()
         await _bind_cli_token(onboarded, token)
