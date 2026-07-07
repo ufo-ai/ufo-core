@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: selfhost-serve
+  labels:
+    {{- include "selfhost-tenant.labels" . | nindent 4 }}
+    app: selfhost-serve
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      app: selfhost-serve
+  template:
+    metadata:
+      labels:
+        {{- include "selfhost-tenant.labels" . | nindent 8 }}
+        app: selfhost-serve
+    spec:
+      serviceAccountName: selfhost-serve
+      containers:
+        - name: serve
+          image: {{ .Values.bundle_image | quote }}
+          # ENTRYPOINT ["selfhost","serve"] is baked into the bundle image.
+          ports:
+            - name: http
+              containerPort: {{ .Values.serve_port }}
+          env:
+            # Minted per tenant by the control plane, carried in the tenant Secret.
+            - name: SELFHOST_CREDENTIAL_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.tenant_secret }}
+                  key: SELFHOST_CREDENTIAL_KEY
+            - name: SELFHOST_ARTIFACT_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.tenant_secret }}
+                  key: SELFHOST_ARTIFACT_TOKEN_SECRET
+          # Model API keys + cloud credentials from the cluster's platform Secret.
+          envFrom:
+            - secretRef:
+                name: {{ .Values.platform_secret }}
+          volumeMounts:
+            # Override the image's baked selfhost.toml with the tenant's rendered config.
+            - name: config
+              mountPath: /app/selfhost.toml
+              subPath: selfhost.toml
+          # No /healthz in core (surfaces mount /v1, /surface, /ext, /artifacts); a TCP probe
+          # confirms uvicorn is bound after core's fail-loud boot.
+          readinessProbe:
+            tcpSocket:
+              port: {{ .Values.serve_port }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: {{ .Values.serve_port }}
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.serve.resources | nindent 12 }}
+      volumes:
+        - name: config
+          secret:
+            secretName: {{ .Values.tenant_secret }}
+            items:
+              - key: selfhost.toml
+                path: selfhost.toml
