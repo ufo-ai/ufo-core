@@ -17,17 +17,30 @@ DEFAULT_AUTO_MODEL = "claude-opus-4-8"
 
 
 class DatabaseConfig(BaseModel):
+    """`system_url` is the DBOS system store's sync-driver url. Unset, it derives as a `_dbos`
+    sibling of the schema database — the single-workspace default. A shared-database deploy sets it
+    explicitly per tenant so tenants never derive the same system store and cross-recover each
+    other's workflows."""
+
     model_config = ConfigDict(extra="forbid")
     url: str
+    system_url: str | None = None
 
-    @property
-    def system_url(self) -> str:
-        """The DBOS system store: a _dbos sibling of the schema database, sync-driver url."""
+    @model_validator(mode="after")
+    def _derive_system_url(self) -> "DatabaseConfig":
+        if self.system_url is not None:
+            return self
         base, _, name = self.url.rpartition("/")
         if self.url.startswith("sqlite"):
             stem, dot, suffix = name.partition(".")
-            return f"{base}/{stem}_dbos{dot}{suffix}".replace("sqlite+aiosqlite", "sqlite", 1)
-        return f"{base}/{name}_dbos".replace("postgresql+asyncpg", "postgresql+psycopg", 1)
+            self.system_url = f"{base}/{stem}_dbos{dot}{suffix}".replace(
+                "sqlite+aiosqlite", "sqlite", 1
+            )
+        else:
+            self.system_url = f"{base}/{name}_dbos".replace(
+                "postgresql+asyncpg", "postgresql+psycopg", 1
+            )
+        return self
 
 
 class BlobConfig(BaseModel):

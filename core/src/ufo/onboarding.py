@@ -98,6 +98,7 @@ class Onboarding:
     model: str
     credentials: CredentialStore | None
     manifests: tuple[Manifest, ...]
+    workspace_id: UUID | None = None
 
     async def run(self) -> Onboarded:
         onboarded = await self.create()
@@ -150,7 +151,7 @@ class Onboarding:
             owner = (await connection.execute(sa.select(tables.member.c.email))).first()
             if owner is not None:
                 raise AlreadyInitialized(f"already initialized (owner {owner.email})")
-            workspace_id, member_id, agent_id = uuid4(), uuid4(), uuid4()
+            workspace_id, member_id, agent_id = self.workspace_id or uuid4(), uuid4(), uuid4()
             await connection.execute(
                 sa.insert(tables.workspace).values(
                     id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()

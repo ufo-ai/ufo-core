@@ -179,3 +179,17 @@ def test_postgres_system_url_uses_sync_driver(tmp_path: Path) -> None:
         )
     )
     assert load_config(path).database.system_url == "postgresql+psycopg://u:p@db:5432/ufo_dbos"
+
+
+def test_explicit_system_url_wins_over_derivation(tmp_path: Path) -> None:
+    """A shared-database deploy pins the DBOS system store per tenant; the explicit value is taken
+    verbatim, not the `_dbos` sibling the url would derive."""
+    path = tmp_path / "ufo.toml"
+    path.write_text(
+        VALID.replace(
+            'url = "sqlite+aiosqlite:///ufo.db"',
+            'url = "postgresql+asyncpg://u:p@db:5432/ufo"\n'
+            'system_url = "postgresql+psycopg://u:p@db:5432/ufo_dbos_tenant"',
+        )
+    )
+    assert load_config(path).database.system_url == "postgresql+psycopg://u:p@db:5432/ufo_dbos_tenant"
