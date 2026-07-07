@@ -83,10 +83,21 @@ class SubagentStatus:
 
 class Spawn(Protocol):
     """Delegate a subtask to a named subagent profile: validate the payload against the profile's
-    input schema, run a child turn, and (foreground) return its schema-validated output."""
+    input schema, run a child turn, and (foreground) return its schema-validated output.
+
+    `dedup_key` makes the child's identity deterministic from the parent turn and the key rather
+    than random, so a caller that re-runs on crash recovery (a fanned-out `wide_*` tool step
+    re-executing) reconnects to the child it already spawned instead of respawning it — the same
+    key yields the same child turn, its admit is idempotent, and a child that already finished is
+    awaited, not recomputed. A caller that wants a fresh child each call (`browser_task`,
+    `spawn_subagent`) omits it."""
 
     async def __call__(
-        self, profile: str, payload: dict[str, Any], background: bool = False
+        self,
+        profile: str,
+        payload: dict[str, Any],
+        background: bool = False,
+        dedup_key: str | None = None,
     ) -> SpawnResult: ...
 
 

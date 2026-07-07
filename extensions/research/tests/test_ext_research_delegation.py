@@ -25,12 +25,16 @@ class _Result(BaseModel):
 
 @dataclass
 class RecordingSpawn:
-    spawned: list[tuple[str, dict[str, object]]] = field(default_factory=list)
+    spawned: list[tuple[str, dict[str, object], str | None]] = field(default_factory=list)
 
     async def __call__(
-        self, profile: str, payload: dict[str, object], background: bool = False
+        self,
+        profile: str,
+        payload: dict[str, object],
+        background: bool = False,
+        dedup_key: str | None = None,
     ) -> SpawnResult:
-        self.spawned.append((profile, payload))
+        self.spawned.append((profile, payload, dedup_key))
         return SpawnResult(turn_id=uuid4(), output=_Result(result=f"did {payload['objective']}"))
 
 
@@ -51,7 +55,12 @@ class FilesSandbox:
         self.writes[path] = content
 
 
-def _context(sandbox: FilesSandbox, spawn: RecordingSpawn, tmp_path: Path) -> ToolContext:
+def _context(
+    sandbox: FilesSandbox,
+    spawn: RecordingSpawn,
+    tmp_path: Path,
+    idempotency_key: str | None = None,
+) -> ToolContext:
     return ToolContext(
         sandbox=sandbox,
         blob=FilesystemBlobStore(root=tmp_path),
@@ -68,6 +77,7 @@ def _context(sandbox: FilesSandbox, spawn: RecordingSpawn, tmp_path: Path) -> To
         spawn=spawn,
         member_id=None,
         artifact_token_secret="",
+        idempotency_key=idempotency_key,
     )
 
 
@@ -92,8 +102,8 @@ async def test_wide_research_fans_the_research_profile_over_deduped_entities(
             }
         ),
     )
-    assert {profile for profile, _ in spawn.spawned} == {"research"}
-    objectives = [payload["objective"] for _, payload in spawn.spawned]
+    assert {profile for profile, _, _ in spawn.spawned} == {"research"}
+    objectives = [payload["objective"] for _, payload, _ in spawn.spawned]
     assert objectives[0].startswith("research acme.com")
     assert objectives[1].startswith("research beta.io")
     assert all('{"headcount": "number"}' in objective for objective in objectives)
@@ -101,6 +111,32 @@ async def test_wide_research_fans_the_research_profile_over_deduped_entities(
     rows = json.loads(sandbox.writes["wide_research.json"])
     assert [row["entity"] for row in rows] == ["acme.com", "beta.io"]
     assert json.loads(result.content[0].text)["output_file"] == "wide_research.json"
+
+
+async def test_wide_research_keys_each_child_on_the_call_and_entity(tmp_path: Path) -> None:
+    """The producer half of the recovery-dedup seam: each child is spawned under a dedup_key derived
+    from the tool call's stable idempotency_key and the entity, so a crash-recovery re-run of the
+    fan-out reconnects to the same children rather than respawning them. The tool is side_effecting,
+    so core folds the idempotency_key onto the context it consumes here."""
+    assert WIDE_RESEARCH_TOOL.side_effecting is True
+    sandbox = FilesSandbox(files={"entities.txt": "acme.com\nbeta.io\n", "schema.json": ""})
+    spawn = RecordingSpawn()
+    ctx = _context(sandbox, spawn, tmp_path, idempotency_key="turn-1/wide_research/call-9")
+    await WIDE_RESEARCH_TOOL.handler(
+        ctx,
+        WIDE_RESEARCH_TOOL.input_model.model_validate(
+            {
+                "entities_file": "entities.txt",
+                "prompt_template": "research {entity}",
+                "output_schema_file": "schema.json",
+                "user_description": "batch",
+            }
+        ),
+    )
+    assert [dedup for _, _, dedup in spawn.spawned] == [
+        "turn-1/wide_research/call-9/acme.com",
+        "turn-1/wide_research/call-9/beta.io",
+    ]
 
 
 async def test_wide_research_caps_the_entity_count(tmp_path: Path) -> None:

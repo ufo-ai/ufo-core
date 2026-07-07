@@ -581,11 +581,14 @@ class SampleModelClient:
 @dataclass(frozen=True)
 class SampleCdpLease:
     """The canned per-turn lease the sample's cdp provider mints: `endpoint` returns a fixed
-    `CdpEndpoint`, `aclose` is a no-op — a real object exercised through the `CdpLease` protocol the
-    browser engine drives, never a mock."""
+    `CdpEndpoint`, `token` the durable reattach handle (the fixed URL), `aclose` is a no-op — a real
+    object exercised through the `CdpLease` protocol the browser engine drives, never a mock."""
 
     async def endpoint(self) -> CdpEndpoint:
         return CdpEndpoint(url=SAMPLE_CDP_URL)
+
+    async def token(self) -> str:
+        return SAMPLE_CDP_URL
 
     async def aclose(self) -> None:
         return None
@@ -594,10 +597,14 @@ class SampleCdpLease:
 @dataclass(frozen=True)
 class SampleCdpProvider:
     """A trivial CdpProvider the probe registers through the `cdp_providers` Manifest point: `lease`
-    mints a canned SampleCdpLease. A real object consumed through the protocol, so a test drives it
-    exactly as core selects and leases it; the BUA engine keeps its own live-CDP proof."""
+    mints a canned SampleCdpLease, `reattach` reconnects to the same fixed endpoint. A real object
+    consumed through the protocol, so a test drives it as core selects and leases it; the BUA engine
+    keeps its own live-CDP proof."""
 
     async def lease(self) -> CdpLease:
+        return SampleCdpLease()
+
+    async def reattach(self, token: str) -> CdpLease:
         return SampleCdpLease()
 
 

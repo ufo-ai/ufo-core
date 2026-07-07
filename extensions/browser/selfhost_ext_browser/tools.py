@@ -95,13 +95,19 @@ def _browser(ctx: ToolContext) -> BuaSurface:
     """The turn's one browser surface: built lazily on first browser-tool call from the selected cdp
     provider, cached for the turn (keyed by its per-turn cleanup registry), and registered on that
     registry so its CDP connection and any hosted-session lease release at turn end. Later calls in
-    the turn reuse it."""
+    the turn reuse it. The surface carries the extension's scoped store and the turn's conversation
+    id so it can persist the lease's reattach token and reconnect the same session on a recovered
+    turn; a call without an extension context (a bare test harness) simply mints fresh each turn."""
     surface = _TURN_SURFACES.get(ctx.cleanup)
     if surface is None:
         if ctx.cdp_provider is None:
             raise RuntimeError("no cdp provider is configured for this turn")
         surface = BuaSurface(
-            cdp_provider=ctx.cdp_provider, find_completer=ctx.find, model=ctx.agent.model
+            cdp_provider=ctx.cdp_provider,
+            find_completer=ctx.find,
+            model=ctx.agent.model,
+            store=ctx.ext.store if ctx.ext is not None else None,
+            conversation_id=ctx.turn.conversation_id,
         )
         _TURN_SURFACES[ctx.cleanup] = surface
         ctx.cleanup.register(surface.aclose)

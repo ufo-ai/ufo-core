@@ -4,7 +4,12 @@
 children over them through `ctx.spawn` — the same Spawn seam `spawn_subagent` uses, so each run is
 scoped to the research profile's tools — and collects their summaries into a workspace JSON file.
 It mirrors the browser pack's `wide_browse`, reusing the `research` profile rather than inventing a
-third one."""
+third one.
+
+The tool is `side_effecting`, so it carries a stable per-call `idempotency_key`; each child is
+spawned under `dedup_key = f"{idempotency_key}/{entity}"`, deterministic across a crash-recovery
+re-run of the fan-out. A recovered parent reconnects to the children it already spawned — completed
+entities return their memoized result, only the remainder is fresh work."""
 
 import asyncio
 import json
@@ -60,7 +65,11 @@ async def _wide_research(ctx: ToolContext, args: WideResearchInput) -> ToolResul
             objective = args.prompt_template.replace("{entity}", entity)
             if output_schema.strip():
                 objective = f"{objective}\n\nReturn data matching this schema:\n{output_schema}"
-            result = await ctx.spawn(RESEARCH_PROFILE_NAME, {"objective": objective})
+            result = await ctx.spawn(
+                RESEARCH_PROFILE_NAME,
+                {"objective": objective},
+                dedup_key=f"{ctx.idempotency_key}/{entity}",
+            )
             return {
                 "entity": entity,
                 "result": "" if result.output is None else result.output.model_dump_json(),
@@ -78,4 +87,5 @@ WIDE_RESEARCH_TOOL = ToolDef(
     description=WIDE_RESEARCH_DESCRIPTION,
     input_model=WideResearchInput,
     handler=_wide_research,
+    side_effecting=True,
 )

@@ -24,6 +24,7 @@ from selfhost.loop.engine import (
     FORCE_FINAL_PROMPT,
     MAX_TOOL_RESULT_CHARS,
     OFFLOAD_NOTICE,
+    TOOL_IMAGE_BLOB_DIR,
     TOOL_OUTPUT_DIR,
     TOOL_RESULT_PREVIEW_CHARS,
     UNTRUSTED_RESULT_CLOSE,
@@ -38,6 +39,7 @@ from selfhost.loop.prompts.render import COMPACTION_SYSTEM_PROMPT, rendered_prom
 from selfhost.loop.transcript import Transcript
 from selfhost.models.interface import (
     ImageBlock,
+    ImageSource,
     Message,
     ModelEvent,
     ModelRequest,
@@ -927,6 +929,57 @@ async def test_dispatch_folds_tool_image_content_into_the_tool_result_block(
     )
     assert result.content[1].source.media_type == "image/png"
     assert result.content[1].source.data == "AAAA"
+
+
+async def test_dispatch_step_offloads_image_bytes_to_a_blob_reference(
+    db: None, tmp_path: Path
+) -> None:
+    """Open decision #3, both ends: `_dispatch_step` is a DBOS step whose output serializes into the
+    step log, so a browser-screenshot image must not ride it inline. The step returns only a blob
+    reference — the image's base64 lives in the blob store, never in the memoized `DispatchResult` —
+    and `_dispatch` rehydrates the full ImageBlock from that blob afterward, so the model still sees
+    the screenshot while the checkpoint stays bounded and a recovery replay reads the same blob."""
+    turn = await _seed_turn("queued", None)
+    payload = "Zm9v" * 20_000
+    tool = _image_result_tool("shot")
+
+    async def big_shot(context: ToolContext, args: BaseModel) -> ToolResult:
+        return ToolResult(
+            content=(
+                TextContent(text="chart.png"),
+                ImageContent(media_type="image/png", data=payload),
+            )
+        )
+
+    tool = replace(tool, handler=big_shot)
+    engine = replace(_engine(turn, EchoModel(), tmp_path), tools=ToolRegistry((tool,)))
+    context = ToolContext(
+        sandbox=engine.sandbox,
+        blob=engine.blob,
+        turn=engine.turn,
+        agent=engine.agent,
+        spawn=engine.spawn,
+        member_id=engine.member_id,
+        artifact_token_secret=engine.artifact_token_secret,
+        grants=engine.grants,
+    )
+    call = ToolUseBlock(id="c1", name="shot", input={})
+
+    step = await engine._dispatch_step(context, call)
+    serialized = step.model_dump_json()
+    assert payload not in serialized
+    assert len(serialized) < 1_000
+    assert step.text == "chart.png"
+    (ref,) = step.image_refs
+    assert ref.blob_key == f"{TOOL_IMAGE_BLOB_DIR}/{turn.id}/c1/0"
+    assert ref.media_type == "image/png"
+    assert (await engine.blob.get(ref.blob_key)).decode() == payload
+
+    rehydrated = await engine._dispatch(context, call)
+    assert rehydrated.content == (
+        TextBlock(text="chart.png"),
+        ImageBlock(source=ImageSource(media_type="image/png", data=payload)),
+    )
 
 
 def _image_error_tool(name: str) -> ToolDef:

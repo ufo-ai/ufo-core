@@ -4,7 +4,12 @@
 summary; `wide_browse` reads an entities file (one per line), fans a bounded pool of `browser`
 children out over them in parallel, and collects their summaries into a workspace JSON file. Both
 reach the child through `ctx.spawn` — the same Spawn seam `spawn_subagent` uses — so a delegated
-browser run is scoped to the browser profile's tools, never a raw browser handle."""
+browser run is scoped to the browser profile's tools, never a raw browser handle.
+
+`browser_task` wants a fresh session each call, so it passes no `dedup_key`. `wide_browse` is
+`side_effecting` and spawns each child under `dedup_key = f"{idempotency_key}/{entity}"`,
+deterministic across a crash-recovery re-run of the fan-out — a recovered parent reconnects to the
+children already spawned rather than respawning them."""
 
 import asyncio
 import json
@@ -105,7 +110,11 @@ async def _wide_browse(ctx: ToolContext, args: WideBrowseInput) -> ToolResult:
             task = args.prompt_template.replace("{entity}", entity)
             if output_schema.strip():
                 task = f"{task}\n\nReturn data matching this schema:\n{output_schema}"
-            result = await ctx.spawn(BROWSER_PROFILE_NAME, {"task": task, "task_name": entity})
+            result = await ctx.spawn(
+                BROWSER_PROFILE_NAME,
+                {"task": task, "task_name": entity},
+                dedup_key=f"{ctx.idempotency_key}/{entity}",
+            )
             return {
                 "entity": entity,
                 "result": "" if result.output is None else result.output.model_dump_json(),
@@ -130,5 +139,6 @@ DELEGATION_TOOLS: tuple[ToolDef, ...] = (
         description=WIDE_BROWSE_DESCRIPTION,
         input_model=WideBrowseInput,
         handler=_wide_browse,
+        side_effecting=True,
     ),
 )

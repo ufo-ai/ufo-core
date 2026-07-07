@@ -335,6 +335,120 @@ async def _finished_child(workspace_id: UUID, agent_id: UUID, text: str) -> UUID
     return turn_id
 
 
+async def _parent(workspace_id: UUID, agent_id: UUID) -> Turn:
+    """A parent turn whose conversation row exists — `_admit` reads the parent conversation's
+    member for the child, so the row must be present as it is for a real turn."""
+    conversation_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                surface="web",
+                queue_key=str(uuid4()),
+                member_id=None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return Turn(
+        id=uuid4(),
+        workspace_id=workspace_id,
+        conversation_id=conversation_id,
+        agent_id=agent_id,
+        seq=1,
+        status="running",
+        inbound="parent",
+    )
+
+
+async def test_spawn_with_a_dedup_key_reconnects_to_a_finished_child_without_respawning(
+    db: None, dbos_launched: Config
+) -> None:
+    """The Phase-2 recovery proof: a fanned-out spawn re-run (a `wide_*` tool step re-executing on
+    crash recovery) must not respawn a completed child. With a dedup_key the child's turn id is
+    deterministic from the parent turn and the key, its admit does-nothing on conflict, and a child
+    that already finished returns its memoized output — so the second spawn reconnects to the one
+    child, never a duplicate row and never recomputed work."""
+    workspace_id, agent_id = await _workspace_agent()
+    parent = await _parent(workspace_id, agent_id)
+    subagents = Subagents(
+        client=_RecordingClient(),
+        registry=SubagentRegistry((_profile("research"),)),
+        parent=parent,
+    )
+
+    first = await subagents.spawn("research", {"task": "acme"}, background=True, dedup_key="acme")
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(
+                status="done",
+                terminal=TerminalFrame(status="done", text='{"finding": "acme done"}').model_dump(
+                    mode="json"
+                ),
+            )
+            .where(tables.turn.c.id == first.turn_id)
+        )
+
+    second = await subagents.spawn("research", {"task": "acme"}, dedup_key="acme")
+    assert second.turn_id == first.turn_id
+    assert second.output is not None
+    assert second.output.model_dump()["finding"] == "acme done"
+
+    async with workspace_tx() as connection:
+        children = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.turn)
+                .where(tables.turn.c.parent_turn_id == parent.id)
+            )
+        ).scalar_one()
+    assert children == 1
+
+
+async def test_spawn_distinct_dedup_keys_admit_distinct_children(
+    db: None, dbos_launched: Config
+) -> None:
+    """Distinct entities are distinct children — the dedup collapses only a re-run of the same
+    branch, never two different branches of one fan-out."""
+    workspace_id, agent_id = await _workspace_agent()
+    parent = await _parent(workspace_id, agent_id)
+    subagents = Subagents(
+        client=_RecordingClient(),
+        registry=SubagentRegistry((_profile("research"),)),
+        parent=parent,
+    )
+    a = await subagents.spawn("research", {"task": "a"}, background=True, dedup_key="a")
+    b = await subagents.spawn("research", {"task": "b"}, background=True, dedup_key="b")
+    assert a.turn_id != b.turn_id
+    async with workspace_tx() as connection:
+        children = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.turn)
+                .where(tables.turn.c.parent_turn_id == parent.id)
+            )
+        ).scalar_one()
+    assert children == 2
+
+
+async def test_spawn_without_a_dedup_key_mints_a_fresh_child_each_call(
+    db: None, dbos_launched: Config
+) -> None:
+    """No key keeps the fresh-child-per-call contract `browser_task`/`spawn_subagent` rely on."""
+    workspace_id, agent_id = await _workspace_agent()
+    parent = await _parent(workspace_id, agent_id)
+    subagents = Subagents(
+        client=_RecordingClient(),
+        registry=SubagentRegistry((_profile("research"),)),
+        parent=parent,
+    )
+    first = await subagents.spawn("research", {"task": "x"}, background=True)
+    second = await subagents.spawn("research", {"task": "x"}, background=True)
+    assert first.turn_id != second.turn_id
+
+
 async def test_wait_reports_every_already_finished_childs_status(
     db: None, dbos_launched: Config
 ) -> None:

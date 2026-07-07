@@ -23,6 +23,12 @@ BROWSER_CDP_HEADERS_ENV = "BROWSER_CDP_HEADERS"
 FindCompleter = Callable[[str, str], Awaitable[str]]
 
 
+class SessionGone(Exception):
+    """A `CdpProvider.reattach` found the session its token names no longer live — a hosted session
+    reaped past its TTL, or a dead endpoint. The caller mints a fresh lease instead of reconnecting,
+    re-grounding the task rather than resuming against a page that is gone."""
+
+
 @dataclass(frozen=True)
 class CdpEndpoint:
     """A resolvable CDP endpoint: the URL the engine connects to plus any headers the connection
@@ -34,26 +40,36 @@ class CdpEndpoint:
 
 class CdpLease(Protocol):
     """A per-turn hold on a CDP endpoint: `endpoint` yields the URL to connect (raising when none is
-    configured), `aclose` releases the hold at turn end — a no-op for a static endpoint, a hosted
-    session release for a remote provider."""
+    configured), `token` yields a durable, serializable reattach handle (a hosted session id, or the
+    static URL) the browser extension persists so a recovered turn can reconnect, and `aclose`
+    releases the hold at turn end — a no-op for a static endpoint, a hosted session release for a
+    remote provider."""
 
     async def endpoint(self) -> CdpEndpoint: ...
+
+    async def token(self) -> str: ...
 
     async def aclose(self) -> None: ...
 
 
 class CdpProvider(Protocol):
-    """Where a turn's Chrome comes from: `lease` mints one `CdpLease` per turn. Process-wide (built
-    once at boot), so a remote provider mints and releases a fresh hosted session each turn while a
-    sandbox provider wraps a static environment endpoint."""
+    """Where a turn's Chrome comes from: `lease` mints one `CdpLease` per turn; `reattach`
+    reconnects to the session a prior run's `token` names — returning a fresh lease over the live
+    session, or raising `SessionGone` when it can no longer resolve so the caller mints instead.
+    Process-wide (built once at boot), so a remote provider mints and releases a fresh hosted
+    session each turn (reattachable within its TTL) while a sandbox provider wraps a static
+    environment endpoint that outlives every turn."""
 
     async def lease(self) -> CdpLease: ...
+
+    async def reattach(self, token: str) -> CdpLease: ...
 
 
 @dataclass(frozen=True)
 class StaticCdpLease:
     """A lease over a fixed endpoint: `endpoint` returns it, raising when none is configured;
-    `aclose` is a no-op because the endpoint outlives the turn (a persistent sandbox Chrome)."""
+    `token` is that endpoint's URL (the durable reattach handle); `aclose` is a no-op because the
+    endpoint outlives the turn (a persistent sandbox Chrome)."""
 
     endpoint_: CdpEndpoint | None
 
@@ -64,6 +80,9 @@ class StaticCdpLease:
                 "Chrome DevTools endpoint, or install a cdp-provider extension that yields one"
             )
         return self.endpoint_
+
+    async def token(self) -> str:
+        return (await self.endpoint()).url
 
     async def aclose(self) -> None:
         return None
@@ -84,6 +103,15 @@ class SandboxCdpProvider:
         return cls(endpoint=CdpEndpoint(url, _env_cdp_headers()) if url else None)
 
     async def lease(self) -> CdpLease:
+        return StaticCdpLease(self.endpoint)
+
+    async def reattach(self, token: str) -> CdpLease:
+        """The static endpoint outlives every turn, so a recovered turn reconnects to the same
+        Chrome rather than re-creating anything — a fresh lease over the same endpoint. Reports the
+        session gone only when the endpoint is no longer configured (a redeploy that dropped the
+        URL), so the caller mints instead of reattaching to nothing."""
+        if self.endpoint is None:
+            raise SessionGone(token)
         return StaticCdpLease(self.endpoint)
 
 

@@ -24,12 +24,16 @@ class _Result(BaseModel):
 
 @dataclass
 class RecordingSpawn:
-    spawned: list[tuple[str, dict[str, object]]] = field(default_factory=list)
+    spawned: list[tuple[str, dict[str, object], str | None]] = field(default_factory=list)
 
     async def __call__(
-        self, profile: str, payload: dict[str, object], background: bool = False
+        self,
+        profile: str,
+        payload: dict[str, object],
+        background: bool = False,
+        dedup_key: str | None = None,
     ) -> SpawnResult:
-        self.spawned.append((profile, payload))
+        self.spawned.append((profile, payload, dedup_key))
         name = payload.get("task_name")
         return SpawnResult(turn_id=uuid4(), output=_Result(result=f"did {name}"))
 
@@ -51,7 +55,12 @@ class FilesSandbox:
         self.writes[path] = content
 
 
-def _context(sandbox: FilesSandbox, spawn: RecordingSpawn, tmp_path: Path) -> ToolContext:
+def _context(
+    sandbox: FilesSandbox,
+    spawn: RecordingSpawn,
+    tmp_path: Path,
+    idempotency_key: str | None = None,
+) -> ToolContext:
     return ToolContext(
         sandbox=sandbox,
         blob=FilesystemBlobStore(root=tmp_path),
@@ -68,6 +77,7 @@ def _context(sandbox: FilesSandbox, spawn: RecordingSpawn, tmp_path: Path) -> To
         spawn=spawn,
         member_id=None,
         artifact_token_secret="",
+        idempotency_key=idempotency_key,
     )
 
 
@@ -93,6 +103,7 @@ async def test_browser_task_spawns_the_browser_profile_with_the_objective(tmp_pa
         (
             "browser",
             {"task": "list open roles", "url": "https://jobs.example.com", "task_name": "jobs"},
+            None,
         )
     ]
     assert json.loads(result.content[0].text) == {"result": "did jobs"}
@@ -118,13 +129,40 @@ async def test_wide_browse_fans_over_deduped_entities_and_writes_the_json(tmp_pa
             }
         ),
     )
-    entities = [payload["task_name"] for _, payload in spawn.spawned]
+    entities = [payload["task_name"] for _, payload, _ in spawn.spawned]
     assert entities == ["acme.com", "beta.io"]
-    assert all('{"price": "number"}' in payload["task"] for _, payload in spawn.spawned)
+    assert all('{"price": "number"}' in payload["task"] for _, payload, _ in spawn.spawned)
     assert "wide_browse.json" in sandbox.writes
     rows = json.loads(sandbox.writes["wide_browse.json"])
     assert [row["entity"] for row in rows] == ["acme.com", "beta.io"]
     assert json.loads(result.content[0].text)["output_file"] == "wide_browse.json"
+
+
+async def test_wide_browse_keys_each_child_on_the_call_and_entity(tmp_path: Path) -> None:
+    """The producer half of the recovery-dedup seam: wide_browse is side_effecting and spawns each
+    child under a dedup_key derived from the call's idempotency_key and the entity, deterministic
+    across a crash-recovery re-run so the parent reconnects rather than respawns. browser_task,
+    which wants a fresh session each call, passes no key (proven above)."""
+    wide_browse = _tool("wide_browse")
+    assert wide_browse.side_effecting is True
+    sandbox = FilesSandbox(files={"entities.txt": "acme.com\nbeta.io\n", "schema.json": ""})
+    spawn = RecordingSpawn()
+    ctx = _context(sandbox, spawn, tmp_path, idempotency_key="turn-1/wide_browse/call-3")
+    await wide_browse.handler(
+        ctx,
+        wide_browse.input_model.model_validate(
+            {
+                "entities_file": "entities.txt",
+                "prompt_template": "get pricing from {entity}",
+                "output_schema_file": "schema.json",
+                "user_description": "batch",
+            }
+        ),
+    )
+    assert [dedup for _, _, dedup in spawn.spawned] == [
+        "turn-1/wide_browse/call-3/acme.com",
+        "turn-1/wide_browse/call-3/beta.io",
+    ]
 
 
 async def test_wide_browse_caps_the_entity_count(tmp_path: Path) -> None:

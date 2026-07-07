@@ -11,10 +11,12 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import sqlalchemy as sa
 from dbos import DBOSClient, EnqueueOptions
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from selfhost.db import workspace_tx
 from selfhost.ext.manifest import SubagentProfile
@@ -98,11 +100,25 @@ class Subagents:
     parent: Turn
 
     async def spawn(
-        self, profile: str, payload: dict[str, Any], background: bool = False
+        self,
+        profile: str,
+        payload: dict[str, Any],
+        background: bool = False,
+        dedup_key: str | None = None,
     ) -> SpawnResult:
+        """Admit and enqueue a child turn. With `dedup_key`, the child's conversation (and so its
+        turn id, the DBOS workflow id) is derived from the parent turn and the key, so a re-run of
+        the spawning tool step reconnects: `_admit` is idempotent, DBOS dedups the re-enqueue on the
+        existing workflow id, and `_await_terminal` returns a child that already finished at once —
+        completed branches are memoized by their own durable terminal, never respawned or rebilled.
+        Without a key, each call mints a fresh random child."""
         resolved = self.registry.get(profile)
         typed_input = resolved.input_model.model_validate(payload)
-        conversation_id = uuid4()
+        conversation_id = (
+            uuid5(NAMESPACE_URL, f"{self.parent.id}/{dedup_key}")
+            if dedup_key is not None
+            else uuid4()
+        )
         turn_id = turn_id_for(self.parent.workspace_id, conversation_id, 1)
         await self._admit(conversation_id, turn_id, profile, typed_input.model_dump_json())
         await self._enqueue(turn_id, conversation_id)
@@ -202,7 +218,11 @@ class Subagents:
     async def _admit(
         self, conversation_id: UUID, turn_id: UUID, profile: str, inbound: str
     ) -> None:
+        """Insert the child conversation and its first turn. The inserts do nothing on conflict, so
+        a deterministic (`dedup_key`) child re-admitted by a recovery re-run of the spawning step
+        settles on the rows already there — the first run's child stands, never a duplicate."""
         async with workspace_tx() as connection:
+            insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
             member_id = (
                 await connection.execute(
                     sa.select(tables.conversation.c.member_id).where(
@@ -211,7 +231,8 @@ class Subagents:
                 )
             ).scalar_one()
             await connection.execute(
-                sa.insert(tables.conversation).values(
+                insert(tables.conversation)
+                .values(
                     id=conversation_id,
                     workspace_id=self.parent.workspace_id,
                     surface=SUBAGENT_SURFACE,
@@ -220,9 +241,11 @@ class Subagents:
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
+                .on_conflict_do_nothing()
             )
             await connection.execute(
-                sa.insert(tables.turn).values(
+                insert(tables.turn)
+                .values(
                     id=turn_id,
                     workspace_id=self.parent.workspace_id,
                     conversation_id=conversation_id,
@@ -236,6 +259,7 @@ class Subagents:
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
+                .on_conflict_do_nothing()
             )
 
     async def _enqueue(self, turn_id: UUID, conversation_id: UUID) -> None:

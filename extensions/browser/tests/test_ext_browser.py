@@ -14,13 +14,14 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import selfhost_ext_browser.manifest as browser_manifest
 import selfhost_ext_browser.tools as browser_tools
+import sqlalchemy as sa
 from pydantic import JsonValue
-from selfhost_ext_browser.bua.backend import BuaSurface
+from selfhost_ext_browser.bua.backend import CDP_TOKEN_KEY, BuaSurface
 from selfhost_ext_browser.subagent import (
     BROWSER_PROFILE,
     BROWSER_SUBAGENT_NAME,
@@ -30,11 +31,14 @@ from selfhost_ext_browser.subagent import (
 from selfhost_ext_browser.tools import BROWSER_TOOL_NAMES, BROWSER_TOOLS
 
 from selfhost.blob import FilesystemBlobStore
-from selfhost.browser import CdpEndpoint, CdpLease, CdpProvider
+from selfhost.browser import CdpEndpoint, CdpLease, CdpProvider, SessionGone
+from selfhost.db import workspace_tx
+from selfhost.ext.context import ScopedStore
 from selfhost.ext.loader import skill_registry, turn_subagents
 from selfhost.loop.prompts.render import render_system_prompt
 from selfhost.loop.subagents import SubagentRegistry, subagent_system_prompt
 from selfhost.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
+from selfhost.schema import tables
 from selfhost.schema.records import Agent, Turn
 from selfhost.tools.builtins import BUILTIN_TOOLS
 from selfhost.tools.context import ImageContent, SpawnResult, ToolContext, TurnCleanup
@@ -97,12 +101,17 @@ class _StopAtConnect(RuntimeError):
 @dataclass
 class FakeCdpLease:
     """Records that it was released; its `endpoint` never yields, so `_open` stops before a dial.
-    A real `CdpLease` the surface leases and releases, not a mock."""
+    `token` is the session id it is bound to — a fresh id when minted, the reattached id when
+    reconnected. A real `CdpLease` the surface leases and releases, not a mock."""
 
+    session_id: str = "session"
     released: bool = False
 
     async def endpoint(self) -> CdpEndpoint:
         raise _StopAtConnect()
+
+    async def token(self) -> str:
+        return self.session_id
 
     async def aclose(self) -> None:
         self.released = True
@@ -110,15 +119,27 @@ class FakeCdpLease:
 
 @dataclass
 class FakeCdpProvider:
-    """A real `CdpProvider` recording every lease it mints, so the test can prove the turn leases
-    exactly once and releases at cleanup."""
+    """A real `CdpProvider` modelling a hosted provider: each `lease` mints a fresh session id,
+    while `reattach` reconnects to the exact session its token names (unless `gone`, when it raises
+    `SessionGone`). Records mints and reattaches so a test can prove a recovered turn reattaches to
+    the live session rather than minting a new one."""
 
     leases: list[FakeCdpLease] = field(default_factory=list)
+    reattached: list[str] = field(default_factory=list)
+    gone: bool = False
+    _minted: int = 0
 
     async def lease(self) -> CdpLease:
-        lease = FakeCdpLease()
+        self._minted += 1
+        lease = FakeCdpLease(session_id=f"session-{self._minted}")
         self.leases.append(lease)
         return lease
+
+    async def reattach(self, token: str) -> CdpLease:
+        self.reattached.append(token)
+        if self.gone:
+            raise SessionGone(token)
+        return FakeCdpLease(session_id=token)
 
 
 @dataclass
@@ -442,3 +463,82 @@ async def test_turn_cleanup_drain_isolates_a_failing_closer() -> None:
     cleanup.register(boom)  # LIFO: popped first; its raise must not skip `ok`
     await cleanup.drain()  # must not propagate
     assert ran == ["ok"]
+
+
+async def _token_store(workspace_id: UUID) -> ScopedStore:
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+    return ScopedStore(workspace_id=workspace_id, extension="browser")
+
+
+def _surface(provider: FakeCdpProvider, store: ScopedStore, conversation_id: UUID) -> BuaSurface:
+    return BuaSurface(
+        cdp_provider=provider,
+        find_completer=None,
+        model=None,
+        store=store,
+        conversation_id=conversation_id,
+    )
+
+
+async def test_a_recovered_turn_reattaches_to_the_live_cdp_session_via_the_durable_token(
+    db: None,
+) -> None:
+    """Phase 3, both ends: the surface persists the lease's reattach token under its conversation's
+    key on first use, so a hard crash (which skips aclose, leaving the token) followed by a recovery
+    replay — a fresh surface for the same conversation — reattaches to the live session rather than
+    minting a new one. Proven without a live Chrome: the fake lease's endpoint short-circuits before
+    a dial, but the lease acquisition (reattach vs mint) is exactly what recovery hinges on."""
+    workspace_id, conversation_id = uuid4(), uuid4()
+    store = await _token_store(workspace_id)
+    provider = FakeCdpProvider()
+
+    with pytest.raises(_StopAtConnect):
+        await _surface(provider, store, conversation_id)._open()
+    assert len(provider.leases) == 1
+    assert provider.reattached == []
+    token = provider.leases[0].session_id
+    assert await store.get(CDP_TOKEN_KEY.format(conversation_id=conversation_id)) == token
+
+    with pytest.raises(_StopAtConnect):
+        await _surface(provider, store, conversation_id)._open()
+    assert provider.reattached == [token]
+    assert len(provider.leases) == 1
+
+
+async def test_a_reaped_session_clears_the_token_and_mints_a_fresh_lease(db: None) -> None:
+    """When reattach finds the session gone (SessionGone), the stale token is cleared and the
+    surface mints fresh — the task re-grounds rather than resuming a page that no longer exists."""
+    workspace_id, conversation_id = uuid4(), uuid4()
+    store = await _token_store(workspace_id)
+    await store.put(CDP_TOKEN_KEY.format(conversation_id=conversation_id), "stale-session")
+    provider = FakeCdpProvider(gone=True)
+
+    with pytest.raises(_StopAtConnect):
+        await _surface(provider, store, conversation_id)._open()
+    assert provider.reattached == ["stale-session"]
+    assert len(provider.leases) == 1
+    fresh = provider.leases[0].session_id
+    assert await store.get(CDP_TOKEN_KEY.format(conversation_id=conversation_id)) == fresh
+
+
+async def test_aclose_clears_the_durable_token_so_a_later_turn_never_reattaches_it(
+    db: None,
+) -> None:
+    """A clean turn end releases the session and clears its token, so the next turn on the same
+    conversation mints fresh — only a crash (which skips aclose) leaves a token to reattach."""
+    workspace_id, conversation_id = uuid4(), uuid4()
+    store = await _token_store(workspace_id)
+    provider = FakeCdpProvider()
+    surface = _surface(provider, store, conversation_id)
+
+    with pytest.raises(_StopAtConnect):
+        await surface._open()
+    assert await store.get(CDP_TOKEN_KEY.format(conversation_id=conversation_id)) is not None
+    await surface.aclose()
+    assert await store.get(CDP_TOKEN_KEY.format(conversation_id=conversation_id)) is None
+    assert provider.leases[0].released is True
