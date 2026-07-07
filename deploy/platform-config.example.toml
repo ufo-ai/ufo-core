@@ -1,0 +1,32 @@
+# The control plane's own config (PlatformConfig) — mounted at /config/platform.toml via the
+# selfhost-k8s-platform ConfigMap. Distinct from a tenant's selfhost.toml: this names the shared
+# backing services and cluster facts the reconciler overlays onto every tenant's core config.
+#
+# Secrets are NOT here — the Postgres admin DSN and the role-derivation seed come from the
+# selfhost-k8s-secrets Secret (see deploy/control-plane.yaml), referenced by env.
+
+chart_path = "/charts/selfhost-tenant"
+registry = "ghcr.io/metalcraftai"
+
+# Shared Postgres: the reconciler mints a per-tenant role + database from the admin DSN
+# (SELFHOST_K8S_POSTGRES_ADMIN_DSN), and each tenant dials it at this host.
+tenant_postgres_host = "postgres.selfhost-system.svc:5432"
+
+# Shared Redis (lifts core's multi-instance boot guard; core keys by workspace_id).
+redis_url = "redis://redis.selfhost-system.svc:6379"
+
+# Shared S3 bucket for tenant blobs (core isolates by workspace_id key prefixes).
+blob_bucket = "selfhost-tenants"
+blob_region = "us-east-1"
+blob_sts_role_arn = "arn:aws:iam::000000000000:role/selfhost-sandbox-fs"
+
+# Ingress / TLS (RFC 0004 decision 6).
+ingress_class = "nginx"
+cluster_issuer = "letsencrypt"
+
+# The Secret carrying model API keys + cloud credentials a tenant's serve reads from env. Created
+# once in selfhost-system (see deploy/control-plane.yaml); the operator replicates it into each
+# tenant namespace during provisioning.
+platform_secret = "selfhost-platform-secrets"
+
+reconcile_interval_seconds = 15
