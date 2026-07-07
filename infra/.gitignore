@@ -1,0 +1,7 @@
+# Terraform — provider/module cache, state, plans, crash logs. Lock files ARE committed.
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+.terraformrc
+terraform.rc

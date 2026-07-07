@@ -53,19 +53,19 @@ module "irsa_external_secrets" {
 }
 
 
-# App service accounts → read/write the store + sandbox-fs buckets, and assume the sandbox-fs role to
-# mint per-thread-scoped mount credentials. The framework reads/writes messages.json.lz4 + agent files in
-# the sandbox-fs bucket via boto3 with these ambient creds; the sandbox's s3fs mount uses the assumed role.
+# Tenant pods → read/write the blob bucket, and assume the sandbox-fs role to mint per-conversation
+# mount credentials. The runtime reads/writes blobs + conversation files via boto3 with these ambient
+# creds; the sandbox's s3fs mount uses the assumed role.
 data "aws_iam_policy_document" "app_s3" {
   statement {
-    sid       = "ListBuckets"
+    sid       = "ListBucket"
     actions   = ["s3:ListBucket", "s3:GetBucketLocation"]
-    resources = [aws_s3_bucket.store.arn, aws_s3_bucket.sandbox_fs.arn]
+    resources = [aws_s3_bucket.blob.arn]
   }
   statement {
     sid       = "ObjectRW"
     actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
-    resources = ["${aws_s3_bucket.store.arn}/*", "${aws_s3_bucket.sandbox_fs.arn}/*"]
+    resources = ["${aws_s3_bucket.blob.arn}/*"]
   }
   statement {
     sid       = "AssumeSandboxFsRole"
@@ -74,11 +74,11 @@ data "aws_iam_policy_document" "app_s3" {
   }
 }
 
-# The sandbox-fs mount role: the executor (app-s3 IRSA) assumes this per thread with an inline session
-# policy scoping s3 to that thread's prefix, then writes the short-lived credential into the sandbox for
-# s3fs. The role grants s3 on the whole bucket; the per-thread session policy minted at AssumeRole narrows
-# it. Trust names the app-s3 role by its COMPUTED arn — referencing module.irsa_app_s3.iam_role_arn would
-# cycle (irsa_app_s3 → app_s3 policy → this role → irsa_app_s3).
+# The sandbox-fs mount role: a tenant pod (app-s3 IRSA) assumes this per conversation with an inline
+# session policy scoping s3 to that conversation's prefix, then writes the short-lived credential into
+# the sandbox for s3fs. The role grants s3 on the whole bucket; the per-conversation session policy
+# minted at AssumeRole narrows it. Trust names the app-s3 role by its COMPUTED arn — referencing
+# module.irsa_app_s3.iam_role_arn would cycle (irsa_app_s3 → app_s3 policy → this role → irsa_app_s3).
 data "aws_iam_policy_document" "sandbox_fs_trust" {
   statement {
     actions = ["sts:AssumeRole"]
@@ -91,14 +91,14 @@ data "aws_iam_policy_document" "sandbox_fs_trust" {
 
 data "aws_iam_policy_document" "sandbox_fs" {
   statement {
-    sid       = "ListSandboxFsBucket"
+    sid       = "ListBlobBucket"
     actions   = ["s3:ListBucket", "s3:GetBucketLocation"]
-    resources = [aws_s3_bucket.sandbox_fs.arn]
+    resources = [aws_s3_bucket.blob.arn]
   }
   statement {
     sid       = "ObjectRW"
     actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
-    resources = ["${aws_s3_bucket.sandbox_fs.arn}/*"]
+    resources = ["${aws_s3_bucket.blob.arn}/*"]
   }
 }
 

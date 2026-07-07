@@ -23,8 +23,19 @@ output "ecr_repository_urls" {
   value = { for k, r in aws_ecr_repository.this : k => r.repository_url }
 }
 
-output "store_bucket" {
-  value = aws_s3_bucket.store.id
+output "system_namespace" {
+  description = "The namespace the control plane + apex workspace run in; ESO + IRSA target it."
+  value       = local.system_namespace
+}
+
+output "blob_bucket" {
+  description = "The single S3 bucket backing core's [blob] backend (blobs + sandbox mounts)."
+  value       = aws_s3_bucket.blob.id
+}
+
+output "sandbox_fs_role_arn" {
+  description = "STS role tenant pods assume to mint per-conversation sandbox mount credentials (blob_sts_role_arn)."
+  value       = aws_iam_role.sandbox_fs.arn
 }
 
 output "rds_endpoint" {

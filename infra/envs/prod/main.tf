@@ -5,20 +5,18 @@ module "platform" {
   region               = var.region
   hostname             = "flyingobject.ai"
   dns_zone_name        = "flyingobject.ai"
-  letsencrypt_email    = var.letsencrypt_email
   cloudflare_api_token = var.cloudflare_api_token
 
-  image_tag  = var.image_tag
-  enable_app = var.enable_app
-  chart_path = abspath("${path.module}/../../../charts/metalcraft")
+  ses_sender           = var.ses_sender
+  e2b_sandbox_template = var.e2b_sandbox_template
 
-  # Managed vector search: new tenants provision turbopuffer Stores. Requires turbopuffer-api-key in the
-  # <prefix>/api-keys Secrets Manager secret before apply, or turbopuffer Stores report BackendUnavailable.
-  index_backend = "turbopuffer"
-
-  # OTLP → Datadog. Set datadog-api-key in the <prefix>/api-keys Secrets Manager secret before apply.
-  datadog_enabled = true
-  datadog_site    = "us5.datadoghq.com"
+  # Static cluster-admins (applier-independent — see eks.tf for why creator-perms is off): the account
+  # root (a human operating as root keeps kubectl access — the deploy runs from an operator machine
+  # while Actions is billing-blocked) and the github-deploy role (for when deploy.yml is revived).
+  cluster_admin_principal_arns = [
+    "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root",
+    "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/github-deploy",
+  ]
 
   # HA across AZs for prod.
   single_nat_gateway        = false

@@ -15,6 +15,16 @@ output "api_keys_secret_arn" {
   value       = module.platform.api_keys_secret_arn
 }
 
-output "hostname" {
+output "ses_dkim_records" {
+  description = "Add these CNAMEs to Cloudflare to verify the SES sending domain."
+  value       = module.platform.ses_dkim_records
+}
+
+output "apex_host" {
   value = module.platform.hostname
+}
+
+output "tenant_base_domain" {
+  description = "Tenants are served at <name>.<this>; wire into the onboarding gateway workspace config."
+  value       = var.tenant_base_domain
 }

@@ -3,6 +3,18 @@ variable "region" {
   default = "us-east-1"
 }
 
+variable "apex_host" {
+  type        = string
+  default     = "testing.flyingobject.ai"
+  description = "Apex FQDN the platform (onboarding gateway) workspace serves."
+}
+
+variable "tenant_base_domain" {
+  type        = string
+  default     = "testing.flyingobject.ai"
+  description = "Tenants are served at <name>.<tenant_base_domain>; consumed by the onboarding gateway when it assembles each tenant's host (surfaced as an output for that wiring)."
+}
+
 variable "image_tag" {
   type        = string
   default     = "latest"

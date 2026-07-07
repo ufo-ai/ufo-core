@@ -1,0 +1,95 @@
+name: Deploy (testing)
+
+# Dormant: manual dispatch only. GitHub Actions billing is blocked, so today's builds + applies run
+# from an operator machine (docker buildx + terraform apply); this is the shape to revive when
+# Actions is unblocked (RFC 0011 hardening ledger). Targets envs/testing (stage 1); repoint TF_DIR to
+# envs/prod for stage 2. Builds the three images at the commit short SHA, pushes to ECR (immutable,
+# skip-if-present so re-runs are idempotent), then terraform apply pins that tag — the control-plane
+# rollout. AWS auth is GitHub OIDC → the github-deploy role (no static keys).
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to build/push/deploy (defaults to the commit short SHA)."
+        required: false
+        default: ""
+
+concurrency:
+  group: deploy-testing
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: 899147036157.dkr.ecr.us-east-1.amazonaws.com
+  DEPLOY_ROLE_ARN: arn:aws:iam::899147036157:role/github-deploy
+  TF_DIR: infra/envs/testing
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Image tag
+        run: |
+          TAG="${{ inputs.image_tag }}"
+          [ -z "$TAG" ] && TAG="${GITHUB_SHA::8}"
+          echo "IMAGE_TAG=$TAG" >> "$GITHUB_ENV"
+
+      - uses: astral-sh/setup-uv@v5
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      # Bundle image: `ufoctl bundle` freezes the assistant_hosted + gateway packs into a build context
+      # (Dockerfile + ufo.toml + ufo.lock), then docker build installs the pinned ufo distribution.
+      - name: Build + push bundle image
+        run: |
+          if aws ecr describe-images --repository-name ufo --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
+            echo "ufo:$IMAGE_TAG already pushed — skipping"
+          else
+            uv run ufoctl bundle --out bundle
+            docker build -t "$ECR_REGISTRY/ufo:$IMAGE_TAG" bundle
+            docker push "$ECR_REGISTRY/ufo:$IMAGE_TAG"
+          fi
+
+      - name: Build + push sandbox image
+        run: |
+          if aws ecr describe-images --repository-name ufo-sandbox --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
+            echo "ufo-sandbox:$IMAGE_TAG already pushed — skipping"
+          else
+            docker build -f core/src/ufo/sandbox/image/Dockerfile -t "$ECR_REGISTRY/ufo-sandbox:$IMAGE_TAG" core/src/ufo/sandbox/image
+            docker push "$ECR_REGISTRY/ufo-sandbox:$IMAGE_TAG"
+          fi
+
+      - name: Build + push control-plane image
+        run: |
+          if aws ecr describe-images --repository-name ufo-control --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
+            echo "ufo-control:$IMAGE_TAG already pushed — skipping"
+          else
+            docker build -f control/Dockerfile -t "$ECR_REGISTRY/ufo-control:$IMAGE_TAG" control
+            docker push "$ECR_REGISTRY/ufo-control:$IMAGE_TAG"
+          fi
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.14.9"
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -input=false
+
+      # image_tag via -var: it must beat the placeholder in terraform.tfvars (tfvars beats TF_VAR_*).
+      - name: Terraform apply
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: terraform apply -auto-approve -input=false -var "image_tag=$IMAGE_TAG"

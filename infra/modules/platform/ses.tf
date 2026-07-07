@@ -1,9 +1,7 @@
-# Transactional email for onboarding verification codes. The cloud-gateway's email_sender_from_env()
-# selects SesEmailSender when METALCRAFT_CLOUD_SES_SOURCE is set; this verifies the sending domain
-# (Easy DKIM) and grants the app role ses:SendEmail for that identity, scoped to the From address.
-# ses_sender = "" leaves SES uncreated — deployments off AWS set METALCRAFT_CLOUD_SMTP_* instead, so
-# email is not an AWS hard dependency. The grant lands on the shared app role (all S3 service
-# accounts), but only the gateway calls SES and the FromAddress condition pins it to ses_sender.
+# Transactional email for onboarding verification codes (the gateway extension's claim machine,
+# RFC 0011 §4). This verifies the sending domain (Easy DKIM) and grants ses:SendEmail for that
+# identity, scoped to the From address. ses_sender = "" leaves SES uncreated. The grant lands on the
+# app IRSA role (system-namespace service accounts); the FromAddress condition pins it to ses_sender.
 #
 # After apply: add the ses_dkim_records CNAMEs to the authoritative DNS (Cloudflare) to verify the
 # domain, and request SES production access to send beyond the verified set (a new account is

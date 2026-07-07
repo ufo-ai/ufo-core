@@ -1,5 +1,6 @@
-# In-cluster controllers that must exist before the metalcraft chart. Installed as
-# upstream Helm releases (not our chart). Versions are pinned — review on upgrade.
+# In-cluster controllers the ufo workloads depend on: the AWS LB controller (fronts ingress-nginx's
+# NLB), metrics-server (tenant HPAs), cert-manager, external-dns, and External Secrets. Installed as
+# upstream Helm releases. Versions are pinned — review on upgrade.
 
 resource "helm_release" "aws_load_balancer_controller" {
   name             = "aws-load-balancer-controller"
@@ -64,8 +65,8 @@ resource "helm_release" "cert_manager" {
   depends_on = [module.eks]
 }
 
-# The chart's ClusterIssuer solves DNS-01 through this token (same token external-dns uses).
-# Ordered after the release so helm owns the namespace.
+# The env's ClusterIssuer (ufo.tf) solves DNS-01 through this token (same token external-dns uses) —
+# Cloudflare proxies the origins, which breaks HTTP-01. Ordered after the release so helm owns the namespace.
 resource "kubernetes_secret" "cloudflare_api_token_cert_manager" {
   metadata {
     name      = "cloudflare-api-token"
@@ -143,17 +144,4 @@ resource "kubernetes_secret" "cloudflare_api_token" {
   data       = { cloudflare_api_token = var.cloudflare_api_token }
   type       = "Opaque"
   depends_on = [helm_release.external_dns]
-}
-
-# Envoy Gateway implements GatewayClass "metalcraft" (the chart creates the GatewayClass
-# pointing at this controller). Fronted by an NLB the AWS LB Controller provisions.
-resource "helm_release" "envoy_gateway" {
-  name             = "envoy-gateway"
-  repository       = "oci://docker.io/envoyproxy"
-  chart            = "gateway-helm"
-  version          = "v1.2.4"
-  namespace        = "envoy-gateway-system"
-  create_namespace = true
-
-  depends_on = [module.eks]
 }
