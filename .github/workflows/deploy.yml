@@ -61,15 +61,12 @@ jobs:
             docker push "$ECR_REGISTRY/ufo:$IMAGE_TAG"
           fi
 
-      - name: Build + push sandbox image
-        run: |
-          if aws ecr describe-images --repository-name ufo-sandbox --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
-            echo "ufo-sandbox:$IMAGE_TAG already pushed — skipping"
-          else
-            uv run python sandbox/build_template.py --build-docker
-            docker tag ufo-sandbox:latest "$ECR_REGISTRY/ufo-sandbox:$IMAGE_TAG"
-            docker push "$ECR_REGISTRY/ufo-sandbox:$IMAGE_TAG"
-          fi
+      # The hosted carrier is E2B: the sandbox artifact is the `ufo-sbx` template, published and
+      # boot-verified from the same layer definition the docker carrier renders. No ECR image.
+      - name: Publish E2B sandbox template
+        env:
+          E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+        run: uv run python sandbox/build_template.py
 
       - name: Build + push control-plane image
         run: |

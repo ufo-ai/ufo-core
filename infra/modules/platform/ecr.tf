@@ -3,7 +3,7 @@
 # CI builds + pushes by commit SHA; the tenant chart and the control-plane deployment pull by tag.
 
 locals {
-  ecr_repositories = ["ufo", "ufo-sandbox", "ufo-control"]
+  ecr_repositories = ["ufo", "ufo-control"]
 }
 
 resource "aws_ecr_repository" "this" {

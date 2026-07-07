@@ -92,7 +92,7 @@ here.
 | `selfhost.toml` / `selfhost.lock` | `ufo.toml` / `ufo.lock` |
 | env `SELFHOST_*` (`CONFIG`, `LOCKFILE`, `CREDENTIAL_KEY`, `ARTIFACT_TOKEN_SECRET`, `E2B_*`) | `UFO_*` |
 | DBOS application name `selfhost` (`serve.py:146-153`) | `ufo` |
-| images `selfhost` / `selfhost-sandbox` (+ control plane) | `ufo` / `ufo-sandbox` / `ufo-control` — three total (§4 removes the fourth) |
+| images `selfhost` / `selfhost-sandbox` (+ control plane) | `ufo` / `ufo-control` — two ECR images (§4 removes the bespoke gateway); the hosted sandbox artifact is the **E2B template `ufo-sbx`** (same layer definition the docker carrier renders for self-host) |
 | chart `selfhost-tenant`; namespaces `selfhost-system` / `selfhost-<name>` | `ufo-tenant`; `ufo-system` / `ufo-<name>` |
 | CRD `tenants.selfhost.sh`; labels `selfhost.sh/*` | `tenants.flyingobject.ai`; labels `flyingobject.ai/*` (the owned domain, metalcraft's `metalcraft.ai` precedent) |
 | package `selfhost_k8s` | `ufo_control` |
@@ -274,7 +274,7 @@ untouched; flipping `flyingobject.ai` is a later repeat of the same module work 
 soaked. `infra/` arrives from metalcraft minus the metalcraft app (platform Helm release,
 cloud-gateway overlay); added: ingress-nginx (the tenant chart's ingress class), a cert-manager
 **DNS01** ClusterIssuer through the existing Cloudflare credentials (Cloudflare proxying breaks
-HTTP01), the `Tenant` CRD, `ufo-system` (control-plane API + operator), ECR repos for the three
+HTTP01), the `Tenant` CRD, `ufo-system` (control-plane API + operator), ECR repos for the two
 images. Hostnames thread as variables — apex `testing.flyingobject.ai`, tenants
 `<name>.testing.flyingobject.ai` — never hardcoded, so the prod repeat is a tfvars change. GitHub
 Actions is billing-blocked: the ported `deploy.yml` lands dormant; today's builds and applies run
@@ -285,8 +285,9 @@ Cutover sequence:
 1. Repo bootstrap + rename (§1); land the execution units below; ufo main green (gates, ruff,
    pytest).
 2. Build + push, digest-pinned: bundle (`ufo.lock` pinning assistant_hosted + gateway + their
-   extensions), sandbox, control-plane — three images; the apex runs the bundle image with the
-   `gateway` pack.
+   extensions) and control-plane — two ECR images; the apex runs the bundle image with the
+   `gateway` pack. Publish + boot-verify the `ufo-sbx` E2B template (`sandbox/build_template.py`,
+   needs `E2B_API_KEY`); tenants reach it via `UFO_E2B_TEMPLATE`.
 3. Secrets Manager entries → External Secrets: pg admin DSN + role seed, model keys, OpenRouter,
    Composio, E2B (+ template), Turbopuffer, Exa, SES sender, `UFO_TOKEN_SECRET`.
 4. RDS: create `ufo` DB + `ufo_owner`; run the migrate-and-RLS-bootstrap Job.
