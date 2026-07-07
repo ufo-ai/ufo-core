@@ -107,7 +107,11 @@ async def call_external_tool(ctx: ToolContext, args: CallExternalToolInput) -> T
     user_id = f"{EXTERNAL_USER_PREFIX}{ctx.turn.workspace_id}"
     try:
         response = await client.execute_tool(
-            args.tool_name, args.arguments, user_id, connected_account_id
+            args.tool_name,
+            args.arguments,
+            user_id,
+            connected_account_id,
+            idempotency_key=ctx.idempotency_key,
         )
     except ComposioError as error:
         if error.status != NOT_FOUND:
@@ -239,5 +243,6 @@ CONNECTOR_TOOLS: tuple[ToolDef, ...] = (
         input_model=CallExternalToolInput,
         handler=call_external_tool,
         untrusted=True,
+        side_effecting=True,
     ),
 )

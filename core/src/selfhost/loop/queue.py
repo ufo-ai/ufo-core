@@ -100,8 +100,12 @@ def reset_runtime() -> None:
     _runtime = None
 
 
-@DBOS.step(preemptible=True)
 async def _execute_turn(turn_id: str) -> str:
+    """The turn body, run directly in the `turn_workflow` DBOS workflow — not wrapped in a step, so
+    the model-round, tool-dispatch, and compaction steps inside `engine.run()` are the workflow's
+    own steps and memoize for crash-recovery replay. Setup here (load, sandbox create-or-attach,
+    engine build) re-runs each recovery and is idempotent; a failure outside the engine commits the
+    terminal through the backstop so the client's wait still ends."""
     runtime = _runtime
     if runtime is None:
         raise RuntimeError("runtime not initialized (init_runtime runs in serve)")

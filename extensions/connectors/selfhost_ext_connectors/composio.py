@@ -28,6 +28,7 @@ COMPOSIO_TIMEOUT_SECONDS = 30.0
 ACTIVE_STATUS = "ACTIVE"
 TOOL_SEARCH_LIMIT = 10
 MAX_EXECUTE_ARGUMENTS_BYTES = 1024 * 1024
+IDEMPOTENCY_HEADER = "x-idempotency-key"
 TOOL_ROUTER_TIMEOUT_SECONDS = 30.0
 TOOL_ROUTER_SESSION_PATH = "/tool_router/session"
 COMPOSIO_SEARCH_TOOL = "COMPOSIO_SEARCH_TOOLS"
@@ -161,13 +162,15 @@ class ComposioClient:
         arguments: dict[str, JsonValue],
         user_id: str,
         connected_account_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, object]:
         body: dict[str, object] = {"user_id": user_id, "arguments": dict(arguments)}
         if connected_account_id:
             body["connected_account_id"] = connected_account_id
         if len(json.dumps(body).encode()) > MAX_EXECUTE_ARGUMENTS_BYTES:
             raise ValueError("connector tool arguments exceed the Composio execute payload bound")
-        return await self._post(f"/tools/execute/{slug}", body)
+        headers = {IDEMPOTENCY_HEADER: idempotency_key} if idempotency_key else None
+        return await self._post(f"/tools/execute/{slug}", body, headers=headers)
 
     async def tool_router_session(self, user_id: str, toolkits: list[str]) -> ToolRouterSession:
         """Open a Tool Router session scoped to `toolkits` for `user_id`, returning its id and MCP
@@ -207,9 +210,11 @@ class ComposioClient:
         async with self._http() as http:
             return _body(await http.get(path, params=params))
 
-    async def _post(self, path: str, body: dict[str, object]) -> dict[str, object]:
+    async def _post(
+        self, path: str, body: dict[str, object], headers: dict[str, str] | None = None
+    ) -> dict[str, object]:
         async with self._http() as http:
-            return _body(await http.post(path, json=body))
+            return _body(await http.post(path, json=body, headers=headers))
 
     def _http(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(

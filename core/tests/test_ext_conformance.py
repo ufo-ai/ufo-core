@@ -9,7 +9,7 @@ breaks this probe, and a Manifest field the sample stops registering breaks the 
 
 import asyncio
 import json
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -666,13 +666,15 @@ async def test_connector_execute_tool_resolves_the_bound_account_without_the_san
         ext=ext_by_tool[tool.name],
     )
     args = tool.input_model.model_validate({"tool_name": "sample_list"})
-    result = await tool.handler(context, args)
+    idempotency_key = f"{context.turn.id}/{sample.CONNECTOR_EXECUTE_TOOL_NAME}/c1"
+    result = await tool.handler(replace(context, idempotency_key=idempotency_key), args)
     assert result.is_error is False
     assert result.content[0].text == sample.CONNECTOR_ACCOUNT
     scoped = ScopedStore(workspace_id=workspace_id, extension=sample.NAME)
     assert await scoped.get(sample.CONNECTOR_EXECUTE_KEY) == {
         "account": sample.CONNECTOR_ACCOUNT,
         "tool_name": "sample_list",
+        "idempotency_key": idempotency_key,
     }
 
 

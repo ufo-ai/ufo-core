@@ -15,8 +15,11 @@ hook — the browser tools build one per-turn surface from them on first use and
 on `cleanup`, the per-turn registry the loop drains at turn end so a CDP connection never outlives
 its turn. `search_provider` is the deploy's selected web-search backend (None when no research
 extension is active) — the research tools call it host-side, so the provider reads its key in the
-serve process and the sandbox never sees it. An extension tool also gets `ext`, its owning
-extension's workspace-scoped ExtensionContext; a builtin tool gets `ext=None`."""
+serve process and the sandbox never sees it. `idempotency_key` is `{turn}/{name}/{call_id}`, folded
+on only for a `side_effecting` tool: it passes it to its external write as a dedup header so a
+cross-attempt resume applies the effect at most once; a read tool gets `None`. An extension tool
+also gets `ext`, its owning extension's workspace-scoped ExtensionContext; a builtin tool gets
+`ext=None`."""
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -135,6 +138,7 @@ class ToolContext:
     grants: GrantStore | None = None
     subagents: SubagentControl | None = None
     read_paths: set[str] = field(default_factory=set)
+    idempotency_key: str | None = None
     skills: SkillRegistry = CORE_SKILL_REGISTRY
     ext: ExtensionContext | None = None
     cdp_provider: CdpProvider | None = None

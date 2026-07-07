@@ -175,6 +175,20 @@ async def test_composio_client_executes_a_tool_with_the_bound_account() -> None:
     }
 
 
+async def test_composio_client_sends_the_idempotency_key_as_a_dedup_header() -> None:
+    seen: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get(composio.IDEMPOTENCY_HEADER))
+        return httpx.Response(200, json={"successful": True})
+
+    client = composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handler))
+    await client.execute_tool(
+        GITHUB_SLUG, {"owner": "acme"}, COMPOSIO_USER, COMPOSIO_ACCOUNT, idempotency_key="t1/x/c1"
+    )
+    assert seen == ["t1/x/c1"]
+
+
 async def test_composio_client_refuses_an_oversized_execute_payload() -> None:
     with pytest.raises(ValueError, match="payload bound"):
         await _mock_client().execute_tool(

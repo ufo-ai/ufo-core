@@ -17,6 +17,7 @@ from typing import Literal
 from uuid import UUID
 
 import lz4.frame
+from dbos import DBOS
 from pydantic import BaseModel
 
 from selfhost.blob import BlobNotFound, BlobStore
@@ -152,9 +153,17 @@ class Compaction:
             return messages, ()
         return await self._compact(messages, "force" if force else "auto")
 
+    @DBOS.step()
     async def _compact(
         self, messages: tuple[Message, ...], reason: Literal["auto", "force"]
     ) -> tuple[tuple[Message, ...], tuple[Usage, ...]]:
+        """The compaction itself, memoized as a DBOS step: the summarize model call, the blob
+        writes, the index selection, and the pre/post_compact hook fires all run once and replay
+        from the recorded output on a crash-recovery re-run, so recovery neither re-summarizes (no
+        tokens re-spent) nor duplicates a compaction record at a fresh index, and the observe-only
+        compaction hooks do not double-fire. `maybe_compact`'s guards stay outside the step —
+        deterministic reads of the window — so a round that does not compact records no step and the
+        step sequence lines up on replay."""
         selection = self._select(messages)
         if selection is None:
             return messages, ()

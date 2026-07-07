@@ -1,4 +1,12 @@
-"""One turn, top to bottom: mark running, load context, model round, terminal commit."""
+"""One turn, top to bottom: mark running, load context, model round, terminal commit.
+
+`run()` is the body of the `turn_workflow` DBOS workflow. Its non-deterministic, side-effecting
+units are DBOS steps — each model round (`_stream_once`), each tool dispatch (`_dispatch`), and each
+compaction (`Compaction._compact`). On a crash the workflow re-dispatches under the same
+`workflow_id`: every recorded step replays from DBOS's `operation_outputs` without re-executing —
+completed rounds are not re-called, completed tools not re-applied — and execution resumes at the
+first unrecorded step. Setup (load, sandbox create-or-attach, spend re-decision, the run claim)
+re-runs each recovery and is idempotent, so the step sequence is stable across replay."""
 
 import asyncio
 import json
@@ -7,6 +15,9 @@ from dataclasses import dataclass, replace
 from uuid import UUID
 
 import sqlalchemy as sa
+from dbos import DBOS
+from dbos._error import DBOSWorkflowCancelledError
+from pydantic import BaseModel
 
 from selfhost.accounting import (
     ALLOW,
@@ -100,6 +111,31 @@ UNTRUSTED_RESULT_NOTICE = (
 UNTRUSTED_RESULT_OPEN = '<untrusted-content source="{source}">'
 UNTRUSTED_RESULT_CLOSE = "</untrusted-content>"
 UNTRUSTED_RESULT_CLOSE_ESCAPE = "&lt;/untrusted-content&gt;"
+
+
+class StreamResult(BaseModel):
+    """One model round's memoized output — the `_stream_once` DBOS step persists this to the step
+    log, so it is a boundary type. A mid-stream model error is carried in `error_class` /
+    `error_message` rather than raised: a raised step records only the exception, losing the round's
+    already-consumed usage, so instead the round returns, its `usages` ride the recorded output (and
+    bill even on a failed or replayed turn), and the caller re-raises the error after accumulating
+    them — preserving the model's own error class and its message for context-overflow detection."""
+
+    text: str = ""
+    tool_calls: tuple[ToolUseBlock, ...] = ()
+    usages: tuple[Usage, ...] = ()
+    error_class: str | None = None
+    error_message: str | None = None
+
+
+class ModelStreamError(Exception):
+    """A model stream that raised mid-round, re-raised by the caller once the round's usage is
+    accumulated so a failed turn bills the partial burn and the terminal records the model's own
+    error class. The message re-embeds that class so context-overflow detection still matches."""
+
+    def __init__(self, error_class: str, message: str) -> None:
+        super().__init__(f"{error_class}: {message}")
+        self.model_error_class = error_class
 
 
 class TurnParked(Exception):
@@ -238,12 +274,17 @@ class TurnEngine:
             except TurnParked as parked:
                 await self._park(parked.message, usage_events)
                 raise
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, DBOSWorkflowCancelledError):
                 await self._bill_cancelled(usage_events)
                 await self._persist_inbound()
                 raise
             except Exception as error:
-                await self._commit("failed", usage_events, error_class=type(error).__name__)
+                match error:
+                    case ModelStreamError():
+                        error_class = error.model_error_class
+                    case _:
+                        error_class = type(error).__name__
+                await self._commit("failed", usage_events, error_class=error_class)
                 await self._persist_inbound()
                 raise
             finally:
@@ -364,19 +405,25 @@ class TurnEngine:
         to summarize), the overflow is unrecoverable and re-raises rather than retrying a doomed
         call; a non-overflow error re-raises unchanged."""
         try:
-            text, tool_calls = await self._stream_once(messages, usage_events, system, offer_tools)
-            return messages, text, tool_calls
+            result = await self._stream_once(messages, system, offer_tools)
+            usage_events.extend(result.usages)
+            if result.error_class is not None:
+                raise ModelStreamError(result.error_class, result.error_message or "")
+            return messages, result.text, result.tool_calls
         except Exception as error:
             if not is_context_overflow(error):
                 raise
             compacted, compaction_usage = await self.compaction.maybe_compact(messages, force=True)
-            if compacted is messages:
+            if not compaction_usage:
                 raise
             usage_events.extend(compaction_usage)
             emit_metric("turn_context_overflow_recovered_total")
             log("turn.context_overflow_recovered", turn_id=str(self.turn.id))
-            text, tool_calls = await self._stream_once(compacted, usage_events, system, offer_tools)
-            return compacted, text, tool_calls
+            result = await self._stream_once(compacted, system, offer_tools)
+            usage_events.extend(result.usages)
+            if result.error_class is not None:
+                raise ModelStreamError(result.error_class, result.error_message or "") from None
+            return compacted, result.text, result.tool_calls
 
     async def _enforce_spend(self, usage_events: list[Usage]) -> None:
         """Before each model round, re-decide against the caps with this turn's in-flight spend
@@ -398,13 +445,20 @@ class TurnEngine:
         if decision.outcome != ALLOW:
             raise TurnParked(decision.message)
 
+    @DBOS.step(preemptible=True)
     async def _stream_once(
         self,
         messages: tuple[Message, ...],
-        usage_events: list[Usage],
         system: str,
         offer_tools: bool = True,
-    ) -> tuple[str, tuple[ToolUseBlock, ...]]:
+    ) -> StreamResult:
+        """One model round, memoized as a DBOS step: it streams the deltas live to the hub and
+        returns the round's text, tool calls, and usage as a StreamResult. Memoizing the round
+        freezes the model-assigned `call_id`s and the round structure, so a crash-recovery replay
+        returns this recorded output without re-calling the model (no tokens re-spent, the same tool
+        ids), and the per-tool `_dispatch` steps that follow key off those frozen ids. A mid-stream
+        model error is caught and carried on the result, never raised out of the step, so the
+        already-consumed usage survives in the recorded output; the caller re-raises it."""
         request = ModelRequest(
             model=self.agent.model,
             system=system,
@@ -420,6 +474,8 @@ class TurnEngine:
         call_names: dict[str, str] = {}
         call_json: dict[str, list[str]] = {}
         call_order: list[str] = []
+        usages: list[Usage] = []
+        error: Exception | None = None
 
         async def flush() -> None:
             nonlocal pending, last_flush
@@ -429,27 +485,35 @@ class TurnEngine:
                 pending = 0
             last_flush = time.monotonic()
 
-        seen = len(usage_events)
-        async for event in self.model.complete(request):
-            match event:
-                case TextDelta(text=chunk):
-                    parts.append(chunk)
-                    buffer.append(chunk)
-                    pending += len(chunk)
-                    if pending >= DELTA_FLUSH_BYTES or (
-                        pending and time.monotonic() - last_flush >= DELTA_FLUSH_SECONDS
-                    ):
-                        await flush()
-                case ToolCallStart(id=call_id, name=name):
-                    call_names[call_id] = name
-                    call_json[call_id] = []
-                    call_order.append(call_id)
-                case ToolCallDelta(id=call_id, partial_json=partial):
-                    call_json[call_id].append(partial)
-                case Usage():
-                    usage_events.append(event)
+        try:
+            async for event in self.model.complete(request):
+                match event:
+                    case TextDelta(text=chunk):
+                        parts.append(chunk)
+                        buffer.append(chunk)
+                        pending += len(chunk)
+                        if pending >= DELTA_FLUSH_BYTES or (
+                            pending and time.monotonic() - last_flush >= DELTA_FLUSH_SECONDS
+                        ):
+                            await flush()
+                    case ToolCallStart(id=call_id, name=name):
+                        call_names[call_id] = name
+                        call_json[call_id] = []
+                        call_order.append(call_id)
+                    case ToolCallDelta(id=call_id, partial_json=partial):
+                        call_json[call_id].append(partial)
+                    case Usage():
+                        usages.append(event)
+        except Exception as caught:
+            error = caught
         await flush()
-        if len(usage_events) == seen:
+        if error is not None:
+            return StreamResult(
+                usages=tuple(usages),
+                error_class=type(error).__name__,
+                error_message=str(error),
+            )
+        if not usages:
             raise RuntimeError("model stream produced no usage")
         tool_calls = tuple(
             ToolUseBlock(
@@ -457,7 +521,7 @@ class TurnEngine:
             )
             for call_id in call_order
         )
-        return "".join(parts), tool_calls
+        return StreamResult(text="".join(parts), tool_calls=tool_calls, usages=tuple(usages))
 
     async def _publish_cost(self, usage_events: list[Usage]) -> None:
         """After each model round, push the turn's spend so far as a live CostTick — the same priced
@@ -474,9 +538,13 @@ class TurnEngine:
             CostTick(cost_micro_usd=self.pricing.micro_usd(self.agent.model, usage), tokens=tokens)
         )
 
+    @DBOS.step(preemptible=True)
     async def _dispatch(self, context: ToolContext, call: ToolUseBlock) -> ToolResultBlock:
-        """Run one tool call end to end. A bad name or bad arguments become an is_error result
-        before any hook fires (there is no validated input to police). Then pre_tool_use may Deny
+        """Run one tool call end to end, memoized as a DBOS step keyed after its round: the recorded
+        `ToolResultBlock` replays on a crash-recovery re-run without re-invoking the handler, so a
+        side-effecting tool's external write is never re-applied. A bad name or bad arguments become
+        an is_error result before any hook fires (there is no validated input to police). Then
+        pre_tool_use may Deny
         (the tool never dispatches) or ModifyInput (fold the args); the handler runs in the sandbox
         with the folded args (a raising handler is an is_error result). A large non-error result is
         offloaded — its full text written to a workspace `.tool-output` file and only a preview plus
@@ -490,9 +558,11 @@ class TurnEngine:
         post_tool_use_failure instead, observe-only, so the error content the model recovers from is
         never rewritten. The pre-dispatch is_error result (a bad name or bad arguments) fires
         neither — it never ran. An extension tool gets its owning ExtensionContext; a builtin runs
-        ext=None. A tool's image content (a read of an image/PDF, a browser screenshot) bypasses the
-        text bound, wall, and hooks and rides a successful result as image blocks the model sees; an
-        error result stays plain text so error-content consumers stay str-typed."""
+        ext=None. A side-effecting tool additionally receives `ctx.idempotency_key`
+        (`{turn}/{name}/{call_id}`) to dedup its external write on a cross-attempt resume; a read
+        tool receives None. A tool's image content (a read of an image/PDF, a browser screenshot)
+        bypasses the text bound, wall, and hooks and rides a successful result as image blocks the
+        model sees; an error result stays plain text so error-content consumers stay str-typed."""
         await self._publish_activity(call)
         try:
             tool = self.tools.get(call.name)
@@ -512,8 +582,12 @@ class TurnEngine:
             return ToolResultBlock(tool_use_id=call.id, content=pre.denied, is_error=True)
         args = pre.tool_input if pre.tool_input is not None else args
         images: list[ImageBlock] = []
+        key = f"{self.turn.id}/{call.name}/{call.id}" if tool.side_effecting else None
         try:
-            result = await tool.handler(replace(context, ext=self.tool_ext.get(call.name)), args)
+            handler_context = replace(
+                context, ext=self.tool_ext.get(call.name), idempotency_key=key
+            )
+            result = await tool.handler(handler_context, args)
             text_parts: list[str] = []
             for block in result.content:
                 match block:

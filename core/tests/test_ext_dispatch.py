@@ -77,6 +77,25 @@ async def _report_ext(ctx: ToolContext, args: ProbeInput) -> ToolResult:
     return ToolResult(content=(TextContent(text=text),))
 
 
+async def _report_idem(ctx: ToolContext, args: ProbeInput) -> ToolResult:
+    return ToolResult(content=(TextContent(text=f"key={ctx.idempotency_key}"),))
+
+
+IDEM_READ_TOOL = ToolDef(
+    name="idem_read",
+    description="A read tool: reports the folded idempotency key (expected None).",
+    input_model=ProbeInput,
+    handler=_report_idem,
+)
+IDEM_WRITE_TOOL = ToolDef(
+    name="idem_write",
+    description="A side-effecting tool: reports the folded idempotency key.",
+    input_model=ProbeInput,
+    handler=_report_idem,
+    side_effecting=True,
+)
+
+
 PROBE_TOOL = ToolDef(
     name="report_ext",
     description="Report whether the dispatched context carries an ExtensionContext.",
@@ -266,6 +285,36 @@ async def test_builtin_shaped_tool_dispatches_with_ext_none(db: None, tmp_path: 
     tool_use = stored.messages[1].content
     assert isinstance(tool_use, tuple) and isinstance(tool_use[0], ToolUseBlock)
     assert tool_use[0].name == "report_ext"
+
+
+async def test_side_effecting_tool_receives_the_stable_idempotency_key(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn()
+    engine = _engine(
+        turn, OneToolModel(tool_name="idem_write"), tmp_path, (*BUILTIN_TOOLS, IDEM_WRITE_TOOL), {}
+    )
+    frame = await engine.run()
+    assert frame.status == "done"
+    stored = await engine.transcript.read()
+    assert stored is not None
+    tool_result = stored.messages[2].content
+    assert isinstance(tool_result, tuple) and isinstance(tool_result[0], ToolResultBlock)
+    assert tool_result[0].content == f"key={turn.id}/idem_write/c1"
+
+
+async def test_read_tool_receives_no_idempotency_key(db: None, tmp_path: Path) -> None:
+    turn = await _seed_turn()
+    engine = _engine(
+        turn, OneToolModel(tool_name="idem_read"), tmp_path, (*BUILTIN_TOOLS, IDEM_READ_TOOL), {}
+    )
+    frame = await engine.run()
+    assert frame.status == "done"
+    stored = await engine.transcript.read()
+    assert stored is not None
+    tool_result = stored.messages[2].content
+    assert isinstance(tool_result, tuple) and isinstance(tool_result[0], ToolResultBlock)
+    assert tool_result[0].content == "key=None"
 
 
 def test_turn_tools_maps_extension_tools_to_owning_context_and_leaves_builtins_unmapped() -> None:

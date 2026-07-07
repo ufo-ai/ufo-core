@@ -4,8 +4,13 @@ A `ToolDef` binds a name and its input model to the handler that runs it; `schem
 pair the model client puts on the wire. `untrusted` marks a tool whose result carries
 attacker-controllable content (a fetched page, a search snippet, a connector API response) — the
 engine walls such a result in a data-only span so the model never reads it as instructions.
-`ToolRegistry` is the frozen set the engine dispatches against — it rejects a duplicate name at
-construction and fails loud on an unknown lookup."""
+`side_effecting` marks a tool whose handler performs an external write or egress (a connector POST,
+an MCP call, a local durable write): the engine folds a per-call `idempotency_key` onto the context
+such a handler receives, so a cross-attempt resume can dedup the external effect at the provider. A
+deterministic read (a bash read, a search, a page read) leaves it `False` and gets no key — DBOS
+step memoization already makes re-executing it harmless. `ToolRegistry` is the frozen set the engine
+dispatches against — it rejects a duplicate name at construction and fails loud on an unknown
+lookup."""
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -24,6 +29,7 @@ class ToolDef[ModelT: BaseModel]:
     input_model: type[ModelT]
     handler: Callable[[ToolContext, ModelT], Awaitable[ToolResult]]
     untrusted: bool = False
+    side_effecting: bool = False
     subagent_default: bool = False
 
     def schema(self) -> ToolSchema:

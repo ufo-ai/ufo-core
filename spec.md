@@ -48,7 +48,7 @@ Tables (all keyed by `workspace_id`, `created_at`, `updated_at`):
 | `grant` | Agent ← capability binding: a connector account, a credential slot, a tool group. Records grantor, when, via which conversation. Created through chat; the speaker gates the *granting act*, never subsequent use. |
 | `credential` | BYOK secrets, encrypted at rest. Slots are declared by extensions; values are workspace-scoped. |
 | `conversation` | Surface context ↔ queue key (Slack thread, CLI session, web session). Private to its creating member unless the surface is shared (a Slack channel is shared by construction). |
-| `turn`, `turn_step`, `transcript` | The loop's durable log: lifecycle, steps, full-conversation transcript + compaction records. |
+| `turn`, `transcript` | The loop's durable log: lifecycle, full-conversation transcript + compaction records. Sub-turn steps — each model round, tool call, and compaction — are DBOS's own `operation_outputs` step log, memoized so a crash-recovery re-run replays completed work instead of redoing it. |
 | `memory_item` (memory extension) | Memory: subject = member or `shared`. The memory extension owns this table via its own migration; the index backend owns `chunk`. |
 | `ledger` | Metered usage: every model and tool call, priced. |
 | `spend_cap` | Caps by scope (`workspace` \| `member` \| `agent`), dimension, window; `reject` or `park` on breach. |

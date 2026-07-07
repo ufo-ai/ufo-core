@@ -466,14 +466,20 @@ class ConnectorExecuteInput(BaseModel):
 async def _connector_execute(ctx: ToolContext, args: ConnectorExecuteInput) -> ToolResult:
     """The stub connector's server-side execute path: it resolves the turn-agent's bound
     connected-account id through `connector_account` — the broker's account id a server-side
-    execution API takes, holding the token itself — and records it through the extension's scoped
-    store so the seam is read back through a public surface. An agent with no grant for the provider
-    fails loud here, before any execution."""
+    execution API takes, holding the token itself — and records it, with the per-call
+    `idempotency_key` core folds onto a side-effecting tool, through the extension's scoped store so
+    both seams are read back through a public surface. An agent with no grant for the provider fails
+    loud here, before any execution."""
     if ctx.ext is None:
         raise RuntimeError("sample connector tool dispatched without its ExtensionContext")
     account = await ctx.connector_account(CONNECTOR_PROVIDER)
     await ctx.ext.store.put(
-        CONNECTOR_EXECUTE_KEY, {"account": account, "tool_name": args.tool_name}
+        CONNECTOR_EXECUTE_KEY,
+        {
+            "account": account,
+            "tool_name": args.tool_name,
+            "idempotency_key": ctx.idempotency_key,
+        },
     )
     return ToolResult(content=(TextContent(text=account),))
 
@@ -708,6 +714,7 @@ def manifest() -> Manifest:
                         description="Resolve the bound connected-account id for server-side exec.",
                         input_model=ConnectorExecuteInput,
                         handler=_connector_execute,
+                        side_effecting=True,
                         subagent_default=True,
                     ),
                 ),
