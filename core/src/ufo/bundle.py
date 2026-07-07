@@ -22,6 +22,12 @@ BUNDLE_LOCKFILE_NAME = "ufo.lock"
 BUNDLE_DOCKERFILE_NAME = "Dockerfile"
 
 
+def wheel_name() -> str:
+    """The wheel the CLI verb builds beside this context — the closed distribution the Dockerfile
+    installs, since no index carries `ufo`."""
+    return f"ufo-{ufo_version()}-py3-none-any.whl"
+
+
 @dataclass(frozen=True)
 class BundleResult:
     out: Path
@@ -78,7 +84,8 @@ class Bundle:
                 "WORKDIR /app",
                 f"ENV UFO_CONFIG=/app/{BUNDLE_CONFIG_NAME} "
                 f"UFO_LOCKFILE=/app/{BUNDLE_LOCKFILE_NAME}",
-                f'RUN pip install --no-cache-dir "ufo=={ufo_version()}"',
+                f"COPY {wheel_name()} /tmp/{wheel_name()}",
+                f"RUN pip install --no-cache-dir /tmp/{wheel_name()} && rm /tmp/{wheel_name()}",
                 f"COPY {BUNDLE_CONFIG_NAME} {BUNDLE_LOCKFILE_NAME} /app/",
                 'ENTRYPOINT ["ufoctl"]',
                 'CMD ["serve"]',

@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import secrets
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,7 +19,7 @@ import sqlalchemy as sa
 from cryptography.fernet import Fernet
 
 from ufo.accounting import SpendReport, SpendRollup
-from ufo.bundle import Bundle
+from ufo.bundle import Bundle, wheel_name
 from ufo.config import Config, config_path, load_config
 from ufo.credentials import CredentialStore
 from ufo.db import apply_migrations, dispose_db, init_db, workspace_tx
@@ -668,7 +669,13 @@ def bundle(out: Path) -> None:
     config = load_config()
     catalog = read_catalog(config.ext.store) if config.ext.store is not None else None
     result = Bundle(config_path=config_path(), catalog=catalog, out=out).build()
-    click.echo(f"bundle at {result.out} — {len(result.pins)} extension(s) pinned")
+    subprocess.run(("uv", "build", "--wheel", "--out-dir", str(result.out)), check=True)
+    wheel = result.out / wheel_name()
+    if not wheel.exists():
+        raise click.ClickException(f"wheel build produced no {wheel}")
+    click.echo(
+        f"bundle at {result.out} — {len(result.pins)} extension(s) pinned, wheel {wheel.name}"
+    )
     for pin in result.pins:
         click.echo(f"  {pin.name} {pin.version} {pin.digest}")
 

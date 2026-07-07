@@ -56,7 +56,7 @@ jobs:
           if aws ecr describe-images --repository-name ufo --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
             echo "ufo:$IMAGE_TAG already pushed — skipping"
           else
-            uv run ufoctl bundle --out bundle
+            UFO_CONFIG=hosted.toml uv run ufoctl bundle --out bundle
             docker build -t "$ECR_REGISTRY/ufo:$IMAGE_TAG" bundle
             docker push "$ECR_REGISTRY/ufo:$IMAGE_TAG"
           fi

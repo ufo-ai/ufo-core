@@ -1,0 +1,9 @@
+[database]
+url = "sqlite+aiosqlite:///ufo.db"
+
+[blob]
+backend = "filesystem"
+root = "./blobs"
+
+[pack]
+name = "assistant_hosted"

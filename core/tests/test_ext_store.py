@@ -20,7 +20,7 @@ from ufo.ext.loader import (
     load_manifests,
     write_lockfile,
 )
-from ufo.ext.store import Catalog, CatalogEntry, ExtensionStore
+from ufo.ext.store import Catalog, CatalogEntry, ExtensionStore, ufo_version
 from ufo.jobs import JobRunner, bindings_from
 from ufo.schema import tables
 
@@ -208,7 +208,8 @@ def test_bundle_pins_a_bundle_only_extension_and_writes_a_build_context(
     assert {pin.name for pin in locked.extensions} == {sample.NAME}
     dockerfile = result.dockerfile.read_text()
     assert dockerfile.startswith("FROM python:3.12-slim")
-    assert 'RUN pip install --no-cache-dir "ufo==' in dockerfile
+    assert f"COPY ufo-{ufo_version()}-py3-none-any.whl" in dockerfile
+    assert "RUN pip install --no-cache-dir /tmp/ufo-" in dockerfile
     assert "ufo-ext-" not in dockerfile
     assert 'ENTRYPOINT ["ufoctl"]' in dockerfile
     assert dockerfile.rstrip().endswith('CMD ["serve"]')
