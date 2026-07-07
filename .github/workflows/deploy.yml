@@ -66,7 +66,8 @@ jobs:
           if aws ecr describe-images --repository-name ufo-sandbox --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
             echo "ufo-sandbox:$IMAGE_TAG already pushed — skipping"
           else
-            docker build -f core/src/ufo/sandbox/image/Dockerfile -t "$ECR_REGISTRY/ufo-sandbox:$IMAGE_TAG" core/src/ufo/sandbox/image
+            uv run python sandbox/build_template.py --build-docker
+            docker tag ufo-sandbox:latest "$ECR_REGISTRY/ufo-sandbox:$IMAGE_TAG"
             docker push "$ECR_REGISTRY/ufo-sandbox:$IMAGE_TAG"
           fi
 
