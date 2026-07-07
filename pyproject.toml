@@ -45,6 +45,7 @@ e2b = "ufo_ext_e2b:manifest"
 embed-openai = "ufo_ext_embed_openai:manifest"
 eval_harness = "ufo_ext_eval_harness.manifest:manifest"
 exa = "ufo_ext_exa:manifest"
+gateway = "ufo_ext_gateway.manifest:manifest"
 index-default = "ufo_ext_index_default:manifest"
 knowledge_graph = "ufo_ext_knowledge_graph.manifest:manifest"
 mcp = "ufo_ext_mcp:manifest"
@@ -68,6 +69,7 @@ web = "ufo_ext_web.manifest:manifest"
 [project.entry-points."ufo.pack"]
 assistant = "ufo_pack_assistant:pack"
 assistant_hosted = "ufo_pack_assistant_hosted:pack"
+gateway = "ufo_pack_gateway:pack"
 sample_pack = "ufo_pack_sample:pack"
 
 [project.entry-points.pytest11]
@@ -101,6 +103,7 @@ packages = [
     "extensions/connectors/ufo_ext_connectors",
     "extensions/documents/ufo_ext_documents",
     "extensions/eval_harness/ufo_ext_eval_harness",
+    "extensions/gateway/ufo_ext_gateway",
     "extensions/page_alerts/ufo_ext_page_alerts",
     "extensions/knowledge_graph/ufo_ext_knowledge_graph",
     "extensions/memory/ufo_ext_memory",
@@ -138,6 +141,7 @@ exclude = ["**/__pycache__", "**/*.pyc"]
 "extensions/todos/todo_list_section.md" = "ufo_ext_todos/todo_list_section.md"
 "packs/assistant/ufo_pack_assistant.py" = "ufo_pack_assistant.py"
 "packs/assistant_hosted/ufo_pack_assistant_hosted.py" = "ufo_pack_assistant_hosted.py"
+"packs/gateway/ufo_pack_gateway.py" = "ufo_pack_gateway.py"
 "packs/sample_pack/ufo_pack_sample.py" = "ufo_pack_sample/__init__.py"
 "packs/sample_pack/skills" = "ufo_pack_sample/skills"
 

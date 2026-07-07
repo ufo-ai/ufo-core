@@ -7,7 +7,7 @@ set -eu
 
 UFO_SCRIPT_VERSION=dev
 UFO_URL="${UFO_URL:-https://flyingobject.ai}"
-UFO_NAMESPACE="${UFO_NAMESPACE:-}"
+WORKSPACE_URL="${WORKSPACE_URL:-}"
 UFO_CHANNEL="${UFO_CHANNEL:-ufo}"
 UFO_HOME="${UFO_HOME:-$HOME/.ufo}"
 BIN="$UFO_HOME/bin/ufo"
@@ -563,8 +563,8 @@ post() {
   set -- "$@" -H "x-ufo-session: $SID"
   installed=0
   [ -x "$BIN" ] && installed=1
-  if [ -n "$UFO_NAMESPACE" ]; then
-    endpoint="$UFO_URL/v1/cli/$UFO_NAMESPACE/$UFO_CHANNEL"
+  if [ -n "$WORKSPACE_URL" ]; then
+    endpoint="$WORKSPACE_URL/surface/ufo/$UFO_CHANNEL"
   else
     endpoint="$UFO_URL/v1/onboard/$UFO_CHANNEL"
   fi
@@ -715,9 +715,9 @@ turn() {
         chmod 600 "$CREDENTIALS"
         ;;
       workspace)
-        UFO_NAMESPACE=$rest
+        WORKSPACE_URL=$rest
         mkdir -p "$UFO_HOME"
-        printf '%s\n' "$UFO_NAMESPACE" > "$WORKSPACE"
+        printf '%s\n' "$WORKSPACE_URL" > "$WORKSPACE"
         ;;
       install)
         if [ -x "$BIN" ]; then
@@ -734,7 +734,7 @@ turn() {
         ;;
       logout)
         rm -f "$CREDENTIALS" "$SESSION" "$WORKSPACE"
-        TOKEN='' SID='' UFO_NAMESPACE=''
+        TOKEN='' SID='' WORKSPACE_URL=''
         ;;
       sendfile)
         NEXT=sendfile
@@ -783,7 +783,7 @@ main() {
       ;;
     login)
       rm -f "$CREDENTIALS" "$SESSION" "$WORKSPACE"
-      UFO_NAMESPACE=''
+      WORKSPACE_URL=''
       shift
       ;;
   esac
@@ -793,7 +793,7 @@ main() {
   trap cleanup EXIT
   [ -s "$CREDENTIALS" ] && TOKEN=$(cat "$CREDENTIALS")
   [ -s "$SESSION" ] && SID=$(cat "$SESSION")
-  [ -z "$UFO_NAMESPACE" ] && [ -s "$WORKSPACE" ] && UFO_NAMESPACE=$(cat "$WORKSPACE")
+  [ -z "$WORKSPACE_URL" ] && [ -s "$WORKSPACE" ] && WORKSPACE_URL=$(cat "$WORKSPACE")
   if [ -z "${SID:-}" ]; then
     SID="$(uname -n 2>/dev/null || printf host).$$.$(date +%s)"
     mkdir -p "$UFO_HOME"
