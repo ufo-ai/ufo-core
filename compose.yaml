@@ -2,15 +2,15 @@ services:
   postgres:
     image: pgvector/pgvector:pg17
     environment:
-      POSTGRES_USER: selfhost
-      POSTGRES_PASSWORD: selfhost
-      POSTGRES_DB: selfhost
+      POSTGRES_USER: ufo
+      POSTGRES_PASSWORD: ufo
+      POSTGRES_DB: ufo
     ports:
       - "127.0.0.1:5541:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U selfhost"]
+      test: ["CMD-SHELL", "pg_isready -U ufo"]
       interval: 2s
       timeout: 2s
       retries: 15

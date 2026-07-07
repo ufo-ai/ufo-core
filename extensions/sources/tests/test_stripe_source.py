@@ -1,5 +1,5 @@
 """The Stripe connector over a mock transport: the `has_more`/`starting_after` cursor walk, the
-`?created[gte]` incremental filter, the `events` stream (which selfhost syncs as plain records — it
+`?created[gte]` incremental filter, the `events` stream (which ufo syncs as plain records — it
 does not route Stripe's cross-object `*.deleted` events to other streams), and a refusal as
 `StreamSkipped`. Stripe's `created` cursor is a unix integer, which the adapter's string watermark
 does not advance, so an incremental stream full-refreshes each run (correct: `snapshot=False` +
@@ -10,11 +10,11 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from selfhost_ext_sources.stripe import STRIPE_VERSION, StripeConnector
+from ufo_ext_sources.stripe import STRIPE_VERSION, StripeConnector
 
-from selfhost.connectors import Credential
-from selfhost.sdk.sources import ConnectorBackend, ConnectorSourceConfig
-from selfhost.sources.sync import SourceAuth, StreamSkipped, SyncResult
+from ufo.connectors import Credential
+from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
+from ufo.sources.sync import SourceAuth, StreamSkipped, SyncResult
 
 ACCOUNT = "acct-1"
 

@@ -6,14 +6,14 @@ import sqlalchemy as sa
 from dbos import DBOSClient
 from pydantic import BaseModel
 
-from selfhost.config import Config
-from selfhost.db import workspace_tx
-from selfhost.ext.manifest import SUBAGENT_ROUND_LIMIT, SubagentProfile
-from selfhost.loop.profiles import CORE_SUBAGENT_PROFILES, GENERAL_PURPOSE
-from selfhost.loop.subagents import SubagentRegistry, Subagents, subagent_system_prompt
-from selfhost.schema import tables
-from selfhost.schema.records import TerminalFrame, Turn, turn_id_for
-from selfhost.tools.builtins import BUILTIN_TOOLS
+from ufo.config import Config
+from ufo.db import workspace_tx
+from ufo.ext.manifest import SUBAGENT_ROUND_LIMIT, SubagentProfile
+from ufo.loop.profiles import CORE_SUBAGENT_PROFILES, GENERAL_PURPOSE
+from ufo.loop.subagents import SubagentRegistry, Subagents, subagent_system_prompt
+from ufo.schema import tables
+from ufo.schema.records import TerminalFrame, Turn, turn_id_for
+from ufo.tools.builtins import BUILTIN_TOOLS
 
 
 class _Task(BaseModel):

@@ -1,7 +1,7 @@
 """Run the eval suites against the workspace and render a report per task.
 
 `python -m evals --list` lists the tasks and their digests. `python -m evals` drives each case as a
-real turn through the agent (a `selfhost serve` must be running to execute the admitted turns),
+real turn through the agent (a `ufoctl serve` must be running to execute the admitted turns),
 grades the answer + trajectory, writes an HTML report per task under `--out`, prints the pass line,
 and exits non-zero if any suite failed."""
 
@@ -12,17 +12,17 @@ import asyncio
 import sys
 from pathlib import Path
 
-from selfhost_ext_eval_harness.harness import EvalReport
-from selfhost_ext_eval_harness.registry import run_tasks, selected_tasks
-from selfhost_ext_eval_harness.report_html import render_report_html
-from selfhost_ext_eval_harness.target import InProcessTarget
+from ufo_ext_eval_harness.harness import EvalReport
+from ufo_ext_eval_harness.registry import run_tasks, selected_tasks
+from ufo_ext_eval_harness.report_html import render_report_html
+from ufo_ext_eval_harness.target import InProcessTarget
 
 from evals.driver import WorkspaceDriver, eval_context, resolve_workspace_and_agent
 from evals.registry import TASKS
-from selfhost.blob import blob_store_for
-from selfhost.config import Config, load_config
-from selfhost.db import dispose_db, init_db
-from selfhost.schema.records import DEFAULT_AGENT_NAME
+from ufo.blob import blob_store_for
+from ufo.config import Config, load_config
+from ufo.db import dispose_db, init_db
+from ufo.schema.records import DEFAULT_AGENT_NAME
 
 DEFAULT_OUT = Path("eval-reports")
 

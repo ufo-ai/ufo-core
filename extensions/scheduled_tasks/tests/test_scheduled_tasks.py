@@ -13,9 +13,9 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
-from selfhost_ext_scheduled_tasks.manifest import NAME, RUNNER_JOB, manifest
-from selfhost_ext_scheduled_tasks.runner import ScheduledTaskRunner
-from selfhost_ext_scheduled_tasks.tasks import (
+from ufo_ext_scheduled_tasks.manifest import NAME, RUNNER_JOB, manifest
+from ufo_ext_scheduled_tasks.runner import ScheduledTaskRunner
+from ufo_ext_scheduled_tasks.tasks import (
     CancelScheduledTaskInput,
     ListScheduledTasksInput,
     ScheduleTaskInput,
@@ -24,16 +24,16 @@ from selfhost_ext_scheduled_tasks.tasks import (
     schedule_task,
 )
 
-from selfhost.credentials import CredentialStore
-from selfhost.db import workspace_tx
-from selfhost.ext.context import ExtensionContext, context_for
-from selfhost.ext.loader import skill_registry
-from selfhost.jobs import JobRunner, bindings_from
-from selfhost.scheduling import ScheduleStore
-from selfhost.schema import tables
-from selfhost.schema.records import WRITEBACK_PENDING, Agent, Turn
-from selfhost.surfaces.admission import Admission, AdmissionInvoker
-from selfhost.tools.context import SpawnResult, ToolContext
+from ufo.credentials import CredentialStore
+from ufo.db import workspace_tx
+from ufo.ext.context import ExtensionContext, context_for
+from ufo.ext.loader import skill_registry
+from ufo.jobs import JobRunner, bindings_from
+from ufo.scheduling import ScheduleStore
+from ufo.schema import tables
+from ufo.schema.records import WRITEBACK_PENDING, Agent, Turn
+from ufo.surfaces.admission import Admission, AdmissionInvoker
+from ufo.tools.context import SpawnResult, ToolContext
 
 DAILY_9AM = "0 9 * * *"
 

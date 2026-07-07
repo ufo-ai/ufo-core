@@ -1,6 +1,6 @@
 """The connectors extension: Composio-brokered OAuth providers and the dynamic Composio tools.
 
-The extension imports only `selfhost.sdk`. These tests source its manifest the way `serve` does
+The extension imports only `ufo.sdk`. These tests source its manifest the way `serve` does
 (`_connect_flow` over the manifest, `turn_tools` for the tool set) and drive the two seams it owns:
 the OAuth consent handoff (grant binding + confused-deputy close) and the dynamic tools
 (`list_external_tools`/`describe_external_tools`/`call_external_tool`). Composio's HTTP is mocked
@@ -15,12 +15,13 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-import selfhost_ext_connectors.composio as composio
-import selfhost_ext_connectors.manifest as connectors
-import selfhost_ext_connectors.provider as provider
 import sqlalchemy as sa
+import ufo_ext_connectors.composio as composio
+import ufo_ext_connectors.manifest as connectors
+import ufo_ext_connectors.provider as provider
 from cryptography.fernet import Fernet
-from selfhost_ext_connectors.tools import (
+from starlette.requests import Request
+from ufo_ext_connectors.tools import (
     CallExternalToolInput,
     DescribeExternalToolsInput,
     ListExternalToolsInput,
@@ -28,28 +29,27 @@ from selfhost_ext_connectors.tools import (
     describe_external_tools,
     list_external_tools,
 )
-from starlette.requests import Request
 
-from selfhost.config import Config
-from selfhost.credentials import CredentialStore
-from selfhost.db import workspace_tx
-from selfhost.ext.context import context_for
-from selfhost.ext.loader import turn_tools
-from selfhost.grants import GrantStore, install_connect_flow
-from selfhost.schema import tables
-from selfhost.schema.records import Agent, Turn
-from selfhost.serve import _connect_flow
-from selfhost.tools.builtins import ConnectAccountInput, connect_account_handler
-from selfhost.tools.context import ToolContext
+from ufo.config import Config
+from ufo.credentials import CredentialStore
+from ufo.db import workspace_tx
+from ufo.ext.context import context_for
+from ufo.ext.loader import turn_tools
+from ufo.grants import GrantStore, install_connect_flow
+from ufo.schema import tables
+from ufo.schema.records import Agent, Turn
+from ufo.serve import _connect_flow
+from ufo.tools.builtins import ConnectAccountInput, connect_account_handler
+from ufo.tools.context import ToolContext
 
-PUBLIC_BASE_URL = "https://selfhost.example.com"
-EXPECTED_REDIRECT_URI = "https://selfhost.example.com/v1/connect/callback"
+PUBLIC_BASE_URL = "https://ufo.example.com"
+EXPECTED_REDIRECT_URI = "https://ufo.example.com/v1/connect/callback"
 PROVIDER = "github"
 PROVIDER_HOST = "api.github.com"
 COMPOSIO_CONSENT_URL = "https://github.com/login/oauth/authorize?client_id=x&state=y"
 COMPOSIO_ACCOUNT = "ca_test123"
 GITHUB_TOKEN = "gho_realsecrettoken"
-COMPOSIO_USER = "selfhost_ws"
+COMPOSIO_USER = "ufo_ws"
 GITHUB_SLUG = "GITHUB_LIST_PULL_REQUESTS"
 UNKNOWN_SLUG = "GITHUB_DEFINITELY_NOT_A_TOOL"
 TOOL_DESCRIPTION = "List pull requests on a repository."
@@ -139,9 +139,7 @@ async def test_composio_client_confirms_an_active_accounts_owner() -> None:
 
 async def test_composio_client_refuses_an_account_owned_by_a_foreign_user() -> None:
     with pytest.raises(composio.ComposioError, match="owned by"):
-        await _mock_client("selfhost_someone_else").connected_account(
-            COMPOSIO_ACCOUNT, COMPOSIO_USER
-        )
+        await _mock_client("ufo_someone_else").connected_account(COMPOSIO_ACCOUNT, COMPOSIO_USER)
 
 
 async def test_composio_client_refuses_an_inactive_account() -> None:
@@ -157,7 +155,7 @@ async def test_composio_client_refuses_an_inactive_account() -> None:
 
 async def test_composio_client_mints_a_connect_link() -> None:
     redirect = await _mock_client().connect_link(
-        toolkit="github", user_id="selfhost_ws", callback_url="https://selfhost.example.com/back"
+        toolkit="github", user_id="ufo_ws", callback_url="https://ufo.example.com/back"
     )
     assert redirect == COMPOSIO_CONSENT_URL
 
@@ -205,7 +203,7 @@ def test_authorize_url_points_the_browser_at_the_oauth_bridge() -> None:
     parsed = urlparse(url)
     assert (parsed.scheme, parsed.netloc, parsed.path) == (
         "https",
-        "selfhost.example.com",
+        "ufo.example.com",
         provider.OAUTH_ROUTE_MOUNT,
     )
     query = parse_qs(parsed.query)

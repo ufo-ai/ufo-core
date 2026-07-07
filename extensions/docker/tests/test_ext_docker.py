@@ -9,13 +9,13 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-import selfhost_ext_docker as docker_ext
-from selfhost_ext_docker import DockerCarrier
+import ufo_ext_docker as docker_ext
+from ufo_ext_docker import DockerCarrier
 
-from selfhost.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
-from selfhost.sandbox.fs_creds import SandboxFsCredentials
-from selfhost.sdk.sandbox import MountSpec, SandboxHandle
-from selfhost.serve import _select_carrier
+from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
+from ufo.sandbox.fs_creds import SandboxFsCredentials
+from ufo.sdk.sandbox import MountSpec, SandboxHandle
+from ufo.serve import _select_carrier
 
 _S3_CREDS = SandboxFsCredentials("AKIASBX", "sbx-secret", "sbx-token")
 
@@ -46,7 +46,7 @@ async def test_s3fs_mount_exec_clears_the_proxy_env_but_the_health_check_does_no
     conversation = uuid4()
     mount = MountSpec(
         kind="s3",
-        bucket="selfhost-blobs",
+        bucket="ufo-blobs",
         key_prefix=f"conversations/{conversation}/workspace",
         credentials=_S3_CREDS,
         s3_url="https://minio:9000",

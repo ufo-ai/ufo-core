@@ -3,7 +3,7 @@ page, `pageInfo.endCursor` threaded into the next request's `after`, `hasNextPag
 the incremental `filter: { updatedAt: { gte } }` gate, a full-refresh stream (no `updatedAt` filter)
 threading no variables, the `render` override that lifts an issue/project into readable prose, a 403
 surfacing as `StreamSkipped`, and a GraphQL `errors` array failing loud. No conftest: the shared
-`selfhost_testsupport` plugin covers fixtures, and these tests are offline (a canned transport, no
+`ufo_testsupport` plugin covers fixtures, and these tests are offline (a canned transport, no
 DB, no token, no broker)."""
 
 import json
@@ -13,11 +13,11 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from selfhost_ext_sources.linear import LinearConnector
+from ufo_ext_sources.linear import LinearConnector
 
-from selfhost.connectors import Credential
-from selfhost.sdk.sources import ConnectorBackend, ConnectorSourceConfig
-from selfhost.sources.sync import SourceAuth, StreamSkipped, SyncResult
+from ufo.connectors import Credential
+from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
+from ufo.sources.sync import SourceAuth, StreamSkipped, SyncResult
 
 ACCOUNT = "acct-1"
 

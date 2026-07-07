@@ -15,19 +15,19 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 from dbos import DBOS, DBOSClient, SetWorkflowID
-from selfhost_ext_index_default import DefaultIndex
+from ufo_ext_index_default import DefaultIndex
 
-from selfhost.accounting import CORE_PRICING
-from selfhost.blob import FilesystemBlobStore
-from selfhost.browser import SandboxCdpProvider
-from selfhost.config import Config
-from selfhost.db import workspace_tx
-from selfhost.ext.loader import skill_registry
-from selfhost.ext.manifest import ModelProviderSpec
-from selfhost.hub import InProcessHub
-from selfhost.loop import queue as loop_queue
-from selfhost.loop.subagents import SubagentRegistry
-from selfhost.models.interface import (
+from ufo.accounting import CORE_PRICING
+from ufo.blob import FilesystemBlobStore
+from ufo.browser import SandboxCdpProvider
+from ufo.config import Config
+from ufo.db import workspace_tx
+from ufo.ext.loader import skill_registry
+from ufo.ext.manifest import ModelProviderSpec
+from ufo.hub import InProcessHub
+from ufo.loop import queue as loop_queue
+from ufo.loop.subagents import SubagentRegistry
+from ufo.models.interface import (
     ModelEvent,
     ModelRequest,
     TextDelta,
@@ -35,10 +35,10 @@ from selfhost.models.interface import (
     ToolCallStart,
     ToolResultBlock,
 )
-from selfhost.models.registry import ModelRegistry
-from selfhost.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
-from selfhost.schema import tables
-from selfhost.schema.records import TerminalFrame, Usage
+from ufo.models.registry import ModelRegistry
+from ufo.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
+from ufo.schema import tables
+from ufo.schema.records import TerminalFrame, Usage
 
 RECOVERY_TIMEOUT_SECONDS = 30
 

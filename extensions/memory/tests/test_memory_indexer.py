@@ -10,11 +10,11 @@ from collections.abc import AsyncIterator
 from uuid import UUID, uuid4
 
 import pytest
-import selfhost_ext_memory.manifest as memory_manifest
 import sqlalchemy as sa
-from selfhost_ext_embed_openai import EMBED_DIM
-from selfhost_ext_index_default import DefaultIndex
-from selfhost_ext_memory.store import (
+import ufo_ext_memory.manifest as memory_manifest
+from ufo_ext_embed_openai import EMBED_DIM
+from ufo_ext_index_default import DefaultIndex
+from ufo_ext_memory.store import (
     MemoryIndexer,
     MemoryStore,
     MemoryWrite,
@@ -22,11 +22,11 @@ from selfhost_ext_memory.store import (
     recall_subjects,
 )
 
-from selfhost.db import workspace_tx
-from selfhost.indexing import TextChunker
-from selfhost.jobs import CORE_EXTENSION, bindings_from
-from selfhost.schema import tables
-from selfhost.subjects import member_subject
+from ufo.db import workspace_tx
+from ufo.indexing import TextChunker
+from ufo.jobs import CORE_EXTENSION, bindings_from
+from ufo.schema import tables
+from ufo.subjects import member_subject
 
 
 def vec(*axes: tuple[int, float]) -> tuple[float, ...]:

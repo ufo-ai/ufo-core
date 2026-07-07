@@ -9,16 +9,16 @@ import yaml
 
 REPO = Path(__file__).resolve().parent.parent
 CONTROL_PLANE = REPO / "deploy" / "control-plane.yaml"
-CHART = REPO / "charts" / "selfhost-tenant"
+CHART = REPO / "charts" / "ufo-tenant"
 DIGEST = "sha256:" + "e" * 64
 
 VALUES = f"""\
-namespace: selfhost-acme
+namespace: ufo-acme
 tenant_name: acme
 pack: assistant
-host: acme.selfhost.app
+host: acme.ufo.app
 owner_email: you@acme.com
-bundle_image: ghcr.io/acme/selfhost@{DIGEST}
+bundle_image: ghcr.io/acme/ufo@{DIGEST}
 sandbox_image: ghcr.io/acme/sandbox@{DIGEST}
 """
 
@@ -44,7 +44,7 @@ def _named(docs: Iterable[Any], kind: str, name: str) -> dict:
 
 def _operator_cluster_role() -> Grants:
     docs = yaml.safe_load_all(CONTROL_PLANE.read_text())
-    return _grants(_named(docs, "ClusterRole", "selfhost-operator")["rules"])
+    return _grants(_named(docs, "ClusterRole", "ufo-operator")["rules"])
 
 
 def _sandbox_manager_role(tmp_path: Path) -> Grants:
@@ -57,7 +57,7 @@ def _sandbox_manager_role(tmp_path: Path) -> Grants:
             "acme",
             str(CHART),
             "--namespace",
-            "selfhost-acme",
+            "ufo-acme",
             "--values",
             str(values),
         ],
@@ -66,7 +66,7 @@ def _sandbox_manager_role(tmp_path: Path) -> Grants:
     )
     assert result.returncode == 0, result.stderr
     docs = yaml.safe_load_all(result.stdout)
-    return _grants(_named(docs, "Role", "selfhost-sandbox-manager")["rules"])
+    return _grants(_named(docs, "Role", "ufo-sandbox-manager")["rules"])
 
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")

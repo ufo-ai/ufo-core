@@ -8,10 +8,10 @@ import asyncio
 from collections.abc import AsyncIterator
 from uuid import UUID, uuid4
 
-from selfhost.hub import InProcessHub, LiveFrame, Terminal
-from selfhost.models.interface import TextDelta
-from selfhost.schema.records import TerminalFrame
-from selfhost.surfaces.hub_tail import tail_frames
+from ufo.hub import InProcessHub, LiveFrame, Terminal
+from ufo.models.interface import TextDelta
+from ufo.schema.records import TerminalFrame
+from ufo.surfaces.hub_tail import tail_frames
 
 
 async def _drain(stream: AsyncIterator[tuple[str, LiveFrame]]) -> None:

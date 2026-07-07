@@ -17,13 +17,13 @@ jobs:
       postgres:
         image: pgvector/pgvector:pg17
         env:
-          POSTGRES_USER: selfhost
-          POSTGRES_PASSWORD: selfhost
-          POSTGRES_DB: selfhost
+          POSTGRES_USER: ufo
+          POSTGRES_PASSWORD: ufo
+          POSTGRES_DB: ufo
         ports:
           - 5541:5432
         options: >-
-          --health-cmd "pg_isready -U selfhost"
+          --health-cmd "pg_isready -U ufo"
           --health-interval 2s
           --health-timeout 2s
           --health-retries 15

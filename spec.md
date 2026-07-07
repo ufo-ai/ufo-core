@@ -1,6 +1,6 @@
-# Selfhost Spec
+# Ufo Spec
 
-Selfhost is an agent runtime a developer can run, read, and extend: a hard-to-vary **core**
+Ufo is an agent runtime a developer can run, read, and extend: a hard-to-vary **core**
 (sandboxed agent loop, memory, surfaces, accounting, model abstraction, the extension system) plus
 **extensions** through which nearly every easy-to-vary capability is built — connectors, data
 sources, tools, subagents, onboarding. A **workspace** hosts one team and its agents.
@@ -25,16 +25,16 @@ test for the extension API — every entry must be expressible without touching 
 
 | Decision | Value |
 |---|---|
-| Language | Python 3.12+, uv. Monorepo: `core/` + `extensions/*` + `packs/*`, built and shipped as one pip-installable distribution (`selfhost`) — `pip install selfhost` brings core, every first-party extension, and every pack, each discovered through its entry point. Rust was considered and rejected for core: the salvage is Python, DBOS has no Rust SDK, the loop is I/O-bound, and extensions must be writable by users and agents in the AI ecosystem's default language. A hot data plane (egress proxy) may become a Rust component later without changing this. |
+| Language | Python 3.12+, uv. Monorepo: `core/` + `extensions/*` + `packs/*`, built and shipped as one pip-installable distribution (`ufo`) — `pip install ufo` brings core, every first-party extension, and every pack, each discovered through its entry point. Rust was considered and rejected for core: the salvage is Python, DBOS has no Rust SDK, the loop is I/O-bound, and extensions must be writable by users and agents in the AI ecosystem's default language. A hot data plane (egress proxy) may become a Rust component later without changing this. |
 | Persistence | One async-SQLAlchemy schema over **SQLite by default** (aiosqlite, WAL — zero services for dev) and **Postgres for deploys** (asyncpg); alembic migrations are the single schema source, dialect-neutral (integers for money/tokens; dialect-only types live inside IndexBackend impls). Plus a pluggable blob store (transcripts, compaction records, sandbox workspaces, shared artifacts): **local filesystem by default**, S3-compatible for deploys — the S3 API is the cloud-portability seam. Every row carries `workspace_id`; a deploy serves ONE workspace (hosted multi-workspace is the enterprise layer). |
 | Durable execution | DBOS on the same database as the schema (SQLite dev / Postgres deploys): a turn is a durable workflow, a subagent a child workflow; queues, async cancel, crash recovery. DBOS-on-SQLite is verified in U1 — fail loud, never silently fall back to requiring Postgres. Dequeue poll interval and system-DB retention are configured from day one. |
 | Streaming | Durable terminal frames in Postgres; live token deltas through a hub interface — in-process in the single-process default, a Redis hub extension for multi-instance deploys. A lost delta costs a redrawn token, never correctness. |
-| Topology | `selfhost serve` is one process on one event loop: surfaces + DBOS workers + jobs. Everything is async-native — a blocking call stalls the whole deploy, so blocking-in-async fails lint. Scale-out = more instances plus a shared hub. |
+| Topology | `ufoctl serve` is one process on one event loop: surfaces + DBOS workers + jobs. Everything is async-native — a blocking call stalls the whole deploy, so blocking-in-async fails lint. Scale-out = more instances plus a shared hub. |
 | Sandbox | A local temp-dir carrier is the core default: no kernel isolation (a raw shell reaches the host FS — only tool arguments are workspace-guarded), and egress is proxy-scoped/metered only for clients that honor the proxy env, not kernel-enforced (model keys still stay fail-closed via the sentinel). It is the development / trusted-input default; use Docker or E2B (carrier extensions on the `carriers` point) for untrusted input, isolation, or multi-tenant deploys. |
 | Models | Model providers are an extension point; core ships Anthropic + OpenAI direct clients behind one `ModelClient` interface. OpenRouter (or any router) is an extension, never core. |
 | Observability | OpenTelemetry APIs only in product code; the OTLP export target (Datadog, …) is deploy config. No vendor SDK in core. |
 | Kubernetes | Absent from core by construction. The enterprise offering later wraps core with k8s (principle 3); nothing in core may assume or import it. |
-| CLI | One CLI: `selfhost` (`chat`, `serve`, `bundle`, `ext`, admin verbs). |
+| CLI | One CLI: `ufo` (`chat`, `serve`, `bundle`, `ext`, admin verbs). |
 
 ## Workspace model
 
@@ -117,8 +117,8 @@ E2B implement it as extensions on the `carriers` point.
 
 ## Extension system
 
-An extension is a Python package exposing one entry point (`selfhost.extension`) that returns a
-`Manifest`. Extensions import only the public SDK (`selfhost.sdk`); a CI gate forbids reaching
+An extension is a Python package exposing one entry point (`ufo.extension`) that returns a
+`Manifest`. Extensions import only the public SDK (`ufo.sdk`); a CI gate forbids reaching
 into core internals.
 
 Manifest registers (each optional):
@@ -128,14 +128,14 @@ Manifest registers (each optional):
 | `tools` | Typed tool defs + handlers; appear in agents' granted tool sets. |
 | `subagents` | Typed subagent profiles. |
 | `prompt_sections` | Capability sections a pack contributes to the agent's system prompt, rendered into the shell's `{{sections}}` slot ordered by name — a pack's rules (web search, browsing, office docs) reach the agent without core naming the capability. |
-| `skills` | Skill folders (SKILL.md + bundled scripts/assets) contributed to the loadable set; the loader parses each into the registry `load_skill` and the `{{skill_index}}` consult, mounted into the sandbox under `.skills/<name>/` beside core's own three. A skill script imports nothing from selfhost (it runs in the sandbox) — a CI gate holds that boundary. |
+| `skills` | Skill folders (SKILL.md + bundled scripts/assets) contributed to the loadable set; the loader parses each into the registry `load_skill` and the `{{skill_index}}` consult, mounted into the sandbox under `.skills/<name>/` beside core's own three. A skill script imports nothing from ufo (it runs in the sandbox) — a CI gate holds that boundary. |
 | `connectors` | Provider actions behind the connector framework; OAuth via the grant flow. **Composio brokers auth by PROXY: every call goes through Composio (`/tools/execute` for tools; a proxying transport → `/tools/execute/proxy` for feed-sync source HTTP, carried by the `composio` auth-proxy backend) carrying `(user_id, connected_account_id)` — Composio holds the provider token and injects it server-side; the token is NEVER exposed to us. A connector grant stores only `connected_account_id`; the confused-deputy check reads the account's `user_id` metadata, never a token. Composio grants derive NO egress InjectionRule — the sentinel→key swap (§Sandboxing) is ONLY for user-supplied BYOK `credentials` keys.** |
-| `sources` | Data-feed backends: `sync(cursor) -> pages` run as jobs; pages land in memory/knowledge via the derivation pipeline. Each backend is pluggable — S3, connector/provider APIs, webhooks; core ships only `folder` (local files). Connector source providers live in `extensions/sources`, built on the read-only REST connector framework core exposes through `selfhost.sdk.sources` (so any extension can provide a source); each resolves a provider `Credential` through the pluggable **auth-proxy** seam, never importing a broker. |
+| `sources` | Data-feed backends: `sync(cursor) -> pages` run as jobs; pages land in memory/knowledge via the derivation pipeline. Each backend is pluggable — S3, connector/provider APIs, webhooks; core ships only `folder` (local files). Connector source providers live in `extensions/sources`, built on the read-only REST connector framework core exposes through `ufo.sdk.sources` (so any extension can provide a source); each resolves a provider `Credential` through the pluggable **auth-proxy** seam, never importing a broker. |
 | `hooks` | Reactive lifecycle handlers on Claude Code's taxonomy, scoped like a job. Seven fire on the turn loop — `pre_tool_use`/`post_tool_use`/`post_tool_use_failure`, `user_prompt_submit`, `stop`, `pre_compact`/`post_compact` — as a runtime policy filter over the tools grants already admit (observe, deny, modify, or inject), never a second grant path. The eighth, `page_change`, is the data-plane seam (data → memory): a core batched cursor-runner replays each changed source page to a consumer's hook off that extension's own cursor — the path the memory indexer and knowledge-graph extractor ride. (Claude Code's session/permission/subagent-stop/notification events have no producer here and are not members until one lands with a consumer.) |
 | `jobs` | Recurring/one-time background work. |
 | `routes` | HTTP endpoints under `/ext/<name>/` (webhooks, OAuth callbacks, plugin UIs). |
 | `surfaces` | A chat surface on the one privileged surface seam: its `SurfaceRoute`s mounted under `/surface/<name>`. A **durable** surface (Slack) declares two-phase delivery (`post` then `attach`) the poller drives — declaring `post` is what marks it durable, and admission registers every turn entering its conversations for delivery, whoever admits it; a **live** surface (web) tails the hub over SSE in its own route. Core's CLI is the built-in live twin. |
-| `credentials` | Named BYOK slots the workspace must fill (drives onboarding); `selfhost init` seeds a slot from its upper-cased env var (`SLACK_BOT_TOKEN` → `slack_bot_token`), and the operator fills or rotates one anytime with `selfhost credential set <slot>`. |
+| `credentials` | Named BYOK slots the workspace must fill (drives onboarding); `ufoctl init` seeds a slot from its upper-cased env var (`SLACK_BOT_TOKEN` → `slack_bot_token`), and the operator fills or rotates one anytime with `ufoctl credential set <slot>`. |
 | `onboarding` | Steps contributed to the workspace/pack onboarding flow. |
 | `models` | Model providers behind `ModelClient` (OpenRouter, local runtimes). |
 | `carriers` | Sandbox carriers — Docker, E2B, remote runners; core's default is a local temp-dir carrier. |
@@ -161,19 +161,19 @@ prompt files on disk. Extensions never see raw DB handles or other workspaces.
 ### Extension store
 
 Extensions are Python packages. A deploy may enable the extension store — a registry index that
-the CLI (and, when granted, an agent in chat) searches and installs from: `selfhost ext search /
+the CLI (and, when granted, an agent in chat) searches and installs from: `ufoctl ext search /
 install / remove`. Installs pin version + digest and are recorded in the bundle lockfile; with the
 store disabled, a deploy runs only what its bundle ships.
 
 ### Packs
 
 A **pack** is the deploy's product configuration as one activation. It is a workspace member under
-`packs/<name>/` whose `selfhost.pack` entry point returns a `Pack` — the set of installed extensions
+`packs/<name>/` whose `ufo.pack` entry point returns a `Pack` — the set of installed extensions
 it bundles (by manifest name) plus any pack-level skills and onboarding steps of its own. A deploy
 names the active pack in config (`[pack] name`, one active pack); activating it narrows the active
 manifest set to exactly the bundled extensions' manifests plus one manifest carrying the pack's own
 contributions, so the pack fully determines what comes up — a coherent config online together. Packs
-are discovered through their entry-point group exactly as extensions are, import only `selfhost.sdk`
+are discovered through their entry-point group exactly as extensions are, import only `ufo.sdk`
 (the same CI gate), name only installed extensions (an uninstalled one fails loud at boot), and own
 no tables — a pack's pack-level skills and onboarding ride the same manifest-consuming paths an
 extension's do. The lockfile is the installed+verified universe; a pack selects the active subset,
@@ -236,21 +236,21 @@ keys come from `credential` slots or deploy config.
 
 ## Deploy config bundling
 
-One declarative file, `selfhost.toml`: Postgres URL, blob store (filesystem root or S3 endpoint),
+One declarative file, `ufo.toml`: Postgres URL, blob store (filesystem root or S3 endpoint),
 model keys (env refs), enabled extensions + versions, the active pack (`[pack] name`), surface
 config (Slack app), sandbox carrier, stream hub, OTLP export target, extension-store
 toggle, spend defaults.
 
 ## Running it
 
-The developer surface is a pip-installable CLI running as a **host process** — selfhost is never
+The developer surface is a pip-installable CLI running as a **host process** — ufo is never
 containerized for development:
 
 ```bash
-uv tool install selfhost        # the Python package is the primitive; brew formula = later wrapper
-selfhost init                   # writes selfhost.toml; onboards workspace + first owner + agent + model key
-selfhost serve                  # one process: surfaces + workers + jobs + proxy — SQLite, zero services
-selfhost chat                   # a client; connects to serve's URL from selfhost.toml
+uv tool install ufo        # the Python package is the primitive; brew formula = later wrapper
+ufoctl init                   # writes ufo.toml; onboards workspace + first owner + agent + model key
+ufoctl serve                  # one process: surfaces + workers + jobs + proxy — SQLite, zero services
+ufoctl chat                   # a client; connects to serve's URL from ufo.toml
 ```
 
 Dev defaults are zero-services: SQLite, filesystem blobs, in-process hub. Docker enters only for
@@ -258,9 +258,9 @@ sandboxes (U2+); Postgres (the checked-in compose or an existing instance) enter
 and the Postgres half of the test matrix.
 
 `serve` talks to the host Docker daemon; sandboxes are **sibling containers**, never children.
-Docker is required for sandboxes, not for running selfhost. `chat` is only a client — if nothing
-listens it says to run `selfhost serve`; there is no embedded auto-start. A containerized `serve`
-(the `selfhost bundle` deploy) spawns siblings via the mounted Docker socket, or uses a remote
+Docker is required for sandboxes, not for running ufo. `chat` is only a client — if nothing
+listens it says to run `ufoctl serve`; there is no embedded auto-start. A containerized `serve`
+(the `ufoctl bundle` deploy) spawns siblings via the mounted Docker socket, or uses a remote
 carrier extension and needs no host Docker at all.
 
 ## Scale-out
@@ -299,7 +299,7 @@ proxy's HTTP endpoint (any instance's proxy derives identical rules from DB stat
 co-located with the instance that created them). An import-boundary gate enforces the seam. The
 enterprise k8s layer then splits roles into Deployments with per-role autoscaling by
 configuration, not code change.
-`selfhost bundle` produces a runnable artifact (OCI image + pinned config + lockfile) — the same
+`ufoctl bundle` produces a runnable artifact (OCI image + pinned config + lockfile) — the same
 bundle installs OSS, on-prem, or hosted.
 
 ## Example extensions (the API's acceptance tests)

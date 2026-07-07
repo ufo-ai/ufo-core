@@ -10,20 +10,20 @@ import pytest
 from aiobotocore.session import get_session
 from botocore.exceptions import BotoCoreError, ClientError
 
-from selfhost.blob import (
+from ufo.blob import (
     S3_MULTIPART_PART_BYTES,
     BlobNotFound,
     FilesystemBlobStore,
     S3BlobStore,
     blob_store_for,
 )
-from selfhost.config import BlobConfig
+from ufo.config import BlobConfig
 
 MINIO_IMAGE = "minio/minio"
 MINIO_CREDENTIAL = "minioadmin"
 MINIO_OP_TIMEOUT_S = 180
 MINIO_READY_SECONDS = 60.0
-TEST_BUCKET = "selfhost-test"
+TEST_BUCKET = "ufo-test"
 
 
 async def test_filesystem_round_trip(tmp_path: Path) -> None:

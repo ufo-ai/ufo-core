@@ -13,7 +13,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
-from selfhost_ext_knowledge_graph.store import (
+from ufo_ext_knowledge_graph.store import (
     GraphExtractor,
     GraphStore,
     UnknownEdgeType,
@@ -22,15 +22,15 @@ from selfhost_ext_knowledge_graph.store import (
     render_subgraph,
 )
 
-from selfhost.accounting import CORE_PRICING
-from selfhost.blob import FilesystemBlobStore
-from selfhost.db import workspace_tx
-from selfhost.ext.context import ModelAccess
-from selfhost.models.interface import ModelEvent, ModelRequest, TextDelta
-from selfhost.schema import tables
-from selfhost.schema.records import Usage
-from selfhost.sources.sync import CorePageFeed
-from selfhost.subjects import SHARED_SUBJECT
+from ufo.accounting import CORE_PRICING
+from ufo.blob import FilesystemBlobStore
+from ufo.db import workspace_tx
+from ufo.ext.context import ModelAccess
+from ufo.models.interface import ModelEvent, ModelRequest, TextDelta
+from ufo.schema import tables
+from ufo.schema.records import Usage
+from ufo.sources.sync import CorePageFeed
+from ufo.subjects import SHARED_SUBJECT
 
 EXTENSION = "knowledge_graph"
 WHEN = datetime(2026, 1, 1, tzinfo=UTC)

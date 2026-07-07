@@ -1,16 +1,16 @@
 import pytest
 from pydantic import ValidationError
 
-from selfhost_k8s.contract import DeployRequest, ImageRef, TenantIdentity
-from selfhost_k8s.kube import request_from_tenant, tenant_body
+from ufo_control.contract import DeployRequest, ImageRef, TenantIdentity
+from ufo_control.kube import request_from_tenant, tenant_body
 
 DIGEST = "sha256:" + "a" * 64
 
 
 def _request(**overrides: object) -> DeployRequest:
     base: dict[str, object] = {
-        "tenant": {"name": "acme", "host": "acme.selfhost.app", "owner_email": "you@acme.com"},
-        "bundle_image": {"repository": "ghcr.io/acme/selfhost", "digest": DIGEST},
+        "tenant": {"name": "acme", "host": "acme.ufo.app", "owner_email": "you@acme.com"},
+        "bundle_image": {"repository": "ghcr.io/acme/ufo", "digest": DIGEST},
         "sandbox_image": {"repository": "ghcr.io/acme/sandbox", "digest": DIGEST},
         "config_toml": '[pack]\nname = "assistant"\n',
         "pack": "assistant",
@@ -27,7 +27,7 @@ def test_request_round_trips_through_the_tenant_object() -> None:
 
 def test_image_ref_requires_a_pinned_digest() -> None:
     with pytest.raises(ValidationError):
-        ImageRef(repository="ghcr.io/acme/selfhost", digest="latest")
+        ImageRef(repository="ghcr.io/acme/ufo", digest="latest")
 
 
 def test_image_ref_builds_a_digest_ref() -> None:
@@ -45,7 +45,7 @@ def test_tenant_name_rejects_non_labels(bad: str) -> None:
 
 
 def test_namespace_is_derived_from_the_name() -> None:
-    assert _request().tenant.namespace == "selfhost-acme"
+    assert _request().tenant.namespace == "ufo-acme"
 
 
 def test_unknown_field_is_rejected() -> None:

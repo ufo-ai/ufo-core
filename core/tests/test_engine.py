@@ -9,18 +9,18 @@ import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from pydantic import BaseModel
 
-from selfhost.blob import FilesystemBlobStore
-from selfhost.browser import SandboxCdpProvider
-from selfhost.db import workspace_tx
-from selfhost.ext.loader import HookChain
-from selfhost.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
-from selfhost.hub import InProcessHub, LiveFrame, SkillLoad, ToolCall
-from selfhost.loop.compaction import (
+from ufo.blob import FilesystemBlobStore
+from ufo.browser import SandboxCdpProvider
+from ufo.db import workspace_tx
+from ufo.ext.loader import HookChain
+from ufo.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
+from ufo.hub import InProcessHub, LiveFrame, SkillLoad, ToolCall
+from ufo.loop.compaction import (
     COMPACTED_CONTEXT_PREFIX,
     Compaction,
     CompactionSummary,
 )
-from selfhost.loop.engine import (
+from ufo.loop.engine import (
     FORCE_FINAL_PROMPT,
     MAX_TOOL_RESULT_CHARS,
     OFFLOAD_NOTICE,
@@ -35,9 +35,9 @@ from selfhost.loop.engine import (
     TurnParked,
     _bounded,
 )
-from selfhost.loop.prompts.render import COMPACTION_SYSTEM_PROMPT, rendered_prompt
-from selfhost.loop.transcript import Transcript
-from selfhost.models.interface import (
+from ufo.loop.prompts.render import COMPACTION_SYSTEM_PROMPT, rendered_prompt
+from ufo.loop.transcript import Transcript
+from ufo.models.interface import (
     ImageBlock,
     ImageSource,
     Message,
@@ -50,19 +50,19 @@ from selfhost.models.interface import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from selfhost.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
-from selfhost.schema import tables
-from selfhost.schema.records import Agent, TerminalFrame, Turn, Usage
-from selfhost.tools.builtins import BUILTIN_TOOLS
-from selfhost.tools.context import (
+from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
+from ufo.schema import tables
+from ufo.schema.records import Agent, TerminalFrame, Turn, Usage
+from ufo.tools.builtins import BUILTIN_TOOLS
+from ufo.tools.context import (
     ImageContent,
     SpawnResult,
     TextContent,
     ToolContext,
     ToolResult,
 )
-from selfhost.tools.registry import ToolDef, ToolRegistry
-from selfhost.transcript import Conversation
+from ufo.tools.registry import ToolDef, ToolRegistry
+from ufo.transcript import Conversation
 
 
 @dataclass

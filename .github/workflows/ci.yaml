@@ -25,7 +25,7 @@ jobs:
       - run: uv run ruff check
       - run: uv run ruff format --check .
       - run: uv run python gates.py
-      - run: uv run mypy core/src/selfhost extensions gates.py
+      - run: uv run mypy core/src/ufo extensions gates.py
       # Rot-guard: the gated integration suite must always import + collect, even where its live
       # dependencies (a model key, extra services) are absent, so it can't silently bit-rot. The
       # whole tree is swept — core's live suite plus each extension's own tests/integration.
@@ -39,13 +39,13 @@ jobs:
       postgres:
         image: pgvector/pgvector:pg17
         env:
-          POSTGRES_USER: selfhost
-          POSTGRES_PASSWORD: selfhost
-          POSTGRES_DB: selfhost
+          POSTGRES_USER: ufo
+          POSTGRES_PASSWORD: ufo
+          POSTGRES_DB: ufo
         ports:
           - 5541:5432
         options: >-
-          --health-cmd "pg_isready -U selfhost"
+          --health-cmd "pg_isready -U ufo"
           --health-interval 2s
           --health-timeout 2s
           --health-retries 15

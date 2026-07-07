@@ -7,15 +7,15 @@ from collections.abc import AsyncIterator
 from types import SimpleNamespace
 
 import pytest
-import selfhost_ext_openrouter as openrouter
+import ufo_ext_openrouter as openrouter
 from openai.types.chat import ChatCompletionChunk
 from openai.types.chat.chat_completion_chunk import Choice, ChoiceDelta
 from openai.types.completion_usage import CompletionUsage
 
-from selfhost.config import BlobConfig, Config, DatabaseConfig
-from selfhost.models.interface import Message, ModelRequest, ModelResponseTruncated, TextDelta
-from selfhost.models.registry import model_registry
-from selfhost.schema.records import Usage
+from ufo.config import BlobConfig, Config, DatabaseConfig
+from ufo.models.interface import Message, ModelRequest, ModelResponseTruncated, TextDelta
+from ufo.models.registry import model_registry
+from ufo.schema.records import Usage
 
 REQUEST = ModelRequest(
     model="google/gemini-2.5-pro",

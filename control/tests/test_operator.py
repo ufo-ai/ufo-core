@@ -4,9 +4,9 @@ from typing import Any
 
 import httpx
 
-from selfhost_k8s.kube import KubeClient
-from selfhost_k8s.operator import LeaderElection, _deleting, _format_time, _parse_time
-from selfhost_k8s.provision import _job_failed, _job_succeeded, _ready_replicas
+from ufo_control.kube import KubeClient
+from ufo_control.operator import LeaderElection, _deleting, _format_time, _parse_time
+from ufo_control.provision import _job_failed, _job_succeeded, _ready_replicas
 
 NOW = datetime(2026, 7, 6, 12, 0, 0, 500000, tzinfo=UTC)
 

@@ -7,14 +7,14 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from selfhost.artifact_token import (
+from ufo.artifact_token import (
     ARTIFACT_KEY_PREFIX,
     ArtifactTokenError,
     mint_artifact_token,
     verify_artifact_token,
 )
-from selfhost.blob import FilesystemBlobStore
-from selfhost.surfaces.artifacts import router as artifacts_router
+from ufo.blob import FilesystemBlobStore
+from ufo.surfaces.artifacts import router as artifacts_router
 
 SECRET = "artifact-signing-secret"
 DOWNLOAD_PATH = "/artifacts/download"

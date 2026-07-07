@@ -18,12 +18,12 @@ services: SQLite + filesystem blobs + in-process hub.
 - DB-touching tests run on both dialects (SQLite everywhere; Postgres suite gates on the live
   service, skip when absent).
 - migration 001: workspace, member, surface_identity, agent, conversation, turn, ledger.
-- `config.py` (selfhost.toml, fail-loud), `db.py` (`workspace_tx` boundary + gate), `o11y.py`, `blob.py`
+- `config.py` (ufo.toml, fail-loud), `db.py` (`workspace_tx` boundary + gate), `o11y.py`, `blob.py`
   (FilesystemBlobStore + S3BlobStore), `hub.py` (in-process), `models/` (anthropic, openai),
   `loop/` (DBOS queue partitioned by conversation, TurnEngine minus compaction/tools, transcript
   `messages.json.lz4`), `accounting.py` (ledger writes + prices only), `surfaces/cli.py`, `cli.py`, `serve.py`.
-- First-run bootstrap: create workspace + first owner + default agent (`selfhost init`).
-- **Proof**: `selfhost chat` streams a real Anthropic turn; transcript in blob store; ledger rows
+- First-run bootstrap: create workspace + first owner + default agent (`ufoctl init`).
+- **Proof**: `ufoctl chat` streams a real Anthropic turn; transcript in blob store; ledger rows
   priced; second message continues the conversation; mid-turn cancel commits a terminal frame;
   kill -9 during a turn → DBOS recovery still ends the client's wait.
 
@@ -44,7 +44,7 @@ services: SQLite + filesystem blobs + in-process hub.
 
 - `sdk/` (public re-exports), `ext/loader.py` (entry points → Manifest, validation, rule
   derivation), `credentials.py` (encrypted BYOK slots), onboarding-step registry (engine in U6).
-- CI gates: extensions import `selfhost.sdk` only; no k8s anywhere; no vendor o11y SDKs.
+- CI gates: extensions import `ufo.sdk` only; no k8s anywhere; no vendor o11y SDKs.
 - `extensions/sample/`: registers one of each — tool, subagent, connector stub, source, hook,
   job, route, credential slot, onboarding step, condenser — the conformance harness for the API.
   It records every call it receives via its own `ExtensionContext` (durable, no mock call-logs);
@@ -95,7 +95,7 @@ services: SQLite + filesystem blobs + in-process hub.
 ## U7 — accounting completion
 
 - `spend_cap` schema + `SpendEvaluator` at inbound and per step (reject/park; parked turns resume
-  on cap change); proxy MeterRule → ledger; live CostTick frames; `selfhost` + web rollups
+  on cap change); proxy MeterRule → ledger; live CostTick frames; `ufoctl` + web rollups
   (workspace/member/agent).
 - Scheduled/extension-invoked turns pass through the same inbound evaluation (closes the old
   scheduled-fire bypass).
@@ -112,16 +112,16 @@ services: SQLite + filesystem blobs + in-process hub.
 
 ## U9 — bundling + extension store + scale-out guard
 
-- `selfhost.toml` finalized (single config source), `selfhost bundle` (OCI image + pinned config +
-  lockfile), `selfhost serve` hardening, `runtime_instance` heartbeat + boot guard, extension store
-  (`selfhost ext search/install/remove`, digest pinning, disabled = bundle-only).
+- `ufo.toml` finalized (single config source), `ufoctl bundle` (OCI image + pinned config +
+  lockfile), `ufoctl serve` hardening, `runtime_instance` heartbeat + boot guard, extension store
+  (`ufoctl ext search/install/remove`, digest pinning, disabled = bundle-only).
 - **Proof**: one bundle boots on a clean machine; an extension installs from the store and fires;
   a second instance with any dev default (SQLite, filesystem blobs, in-process hub) refuses to
   boot.
 
 ## U10 — packs + scheduled tasks
 
-- Packs seam (`selfhost.pack` entry point → `Pack` bundling installed extensions + pack-level
+- Packs seam (`ufo.pack` entry point → `Pack` bundling installed extensions + pack-level
   skills/onboarding; `[pack] name` activates one, narrowing the active manifest set); assistant pack
   bundling memory + browser + connectors + exa; scheduled-tasks extension (JobSpec cron → `invoke`).
 - **Proof**: activating a pack makes exactly its bundled extensions' manifests active and its

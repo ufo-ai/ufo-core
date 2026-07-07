@@ -11,32 +11,32 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
-from selfhost_ext_embed_openai import EMBED_DIM
-from selfhost_ext_index_default import DefaultIndex
-from selfhost_ext_memory.store import (
+from sqlalchemy.ext.asyncio import AsyncConnection
+from ufo_ext_embed_openai import EMBED_DIM
+from ufo_ext_index_default import DefaultIndex
+from ufo_ext_memory.store import (
     MemoryIndexer,
     MemoryStore,
     MemoryWrite,
     PageIndexer,
     recall_subjects,
 )
-from sqlalchemy.ext.asyncio import AsyncConnection
 
-from selfhost.accounting import SpendEvaluator, record_sandbox_tokens
-from selfhost.blob import FilesystemBlobStore
-from selfhost.config import SourceConfig, SourceEntry
-from selfhost.db import workspace_tx
-from selfhost.indexing import TextChunker
-from selfhost.schema import tables
-from selfhost.schema.records import Usage
-from selfhost.sources.sync import (
+from ufo.accounting import SpendEvaluator, record_sandbox_tokens
+from ufo.blob import FilesystemBlobStore
+from ufo.config import SourceConfig, SourceEntry
+from ufo.db import workspace_tx
+from ufo.indexing import TextChunker
+from ufo.schema import tables
+from ufo.schema.records import Usage
+from ufo.sources.sync import (
     FOLDER_BACKEND,
     CorePageFeed,
     FolderSource,
     SyncDriver,
     register_sources,
 )
-from selfhost.subjects import SHARED_SUBJECT, member_subject
+from ufo.subjects import SHARED_SUBJECT, member_subject
 
 pytestmark = pytest.mark.integration
 

@@ -11,12 +11,12 @@ from uuid import uuid4
 
 import pytest
 from pydantic import BaseModel
-from selfhost_ext_research.delegation import MAX_WIDE_RESEARCH_ENTITIES, WIDE_RESEARCH_TOOL
+from ufo_ext_research.delegation import MAX_WIDE_RESEARCH_ENTITIES, WIDE_RESEARCH_TOOL
 
-from selfhost.blob import FilesystemBlobStore
-from selfhost.sandbox.session import ExecResult
-from selfhost.schema.records import Agent, Turn
-from selfhost.tools.context import SpawnResult, ToolContext
+from ufo.blob import FilesystemBlobStore
+from ufo.sandbox.session import ExecResult
+from ufo.schema.records import Agent, Turn
+from ufo.tools.context import SpawnResult, ToolContext
 
 
 class _Result(BaseModel):

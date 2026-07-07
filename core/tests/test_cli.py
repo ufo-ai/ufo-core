@@ -2,7 +2,7 @@
 
 import io
 
-from selfhost.cli import _TurnDisplay
+from ufo.cli import _TurnDisplay
 
 DONE_FRAME: dict[str, object] = {
     "status": "done",

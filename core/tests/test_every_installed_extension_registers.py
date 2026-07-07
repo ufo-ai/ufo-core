@@ -1,8 +1,8 @@
 """The keyless evidence floor: every installed extension and pack discovers, loads, and resolves.
 
 Where `test_ext_conformance` drives the one sample extension through each point-type, this file
-generalizes across the whole installed set: it enumerates every `selfhost.extension` and
-`selfhost.pack` via the real loader (never a hardcoded list, so a newly installed extension is
+generalizes across the whole installed set: it enumerates every `ufo.extension` and
+`ufo.pack` via the real loader (never a hardcoded list, so a newly installed extension is
 covered the moment it is present) and asserts each declared Manifest point resolves through the same
 core selection and registration seams `serve` runs at boot — tools through the ToolRegistry, the
 backend points through their `_select_*`/`*_backend` seams, surfaces through the mount, hooks
@@ -20,8 +20,8 @@ import pytest
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 
-from selfhost.blob import FilesystemBlobStore
-from selfhost.config import (
+from ufo.blob import FilesystemBlobStore
+from ufo.config import (
     DEFAULT_CDP_PROVIDER,
     IN_PROCESS_BACKEND,
     BlobConfig,
@@ -34,9 +34,9 @@ from selfhost.config import (
     ResearchConfig,
     SandboxConfig,
 )
-from selfhost.credentials import CredentialStore
-from selfhost.ext.context import context_for
-from selfhost.ext.loader import (
+from ufo.credentials import CredentialStore
+from ufo.ext.context import context_for
+from ufo.ext.loader import (
     NotRegisteredError,
     discovered,
     discovered_packs,
@@ -48,13 +48,13 @@ from selfhost.ext.loader import (
     turn_subagents,
     turn_tools,
 )
-from selfhost.ext.manifest import Manifest
-from selfhost.hub import InProcessHub
-from selfhost.jobs import bindings_from
-from selfhost.loop.prompts.render import render_system_prompt
-from selfhost.loop.subagents import SubagentRegistry
-from selfhost.models.registry import model_registry
-from selfhost.serve import (
+from ufo.ext.manifest import Manifest
+from ufo.hub import InProcessHub
+from ufo.jobs import bindings_from
+from ufo.loop.prompts.render import render_system_prompt
+from ufo.loop.subagents import SubagentRegistry
+from ufo.models.registry import model_registry
+from ufo.serve import (
     _connect_flow,
     _mount_ext_routes,
     _mount_surfaces,
@@ -65,14 +65,14 @@ from selfhost.serve import (
     _select_search_provider,
     _source_backends,
 )
-from selfhost.skills.runtime import parse_skill
-from selfhost.tools.registry import ToolRegistry
+from ufo.skills.runtime import parse_skill
+from ufo.tools.registry import ToolRegistry
 
 INSTALLED: dict[str, tuple[Manifest, object]] = discovered()
 PACKS = discovered_packs()
 WORKSPACE_ID = uuid4()
 REDIS_URL = "redis://localhost:6379/0"
-PUBLIC_BASE_URL = "https://selfhost.test"
+PUBLIC_BASE_URL = "https://ufo.test"
 
 
 def _credential_store() -> CredentialStore:

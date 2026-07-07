@@ -16,18 +16,18 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
-import selfhost_ext_sample as sample
 import sqlalchemy as sa
+import ufo_ext_sample as sample
 from cryptography.fernet import Fernet
 
-from selfhost.accounting import CORE_PRICING
-from selfhost.blob import FilesystemBlobStore
-from selfhost.credentials import CredentialStore
-from selfhost.db import workspace_tx
-from selfhost.ext.context import ScopedStore
-from selfhost.ext.loader import load_manifests
-from selfhost.ext.manifest import HookContext, HookOutcome, HookSpec, Manifest
-from selfhost.jobs import (
+from ufo.accounting import CORE_PRICING
+from ufo.blob import FilesystemBlobStore
+from ufo.credentials import CredentialStore
+from ufo.db import workspace_tx
+from ufo.ext.context import ScopedStore
+from ufo.ext.loader import load_manifests
+from ufo.ext.manifest import HookContext, HookOutcome, HookSpec, Manifest
+from ufo.jobs import (
     CORE_EXTENSION,
     PAGE_CHANGE_CURSOR_KEY,
     PAGE_CHANGE_JOB,
@@ -37,11 +37,11 @@ from selfhost.jobs import (
     bindings_from,
     core_jobs,
 )
-from selfhost.models.registry import ModelRegistry
-from selfhost.sandbox.local import LocalCarrier
-from selfhost.schema import tables
-from selfhost.sources.sync import CorePageFeed, FolderSource, SyncDriver
-from selfhost.subjects import SHARED_SUBJECT
+from ufo.models.registry import ModelRegistry
+from ufo.sandbox.local import LocalCarrier
+from ufo.schema import tables
+from ufo.sources.sync import CorePageFeed, FolderSource, SyncDriver
+from ufo.subjects import SHARED_SUBJECT
 
 
 def _sample_manifest() -> object:

@@ -16,23 +16,23 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-import selfhost_ext_slack.surface as slack
 import sqlalchemy as sa
+import ufo_ext_slack.surface as slack
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from selfhost_ext_slack.manifest import manifest as slack_manifest
+from ufo_ext_slack.manifest import manifest as slack_manifest
 
-from selfhost.artifact_token import verify_artifact_token
-from selfhost.blob import BlobNotFound, FilesystemBlobStore
-from selfhost.credentials import CredentialStore
-from selfhost.db import workspace_tx
-from selfhost.ext.loader import skill_registry
-from selfhost.ext.surface import WRITEBACK_DELIVERED, workspace_key
-from selfhost.hub import InProcessHub
-from selfhost.schema import tables
-from selfhost.schema.records import WRITEBACK_PENDING, TerminalFrame
-from selfhost.serve import _mount_surfaces
+from ufo.artifact_token import verify_artifact_token
+from ufo.blob import BlobNotFound, FilesystemBlobStore
+from ufo.credentials import CredentialStore
+from ufo.db import workspace_tx
+from ufo.ext.loader import skill_registry
+from ufo.ext.surface import WRITEBACK_DELIVERED, workspace_key
+from ufo.hub import InProcessHub
+from ufo.schema import tables
+from ufo.schema.records import WRITEBACK_PENDING, TerminalFrame
+from ufo.serve import _mount_surfaces
 
 TEAM_ID = "T0000001"
 BOT_USER_ID = "UBOT00000"
@@ -40,7 +40,7 @@ SIGNING_SECRET = "signing-secret"
 BOT_TOKEN = "xoxb-test"
 UPLOAD_URL = "https://files.slack.com/upload/session-1"
 ARTIFACT_SECRET = "artifact-token-secret"
-PUBLIC_BASE_URL = "https://selfhost.example.test"
+PUBLIC_BASE_URL = "https://ufo.example.test"
 
 
 @dataclass
@@ -215,7 +215,7 @@ def test_slack_app_setup_skill_parses_indexes_and_names_the_real_route_and_slots
         slack.SLACK_BOT_USER_ID_SLOT,
         slack.SLACK_TEAM_ID_SLOT,
     ):
-        assert f"selfhost credential set {slot}" in body
+        assert f"ufoctl credential set {slot}" in body
 
 
 async def test_bad_signature_is_rejected(db: None, tmp_path, monkeypatch) -> None:

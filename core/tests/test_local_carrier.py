@@ -12,9 +12,9 @@ from uuid import uuid4
 
 import pytest
 
-from selfhost.blob import FilesystemBlobStore
-from selfhost.sandbox.local import EXEC_TIMEOUT_CODE, LOCAL_CONTAINER_ID, LocalCarrier
-from selfhost.sandbox.session import (
+from ufo.blob import FilesystemBlobStore
+from ufo.sandbox.local import EXEC_TIMEOUT_CODE, LOCAL_CONTAINER_ID, LocalCarrier
+from ufo.sandbox.session import (
     SENTINEL_MODEL_KEY,
     MountSpec,
     ProxyEndpoint,
@@ -29,7 +29,7 @@ PROXY_PORT = 9999
 def _spec(workspace: Path) -> SandboxSpec:
     return SandboxSpec(
         conversation_id=uuid4(),
-        image_ref="selfhost-sandbox:latest",
+        image_ref="ufo-sandbox:latest",
         mount=MountSpec(kind="filesystem", host_path=str(workspace)),
         proxy=ProxyEndpoint(port=PROXY_PORT, ca_cert="CA-PEM-BYTES"),
         run_token=RUN_TOKEN,

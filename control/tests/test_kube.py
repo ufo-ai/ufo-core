@@ -3,8 +3,8 @@ import json
 import httpx
 import pytest
 
-from selfhost_k8s.contract import DeployRequest, DeployStatus
-from selfhost_k8s.kube import APPLY_CONTENT_TYPE, KubeClient
+from ufo_control.contract import DeployRequest, DeployStatus
+from ufo_control.kube import APPLY_CONTENT_TYPE, KubeClient
 
 DIGEST = "sha256:" + "c" * 64
 
@@ -16,7 +16,7 @@ def _client(handler: httpx.MockTransport) -> KubeClient:
 def _request() -> DeployRequest:
     return DeployRequest.model_validate(
         {
-            "tenant": {"name": "acme", "host": "acme.selfhost.app", "owner_email": "you@acme.com"},
+            "tenant": {"name": "acme", "host": "acme.ufo.app", "owner_email": "you@acme.com"},
             "bundle_image": {"repository": "r/b", "digest": DIGEST},
             "sandbox_image": {"repository": "r/s", "digest": DIGEST},
             "config_toml": "[pack]\nname='assistant'\n",
@@ -40,7 +40,7 @@ async def test_apply_tenant_is_a_forced_server_side_apply() -> None:
 
     assert seen["method"] == "PATCH"
     assert seen["content_type"] == APPLY_CONTENT_TYPE
-    assert seen["params"] == {"fieldManager": "selfhost.sh/operator", "force": "true"}
+    assert seen["params"] == {"fieldManager": "flyingobject.ai/operator", "force": "true"}
     body = seen["body"]
     assert isinstance(body, dict)
     assert body["kind"] == "Tenant"

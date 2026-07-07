@@ -14,7 +14,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
-from selfhost_ext_knowledge_graph.store import (
+from ufo_ext_knowledge_graph.store import (
     GraphExtractor,
     GraphStore,
     UnknownEdgeType,
@@ -24,11 +24,11 @@ from selfhost_ext_knowledge_graph.store import (
     to_edge_type,
 )
 
-from selfhost.blob import FilesystemBlobStore
-from selfhost.db import workspace_tx
-from selfhost.schema import tables
-from selfhost.sources.sync import CorePageFeed
-from selfhost.subjects import SHARED_SUBJECT
+from ufo.blob import FilesystemBlobStore
+from ufo.db import workspace_tx
+from ufo.schema import tables
+from ufo.sources.sync import CorePageFeed
+from ufo.subjects import SHARED_SUBJECT
 
 PAGE_BATCH = 50
 

@@ -12,10 +12,10 @@ import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 
-from selfhost.blob import FilesystemBlobStore
-from selfhost.credentials import CredentialStore
-from selfhost.db import workspace_tx
-from selfhost.ext.surface import (
+from ufo.blob import FilesystemBlobStore
+from ufo.credentials import CredentialStore
+from ufo.db import workspace_tx
+from ufo.ext.surface import (
     WRITEBACK_CLAIMED,
     WRITEBACK_DELIVERED,
     WRITEBACK_FAILED,
@@ -28,11 +28,11 @@ from selfhost.ext.surface import (
     WritebackPoller,
     workspace_key,
 )
-from selfhost.hub import InProcessHub
-from selfhost.schema import tables
-from selfhost.schema.records import WRITEBACK_PENDING, TerminalFrame
-from selfhost.surfaces.admission import Admission, AdmissionInvoker
-from selfhost.surfaces.hub_tail import HubTailer
+from ufo.hub import InProcessHub
+from ufo.schema import tables
+from ufo.schema.records import WRITEBACK_PENDING, TerminalFrame
+from ufo.surfaces.admission import Admission, AdmissionInvoker
+from ufo.surfaces.hub_tail import HubTailer
 
 SURFACE = "test_surface"
 
@@ -116,7 +116,7 @@ def _context(workspace_id: UUID, dbos: StubDbos, blob: FilesystemBlobStore) -> S
         _tailer=HubTailer(hub=InProcessHub()),
         _credentials=store,
         _artifact_token_secret="artifact-token-secret",
-        _public_base_url="https://selfhost.example.test",
+        _public_base_url="https://ufo.example.test",
     )
 
 

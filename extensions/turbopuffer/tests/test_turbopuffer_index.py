@@ -13,15 +13,15 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-import selfhost_ext_turbopuffer as tpuf
 import sqlalchemy as sa
+import ufo_ext_turbopuffer as tpuf
 from cryptography.fernet import Fernet
 
-from selfhost.credentials import CredentialStore
-from selfhost.db import workspace_tx
-from selfhost.ext.context import CredentialAccess, context_for
-from selfhost.indexing import Chunk, IndexScope
-from selfhost.schema import tables
+from ufo.credentials import CredentialStore
+from ufo.db import workspace_tx
+from ufo.ext.context import CredentialAccess, context_for
+from ufo.indexing import Chunk, IndexScope
+from ufo.schema import tables
 
 SHARED = "shared"
 OWNER_KIND = "memory_item"

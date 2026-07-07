@@ -4,14 +4,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
-import selfhost_ext_repl.manifest as repl
-from selfhost_ext_repl.manifest import JsReplInput, XlsxReplInput
+import ufo_ext_repl.manifest as repl
+from ufo_ext_repl.manifest import JsReplInput, XlsxReplInput
 
-from selfhost.blob import FilesystemBlobStore
-from selfhost.ext.loader import skill_registry
-from selfhost.sandbox.session import ExecResult
-from selfhost.schema.records import Agent, Turn
-from selfhost.tools.context import SpawnResult, ToolContext
+from ufo.blob import FilesystemBlobStore
+from ufo.ext.loader import skill_registry
+from ufo.sandbox.session import ExecResult
+from ufo.schema.records import Agent, Turn
+from ufo.tools.context import SpawnResult, ToolContext
 
 
 @dataclass

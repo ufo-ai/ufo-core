@@ -8,21 +8,21 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 SOURCE_ROOTS = ("core", "extensions", "packs")
-CORE_SRC = Path("core/src/selfhost")
+CORE_SRC = Path("core/src/ufo")
 FORBIDDEN_MODULE_NAMES = {"utils", "helpers", "common"}
 DB_MODULE = CORE_SRC / "db.py"
 ENGINE_TOKENS = ("create_async_engine", "async_sessionmaker", ".begin(")
 SDK_EXEMPT_PART = "sdk"
 COMPOSITION_ROOT = CORE_SRC / "serve.py"
-ROLE_PACKAGES = ("selfhost.surfaces", "selfhost.loop", "selfhost.jobs", "selfhost.sandbox.proxy")
+ROLE_PACKAGES = ("ufo.surfaces", "ufo.loop", "ufo.jobs", "ufo.sandbox.proxy")
 ENVELOPE_COLUMNS = {"workspace_id", "created_at", "updated_at"}
 SCHEMA_TABLES = CORE_SRC / "schema" / "tables.py"
 EXTENSIONS_ROOT = "extensions"
 PACKS_ROOT = "packs"
 EXT_SCAFFOLD_DIRS = frozenset({"tests", "evals"})
-SDK_PUBLIC_PREFIX = "selfhost.sdk"
+SDK_PUBLIC_PREFIX = "ufo.sdk"
 MANIFEST_MODULE = CORE_SRC / "ext" / "manifest.py"
-SAMPLE_MODULE = Path(EXTENSIONS_ROOT) / "sample" / "selfhost_ext_sample.py"
+SAMPLE_MODULE = Path(EXTENSIONS_ROOT) / "sample" / "ufo_ext_sample.py"
 CORE_SKILLS_DIR = CORE_SRC / "skills"
 CORE_SKILL_NAMES = frozenset({"sandbox", "delegation"})
 SKILL_MANIFEST = "SKILL.md"
@@ -34,7 +34,7 @@ def _is_skill_content(path: Path) -> bool:
     """A file bundled inside a skill folder — a directory holding a `SKILL.md`, at or above it. Such
     a file is sandbox content mounted verbatim (a script the agent runs in the sandbox, an asset it
     reads), never framework Python: it is held only to the skill boundary gate, not the code gates
-    that govern the selfhost process."""
+    that govern the ufo process."""
     return any((parent / SKILL_MANIFEST).is_file() for parent in path.parents)
 
 
@@ -82,9 +82,9 @@ def _call_names(tree: ast.Module) -> list[str]:
 
 
 def _module_name(rel: Path) -> str:
-    if rel.parts[:3] != ("core", "src", "selfhost"):
+    if rel.parts[:3] != ("core", "src", "ufo"):
         return ""
-    return ".".join(("selfhost", *rel.parts[3:])).removesuffix(".py").removesuffix(".__init__")
+    return ".".join(("ufo", *rel.parts[3:])).removesuffix(".py").removesuffix(".__init__")
 
 
 def _role_of(module: str) -> str | None:
@@ -131,7 +131,7 @@ def _is_ext_scaffold(rel: Path) -> bool:
 
 def _sdk_import_failures(trees: dict[Path, ast.Module]) -> list[str]:
     """Every file under `extensions/` and `packs/` reaches core only through the public
-    `selfhost.sdk` surface; any other `selfhost.<internal>` import is a break of the seam the SDK
+    `ufo.sdk` surface; any other `ufo.<internal>` import is a break of the seam the SDK
     exists to pin."""
     failures = []
     for rel, tree in trees.items():
@@ -141,10 +141,10 @@ def _sdk_import_failures(trees: dict[Path, ast.Module]) -> list[str]:
             continue
         for imported in _imported_modules(tree):
             in_sdk = imported == SDK_PUBLIC_PREFIX or imported.startswith(SDK_PUBLIC_PREFIX + ".")
-            in_core = imported == "selfhost" or imported.startswith("selfhost.")
+            in_core = imported == "ufo" or imported.startswith("ufo.")
             if in_core and not in_sdk:
                 failures.append(
-                    f"{rel}: extensions and packs import selfhost only via {SDK_PUBLIC_PREFIX} "
+                    f"{rel}: extensions and packs import ufo only via {SDK_PUBLIC_PREFIX} "
                     f"(found {imported!r})"
                 )
     return failures
@@ -359,17 +359,17 @@ def _skill_failures() -> list[str]:
 
 
 def _skill_boundary_failures(trees: dict[Path, ast.Module]) -> list[str]:
-    """A bundled skill script runs inside the sandbox, where the selfhost package does not exist; it
-    imports only the standard library and third-party tools, never selfhost — not core internals and
-    not the SDK, which are process-side surfaces. A skill script that imports selfhost is either
+    """A bundled skill script runs inside the sandbox, where the ufo package does not exist; it
+    imports only the standard library and third-party tools, never ufo — not core internals and
+    not the SDK, which are process-side surfaces. A skill script that imports ufo is either
     mis-placed framework code or a leak of the process boundary into sandbox content."""
     failures = []
     for rel, tree in trees.items():
         for imported in _imported_modules(tree):
-            if imported == "selfhost" or imported.startswith("selfhost."):
+            if imported == "ufo" or imported.startswith("ufo."):
                 failures.append(
                     f"{rel}: skill script imports {imported!r} — skill content runs in the "
-                    f"sandbox and must not import selfhost"
+                    f"sandbox and must not import ufo"
                 )
     return failures
 

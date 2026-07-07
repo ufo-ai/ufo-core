@@ -6,9 +6,9 @@ import sqlalchemy as sa
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
-from selfhost.db import MIGRATIONS_DIR, apply_migrations, workspace_tx
-from selfhost.ext.loader import migration_locations
-from selfhost.schema import tables
+from ufo.db import MIGRATIONS_DIR, apply_migrations, workspace_tx
+from ufo.ext.loader import migration_locations
+from ufo.schema import tables
 
 
 def test_migrations_are_idempotent(database_url: str) -> None:
@@ -44,15 +44,15 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
 def test_migrate_command_brings_the_schema_to_head(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The operator verb behind the extension-migration seam: `selfhost migrate` applies core's
+    """The operator verb behind the extension-migration seam: `ufoctl migrate` applies core's
     schema plus every active extension's branch, so `ext install` → `migrate` → `serve` actually
     creates a table-owning extension's tables. Idempotent, so it is safe to re-run."""
     from click.testing import CliRunner
 
-    from selfhost.cli import main
+    from ufo.cli import main
 
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "selfhost.toml").write_text(
+    (tmp_path / "ufo.toml").write_text(
         '[database]\nurl = "sqlite+aiosqlite:///app.db"\n'
         '[blob]\nbackend = "filesystem"\nroot = "./blobs"\n'
     )

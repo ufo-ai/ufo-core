@@ -3,8 +3,8 @@ right order, restraint on questions it can answer from its own knowledge, and fi
 on a local task. No LLM judge, no variance. A `web_dependent` case infra-excludes on a web outage —
 the grader checks the agent CALLED the web tool, which holds even when the call errors."""
 
-from selfhost_ext_eval_harness.capability import CapabilityCase, Grader
-from selfhost_ext_eval_harness.scorers import (
+from ufo_ext_eval_harness.capability import CapabilityCase, Grader
+from ufo_ext_eval_harness.scorers import (
     WEB_TOOLS,
     local_fs_scorer,
     required_tools_scorer,

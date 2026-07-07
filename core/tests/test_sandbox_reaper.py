@@ -4,12 +4,12 @@ from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 
-from selfhost.db import workspace_tx
-from selfhost.jobs import SANDBOX_IDLE_TTL_SECONDS, SandboxReaper
-from selfhost.sandbox.local import LocalCarrier
-from selfhost.sandbox.session import SandboxHandle, SandboxSpec
-from selfhost.schema import tables
-from selfhost.schema.records import NON_TERMINAL_STATUSES, TerminalFrame
+from ufo.db import workspace_tx
+from ufo.jobs import SANDBOX_IDLE_TTL_SECONDS, SandboxReaper
+from ufo.sandbox.local import LocalCarrier
+from ufo.sandbox.session import SandboxHandle, SandboxSpec
+from ufo.schema import tables
+from ufo.schema.records import NON_TERMINAL_STATUSES, TerminalFrame
 
 IDLE_AGE_SECONDS = SANDBOX_IDLE_TTL_SECONDS + 3600
 FRESH_AGE_SECONDS = 60

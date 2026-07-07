@@ -4,20 +4,20 @@ from typing import ClassVar
 from uuid import UUID, uuid4
 
 import pytest
-import selfhost_ext_memory.manifest as memory_manifest
 import sqlalchemy as sa
+import ufo_ext_memory.manifest as memory_manifest
 from cryptography.fernet import Fernet
-from selfhost_ext_embed_openai import EMBED_DIM
-from selfhost_ext_index_default import DefaultIndex
-from selfhost_ext_memory.store import MemoryStore, PageIndexer, mem_page, recall_subjects
+from ufo_ext_embed_openai import EMBED_DIM
+from ufo_ext_index_default import DefaultIndex
+from ufo_ext_memory.store import MemoryStore, PageIndexer, mem_page, recall_subjects
 
-from selfhost.blob import FilesystemBlobStore
-from selfhost.config import SourceConfig, SourceEntry
-from selfhost.credentials import CredentialStore
-from selfhost.db import workspace_tx
-from selfhost.ext.context import context_for
-from selfhost.indexing import OWNER_KIND_PAGE, Chunk, TextChunker
-from selfhost.jobs import (
+from ufo.blob import FilesystemBlobStore
+from ufo.config import SourceConfig, SourceEntry
+from ufo.credentials import CredentialStore
+from ufo.db import workspace_tx
+from ufo.ext.context import context_for
+from ufo.indexing import OWNER_KIND_PAGE, Chunk, TextChunker
+from ufo.jobs import (
     CORE_EXTENSION,
     SANDBOX_REAP_JOB,
     SPEND_RESUME_JOB,
@@ -27,10 +27,10 @@ from selfhost.jobs import (
     bindings_from,
     core_jobs,
 )
-from selfhost.sandbox.local import LocalCarrier
-from selfhost.schema import tables
-from selfhost.schema.records import Agent, Turn
-from selfhost.sources.sync import (
+from ufo.sandbox.local import LocalCarrier
+from ufo.schema import tables
+from ufo.schema.records import Agent, Turn
+from ufo.sources.sync import (
     FOLDER_BACKEND,
     SOURCE_SYNC_JOB,
     CorePageFeed,
@@ -45,8 +45,8 @@ from selfhost.sources.sync import (
     register_sources,
     source_row_id,
 )
-from selfhost.subjects import SHARED_SUBJECT, member_subject
-from selfhost.tools.context import SpawnResult, ToolContext, ToolResult
+from ufo.subjects import SHARED_SUBJECT, member_subject
+from ufo.tools.context import SpawnResult, ToolContext, ToolResult
 
 MEMORY_TOOLS = {tool.name: tool for tool in memory_manifest.manifest().tools}
 

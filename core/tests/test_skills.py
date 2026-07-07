@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from selfhost.skills.runtime import (
+from ufo.skills.runtime import (
     CORE_SKILL_NAMES,
     CORE_SKILL_REGISTRY,
     CORE_SKILLS,

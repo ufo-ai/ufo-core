@@ -15,13 +15,13 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
-import selfhost_ext_memory.manifest as memory_manifest
 import sqlalchemy as sa
+import ufo_ext_memory.manifest as memory_manifest
 from cryptography.fernet import Fernet
-from selfhost_ext_embed_openai import EMBED_DIM
-from selfhost_ext_index_default import DefaultIndex
-from selfhost_ext_memory.condenser import FactDeriver, MemoryConsolidator
-from selfhost_ext_memory.store import (
+from ufo_ext_embed_openai import EMBED_DIM
+from ufo_ext_index_default import DefaultIndex
+from ufo_ext_memory.condenser import FactDeriver, MemoryConsolidator
+from ufo_ext_memory.store import (
     FACT,
     KIND_FACT,
     SEMANTIC,
@@ -29,27 +29,27 @@ from selfhost_ext_memory.store import (
     memory_item,
 )
 
-from selfhost.accounting import CORE_PRICING
-from selfhost.blob import FilesystemBlobStore
-from selfhost.credentials import CredentialStore
-from selfhost.db import workspace_tx
-from selfhost.ext.context import ModelAccess, ScopedStore
-from selfhost.ext.manifest import (
+from ufo.accounting import CORE_PRICING
+from ufo.blob import FilesystemBlobStore
+from ufo.credentials import CredentialStore
+from ufo.db import workspace_tx
+from ufo.ext.context import ModelAccess, ScopedStore
+from ufo.ext.manifest import (
     HookContext,
     HookOutcome,
     HookSpec,
     Manifest,
     ModelProviderSpec,
 )
-from selfhost.indexing import OWNER_KIND_MEMORY_ITEM, Chunk
-from selfhost.jobs import PageChangeRunner, SandboxReaper, SpendResume, core_jobs
-from selfhost.models.interface import ModelEvent, ModelRequest, TextDelta
-from selfhost.models.registry import ModelRegistry
-from selfhost.sandbox.local import LocalCarrier
-from selfhost.schema import tables
-from selfhost.schema.records import Usage
-from selfhost.sources.sync import CorePageFeed, FolderSource, PageChange, SyncDriver
-from selfhost.subjects import SHARED_SUBJECT
+from ufo.indexing import OWNER_KIND_MEMORY_ITEM, Chunk
+from ufo.jobs import PageChangeRunner, SandboxReaper, SpendResume, core_jobs
+from ufo.models.interface import ModelEvent, ModelRequest, TextDelta
+from ufo.models.registry import ModelRegistry
+from ufo.sandbox.local import LocalCarrier
+from ufo.schema import tables
+from ufo.schema.records import Usage
+from ufo.sources.sync import CorePageFeed, FolderSource, PageChange, SyncDriver
+from ufo.subjects import SHARED_SUBJECT
 
 WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 AUTO_MODEL = "claude-opus-4-8"

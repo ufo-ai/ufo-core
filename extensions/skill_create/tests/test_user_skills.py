@@ -15,12 +15,12 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
-from selfhost_ext_skill_create.manifest import (
+from ufo_ext_skill_create.manifest import (
     SaveCustomSkillInput,
     manifest,
     save_custom_skill_handler,
 )
-from selfhost_ext_skill_create.store import (
+from ufo_ext_skill_create.store import (
     InvalidSkillName,
     SkillCollidesWithCoreSkill,
     TooManyUserSkills,
@@ -28,22 +28,22 @@ from selfhost_ext_skill_create.store import (
     user_skill,
 )
 
-from selfhost.blob import FilesystemBlobStore
-from selfhost.credentials import CredentialStore
-from selfhost.db import workspace_tx
-from selfhost.ext.context import ExtensionContext, context_for
-from selfhost.ext.loader import turn_runtime_skills
-from selfhost.sandbox.local import LocalCarrier
-from selfhost.sandbox.session import (
+from ufo.blob import FilesystemBlobStore
+from ufo.credentials import CredentialStore
+from ufo.db import workspace_tx
+from ufo.ext.context import ExtensionContext, context_for
+from ufo.ext.loader import turn_runtime_skills
+from ufo.sandbox.local import LocalCarrier
+from ufo.sandbox.session import (
     MountSpec,
     ProxyEndpoint,
     SandboxSession,
     SandboxSpec,
 )
-from selfhost.schema import tables
-from selfhost.schema.records import Agent, Turn
-from selfhost.skills.runtime import CORE_SKILL_NAMES, CORE_SKILL_REGISTRY, RuntimeSkill
-from selfhost.tools.context import SpawnResult, ToolContext
+from ufo.schema import tables
+from ufo.schema.records import Agent, Turn
+from ufo.skills.runtime import CORE_SKILL_NAMES, CORE_SKILL_REGISTRY, RuntimeSkill
+from ufo.tools.context import SpawnResult, ToolContext
 
 
 def _skill_md(name: str, description: str, body: str = "Follow the steps.") -> bytes:
@@ -193,7 +193,7 @@ async def test_load_all_skips_a_corrupt_skill_and_keeps_the_rest(db: None) -> No
 async def test_save_refuses_over_the_skill_cap_but_allows_a_resave(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("selfhost_ext_skill_create.store.MAX_USER_SKILLS_PER_WORKSPACE", 2)
+    monkeypatch.setattr("ufo_ext_skill_create.store.MAX_USER_SKILLS_PER_WORKSPACE", 2)
     workspace_id = await _workspace()
     store = _store(workspace_id)
     await store.save(workspace_id, "one", {"SKILL.md": _skill_md("one", "1")}, frozenset())
@@ -248,7 +248,7 @@ async def test_save_custom_skill_tool_round_trips_through_the_sandbox(db: None, 
     handle = await carrier.create(
         SandboxSpec(
             conversation_id=uuid4(),
-            image_ref="selfhost-sandbox:latest",
+            image_ref="ufo-sandbox:latest",
             mount=MountSpec(kind="filesystem", host_path=str(tmp_path / "workspace")),
             proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM"),
             run_token="run-token",
@@ -295,7 +295,7 @@ async def test_save_custom_skill_tool_skips_a_non_regular_file(db: None, tmp_pat
     handle = await carrier.create(
         SandboxSpec(
             conversation_id=uuid4(),
-            image_ref="selfhost-sandbox:latest",
+            image_ref="ufo-sandbox:latest",
             mount=MountSpec(kind="filesystem", host_path=str(tmp_path / "workspace")),
             proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM"),
             run_token="run-token",

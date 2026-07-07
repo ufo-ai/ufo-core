@@ -4,16 +4,16 @@ from pathlib import Path
 
 import pytest
 
-CHART = Path(__file__).resolve().parent.parent / "charts" / "selfhost-tenant"
+CHART = Path(__file__).resolve().parent.parent / "charts" / "ufo-tenant"
 DIGEST = "sha256:" + "d" * 64
 
 VALUES = f"""\
-namespace: selfhost-acme
+namespace: ufo-acme
 tenant_name: acme
 pack: assistant
-host: acme.selfhost.app
+host: acme.ufo.app
 owner_email: you@acme.com
-bundle_image: ghcr.io/acme/selfhost@{DIGEST}
+bundle_image: ghcr.io/acme/ufo@{DIGEST}
 sandbox_image: ghcr.io/acme/sandbox@{DIGEST}
 """
 
@@ -43,7 +43,7 @@ def test_chart_renders_the_tenant_workload(tmp_path: Path) -> None:
             "acme",
             str(CHART),
             "--namespace",
-            "selfhost-acme",
+            "ufo-acme",
             "--values",
             str(_write_values(tmp_path)),
         ],
@@ -57,11 +57,11 @@ def test_chart_renders_the_tenant_workload(tmp_path: Path) -> None:
     assert "kind: Ingress" in rendered
     assert 'cert-manager.io/cluster-issuer: "letsencrypt"' in rendered
     assert "external-dns.alpha.kubernetes.io/hostname" in rendered
-    assert f"ghcr.io/acme/selfhost@{DIGEST}" in rendered
+    assert f"ghcr.io/acme/ufo@{DIGEST}" in rendered
     # The init Job runs once, on install only.
     assert '"helm.sh/hook": post-install' in rendered
-    assert "selfhost-sandbox-manager" in rendered
+    assert "ufo-sandbox-manager" in rendered
     # Both the serve Deployment and the init Job envFrom the platform Secret (model + cloud creds)
     # the operator replicates into the namespace — the consumer end of that Secret.
     assert rendered.count("secretRef") >= 2
-    assert "selfhost-platform-secrets" in rendered
+    assert "ufo-platform-secrets" in rendered

@@ -4,8 +4,8 @@ so renaming a profile or its payload fields breaks loudly here, not in a member'
 
 import pytest
 from pydantic import ValidationError
-from selfhost_ext_brief_pipeline.manifest import manifest
-from selfhost_ext_brief_pipeline.pipeline import (
+from ufo_ext_brief_pipeline.manifest import manifest
+from ufo_ext_brief_pipeline.pipeline import (
     CRITIC_PROFILE,
     DRAFT_PROFILE,
     OUTLINE_PROFILE,
@@ -14,9 +14,9 @@ from selfhost_ext_brief_pipeline.pipeline import (
     DraftRequest,
 )
 
-from selfhost.ext.loader import skill_registry, turn_subagents
-from selfhost.loop.profiles import CORE_SUBAGENT_PROFILES
-from selfhost.loop.subagents import SubagentRegistry, subagent_system_prompt
+from ufo.ext.loader import skill_registry, turn_subagents
+from ufo.loop.profiles import CORE_SUBAGENT_PROFILES
+from ufo.loop.subagents import SubagentRegistry, subagent_system_prompt
 
 
 def test_profiles_register_beside_core_without_collision() -> None:

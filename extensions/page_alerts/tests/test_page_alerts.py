@@ -13,7 +13,7 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
-from selfhost_ext_page_alerts.alerts import (
+from ufo_ext_page_alerts.alerts import (
     PAGE_EXCERPT_CHARS,
     WATCH_PREFIX,
     CancelPageWatchInput,
@@ -24,18 +24,18 @@ from selfhost_ext_page_alerts.alerts import (
     on_page_change,
     watch_pages,
 )
-from selfhost_ext_page_alerts.manifest import NAME, manifest
+from ufo_ext_page_alerts.manifest import NAME, manifest
 
-from selfhost.credentials import CredentialStore
-from selfhost.db import workspace_tx
-from selfhost.ext.context import ScopedStore, context_for
-from selfhost.ext.manifest import HookContext, PageChangeBatch
-from selfhost.models.interface import ModelRequest, TextDelta
-from selfhost.schema import tables
-from selfhost.schema.records import WRITEBACK_PENDING, Agent, Turn, Usage
-from selfhost.sources.sync import PageChange
-from selfhost.surfaces.admission import Admission, AdmissionInvoker
-from selfhost.tools.context import SpawnResult, ToolContext
+from ufo.credentials import CredentialStore
+from ufo.db import workspace_tx
+from ufo.ext.context import ScopedStore, context_for
+from ufo.ext.manifest import HookContext, PageChangeBatch
+from ufo.models.interface import ModelRequest, TextDelta
+from ufo.schema import tables
+from ufo.schema.records import WRITEBACK_PENDING, Agent, Turn, Usage
+from ufo.sources.sync import PageChange
+from ufo.surfaces.admission import Admission, AdmissionInvoker
+from ufo.tools.context import SpawnResult, ToolContext
 
 BILLED_MODEL = "claude-opus-4-8"
 

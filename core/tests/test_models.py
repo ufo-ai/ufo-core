@@ -11,11 +11,11 @@ from anthropic.types.raw_message_delta_event import Delta
 from openai.types.chat import chat_completion_chunk
 from openai.types.completion_usage import CompletionUsage, PromptTokensDetails
 
-from selfhost.config import BlobConfig, Config, DatabaseConfig, ModelsConfig
-from selfhost.models.anthropic import MAX_EMPTY_PROVIDER_RETRIES as ANTHROPIC_MAX_EMPTY_RETRIES
-from selfhost.models.anthropic import MAX_PROVIDER_RETRIES as ANTHROPIC_MAX_RETRIES
-from selfhost.models.anthropic import AnthropicClient, anthropic_sdk_client
-from selfhost.models.interface import (
+from ufo.config import BlobConfig, Config, DatabaseConfig, ModelsConfig
+from ufo.models.anthropic import MAX_EMPTY_PROVIDER_RETRIES as ANTHROPIC_MAX_EMPTY_RETRIES
+from ufo.models.anthropic import MAX_PROVIDER_RETRIES as ANTHROPIC_MAX_RETRIES
+from ufo.models.anthropic import AnthropicClient, anthropic_sdk_client
+from ufo.models.interface import (
     IMAGE_OMITTED_TEXT,
     ImageBlock,
     ImageSource,
@@ -29,11 +29,11 @@ from selfhost.models.interface import (
     ToolUseBlock,
     trim_images,
 )
-from selfhost.models.openai import MAX_EMPTY_PROVIDER_RETRIES as OPENAI_MAX_EMPTY_RETRIES
-from selfhost.models.openai import MAX_PROVIDER_RETRIES as OPENAI_MAX_RETRIES
-from selfhost.models.openai import OpenAIClient, openai_sdk_client
-from selfhost.models.registry import model_registry
-from selfhost.schema.records import Usage
+from ufo.models.openai import MAX_EMPTY_PROVIDER_RETRIES as OPENAI_MAX_EMPTY_RETRIES
+from ufo.models.openai import MAX_PROVIDER_RETRIES as OPENAI_MAX_RETRIES
+from ufo.models.openai import OpenAIClient, openai_sdk_client
+from ufo.models.registry import model_registry
+from ufo.schema.records import Usage
 
 REQUEST = ModelRequest(
     model="claude-opus-4-8",

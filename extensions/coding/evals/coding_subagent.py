@@ -2,8 +2,8 @@
 delegated to it (`spawn_subagent` with profile "coding") and relayed the correct result back —
 grading the delegation lane, not just the answer."""
 
-from selfhost_ext_eval_harness.capability import CapabilityCase, Grader
-from selfhost_ext_eval_harness.scorers import combine, exact_scorer, lane_scorer
+from ufo_ext_eval_harness.capability import CapabilityCase, Grader
+from ufo_ext_eval_harness.scorers import combine, exact_scorer, lane_scorer
 
 SPECS: list[tuple[str, str, Grader]] = [
     (

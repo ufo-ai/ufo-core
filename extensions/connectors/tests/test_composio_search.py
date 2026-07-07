@@ -9,8 +9,8 @@ from typing import Any, cast
 from uuid import uuid4
 
 import pytest
-import selfhost_ext_connectors.composio as composio
-import selfhost_ext_connectors.mcp_session as mcp_session
+import ufo_ext_connectors.composio as composio
+import ufo_ext_connectors.mcp_session as mcp_session
 
 _ROUTER_RESULT = {
     "data": {

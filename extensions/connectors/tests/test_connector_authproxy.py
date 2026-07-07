@@ -11,9 +11,9 @@ from uuid import uuid4
 
 import httpx
 import pytest
-import selfhost_ext_connectors.composio as composio
-import selfhost_ext_connectors.composio_proxy as composio_proxy
-from selfhost_ext_connectors.authproxy import ComposioAuthProxy
+import ufo_ext_connectors.composio as composio
+import ufo_ext_connectors.composio_proxy as composio_proxy
+from ufo_ext_connectors.authproxy import ComposioAuthProxy
 
 ACCOUNT = "ca_asana_1"
 ASANA_BASE = "https://app.asana.com/api/1.0"

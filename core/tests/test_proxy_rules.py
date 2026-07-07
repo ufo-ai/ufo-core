@@ -1,6 +1,6 @@
 import pytest
 
-from selfhost.sandbox.proxy.rules import (
+from ufo.sandbox.proxy.rules import (
     ANTHROPIC_HOST,
     OPENAI_HOST,
     SENTINEL_MODEL_KEY,

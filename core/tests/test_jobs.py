@@ -5,13 +5,13 @@ import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from dbos import DBOS
 
-from selfhost import jobs as jobs_module
-from selfhost.credentials import CredentialStore
-from selfhost.db import workspace_tx
-from selfhost.ext.context import ExtensionContext, ScopedStore
-from selfhost.ext.manifest import JobSpec
-from selfhost.jobs import CORE_EXTENSION, JobRunner, bindings_from
-from selfhost.schema import tables
+from ufo import jobs as jobs_module
+from ufo.credentials import CredentialStore
+from ufo.db import workspace_tx
+from ufo.ext.context import ExtensionContext, ScopedStore
+from ufo.ext.manifest import JobSpec
+from ufo.jobs import CORE_EXTENSION, JobRunner, bindings_from
+from ufo.schema import tables
 
 FIRE_TIMEOUT_SECONDS = 25
 MARKER_KEY = "fired"

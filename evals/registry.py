@@ -9,8 +9,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
-from selfhost_ext_eval_harness.capability import CapabilityCase
-from selfhost_ext_eval_harness.registry import EvalTask, capability_task
+from ufo_ext_eval_harness.capability import CapabilityCase
+from ufo_ext_eval_harness.registry import EvalTask, capability_task
 
 from evals import basics, tool_calling
 
@@ -23,7 +23,7 @@ def _discovered_tasks() -> tuple[EvalTask, ...]:
         name = path.stem
         if name in tasks:
             raise ValueError(f"duplicate eval task name {name!r} from {path}")
-        spec = importlib.util.spec_from_file_location(f"selfhost_eval_task_{name}", path)
+        spec = importlib.util.spec_from_file_location(f"ufo_eval_task_{name}", path)
         if spec is None or spec.loader is None:
             raise RuntimeError(f"eval task {path} is not loadable")
         module = importlib.util.module_from_spec(spec)

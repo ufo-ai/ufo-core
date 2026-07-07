@@ -7,7 +7,7 @@ slot nothing fills fails loud rather than reaching the model as a literal brace.
 
 import pytest
 
-from selfhost.loop.prompts.render import (
+from ufo.loop.prompts.render import (
     COMPACTION_SYSTEM_PROMPT,
     render_skill_index,
     render_system_prompt,

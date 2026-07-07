@@ -2,7 +2,7 @@
 `modifiedTime` watermark threaded into the Drive query, the per-doc `403` stub that keeps the run
 going, a Drive-list refusal surfacing as `StreamSkipped`, and the `render` override that walks a
 document's `body.content` paragraphs into readable prose. No conftest: the shared
-`selfhost_testsupport` plugin covers fixtures; these tests are offline (a canned transport, no DB,
+`ufo_testsupport` plugin covers fixtures; these tests are offline (a canned transport, no DB,
 no token, no broker)."""
 
 from collections.abc import Callable
@@ -11,11 +11,11 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from selfhost_ext_sources.google_docs import GoogleDocsConnector
+from ufo_ext_sources.google_docs import GoogleDocsConnector
 
-from selfhost.connectors import Credential
-from selfhost.sdk.sources import ConnectorBackend, ConnectorSourceConfig
-from selfhost.sources.sync import SourceAuth, StreamSkipped
+from ufo.connectors import Credential
+from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
+from ufo.sources.sync import SourceAuth, StreamSkipped
 
 ACCOUNT = "acct-1"
 

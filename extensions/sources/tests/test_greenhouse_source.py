@@ -9,11 +9,11 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from selfhost_ext_sources.greenhouse import GreenhouseConnector
+from ufo_ext_sources.greenhouse import GreenhouseConnector
 
-from selfhost.connectors import Credential
-from selfhost.sdk.sources import ConnectorBackend, ConnectorSourceConfig
-from selfhost.sources.sync import SourceAuth, StreamSkipped
+from ufo.connectors import Credential
+from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
+from ufo.sources.sync import SourceAuth, StreamSkipped
 
 ACCOUNT = "acct-1"
 NEXT_JOBS_PAGE = "https://harvest.greenhouse.io/v1/jobs?per_page=500&page=2"

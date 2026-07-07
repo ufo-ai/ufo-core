@@ -12,9 +12,9 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
-from selfhost_ext_embed_openai import EMBED_DIM
-from selfhost_ext_index_default import DefaultIndex
-from selfhost_ext_memory.store import (
+from ufo_ext_embed_openai import EMBED_DIM
+from ufo_ext_index_default import DefaultIndex
+from ufo_ext_memory.store import (
     FACT,
     MemoryIndexer,
     MemoryStore,
@@ -29,10 +29,10 @@ from selfhost_ext_memory.store import (
     recall_subjects,
 )
 
-from selfhost.db import workspace_tx
-from selfhost.indexing import OWNER_KIND_MEMORY_ITEM, OWNER_KIND_PAGE, Chunk, Hit, TextChunker
-from selfhost.schema import tables
-from selfhost.subjects import SHARED_SUBJECT, member_subject
+from ufo.db import workspace_tx
+from ufo.indexing import OWNER_KIND_MEMORY_ITEM, OWNER_KIND_PAGE, Chunk, Hit, TextChunker
+from ufo.schema import tables
+from ufo.subjects import SHARED_SUBJECT, member_subject
 
 
 def vec(*axes: tuple[int, float]) -> tuple[float, ...]:

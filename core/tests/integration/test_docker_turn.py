@@ -16,18 +16,18 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
-from selfhost_ext_docker import DockerCarrier
+from ufo_ext_docker import DockerCarrier
 
-from selfhost.blob import FilesystemBlobStore
-from selfhost.browser import SandboxCdpProvider
-from selfhost.db import workspace_tx
-from selfhost.ext.loader import HookChain
-from selfhost.hub import InProcessHub
-from selfhost.loop.compaction import Compaction
-from selfhost.loop.engine import TurnEngine
-from selfhost.loop.prompts.render import rendered_prompt
-from selfhost.loop.transcript import Transcript
-from selfhost.models.interface import (
+from ufo.blob import FilesystemBlobStore
+from ufo.browser import SandboxCdpProvider
+from ufo.db import workspace_tx
+from ufo.ext.loader import HookChain
+from ufo.hub import InProcessHub
+from ufo.loop.compaction import Compaction
+from ufo.loop.engine import TurnEngine
+from ufo.loop.prompts.render import rendered_prompt
+from ufo.loop.transcript import Transcript
+from ufo.models.interface import (
     ModelEvent,
     ModelRequest,
     TextDelta,
@@ -36,23 +36,23 @@ from selfhost.models.interface import (
     ToolResultBlock,
     Usage,
 )
-from selfhost.sandbox import session as session_module
-from selfhost.sandbox.session import (
+from ufo.sandbox import session as session_module
+from ufo.sandbox.session import (
     SANDBOX_GID,
     SANDBOX_UID,
     MountSpec,
     SandboxHandle,
     SandboxSession,
 )
-from selfhost.schema import tables
-from selfhost.schema.records import Agent, Turn
-from selfhost.tools.builtins import BUILTIN_TOOLS
-from selfhost.tools.context import SpawnResult
-from selfhost.tools.registry import ToolRegistry
+from ufo.schema import tables
+from ufo.schema.records import Agent, Turn
+from ufo.tools.builtins import BUILTIN_TOOLS
+from ufo.tools.context import SpawnResult
+from ufo.tools.registry import ToolRegistry
 
 pytestmark = pytest.mark.docker
 
-SANDBOX_TEST_IMAGE = "selfhost-sandbox:test"
+SANDBOX_TEST_IMAGE = "ufo-sandbox:test"
 MARKER = "sandbox-lives-42"
 
 

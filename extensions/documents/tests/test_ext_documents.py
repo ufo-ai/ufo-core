@@ -3,9 +3,9 @@
 that a skill-name collision across packs is refused where the registry is built."""
 
 import pytest
-import selfhost_ext_documents.manifest as documents
+import ufo_ext_documents.manifest as documents
 
-from selfhost.ext.loader import skill_registry
+from ufo.ext.loader import skill_registry
 
 
 def test_documents_skills_parse_and_index() -> None:

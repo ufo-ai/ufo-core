@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ufo-serve
+  labels:
+    {{- include "ufo-tenant.labels" . | nindent 4 }}
+    app: ufo-serve
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      app: ufo-serve
+  template:
+    metadata:
+      labels:
+        {{- include "ufo-tenant.labels" . | nindent 8 }}
+        app: ufo-serve
+    spec:
+      serviceAccountName: ufo-serve
+      containers:
+        - name: serve
+          image: {{ .Values.bundle_image | quote }}
+          # ENTRYPOINT ["ufoctl","serve"] is baked into the bundle image.
+          ports:
+            - name: http
+              containerPort: {{ .Values.serve_port }}
+          env:
+            # Minted per tenant by the control plane, carried in the tenant Secret.
+            - name: UFO_CREDENTIAL_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.tenant_secret }}
+                  key: UFO_CREDENTIAL_KEY
+            - name: UFO_ARTIFACT_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.tenant_secret }}
+                  key: UFO_ARTIFACT_TOKEN_SECRET
+          # Model API keys + cloud credentials from the cluster's platform Secret.
+          envFrom:
+            - secretRef:
+                name: {{ .Values.platform_secret }}
+          volumeMounts:
+            # Override the image's baked ufo.toml with the tenant's rendered config.
+            - name: config
+              mountPath: /app/ufo.toml
+              subPath: ufo.toml
+          # No /healthz in core (surfaces mount /v1, /surface, /ext, /artifacts); a TCP probe
+          # confirms uvicorn is bound after core's fail-loud boot.
+          readinessProbe:
+            tcpSocket:
+              port: {{ .Values.serve_port }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: {{ .Values.serve_port }}
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.serve.resources | nindent 12 }}
+      volumes:
+        - name: config
+          secret:
+            secretName: {{ .Values.tenant_secret }}
+            items:
+              - key: ufo.toml
+                path: ufo.toml

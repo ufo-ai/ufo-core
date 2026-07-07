@@ -5,16 +5,16 @@ import lz4.frame
 import pytest
 from pydantic import ValidationError
 
-from selfhost.blob import FilesystemBlobStore
-from selfhost.loop.transcript import Transcript
-from selfhost.models.interface import (
+from ufo.blob import FilesystemBlobStore
+from ufo.loop.transcript import Transcript
+from ufo.models.interface import (
     ImageBlock,
     ImageSource,
     Message,
     TextBlock,
     ToolResultBlock,
 )
-from selfhost.transcript import Conversation, decode, transcript_key
+from ufo.transcript import Conversation, decode, transcript_key
 
 
 def _transcript(tmp_path: Path) -> Transcript:
