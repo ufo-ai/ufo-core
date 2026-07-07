@@ -2,8 +2,8 @@ import json
 
 import httpx
 import pytest
+from ufo.deploy import DeployRequest, DeployStatus
 
-from ufo_control.contract import DeployRequest, DeployStatus
 from ufo_control.kube import APPLY_CONTENT_TYPE, KubeClient
 
 DIGEST = "sha256:" + "c" * 64
@@ -48,9 +48,10 @@ async def test_apply_tenant_is_a_forced_server_side_apply() -> None:
     await client.close()
 
 
-async def test_status_patch_omits_absent_url() -> None:
+async def test_status_patch_omits_absent_url_and_carries_workspace_id() -> None:
     # A Failed status has no url; the CRD's status.url is a non-nullable string, so the applied
-    # body must omit url rather than send `null` (which the apiserver rejects 422).
+    # body must omit url rather than send `null` (which the apiserver rejects 422). The minted
+    # workspaceId is persisted even on a Failed reconcile so the next pass reuses it (idempotency).
     seen: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -59,11 +60,12 @@ async def test_status_patch_omits_absent_url() -> None:
 
     client = _client(httpx.MockTransport(handler))
     status = DeployStatus(tenant="acme", phase="Failed", message="boom")
-    await client.patch_tenant_status("acme", status)
+    await client.patch_tenant_status("acme", status, "3f8c1e2a-0b4d-4c6e-9a1f-2b3c4d5e6f70")
     body = seen["body"]
     assert isinstance(body, dict)
     assert "url" not in body["status"]
     assert body["status"]["phase"] == "Failed"
+    assert body["status"]["workspaceId"] == "3f8c1e2a-0b4d-4c6e-9a1f-2b3c4d5e6f70"
     await client.close()
 
 

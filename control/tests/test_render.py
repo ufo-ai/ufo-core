@@ -1,11 +1,14 @@
 import base64
 import tomllib
 
-from ufo_control.contract import DeployRequest
+from ufo.deploy import DeployRequest
+
 from ufo_control.platform import PlatformConfig
+from ufo_control.postgres import TenantPostgres
 from ufo_control.render import CONFIG_FILE, render_tenant
 
 DIGEST = "sha256:" + "b" * 64
+WORKSPACE_ID = "3f8c1e2a-0b4d-4c6e-9a1f-2b3c4d5e6f70"
 OPERATOR_CONFIG = """\
 [pack]
 name = "assistant"
@@ -46,12 +49,24 @@ def _platform() -> PlatformConfig:
     )
 
 
+def _database_postgres() -> TenantPostgres:
+    return TenantPostgres(url="postgresql+asyncpg://u:p@pg.svc:5432/ufo_acme")
+
+
+def _rls_postgres() -> TenantPostgres:
+    return TenantPostgres(
+        url="postgresql+asyncpg://ufo_t_acme:pw@pg.svc:5432/ufo",
+        system_url="postgresql+psycopg://ufo_t_acme:pw@pg.svc:5432/ufo_dbos_acme",
+        workspace_id=WORKSPACE_ID,
+    )
+
+
 def test_overlay_replaces_infra_and_preserves_operator_sections() -> None:
-    render = render_tenant(_request(), _platform(), "postgresql+asyncpg://u:p@pg.svc:5432/db")
+    render = render_tenant(_request(), _platform(), _database_postgres())
     config = tomllib.loads(render.secret.config_toml)
 
     assert config["serve"]["host"] == "0.0.0.0"
-    assert config["database"]["url"] == "postgresql+asyncpg://u:p@pg.svc:5432/db"
+    assert config["database"]["url"] == "postgresql+asyncpg://u:p@pg.svc:5432/ufo_acme"
     assert config["blob"] == {"backend": "s3", "bucket": "acme-blobs", "region": "us-east-1"}
     assert config["hub"] == {"backend": "redis", "url": "redis://redis.svc:6379"}
     assert config["connect"]["public_base_url"] == "https://acme.ufo.app"
@@ -61,8 +76,27 @@ def test_overlay_replaces_infra_and_preserves_operator_sections() -> None:
     assert config["sandbox"]["backend"] == "docker"
 
 
+def test_database_tier_omits_system_url_and_workspace_id() -> None:
+    render = render_tenant(_request(), _platform(), _database_postgres())
+    config = tomllib.loads(render.secret.config_toml)
+    # The database tier lets core derive the _dbos sibling and mint the workspace uuid itself.
+    assert "system_url" not in config["database"]
+    assert render.values.workspace_id is None
+
+
+def test_rls_tier_emits_shared_db_dsn_system_url_and_workspace_id() -> None:
+    render = render_tenant(_request(), _platform(), _rls_postgres())
+    config = tomllib.loads(render.secret.config_toml)
+    assert config["database"]["url"] == "postgresql+asyncpg://ufo_t_acme:pw@pg.svc:5432/ufo"
+    assert config["database"]["system_url"] == (
+        "postgresql+psycopg://ufo_t_acme:pw@pg.svc:5432/ufo_dbos_acme"
+    )
+    # The workspace uuid rides the chart values → the init Job's --workspace-id.
+    assert render.values.workspace_id == WORKSPACE_ID
+
+
 def test_secret_carries_base64_config_and_minted_keys() -> None:
-    render = render_tenant(_request(), _platform(), "dsn")
+    render = render_tenant(_request(), _platform(), _database_postgres())
     data = render.secret.data()
     assert base64.b64decode(data[CONFIG_FILE]).decode() == render.secret.config_toml
     assert base64.b64decode(data["UFO_CREDENTIAL_KEY"]).decode() == render.secret.credential_key
@@ -70,7 +104,7 @@ def test_secret_carries_base64_config_and_minted_keys() -> None:
 
 
 def test_values_carry_digest_pinned_refs() -> None:
-    render = render_tenant(_request(), _platform(), "dsn")
+    render = render_tenant(_request(), _platform(), _database_postgres())
     assert render.values.namespace == "ufo-acme"
     assert render.values.bundle_image == f"ghcr.io/acme/ufo@{DIGEST}"
     assert render.values.cluster_issuer == "letsencrypt"

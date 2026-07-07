@@ -20,6 +20,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+from uuid import uuid4
 
 from fastapi import FastAPI
 
@@ -28,6 +29,7 @@ from ufo_control.platform import (
     LEASE_DURATION_SECONDS,
     OPERATOR_LEASE_NAME,
     PLATFORM_NAMESPACE,
+    WORKSPACE_ID_STATUS_FIELD,
     PlatformConfig,
     load_platform_config,
 )
@@ -99,8 +101,9 @@ class Operator:
             if _deleting(obj):
                 continue
             request = request_from_tenant(obj)
-            status = await reconciler.reconcile(request)
-            await self.kube.patch_tenant_status(request.tenant.name, status)
+            workspace_id = _workspace_id(obj)
+            status = await reconciler.reconcile(request, workspace_id)
+            await self.kube.patch_tenant_status(request.tenant.name, status, workspace_id)
 
 
 def operator_app() -> FastAPI:
@@ -125,6 +128,12 @@ def operator_app() -> FastAPI:
         return {"status": "ok"}
 
     return app
+
+
+def _workspace_id(obj: dict[str, Any]) -> str:
+    """Reuse the uuid persisted on the CR status; mint one on the first reconcile. Threaded into
+    provisioning (the RLS GUC pin, ``init --workspace-id``) and re-persisted so it never drifts."""
+    return obj.get("status", {}).get(WORKSPACE_ID_STATUS_FIELD) or str(uuid4())
 
 
 def _deleting(obj: dict[str, Any]) -> bool:

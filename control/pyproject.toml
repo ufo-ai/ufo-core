@@ -58,6 +58,12 @@ files = ["src/ufo_control", "tests"]
 module = ["asyncpg"]
 ignore_missing_imports = true
 
+# The runtime `ufo` package ships no py.typed marker; follow into its source so control checks
+# against the real DeployRequest/DeployStatus shapes it imports (RFC 0011 §1: one definition).
+[[tool.mypy.overrides]]
+module = ["ufo.*"]
+follow_untyped_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

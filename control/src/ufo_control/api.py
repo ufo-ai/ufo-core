@@ -11,8 +11,8 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from ufo.deploy import DeployRequest, DeployStatus
 
-from ufo_control.contract import DeployRequest, DeployStatus
 from ufo_control.kube import KubeClient
 
 

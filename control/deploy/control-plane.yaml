@@ -3,7 +3,8 @@
 # helm), the deploy API Deployment/Service, and the leader-elected operator Deployment.
 #
 # Apply after deploy/crds/tenant.yaml. Set the image, the platform ConfigMap, the
-# ufo-control-secrets Secret (Postgres admin DSN + role seed), and the ufo-platform-secrets
+# ufo-control-secrets Secret (Postgres admin DSN + role seed; owner DSN under postgres-owner-dsn
+# for the migrate Job's RLS bootstrap, deploy/migrate-job.yaml), and the ufo-platform-secrets
 # Secret (model API keys + cloud credentials the tenant pods read from env — the operator replicates
 # it from this namespace into each tenant namespace during provisioning) for your cluster first.
 apiVersion: v1

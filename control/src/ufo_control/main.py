@@ -5,8 +5,12 @@ This is metalcraft's one-image/console-script-args deployment shape (``[metalcra
 stripped to the two processes this control plane needs. Both serve ``/healthz`` for probes.
 """
 
+import asyncio
+
 import click
 import uvicorn
+
+from ufo_control.rls import bootstrap_policies, owner_dsn
 
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8080
@@ -33,3 +37,11 @@ def operator(host: str, port: int) -> None:
     uvicorn.run(
         "ufo_control.operator:operator_app", host=host, port=port, factory=True, log_level="info"
     )
+
+
+@main.command(name="rls-bootstrap")
+def rls_bootstrap() -> None:
+    """Enable RLS + workspace policies on the shared app database, as the owner. The cluster migrate
+    Job runs this after ``ufoctl migrate``, once per bundle rollout."""
+    asyncio.run(bootstrap_policies(owner_dsn()))
+    click.echo("rls policies at head")
