@@ -321,6 +321,25 @@ class SurfaceContext:
             ).one_or_none()
         return None if row is None else row.member_id
 
+    async def latest_turn(self, conversation_id: UUID) -> UUID | None:
+        """The most recent turn admitted to a conversation, or None when it holds none — the turn a
+        live surface resumes tailing when a held stream reconnects to drain an answer that outran the
+        hold, a conversation-keyed poll the web surface never needs because its own stream route
+        carries the turn id."""
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(tables.turn.c.id)
+                    .where(
+                        tables.turn.c.workspace_id == self.workspace_id,
+                        tables.turn.c.conversation_id == conversation_id,
+                    )
+                    .order_by(tables.turn.c.seq.desc())
+                    .limit(1)
+                )
+            ).one_or_none()
+        return None if row is None else row.id
+
     def tail(self, turn_id: UUID, since: str = "") -> AsyncIterator[tuple[str, LiveFrame]]:
         """Tail a turn's live frames off the hub until it ends — a live surface streams these to the
         member's held connection (SSE), reaching the hub only through the injected tailer."""
