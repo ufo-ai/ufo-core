@@ -10,7 +10,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Static checks — no database. Runs concurrently with `test` on its own runner, so mypy and the
+  # rot-guard never sit on the test job's critical path.
   checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync
+      - run: uv run ruff check
+      - run: uv run ruff format --check .
+      - run: uv run python gates.py
+      - run: uv run mypy core/src/selfhost extensions gates.py
+      # Rot-guard: the gated integration suite must always import + collect, even where its live
+      # dependencies (a model key, extra services) are absent, so it can't silently bit-rot. The
+      # whole tree is swept — core's live suite plus each extension's own tests/integration.
+      - run: uv run pytest --collect-only -m integration -q
+
+  # Parallel unit tests — the per-push bottleneck, on its own runner with the postgres service.
+  test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     services:
@@ -34,14 +56,6 @@ jobs:
           python-version: "3.12"
           enable-cache: true
       - run: uv sync
-      - run: uv run ruff check
-      - run: uv run ruff format --check .
-      - run: uv run python gates.py
-      - run: uv run mypy core/src/selfhost extensions gates.py
-      # Rot-guard: the gated integration suite must always import + collect, even where its live
-      # dependencies (a model key, extra services) are absent, so it can't silently bit-rot. The
-      # whole tree is swept — core's live suite plus each extension's own tests/integration.
-      - run: uv run pytest --collect-only -m integration -q
       # Parallel unit pass: the process-parallel-safe tests fan out across xdist workers. Each worker
       # is its own process (so the process-singleton DBOS executor is fine per worker) with its own
       # sqlite temp dir and its own worker-suffixed postgres database, so no two workers touch one
