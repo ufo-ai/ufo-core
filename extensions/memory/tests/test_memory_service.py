@@ -19,6 +19,7 @@ from ufo_ext_memory.store import (
     MemoryIndexer,
     MemoryStore,
     MemoryWrite,
+    PageIndexer,
     Recalled,
     decay_factor,
     enforce_type_diversity,
@@ -32,6 +33,7 @@ from ufo_ext_memory.store import (
 from ufo.db import workspace_tx
 from ufo.indexing import OWNER_KIND_MEMORY_ITEM, OWNER_KIND_PAGE, Chunk, Hit, TextChunker
 from ufo.schema import tables
+from ufo.sources.sync import PageChange
 from ufo.subjects import SHARED_SUBJECT, member_subject
 
 
@@ -119,14 +121,21 @@ async def _seed_item(
     return item_id
 
 
-async def _seed_page_chunk(subject: str, body: str, vector: tuple[float, ...]) -> None:
+async def _seed_page_chunk(
+    workspace_id: UUID, subject: str, body: str, vector: tuple[float, ...]
+) -> None:
     page_id = uuid4()
     await DefaultIndex(embed=StubEmbed(vector), transaction=workspace_tx).upsert(
         (Chunk("p-" + page_id.hex, OWNER_KIND_PAGE, str(page_id), subject, 0, body, vector),)
     )
     async with workspace_tx() as connection:
         await connection.execute(
-            sa.insert(mem_page).values(page_id=page_id, subject=subject, created_at=sa.func.now())
+            sa.insert(mem_page).values(
+                page_id=page_id,
+                workspace_id=workspace_id,
+                subject=subject,
+                created_at=sa.func.now(),
+            )
         )
 
 
@@ -324,8 +333,8 @@ async def test_pages_and_facts_do_not_crowd_each_others_candidate_window(clean: 
     probe = vec((4, 1.0))
     fact_a = await _seed_item(workspace_id, SHARED_SUBJECT, "quarterly report figures", probe)
     fact_b = await _seed_item(workspace_id, SHARED_SUBJECT, "quarterly report summary", probe)
-    await _seed_page_chunk(SHARED_SUBJECT, "quarterly report appendix", probe)
-    await _seed_page_chunk(SHARED_SUBJECT, "quarterly report preface", probe)
+    await _seed_page_chunk(workspace_id, SHARED_SUBJECT, "quarterly report appendix", probe)
+    await _seed_page_chunk(workspace_id, SHARED_SUBJECT, "quarterly report preface", probe)
 
     store = _store(StubEmbed(probe), workspace_id)
     subjects = frozenset({SHARED_SUBJECT})
@@ -428,3 +437,51 @@ async def test_recall_filters_to_the_created_at_window(clean: None) -> None:
     assert {item.memory_id for item in since} == {new}
     assert {item.memory_id for item in before} == {old}
     assert {item.memory_id for item in span} == {old, new}
+
+
+async def test_mem_page_carries_workspace_id(db: None) -> None:
+    """The migration end state: `mem_page.workspace_id` is NOT NULL with a CASCADE FK to workspace,
+    on whichever dialect the migration just ran against."""
+    async with workspace_tx() as connection:
+        columns = await connection.run_sync(
+            lambda sync: sa.inspect(sync).get_columns("mem_page")
+        )
+        foreign_keys = await connection.run_sync(
+            lambda sync: sa.inspect(sync).get_foreign_keys("mem_page")
+        )
+    workspace_column = next(column for column in columns if column["name"] == "workspace_id")
+    assert workspace_column["nullable"] is False
+    workspace_fk = next(fk for fk in foreign_keys if fk["referred_table"] == "workspace")
+    assert workspace_fk["constrained_columns"] == ["workspace_id"]
+    assert workspace_fk["options"]["ondelete"].upper() == "CASCADE"
+
+
+async def test_page_indexer_writes_the_contexts_workspace_id(clean: None) -> None:
+    """The `page_change` writer populates `workspace_id` from the context it holds: the mirror row
+    it upserts for a page change carries the indexer's workspace, not a NULL."""
+    workspace_id = await _workspace()
+    probe = vec((5, 1.0))
+    change = PageChange(
+        page_id=uuid4(),
+        subject=SHARED_SUBJECT,
+        body="the merger closes in the third quarter",
+        digest="sha256:seeded",
+        tombstone=False,
+        created_at=datetime(2025, 1, 1, tzinfo=UTC),
+        changed_at=datetime(2025, 1, 1, tzinfo=UTC),
+    )
+    await PageIndexer(
+        index=DefaultIndex(embed=StubEmbed(probe), transaction=workspace_tx),
+        embed=StubEmbed(probe),
+        transaction=workspace_tx,
+        chunker=TextChunker(),
+        workspace_id=workspace_id,
+    ).apply((change,))
+
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(mem_page.c.workspace_id).where(mem_page.c.page_id == change.page_id)
+            )
+        ).one()
+    assert row.workspace_id == workspace_id

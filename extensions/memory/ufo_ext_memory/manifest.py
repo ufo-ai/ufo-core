@@ -242,6 +242,7 @@ async def index_pages(ctx: HookContext) -> HookOutcome:
         embed=ctx.ext.embed,
         transaction=ctx.ext.transaction,
         chunker=TextChunker(),
+        workspace_id=ctx.ext.store.workspace_id,
     ).apply(ctx.payload.changes)
     return None
 

@@ -97,6 +97,7 @@ mem_page = sa.Table(
     "mem_page",
     _metadata,
     sa.Column("page_id", sa.Uuid, primary_key=True),
+    sa.Column("workspace_id", sa.Uuid, nullable=False),
     sa.Column("subject", sa.Text, nullable=False),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
 )
@@ -608,6 +609,7 @@ class PageIndexer:
     embed: EmbedClient
     transaction: Transaction
     chunker: TextChunker
+    workspace_id: UUID
 
     async def apply(self, changes: tuple[PageChange, ...]) -> None:
         for change in changes:
@@ -640,6 +642,7 @@ class PageIndexer:
                 await connection.execute(
                     sa.insert(mem_page).values(
                         page_id=change.page_id,
+                        workspace_id=self.workspace_id,
                         subject=change.subject,
                         created_at=change.created_at,
                     )
