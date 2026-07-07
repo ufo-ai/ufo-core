@@ -443,9 +443,7 @@ async def test_mem_page_carries_workspace_id(db: None) -> None:
     """The migration end state: `mem_page.workspace_id` is NOT NULL with a CASCADE FK to workspace,
     on whichever dialect the migration just ran against."""
     async with workspace_tx() as connection:
-        columns = await connection.run_sync(
-            lambda sync: sa.inspect(sync).get_columns("mem_page")
-        )
+        columns = await connection.run_sync(lambda sync: sa.inspect(sync).get_columns("mem_page"))
         foreign_keys = await connection.run_sync(
             lambda sync: sa.inspect(sync).get_foreign_keys("mem_page")
         )

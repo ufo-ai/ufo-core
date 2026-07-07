@@ -12,3 +12,4 @@ blobs/
 *.db
 .coverage
 .claude/
+.worktrees/

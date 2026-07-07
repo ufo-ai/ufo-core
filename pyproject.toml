@@ -76,6 +76,7 @@ ufo_testsupport = "ufo_testsupport.plugin"
 
 [dependency-groups]
 dev = [
+    "pre-commit>=4.0",
     "ufo-control",
     "mypy>=1.13",
     "pytest>=8.3",
@@ -146,7 +147,7 @@ exclude = ["**/__pycache__", "**/*.pyc"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-extend-exclude = ["extensions/**/skills/**"]
+extend-exclude = ["extensions/**/skills/**", ".worktrees"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "ASYNC", "PTH", "RUF", "TID"]

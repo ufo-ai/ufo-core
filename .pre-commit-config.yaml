@@ -24,3 +24,9 @@ repos:
         language: system
         types: [python]
         pass_filenames: false
+      - id: mypy-control
+        name: mypy control
+        entry: bash -c 'cd control && uv run mypy'
+        language: system
+        types: [python]
+        pass_filenames: false

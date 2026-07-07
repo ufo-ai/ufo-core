@@ -21,7 +21,7 @@ import hashlib
 import hmac
 import json
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -163,7 +163,8 @@ async def stream_directives(
                 terminated = True
                 break
     finally:
-        await frames.aclose()
+        if isinstance(frames, AsyncGenerator):
+            await frames.aclose()
     if not terminated:
         yield directive("poll", str(POLL_SECONDS))
 

@@ -192,4 +192,6 @@ def test_explicit_system_url_wins_over_derivation(tmp_path: Path) -> None:
             'system_url = "postgresql+psycopg://u:p@db:5432/ufo_dbos_tenant"',
         )
     )
-    assert load_config(path).database.system_url == "postgresql+psycopg://u:p@db:5432/ufo_dbos_tenant"
+    assert (
+        load_config(path).database.system_url == "postgresql+psycopg://u:p@db:5432/ufo_dbos_tenant"
+    )

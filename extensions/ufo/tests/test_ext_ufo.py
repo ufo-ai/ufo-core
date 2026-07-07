@@ -311,9 +311,9 @@ async def _turn_count(workspace_id: UUID) -> int:
     async with workspace_tx() as connection:
         return (
             await connection.execute(
-                sa.select(sa.func.count()).select_from(tables.turn).where(
-                    tables.turn.c.workspace_id == workspace_id
-                )
+                sa.select(sa.func.count())
+                .select_from(tables.turn)
+                .where(tables.turn.c.workspace_id == workspace_id)
             )
         ).scalar_one()
 

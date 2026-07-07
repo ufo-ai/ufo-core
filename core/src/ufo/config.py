@@ -24,11 +24,11 @@ class DatabaseConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     url: str
-    system_url: str | None = None
+    system_url: str = ""
 
     @model_validator(mode="after")
     def _derive_system_url(self) -> "DatabaseConfig":
-        if self.system_url is not None:
+        if self.system_url:
             return self
         base, _, name = self.url.rpartition("/")
         if self.url.startswith("sqlite"):

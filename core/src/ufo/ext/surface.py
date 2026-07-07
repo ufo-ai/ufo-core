@@ -322,10 +322,10 @@ class SurfaceContext:
         return None if row is None else row.member_id
 
     async def latest_turn(self, conversation_id: UUID) -> UUID | None:
-        """The most recent turn admitted to a conversation, or None when it holds none — the turn a
-        live surface resumes tailing when a held stream reconnects to drain an answer that outran the
-        hold, a conversation-keyed poll the web surface never needs because its own stream route
-        carries the turn id."""
+        """The most recent turn admitted to a conversation, or None when it holds none — the
+        turn a live surface resumes tailing when a held stream reconnects to drain an answer that
+        outran the hold, a conversation-keyed poll the web surface never needs because its own
+        stream route carries the turn id."""
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
