@@ -54,16 +54,21 @@ async def reset_postgres_database(name: str) -> None:
 
 
 @pytest.fixture(scope="session", params=["sqlite", "postgres"])
-def database_url(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory) -> str:
+def database_url(
+    request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory, worker_id: str
+) -> str:
     if request.param == "sqlite":
         url = f"sqlite+aiosqlite:///{tmp_path_factory.mktemp('db') / 'selfhost_test.db'}"
         apply_migrations(url)
         return url
     if not postgres_reachable():
         pytest.skip("postgres service not reachable")
-    asyncio.run(reset_postgres_database(make_url(POSTGRES_TEST_URL).database))
-    apply_migrations(POSTGRES_TEST_URL)
-    return POSTGRES_TEST_URL
+    base = make_url(POSTGRES_TEST_URL)
+    url = base.set(database=f"{base.database}_{worker_id}")
+    dsn = url.render_as_string(hide_password=False)
+    asyncio.run(reset_postgres_database(url.database))
+    apply_migrations(dsn)
+    return dsn
 
 
 @pytest.fixture

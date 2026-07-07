@@ -1,0 +1,50 @@
+name: integration
+
+on:
+  schedule:
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: selfhost
+          POSTGRES_PASSWORD: selfhost
+          POSTGRES_DB: selfhost
+        ports:
+          - 5541:5432
+        options: >-
+          --health-cmd "pg_isready -U selfhost"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+      # The sandbox image (e2b base + libreoffice + chromium + playwright + pip/npm) is ~6-7 GB and
+      # its build peaks near the runner's ~14 GB free disk. Reclaim the large preinstalled toolchains
+      # this build never touches so the docker-gated tests can build instead of stalling on space.
+      - name: Reclaim runner disk for the sandbox image build
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          docker image prune -af || true
+          df -h /
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync
+      # Serial pass: the container/image-build/live turns run one process, no xdist — the ~6-7 GB
+      # sandbox image build, the fixed-name MinIO container, and the live integration turns each need
+      # a single owner of their shared resource. `integration` tests needing an absent key (a live
+      # model) skip with a clear reason; `-rs` surfaces those skip reasons so a bounded-out image
+      # build or an absent dependency is visible in the log rather than hidden behind a bare "s".
+      - run: uv run pytest -rs -m "serial or integration or docker"
