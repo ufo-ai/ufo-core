@@ -214,6 +214,28 @@ class PackConfig(BaseModel):
     name: str | None = None
 
 
+class DeployConfig(BaseModel):
+    """`selfhost deploy` settings — the set-once identity of this deploy, so the verb takes no
+    per-run flags. `backend` selects how the deploy request is realized: `compose` (a local
+    single-box stack) or `k8s` (posted to a selfhost-k8s control plane). `remote` is that control
+    plane's base URL — posting is automatic when it (or `--remote`) is set. `host` is the public
+    hostname; unset, it derives as `<name>.<base_domain>` when `base_domain` is given, else
+    `localhost` for the compose backend (the k8s backend fails loud without one). `name` is the
+    tenant slug, defaulting to the workspace's agent name. `bundle_image`/`sandbox_image` are the
+    digest-pinned image refs (`repo@sha256:…`) the control plane runs — they come from a build+push,
+    so they are set here, not derived. `owner_email` is never here: it is read from the workspace
+    the owner's `selfhost init` created."""
+
+    model_config = ConfigDict(extra="forbid")
+    backend: Literal["compose", "k8s"] = "compose"
+    remote: str | None = None
+    host: str | None = None
+    base_domain: str | None = None
+    name: str | None = None
+    bundle_image: str | None = None
+    sandbox_image: str | None = None
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
     database: DatabaseConfig
@@ -233,6 +255,7 @@ class Config(BaseModel):
     connectors: ConnectorsConfig = ConnectorsConfig()
     research: ResearchConfig = ResearchConfig()
     pack: PackConfig = PackConfig()
+    deploy: DeployConfig = DeployConfig()
 
 
 def config_path() -> Path:

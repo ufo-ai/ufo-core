@@ -22,6 +22,14 @@ from selfhost.bundle import Bundle
 from selfhost.config import Config, config_path, load_config
 from selfhost.credentials import CredentialStore
 from selfhost.db import apply_migrations, dispose_db, init_db, workspace_tx
+from selfhost.deploy import (
+    Deploy,
+    DeployRequest,
+    DeployResolutionError,
+    DeployStatus,
+    WorkspaceIdentity,
+    resolve_request,
+)
 from selfhost.ext.loader import load_manifests, lockfile_path
 from selfhost.ext.store import ExtensionStore, read_catalog
 from selfhost.grants import GrantSummary, grant_summaries
@@ -657,3 +665,98 @@ def bundle(out: Path) -> None:
     click.echo(f"bundle at {result.out} — {len(result.pins)} extension(s) pinned")
     for pin in result.pins:
         click.echo(f"  {pin.name} {pin.version} {pin.digest}")
+
+
+DEFAULT_DEPLOY_DIR = Path("deploy")
+DEPLOY_POLL_SECONDS = 5.0
+DEPLOY_POLL_TIMEOUT_SECONDS = 600.0
+
+
+@main.command()
+@click.option("--remote", default=None, help="Override [deploy].remote — the control-plane URL.")
+@click.option(
+    "--out", type=click.Path(path_type=Path), default=DEFAULT_DEPLOY_DIR, show_default=True
+)
+def deploy(remote: str | None, out: Path) -> None:
+    """Freeze this deploy into a control-plane request from [deploy] config and the workspace,
+    beside the bundle. Posts to the control plane and waits for Ready when [deploy].remote (or
+    --remote) is set; generate-only otherwise — like bundle, it imports no orchestrator. Everything
+    is derived: the owner from the workspace, the tenant name from [deploy].name or the agent, the
+    Postgres model from the backend. Fails loud naming any underivable [deploy] field it needs."""
+    config = load_config()
+    catalog = read_catalog(config.ext.store) if config.ext.store is not None else None
+    remote_url = remote or config.deploy.remote
+    workspace = asyncio.run(_read_workspace_identity(config))
+    request: DeployRequest | None = None
+    reason = "run selfhost init first (deploy derives the owner and name from the workspace)"
+    if workspace is not None:
+        try:
+            request = resolve_request(config.deploy, config, config_path(), workspace)
+        except DeployResolutionError as error:
+            reason = str(error)
+    if request is None and remote_url is not None:
+        raise click.ClickException(reason)
+    result = Deploy(config_path=config_path(), catalog=catalog, out=out, request=request).build()
+    click.echo(f"bundle at {result.bundle.out}")
+    if result.request is None:
+        click.echo(f"deploy request skipped — {reason}")
+        return
+    tenant = result.request.tenant
+    click.echo(
+        f"deploy request at {result.request_path} — tenant {tenant.name} → https://{tenant.host}"
+    )
+    if remote_url is None:
+        click.echo("set [deploy].remote (or pass --remote) to post it to a control plane")
+        return
+    status = asyncio.run(_post_deploy(remote_url, result.request))
+    suffix = f" — {status.url}" if status.url else ""
+    click.echo(f"{status.phase}: {status.message}{suffix}")
+    if status.phase == "Failed":
+        raise click.ClickException("deploy failed — see the control plane")
+
+
+async def _read_workspace_identity(config: Config) -> WorkspaceIdentity | None:
+    """The owner email + a default tenant name from the workspace `selfhost init` created; None when
+    no owner exists yet (not initialized)."""
+    init_db(config.database.url)
+    try:
+        async with workspace_tx() as connection:
+            owner = (await connection.execute(sa.select(tables.member.c.email))).first()
+            if owner is None:
+                return None
+            agent = (
+                await connection.execute(
+                    sa.select(tables.agent.c.name).order_by(tables.agent.c.created_at).limit(1)
+                )
+            ).first()
+            default_name = agent.name if agent is not None else DEFAULT_AGENT_NAME
+            return WorkspaceIdentity(owner_email=owner.email, default_name=default_name)
+    finally:
+        await dispose_db()
+
+
+async def _post_deploy(remote: str, request: DeployRequest) -> DeployStatus:
+    async with httpx.AsyncClient(base_url=remote, timeout=30.0) as client:
+        return await _drive_deploy(client, request)
+
+
+async def _drive_deploy(client: httpx.AsyncClient, request: DeployRequest) -> DeployStatus:
+    """Post the request to the control plane, then poll the tenant to a terminal phase. Retry/poll
+    is legitimate here — the control plane is an external service reconciling asynchronously."""
+    response = await client.post("/v1/deploy", json=request.model_dump(mode="json"))
+    response.raise_for_status()
+    deadline = asyncio.get_event_loop().time() + DEPLOY_POLL_TIMEOUT_SECONDS
+    while True:
+        poll = await client.get(f"/v1/tenants/{request.tenant.name}")
+        poll.raise_for_status()
+        status = DeployStatus.model_validate(poll.json())
+        if status.phase in ("Ready", "Failed"):
+            return status
+        if asyncio.get_event_loop().time() >= deadline:
+            return DeployStatus(
+                tenant=request.tenant.name,
+                phase=status.phase,
+                url=status.url,
+                message="timed out waiting for Ready",
+            )
+        await asyncio.sleep(DEPLOY_POLL_SECONDS)

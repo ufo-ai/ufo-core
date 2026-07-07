@@ -80,11 +80,21 @@ None of the "missing" column is core doctrine's to own. Each is a control-plane 
 
 ### Single box — `selfhost deploy`
 
-An operator verb (the `selfhost` CLI is the operator surface; a member never deploys). Zero to a
-running, addressable, TLS'd system on one VM:
+An operator verb (the `selfhost` CLI is the operator surface; a member never deploys). It is
+**config-driven and near-argless** — the deploy identity is set once in a `[deploy]` block, and the
+verb derives the rest, so there are no confusing per-run flags:
+
+```toml
+# selfhost.toml
+[deploy]
+backend = "compose"            # or "k8s"; default "compose" (local single box)
+host = "chat.acme.com"         # or base_domain = "acme.com" → host = <name>.<base_domain>
+# name defaults to the workspace agent; owner_email is read from the workspace init created
+# bundle_image / sandbox_image (digest-pinned) — set once from your build+push, for the k8s backend
+```
 
 ```bash
-selfhost deploy --host chat.acme.com --pack assistant --email you@acme.com
+selfhost deploy                 # reads [deploy] + the workspace; the only flags are --remote, --out
 # 1. selfhost bundle              → image context + pinned config + lockfile
 # 2. build sandbox image          → selfhost-sandbox:latest on this host
 # 3. generate a compose stack      → serve + postgres(pgvector) + redis + caddy(TLS)
@@ -94,17 +104,23 @@ selfhost deploy --host chat.acme.com --pack assistant --email you@acme.com
 # → prints:  https://chat.acme.com  · owner you@acme.com · first-run link
 ```
 
-`deploy` **generates a recipe and only runs it under `--up`** — exactly as `bundle` writes a
-Dockerfile it never builds. The generated compose is a plain artifact an operator can read, edit,
-and run themselves; `--up` shells to `docker compose` (sync subprocess is fine at CLI startup, off
-the serve loop). No orchestrator import enters `core/`.
+`deploy` **derives, it does not ask**: `owner_email` is read from the workspace `selfhost init`
+onboarded, the tenant `name` defaults to `[deploy].name` or the workspace's agent, and the Postgres
+model is backend-determined (k8s provisions a database per tenant, compose a local one) — never a
+user flag. It **fails loud** naming any genuinely-underivable `[deploy]` field it still needs (e.g.
+`host`/`base_domain` for a remote deploy).
+
+`deploy` **generates a recipe and only runs it under `--up`/`--remote`** — exactly as `bundle`
+writes a Dockerfile it never builds. The generated compose is a plain artifact an operator can read,
+edit, and run themselves; `--up` shells to `docker compose` (sync subprocess is fine at CLI startup,
+off the serve loop). No orchestrator import enters `core/`.
 
 ### `git push`-style (hosted)
 
 The hosted service treats a **pack repo** (a `packs/<name>/` + `selfhost.toml`) as the deployable:
 
 ```bash
-git push selfhost main          # or: selfhost deploy --remote acme
+git push selfhost main          # or: set [deploy].remote (or pass --remote <control-plane url>)
 # control plane: build bundle → assign acme.selfhost.app + cert → provision
 #   Postgres schema + S3 prefix + Redis → inject secrets → run image → route
 ```
