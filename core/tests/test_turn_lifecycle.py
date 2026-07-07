@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from pydantic import BaseModel
 from selfhost_ext_index_default import DefaultIndex
+from selfhost_testsupport.stream_gate import GatingHub, StreamGate, release_when_running
 
 from selfhost.accounting import CORE_PRICING
 from selfhost.blob import FilesystemBlobStore
@@ -22,7 +23,7 @@ from selfhost.config import Config
 from selfhost.db import workspace_tx
 from selfhost.ext.loader import skill_registry
 from selfhost.ext.manifest import ModelProviderSpec
-from selfhost.hub import InProcessHub
+from selfhost.hub import Hub, InProcessHub
 from selfhost.jobs import SpendResume
 from selfhost.loop import queue as loop_queue
 from selfhost.loop.engine import EMPTY_RESPONSE_NUDGE, FORCE_FINAL_PROMPT
@@ -40,10 +41,12 @@ from selfhost.models.registry import ModelRegistry
 from selfhost.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
 from selfhost.schema import tables
 from selfhost.schema.records import TerminalFrame, Usage
+from selfhost.surfaces import hub_tail
 from selfhost.surfaces.cli import router
 from selfhost.transcript import Conversation
 
 STREAM_TIMEOUT_SECONDS = 30
+STREAM_GATE = StreamGate()
 
 
 @dataclass(frozen=True)
@@ -183,9 +186,9 @@ class StandInCarrier:
 @pytest.fixture(scope="session")
 def dbos_runtime(
     dbos_launched: Config,
-) -> Iterator[tuple[Config, InProcessHub, FilesystemBlobStore]]:
+) -> Iterator[tuple[Config, GatingHub, FilesystemBlobStore]]:
     config = dbos_launched
-    hub = InProcessHub()
+    hub = GatingHub(InProcessHub(), STREAM_GATE)
     blob = FilesystemBlobStore(root=config.blob.root)
     proxy = ProxyEndpoint(port=0, ca_cert="test-ca")
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
@@ -220,9 +223,14 @@ def dbos_runtime(
 @pytest.fixture
 async def surface(
     db: None,
-    dbos_runtime: tuple[Config, InProcessHub, FilesystemBlobStore],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> AsyncIterator[AsyncClient]:
     config, hub, _ = dbos_runtime
+    STREAM_GATE.reset()
+    monkeypatch.setattr(
+        hub_tail, "turn_status_frame", release_when_running(STREAM_GATE, hub_tail.turn_status_frame)
+    )
     app = FastAPI()
     app.state.hub = hub
     app.state.dbos = DBOSClient(system_database_url=config.database.system_url)
@@ -332,6 +340,7 @@ async def test_workspace_mount_source_is_absolute_for_a_relative_blob_root(
 
 async def test_turn_round_trip_bills_and_persists(surface: AsyncClient) -> None:
     headers = await _bootstrap()
+    STREAM_GATE.arm()
     admitted = await surface.post("/v1/chat", content=b"ping", headers=headers)
     assert admitted.status_code == 200
     turn_id = admitted.json()["turn_id"]
@@ -372,6 +381,7 @@ async def test_auto_model_resolves_to_the_configured_default(surface: AsyncClien
 
 async def test_cost_ticks_stream_as_a_turn_accrues_spend(surface: AsyncClient) -> None:
     headers = await _bootstrap()
+    STREAM_GATE.arm()
     turn_id = (await surface.post("/v1/chat", content=b"ping", headers=headers)).json()["turn_id"]
     costs: list[dict[str, object]] = []
     async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
@@ -391,6 +401,7 @@ async def test_cost_ticks_stream_as_a_turn_accrues_spend(surface: AsyncClient) -
 
 async def test_second_turn_continues_the_conversation(surface: AsyncClient) -> None:
     headers = await _bootstrap()
+    STREAM_GATE.arm()
     first = (await surface.post("/v1/chat", content=b"one", headers=headers)).json()["turn_id"]
     await _consume(surface, headers, first)
     second = (await surface.post("/v1/chat", content=b"two", headers=headers)).json()["turn_id"]
@@ -406,6 +417,7 @@ async def test_second_turn_continues_the_conversation(surface: AsyncClient) -> N
 
 async def test_back_to_back_turns_serialize_per_conversation(surface: AsyncClient) -> None:
     headers = await _bootstrap()
+    STREAM_GATE.arm()
     first = (await surface.post("/v1/chat", content=b"one", headers=headers)).json()["turn_id"]
     second = (await surface.post("/v1/chat", content=b"two", headers=headers)).json()["turn_id"]
     _, first_terminal = await _consume(surface, headers, first)
@@ -477,7 +489,7 @@ async def test_foreign_token_cannot_reach_the_turn(surface: AsyncClient) -> None
     assert denied.status_code == 403
 
 
-def _runtime_parts(surface: AsyncClient) -> tuple[Config, InProcessHub, FilesystemBlobStore]:
+def _runtime_parts(surface: AsyncClient) -> tuple[Config, Hub, FilesystemBlobStore]:
     runtime = loop_queue._runtime
     assert runtime is not None
     assert isinstance(runtime.blob, FilesystemBlobStore)
@@ -586,6 +598,7 @@ async def test_empty_response_nudge_recovers_and_bills_both_calls(
     surface: AsyncClient,
 ) -> None:
     headers = await _bootstrap()
+    STREAM_GATE.arm()
     turn_id = (await surface.post("/v1/chat", content=b"shy", headers=headers)).json()["turn_id"]
     streamed, terminal = await _consume(surface, headers, turn_id)
     assert terminal["status"] == "done"

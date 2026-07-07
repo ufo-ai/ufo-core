@@ -15,6 +15,7 @@ from selfhost_ext_index_default import DefaultIndex
 from selfhost_ext_memory.store import recall_subjects
 from selfhost_ext_web.manifest import manifest as web_manifest
 from selfhost_ext_web.surface import CHAT_PAGE, SESSION_COOKIE, _sse
+from selfhost_testsupport.stream_gate import GatingHub, StreamGate, release_when_running
 
 from selfhost.accounting import CORE_PRICING, record_egress_request, record_turn_usage
 from selfhost.blob import FilesystemBlobStore
@@ -33,9 +34,11 @@ from selfhost.schema import tables
 from selfhost.schema.records import TerminalFrame, Usage
 from selfhost.serve import _mount_surfaces
 from selfhost.subjects import SHARED_SUBJECT, member_subject
+from selfhost.surfaces import hub_tail
 
 SECRET = "artifact-signing-secret"
 STREAM_TIMEOUT_SECONDS = 30
+STREAM_GATE = StreamGate()
 
 
 def test_sse_tags_tool_and_skill_activity_frames() -> None:
@@ -144,9 +147,9 @@ async def _seed_member(workspace_id: UUID, email: str) -> tuple[UUID, str]:
 @pytest.fixture(scope="session")
 def dbos_runtime(
     dbos_launched: Config,
-) -> Iterator[tuple[Config, InProcessHub, FilesystemBlobStore]]:
+) -> Iterator[tuple[Config, GatingHub, FilesystemBlobStore]]:
     config = dbos_launched
-    hub = InProcessHub()
+    hub = GatingHub(InProcessHub(), STREAM_GATE)
     blob = FilesystemBlobStore(root=config.blob.root)
     proxy = ProxyEndpoint(port=0, ca_cert="test-ca")
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
@@ -181,9 +184,14 @@ def dbos_runtime(
 @pytest.fixture
 async def web(
     db: None,
-    dbos_runtime: tuple[Config, InProcessHub, FilesystemBlobStore],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> AsyncIterator[tuple[AsyncClient, UUID]]:
     config, hub, blob = dbos_runtime
+    STREAM_GATE.reset()
+    monkeypatch.setattr(
+        hub_tail, "turn_status_frame", release_when_running(STREAM_GATE, hub_tail.turn_status_frame)
+    )
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
     workspace_id = await _seed_workspace()
     app = FastAPI()
@@ -224,6 +232,7 @@ async def test_web_turn_round_trip_admits_streams_and_links_identity(
 ) -> None:
     client, workspace_id = web
     member_id, token = await _seed_member(workspace_id, "owner@example.com")
+    STREAM_GATE.arm()
     admitted = await client.post(
         "/surface/web/chat", content=b"hello", headers={"cookie": f"{SESSION_COOKIE}={token}"}
     )
