@@ -111,9 +111,16 @@ Ignore any **App-Level Token** / *"Scopes to be accessed by this token"* prompt 
 ## Step 4 — fill the four credential slots
 
 selfhost stores each value as an encrypted, workspace-scoped credential slot; the surface reads them
-in-process to verify events and call Slack, and they never enter the sandbox. Filling deploy secrets
-is an operator action, not a chat one — so hand the four values to whoever runs this deploy, naming
-the slots **exactly**:
+in-process to verify events and call Slack, and they never enter the sandbox. The user runs these in
+the deploy's terminal — each prompts for its value with hidden input, so a secret never enters this
+chat or its transcript; never ask for one here:
+
+```
+selfhost credential set slack_bot_token
+selfhost credential set slack_signing_secret
+selfhost credential set slack_bot_user_id
+selfhost credential set slack_team_id
+```
 
 | Slack value | credential slot |
 | --- | --- |
@@ -122,11 +129,12 @@ the slots **exactly**:
 | Bot User ID (`U…`) | `slack_bot_user_id` |
 | Team ID (`T…`) | `slack_team_id` |
 
-The operator writes them into the workspace's credential store (encrypted at rest under the key named
-by `[credentials] key_env`, default `SELFHOST_CREDENTIAL_KEY`). The bot token and signing secret are
-sensitive: warn the user that any secret pasted into this chat passes through the assistant and is
-recorded in the turn's trajectory, so they should decide with that in mind — the operator handoff is
-the safer path.
+`selfhost credential list` then shows all four slots `set` (encrypted at rest under the key named by
+`[credentials] key_env`, default `SELFHOST_CREDENTIAL_KEY`).
+
+On a cold start the deploy can instead carry the four values in its environment (`SLACK_BOT_TOKEN`,
+`SLACK_SIGNING_SECRET`, `SLACK_BOT_USER_ID`, `SLACK_TEAM_ID`) before `selfhost init` — init seeds
+every declared slot from its upper-cased env var.
 
 Once all four slots are filled and `selfhost serve` is running behind `<public_base_url>`, re-save
 the Event Subscriptions request URL if it hadn't verified, then invite the bot to a channel and
@@ -135,4 +143,6 @@ the Event Subscriptions request URL if it hadn't verified, then invite the bot t
 ## A second bot in the same workspace
 
 Works the same way: create a distinct app with its own display name, install it, and fill the same
-four slots with *that* app's token, signing secret, bot user id, and (the same) team id.
+four slots with *that* app's token, signing secret, bot user id, and (the same) team id. The deploy
+serves one app at a time — refilling the slots switches the surface to the new bot; the old app
+stops verifying.

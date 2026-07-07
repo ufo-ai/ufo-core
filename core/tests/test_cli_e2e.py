@@ -12,6 +12,7 @@ its own — the same lifecycle boundary the real process has between `serve` and
 
 import asyncio
 import hashlib
+import os
 import socket
 import threading
 import time
@@ -33,7 +34,8 @@ from selfhost import cli
 from selfhost.accounting import CORE_PRICING
 from selfhost.blob import FilesystemBlobStore
 from selfhost.browser import SandboxCdpProvider
-from selfhost.config import Config
+from selfhost.config import Config, load_config
+from selfhost.credentials import CredentialStore
 from selfhost.db import dispose_db, init_db, workspace_tx
 from selfhost.ext.loader import skill_registry
 from selfhost.ext.manifest import ModelProviderSpec
@@ -146,6 +148,55 @@ def test_grants_lists_none_when_no_account_is_connected(cli_home: CliRunner) -> 
     assert "no grants" in result.output
 
 
+async def _read_credential(slot: str) -> str:
+    config = load_config()
+    init_db(config.database.url)
+    try:
+        async with workspace_tx() as connection:
+            workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
+        key = os.environ["SELFHOST_CREDENTIAL_KEY"]
+        return await CredentialStore(fernet=Fernet(key.encode())).get(workspace_id, slot)
+    finally:
+        await dispose_db()
+
+
+def test_credential_set_round_trips_into_the_store_the_surface_reads(cli_home: CliRunner) -> None:
+    _init(cli_home)
+    result = cli_home.invoke(cli.main, ["credential", "set", "exa_api"], input="exa-cli-secret\n")
+    assert result.exit_code == 0, result.output
+    assert "exa-cli-secret" not in result.output
+    assert asyncio.run(_read_credential("exa_api")) == "exa-cli-secret"
+
+
+def test_init_seeds_declared_slots_from_env(
+    cli_home: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXA_API", "exa-env-seeded")
+    _init(cli_home)
+    assert asyncio.run(_read_credential("exa_api")) == "exa-env-seeded"
+
+
+def test_credential_set_rejects_an_undeclared_slot(cli_home: CliRunner) -> None:
+    _init(cli_home)
+    result = cli_home.invoke(cli.main, ["credential", "set", "no_such_slot"], input="value\n")
+    assert result.exit_code != 0
+    assert "exa_api" in result.output
+
+
+def test_credential_list_reports_set_and_unset_without_values(cli_home: CliRunner) -> None:
+    _init(cli_home)
+    setting = cli_home.invoke(cli.main, ["credential", "set", "exa_api"], input="exa-cli-secret\n")
+    assert setting.exit_code == 0, setting.output
+    listed = cli_home.invoke(cli.main, ["credential", "list"])
+    assert listed.exit_code == 0, listed.output
+    assert "exa-cli-secret" not in listed.output
+    statuses = {
+        line.split()[0]: line.split()[-1] for line in listed.output.splitlines() if line.strip()
+    }
+    assert statuses["exa_api"] == "set"
+    assert statuses["mcp_servers"] == "unset"
+
+
 def test_bundle_writes_a_runnable_artifact(cli_home: CliRunner) -> None:
     _init(cli_home)
     result = cli_home.invoke(cli.main, ["bundle", "--out", "bundle"])
@@ -154,7 +205,8 @@ def test_bundle_writes_a_runnable_artifact(cli_home: CliRunner) -> None:
     out = Path("bundle")
     dockerfile = (out / "Dockerfile").read_text()
     assert "selfhost" in dockerfile
-    assert 'ENTRYPOINT ["selfhost", "serve"]' in dockerfile
+    assert 'ENTRYPOINT ["selfhost"]' in dockerfile
+    assert 'CMD ["serve"]' in dockerfile
     assert (out / "selfhost.toml").read_text()
     lockfile = (out / "selfhost.lock").read_text()
     assert "selfhost_version" in lockfile

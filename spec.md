@@ -132,7 +132,7 @@ Manifest registers (each optional):
 | `jobs` | Recurring/one-time background work. |
 | `routes` | HTTP endpoints under `/ext/<name>/` (webhooks, OAuth callbacks, plugin UIs). |
 | `surfaces` | A chat surface on the one privileged surface seam: its `SurfaceRoute`s mounted under `/surface/<name>`. A **durable** surface (Slack) admits with writeback and declares two-phase delivery (`post` then `attach`) the poller drives; a **live** surface (web) admits without writeback and tails the hub over SSE in its own route. Core's CLI is the built-in live twin. |
-| `credentials` | Named BYOK slots the workspace must fill (drives onboarding). |
+| `credentials` | Named BYOK slots the workspace must fill (drives onboarding); `selfhost init` seeds a slot from its upper-cased env var (`SLACK_BOT_TOKEN` → `slack_bot_token`), and the operator fills or rotates one anytime with `selfhost credential set <slot>`. |
 | `onboarding` | Steps contributed to the workspace/pack onboarding flow. |
 | `models` | Model providers behind `ModelClient` (OpenRouter, local runtimes). |
 | `carriers` | Sandbox carriers — Docker, E2B, remote runners; core's default is a local temp-dir carrier. |
@@ -302,7 +302,7 @@ bundle installs OSS, on-prem, or hosted.
 | Extension | Points it exercises |
 |---|---|
 | OpenRouter (any model router) | models |
-| Slack surface (ingest + writeback + attachments) | surfaces, credentials |
+| Slack surface (ingest + writeback + attachments) | surfaces, credentials, skills |
 | Composio connectors | connectors, credentials, routes (OAuth), auth_proxies |
 | Docker, E2B | carriers |
 | Redis stream hub | hubs |

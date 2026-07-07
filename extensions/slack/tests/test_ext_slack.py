@@ -215,7 +215,7 @@ def test_slack_app_setup_skill_parses_indexes_and_names_the_real_route_and_slots
         slack.SLACK_BOT_USER_ID_SLOT,
         slack.SLACK_TEAM_ID_SLOT,
     ):
-        assert slot in body
+        assert f"selfhost credential set {slot}" in body
 
 
 async def test_bad_signature_is_rejected(db: None, tmp_path, monkeypatch) -> None:

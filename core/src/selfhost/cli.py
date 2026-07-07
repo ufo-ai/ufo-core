@@ -514,6 +514,84 @@ async def _read_grants(config: Config) -> tuple[GrantSummary, ...]:
 
 
 @main.group()
+def credential() -> None:
+    """Fill and inspect the BYOK credential slots installed extensions declare, encrypted at
+    rest."""
+
+
+@credential.command(name="set")
+@click.argument("slot")
+def credential_set(slot: str) -> None:
+    """Store one slot's secret — prompted hidden on a terminal, read from stdin when piped, never
+    argv, never echoed."""
+    config = load_config()
+    declared = _declared_slots(config)
+    owner = declared.get(slot)
+    if owner is None:
+        available = ", ".join(sorted(declared)) or "none"
+        raise click.ClickException(f"unknown credential slot {slot!r} (declared: {available})")
+    key = os.environ.get(config.credentials.key_env)
+    if not key:
+        raise click.ClickException(f"{config.credentials.key_env} must be set to store credentials")
+    value = (
+        click.prompt(slot, hide_input=True) if sys.stdin.isatty() else sys.stdin.readline()
+    ).strip()
+    if not value:
+        raise click.ClickException("empty credential value")
+    asyncio.run(_write_credential(config, key, slot, value))
+    click.echo(f"credential {slot} set ({owner})")
+
+
+@credential.command(name="list")
+def credential_list() -> None:
+    """Each declared slot, its extension, and set/unset — values are never read or printed."""
+    config = load_config()
+    declared = _declared_slots(config)
+    if not declared:
+        click.echo("no credential slots declared")
+        return
+    stored = asyncio.run(_read_stored_slots(config))
+    for name, extension in sorted(declared.items()):
+        status = "set" if name in stored else "unset"
+        click.echo(f"{name:<28}{extension:<20}{status}")
+
+
+def _declared_slots(config: Config) -> dict[str, str]:
+    try:
+        manifests = load_manifests(config.pack.name)
+    except RuntimeError as error:
+        raise click.ClickException(str(error)) from error
+    return {slot.name: manifest.name for manifest in manifests for slot in manifest.credentials}
+
+
+async def _write_credential(config: Config, key: str, slot: str, value: str) -> None:
+    init_db(config.database.url)
+    try:
+        async with workspace_tx() as connection:
+            workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
+        await CredentialStore(fernet=Fernet(key.encode())).put(workspace_id, slot, value)
+    finally:
+        await dispose_db()
+
+
+async def _read_stored_slots(config: Config) -> frozenset[str]:
+    init_db(config.database.url)
+    try:
+        async with workspace_tx() as connection:
+            workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
+            rows = (
+                await connection.execute(
+                    sa.select(tables.credential.c.slot).where(
+                        tables.credential.c.workspace_id == workspace_id
+                    )
+                )
+            ).all()
+        return frozenset(row.slot for row in rows)
+    finally:
+        await dispose_db()
+
+
+@main.group()
 def ext() -> None:
     """Search the extension store and pin installs into the deploy's lockfile."""
 

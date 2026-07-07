@@ -15,11 +15,11 @@ from cryptography.fernet import Fernet
 
 from selfhost import cli
 from selfhost.config import BlobConfig, Config, DatabaseConfig
-from selfhost.credentials import CredentialStore
+from selfhost.credentials import CredentialSlotUnset, CredentialStore
 from selfhost.db import workspace_tx
 from selfhost.ext.context import ExtensionContext, ScopedStore
 from selfhost.ext.loader import load_manifests
-from selfhost.ext.manifest import Manifest, OnboardingStep
+from selfhost.ext.manifest import CredentialSlot, Manifest, OnboardingStep
 from selfhost.onboarding import DEFAULT_AGENT_PROMPT, AlreadyInitialized, Onboarding
 from selfhost.schema import tables
 from selfhost.schema.records import DEFAULT_AGENT_NAME
@@ -108,6 +108,48 @@ async def test_onboarding_runs_each_installed_extensions_steps(
     ).run()
     scoped = ScopedStore(workspace_id=onboarded.workspace_id, extension=sample.NAME)
     assert await scoped.get(sample.ONBOARDING_KEY) == {"onboarded": True}
+
+
+async def test_onboarding_seeds_declared_slots_the_environment_provides(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-onboard")
+    monkeypatch.setenv("SEEDED_API_KEY", "seeded-value")
+    monkeypatch.delenv("UNSEEDED_API_KEY", raising=False)
+    manifest = Manifest(
+        name="seeding_ext",
+        version="0.1.0",
+        credentials=(
+            CredentialSlot(name="seeded_api_key", description="seeded from env"),
+            CredentialSlot(name="unseeded_api_key", description="absent from env"),
+        ),
+    )
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    onboarded = await _onboarding(
+        database_url, tmp_path, credentials=store, manifests=(manifest,)
+    ).run()
+    assert await store.get(onboarded.workspace_id, "seeded_api_key") == "seeded-value"
+    with pytest.raises(CredentialSlotUnset):
+        await store.get(onboarded.workspace_id, "unseeded_api_key")
+
+
+async def test_an_environment_credential_without_a_key_fails_before_the_db(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-onboard")
+    monkeypatch.setenv("SEEDED_API_KEY", "seeded-value")
+    manifest = Manifest(
+        name="seeding_ext",
+        version="0.1.0",
+        credentials=(CredentialSlot(name="seeded_api_key", description="seeded from env"),),
+    )
+    with pytest.raises(RuntimeError, match="SELFHOST_CREDENTIAL_KEY"):
+        await _onboarding(database_url, tmp_path, credentials=None, manifests=(manifest,)).run()
+    async with workspace_tx() as connection:
+        workspaces = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.workspace))
+        ).scalar_one()
+    assert workspaces == 0
 
 
 async def test_a_failing_onboarding_step_is_isolated_from_its_siblings(
