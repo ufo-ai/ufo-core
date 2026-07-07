@@ -1,0 +1,855 @@
+#!/bin/sh
+# usage: curl -fsSL https://flyingobject.ai/ufo | sh
+# the server drives every screen; this renders directives and reads input.
+# layout: finalized transcript lines scroll natively; a repainted dynamic region sits
+# at the bottom: [activity row] [rule] [entry rows, ship at the right] [rule].
+set -eu
+
+UFO_SCRIPT_VERSION=dev
+UFO_URL="${UFO_URL:-https://flyingobject.ai}"
+UFO_NAMESPACE="${UFO_NAMESPACE:-}"
+UFO_CHANNEL="${UFO_CHANNEL:-ufo}"
+UFO_HOME="${UFO_HOME:-$HOME/.ufo}"
+BIN="$UFO_HOME/bin/ufo"
+CREDENTIALS="$UFO_HOME/credentials"
+SESSION="$UFO_HOME/session"
+WORKSPACE="$UFO_HOME/workspace"
+UFO_W=15
+UFO_H=4
+
+FRAME=''
+FRAME_W=$UFO_W
+S1='' S2='' S3='' S4=''
+OPENBUF=''
+PREVIEW=''
+STATUS=''
+INPUT=''
+PTXT='›'
+ASKING=0
+DYN_H=0
+RULE=''
+RULE_COLS=0
+NL=$(printf '\nx')
+NL=${NL%x}
+ESC=$(printf '\033')
+BS=$(printf '\177')
+CTRL_H=$(printf '\b')
+EOT=$(printf '\004')
+NAK=$(printf '\025')
+CR=$(printf '\r')
+CHOICES=''
+CHOSEN=''
+
+TTY=0
+[ -t 1 ] && TTY=1
+FX=0
+COLS=80
+ROWS=24
+if [ "$TTY" = 1 ] && [ "${TERM:-dumb}" != dumb ] && [ -z "${UFO_PLAIN:-}" ]; then
+  BOLD="$(printf '\033[1m')" DIM="$(printf '\033[2m')" CYAN="$(printf '\033[36m')"
+  MAGENTA="$(printf '\033[35m')" RESET="$(printf '\033[0m')"
+  case "${COLORTERM:-}:$TERM" in
+    *truecolor* | *256color*)
+      CYAN="$(printf '\033[38;5;87m')" MAGENTA="$(printf '\033[38;5;213m')"
+      ;;
+  esac
+  FX=1
+else
+  BOLD='' DIM='' CYAN='' MAGENTA='' RESET=''
+fi
+
+say() { printf '%s\n' "$*"; }
+die() { printf 'ufo: %s\n' "$*" >&2; exit 1; }
+
+term_size() {
+  set -- $(stty size < /dev/tty 2>/dev/null || printf '24 80')
+  ROWS=$1 COLS=$2
+  if [ "$ROWS" -lt 14 ] || [ "$COLS" -lt 48 ]; then
+    FX=0
+  fi
+}
+
+rule_cache() {
+  RULE_W=$((COLS - FRAME_W - 1))
+  [ "$RULE_COLS" = "$RULE_W" ] && return 0
+  RULE=''
+  _i=$RULE_W
+  while [ "$_i" -gt 0 ]; do
+    RULE="${RULE}─"
+    _i=$((_i - 1))
+  done
+  RULE_COLS=$RULE_W
+}
+
+take() { # TAKEN = first $1 characters of $2
+  TAKEN=$2
+  while [ "${#TAKEN}" -gt "$1" ]; do
+    TAKEN=${TAKEN%?}
+  done
+}
+
+set_ship() {
+  S1='' S2='' S3='' S4=''
+  [ -n "$FRAME" ] || return 0
+  _i=1
+  while IFS= read -r _l; do
+    case $_i in
+      1) S1=$_l ;;
+      2) S2=$_l ;;
+      3) S3=$_l ;;
+      4) S4=$_l ;;
+    esac
+    _i=$((_i + 1))
+  done <<EOF
+$(printf '%b' "$FRAME")
+EOF
+}
+
+entry_geometry() {
+  CAP1=$((COLS - FRAME_W - 3 - ${#PTXT}))
+  CAP=$((COLS - FRAME_W - 3))
+  _rest=$INPUT
+  take "$CAP1" "$_rest"
+  _rest=${_rest#"$TAKEN"}
+  LAST_LEN=${#TAKEN}
+  ENTRY_LINES=1
+  while [ -n "$_rest" ]; do
+    take "$CAP" "$_rest"
+    _rest=${_rest#"$TAKEN"}
+    LAST_LEN=${#TAKEN}
+    ENTRY_LINES=$((ENTRY_LINES + 1))
+  done
+  ENTRY_H=$ENTRY_LINES
+}
+
+dyn_top() {
+  if [ "$DYN_H" -gt 1 ]; then
+    printf '\r\033[%dA' "$((DYN_H - 1))" > /dev/tty
+  else
+    printf '\r' > /dev/tty
+  fi
+}
+
+dyn_erase() {
+  [ "$DYN_H" -gt 0 ] || return 0
+  dyn_top
+  printf '\033[J' > /dev/tty
+  DYN_H=0
+}
+
+flush_open() {
+  [ -n "$OPENBUF" ] || return 0
+  printf '%s\n' "$OPENBUF"
+  OPENBUF=''
+  PREVIEW=''
+}
+
+activity_row() {
+  if [ -n "$PREVIEW" ]; then
+    printf '\033[2K%s' "$PREVIEW" > /dev/tty
+  elif [ -n "$STATUS" ]; then
+    printf '\033[2K  %s%s%s' "$DIM" "$STATUS" "$RESET" > /dev/tty
+  else
+    printf '\033[2K' > /dev/tty
+  fi
+}
+
+ship_suffix() { # overlay ship line $_s (1-based) at the right of the current row
+  if [ -n "$FRAME" ] && [ "$_s" -le "$UFO_H" ]; then
+    case $_s in
+      1) _r=$S1 ;;
+      2) _r=$S2 ;;
+      3) _r=$S3 ;;
+      *) _r=$S4 ;;
+    esac
+    printf '\033[%dG%s\033[0m' "$((COLS - FRAME_W + 1))" "$_r" > /dev/tty
+  fi
+  _s=$((_s + 1))
+}
+
+dyn_paint() {
+  [ "$FX" = 1 ] || return 0
+  if [ -z "$FRAME" ] && [ "$ASKING" = 0 ]; then
+    return 0
+  fi
+  term_size
+  [ "$FX" = 1 ] || return 0
+  rule_cache
+  entry_geometry
+  dyn_top
+  activity_row
+  _s=1
+  printf '\n\033[2K%s%s%s' "$DIM" "$RULE" "$RESET" > /dev/tty
+  ship_suffix
+  _rest=$INPUT
+  _i=0
+  while [ "$_i" -lt "$ENTRY_H" ]; do
+    if [ "$_i" = 0 ]; then
+      take "$CAP1" "$_rest"
+    else
+      take "$CAP" "$_rest"
+    fi
+    _p=$TAKEN
+    _rest=${_rest#"$_p"}
+    printf '\n\033[2K' > /dev/tty
+    if [ "$_i" = 0 ]; then
+      if [ "$ASKING" = 1 ]; then
+        printf '%s%s%s %s' "$MAGENTA" "$PTXT" "$RESET" "$_p" > /dev/tty
+      else
+        printf '%s%s%s' "$DIM" "$PTXT" "$RESET" > /dev/tty
+      fi
+    elif [ -n "$_p" ]; then
+      printf '  %s' "$_p" > /dev/tty
+    fi
+    ship_suffix
+    _i=$((_i + 1))
+  done
+  printf '\n\033[2K%s%s%s' "$DIM" "$RULE" "$RESET" > /dev/tty
+  ship_suffix
+  printf '\n\033[2K' > /dev/tty
+  ship_suffix
+  printf '\033[J\r' > /dev/tty
+  DYN_H=$((ENTRY_H + 4))
+}
+
+preview_paint() {
+  [ "$FX" = 1 ] || return 0
+  if [ "$DYN_H" -eq 0 ]; then
+    dyn_paint
+    return 0
+  fi
+  dyn_top
+  activity_row
+  printf '\033[%dB\r' "$((DYN_H - 1))" > /dev/tty
+}
+
+place_cursor() {
+  printf '\0337' > /dev/tty
+  if [ "$ENTRY_LINES" = 1 ]; then
+    _col=$((${#PTXT} + 2 + LAST_LEN))
+  else
+    _col=$((3 + LAST_LEN))
+  fi
+  printf '\033[2A\033[%dG' "$_col" > /dev/tty
+}
+
+ask_fx() {
+  PTXT=$(printf '%b' "$1")
+  ASKING=1
+  STATUS=''
+  INPUT=''
+  STTY_SAVED=$(stty -g < /dev/tty)
+  stty -icanon -echo min 1 time 0 < /dev/tty
+  printf '\033[?25h' > /dev/tty
+  dyn_paint
+  place_cursor
+  _eof=0
+  while :; do
+    _c=$(dd if=/dev/tty bs=1 count=1 2> "$WORKDIR/ddlog" || true)
+    case $_c in
+      '')
+        if grep -q '^0+0' "$WORKDIR/ddlog" 2> /dev/null; then
+          _eof=1
+        fi
+        break
+        ;;
+      "$EOT")
+        if [ -z "$INPUT" ]; then
+          _eof=1
+          break
+        fi
+        ;;
+      "$BS" | "$CTRL_H") INPUT=${INPUT%?} ;;
+      "$NAK") INPUT='' ;;
+      "$ESC")
+        stty min 0 time 1 < /dev/tty
+        dd if=/dev/tty bs=8 count=1 > /dev/null 2>&1 || true
+        stty min 1 time 0 < /dev/tty
+        ;;
+      *) INPUT=$INPUT$_c ;;
+    esac
+    printf '\0338' > /dev/tty
+    dyn_paint
+    place_cursor
+  done
+  printf '\0338' > /dev/tty
+  stty "$STTY_SAVED" < /dev/tty
+  STTY_SAVED=''
+  ASKING=0
+  if [ "$_eof" = 1 ]; then
+    PTXT='›'
+    return 1
+  fi
+  REPLY=$INPUT
+  INPUT=''
+  PTXT='›'
+  dyn_erase
+  printf '%s›%s %s\n' "$MAGENTA" "$RESET" "$REPLY"
+  dyn_paint
+}
+
+ask() {
+  if [ "$FX" = 1 ] && (: < /dev/tty) 2> /dev/null; then
+    term_size
+  fi
+  if [ "$FX" = 1 ] && (: < /dev/tty) 2> /dev/null; then
+    ask_fx "$1"
+  elif (: < /dev/tty) 2> /dev/null; then
+    printf '%s%b%s ' "$MAGENTA" "$1" "$RESET" > /dev/tty
+    IFS= read -r REPLY < /dev/tty || return 1
+  else
+    printf '%b ' "$1" >&2
+    IFS= read -r REPLY || return 1
+  fi
+}
+
+menu_render() { # prompt selected-index option...
+  MR_PROMPT=$1
+  MR_SEL=$2
+  shift 2
+  printf '\r\033[2K%s%s%s\n' "$BOLD" "$MR_PROMPT" "$RESET" > /dev/tty
+  MR_I=1
+  for MR_O do
+    if [ "$MR_I" = "$MR_SEL" ]; then
+      printf '\r\033[2K%s❯ %s%s\n' "$MAGENTA" "$MR_O" "$RESET" > /dev/tty
+    else
+      printf '\r\033[2K  %s\n' "$MR_O" > /dev/tty
+    fi
+    MR_I=$((MR_I + 1))
+  done
+}
+
+menu_pick_tty() { # prompt option... ; sets CHOSEN, returns 1 on cancel
+  MP_PROMPT=$1
+  shift
+  MP_N=$#
+  MP_SEL=1
+  STTY_SAVED=$(stty -g < /dev/tty)
+  stty -icanon -echo -icrnl min 1 time 0 < /dev/tty
+  printf '\033[?25l' > /dev/tty
+  menu_render "$MP_PROMPT" "$MP_SEL" "$@"
+  while :; do
+    MP_C=$(dd if=/dev/tty bs=1 count=1 2> "$WORKDIR/ddlog" || true)
+    case "$MP_C" in
+      '')
+        # a successful read of a newline byte is stripped to empty by $(...) — that is Enter;
+        # a read of nothing (dd logs `0+0`) is EOF — cancel.
+        if grep -q '^0+0' "$WORKDIR/ddlog" 2> /dev/null; then
+          stty "$STTY_SAVED" < /dev/tty
+          STTY_SAVED=''
+          printf '\033[?25h' > /dev/tty
+          return 1
+        fi
+        break
+        ;;
+      "$CR") break ;;
+      "$ESC")
+        MP_SEQ=$(dd if=/dev/tty bs=2 count=1 2> /dev/null || true)
+        case "$MP_SEQ" in
+          '[A') MP_SEL=$((MP_SEL - 1)); [ "$MP_SEL" -lt 1 ] && MP_SEL=$MP_N ;;
+          '[B') MP_SEL=$((MP_SEL + 1)); [ "$MP_SEL" -gt "$MP_N" ] && MP_SEL=1 ;;
+        esac
+        ;;
+      k) MP_SEL=$((MP_SEL - 1)); [ "$MP_SEL" -lt 1 ] && MP_SEL=$MP_N ;;
+      j) MP_SEL=$((MP_SEL + 1)); [ "$MP_SEL" -gt "$MP_N" ] && MP_SEL=1 ;;
+      *) continue ;;
+    esac
+    printf '\033[%dA' "$((MP_N + 1))" > /dev/tty
+    menu_render "$MP_PROMPT" "$MP_SEL" "$@"
+  done
+  stty "$STTY_SAVED" < /dev/tty
+  STTY_SAVED=''
+  printf '\033[?25h' > /dev/tty
+  shift $((MP_SEL - 1))
+  CHOSEN=$1
+}
+
+menu_pick_plain() { # prompt option... ; sets CHOSEN, returns 1 on cancel
+  MP_PROMPT=$1
+  shift
+  say "$MP_PROMPT"
+  MP_I=1
+  for MP_O do
+    say "  $MP_I) $MP_O"
+    MP_I=$((MP_I + 1))
+  done
+  if (: < /dev/tty) 2> /dev/null; then
+    printf '%s› %s' "$MAGENTA" "$RESET" > /dev/tty
+    IFS= read -r MP_ANS < /dev/tty || return 1
+  else
+    printf '› ' >&2
+    IFS= read -r MP_ANS || return 1
+  fi
+  case "$MP_ANS" in
+    '') return 1 ;;
+    *[!0-9]*) CHOSEN=$MP_ANS ;;
+    *)
+      CHOSEN=$MP_ANS
+      MP_I=1
+      for MP_O do
+        if [ "$MP_I" = "$MP_ANS" ]; then
+          CHOSEN=$MP_O
+          break
+        fi
+        MP_I=$((MP_I + 1))
+      done
+      ;;
+  esac
+}
+
+menu_pick() { # prompt option... ; selectable in a TTY, numbered read otherwise
+  MP_PROMPT=$1
+  shift
+  if [ "$FX" = 1 ] && (: < /dev/tty) 2> /dev/null; then
+    menu_pick_tty "$MP_PROMPT" "$@"
+  else
+    menu_pick_plain "$MP_PROMPT" "$@"
+  fi
+}
+
+free_text() { # prompt ; reads a free-text answer into CHOSEN, returns 1 on cancel
+  say "$1"
+  if (: < /dev/tty) 2> /dev/null; then
+    printf '%s› %s' "$MAGENTA" "$RESET" > /dev/tty
+    IFS= read -r REPLY < /dev/tty || return 1
+  else
+    printf '› ' >&2
+    IFS= read -r REPLY || return 1
+  fi
+  CHOSEN=$REPLY
+}
+
+choose_menu() { # walk the queued questions, collect answers into REPLY
+  dyn_erase
+  CM_REST=$CHOICES
+  CM_ANSWERS=''
+  CM_N=0
+  CM_SCAN=$CHOICES
+  while [ -n "$CM_SCAN" ]; do
+    CM_Q=${CM_SCAN%%"$NL"*}
+    CM_SCAN=${CM_SCAN#*"$NL"}
+    [ -n "$CM_Q" ] && CM_N=$((CM_N + 1))
+  done
+  while [ -n "$CM_REST" ]; do
+    CM_LINE=${CM_REST%%"$NL"*}
+    CM_REST=${CM_REST#*"$NL"}
+    [ -n "$CM_LINE" ] || continue
+    CM_PROMPT=${CM_LINE%%"$TAB"*}
+    case "$CM_LINE" in
+      *"$TAB"*) CM_OPTS=${CM_LINE#*"$TAB"} ;;
+      *) CM_OPTS='' ;;
+    esac
+    if [ -n "$CM_OPTS" ]; then
+      CM_OIFS=$IFS
+      IFS=$TAB
+      # shellcheck disable=SC2086
+      set -- $CM_OPTS
+      IFS=$CM_OIFS
+      menu_pick "$CM_PROMPT" "$@" || return 1
+    else
+      free_text "$CM_PROMPT" || return 1
+    fi
+    if [ "$CM_N" -gt 1 ]; then
+      CM_ANSWERS="${CM_ANSWERS:+$CM_ANSWERS$NL}$CM_PROMPT: $CHOSEN"
+    else
+      CM_ANSWERS=$CHOSEN
+    fi
+  done
+  REPLY=$CM_ANSWERS
+}
+
+spin() {
+  while :; do
+    for c in '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏'; do
+      if [ "$DYN_H" -gt 1 ]; then
+        printf '\0337\r\033[%dA\033[2K %s%s%s\0338' "$((DYN_H - 1))" "$CYAN" "$c" "$RESET" > /dev/tty
+      else
+        printf '\r\033[K %s%s%s' "$CYAN" "$c" "$RESET" > /dev/tty
+      fi
+      sleep 0.08
+    done
+  done
+}
+
+spin_start() {
+  [ "$FX" = 1 ] || return 0
+  printf '\033[?25l' > /dev/tty
+  spin &
+  SPIN=$!
+}
+
+spin_stop() {
+  [ -n "${SPIN:-}" ] || return 0
+  kill "$SPIN" 2> /dev/null || true
+  wait "$SPIN" 2> /dev/null || true
+  SPIN=''
+  if [ "$DYN_H" -gt 1 ]; then
+    printf '\0337\r\033[%dA\033[2K\0338' "$((DYN_H - 1))" > /dev/tty
+  else
+    printf '\r\033[K' > /dev/tty
+  fi
+}
+
+cleanup() {
+  spin_stop
+  if [ -n "${STTY_SAVED:-}" ]; then
+    stty "$STTY_SAVED" < /dev/tty 2> /dev/null || true
+  fi
+  if [ "$FX" = 1 ]; then
+    printf '\033[?25h' > /dev/tty 2> /dev/null || true
+    dyn_erase 2> /dev/null || true
+  fi
+  rm -rf "${WORKDIR:-}" 2>/dev/null || true
+}
+
+profile_file() {
+  case "${SHELL:-/bin/sh}" in
+    */zsh) printf '%s' "${ZDOTDIR:-$HOME}/.zshrc" ;;
+    */bash)
+      if [ "$(uname -s)" = Darwin ]; then
+        printf '%s' "$HOME/.bash_profile"
+      else
+        printf '%s' "$HOME/.bashrc"
+      fi
+      ;;
+    */fish) printf '%s' "$HOME/.config/fish/conf.d/ufo.fish" ;;
+    *) printf '%s' "$HOME/.profile" ;;
+  esac
+}
+
+add_to_path() {
+  case ":$PATH:" in *":$UFO_HOME/bin:"*) return 0 ;; esac
+  case ":$PATH:" in
+    *":$HOME/.local/bin:"*)
+      mkdir -p "$HOME/.local/bin"
+      ln -sf "$BIN" "$HOME/.local/bin/ufo"
+      say "${DIM}✓ linked ufo into ~/.local/bin${RESET}"
+      return 0
+      ;;
+  esac
+  bin_ref="$UFO_HOME/bin"
+  case "$bin_ref" in "$HOME"/*) bin_ref="\$HOME${bin_ref#"$HOME"}" ;; esac
+  profile=$(profile_file)
+  line="export PATH=\"$bin_ref:\$PATH\""
+  case "$profile" in *.fish) line="fish_add_path -g \"$bin_ref\"" ;; esac
+  if [ -f "$profile" ] && grep -Fq "$bin_ref" "$profile"; then
+    return 0
+  fi
+  mkdir -p "$(dirname "$profile")"
+  printf '\n# added by ufo installer\n%s\n' "$line" >> "$profile"
+  say "${DIM}✓ added ufo to PATH in $profile${RESET}"
+  say "${DIM}  for this shell:${RESET} export PATH=\"$UFO_HOME/bin:\$PATH\""
+}
+
+do_install() {
+  mkdir -p "$UFO_HOME/bin"
+  curl -fsSL "$UFO_URL/ufo" -o "$BIN.tmp" || die "could not fetch $UFO_URL/ufo"
+  mv "$BIN.tmp" "$BIN"
+  chmod +x "$BIN"
+  say "${DIM}✓ ufo installed ($BIN)${RESET}"
+  add_to_path
+}
+
+post() {
+  if [ -n "${SEND_FILE:-}" ]; then
+    set -- --data-binary "@$SEND_FILE" -H "x-ufo-file: $SEND_FILE" \
+      -H "x-ufo-command: ${SEND_CMD:-}"
+  else
+    set -- --data-binary "$1"
+  fi
+  if [ -n "${TOKEN:-}" ]; then
+    set -- "$@" -H "authorization: Bearer $TOKEN"
+  fi
+  set -- "$@" -H "x-ufo-session: $SID"
+  installed=0
+  [ -x "$BIN" ] && installed=1
+  if [ -n "$UFO_NAMESPACE" ]; then
+    endpoint="$UFO_URL/v1/cli/$UFO_NAMESPACE/$UFO_CHANNEL"
+  else
+    endpoint="$UFO_URL/v1/onboard/$UFO_CHANNEL"
+  fi
+  curl -fsS -N --max-time 90 -H 'content-type: text/plain' -H "x-ufo-tty: $TTY" \
+    -H "x-ufo-installed: $installed" \
+    -H "x-ufo-script: $UFO_SCRIPT_VERSION" "$@" \
+    "$endpoint"
+}
+
+line_break() {
+  if [ "${OPEN:-0}" = 1 ]; then
+    printf '\n'
+    OPEN=0
+  fi
+}
+
+turn() {
+  CMD=$1
+  NEXT=end
+  PROMPT=''
+  CHOICES=''
+  SLEEP=0
+  CODE=0
+  GOT=0
+  spin_start
+  post "$1" > "$FIFO" &
+  CURL=$!
+  SEND_FILE=''
+
+  TAB=$(printf '\t')
+  while IFS="$TAB" read -r verb rest; do
+    if [ "$GOT" = 0 ]; then
+      spin_stop
+      GOT=1
+    fi
+    case "$verb" in
+      say)
+        STATUS=''
+        if [ "$FX" = 1 ]; then
+          dyn_erase
+          flush_open
+          printf '%b\n' "$rest"
+          dyn_paint
+        else
+          line_break
+          printf '%b\n' "$rest"
+        fi
+        ;;
+      note)
+        STATUS=''
+        if [ "$FX" = 1 ]; then
+          dyn_erase
+          flush_open
+          printf '%s%b%s\n' "$DIM" "$rest" "$RESET"
+          dyn_paint
+        else
+          line_break
+          printf '%s%b%s\n' "$DIM" "$rest" "$RESET"
+        fi
+        ;;
+      txt)
+        STATUS=''
+        if [ "$FX" = 1 ]; then
+          _chunk=$(printf '%b' "$rest"; printf x)
+          _chunk=${_chunk%x}
+          OPENBUF=$OPENBUF$_chunk
+          _wrap=$((COLS - 2))
+          _full=0
+          case $OPENBUF in
+            *"$NL"*) _full=1 ;;
+            *) [ "${#OPENBUF}" -lt "$_wrap" ] || _full=1 ;;
+          esac
+          if [ "$_full" = 1 ]; then
+            # stream into the transcript: completed lines verbatim, long lines
+            # word-wrapped a row at a time, so streamed text accumulates above
+            # instead of sliding through the one-row preview.
+            dyn_erase
+            while :; do
+              _line=''
+              case $OPENBUF in
+                *"$NL"*) _line=${OPENBUF%%"$NL"*} ;;
+                *) _line=$OPENBUF ;;
+              esac
+              if [ "${#_line}" -lt "$_wrap" ]; then
+                case $OPENBUF in
+                  *"$NL"*)
+                    printf '%s\n' "$_line"
+                    OPENBUF=${OPENBUF#*"$NL"}
+                    continue
+                    ;;
+                esac
+                break
+              fi
+              take "$_wrap" "$OPENBUF"
+              _head=$TAKEN
+              case $_head in
+                *' '?*) _head=${_head% *} ;;
+              esac
+              [ -n "$_head" ] || _head=$TAKEN
+              printf '%s\n' "$_head"
+              OPENBUF=${OPENBUF#"$_head"}
+              OPENBUF=${OPENBUF# }
+            done
+            PREVIEW=$OPENBUF
+            dyn_paint
+          else
+            PREVIEW=$OPENBUF
+            preview_paint
+          fi
+        else
+          printf '%b' "$rest"
+          case $rest in *'\n') OPEN=0 ;; *) OPEN=1 ;; esac
+        fi
+        ;;
+      status)
+        if [ "$FX" = 1 ]; then
+          STATUS=$(printf '%b' "$rest")
+          while [ "${#STATUS}" -gt "$((COLS - 4))" ]; do
+            STATUS=${STATUS%?}
+          done
+          preview_paint
+        else
+          printf '  %b\n' "$rest"
+        fi
+        ;;
+      ufo)
+        FRAME_W=${rest%% *}
+        FRAME=${rest#* }
+        set_ship
+        [ "$FX" = 0 ] || dyn_paint
+        ;;
+      ask)
+        NEXT=ask
+        PROMPT=$rest
+        ;;
+      choose)
+        NEXT=choose
+        CHOICES="${CHOICES}${rest}${NL}"
+        ;;
+      poll)
+        NEXT=poll
+        SLEEP=$rest
+        ;;
+      token)
+        TOKEN=$rest
+        mkdir -p "$UFO_HOME"
+        printf '%s\n' "$TOKEN" > "$CREDENTIALS"
+        chmod 600 "$CREDENTIALS"
+        ;;
+      workspace)
+        UFO_NAMESPACE=$rest
+        mkdir -p "$UFO_HOME"
+        printf '%s\n' "$UFO_NAMESPACE" > "$WORKSPACE"
+        ;;
+      install)
+        if [ -x "$BIN" ]; then
+          UPDATED=1
+        fi
+        if [ "$FX" = 1 ]; then
+          dyn_erase
+          flush_open
+        else
+          line_break
+        fi
+        do_install
+        [ "$FX" = 0 ] || dyn_paint
+        ;;
+      logout)
+        rm -f "$CREDENTIALS" "$SESSION" "$WORKSPACE"
+        TOKEN='' SID='' UFO_NAMESPACE=''
+        ;;
+      sendfile)
+        NEXT=sendfile
+        FILE_PATH=$rest
+        ;;
+      exit)
+        NEXT='exit'
+        CODE=$rest
+        ;;
+    esac
+  done < "$FIFO"
+  wait "$CURL" || true
+  spin_stop
+  if [ "$GOT" = 0 ]; then
+    die "lost contact with the mothership ($UFO_URL)"
+  fi
+  STATUS=''
+  if [ "$FX" = 1 ]; then
+    if [ -n "$OPENBUF" ]; then
+      dyn_erase
+      flush_open
+    fi
+    dyn_paint
+  else
+    line_break
+  fi
+}
+
+maybe_restart() {
+  [ "${UPDATED:-0}" = 1 ] || return 0
+  [ -z "${UFO_UPDATED:-}" ] || return 0
+  [ -x "$BIN" ] || return 0
+  UFO_UPDATED=1
+  export UFO_UPDATED
+  trap - EXIT
+  cleanup
+  exec "$BIN" "$INPUT0"
+}
+
+main() {
+  case "${1:-}" in
+    logout)
+      rm -f "$CREDENTIALS" "$SESSION" "$WORKSPACE"
+      say 'signed out.'
+      exit 0
+      ;;
+    login)
+      rm -f "$CREDENTIALS" "$SESSION" "$WORKSPACE"
+      UFO_NAMESPACE=''
+      shift
+      ;;
+  esac
+  WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/ufo.XXXXXX")
+  FIFO="$WORKDIR/fifo"
+  mkfifo "$FIFO"
+  trap cleanup EXIT
+  [ -s "$CREDENTIALS" ] && TOKEN=$(cat "$CREDENTIALS")
+  [ -s "$SESSION" ] && SID=$(cat "$SESSION")
+  [ -z "$UFO_NAMESPACE" ] && [ -s "$WORKSPACE" ] && UFO_NAMESPACE=$(cat "$WORKSPACE")
+  if [ -z "${SID:-}" ]; then
+    SID="$(uname -n 2>/dev/null || printf host).$$.$(date +%s)"
+    mkdir -p "$UFO_HOME"
+    printf '%s\n' "$SID" > "$SESSION"
+  fi
+  INPUT0="$*"
+  input="$*"
+  while :; do
+    turn "$input"
+    case "$NEXT" in
+      ask)
+        if ! ask "$PROMPT"; then
+          dyn_erase
+          if [ "$TTY" = 1 ]; then
+            say ''
+            say "${DIM}the saucer waits - type ${RESET}${BOLD}ufo${RESET}${DIM} to continue.${RESET}"
+          fi
+          exit 0
+        fi
+        input=$REPLY
+        ;;
+      choose)
+        if ! choose_menu; then
+          dyn_erase
+          if [ "$TTY" = 1 ]; then
+            say ''
+            say "${DIM}the saucer waits - type ${RESET}${BOLD}ufo${RESET}${DIM} to continue.${RESET}"
+          fi
+          exit 0
+        fi
+        input=$REPLY
+        ;;
+      poll)
+        sleep "$SLEEP"
+        input=''
+        ;;
+      sendfile)
+        if [ "$FILE_PATH" != - ] && [ ! -f "$FILE_PATH" ]; then
+          die "no such file: $FILE_PATH"
+        fi
+        SEND_FILE=$FILE_PATH
+        SEND_CMD=$CMD
+        input=''
+        ;;
+      exit)
+        maybe_restart
+        exit "$CODE"
+        ;;
+      end)
+        maybe_restart
+        exit 0
+        ;;
+    esac
+  done
+}
+
+trap 'printf "\n"; exit 130' INT
+
+main "$@"
