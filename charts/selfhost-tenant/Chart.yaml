@@ -1,0 +1,6 @@
+apiVersion: v2
+name: selfhost-tenant
+description: One tenant namespace running a whole selfhost-core workspace (surfaces + workers + jobs + proxy)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

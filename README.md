@@ -61,11 +61,30 @@ The metalcraft control plane it re-derives (reference, read-only): `~/src/metalc
 
 ## Layout
 
-See the implementation branch. Top level:
+- `src/selfhost_k8s/` — the Python control plane:
+  - `contract.py` — the `DeployRequest`/`DeployStatus` contract (the one OSS↔closed boundary).
+  - `platform.py` — control-plane constants + `PlatformConfig` (shared services, cluster facts).
+  - `render.py` — the config overlay: `DeployRequest` + provisioned Postgres → tenant `selfhost.toml`
+    + Helm values (pure, cluster-free — the unit-tested heart).
+  - `postgres.py` — database-per-tenant provisioning (mints a per-tenant role + database).
+  - `kube.py` — a minimal async apiserver client (SSA the `Tenant`/namespace/Secret, read readiness,
+    Lease) — the stripped re-derivation of metalcraft's raw `kubernetes_client.py`.
+  - `provision.py` — the reconcile-one-tenant workflow (namespace → Postgres → render → Secret →
+    Helm → observe).
+  - `operator.py` — the level-triggered reconcile loop + Lease leader election.
+  - `api.py` — the deploy endpoint (`POST /v1/deploy`, `GET /v1/tenants/{name}`).
+  - `main.py` — `selfhost-k8s api` / `selfhost-k8s operator` (one image, one role per Deployment).
+- `charts/selfhost-tenant/` — the Helm chart for one tenant namespace: quota, LimitRange,
+  default-deny NetworkPolicy, sandbox-manager RBAC, serve Deployment + HPA + Service, Ingress +
+  cert-manager TLS + ExternalDNS, and the `selfhost init` hook Job.
+- `deploy/` — the control plane's own install: the `Tenant` CRD, the operator + API Deployments,
+  RBAC, the platform-config example.
+- `Dockerfile` — the control-plane image (bakes `helm` + the tenant chart).
+- `tests/` — contract, render, postgres, kube-client, leader-election, and (helm-gated) chart tests.
 
-- `charts/selfhost-tenant/` — the Helm chart for one tenant namespace (the metalcraft tenant package,
-  stripped to run the whole selfhost runtime per namespace).
-- `deploy/` — the control-plane's own install: the `Tenant` CRD, the operator + API Deployment, RBAC.
-- `src/selfhost_k8s/` — the Python control plane: the deploy-request contract, the provisioner, the
-  operator reconcile loop, the API.
-- `tests/` — contract + rendering + reconcile unit tests.
+## Local validation
+
+`uv run ruff check . && uv run mypy && uv run pytest` — all green. `helm lint` / `helm template`
+validate the chart (a `helm`-gated test asserts the rendered resources). No live cluster or cloud was
+available here, so `kubectl apply` and the end-to-end reconcile against a real apiserver are
+unexercised; the manifests are YAML- and `helm template`-validated only.

@@ -1,0 +1,152 @@
+# The control plane's own install: the selfhost-system namespace, the operator ServiceAccount + a
+# broad ClusterRole (it manages tenant namespaces and every resource the tenant chart applies via
+# helm), the deploy API Deployment/Service, and the leader-elected operator Deployment.
+#
+# Apply after deploy/crds/tenant.yaml. Set the image, the platform ConfigMap, and the
+# selfhost-k8s-secrets Secret (Postgres admin DSN + role seed) for your cluster first.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: selfhost-system
+  labels:
+    app.kubernetes.io/managed-by: selfhost-k8s
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: selfhost-operator
+  namespace: selfhost-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: selfhost-operator
+rules:
+  # The Tenant kind + its status.
+  - apiGroups: [selfhost.sh]
+    resources: [tenants]
+    verbs: [get, list, watch, create, update, patch]
+  - apiGroups: [selfhost.sh]
+    resources: [tenants/status]
+    verbs: [get, update, patch]
+  # Tenant namespaces and the per-tenant Secret (config + minted keys).
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, list, create, update, patch]
+  - apiGroups: [""]
+    resources: [secrets, services, serviceaccounts, resourcequotas, limitranges, configmaps]
+    verbs: [get, list, create, update, patch, delete]
+  # The tenant workload the chart applies via helm.
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets]
+    verbs: [get, list, create, update, patch, delete]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, create, update, patch, delete]
+  - apiGroups: [autoscaling]
+    resources: [horizontalpodautoscalers]
+    verbs: [get, list, create, update, patch, delete]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses, networkpolicies]
+    verbs: [get, list, create, update, patch, delete]
+  # It grants the sandbox-manager Role, so it must hold those verbs (RBAC escalation guard).
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [roles, rolebindings]
+    verbs: [get, list, create, update, patch, delete]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, create, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: selfhost-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: selfhost-operator
+subjects:
+  - kind: ServiceAccount
+    name: selfhost-operator
+    namespace: selfhost-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: selfhost-api
+  namespace: selfhost-system
+  labels: {app: selfhost-api}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: selfhost-api}
+  template:
+    metadata:
+      labels: {app: selfhost-api}
+    spec:
+      serviceAccountName: selfhost-operator
+      containers:
+        - name: api
+          image: ghcr.io/metalcraftai/selfhost-k8s:latest
+          args: [api]
+          ports:
+            - {name: http, containerPort: 8080}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: selfhost-api
+  namespace: selfhost-system
+spec:
+  selector: {app: selfhost-api}
+  ports:
+    - {name: http, port: 80, targetPort: http}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: selfhost-operator
+  namespace: selfhost-system
+  labels: {app: selfhost-operator}
+spec:
+  # One replica + Recreate is the mutual-exclusion guarantee; the Lease coordinates the rollout gap.
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: selfhost-operator}
+  template:
+    metadata:
+      labels: {app: selfhost-operator}
+    spec:
+      serviceAccountName: selfhost-operator
+      containers:
+        - name: operator
+          image: ghcr.io/metalcraftai/selfhost-k8s:latest
+          args: [operator]
+          ports:
+            - {name: http, containerPort: 8080}
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef: {fieldPath: metadata.name}
+            - name: SELFHOST_K8S_CONFIG
+              value: /config/platform.toml
+            - name: SELFHOST_K8S_POSTGRES_ADMIN_DSN
+              valueFrom:
+                secretKeyRef: {name: selfhost-k8s-secrets, key: postgres-admin-dsn}
+            - name: SELFHOST_K8S_PG_ROLE_SEED
+              valueFrom:
+                secretKeyRef: {name: selfhost-k8s-secrets, key: pg-role-seed}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+          volumeMounts:
+            - {name: config, mountPath: /config}
+      volumes:
+        - name: config
+          configMap: {name: selfhost-k8s-platform}

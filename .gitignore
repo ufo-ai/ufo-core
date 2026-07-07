@@ -12,3 +12,6 @@ dist/
 .env
 *.local.yaml
 rendered/
+
+# macOS
+.DS_Store

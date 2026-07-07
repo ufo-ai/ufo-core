@@ -1,0 +1,66 @@
+[project]
+name = "selfhost-k8s"
+version = "0.1.0"
+description = "The Kubernetes control plane that runs selfhost-core as its per-workspace backend runtime"
+requires-python = ">=3.12"
+dependencies = [
+    "asyncpg>=0.31.0",
+    "click>=8.1",
+    "fastapi>=0.115",
+    "httpx>=0.27",
+    "pydantic>=2.9",
+    "tomli-w>=1.0",
+    "uvicorn>=0.30",
+]
+
+[project.scripts]
+selfhost-k8s = "selfhost_k8s.main:main"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.13",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.7",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/selfhost_k8s"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "ASYNC", "PTH", "RUF", "TID"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["selfhost_k8s"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"requests" = { msg = "sync HTTP client blocks the loop; use httpx.AsyncClient" }
+
+[tool.mypy]
+python_version = "3.12"
+check_untyped_defs = true
+no_implicit_optional = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+files = ["src/selfhost_k8s", "tests"]
+
+[[tool.mypy.overrides]]
+module = ["asyncpg"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+addopts = "--strict-markers"
+markers = [
+    "cluster: needs a live Kubernetes cluster (kubectl/helm apply) — skipped without one",
+]

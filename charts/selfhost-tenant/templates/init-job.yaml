@@ -1,0 +1,55 @@
+# `selfhost init` — schema + onboard, run once against the tenant DB (RFC 0004 decision 4: a Job that
+# reuses core's `init` verbatim). A `post-install` hook (NOT post-upgrade): core's `init` raises
+# AlreadyInitialized on a second run, so it must fire exactly once, on the first `helm install`.
+# Every subsequent reconcile is a `helm upgrade` and skips it.
+#
+# The owner claims the workspace via the first-run web link the deploy returns; the CLI token `init`
+# writes is ephemeral to this pod. Persisting a pre-issued owner CLI token to a Secret (RFC 0004
+# decision 5) depends on the parked member/access seam and is the documented follow-up.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: selfhost-init
+  labels:
+    {{- include "selfhost-tenant.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 4
+  template:
+    metadata:
+      labels:
+        {{- include "selfhost-tenant.labels" . | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: init
+          image: {{ .Values.bundle_image | quote }}
+          args: ["init", "--email", {{ .Values.owner_email | quote }}]
+          env:
+            - name: SELFHOST_CREDENTIAL_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.tenant_secret }}
+                  key: SELFHOST_CREDENTIAL_KEY
+            - name: SELFHOST_ARTIFACT_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.tenant_secret }}
+                  key: SELFHOST_ARTIFACT_TOKEN_SECRET
+          envFrom:
+            - secretRef:
+                name: {{ .Values.platform_secret }}
+          volumeMounts:
+            - name: config
+              mountPath: /app/selfhost.toml
+              subPath: selfhost.toml
+      volumes:
+        - name: config
+          secret:
+            secretName: {{ .Values.tenant_secret }}
+            items:
+              - key: selfhost.toml
+                path: selfhost.toml
