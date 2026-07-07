@@ -4,8 +4,8 @@ from typing import Any
 
 import httpx
 import pytest
+from ufo.deploy import DeployRequest
 
-from ufo_control.contract import DeployRequest
 from ufo_control.kube import KubeClient
 from ufo_control.platform import PlatformConfig
 from ufo_control.provision import TenantReconciler, _is_failed_first_install
@@ -98,6 +98,6 @@ async def test_reconcile_surfaces_any_error_as_failed_status() -> None:
         kube=_kube(httpx.MockTransport(lambda request: httpx.Response(500, json={"m": "boom"}))),
         platform=_platform(),
     )
-    status = await reconciler.reconcile(_request())
+    status = await reconciler.reconcile(_request(), "3f8c1e2a-0b4d-4c6e-9a1f-2b3c4d5e6f70")
     assert status.phase == "Failed"
     assert status.message

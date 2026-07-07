@@ -20,8 +20,8 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from ufo.deploy import DeployRequest, DeployStatus
 
-from ufo_control.contract import DeployRequest, DeployStatus
 from ufo_control.platform import (
     API_GROUP_VERSION,
     FIELD_MANAGER,
@@ -30,6 +30,7 @@ from ufo_control.platform import (
     TENANT_KIND,
     TENANT_NAME_LABEL,
     TENANT_PLURAL,
+    WORKSPACE_ID_STATUS_FIELD,
 )
 
 SA_ROOT = Path("/var/run/secrets/kubernetes.io/serviceaccount")
@@ -111,15 +112,19 @@ class KubeClient:
     async def apply_tenant(self, request: DeployRequest) -> None:
         await self.apply(self._tenant_path(request.tenant.name), tenant_body(request))
 
-    async def patch_tenant_status(self, name: str, status: DeployStatus) -> None:
+    async def patch_tenant_status(self, name: str, status: DeployStatus, workspace_id: str) -> None:
         # exclude_none: a Failed status carries no url, and the CRD's status.url is a non-nullable
         # string — emitting `"url": null` is rejected 422, so an errored reconcile would never
         # surface its phase. Omitting the absent optional lets the apply set exactly what is known.
+        # workspaceId rides the status alongside the DeployStatus fields (it is not on core's
+        # DeployStatus): persisted so re-reconciles reuse the minted uuid — idempotency.
+        status_body = status.model_dump(mode="json", exclude_none=True)
+        status_body[WORKSPACE_ID_STATUS_FIELD] = workspace_id
         body = {
             "apiVersion": API_GROUP_VERSION,
             "kind": TENANT_KIND,
             "metadata": {"name": name, "namespace": PLATFORM_NAMESPACE},
-            "status": status.model_dump(mode="json", exclude_none=True),
+            "status": status_body,
         }
         await self.apply(f"{self._tenant_path(name)}/status", body)
 

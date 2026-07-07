@@ -18,11 +18,18 @@ from dataclasses import dataclass
 
 import tomli_w
 from pydantic import BaseModel, ConfigDict
+from ufo.deploy import MINTED_SECRETS, DeployImage, DeployRequest
 
-from ufo_control.contract import SECRET_ARTIFACT_TOKEN, SECRET_CREDENTIAL_KEY, DeployRequest
-from ufo_control.platform import SERVE_PORT, PlatformConfig
+from ufo_control.platform import SERVE_PORT, PlatformConfig, tenant_namespace
+from ufo_control.postgres import TenantPostgres
 
 CONFIG_FILE = "ufo.toml"
+SECRET_CREDENTIAL_KEY, SECRET_ARTIFACT_TOKEN = MINTED_SECRETS
+
+
+def _image_ref(image: DeployImage) -> str:
+    """The digest-pinned pull ref the cluster runs — ``repository@sha256:…``."""
+    return f"{image.repository}@{image.digest}"
 
 
 class TenantChartValues(BaseModel):
@@ -43,6 +50,7 @@ class TenantChartValues(BaseModel):
     platform_secret: str
     ingress_class: str
     cluster_issuer: str
+    workspace_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -74,34 +82,40 @@ def mint_fernet_key() -> str:
 
 
 def render_tenant(
-    request: DeployRequest, platform: PlatformConfig, tenant_dsn: str
+    request: DeployRequest, platform: PlatformConfig, postgres: TenantPostgres
 ) -> TenantRender:
-    config_toml = _overlay_config(request, platform, tenant_dsn)
+    config_toml = _overlay_config(request, platform, postgres)
     secret = TenantSecret(
         config_toml=config_toml,
         credential_key=mint_fernet_key(),
         artifact_token_secret=secrets.token_hex(32),
     )
     values = TenantChartValues(
-        namespace=request.tenant.namespace,
+        namespace=tenant_namespace(request.tenant.name),
         tenant_name=request.tenant.name,
         pack=request.pack,
         host=request.tenant.host,
         owner_email=request.tenant.owner_email,
-        bundle_image=request.bundle_image.ref,
-        sandbox_image=request.sandbox_image.ref,
+        bundle_image=_image_ref(request.bundle_image),
+        sandbox_image=_image_ref(request.sandbox_image),
         tenant_secret="ufo-tenant",
         platform_secret=platform.platform_secret,
         ingress_class=platform.ingress_class,
         cluster_issuer=platform.cluster_issuer,
+        workspace_id=postgres.workspace_id,
     )
     return TenantRender(values=values, secret=secret)
 
 
-def _overlay_config(request: DeployRequest, platform: PlatformConfig, tenant_dsn: str) -> str:
+def _overlay_config(
+    request: DeployRequest, platform: PlatformConfig, postgres: TenantPostgres
+) -> str:
     config = tomllib.loads(request.config_toml)
     config["serve"] = {**config.get("serve", {}), "host": "0.0.0.0", "port": SERVE_PORT}
-    config["database"] = {"url": tenant_dsn}
+    database: dict[str, str] = {"url": postgres.url}
+    if postgres.system_url is not None:
+        database["system_url"] = postgres.system_url
+    config["database"] = database
     config["blob"] = _blob_section(platform)
     config["hub"] = {"backend": "redis", "url": platform.redis_url}
     config["connect"] = {"public_base_url": f"https://{request.tenant.host}"}

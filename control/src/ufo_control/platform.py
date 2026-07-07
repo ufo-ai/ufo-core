@@ -14,6 +14,7 @@ reconciler overlays onto each tenant's core config.
 import os
 import tomllib
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -24,9 +25,20 @@ PLATFORM_NAMESPACE = "ufo-system"
 
 TENANT_KIND = "Tenant"
 TENANT_PLURAL = "tenants"
+TENANT_NAMESPACE_PREFIX = "ufo-"
 TENANT_NAMESPACE_LABEL = f"{API_GROUP}/tenant"
 TENANT_NAME_LABEL = f"{API_GROUP}/tenant-name"
 PACK_LABEL = f"{API_GROUP}/pack"
+
+# The control-plane-minted workspace uuid, persisted on the Tenant CR's status so re-reconciles
+# reuse it (idempotency). Kept off core's DeployStatus (extra="forbid"); the operator threads it and
+# kube.patch_tenant_status merges it into the status body.
+WORKSPACE_ID_STATUS_FIELD = "workspaceId"
+
+
+def tenant_namespace(name: str) -> str:
+    return f"{TENANT_NAMESPACE_PREFIX}{name}"
+
 
 FIELD_MANAGER = f"{API_GROUP}/operator"
 OPERATOR_LEASE_NAME = "ufo-operator"
@@ -44,14 +56,16 @@ DEFAULT_CONFIG_PATH = Path("platform.toml")
 class PlatformConfig(BaseModel):
     """The shared services and cluster facts the reconciler overlays onto every tenant.
 
-    ``postgres_admin_dsn_env`` names the env var holding a libpq DSN with CREATEROLE/CREATEDB on the
-    shared Postgres; the reconciler mints a per-tenant role+database from it (database-per-tenant
-    isolation). ``tenant_postgres_host`` is the ``host:port`` a tenant pod dials that database at.
-    The blob and redis fields are the shared S3 bucket and Redis a tenant's core config points at —
-    core isolates by ``workspace_id`` on every row and key. ``platform_secret`` is the Secret name
-    carrying the model API keys and cloud credentials a tenant's ``serve`` reads from env; the owner
-    creates it once in ``ufo-system`` and the reconciler replicates it into each tenant
-    namespace during provisioning.
+    ``postgres_model`` picks the tenant Postgres tier server-side (``DeployRequest.postgres`` is a
+    request the platform overrides): ``rls`` — the hosted default — mints an RLS-subject role on the
+    one shared ``app_database`` and a per-tenant DBOS sibling; ``database`` mints a whole database
+    per tenant. ``postgres_admin_dsn_env`` names the env var holding a libpq DSN with
+    CREATEROLE/CREATEDB on the shared Postgres; the reconciler provisions roles/databases from it.
+    ``tenant_postgres_host`` is the ``host:port`` a tenant pod dials Postgres at. The blob and redis
+    fields are the shared S3 bucket and Redis a tenant's core config points at — core isolates by
+    ``workspace_id`` on every row and key. ``platform_secret`` is the Secret name carrying the model
+    API keys and cloud credentials a tenant's ``serve`` reads from env; the owner creates it once in
+    ``ufo-system`` and the reconciler replicates it into each tenant namespace during provisioning.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -59,8 +73,10 @@ class PlatformConfig(BaseModel):
     chart_path: Path
     registry: str
 
+    postgres_model: Literal["database", "rls"] = "rls"
     postgres_admin_dsn_env: str = "UFO_CONTROL_POSTGRES_ADMIN_DSN"
     tenant_postgres_host: str
+    app_database: str = "ufo"
 
     redis_url: str
 

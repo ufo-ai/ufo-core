@@ -27,7 +27,16 @@ spec:
       containers:
         - name: init
           image: {{ .Values.bundle_image | quote }}
-          args: ["init", "--email", {{ .Values.owner_email | quote }}]
+          # The rls tier pins the workspace uuid the control plane minted, so the workspace row
+          # equals the GUC RLS checks; the database tier omits it and `init` mints its own.
+          args:
+            - init
+            - --email
+            - {{ .Values.owner_email | quote }}
+            {{- if .Values.workspace_id }}
+            - --workspace-id
+            - {{ .Values.workspace_id | quote }}
+            {{- end }}
           env:
             - name: UFO_CREDENTIAL_KEY
               valueFrom:

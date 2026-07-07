@@ -1,8 +1,9 @@
 import pytest
 from pydantic import ValidationError
+from ufo.deploy import DeployImage, DeployRequest, TenantIdentity
 
-from ufo_control.contract import DeployRequest, ImageRef, TenantIdentity
 from ufo_control.kube import request_from_tenant, tenant_body
+from ufo_control.platform import tenant_namespace
 
 DIGEST = "sha256:" + "a" * 64
 
@@ -27,25 +28,15 @@ def test_request_round_trips_through_the_tenant_object() -> None:
 
 def test_image_ref_requires_a_pinned_digest() -> None:
     with pytest.raises(ValidationError):
-        ImageRef(repository="ghcr.io/acme/ufo", digest="latest")
-
-
-def test_image_ref_builds_a_digest_ref() -> None:
-    assert ImageRef(repository="r/x", digest=DIGEST).ref == f"r/x@{DIGEST}"
+        DeployImage(repository="ghcr.io/acme/ufo", digest="latest")
 
 
 def test_tenant_name_is_a_lowercased_dns_label() -> None:
     assert TenantIdentity(name="Acme", host="h", owner_email="e").name == "acme"
 
 
-@pytest.mark.parametrize("bad", ["1acme", "ac me", "a" * 41, ""])
-def test_tenant_name_rejects_non_labels(bad: str) -> None:
-    with pytest.raises(ValidationError):
-        TenantIdentity(name=bad, host="h", owner_email="e")
-
-
 def test_namespace_is_derived_from_the_name() -> None:
-    assert _request().tenant.namespace == "ufo-acme"
+    assert tenant_namespace(_request().tenant.name) == "ufo-acme"
 
 
 def test_unknown_field_is_rejected() -> None:

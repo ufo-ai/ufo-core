@@ -20,10 +20,20 @@ sandbox_image: ghcr.io/acme/sandbox@{DIGEST}
 pytestmark = pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
 
 
-def _write_values(tmp_path: Path) -> Path:
+def _write_values(tmp_path: Path, extra: str = "") -> Path:
     values = tmp_path / "values.yaml"
-    values.write_text(VALUES)
+    values.write_text(VALUES + extra)
     return values
+
+
+def _template(values: Path) -> str:
+    result = subprocess.run(
+        ["helm", "template", "acme", str(CHART), "-n", "ufo-acme", "--values", str(values)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout
 
 
 def test_chart_lints(tmp_path: Path) -> None:
@@ -65,3 +75,14 @@ def test_chart_renders_the_tenant_workload(tmp_path: Path) -> None:
     # the operator replicates into the namespace — the consumer end of that Secret.
     assert rendered.count("secretRef") >= 2
     assert "ufo-platform-secrets" in rendered
+    # The database tier omits workspace_id, so init mints its own workspace uuid.
+    assert "--workspace-id" not in rendered
+
+
+def test_init_job_pins_workspace_id_for_the_rls_tier(tmp_path: Path) -> None:
+    # The rls tier renders workspace_id, so the init Job pins the control-plane-minted uuid the RLS
+    # GUC checks — the consumer end of render's workspace_id value.
+    workspace_id = "11111111-2222-3333-4444-555555555555"
+    rendered = _template(_write_values(tmp_path, extra=f"workspace_id: {workspace_id}\n"))
+    assert "--workspace-id" in rendered
+    assert workspace_id in rendered

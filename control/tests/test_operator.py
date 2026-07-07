@@ -5,7 +5,13 @@ from typing import Any
 import httpx
 
 from ufo_control.kube import KubeClient
-from ufo_control.operator import LeaderElection, _deleting, _format_time, _parse_time
+from ufo_control.operator import (
+    LeaderElection,
+    _deleting,
+    _format_time,
+    _parse_time,
+    _workspace_id,
+)
 from ufo_control.provision import _job_failed, _job_succeeded, _ready_replicas
 
 NOW = datetime(2026, 7, 6, 12, 0, 0, 500000, tzinfo=UTC)
@@ -13,6 +19,14 @@ NOW = datetime(2026, 7, 6, 12, 0, 0, 500000, tzinfo=UTC)
 
 def test_lease_time_round_trips() -> None:
     assert _parse_time(_format_time(NOW)) == NOW
+
+
+def test_workspace_id_reuses_status_and_mints_when_absent() -> None:
+    persisted = "3f8c1e2a-0b4d-4c6e-9a1f-2b3c4d5e6f70"
+    assert _workspace_id({"status": {"workspaceId": persisted}}) == persisted
+    minted = _workspace_id({"status": {}})
+    assert minted and minted != persisted
+    assert _workspace_id({}) != _workspace_id({})
 
 
 def test_ready_and_job_helpers() -> None:

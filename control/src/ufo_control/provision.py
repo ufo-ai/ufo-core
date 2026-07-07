@@ -18,15 +18,17 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from ufo_control.contract import DeployRequest, DeployStatus
+from ufo.deploy import DeployRequest, DeployStatus
+
 from ufo_control.kube import KubeClient
 from ufo_control.platform import (
     PLATFORM_NAMESPACE,
     TENANT_NAME_LABEL,
     TENANT_NAMESPACE_LABEL,
     PlatformConfig,
+    tenant_namespace,
 )
-from ufo_control.postgres import ensure_tenant_postgres
+from ufo_control.postgres import TenantPostgres, ensure_tenant_postgres
 from ufo_control.render import TenantChartValues, render_tenant
 
 SERVE_DEPLOYMENT = "ufo-serve"
@@ -45,19 +47,21 @@ class TenantReconciler:
     kube: KubeClient
     platform: PlatformConfig
 
-    async def reconcile(self, request: DeployRequest) -> DeployStatus:
+    async def reconcile(self, request: DeployRequest, workspace_id: str) -> DeployStatus:
         name = request.tenant.name
         try:
             await self._ensure_namespace(request)
             await self._ensure_platform_secret(request)
-            dsn = await ensure_tenant_postgres(
-                request.postgres,
+            postgres = await ensure_tenant_postgres(
+                self.platform.postgres_model,
                 self.platform.postgres_admin_dsn,
                 name,
                 self.platform.tenant_postgres_host,
+                self.platform.app_database,
+                workspace_id,
             )
-            values, secret_data = self._render(request, dsn)
-            await self.kube.apply_secret(request.tenant.namespace, TENANT_SECRET, secret_data)
+            values, secret_data = self._render(request, postgres)
+            await self.kube.apply_secret(tenant_namespace(name), TENANT_SECRET, secret_data)
             await self._helm_apply(values)
             return await self._observe(request)
         except Exception as error:
@@ -65,7 +69,7 @@ class TenantReconciler:
 
     async def _ensure_namespace(self, request: DeployRequest) -> None:
         await self.kube.apply_namespace(
-            request.tenant.namespace,
+            tenant_namespace(request.tenant.name),
             {TENANT_NAMESPACE_LABEL: "true", TENANT_NAME_LABEL: request.tenant.name},
         )
 
@@ -78,10 +82,14 @@ class TenantReconciler:
                 "the model API keys + cloud credentials tenant pods read from env (see "
                 "deploy/control-plane.yaml); the operator replicates it into each tenant namespace"
             )
-        await self.kube.apply_secret(request.tenant.namespace, secret, source.get("data", {}))
+        await self.kube.apply_secret(
+            tenant_namespace(request.tenant.name), secret, source.get("data", {})
+        )
 
-    def _render(self, request: DeployRequest, dsn: str) -> tuple[TenantChartValues, dict[str, str]]:
-        rendered = render_tenant(request, self.platform, dsn)
+    def _render(
+        self, request: DeployRequest, postgres: TenantPostgres
+    ) -> tuple[TenantChartValues, dict[str, str]]:
+        rendered = render_tenant(request, self.platform, postgres)
         return rendered.values, rendered.secret.data()
 
     async def _helm_apply(self, values: TenantChartValues) -> None:
@@ -148,7 +156,7 @@ class TenantReconciler:
 
     async def _observe(self, request: DeployRequest) -> DeployStatus:
         name = request.tenant.name
-        namespace = request.tenant.namespace
+        namespace = tenant_namespace(name)
         url = f"https://{request.tenant.host}"
         job = await self.kube.read_job(namespace, INIT_JOB)
         if job is not None and _job_failed(job):
