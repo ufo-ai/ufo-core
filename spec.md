@@ -305,6 +305,7 @@ bundle installs OSS, on-prem, or hosted.
 |---|---|
 | OpenRouter (any model router) | models |
 | Slack surface (ingest + writeback + attachments) | surfaces, credentials, skills |
+| Page alerts (chat-bound watches over synced pages, off-turn classify + alert turn) | tools, hooks (page_change) |
 | Composio connectors | connectors, credentials, routes (OAuth), auth_proxies |
 | Docker, E2B | carriers |
 | Redis stream hub | hubs |

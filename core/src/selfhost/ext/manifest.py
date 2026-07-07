@@ -386,11 +386,13 @@ HookOutcome = Deny | ModifyInput | ModifyOutput | InjectContext | None
 class HookContext:
     """What a hook handler receives: the same workspace-scoped `ExtensionContext` a job or route
     gets (its store, declared credential slots, memory) and the per-event payload. A turn-lifecycle
-    event carries the frozen turn and agent it fires under and the conversation's member; a
-    data-plane event (page_change) fires outside any turn, so `turn`, `agent`, and `member_id` are
-    None and the payload alone carries the event's arguments. Deliberately no raw SandboxSession,
-    ToolContext, DB handle, spawn, admit, or invoke — a hook observes and filters, it cannot act
-    outside its scope or fire work that would re-enter the loop it runs inside."""
+    event carries the frozen turn and agent it fires under and the conversation's member, and its
+    context deliberately wires no model or invoker — inside the loop a hook observes and filters,
+    never firing work that would re-enter the turn it runs within. A data-plane event (page_change)
+    fires outside any turn — `turn`, `agent`, and `member_id` are None — and the page-change runner
+    builds its context in the jobs role with the metered off-turn model and the admit-turn invoker
+    wired: a listener classifies and invokes exactly as a scheduled fire does, fed only by the
+    source pipeline so it can never fire on work it caused."""
 
     ext: ExtensionContext
     payload: HookPayload

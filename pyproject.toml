@@ -48,6 +48,7 @@ index-default = "selfhost_ext_index_default:manifest"
 knowledge_graph = "selfhost_ext_knowledge_graph.manifest:manifest"
 mcp = "selfhost_ext_mcp:manifest"
 memory = "selfhost_ext_memory.manifest:manifest"
+page_alerts = "selfhost_ext_page_alerts.manifest:manifest"
 openrouter = "selfhost_ext_openrouter:manifest"
 redis_hub = "selfhost_ext_redis_hub.manifest:manifest"
 repl = "selfhost_ext_repl.manifest:manifest"
@@ -97,6 +98,7 @@ packages = [
     "extensions/connectors/selfhost_ext_connectors",
     "extensions/documents/selfhost_ext_documents",
     "extensions/eval_harness/selfhost_ext_eval_harness",
+    "extensions/page_alerts/selfhost_ext_page_alerts",
     "extensions/knowledge_graph/selfhost_ext_knowledge_graph",
     "extensions/memory/selfhost_ext_memory",
     "extensions/redis_hub/selfhost_ext_redis_hub",

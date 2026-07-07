@@ -46,6 +46,15 @@ async def test_scoped_store_upserts(db: None) -> None:
     assert await store.get("k") == "two"
 
 
+async def test_scoped_store_delete_removes_only_its_key(db: None) -> None:
+    store = ScopedStore(workspace_id=await _workspace(), extension="sample")
+    await store.put("watch:a", 1)
+    await store.put("watch:b", 2)
+    await store.delete("watch:a")
+    assert await store.get("watch:a") is None
+    assert await store.list("watch:") == (("watch:b", 2),)
+
+
 async def test_scoped_store_lists_by_prefix_within_its_extension(db: None) -> None:
     workspace_id = await _workspace()
     sample = ScopedStore(workspace_id=workspace_id, extension="sample")

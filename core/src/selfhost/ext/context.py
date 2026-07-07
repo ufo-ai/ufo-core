@@ -84,6 +84,16 @@ class ScopedStore:
                     )
                 )
 
+    async def delete(self, key: str) -> None:
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.delete(tables.ext_store).where(
+                    tables.ext_store.c.workspace_id == self.workspace_id,
+                    tables.ext_store.c.extension == self.extension,
+                    tables.ext_store.c.key == key,
+                )
+            )
+
     async def list(self, prefix: str = "") -> tuple[tuple[str, JsonValue], ...]:
         async with workspace_tx() as connection:
             rows = (
