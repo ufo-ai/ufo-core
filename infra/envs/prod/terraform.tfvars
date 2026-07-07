@@ -1,7 +1,5 @@
-region            = "us-east-1"
-letsencrypt_email = "alex@metalcraft.ai"
+region = "us-east-1"
 
-# Stand prod up substrate-first (enable_app = false). Promote a testing-proven image SHA
-# here and set enable_app = true only after testing.flyingobject.ai is verified.
-image_tag  = "latest"
-enable_app = false
+# Set a pushed ufo-control image tag (git short SHA) here, or pass -var image_tag on apply
+# (deploy.yml does). "latest" is only a placeholder for a first substrate-only apply.
+image_tag = "latest"

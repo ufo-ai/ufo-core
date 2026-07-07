@@ -1,9 +1,9 @@
-# Image registry. One repo per image we build: the all-in-one platform image, the sandbox-proxy
-# image, and the commercial cloud-gateway image (Dockerfile.cloud). CI builds + pushes by commit
-# SHA; the chart and the hosted overlay pull by tag.
+# Image registry. One repo per image we build: the bundle image (`ufo serve` of the assistant_hosted
+# / gateway packs), the E2B sandbox image, and the control-plane image (`ufoctl` api/operator).
+# CI builds + pushes by commit SHA; the tenant chart and the control-plane deployment pull by tag.
 
 locals {
-  ecr_repositories = ["metalcraft/platform", "metalcraft/sandbox-proxy", "metalcraft/cloud-gateway"]
+  ecr_repositories = ["ufo", "ufo-sandbox", "ufo-control"]
 }
 
 resource "aws_ecr_repository" "this" {

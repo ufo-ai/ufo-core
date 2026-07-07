@@ -6,8 +6,8 @@ output "ecr_repository_urls" {
   value = module.platform.ecr_repository_urls
 }
 
-output "store_bucket" {
-  value = module.platform.store_bucket
+output "blob_bucket" {
+  value = module.platform.blob_bucket
 }
 
 output "api_keys_secret_arn" {

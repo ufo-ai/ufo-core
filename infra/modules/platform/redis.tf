@@ -1,5 +1,6 @@
-# ElastiCache Redis — the live run-frame hub (kernel/stream_hub.py). In-VPC, reachable
-# only from the node group SG. The chart wires METALCRAFT_REDIS_URL to the primary endpoint.
+# ElastiCache Redis — the live-frame hub (core's [hub] backend="redis"). In-VPC, reachable only from
+# the node group SG. The control plane's platform.toml points tenants at the primary endpoint; core
+# keys hub channels by turn/conversation uuid, so one instance is shared across tenants.
 
 resource "aws_security_group" "redis" {
   name        = "${local.name}-redis"
@@ -26,7 +27,7 @@ resource "aws_elasticache_subnet_group" "redis" {
 
 resource "aws_elasticache_replication_group" "redis" {
   replication_group_id = "${local.name}-redis"
-  description          = "metalcraft live-frame hub (${var.name})"
+  description          = "ufo live-frame hub (${var.name})"
 
   engine         = "redis"
   engine_version = var.redis_engine_version

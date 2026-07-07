@@ -6,22 +6,35 @@ variable "region" {
 variable "image_tag" {
   type        = string
   default     = "latest"
-  description = "metalcraft platform image tag (set a pushed git SHA before enabling the app)."
-}
-
-variable "enable_app" {
-  type        = bool
-  default     = false
-  description = "Flip to true once charts/metalcraft exists and the image is pushed to ECR."
+  description = "Tag for the ufo-control image the control-plane deployment pulls (a pushed git short SHA). deploy.yml passes -var image_tag."
 }
 
 variable "letsencrypt_email" {
-  type    = string
-  default = "alex@metalcraft.ai"
+  type        = string
+  default     = "ops@flyingobject.ai"
+  description = "ACME account contact for cert expiry notices. Override via tfvars with a monitored mailbox."
+}
+
+variable "acme_server" {
+  type        = string
+  default     = "https://acme-v02.api.letsencrypt.org/directory"
+  description = "ACME directory the cert-manager ClusterIssuer uses. Point at staging to avoid rate limits."
+}
+
+variable "ses_sender" {
+  type        = string
+  default     = "no-reply@flyingobject.ai"
+  description = "From address for onboarding email; its domain is verified as the SES sending identity."
+}
+
+variable "e2b_sandbox_template" {
+  type        = string
+  default     = "ufo-sbx"
+  description = "E2B template id the runtime launches sandboxes from."
 }
 
 variable "cloudflare_api_token" {
   type        = string
   sensitive   = true
-  description = "Cloudflare API token (Zone:DNS:Edit on flyingobject.ai) for external-dns. Supply via TF_VAR_cloudflare_api_token; never commit."
+  description = "Cloudflare API token (Zone:DNS:Edit on flyingobject.ai) for external-dns + cert-manager DNS-01. Supply via TF_VAR_cloudflare_api_token; never commit."
 }

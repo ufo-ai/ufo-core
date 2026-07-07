@@ -55,7 +55,7 @@ module "eks" {
       max_size       = var.node_max_size
       desired_size   = var.node_desired_size
 
-      labels = { "metalcraft.ai/pool" = "default" }
+      labels = { "flyingobject.ai/pool" = "default" }
     }
   }
 

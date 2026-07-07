@@ -5,7 +5,6 @@ terraform {
     aws        = { source = "hashicorp/aws", version = "~> 5.95" }
     helm       = { source = "hashicorp/helm", version = "~> 2.17" }
     kubernetes = { source = "hashicorp/kubernetes", version = "~> 2.35" }
-    tls        = { source = "hashicorp/tls", version = "~> 4.0" }
-    random     = { source = "hashicorp/random", version = "~> 3.6" }
+    kubectl    = { source = "alekc/kubectl", version = "~> 2.1" }
   }
 }

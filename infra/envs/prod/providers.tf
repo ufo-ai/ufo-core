@@ -3,8 +3,8 @@ provider "aws" {
 
   default_tags {
     tags = {
-      "metalcraft.ai/environment" = "prod"
-      "ManagedBy"                 = "terraform"
+      "flyingobject.ai/environment" = "prod"
+      "ManagedBy"                   = "terraform"
     }
   }
 }
@@ -32,5 +32,20 @@ provider "helm" {
       command     = "aws"
       args        = ["eks", "get-token", "--cluster-name", module.platform.cluster_name, "--region", var.region]
     }
+  }
+}
+
+# kubectl provider applies the control-plane + issuer + External Secrets manifests as raw YAML —
+# `kubectl apply` adopts the resources without the cluster being reachable at plan time (unlike the
+# kubernetes provider's kubernetes_manifest), so a first apply works.
+provider "kubectl" {
+  host                   = module.platform.cluster_endpoint
+  cluster_ca_certificate = base64decode(module.platform.cluster_certificate_authority_data)
+  load_config_file       = false
+
+  exec {
+    api_version = "client.authentication.k8s.io/v1beta1"
+    command     = "aws"
+    args        = ["eks", "get-token", "--cluster-name", module.platform.cluster_name, "--region", var.region]
   }
 }
