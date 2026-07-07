@@ -268,14 +268,18 @@ stay unified under subject scoping until a real product demand says otherwise.
 
 ### 6. Deploy and cutover — today
 
-Reuse the prod substrate that already exists dark (`infra/envs/prod`): EKS, RDS, ElastiCache, S3,
-SES, Secrets Manager, Cloudflare. `infra/` arrives from metalcraft minus the metalcraft app
-(platform Helm release, cloud-gateway overlay); added: ingress-nginx (the tenant chart's ingress
-class), a cert-manager **DNS01** ClusterIssuer through the existing Cloudflare credentials
-(Cloudflare proxying breaks HTTP01), the `Tenant` CRD, `ufo-system` (control-plane API +
-operator), ECR repos for the three images. GitHub Actions is billing-blocked: the ported
-`deploy.yml` lands dormant; today's builds and applies run from the operator machine (docker
-buildx + `terraform apply`, OIDC-independent AWS creds).
+Stage 1 targets the **testing environment** (`infra/envs/testing`): ufo **replaces the live
+metalcraft app at `testing.flyingobject.ai`** on the substrate already running there — EKS, RDS,
+ElastiCache, S3, SES, Secrets Manager, Cloudflare. Prod (`infra/envs/prod`) stays dark and
+untouched; flipping `flyingobject.ai` is a later repeat of the same module work once testing has
+soaked. `infra/` arrives from metalcraft minus the metalcraft app (platform Helm release,
+cloud-gateway overlay); added: ingress-nginx (the tenant chart's ingress class), a cert-manager
+**DNS01** ClusterIssuer through the existing Cloudflare credentials (Cloudflare proxying breaks
+HTTP01), the `Tenant` CRD, `ufo-system` (control-plane API + operator), ECR repos for the three
+images. Hostnames thread as variables — apex `testing.flyingobject.ai`, tenants
+`<name>.testing.flyingobject.ai` — never hardcoded, so the prod repeat is a tfvars change. GitHub
+Actions is billing-blocked: the ported `deploy.yml` lands dormant; today's builds and applies run
+from the operator machine (docker buildx + `terraform apply`, OIDC-independent AWS creds).
 
 Cutover sequence:
 
@@ -287,22 +291,27 @@ Cutover sequence:
 3. Secrets Manager entries → External Secrets: pg admin DSN + role seed, model keys, OpenRouter,
    Composio, E2B (+ template), Turbopuffer, Exa, SES sender, `UFO_TOKEN_SECRET`.
 4. RDS: create `ufo` DB + `ufo_owner`; run the migrate-and-RLS-bootstrap Job.
-5. `terraform apply` prod; verify control plane healthy (`/healthz`), operator holds the Lease;
-   provision the platform workspace through the control plane (`pack="gateway"`, host
-   `flyingobject.ai`) and verify it Ready.
-6. Cloudflare: apex `flyingobject.ai` → the platform workspace's ingress (proxied,
-   source-restricted to CF ranges, the existing pattern); `*.flyingobject.ai` → tenant ingress LB.
-7. Smoke, in order: `curl -fsSL https://flyingobject.ai/ufo | sh` → onboard with a real email →
+5. `terraform apply` testing (this removes the metalcraft app and installs ufo in one apply);
+   verify control plane healthy (`/healthz`), operator holds the Lease; provision the platform
+   workspace through the control plane (`pack="gateway"`, host `testing.flyingobject.ai`) and
+   verify it Ready.
+6. Cloudflare: `testing.flyingobject.ai` → the platform workspace's ingress (proxied,
+   source-restricted to CF ranges, the existing pattern); `*.testing.flyingobject.ai` → tenant
+   ingress LB.
+7. Smoke, in order: `curl -fsSL https://testing.flyingobject.ai/ufo | sh` → onboard with a real
+   email →
    watch the Tenant CR reconcile (namespace, role + GUC, `ufo_dbos_*`, init Job, serve Ready) →
    chat turn round-trips live → **RLS proof**: onboard a second domain, `psql` as each tenant role
    and assert zero cross-visibility → `connect_account` OAuth round-trips → browser tool boots
    under the E2B carrier (else set `BROWSER_CDP_URL` per `serve.py:419-424` before opening
    traffic).
-8. `testing.flyingobject.ai` (metalcraft) is left running untouched during soak; nothing is
-   migrated — prod never served members, testing holds only test tenants. Decommission of the
-   metalcraft app and archiving of the two source repos happen after soak, not today.
+8. Nothing is migrated — testing held only metalcraft test tenants and prod never served members.
+   Archiving of the two source repos happens after soak; the prod (`flyingobject.ai`) flip is the
+   same terraform against `envs/prod` once testing has soaked.
 
-Rollback at any step ≤7: flip Cloudflare back; the metalcraft testing env was never modified.
+Rollback at any step: `terraform apply` of metalcraft's testing configuration restores the old
+app at `testing.flyingobject.ai` (its images remain in ECR and its DB/schema are untouched — ufo
+uses its own `ufo` database and roles).
 
 ## Doctrine fit / implications
 
