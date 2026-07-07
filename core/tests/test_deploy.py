@@ -80,7 +80,26 @@ def test_resolve_fails_loud_naming_every_missing_field(tmp_path: Path) -> None:
     message = str(error.value)
     assert "[deploy].host or [deploy].base_domain" in message
     assert "[deploy].bundle_image" in message
-    assert "[deploy].sandbox_image" in message
+
+
+def test_resolve_without_sandbox_image_leaves_it_unset(tmp_path: Path) -> None:
+    config, path = _config(
+        tmp_path,
+        f'\n[deploy]\nbackend = "k8s"\nhost = "chat.acme.com"\nbundle_image = "{BUNDLE}"\n',
+    )
+    request = resolve_request(config.deploy, config, path, WORKSPACE)
+    assert request.sandbox_image is None  # the e2b carrier pulls no image
+
+
+def test_resolve_parses_the_pinned_sandbox_image(tmp_path: Path) -> None:
+    config, path = _config(
+        tmp_path,
+        f'\n[deploy]\nbackend = "k8s"\nhost = "chat.acme.com"\n'
+        f'bundle_image = "{BUNDLE}"\nsandbox_image = "{SANDBOX}"\n',
+    )
+    request = resolve_request(config.deploy, config, path, WORKSPACE)
+    assert request.sandbox_image is not None
+    assert request.sandbox_image.digest == DIGEST
 
 
 def test_image_parse_requires_a_digest() -> None:

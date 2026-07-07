@@ -32,7 +32,6 @@ class TenantView:
 class DeployTarget:
     base_domain: str
     bundle_image: str
-    sandbox_image: str
 
 
 def slugify_domain(domain: str) -> str:
@@ -54,8 +53,9 @@ def image_ref(ref: str) -> dict[str, str]:
 
 def deploy_request(name: str, owner_email: str, target: DeployTarget) -> dict[str, object]:
     """The `DeployRequest` wire shape (snake_case JSON) the control plane consumes — the identical
-    contract `ufoctl deploy` produces. `postgres` and `secrets` are left to their defaults; the tier
-    is chosen server-side."""
+    contract `ufoctl deploy` produces. `postgres`, `secrets`, and `sandbox_image` are left to their
+    defaults: the hosted tier runs the e2b carrier, which needs no sandbox image, and the tier is
+    chosen server-side."""
     return {
         "tenant": {
             "name": name,
@@ -63,7 +63,6 @@ def deploy_request(name: str, owner_email: str, target: DeployTarget) -> dict[st
             "owner_email": owner_email,
         },
         "bundle_image": image_ref(target.bundle_image),
-        "sandbox_image": image_ref(target.sandbox_image),
         "config_toml": CONFIG_TOML,
         "pack": ASSISTANT_HOSTED_PACK,
     }

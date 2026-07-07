@@ -234,10 +234,11 @@ class DeployConfig(BaseModel):
     plane's base URL — posting is automatic when it (or `--remote`) is set. `host` is the public
     hostname; unset, it derives as `<name>.<base_domain>` when `base_domain` is given, else
     `localhost` for the compose backend (the k8s backend fails loud without one). `name` is the
-    tenant slug, defaulting to the workspace's agent name. `bundle_image`/`sandbox_image` are the
-    digest-pinned image refs (`repo@sha256:…`) the control plane runs — they come from a build+push,
-    so they are set here, not derived. `owner_email` is never here: it is read from the workspace
-    the owner's `ufoctl init` created."""
+    tenant slug, defaulting to the workspace's agent name. `bundle_image` is the digest-pinned
+    (`repo@sha256:…`) serve image the control plane runs; `sandbox_image` is the digest-pinned image
+    the `docker`/`pod` carrier pulls, left unset when the carrier needs none (the `e2b` carrier runs
+    from its own template). Both come from a build+push, so they are set here, not derived.
+    `owner_email` is never here: it is read from the workspace the owner's `ufoctl init` created."""
 
     model_config = ConfigDict(extra="forbid")
     backend: Literal["compose", "k8s"] = "compose"

@@ -16,8 +16,7 @@ from ufo_ext_gateway.provision import (
 from ufo.deploy import DeployRequest
 
 BUNDLE = "ghcr.io/metalcraftai/ufo@sha256:" + "a" * 64
-SANDBOX = "ghcr.io/metalcraftai/ufo-sandbox@sha256:" + "b" * 64
-TARGET = DeployTarget(base_domain="flyingobject.ai", bundle_image=BUNDLE, sandbox_image=SANDBOX)
+TARGET = DeployTarget(base_domain="flyingobject.ai", bundle_image=BUNDLE)
 
 
 def test_slugify_and_tenant_name() -> None:
@@ -35,6 +34,7 @@ def test_deploy_request_is_wire_valid() -> None:
     assert validated.tenant.owner_email == "me@acme.com"
     assert validated.pack == "assistant_hosted"
     assert validated.bundle_image.digest == "sha256:" + "a" * 64
+    assert validated.sandbox_image is None  # the hosted e2b carrier pulls no image
 
 
 def _join(handler: httpx.MockTransport) -> JoinOrProvision:

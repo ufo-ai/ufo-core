@@ -41,7 +41,7 @@ spec:
           properties:
             spec:
               type: object
-              required: [tenant, bundle_image, sandbox_image, config_toml, pack]
+              required: [tenant, bundle_image, config_toml, pack]
               properties:
                 tenant:
                   type: object
