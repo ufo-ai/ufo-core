@@ -1,7 +1,7 @@
 module "platform" {
   source = "../../modules/platform"
 
-  name                 = "testing"
+  name                 = "ufo-testing"
   region               = var.region
   hostname             = var.apex_host
   dns_zone_name        = "flyingobject.ai"
