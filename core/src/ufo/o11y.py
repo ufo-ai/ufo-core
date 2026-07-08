@@ -19,6 +19,8 @@ from opentelemetry.trace import Span, SpanKind
 
 INSTRUMENTATION_NAME = "ufo"
 METRIC_EXPORT_INTERVAL_MILLIS = 30_000
+OTLP_TRACES_PATH = "v1/traces"
+OTLP_METRICS_PATH = "v1/metrics"
 METRICS = (
     "turn_started_total",
     "turn_terminal_total",
@@ -46,18 +48,27 @@ _counters: dict[str, Counter] = {}
 
 
 def init_o11y(otlp_endpoint: str | None) -> None:
-    """Install OTel providers exporting to the OTLP endpoint; None keeps the no-op defaults."""
+    """Install OTel providers exporting to the OTLP/HTTP collector; None keeps no-op defaults."""
     if otlp_endpoint is None:
         return
+    traces_url, metrics_url = _otlp_signal_urls(otlp_endpoint)
     resource = Resource.create({"service.name": INSTRUMENTATION_NAME})
     tracer_provider = TracerProvider(resource=resource)
-    tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=otlp_endpoint)))
+    tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=traces_url)))
     trace.set_tracer_provider(tracer_provider)
     reader = PeriodicExportingMetricReader(
-        OTLPMetricExporter(endpoint=otlp_endpoint),
+        OTLPMetricExporter(endpoint=metrics_url),
         export_interval_millis=METRIC_EXPORT_INTERVAL_MILLIS,
     )
     metrics.set_meter_provider(MeterProvider(resource=resource, metric_readers=[reader]))
+
+
+def _otlp_signal_urls(otlp_endpoint: str) -> tuple[str, str]:
+    """(traces, metrics) URLs off the collector base. The OTLP/HTTP exporter posts to the exact
+    endpoint it is handed — it never appends a signal path — so the per-signal path the collector
+    receiver serves is built here, else exports hit the base URL and the collector 404s them."""
+    base = otlp_endpoint.rstrip("/")
+    return f"{base}/{OTLP_TRACES_PATH}", f"{base}/{OTLP_METRICS_PATH}"
 
 
 @contextmanager

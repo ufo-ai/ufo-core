@@ -63,3 +63,11 @@ def test_init_o11y_none_installs_no_providers():
     o11y.init_o11y(None)
     assert not isinstance(trace.get_tracer_provider(), TracerProvider)
     assert not isinstance(metrics.get_meter_provider(), MeterProvider)
+
+
+def test_otlp_signal_urls_append_the_per_signal_paths():
+    traces_url, metrics_url = o11y._otlp_signal_urls(
+        "http://otel-collector.ufo-system.svc.cluster.local:4318/"
+    )
+    assert traces_url == "http://otel-collector.ufo-system.svc.cluster.local:4318/v1/traces"
+    assert metrics_url == "http://otel-collector.ufo-system.svc.cluster.local:4318/v1/metrics"
