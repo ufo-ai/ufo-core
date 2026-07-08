@@ -4,7 +4,8 @@
 #
 # Apply after deploy/crds/tenant.yaml. Set the image, the platform ConfigMap, the
 # ufo-control-secrets Secret (Postgres admin DSN + role seed; owner DSN under postgres-owner-dsn
-# for the migrate Job's RLS bootstrap, deploy/migrate-job.yaml, and the gateway's member/claim
+# for the rollout migrate Job's RLS bootstrap (templated into infra/envs/*/ufo/control-plane.yaml.tpl)
+# and the gateway's member/claim
 # writes; the apex bearer secret under token-secret; the SES access/secret keys under
 # ses-access-key/ses-secret-key), and the ufo-platform-secrets Secret (model API keys + cloud
 # credentials the tenant pods read from env — the operator replicates it from this namespace into

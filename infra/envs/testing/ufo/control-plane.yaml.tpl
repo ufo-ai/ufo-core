@@ -4,6 +4,43 @@
 # image (ECR ufo-control by tag) and the renamed group/namespace. The ufo-system Namespace, the
 # platform ConfigMap, and the ufo-control-secrets / ufo-platform-secrets Secrets are applied by
 # terraform (ufo.tf); this file assumes they exist.
+#
+# Run-once-per-rollout schema migration + RLS bootstrap, as the RLS-bypassing owner. Named by the
+# image tag so a new bundle applies a FRESH Job (Jobs are immutable) and terraform destroys the
+# prior tag's Job — so every rollout brings the shared schema to head before serve reads it, instead
+# of drifting. `ufoctl migrate` (bundle image) reads UFO_OWNER_DSN + the baked [pack]; then
+# `ufo-control rls-bootstrap` (control image) (re)creates the workspace RLS policies — both as the
+# owner from ufo-control-secrets.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ufo-migrate-${image_tag}
+  namespace: ${namespace}
+  labels: {app: ufo-migrate}
+spec:
+  backoffLimit: 4
+  template:
+    metadata:
+      labels: {app: ufo-migrate}
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        - name: migrate
+          image: ${bundle_image}
+          args: [migrate]
+          env:
+            - name: UFO_OWNER_DSN
+              valueFrom:
+                secretKeyRef: {name: ufo-control-secrets, key: postgres-admin-dsn}
+      containers:
+        - name: rls-bootstrap
+          image: ${registry}/ufo-control:${image_tag}
+          args: [rls-bootstrap]
+          env:
+            - name: UFO_CONTROL_POSTGRES_OWNER_DSN
+              valueFrom:
+                secretKeyRef: {name: ufo-control-secrets, key: postgres-admin-dsn}
+---
 apiVersion: v1
 kind: ServiceAccount
 metadata:

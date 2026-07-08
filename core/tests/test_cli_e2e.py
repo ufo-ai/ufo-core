@@ -479,3 +479,28 @@ def test_chat_streams_a_terminal_frame_then_spend_reports_the_burn(
     spent = runner.invoke(cli.main, ["spend"])
     assert spent.exit_code == 0, spent.output
     assert "$0.000110" in spent.output
+
+
+def test_migrate_prefers_owner_dsn_env_as_asyncpg(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cluster migrate Job runs as the RLS-bypassing owner: `ufoctl migrate` takes UFO_OWNER_DSN
+    over the config's url and normalizes it to the asyncpg driver alembic dials (mirrors the proxy).
+    Without the env it falls back to the config's own url."""
+    from pathlib import Path
+
+    from ufo.config import BlobConfig, Config, DatabaseConfig
+
+    config = Config(
+        database=DatabaseConfig(url="sqlite+aiosqlite:///tenant.db"),
+        blob=BlobConfig(backend="filesystem", root=Path("/tmp/blobs")),
+    )
+    captured: dict[str, str] = {}
+    monkeypatch.setattr(cli, "load_config", lambda: config)
+    monkeypatch.setattr(cli, "apply_migrations", lambda url, pack: captured.update(url=url))
+
+    monkeypatch.setenv("UFO_OWNER_DSN", "postgresql://ufo_owner@rds/ufo")
+    assert CliRunner().invoke(cli.main, ["migrate"]).exit_code == 0
+    assert captured["url"] == "postgresql+asyncpg://ufo_owner@rds/ufo"
+
+    monkeypatch.delenv("UFO_OWNER_DSN", raising=False)
+    assert CliRunner().invoke(cli.main, ["migrate"]).exit_code == 0
+    assert captured["url"] == "sqlite+aiosqlite:///tenant.db"

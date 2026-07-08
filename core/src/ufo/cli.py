@@ -36,6 +36,7 @@ from ufo.ext.loader import load_manifests, lockfile_path
 from ufo.ext.store import ExtensionStore, read_catalog
 from ufo.grants import GrantSummary, grant_summaries
 from ufo.onboarding import AlreadyInitialized, Onboarded, Onboarding
+from ufo.proxy_serve import OWNER_DSN_ENV
 from ufo.proxy_serve import run as proxy_run
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME
@@ -216,9 +217,20 @@ async def _create_postgres_system_database(config: Config) -> None:
 def migrate() -> None:
     """Bring the database to head: apply core's schema plus every active extension's migration
     branch. `init` runs this once at onboarding; run it again after `ext install` adds a
-    table-owning extension, before `serve`, so the extension's tables exist. Idempotent."""
+    table-owning extension, before `serve`, so the extension's tables exist. Idempotent.
+
+    The shared-schema deploy runs this once as the RLS-bypassing owner (the tables' owner), so the
+    cluster migrate Job injects the owner DSN as `UFO_OWNER_DSN` — mirroring `ufoctl proxy` — while
+    the baked config still supplies `[pack]`. Without it, the config's own `database.url` is used
+    (local dev, per-tenant init)."""
     config = load_config()
-    apply_migrations(config.database.url, config.pack.name)
+    owner = os.environ.get(OWNER_DSN_ENV)
+    if owner:
+        owner = owner.replace("postgres://", "postgresql://", 1)
+        url = owner.replace("postgresql://", "postgresql+asyncpg://", 1)
+    else:
+        url = config.database.url
+    apply_migrations(url, config.pack.name)
     click.echo("schema at head")
 
 
