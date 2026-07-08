@@ -129,6 +129,7 @@ data "kubectl_file_documents" "control_plane" {
     cluster_issuer = "letsencrypt"
     ingress_class  = "nginx"
     bundle_image   = "${module.platform.ecr_registry}/ufo@${data.aws_ecr_image.ufo.image_digest}"
+    otlp_endpoint  = "http://otel-collector.${local.system_namespace}.svc.cluster.local:4318"
   })
 }
 

@@ -26,6 +26,7 @@ from ufo.sandbox.proxy.server import EgressProxy, PerAgentRules
 from ufo.sandbox.session import EGRESS_CA_CERT_ENV, EGRESS_CA_KEY_ENV
 
 MODEL_PROBES = ("claude-opus-4-8", "gpt-5")
+OWNER_DSN_ENV = "UFO_OWNER_DSN"
 
 
 def run() -> None:
@@ -66,13 +67,17 @@ def _egress_ca() -> tuple[str, str]:
 def _owner_dsn(config: Config) -> str:
     """The RLS-bypassing owner DSN the shared proxy opens — never the tenant-scoped `database.url`.
     One process serves every tenant, so it cannot use a tenant-pinned RLS role; the resolver's
-    explicit `workspace_id` filters scope each query. Unset fails loud."""
-    if not config.database.owner_url:
+    explicit `workspace_id` filters scope each query. Read from `UFO_OWNER_DSN` (a k8s secretKeyRef
+    injects it, since a password-bearing DSN cannot ride a configmap), falling back to `[database]
+    owner_url`; neither set fails loud."""
+    dsn = os.environ.get(OWNER_DSN_ENV) or config.database.owner_url
+    if not dsn:
         raise RuntimeError(
-            "[database] owner_url must be set for `ufoctl proxy` — the shared proxy bypasses RLS "
-            "with the owner role and scopes every query by the run token's workspace_id"
+            f"{OWNER_DSN_ENV} or [database] owner_url must be set for `ufoctl proxy` — the shared "
+            "proxy bypasses RLS with the owner role and scopes every query by the run token's "
+            "workspace_id"
         )
-    return config.database.owner_url
+    return dsn
 
 
 @dataclass(frozen=True)

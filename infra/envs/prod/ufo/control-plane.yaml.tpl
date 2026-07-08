@@ -157,3 +157,109 @@ spec:
       volumes:
         - name: config
           configMap: {name: ufo-control-platform}
+---
+# The shared egress proxy — one standalone service fronting every tenant's sandbox egress. It runs
+# from the ufo bundle image (`ufoctl proxy`), opens the RLS-bypassing owner DSN and scopes every
+# rule query by the run token's own workspace_id, signs sandbox leaves from a stable platform CA
+# (UFO_EGRESS_CA_*), and injects only the platform model-provider key. An off-cluster sandbox (e2b)
+# dials it through the internet-facing NLB below; the old per-tenant proxy LoadBalancer is gone.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ufo-sandbox-proxy-config
+  namespace: ${namespace}
+data:
+  proxy.toml: |
+    [pack]
+    name = "assistant_hosted"
+
+    # Inert placeholder: `ufoctl proxy` opens UFO_OWNER_DSN (the secretKeyRef below), never this
+    # url. core's Config requires [database] url; the proxy never connects to it.
+    [database]
+    url = "postgresql+asyncpg://unused@localhost/unused"
+
+    [sandbox]
+    proxy_port = 8888
+    proxy_public_url = "http://sandbox-proxy.${base_domain}:8888"
+
+    [o11y]
+    otlp_endpoint = "${otlp_endpoint}"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ufo-sandbox-proxy
+  namespace: ${namespace}
+  labels: {app: ufo-sandbox-proxy}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: ufo-sandbox-proxy}
+  template:
+    metadata:
+      labels: {app: ufo-sandbox-proxy}
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: proxy
+          image: ${bundle_image}
+          # ENTRYPOINT ["ufoctl"] is baked into the bundle image; `proxy` runs the shared egress proxy.
+          args: [proxy]
+          ports:
+            - {name: proxy, containerPort: 8888}
+          env:
+            # The RLS-bypassing owner DSN (password-bearing → a Secret, never the config ConfigMap).
+            - name: UFO_OWNER_DSN
+              valueFrom:
+                secretKeyRef: {name: ufo-control-secrets, key: postgres-admin-dsn}
+            # The stable platform CA the proxy signs every per-host sandbox leaf from.
+            - name: UFO_EGRESS_CA_CERT
+              valueFrom:
+                secretKeyRef: {name: ufo-egress-ca, key: UFO_EGRESS_CA_CERT}
+            - name: UFO_EGRESS_CA_KEY
+              valueFrom:
+                secretKeyRef: {name: ufo-egress-ca, key: UFO_EGRESS_CA_KEY}
+            # The platform model-provider keys the proxy swaps onto the wire for sandbox egress.
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef: {name: ufo-platform-secrets, key: ANTHROPIC_API_KEY}
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef: {name: ufo-platform-secrets, key: OPENAI_API_KEY}
+            - {name: UFO_CONFIG, value: /config/proxy.toml}
+          volumeMounts:
+            - {name: config, mountPath: /config}
+          # No /healthz on the raw CONNECT proxy; a TCP probe confirms the bind after fail-loud boot.
+          readinessProbe:
+            tcpSocket: {port: proxy}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: {port: proxy}
+            initialDelaySeconds: 30
+            periodSeconds: 20
+      volumes:
+        - name: config
+          configMap: {name: ufo-sandbox-proxy-config}
+---
+# Internet-facing NLB the off-cluster sandbox (e2b) dials. DNS-only (grey-cloud): a raw TCP CONNECT
+# proxy Cloudflare's HTTP proxy cannot front, and e2b connects from its own IPs, so it is NOT
+# source-restricted — reachability is bounded by the proxy's run-token authorization (every CONNECT
+# carries a token that must resolve to a running turn; an unauthorized or keyed-host CONNECT fails).
+apiVersion: v1
+kind: Service
+metadata:
+  name: ufo-sandbox-proxy
+  namespace: ${namespace}
+  labels: {app: ufo-sandbox-proxy}
+  annotations:
+    external-dns.alpha.kubernetes.io/hostname: sandbox-proxy.${base_domain}
+    external-dns.alpha.kubernetes.io/cloudflare-proxied: "false"
+    service.beta.kubernetes.io/aws-load-balancer-type: external
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+spec:
+  type: LoadBalancer
+  selector: {app: ufo-sandbox-proxy}
+  ports:
+    - {name: proxy, port: 8888, targetPort: proxy}

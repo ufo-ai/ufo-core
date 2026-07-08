@@ -95,10 +95,10 @@ class PlatformConfig(BaseModel):
     # that supplies credentials another way.
     serve_role_arn: str | None = None
 
-    # The externally-reachable base an off-cluster sandbox (e2b) dials the tenant's in-pod egress
-    # proxy at (e.g. http://sandbox-proxy.<domain>:8888). Set only for an off-cluster sandbox
-    # backend; the reconciler overlays it as [sandbox] proxy_public_url and the tenant chart exposes
-    # the proxy port on a LoadBalancer at this host. Unset for an in-cluster backend (docker/pod).
+    # The externally-reachable base an off-cluster sandbox (e2b) dials the shared egress proxy at
+    # (e.g. http://sandbox-proxy.<domain>:8888). Set only for an off-cluster sandbox backend; the
+    # reconciler overlays it as [sandbox] proxy_public_url so the sandbox reaches the ufo-system
+    # ufo-sandbox-proxy Deployment. Unset for an in-cluster backend (docker/pod).
     sandbox_proxy_url: str | None = None
 
     ingress_class: str = "nginx"

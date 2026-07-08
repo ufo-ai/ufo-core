@@ -15,7 +15,6 @@ import base64
 import secrets
 import tomllib
 from dataclasses import dataclass
-from urllib.parse import urlsplit
 
 import tomli_w
 from pydantic import BaseModel, ConfigDict
@@ -55,10 +54,6 @@ class TenantChartValues(BaseModel):
     ingress_class: str
     cluster_issuer: str
     workspace_id: str | None = None
-    # The DNS name the tenant chart publishes the sandbox-proxy LoadBalancer at, from the host of
-    # the platform's sandbox_proxy_url. Empty for an in-cluster sandbox backend, so the chart
-    # provisions no proxy LoadBalancer.
-    sandbox_proxy_hostname: str = ""
     # The IRSA role ARN annotated on the ufo-serve ServiceAccount (blob-bucket access + sandbox-fs
     # mount mint). Empty when the deploy supplies the runtime's AWS identity another way.
     serve_role_arn: str = ""
@@ -120,18 +115,9 @@ def render_tenant(
         ingress_class=platform.ingress_class,
         cluster_issuer=platform.cluster_issuer,
         workspace_id=postgres.workspace_id,
-        sandbox_proxy_hostname=_proxy_hostname(platform),
         serve_role_arn=platform.serve_role_arn or "",
     )
     return TenantRender(values=values, secret=secret)
-
-
-def _proxy_hostname(platform: PlatformConfig) -> str:
-    """The DNS name for the sandbox-proxy LoadBalancer, from the host of the platform's off-cluster
-    proxy URL — empty when unset (an in-cluster backend exposes no proxy)."""
-    if platform.sandbox_proxy_url is None:
-        return ""
-    return urlsplit(platform.sandbox_proxy_url).hostname or ""
 
 
 def _overlay_config(
