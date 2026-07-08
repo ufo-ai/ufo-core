@@ -183,7 +183,7 @@ spec:
           env:
             - {name: UFO_PUBLIC_BASE_URL, value: "https://${apex_host}"}
             - {name: UFO_BASE_DOMAIN, value: "${base_domain}"}
-            - {name: UFO_BUNDLE_IMAGE, value: "${registry}/ufo:${image_tag}"}
+            - {name: UFO_BUNDLE_IMAGE, value: "${bundle_image}"}
             - {name: UFO_GATEWAY_EMAIL_BACKEND, value: "logging"}
             - name: UFO_CONTROL_POSTGRES_OWNER_DSN
               valueFrom:

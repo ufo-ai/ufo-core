@@ -107,6 +107,11 @@ data "kubectl_file_documents" "tenant_crd" {
   content = file("${path.module}/../../../control/deploy/crds/tenant.yaml")
 }
 
+data "aws_ecr_image" "ufo" {
+  repository_name = "ufo"
+  image_tag       = var.image_tag
+}
+
 data "kubectl_file_documents" "control_plane" {
   content = templatefile("${path.module}/ufo/control-plane.yaml.tpl", {
     registry       = module.platform.ecr_registry
@@ -116,6 +121,7 @@ data "kubectl_file_documents" "control_plane" {
     base_domain    = var.tenant_base_domain
     cluster_issuer = "letsencrypt"
     ingress_class  = "nginx"
+    bundle_image   = "${module.platform.ecr_registry}/ufo@${data.aws_ecr_image.ufo.image_digest}"
   })
 }
 
