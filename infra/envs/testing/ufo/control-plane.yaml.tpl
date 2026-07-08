@@ -173,6 +173,7 @@ spec:
       labels: {app: ufo-gateway}
     spec:
       serviceAccountName: ufo-operator
+      enableServiceLinks: false
       containers:
         - name: gateway
           image: ${registry}/ufo-control:${image_tag}
