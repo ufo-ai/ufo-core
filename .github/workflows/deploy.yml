@@ -1,12 +1,28 @@
 name: Deploy (testing)
 
-# Dormant: manual dispatch only. GitHub Actions billing is blocked, so today's builds + applies run
-# from an operator machine (docker buildx + terraform apply); this is the shape to revive when
-# Actions is unblocked (RFC 0011 hardening ledger). Targets envs/testing (stage 1); repoint TF_DIR to
-# envs/prod for stage 2. Builds the three images at the commit short SHA, pushes to ECR (immutable,
-# skip-if-present so re-runs are idempotent), then terraform apply pins that tag — the control-plane
-# rollout. AWS auth is GitHub OIDC → the github-deploy role (no static keys).
+# Merge to main → build the images at the commit short SHA, push to ECR (immutable, skip-if-present
+# so re-runs are idempotent), publish the E2B sandbox template, then terraform apply pins that tag —
+# the control-plane rollout. PRs touching infra run terraform plan only (against the newest pushed
+# image, since the ECR digest data source needs a real tag). workflow_dispatch redeploys a chosen
+# tag. Targets envs/testing (stage 1); repoint TF_DIR to envs/prod for stage 2. AWS auth is GitHub
+# OIDC → the github-deploy role (no static keys).
 on:
+  push:
+    branches: [main]
+    paths:
+      - core/**
+      - control/**
+      - packs/**
+      - sandbox/**
+      - infra/**
+      - hosted.toml
+      - pyproject.toml
+      - uv.lock
+      - .github/workflows/deploy.yml
+  pull_request:
+    paths:
+      - infra/**
+      - .github/workflows/deploy.yml
   workflow_dispatch:
     inputs:
       image_tag:
@@ -14,6 +30,7 @@ on:
         required: false
         default: ""
 
+# Serialize deploys; never cancel an in-flight apply.
 concurrency:
   group: deploy-testing
   cancel-in-progress: false
@@ -34,14 +51,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Image tag
-        run: |
-          TAG="${{ inputs.image_tag }}"
-          [ -z "$TAG" ] && TAG="${GITHUB_SHA::8}"
-          echo "IMAGE_TAG=$TAG" >> "$GITHUB_ENV"
-
-      - uses: astral-sh/setup-uv@v5
-
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
@@ -49,9 +58,25 @@ jobs:
 
       - uses: aws-actions/amazon-ecr-login@v2
 
+      # Deploys tag the commit short SHA; a PR plans against the newest pushed bundle image so the
+      # aws_ecr_image digest lookup resolves.
+      - name: Image tag
+        run: |
+          TAG="${{ inputs.image_tag }}"
+          if [ -z "$TAG" ] && [ "${{ github.event_name }}" = "pull_request" ]; then
+            TAG=$(aws ecr describe-images --repository-name ufo \
+              --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags[0]' --output text)
+          fi
+          [ -z "$TAG" ] || [ "$TAG" = "None" ] && TAG="${GITHUB_SHA::8}"
+          echo "IMAGE_TAG=$TAG" >> "$GITHUB_ENV"
+
+      - uses: astral-sh/setup-uv@v5
+        if: github.event_name != 'pull_request'
+
       # Bundle image: `ufoctl bundle` freezes the assistant_hosted pack into a build context
       # (Dockerfile + ufo.toml + ufo.lock), then docker build installs the pinned ufo distribution.
       - name: Build + push bundle image
+        if: github.event_name != 'pull_request'
         run: |
           if aws ecr describe-images --repository-name ufo --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
             echo "ufo:$IMAGE_TAG already pushed — skipping"
@@ -64,11 +89,13 @@ jobs:
       # The hosted carrier is E2B: the sandbox artifact is the `ufo-sbx` template, published and
       # boot-verified from the same layer definition the docker carrier renders. No ECR image.
       - name: Publish E2B sandbox template
+        if: github.event_name != 'pull_request'
         env:
           E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
         run: uv run python sandbox/build_template.py
 
       - name: Build + push control-plane image
+        if: github.event_name != 'pull_request'
         run: |
           if aws ecr describe-images --repository-name ufo-control --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
             echo "ufo-control:$IMAGE_TAG already pushed — skipping"
@@ -86,7 +113,15 @@ jobs:
         run: terraform init -input=false
 
       # image_tag via -var: it must beat the placeholder in terraform.tfvars (tfvars beats TF_VAR_*).
+      - name: Terraform plan
+        if: github.event_name == 'pull_request'
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: terraform plan -input=false -no-color -var "image_tag=$IMAGE_TAG"
+
       - name: Terraform apply
+        if: github.event_name != 'pull_request'
         working-directory: ${{ env.TF_DIR }}
         env:
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}

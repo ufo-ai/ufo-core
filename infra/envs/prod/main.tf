@@ -10,9 +10,9 @@ module "platform" {
   ses_sender           = var.ses_sender
   e2b_sandbox_template = var.e2b_sandbox_template
 
-  # Static cluster-admins (applier-independent — see eks.tf for why creator-perms is off): the account
-  # root (a human operating as root keeps kubectl access — the deploy runs from an operator machine
-  # while Actions is billing-blocked) and the github-deploy role (for when deploy.yml is revived).
+  # Static cluster-admins (applier-independent — see eks.tf for why creator-perms is off): the
+  # github-deploy role (deploy.yml's terraform apply drives the helm/kubectl providers) and the
+  # account root (a human operating as root keeps kubectl access for local ops).
   cluster_admin_principal_arns = [
     "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root",
     "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/github-deploy",
