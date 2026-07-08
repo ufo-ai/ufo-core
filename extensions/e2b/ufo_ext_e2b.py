@@ -82,10 +82,13 @@ class E2BFiles(Protocol):
 
 class E2BSandbox(Protocol):
     sandbox_id: str
+    traffic_access_token: str | None
     commands: E2BCommands
     files: E2BFiles
 
     def pause(self, **opts: object) -> bool: ...
+
+    def get_host(self, port: int) -> str: ...
 
 
 class E2BSdk(Protocol):
@@ -135,7 +138,10 @@ class E2BCarrier:
         self._live[spec.conversation_id] = sandbox
         await self._mount_s3(sandbox, spec.mount)
         return SandboxHandle(
-            conversation_id=spec.conversation_id, container_id=sandbox.sandbox_id, mount=spec.mount
+            conversation_id=spec.conversation_id,
+            container_id=sandbox.sandbox_id,
+            mount=spec.mount,
+            traffic_token=sandbox.traffic_access_token,
         )
 
     async def _mount_s3(self, sandbox: E2BSandbox, mount: MountSpec) -> None:
@@ -218,6 +224,15 @@ class E2BCarrier:
         sandbox = await self._sandbox(handle)
         data = await asyncio.to_thread(sandbox.files.read, path, READ_FORMAT)
         await blob.put(key, data)
+
+    async def host(self, handle: SandboxHandle, port: int) -> str:
+        """The sandbox's public per-port host: e2b routes an in-sandbox port over a per-port
+        subdomain (`{port}-{sandbox_id}.{domain}`), reached from outside with the sandbox's traffic
+        token. The generic inbound path for any service the turn started inside the container (a
+        browser's CDP endpoint, a site's dev-server preview). `get_host` is pure address formatting,
+        no round trip."""
+        sandbox = await self._sandbox(handle)
+        return sandbox.get_host(port)
 
     async def destroy(self, handle: SandboxHandle) -> None:
         """Pause and drop the conversation's sandbox. The idle reaper reaps by conversation identity

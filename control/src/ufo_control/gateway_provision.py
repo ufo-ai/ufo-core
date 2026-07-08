@@ -22,7 +22,8 @@ CONFIG_TOML = (
     '[pack]\nname = "assistant_hosted"\n\n'
     '[memory]\nindex_backend = "turbopuffer"\n\n'
     '[research]\nsearch_provider = "exa"\n\n'
-    '[sandbox]\nbackend = "e2b"\n'
+    '[sandbox]\nbackend = "e2b"\n\n'
+    '[browser]\ncdp_provider = "sandbox-chrome"\n'
 )
 
 

@@ -5,7 +5,8 @@ selected by `config.browser.cdp_provider` — mints a per-turn `CdpLease`: a `Cd
 resolvable CDP URL plus any connection headers) held for the turn and released at turn end. Core's
 default `SandboxCdpProvider` wraps the `BROWSER_CDP_URL` endpoint in a static lease (a headless
 Chrome, or a sandbox-mapped port); an extension registers another provider at the `cdp_providers`
-Manifest seam, where browserbase mints and releases a fresh hosted session per turn. The engine that
+Manifest seam, where browserbase mints a fresh hosted session per turn or a per-conversation-sandbox
+provider resolves its endpoint against the Chrome running inside the turn's sandbox. The engine that
 connects the endpoint and drives the page is the browser extension, never core. `FindCompleter` is
 the host-side element-ranking hook that engine calls back through, metered onto the turn."""
 
@@ -16,6 +17,8 @@ import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Protocol
+
+from ufo.sandbox.session import SandboxSession
 
 BROWSER_CDP_URL_ENV = "BROWSER_CDP_URL"
 BROWSER_CDP_HEADERS_ENV = "BROWSER_CDP_HEADERS"
@@ -53,14 +56,16 @@ class CdpLease(Protocol):
 
 
 class CdpProvider(Protocol):
-    """Where a turn's Chrome comes from: `lease` mints one `CdpLease` per turn; `reattach`
+    """Where a turn's Chrome comes from: `lease` mints one `CdpLease` per turn, optionally given the
+    turn's `SandboxSession` so a per-conversation-sandbox provider resolves its endpoint against the
+    Chrome running inside that sandbox (a static or remote provider ignores it); `reattach`
     reconnects to the session a prior run's `token` names — returning a fresh lease over the live
     session, or raising `SessionGone` when it can no longer resolve so the caller mints instead.
     Process-wide (built once at boot), so a remote provider mints and releases a fresh hosted
     session each turn (reattachable within its TTL) while a sandbox provider wraps a static
     environment endpoint that outlives every turn."""
 
-    async def lease(self) -> CdpLease: ...
+    async def lease(self, sandbox: SandboxSession | None = None) -> CdpLease: ...
 
     async def reattach(self, token: str) -> CdpLease: ...
 
@@ -102,7 +107,7 @@ class SandboxCdpProvider:
         url = os.environ.get(BROWSER_CDP_URL_ENV)
         return cls(endpoint=CdpEndpoint(url, _env_cdp_headers()) if url else None)
 
-    async def lease(self) -> CdpLease:
+    async def lease(self, sandbox: SandboxSession | None = None) -> CdpLease:
         return StaticCdpLease(self.endpoint)
 
     async def reattach(self, token: str) -> CdpLease:
