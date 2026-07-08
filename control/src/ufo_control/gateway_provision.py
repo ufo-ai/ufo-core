@@ -18,7 +18,12 @@ from ufo_control.members import MemberRequest, add_member
 
 ASSISTANT_HOSTED_PACK = "assistant_hosted"
 TENANT_NAME_SHA_LEN = 8
-CONFIG_TOML = '[pack]\nname = "assistant_hosted"\n\n[memory]\nindex_backend = "turbopuffer"\n'
+CONFIG_TOML = (
+    '[pack]\nname = "assistant_hosted"\n\n'
+    '[memory]\nindex_backend = "turbopuffer"\n\n'
+    '[research]\nsearch_provider = "exa"\n\n'
+    '[sandbox]\nbackend = "e2b"\n'
+)
 
 
 class TooManyTenantsForDomain(RuntimeError):
