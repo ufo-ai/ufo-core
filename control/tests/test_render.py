@@ -51,6 +51,21 @@ def _platform() -> PlatformConfig:
     )
 
 
+def _platform_with_proxy() -> PlatformConfig:
+    return PlatformConfig.model_validate(
+        {
+            "chart_path": "/charts/ufo-tenant",
+            "registry": "ghcr.io/acme",
+            "tenant_postgres_host": "pg.svc:5432",
+            "redis_url": "redis://redis.svc:6379",
+            "blob_bucket": "acme-blobs",
+            "blob_region": "us-east-1",
+            "blob_s3_url": "https://s3.us-east-1.amazonaws.com",
+            "sandbox_proxy_url": "http://sandbox-proxy.ufo.app:8888",
+        }
+    )
+
+
 def _database_postgres() -> TenantPostgres:
     return TenantPostgres(url="postgresql+asyncpg://u:p@pg.svc:5432/ufo_acme")
 
@@ -76,6 +91,37 @@ def test_overlay_replaces_infra_and_preserves_operator_sections() -> None:
     assert config["pack"]["name"] == "assistant"
     assert config["models"]["reasoning_effort"] == "high"
     assert config["sandbox"]["backend"] == "docker"
+
+
+def test_overlay_writes_the_sandbox_proxy_url_and_preserves_backend() -> None:
+    render = render_tenant(
+        _request(config_toml=E2B_CONFIG, sandbox_image=None),
+        _platform_with_proxy(),
+        _database_postgres(),
+    )
+    config = tomllib.loads(render.secret.config_toml)
+    # The operator's backend passes through; the off-cluster proxy URL is overlaid beside it.
+    assert config["sandbox"]["backend"] == "e2b"
+    assert config["sandbox"]["proxy_public_url"] == "http://sandbox-proxy.ufo.app:8888"
+    # The chart publishes the sandbox-proxy LoadBalancer at the proxy URL's host.
+    assert render.values.sandbox_proxy_hostname == "sandbox-proxy.ufo.app"
+
+
+def test_overlay_includes_blob_s3_url_when_the_platform_sets_it() -> None:
+    # The s3fs workspace mount minter fails loud at boot without blob.s3_url; the platform sets the
+    # sandbox-reachable S3 endpoint so the mount initializes.
+    render = render_tenant(_request(), _platform_with_proxy(), _database_postgres())
+    config = tomllib.loads(render.secret.config_toml)
+    assert config["blob"]["s3_url"] == "https://s3.us-east-1.amazonaws.com"
+
+
+def test_overlay_omits_the_proxy_when_the_platform_leaves_it_unset() -> None:
+    # The default _platform() sets no sandbox_proxy_url: an in-cluster backend gets no proxy knob
+    # and no LoadBalancer hostname, so the operator's [sandbox] section passes through untouched.
+    render = render_tenant(_request(), _platform(), _database_postgres())
+    config = tomllib.loads(render.secret.config_toml)
+    assert "proxy_public_url" not in config["sandbox"]
+    assert render.values.sandbox_proxy_hostname == ""
 
 
 def test_database_tier_omits_system_url_and_workspace_id() -> None:

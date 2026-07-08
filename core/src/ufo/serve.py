@@ -129,7 +129,12 @@ def run() -> None:
             carrier=carrier,
             cdp_provider=_select_cdp_provider(config, manifests, workspace_id, credentials),
             search_provider=_select_search_provider(config, manifests, workspace_id, credentials),
-            proxy=_egress_proxy(asyncio.run(_resolver(config, credentials)), registry.pricing),
+            proxy=_egress_proxy(
+                asyncio.run(_resolver(config, credentials)),
+                registry.pricing,
+                config.sandbox.proxy_port,
+                config.sandbox.proxy_public_url,
+            ),
             dbos=dbos_client,
             subagents=SubagentRegistry((*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests))),
             subagent_grants=turn_subagent_grants(manifests),
@@ -285,18 +290,30 @@ def _select_carrier(config: Config, manifests: tuple[Manifest, ...]) -> Carrier:
     `local` carrier plus every carrier an extension contributes via its `carriers` Manifest point
     (`docker`, `e2b`, a remote runner). An extension name that collides with the built-in or another
     extension fails loud, and a backend name no carrier registers fails loud — so the selected name
-    resolves to exactly one factory, built once here and held as `Runtime.carrier`."""
+    resolves to exactly one factory, built once here and held as `Runtime.carrier`. An off-cluster
+    backend (its sandbox runs outside the serve pod's network) with no `[sandbox] proxy_public_url`
+    fails loud too: its sandbox could reach neither the in-pod proxy nor a metered egress route, so
+    it would run open — never a silent default."""
     factories: dict[str, Callable[[], Carrier]] = {"local": LocalCarrier}
+    off_cluster: set[str] = set()
     for manifest in manifests:
         for spec in manifest.carriers:
             if spec.name in factories:
                 raise RuntimeError(f"two carriers register backend {spec.name!r}")
             factories[spec.name] = spec.factory
+            if spec.off_cluster:
+                off_cluster.add(spec.name)
     factory = factories.get(config.sandbox.backend)
     if factory is None:
         raise NotRegisteredError(
             f"sandbox backend {config.sandbox.backend!r} is not a registered carrier "
             f"(have {sorted(factories)})"
+        )
+    if config.sandbox.backend in off_cluster and not config.sandbox.proxy_public_url:
+        raise RuntimeError(
+            f"sandbox backend {config.sandbox.backend!r} runs off-cluster and cannot reach the "
+            "in-pod egress proxy; set [sandbox] proxy_public_url to the externally-reachable proxy "
+            "URL so in-sandbox egress is credential-injected, default-denied, and metered"
         )
     return factory()
 
@@ -638,14 +655,18 @@ async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]:
         await heartbeat.retire()
 
 
-def _egress_proxy(resolver: PerAgentRules, pricing: Pricing) -> ProxyEndpoint:
+def _egress_proxy(
+    resolver: PerAgentRules, pricing: Pricing, port: int, public_url: str | None
+) -> ProxyEndpoint:
     """The sandbox's sole route out runs on its own event loop: a standalone network service, not
     part of the turn loop, that outlives every turn for the life of the process. The proxy resolves
     each request's rules through `resolver`, which reads the turn's agent and grants per turn, and
     authorizes each keyed-host CONNECT through `resolver.turn_live`, which reads the turn's status
     fresh so a real key is injected only while the turn is running. `pricing` is the deploy's merged
     model price table, so an in-sandbox model call is billed and stamped exactly as the host turn's
-    tokens are — a contributed slug at its real rate, under the same digest."""
+    tokens are — a contributed slug at its real rate, under the same digest. It binds the deploy's
+    stable `port` and carries `public_url` (the off-cluster sandbox's dial-back base) into the
+    endpoint every carrier threads into its sandboxes."""
     loop = asyncio.new_event_loop()
     threading.Thread(target=loop.run_forever, daemon=True).start()
 
@@ -657,7 +678,7 @@ def _egress_proxy(resolver: PerAgentRules, pricing: Pricing) -> ProxyEndpoint:
             ca_cert=cert,
             ca_key=key,
             pricing=pricing,
-        ).start()
+        ).start(port=port, public_url=public_url)
 
     return asyncio.run_coroutine_threadsafe(_boot(), loop).result(PROXY_STARTUP_TIMEOUT_SECONDS)
 

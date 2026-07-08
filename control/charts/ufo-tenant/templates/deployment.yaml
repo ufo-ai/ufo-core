@@ -24,6 +24,10 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.serve_port }}
+            # The in-process egress proxy: one bind per serve pod, exposed off-cluster through the
+            # sandbox-proxy LoadBalancer (service.yaml) when a remote sandbox backend is selected.
+            - name: proxy
+              containerPort: {{ .Values.proxy_port }}
           env:
             # Minted per tenant by the control plane, carried in the tenant Secret.
             - name: UFO_CREDENTIAL_KEY

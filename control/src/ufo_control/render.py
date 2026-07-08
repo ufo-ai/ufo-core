@@ -15,6 +15,7 @@ import base64
 import secrets
 import tomllib
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 import tomli_w
 from pydantic import BaseModel, ConfigDict
@@ -54,6 +55,10 @@ class TenantChartValues(BaseModel):
     ingress_class: str
     cluster_issuer: str
     workspace_id: str | None = None
+    # The DNS name the tenant chart publishes the sandbox-proxy LoadBalancer at, from the host of
+    # the platform's sandbox_proxy_url. Empty for an in-cluster sandbox backend, so the chart
+    # provisions no proxy LoadBalancer.
+    sandbox_proxy_hostname: str = ""
 
 
 @dataclass(frozen=True)
@@ -112,8 +117,17 @@ def render_tenant(
         ingress_class=platform.ingress_class,
         cluster_issuer=platform.cluster_issuer,
         workspace_id=postgres.workspace_id,
+        sandbox_proxy_hostname=_proxy_hostname(platform),
     )
     return TenantRender(values=values, secret=secret)
+
+
+def _proxy_hostname(platform: PlatformConfig) -> str:
+    """The DNS name for the sandbox-proxy LoadBalancer, from the host of the platform's off-cluster
+    proxy URL — empty when unset (an in-cluster backend exposes no proxy)."""
+    if platform.sandbox_proxy_url is None:
+        return ""
+    return urlsplit(platform.sandbox_proxy_url).hostname or ""
 
 
 def _overlay_config(
@@ -128,6 +142,13 @@ def _overlay_config(
     config["blob"] = _blob_section(platform)
     config["hub"] = {"backend": "redis", "url": platform.redis_url}
     config["connect"] = {"public_base_url": f"https://{request.tenant.host}"}
+    if platform.sandbox_proxy_url is not None:
+        # An off-cluster sandbox dials the in-pod egress proxy at this externally-reachable URL —
+        # merged onto the operator's [sandbox] section (its backend passes through untouched).
+        config["sandbox"] = {
+            **config.get("sandbox", {}),
+            "proxy_public_url": platform.sandbox_proxy_url,
+        }
     if platform.otlp_endpoint is not None:
         config["o11y"] = {"otlp_endpoint": platform.otlp_endpoint}
     return tomli_w.dumps(config)

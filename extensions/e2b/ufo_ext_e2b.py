@@ -8,11 +8,14 @@ on the deploy's template or resumes the conversation's live one; `exec` runs a c
 `commands.run`; `export` reads a produced file out with `files.read`; `destroy` pauses the sandbox
 so its next turn resumes cheaply. The container stays a disposable cache over the durable workspace.
 
-Egress for a remote sandbox needs a publicly-reachable proxy URL the sandbox dials back through;
-that route, the durable conversation→sandbox map that survives a process restart (so the reaper can
-reach a sandbox created by a prior process rather than leaving it to the provider's own idle-pause),
-and workspace materialization are the e2b depth this carrier is built to carry but does not yet
-wire."""
+A remote sandbox runs off-cluster, so it reaches the egress proxy at the proxy's externally-
+reachable public URL (not a host-local address): every command runs with `HTTP(S)_PROXY` dialing
+that URL, the turn's run token as the proxy basic-auth username so each metered request keys to the
+turn, the model sentinels the proxy swaps for the real key on the wire, and the proxy CA written
+into the sandbox so it terminates TLS the sandbox trusts. The s3fs mount step runs without that env
+— it talks to S3 directly with its own prefix-scoped credential, never through the agent's egress
+proxy. The reaper leans on the provider's own idle-pause to reclaim a sandbox created by a prior
+process; a durable conversation→sandbox map is the depth beyond that."""
 
 import asyncio
 import base64
@@ -32,11 +35,13 @@ from ufo.sdk.sandbox import (
     AWS_CREDENTIALS_PATH,
     MOUNT_HEALTH_CHECK_TIMEOUT_SECONDS,
     MOUNT_TIMEOUT_SECONDS,
+    SENTINEL_MODEL_KEY,
     WORKSPACE_DIR,
     BlobStore,
     CarrierSpec,
     ExecResult,
     MountSpec,
+    ProxyEndpoint,
     SandboxHandle,
     SandboxSpec,
     aws_credentials_file,
@@ -52,6 +57,37 @@ EXEC_TIMEOUT_CODE = 124
 READ_FORMAT: Literal["bytes"] = "bytes"
 CONVERSATION_METADATA_KEY = "ufo.conversation_id"
 E2B_LIFECYCLE: SandboxLifecycle = {"on_timeout": "pause", "auto_resume": True}
+CA_SANDBOX_PATH = "/home/user/.ufo-egress-ca.pem"
+
+
+def _egress_env(proxy: ProxyEndpoint, run_token: str) -> dict[str, str]:
+    """The environment a sandbox command runs under so its every network call routes through the
+    egress proxy: `HTTP(S)_PROXY` dial the proxy at its public base with the turn's run token as the
+    basic-auth username (so the proxy attributes and meters the request to the turn), the model keys
+    are the sentinels the proxy swaps for the real key on the wire, and the CA is the one written
+    into the sandbox so the proxy can terminate TLS the sandbox trusts. The run token is base64url,
+    so it drops into the URL's userinfo unescaped. Off-cluster means the proxy's public base is
+    required — absent it (the guard `serve` applies at boot), the sandbox would have no metered
+    route out, so this fails loud rather than build an open sandbox."""
+    if proxy.public_url is None:
+        raise RuntimeError(
+            "the e2b carrier runs off-cluster and needs a reachable egress proxy; "
+            "set [sandbox] proxy_public_url to the externally-reachable proxy URL"
+        )
+    scheme, _, authority = proxy.public_url.partition("://")
+    proxy_url = f"{scheme}://{run_token}:@{authority}"
+    return {
+        "HTTP_PROXY": proxy_url,
+        "HTTPS_PROXY": proxy_url,
+        "http_proxy": proxy_url,
+        "https_proxy": proxy_url,
+        "ANTHROPIC_API_KEY": SENTINEL_MODEL_KEY,
+        "OPENAI_API_KEY": SENTINEL_MODEL_KEY,
+        "SSL_CERT_FILE": CA_SANDBOX_PATH,
+        "REQUESTS_CA_BUNDLE": CA_SANDBOX_PATH,
+        "CURL_CA_BUNDLE": CA_SANDBOX_PATH,
+        "NODE_EXTRA_CA_CERTS": CA_SANDBOX_PATH,
+    }
 
 
 class E2BCommandResult(Protocol):
@@ -115,6 +151,7 @@ class E2BCarrier:
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
     sdk: E2BSdk = E2B_SDK
     _live: dict[UUID, E2BSandbox] = field(default_factory=dict)
+    _egress: dict[UUID, dict[str, str]] = field(default_factory=dict)
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         live = self._live.get(spec.conversation_id)
@@ -136,6 +173,10 @@ class E2BCarrier:
             )
             await asyncio.to_thread(sandbox.files.make_dir, WORKSPACE_DIR)
         self._live[spec.conversation_id] = sandbox
+        # Write the proxy CA and (re)build the turn's egress env on every create — a resume picks up
+        # this process's CA (the proxy mints a fresh one at boot) and this turn's run token.
+        await asyncio.to_thread(sandbox.files.write, CA_SANDBOX_PATH, spec.proxy.ca_cert)
+        self._egress[spec.conversation_id] = _egress_env(spec.proxy, spec.run_token)
         await self._mount_s3(sandbox, spec.mount)
         return SandboxHandle(
             conversation_id=spec.conversation_id,
@@ -149,7 +190,9 @@ class E2BCarrier:
         create/resume and is idempotent: skips a healthy mount so a subagent sharing the sandbox
         never remounts under an in-flight dispatch. Writes the prefix-scoped credential, then runs
         the root `prepare` and the agent `mount` through the sync SDK off the loop — the privileged
-        prepare runs as root, the s3fs mount as the agent."""
+        prepare runs as root, the s3fs mount as the agent. These steps pass no egress env, so s3fs
+        reaches S3 directly with its own scoped credential — never through the agent's egress proxy,
+        whose default-deny rules would refuse the S3 host at CONNECT (docker's PROXY_CLEAR_ARGS)."""
         if mount.kind != "s3":
             return
         if await self._mount_healthy(sandbox):
@@ -201,7 +244,9 @@ class E2BCarrier:
         string with no stdin channel, so argv is quoted into one command and any stdin rides in
         base64 through the sandbox's own `base64 -d` — the write path the file tools depend on. A
         non-zero exit and a command timeout arrive as SDK exceptions, mapped to the ExecResult the
-        session reads exactly as the shell's own exit code would."""
+        session reads exactly as the shell's own exit code would. The command runs under the turn's
+        egress env, so its every network call routes through the proxy with the turn's run token —
+        the raw model key never enters the sandbox and every request is metered."""
         sandbox = await self._sandbox(handle)
         command = shlex.join(argv)
         if stdin:
@@ -209,7 +254,11 @@ class E2BCarrier:
             command = f"printf %s {payload} | base64 -d | {command}"
         try:
             result = await asyncio.to_thread(
-                sandbox.commands.run, command, cwd=WORKSPACE_DIR, timeout=timeout_s
+                sandbox.commands.run,
+                command,
+                cwd=WORKSPACE_DIR,
+                envs=self._egress[handle.conversation_id],
+                timeout=timeout_s,
             )
         except CommandExitException as error:
             return ExecResult(stdout=error.stdout, stderr=error.stderr, exit_code=error.exit_code)
@@ -239,6 +288,7 @@ class E2BCarrier:
         with no container id, so a conversation this process still holds is paused, and one it never
         held (already gone, or created before a restart) is a no-op that never raises — the
         provider's own idle-pause reclaims a sandbox this process can no longer address."""
+        self._egress.pop(handle.conversation_id, None)
         live = self._live.pop(handle.conversation_id, None)
         if live is not None:
             await asyncio.to_thread(live.pause, api_key=self.api_key)
@@ -279,5 +329,5 @@ def manifest() -> Manifest:
     return Manifest(
         name=CARRIER_NAME,
         version="0.1.0",
-        carriers=(CarrierSpec(name=CARRIER_NAME, factory=build_e2b_carrier),),
+        carriers=(CarrierSpec(name=CARRIER_NAME, factory=build_e2b_carrier, off_cluster=True),),
     )

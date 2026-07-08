@@ -19,11 +19,13 @@ import ufo_ext_e2b as e2b_ext
 from e2b.exceptions import TimeoutException
 from e2b.sandbox.commands.command_handle import CommandExitException
 from ufo_ext_e2b import (
+    CA_SANDBOX_PATH,
     CONVERSATION_METADATA_KEY,
     E2B_API_KEY_ENVS,
     E2B_LIFECYCLE,
     E2B_TEMPLATE_ENV,
     EXEC_TIMEOUT_CODE,
+    SENTINEL_MODEL_KEY,
     E2BCarrier,
     build_e2b_carrier,
 )
@@ -54,6 +56,7 @@ class _Result:
 class _Commands:
     runs: list[tuple[str, str | None, float | None]] = field(default_factory=list)
     users: list[str | None] = field(default_factory=list)
+    envs: list[dict[str, str] | None] = field(default_factory=list)
     result: _Result = field(default_factory=lambda: _Result("out", "", 0))
     raises: Exception | None = None
     fail_on: tuple[str, ...] = ()
@@ -69,6 +72,7 @@ class _Commands:
     ) -> _Result:
         self.runs.append((cmd, cwd, timeout))
         self.users.append(user)
+        self.envs.append(envs)
         if any(token in cmd for token in self.fail_on):
             raise CommandExitException(stderr="", stdout="", exit_code=1, error="not mounted")
         if self.raises is not None:
@@ -147,12 +151,15 @@ class _Sdk:
         return self.sandboxes[sandbox_id]
 
 
+PROXY_PUBLIC_URL = "http://sandbox-proxy.test:8888"
+
+
 def _spec(conversation: UUID) -> SandboxSpec:
     return SandboxSpec(
         conversation_id=conversation,
         image_ref="ufo-sandbox:latest",
         mount=MountSpec(kind="filesystem", host_path="/tmp/ws"),
-        proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem"),
+        proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem", public_url=PROXY_PUBLIC_URL),
         run_token="run-token",
     )
 
@@ -173,7 +180,7 @@ def _s3_spec(conversation: UUID) -> SandboxSpec:
             region="us-east-1",
             path_style=True,
         ),
-        proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem"),
+        proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem", public_url=PROXY_PUBLIC_URL),
         run_token="run-token",
     )
 
@@ -189,7 +196,10 @@ async def test_create_mounts_the_s3_workspace_prefix_over_s3fs() -> None:
     handle = await carrier.create(_s3_spec(conversation))
 
     sandbox = sdk.sandboxes["sbx-1"]
-    assert sandbox.files.written == [(AWS_CREDENTIALS_PATH, aws_credentials_file(_S3_CREDS))]
+    assert sandbox.files.written == [
+        (CA_SANDBOX_PATH, "ca-pem"),
+        (AWS_CREDENTIALS_PATH, aws_credentials_file(_S3_CREDS)),
+    ]
     commands = [cmd for cmd, _, _ in sandbox.commands.runs]
     assert commands[0] == f"mountpoint -q {WORKSPACE_DIR}"
     assert "chmod 666 /dev/fuse" in commands[1]
@@ -200,6 +210,8 @@ async def test_create_mounts_the_s3_workspace_prefix_over_s3fs() -> None:
     assert "-o url=https://minio:9000" in commands[2]
     assert "-o use_path_request_style" in commands[2]
     assert sandbox.commands.users == [None, "root", None]
+    # The mount steps carry no egress env — s3fs reaches S3 directly, never through the proxy.
+    assert sandbox.commands.envs == [None, None, None]
     assert handle.mount is not None and handle.mount.kind == "s3"
 
 
@@ -212,7 +224,7 @@ async def test_create_skips_the_s3_mount_when_already_healthy() -> None:
     await carrier.create(_s3_spec(uuid4()))
 
     sandbox = sdk.sandboxes["sbx-1"]
-    assert sandbox.files.written == []
+    assert sandbox.files.written == [(CA_SANDBOX_PATH, "ca-pem")]
     assert [cmd for cmd, _, _ in sandbox.commands.runs] == [f"mountpoint -q {WORKSPACE_DIR}"]
 
 
@@ -232,6 +244,57 @@ async def test_create_opens_a_sandbox_on_the_template_and_returns_its_handle() -
     assert created["metadata"] == {CONVERSATION_METADATA_KEY: str(conversation)}
     assert WORKSPACE_DIR in sdk.sandboxes["sbx-1"].files.made_dirs
     assert handle.traffic_token == "traffic-tok"
+
+
+async def test_create_writes_the_proxy_ca_into_the_sandbox() -> None:
+    """The sandbox trusts the proxy's minted leaf certs only if it holds the proxy CA: create writes
+    this process's CA into the sandbox fs, at the path the egress env's CA vars point at."""
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+
+    await carrier.create(_spec(uuid4()))
+
+    assert (CA_SANDBOX_PATH, "ca-pem") in sdk.sandboxes["sbx-1"].files.written
+
+
+async def test_exec_runs_under_the_turn_egress_env() -> None:
+    """Every sandbox command routes out through the proxy: exec passes an egress env whose
+    HTTP(S)_PROXY dial the proxy's public URL with the turn's run token as the basic-auth username
+    (so the proxy meters the request to the turn), whose model keys are the sentinels the proxy
+    swaps for the real key on the wire, and whose CA vars point at the written proxy CA."""
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    handle = await carrier.create(_spec(uuid4()))
+
+    await carrier.exec(handle, ("bash", "-lc", "curl https://example.com"), b"", 60)
+
+    envs = sdk.sandboxes["sbx-1"].commands.envs[-1]
+    assert envs is not None
+    proxy_url = "http://run-token:@sandbox-proxy.test:8888"
+    assert envs["HTTP_PROXY"] == proxy_url
+    assert envs["HTTPS_PROXY"] == proxy_url
+    assert envs["http_proxy"] == proxy_url
+    assert envs["https_proxy"] == proxy_url
+    assert envs["ANTHROPIC_API_KEY"] == SENTINEL_MODEL_KEY
+    assert envs["OPENAI_API_KEY"] == SENTINEL_MODEL_KEY
+    assert envs["SSL_CERT_FILE"] == CA_SANDBOX_PATH
+    assert envs["REQUESTS_CA_BUNDLE"] == CA_SANDBOX_PATH
+
+
+async def test_create_without_a_reachable_proxy_url_fails_loud() -> None:
+    """The carrier's own fail-loud, behind the boot guard: an e2b spec whose proxy carries no public
+    URL cannot build a metered egress env, so create raises rather than run an open sandbox."""
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    spec = SandboxSpec(
+        conversation_id=uuid4(),
+        image_ref="ufo-sandbox:latest",
+        mount=MountSpec(kind="filesystem", host_path="/tmp/ws"),
+        proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem"),
+        run_token="run-token",
+    )
+    with pytest.raises(RuntimeError, match="proxy_public_url"):
+        await carrier.create(spec)
 
 
 async def test_host_returns_the_sandbox_public_per_port_host() -> None:
@@ -388,8 +451,27 @@ def test_config_backend_e2b_resolves_the_extension_contributed_carrier(
     config = Config(
         database=DatabaseConfig(url="sqlite+aiosqlite:///carrier.db"),
         blob=BlobConfig(backend="filesystem", root=Path("blobs")),
-        sandbox=SandboxConfig(backend="e2b"),
+        sandbox=SandboxConfig(backend="e2b", proxy_public_url=PROXY_PUBLIC_URL),
     )
     carrier = _select_carrier(config, (e2b_ext.manifest(),))
     assert isinstance(carrier, E2BCarrier)
     assert carrier.template == "tpl"
+
+
+def test_e2b_backend_without_proxy_public_url_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The off-cluster fail-closed guard: `[sandbox] backend = "e2b"` with no `proxy_public_url`
+    raises at carrier selection — its off-cluster sandbox could reach no metered egress route, so
+    open egress is never a silent default. The e2b Manifest marks the carrier `off_cluster`, so core
+    refuses it without naming e2b."""
+    _clear_e2b_env(monkeypatch)
+    monkeypatch.setenv(E2B_TEMPLATE_ENV, "tpl")
+    monkeypatch.setenv("E2B_API_KEY", "sk-env")
+    config = Config(
+        database=DatabaseConfig(url="sqlite+aiosqlite:///carrier.db"),
+        blob=BlobConfig(backend="filesystem", root=Path("blobs")),
+        sandbox=SandboxConfig(backend="e2b"),
+    )
+    with pytest.raises(RuntimeError, match="proxy_public_url"):
+        _select_carrier(config, (e2b_ext.manifest(),))

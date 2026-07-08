@@ -15,6 +15,13 @@ sandbox_image: ""
 
 serve_port: 8710
 
+# The in-process egress proxy port (core [sandbox] proxy_port). An off-cluster sandbox (e2b) dials
+# it through an internet-facing LoadBalancer this chart provisions when sandbox_proxy_hostname is
+# set; sandbox_proxy_hostname is the DNS name ExternalDNS publishes for that LoadBalancer (empty for
+# an in-cluster backend, which provisions no proxy LoadBalancer).
+proxy_port: 8888
+sandbox_proxy_hostname: ""
+
 # The per-tenant Secret (config + minted keys) the control plane applies out of band, and the
 # cluster Secret carrying model + cloud credentials. Referenced by name only — no secret in values.
 tenant_secret: ufo-tenant

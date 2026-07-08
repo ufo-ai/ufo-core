@@ -108,10 +108,15 @@ class CarrierSpec:
     and the `factory` `serve` calls once to build the Carrier. Core ships `docker` and `e2b`; an
     extension contributes another (a remote executor, a pooled or bring-your-own backend) without
     core naming it, and a name that collides with a built-in or another extension's fails loud at
-    boot. The selected carrier is held for the process's life as `Runtime.carrier`."""
+    boot. The selected carrier is held for the process's life as `Runtime.carrier`. `off_cluster`
+    marks a backend whose sandbox runs outside the serve pod's network (e2b) and so cannot reach
+    the in-pod egress proxy over a host-local address: selecting one with no `[sandbox]
+    proxy_public_url` fails loud at boot, since its sandbox would otherwise egress open and
+    unmetered."""
 
     name: str
     factory: Callable[[], Carrier]
+    off_cluster: bool = False
 
 
 @dataclass(frozen=True)

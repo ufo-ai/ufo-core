@@ -173,15 +173,21 @@ class EgressProxy:
     _meter_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False)
     _rule_cache: dict[str, tuple[Rule, ...]] = field(default_factory=dict, init=False)
 
-    async def start(self, bind_host: str = PROXY_BIND_HOST) -> ProxyEndpoint:
+    async def start(
+        self, bind_host: str = PROXY_BIND_HOST, port: int = 0, public_url: str | None = None
+    ) -> ProxyEndpoint:
+        """Bind the proxy and return the endpoint carriers thread into every sandbox. `port` is the
+        stable port a deploy fixes so an off-cluster sandbox and its exposing LoadBalancer share one
+        known address; the default 0 is an ephemeral bind for tests. `public_url` is the
+        externally-reachable base an off-cluster sandbox dials, carried through to the endpoint."""
         self._workdir = tempfile.TemporaryDirectory()
         root = Path(self._workdir.name)
         (root / "ca.crt").write_text(self.ca_cert)
         (root / "ca.key").write_text(self.ca_key)
         await _openssl("genrsa", "-out", str(root / "leaf.key"), "2048")
-        self._server = await asyncio.start_server(self._handle, bind_host, 0)
-        port = self._server.sockets[0].getsockname()[1]
-        return ProxyEndpoint(port=port, ca_cert=self.ca_cert)
+        self._server = await asyncio.start_server(self._handle, bind_host, port)
+        bound = self._server.sockets[0].getsockname()[1]
+        return ProxyEndpoint(port=bound, ca_cert=self.ca_cert, public_url=public_url)
 
     async def stop(self) -> None:
         if self._server is not None:

@@ -1,8 +1,9 @@
 # Default-deny ingress across the tenant namespace, then narrowly re-open ingress to the serve pods
-# on the serve port (the ingress controller reaches them through the Service). Egress is left open:
-# the whole-`serve` runtime must reach the model API, OAuth, S3, Postgres and Redis directly. Forcing
-# sandbox egress through core's in-process proxy (metalcraft's egress-proxy tiering) is the pod
-# carrier's concern (P2.b) and lands with it.
+# on the serve port (the ingress controller reaches them through the Service) and, when a remote
+# sandbox backend exposes the egress proxy off-cluster, on the proxy port (the sandbox-proxy
+# LoadBalancer forwards e2b's CONNECTs there). Egress is left open: the whole-`serve` runtime must
+# reach the model API, OAuth, S3, Postgres and Redis directly; the sandbox's own egress is confined
+# by the in-process proxy, not this policy.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -28,3 +29,7 @@ spec:
     - ports:
         - protocol: TCP
           port: {{ .Values.serve_port }}
+{{- if .Values.sandbox_proxy_hostname }}
+        - protocol: TCP
+          port: {{ .Values.proxy_port }}
+{{- end }}
