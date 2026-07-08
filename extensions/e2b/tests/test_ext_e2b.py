@@ -82,12 +82,13 @@ class _Commands:
 
 @dataclass
 class _Files:
-    contents: bytes = b""
     made_dirs: list[str] = field(default_factory=list)
     written: list[tuple[str, str | bytes]] = field(default_factory=list)
+    reads: list[str] = field(default_factory=list)
 
     def read(self, path: str, format: str) -> bytes:
-        return self.contents
+        self.reads.append(path)
+        return b""
 
     def make_dir(self, path: str, *, user: str | None = None) -> bool:
         self.made_dirs.append(path)
@@ -375,16 +376,35 @@ async def test_exec_maps_a_timeout_to_the_timeout_code() -> None:
     assert "timed out" in result.stderr
 
 
-async def test_export_reads_the_file_into_the_blob_store(tmp_path: Path) -> None:
+async def test_export_copies_the_file_server_side_from_the_workspace_prefix(
+    tmp_path: Path,
+) -> None:
+    """export promotes the produced file with a blob-store copy from the workspace S3 prefix to the
+    artifact key — it never reads the bytes back out through the sandbox SDK."""
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    conversation = uuid4()
+    handle = await carrier.create(_s3_spec(conversation))
+    key_prefix = f"conversations/{conversation}/workspace"
+    blob = FilesystemBlobStore(root=tmp_path)
+    await blob.put(f"{key_prefix}/out.txt", b"produced-bytes")
+
+    await carrier.export(handle, f"{WORKSPACE_DIR}/out.txt", blob, "artifacts/abc/out.txt")
+
+    assert await blob.get("artifacts/abc/out.txt") == b"produced-bytes"
+    assert sdk.sandboxes["sbx-1"].files.reads == []
+
+
+async def test_export_without_an_s3_mount_fails_loud(tmp_path: Path) -> None:
+    """A filesystem-mount handle has no S3 prefix to copy from, so export refuses it rather than
+    fall back to a read-through-the-pod."""
     sdk = _Sdk()
     carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
     handle = await carrier.create(_spec(uuid4()))
-    sdk.sandboxes["sbx-1"].files.contents = b"produced-bytes"
     blob = FilesystemBlobStore(root=tmp_path)
 
-    await carrier.export(handle, "/workspace/out.txt", blob, "exports/out.txt")
-
-    assert await blob.get("exports/out.txt") == b"produced-bytes"
+    with pytest.raises(RuntimeError, match="s3 workspace mount"):
+        await carrier.export(handle, f"{WORKSPACE_DIR}/out.txt", blob, "artifacts/abc/out.txt")
 
 
 async def test_destroy_pauses_the_sandbox() -> None:
