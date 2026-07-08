@@ -207,9 +207,9 @@ class CdpProviderSpec:
     """A cdp provider an extension registers, selected by `config.browser.cdp_provider`. `backend`
     is the name; `build` constructs the process-wide CdpProvider once at boot, only when selected,
     given a credential reader scoped to this manifest's slots (a remote provider reads its key
-    in-process, host-side, never in the sandbox). Core's default `sandbox_cdp` provider wraps the
-    `BROWSER_CDP_URL` endpoint in a static lease; a browserbase extension mints a fresh hosted
-    session per turn. The one BUA engine (the browser extension) connects whatever endpoint the
+    in-process, host-side, never in the sandbox). Core ships no provider: the `sandbox_chrome`
+    extension leases CDP from the turn's own sandbox, and a `browserbase` extension leases a remote
+    hosted endpoint. The one BUA engine (the browser extension) connects whatever endpoint the
     selected provider's per-turn lease yields — only the transport is configurable, never the
     engine."""
 

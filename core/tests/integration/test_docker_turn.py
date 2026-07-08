@@ -19,7 +19,6 @@ import sqlalchemy as sa
 from ufo_ext_docker import DockerCarrier
 
 from ufo.blob import FilesystemBlobStore
-from ufo.browser import SandboxCdpProvider
 from ufo.db import workspace_tx
 from ufo.ext.loader import HookChain
 from ufo.hub import InProcessHub
@@ -251,7 +250,7 @@ async def test_turn_execs_bash_in_a_live_container(
         ),
         hub=InProcessHub(),
         sandbox=SandboxSession(carrier=DockerCarrier(), handle=live_container),
-        cdp_provider=SandboxCdpProvider(endpoint=None),
+        cdp_provider=None,
         search_provider=None,
         tools=ToolRegistry(BUILTIN_TOOLS),
         tool_ext={},

@@ -207,7 +207,7 @@ class TurnEngine:
     compaction: Compaction
     hub: Hub
     sandbox: SandboxSession
-    cdp_provider: CdpProvider
+    cdp_provider: CdpProvider | None
     search_provider: SearchProvider | None
     tools: ToolRegistry
     tool_ext: dict[str, ExtensionContext]

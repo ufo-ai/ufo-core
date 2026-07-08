@@ -19,7 +19,6 @@ from ufo_testsupport.stream_gate import GatingHub, StreamGate, release_when_runn
 
 from ufo.accounting import CORE_PRICING, record_egress_request, record_turn_usage
 from ufo.blob import FilesystemBlobStore
-from ufo.browser import SandboxCdpProvider
 from ufo.config import Config
 from ufo.db import workspace_tx
 from ufo.ext.loader import skill_registry
@@ -161,7 +160,7 @@ def dbos_runtime(
             workspace_fs=None,
             hub=hub,
             carrier=StandInCarrier(),
-            cdp_provider=SandboxCdpProvider(endpoint=None),
+            cdp_provider=None,
             search_provider=None,
             proxy=proxy,
             dbos=dbos_client,

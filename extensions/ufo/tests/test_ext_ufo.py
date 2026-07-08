@@ -26,7 +26,6 @@ from ufo_ext_ufo.surface import (
 
 from ufo.accounting import CORE_PRICING
 from ufo.blob import FilesystemBlobStore
-from ufo.browser import SandboxCdpProvider
 from ufo.config import Config
 from ufo.db import workspace_tx
 from ufo.ext.loader import skill_registry
@@ -258,7 +257,7 @@ def runtime(dbos_launched: Config) -> Iterator[tuple[Config, InProcessHub, Files
             workspace_fs=None,
             hub=hub,
             carrier=StandInCarrier(),
-            cdp_provider=SandboxCdpProvider(endpoint=None),
+            cdp_provider=None,
             search_provider=None,
             proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
             dbos=dbos_client,

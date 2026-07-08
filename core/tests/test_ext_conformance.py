@@ -26,7 +26,6 @@ from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import MemoryStore, PageIndexer
 
 from ufo.blob import FilesystemBlobStore
-from ufo.browser import SandboxCdpProvider
 from ufo.config import (
     BlobConfig,
     BrowserConfig,
@@ -256,28 +255,26 @@ def _cdp_config(cdp_provider: str) -> Config:
 
 
 def test_core_selects_a_manifest_contributed_cdp_provider() -> None:
-    """The `cdp_providers` seam end to end: core's boot-time selection knows only the built-in
-    `sandbox_cdp` default, so resolving the sample's provider name proves the Manifest
-    `cdp_providers` point flowed into selection. Selecting a name no manifest registers, and two
-    manifests claiming one name, both fail loud; a named provider with no credential key set fails
-    loud."""
+    """The `cdp_providers` seam end to end: core ships no provider, so resolving the sample's
+    registered provider name proves the Manifest `cdp_providers` point flowed into selection.
+    Selecting a name no manifest registers yields None (a no-browser deploy needs none); two
+    manifests claiming one name fails loud; a provider whose extension declares credential slots
+    with no key set fails loud."""
     manifest = _sample_manifest()
     workspace_id = uuid4()
     store = _credential_store()
 
-    default = _select_cdp_provider(_cdp_config("sandbox_cdp"), (), workspace_id, None)
-    assert isinstance(default, SandboxCdpProvider)
+    assert _select_cdp_provider(_cdp_config("nonesuch"), (), workspace_id, None) is None
     selected = _select_cdp_provider(
         _cdp_config(sample.CDP_PROVIDER), (manifest,), workspace_id, store
     )
     assert isinstance(selected, sample.SampleCdpProvider)
-    with pytest.raises(RuntimeError, match="no extension registers it"):
-        _select_cdp_provider(_cdp_config(sample.CDP_PROVIDER), (), workspace_id, store)
+    assert _select_cdp_provider(_cdp_config(sample.CDP_PROVIDER), (), workspace_id, store) is None
     with pytest.raises(RuntimeError, match="two extensions register cdp provider"):
         _select_cdp_provider(
             _cdp_config(sample.CDP_PROVIDER), (manifest, manifest), workspace_id, store
         )
-    with pytest.raises(RuntimeError, match="needs a credential key"):
+    with pytest.raises(RuntimeError, match="declares credential slots"):
         _select_cdp_provider(_cdp_config(sample.CDP_PROVIDER), (manifest,), workspace_id, None)
 
 
@@ -291,26 +288,25 @@ async def test_sample_cdp_provider_yields_a_drivable_lease() -> None:
     await lease.aclose()
 
 
-def test_boot_validation_of_requires_fails_when_the_cdp_endpoint_is_unset(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_boot_validation_of_requires_fails_when_no_cdp_provider_is_registered() -> None:
     """The `requires` + boot-validation seam end to end: an extension declaring `requires` a seam
     whose backend is unusable fails `serve` at boot. With the browser extension's
-    `requires=("cdp_providers",)` and the default `sandbox_cdp` provider selected but no
-    `BROWSER_CDP_URL`, `_validate_requires` fails loud, naming the extension and the seam; setting
-    the endpoint clears it. A `requires` an extension names that core does not know also fails."""
-    monkeypatch.delenv("BROWSER_CDP_URL", raising=False)
+    `requires=("cdp_providers",)` and the selected provider registered by no active extension,
+    `_validate_requires` fails loud naming the extension and the seam; registering that provider
+    clears it. A `requires` an extension names that core does not know also fails."""
     workspace_id = uuid4()
     browser = Manifest(name="browser", version="0", requires=("cdp_providers",))
     with pytest.raises(RuntimeError, match=r"requires the 'cdp_providers' seam"):
-        _validate_requires(_cdp_config("sandbox_cdp"), (browser,), workspace_id, None)
+        _validate_requires(_cdp_config(sample.CDP_PROVIDER), (browser,), workspace_id, None)
 
-    monkeypatch.setenv("BROWSER_CDP_URL", "ws://127.0.0.1:9222")
-    _validate_requires(_cdp_config("sandbox_cdp"), (browser,), workspace_id, None)
+    provider = _sample_manifest()
+    _validate_requires(
+        _cdp_config(sample.CDP_PROVIDER), (browser, provider), workspace_id, _credential_store()
+    )
 
     unknown = Manifest(name="needs-nothing-real", version="0", requires=("nonesuch",))
     with pytest.raises(RuntimeError, match="unknown seam 'nonesuch'"):
-        _validate_requires(_cdp_config("sandbox_cdp"), (unknown,), workspace_id, None)
+        _validate_requires(_cdp_config(sample.CDP_PROVIDER), (unknown,), workspace_id, None)
 
 
 def test_core_selects_a_manifest_contributed_auth_proxy() -> None:

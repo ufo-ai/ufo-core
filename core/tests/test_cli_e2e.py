@@ -33,7 +33,6 @@ from ufo_testsupport.tables import DELETE_ORDER
 from ufo import cli
 from ufo.accounting import CORE_PRICING
 from ufo.blob import FilesystemBlobStore
-from ufo.browser import SandboxCdpProvider
 from ufo.config import Config, load_config
 from ufo.credentials import CredentialStore
 from ufo.db import dispose_db, init_db, workspace_tx
@@ -416,7 +415,7 @@ def chat_server(
             workspace_fs=None,
             hub=hub,
             carrier=StandInCarrier(),
-            cdp_provider=SandboxCdpProvider(endpoint=None),
+            cdp_provider=None,
             search_provider=None,
             proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
             dbos=dbos_client,

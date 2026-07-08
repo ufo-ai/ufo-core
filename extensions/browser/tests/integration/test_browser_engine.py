@@ -1,7 +1,7 @@
 """The BUA engine end to end against a REAL Chrome over CDP — the live proof the shell never gave.
 
-A headless Chrome is launched with `--remote-debugging-port`; `BROWSER_CDP_URL` points the default
-`SandboxCdpProvider` at it, and one `BuaSurface` connects and drives a real page: navigate →
+A headless Chrome is launched with `--remote-debugging-port`; `BROWSER_CDP_URL` points a small
+test-local cdp provider at it, and one `BuaSurface` connects and drives a real page: navigate →
 read_page → get_page_text → find → a `computer` screenshot and click → tabs create/context/close.
 Nothing here
 is faked — the CDP protocol handling (WebSocket transport, DOMSnapshot + accessibility join, input
@@ -9,11 +9,13 @@ synthesis, settle) is exercised against Chrome itself. Skips with a clear reason
 binary is present, so the suite stays collectable everywhere."""
 
 import base64
+import os
 import shutil
 import socket
 import subprocess
 import time
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
 
@@ -21,7 +23,7 @@ import httpx
 import pytest
 from ufo_ext_browser.bua.backend import BuaSurface
 
-from ufo.browser import SandboxCdpProvider
+from ufo.browser import CdpEndpoint, CdpLease
 
 CHROME_CANDIDATES = (
     "google-chrome",
@@ -103,8 +105,34 @@ def chrome_cdp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]
             process.kill()
 
 
+@dataclass(frozen=True)
+class _StaticLease:
+    endpoint_: CdpEndpoint
+
+    async def endpoint(self) -> CdpEndpoint:
+        return self.endpoint_
+
+    async def token(self) -> str:
+        return self.endpoint_.url
+
+    async def aclose(self) -> None:
+        return None
+
+
+@dataclass(frozen=True)
+class _EnvCdpProvider:
+    """Yields the Chrome the `chrome_cdp` fixture launched, from `BROWSER_CDP_URL` — the transport
+    the engine drives against; core ships no such provider, so the test carries its own."""
+
+    async def lease(self, sandbox: object | None = None) -> CdpLease:
+        return _StaticLease(CdpEndpoint(url=os.environ["BROWSER_CDP_URL"]))
+
+    async def reattach(self, token: str) -> CdpLease:
+        return _StaticLease(CdpEndpoint(url=os.environ["BROWSER_CDP_URL"]))
+
+
 def _surface() -> BuaSurface:
-    return BuaSurface(cdp_provider=SandboxCdpProvider.from_env(), find_completer=None, model=None)
+    return BuaSurface(cdp_provider=_EnvCdpProvider(), find_completer=None, model=None)
 
 
 async def test_bua_engine_drives_a_real_chrome_over_cdp(chrome_cdp: str) -> None:

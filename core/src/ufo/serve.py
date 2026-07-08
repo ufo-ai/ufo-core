@@ -18,9 +18,8 @@ from starlette.responses import Response
 
 from ufo.accounting import Pricing
 from ufo.blob import BlobStore, blob_store_for
-from ufo.browser import BROWSER_CDP_URL_ENV, CdpProvider, SandboxCdpProvider
+from ufo.browser import CdpProvider
 from ufo.config import (
-    DEFAULT_CDP_PROVIDER,
     IN_PROCESS_BACKEND,
     BlobConfig,
     Config,
@@ -348,40 +347,30 @@ def _select_cdp_provider(
     manifests: tuple[Manifest, ...],
     workspace_id: UUID,
     credentials: CredentialStore | None,
-) -> CdpProvider:
-    """The process-wide cdp provider the deploy selects: core's default `sandbox-cdp` provider (a
-    static lease over the `BROWSER_CDP_URL` endpoint), or a provider an extension registers through
-    its Manifest `cdp_providers` point, built once at boot with a credential reader scoped to that
-    extension's slots. Two extensions claiming one name fail loud, as does selecting a name no
-    extension registers or an extension shadowing the core `sandbox-cdp` default; a named provider
-    with no credential key set fails loud, since its factory may read a BYOK slot host-side. The
-    default is lazy — a missing URL fails at connect, not here — so a deploy without a browser
-    extension still boots; a browser extension's `requires` turns the missing URL into a boot
-    failure through `_validate_requires`."""
-    if config.browser.cdp_provider == DEFAULT_CDP_PROVIDER:
-        return SandboxCdpProvider.from_env()
+) -> CdpProvider | None:
+    """The process-wide cdp provider the deploy selects, or None when no active extension registers
+    that name — core ships no provider, so a deploy without a browser extension needs none and boots
+    with None here. A provider an extension contributes at its `cdp_providers` Manifest point is
+    built once at boot, only when selected, with a credential reader scoped to its slots (its
+    factory reads a BYOK slot host-side). Two extensions claiming one name fail loud; a provider
+    whose extension declares credential slots with no key set fails loud. A browser extension's
+    `requires` turns a None into a boot failure through `_validate_requires`."""
     specs: dict[str, tuple[CdpProviderSpec, Manifest]] = {}
     for manifest in manifests:
         for spec in manifest.cdp_providers:
-            if spec.backend == DEFAULT_CDP_PROVIDER:
-                raise RuntimeError(
-                    f"extension may not register the core cdp provider {spec.backend!r}"
-                )
             if spec.backend in specs:
                 raise RuntimeError(f"two extensions register cdp provider {spec.backend!r}")
             specs[spec.backend] = (spec, manifest)
     found = specs.get(config.browser.cdp_provider)
     if found is None:
-        raise NotRegisteredError(
-            f"config selects cdp provider {config.browser.cdp_provider!r} "
-            "but no extension registers it"
-        )
+        return None
     spec, manifest = found
-    if credentials is None:
-        raise RuntimeError(
-            f"cdp provider {config.browser.cdp_provider!r} needs a credential key but none is set"
-        )
     declared = frozenset(slot.name for slot in manifest.credentials)
+    if declared and credentials is None:
+        raise RuntimeError(
+            f"cdp provider {config.browser.cdp_provider!r} declares credential slots "
+            "but no credential key is set"
+        )
     context = context_for(workspace_id, manifest.name, declared, credentials)
     return spec.build(context.credentials)
 
@@ -419,17 +408,15 @@ def _require_cdp_provider(
     workspace_id: UUID,
     credentials: CredentialStore | None,
 ) -> None:
-    """The `cdp_providers` readiness contract: the selected provider resolves (unknown name,
-    collision, or missing credential key each fail loud) and, for the core `sandbox-cdp` default,
-    `BROWSER_CDP_URL` is set — so a browser extension active with no reachable Chrome fails at boot
-    rather than on the first browse."""
-    _select_cdp_provider(config, manifests, workspace_id, credentials)
-    if config.browser.cdp_provider == DEFAULT_CDP_PROVIDER and not os.environ.get(
-        BROWSER_CDP_URL_ENV
-    ):
+    """The `cdp_providers` readiness contract for an active browser extension: the selected provider
+    must be registered by an active extension (and, if its extension declares credential slots,
+    keyed) — else boot fails here naming it, rather than the first browse failing. Core ships no
+    provider, so a name no active extension registers resolves to None and fails loud here only
+    because a browser extension requires it."""
+    if _select_cdp_provider(config, manifests, workspace_id, credentials) is None:
         raise RuntimeError(
-            f"the {DEFAULT_CDP_PROVIDER!r} provider needs {BROWSER_CDP_URL_ENV} set to a reachable "
-            "Chrome DevTools endpoint"
+            f"cdp provider {config.browser.cdp_provider!r} is required but no active extension "
+            "registers it"
         )
 
 

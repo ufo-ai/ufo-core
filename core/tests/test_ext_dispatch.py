@@ -9,7 +9,6 @@ from cryptography.fernet import Fernet
 from pydantic import BaseModel
 
 from ufo.blob import FilesystemBlobStore
-from ufo.browser import SandboxCdpProvider
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, ScopedStore, context_for
@@ -233,7 +232,7 @@ def _engine(
         ),
         hub=InProcessHub(),
         sandbox=SandboxSession(carrier=StubCarrier(), handle=handle),
-        cdp_provider=SandboxCdpProvider(endpoint=None),
+        cdp_provider=None,
         search_provider=None,
         tools=ToolRegistry(tools),
         tool_ext=tool_ext,

@@ -23,7 +23,6 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from ufo.blob import FilesystemBlobStore
-from ufo.browser import SandboxCdpProvider
 from ufo.config import Config
 from ufo.db import workspace_tx
 from ufo.hub import InProcessHub
@@ -83,7 +82,7 @@ async def live_surface(
             workspace_fs=None,
             hub=hub,
             carrier=_StandInCarrier(),
-            cdp_provider=SandboxCdpProvider(endpoint=None),
+            cdp_provider=None,
             search_provider=None,
             proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
             dbos=runtime_dbos,

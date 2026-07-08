@@ -24,7 +24,6 @@ from pydantic import BaseModel
 
 import ufo.ext.loader as loader
 from ufo.blob import FilesystemBlobStore
-from ufo.browser import SandboxCdpProvider
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, ScopedStore, context_for
@@ -461,7 +460,7 @@ def _engine(
         ),
         hub=InProcessHub(),
         sandbox=SandboxSession(carrier=carrier or RecordingCarrier(), handle=handle),
-        cdp_provider=SandboxCdpProvider(endpoint=None),
+        cdp_provider=None,
         search_provider=None,
         tools=ToolRegistry(tools),
         tool_ext=tool_ext or {},

@@ -19,7 +19,6 @@ from ufo_ext_index_default import DefaultIndex
 
 from ufo.accounting import CORE_PRICING
 from ufo.blob import FilesystemBlobStore
-from ufo.browser import SandboxCdpProvider
 from ufo.config import Config
 from ufo.db import workspace_tx
 from ufo.ext.loader import skill_registry
@@ -157,7 +156,7 @@ def _install_runtime(config: Config, registry: ModelRegistry, carrier: _Counting
             workspace_fs=None,
             hub=InProcessHub(),
             carrier=carrier,
-            cdp_provider=SandboxCdpProvider(endpoint=None),
+            cdp_provider=None,
             search_provider=None,
             proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
             dbos=DBOSClient(system_database_url=config.database.system_url),

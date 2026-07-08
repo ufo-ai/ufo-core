@@ -70,7 +70,7 @@ class Runtime:
     workspace_fs: SandboxFsCredentialMinter | None
     hub: Hub
     carrier: Carrier
-    cdp_provider: CdpProvider
+    cdp_provider: CdpProvider | None
     search_provider: SearchProvider | None
     proxy: ProxyEndpoint
     dbos: DBOSClient
