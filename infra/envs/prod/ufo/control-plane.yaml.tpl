@@ -163,28 +163,6 @@ spec:
 # rule query by the run token's own workspace_id, signs sandbox leaves from a stable platform CA
 # (UFO_EGRESS_CA_*), and injects only the platform model-provider key. An off-cluster sandbox (e2b)
 # dials it through the internet-facing NLB below; the old per-tenant proxy LoadBalancer is gone.
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: ufo-sandbox-proxy-config
-  namespace: ${namespace}
-data:
-  proxy.toml: |
-    [pack]
-    name = "assistant_hosted"
-
-    # Inert placeholder: `ufoctl proxy` opens UFO_OWNER_DSN (the secretKeyRef below), never this
-    # url. core's Config requires [database] url; the proxy never connects to it.
-    [database]
-    url = "postgresql+asyncpg://unused@localhost/unused"
-
-    [sandbox]
-    proxy_port = 8888
-    proxy_public_url = "http://sandbox-proxy.${base_domain}:8888"
-
-    [o11y]
-    otlp_endpoint = "${otlp_endpoint}"
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -203,12 +181,13 @@ spec:
       containers:
         - name: proxy
           image: ${bundle_image}
-          # ENTRYPOINT ["ufoctl"] is baked into the bundle image; `proxy` runs the shared egress proxy.
+          # ENTRYPOINT ["ufoctl"] is baked in; `proxy` reads the bundle's own baked /app/ufo.toml
+          # (the config serve starts from) and takes its owner DSN, CA, and model keys from env below.
           args: [proxy]
           ports:
             - {name: proxy, containerPort: 8888}
           env:
-            # The RLS-bypassing owner DSN (password-bearing → a Secret, never the config ConfigMap).
+            # The RLS-bypassing owner DSN (password-bearing → a Secret, never a ConfigMap).
             - name: UFO_OWNER_DSN
               valueFrom:
                 secretKeyRef: {name: ufo-control-secrets, key: postgres-admin-dsn}
@@ -226,9 +205,6 @@ spec:
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef: {name: ufo-platform-secrets, key: OPENAI_API_KEY}
-            - {name: UFO_CONFIG, value: /config/proxy.toml}
-          volumeMounts:
-            - {name: config, mountPath: /config}
           # No /healthz on the raw CONNECT proxy; a TCP probe confirms the bind after fail-loud boot.
           readinessProbe:
             tcpSocket: {port: proxy}
@@ -238,9 +214,6 @@ spec:
             tcpSocket: {port: proxy}
             initialDelaySeconds: 30
             periodSeconds: 20
-      volumes:
-        - name: config
-          configMap: {name: ufo-sandbox-proxy-config}
 ---
 # Internet-facing NLB the off-cluster sandbox (e2b) dials. DNS-only (grey-cloud): a raw TCP CONNECT
 # proxy Cloudflare's HTTP proxy cannot front, and e2b connects from its own IPs, so it is NOT

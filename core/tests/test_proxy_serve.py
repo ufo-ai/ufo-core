@@ -3,7 +3,8 @@ from pathlib import Path
 import pytest
 
 from ufo.accounting import CORE_PRICING
-from ufo.config import BlobConfig, Config, DatabaseConfig
+from ufo.config import BlobConfig, Config, DatabaseConfig, load_config
+from ufo.ext.loader import load_manifests
 from ufo.ext.manifest import CredentialSlot, InjectionTarget, Manifest
 from ufo.proxy_serve import OWNER_DSN_ENV, ProxyServe, _egress_ca, _owner_dsn, model_rule_base
 from ufo.sandbox.proxy.rules import ANTHROPIC_HOST, ScopeRule, derive_model_rules
@@ -132,3 +133,17 @@ def test_owner_dsn_fails_loud_when_env_and_config_are_unset(
     monkeypatch.delenv(OWNER_DSN_ENV, raising=False)
     with pytest.raises(RuntimeError, match=OWNER_DSN_ENV):
         _owner_dsn(_config(owner_url=None))
+
+
+def test_bundle_baked_config_satisfies_the_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The proxy carries no bespoke config — it runs on the same `hosted.toml` the bundle bakes to
+    /app/ufo.toml. That baked base must load and satisfy `ProxyServe`: the pack resolves, declares
+    no injecting slot the shared proxy cannot honor, and the model base derives. The crashloop this
+    replaces (a hand-written proxy.toml missing a required section) had no test at all."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    baked = Path(__file__).parents[2] / "hosted.toml"
+    config = load_config(baked)
+    manifests = load_manifests(config.pack.name)
+    base = _proxy_serve(config, manifests)._base()
+    assert any(isinstance(rule, ScopeRule) for rule in base)
