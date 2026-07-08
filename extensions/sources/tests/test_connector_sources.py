@@ -601,7 +601,11 @@ async def test_asana_source_syncs_through_the_driver_into_recallable_memory(
     )
     page_feed = CorePageFeed(blob=blob)
     page_indexer = PageIndexer(
-        index=index, embed=embed, transaction=workspace_tx, chunker=TextChunker()
+        index=index,
+        embed=embed,
+        transaction=workspace_tx,
+        chunker=TextChunker(),
+        workspace_id=workspace_id,
     )
     service = MemoryStore(
         index=index, embed=embed, transaction=workspace_tx, workspace_id=workspace_id

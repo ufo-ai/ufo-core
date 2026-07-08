@@ -121,7 +121,13 @@ def _wire(
         blob=blob,
         postgres=database_url.startswith("postgresql"),
     )
-    indexer = PageIndexer(index=index, embed=embed, transaction=workspace_tx, chunker=TextChunker())
+    indexer = PageIndexer(
+        index=index,
+        embed=embed,
+        transaction=workspace_tx,
+        chunker=TextChunker(),
+        workspace_id=workspace_id,
+    )
 
     async def index_pages() -> None:
         batch = await feed.pages_changed_since(None, 50)
@@ -465,7 +471,10 @@ async def test_member_scoped_page_is_invisible_to_another_member(
         )
         await connection.execute(
             sa.insert(mem_page).values(
-                page_id=page_id, subject=member_subject(alice), created_at=sa.func.now()
+                page_id=page_id,
+                workspace_id=workspace_id,
+                subject=member_subject(alice),
+                created_at=sa.func.now(),
             )
         )
     _, _, service = _wire(database_url, probe, tmp_path / "blobs", workspace_id)

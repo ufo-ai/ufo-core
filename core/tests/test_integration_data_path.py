@@ -189,7 +189,11 @@ async def test_folder_source_syncs_indexes_and_is_recalled(
     driver = SyncDriver(backends={FOLDER_BACKEND: FolderSource()}, blob=blob, postgres=postgres)
     page_feed = CorePageFeed(blob=blob)
     page_indexer = PageIndexer(
-        index=index, embed=embed, transaction=workspace_tx, chunker=TextChunker()
+        index=index,
+        embed=embed,
+        transaction=workspace_tx,
+        chunker=TextChunker(),
+        workspace_id=workspace_id,
     )
     service = MemoryStore(
         index=index, embed=embed, transaction=workspace_tx, workspace_id=workspace_id
