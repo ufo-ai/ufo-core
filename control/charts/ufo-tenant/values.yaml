@@ -22,6 +22,10 @@ serve_port: 8710
 proxy_port: 8888
 sandbox_proxy_hostname: ""
 
+# IRSA role ARN annotated on the ufo-serve ServiceAccount (blob-bucket access + sandbox-fs mount
+# mint). Empty for a deploy that supplies the runtime's AWS identity another way (local/dev).
+serve_role_arn: ""
+
 # The per-tenant Secret (config + minted keys) the control plane applies out of band, and the
 # cluster Secret carrying model + cloud credentials. Referenced by name only — no secret in values.
 tenant_secret: ufo-tenant

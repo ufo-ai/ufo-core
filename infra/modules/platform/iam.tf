@@ -131,10 +131,18 @@ module "irsa_app_s3" {
     local.ses_enabled ? { ses = aws_iam_policy.app_ses[0].arn } : {},
   )
 
+  # Tenant serve pods run in per-tenant namespaces (ufo-<slug>), not only ufo-system, so the trust
+  # admits ufo-serve in any ufo-* namespace via a glob (StringLike) alongside the exact control-plane
+  # SAs. Every use assumes sandbox-fs with a prefix-scoped session policy, so a tenant pod reaches
+  # only its own workspace prefix regardless of which namespace it runs in.
+  assume_role_condition_test = "StringLike"
   oidc_providers = {
     main = {
-      provider_arn               = module.eks.oidc_provider_arn
-      namespace_service_accounts = [for sa in local.s3_service_accounts : "${local.system_namespace}:${sa}"]
+      provider_arn = module.eks.oidc_provider_arn
+      namespace_service_accounts = concat(
+        [for sa in local.s3_service_accounts : "${local.system_namespace}:${sa}"],
+        ["ufo-*:ufo-serve"],
+      )
     }
   }
   tags = local.tags

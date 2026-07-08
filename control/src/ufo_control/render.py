@@ -59,6 +59,9 @@ class TenantChartValues(BaseModel):
     # the platform's sandbox_proxy_url. Empty for an in-cluster sandbox backend, so the chart
     # provisions no proxy LoadBalancer.
     sandbox_proxy_hostname: str = ""
+    # The IRSA role ARN annotated on the ufo-serve ServiceAccount (blob-bucket access + sandbox-fs
+    # mount mint). Empty when the deploy supplies the runtime's AWS identity another way.
+    serve_role_arn: str = ""
 
 
 @dataclass(frozen=True)
@@ -118,6 +121,7 @@ def render_tenant(
         cluster_issuer=platform.cluster_issuer,
         workspace_id=postgres.workspace_id,
         sandbox_proxy_hostname=_proxy_hostname(platform),
+        serve_role_arn=platform.serve_role_arn or "",
     )
     return TenantRender(values=values, secret=secret)
 

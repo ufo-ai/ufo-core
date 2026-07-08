@@ -38,6 +38,11 @@ output "sandbox_fs_role_arn" {
   value       = aws_iam_role.sandbox_fs.arn
 }
 
+output "app_s3_role_arn" {
+  description = "IRSA role annotated on the ufo-serve ServiceAccount — the pod's boto3 reaches the blob bucket and assumes sandbox-fs for the s3fs mount (serve_role_arn)."
+  value       = module.irsa_app_s3.iam_role_arn
+}
+
 output "rds_endpoint" {
   value = module.rds.db_instance_endpoint
 }
