@@ -141,12 +141,13 @@ async def _ensure_group_role(connection: asyncpg.Connection) -> None:
 
 async def _ensure_tenant_role(connection: asyncpg.Connection, role: str, password: str) -> None:
     exists = await connection.fetchval("select 1 from pg_roles where rolname = $1", role)
-    clause = f"login in role \"{APP_GROUP_ROLE}\" password '{password}'"
     if exists is None:
-        await connection.execute(f'create role "{role}" {clause}')
+        await connection.execute(
+            f'create role "{role}" login in role "{APP_GROUP_ROLE}" password \'{password}\''
+        )
     else:
-        await connection.execute(f'alter role "{role}" with {clause}')
-        await connection.execute(f'grant "{APP_GROUP_ROLE}" to "{role}"')
+        await connection.execute(f"alter role \"{role}\" with login password '{password}'")
+    await connection.execute(f'grant "{APP_GROUP_ROLE}" to "{role}"')
 
 
 async def _grant_app_group(connection: asyncpg.Connection) -> None:

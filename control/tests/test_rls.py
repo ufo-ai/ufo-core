@@ -143,6 +143,18 @@ def rls_env() -> Iterator[RlsEnv]:
             os.environ[PG_ROLE_SEED_ENV] = previous_seed
 
 
+async def test_reprovisioning_an_existing_tenant_is_idempotent(rls_env: RlsEnv) -> None:
+    acme = rls_env.tenants[0]
+    result = await _provision(acme.name, acme.workspace_id)
+    assert result.workspace_id == acme.workspace_id
+    connection = await asyncpg.connect(_libpq(result.url))
+    try:
+        pinned = await connection.fetchval("select current_setting('app.workspace_id')")
+        assert pinned == acme.workspace_id
+    finally:
+        await connection.close()
+
+
 async def test_each_tenant_role_sees_only_its_own_workspace(rls_env: RlsEnv) -> None:
     for tenant in rls_env.tenants:
         connection = await asyncpg.connect(_libpq(tenant.postgres.url))
