@@ -49,12 +49,15 @@ locals {
     ingress_class = "nginx"
     cluster_issuer = "letsencrypt"
     platform_secret = "ufo-platform-secrets"
+
+    otlp_endpoint = "http://otel-collector.${local.system_namespace}.svc.cluster.local:4318"
   TOML
 
   ufo_manifests = merge(
     data.kubectl_file_documents.tenant_crd.manifests,
     data.kubectl_file_documents.control_plane.manifests,
     data.kubectl_file_documents.cluster_services.manifests,
+    data.kubectl_file_documents.observability.manifests,
   )
 }
 
@@ -138,6 +141,18 @@ data "kubectl_file_documents" "cluster_services" {
     namespace       = local.system_namespace
     secret_postgres = module.platform.secret_names.postgres
     secret_platform = module.platform.secret_names.platform
+    secret_api_keys = module.platform.secret_names.api_keys
+  })
+}
+
+# Shared OpenTelemetry collector (ufo-system): tenant serve pods export OTLP to it and it forwards to
+# Datadog. Pinned public collector-contrib image (carries the datadog exporter); DD key from the
+# datadog-api-key Secret (api-keys SM entry). The platform_config points tenants at its OTLP/HTTP port.
+data "kubectl_file_documents" "observability" {
+  content = templatefile("${path.module}/ufo/observability.yaml.tpl", {
+    namespace       = local.system_namespace
+    collector_image = "otel/opentelemetry-collector-contrib:0.115.0"
+    dd_site         = "datadoghq.com"
     secret_api_keys = module.platform.secret_names.api_keys
   })
 }
