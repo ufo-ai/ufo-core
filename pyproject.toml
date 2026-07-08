@@ -70,7 +70,7 @@ web = "ufo_ext_web.manifest:manifest"
 [project.entry-points."ufo.pack"]
 assistant = "ufo_pack_assistant:pack"
 assistant_hosted = "ufo_pack_assistant_hosted:pack"
-gateway = "ufo_pack_gateway:pack"
+apex = "ufo_pack_gateway:pack"
 sample_pack = "ufo_pack_sample:pack"
 
 [project.entry-points.pytest11]
