@@ -112,11 +112,19 @@ data "kubectl_file_documents" "tenant_crd" {
   content = file("${path.module}/../../../control/deploy/crds/tenant.yaml")
 }
 
+data "aws_ecr_image" "ufo" {
+  repository_name = "ufo"
+  image_tag       = var.image_tag
+}
+
 data "kubectl_file_documents" "control_plane" {
   content = templatefile("${path.module}/ufo/control-plane.yaml.tpl", {
-    registry  = module.platform.ecr_registry
-    image_tag = var.image_tag
-    namespace = local.system_namespace
+    registry      = module.platform.ecr_registry
+    image_tag     = var.image_tag
+    namespace     = local.system_namespace
+    base_domain   = module.platform.hostname
+    bundle_image  = "${module.platform.ecr_registry}/ufo@${data.aws_ecr_image.ufo.image_digest}"
+    otlp_endpoint = "http://otel-collector.${local.system_namespace}.svc.cluster.local:4318"
   })
 }
 

@@ -15,13 +15,6 @@ sandbox_image: ""
 
 serve_port: 8710
 
-# The in-process egress proxy port (core [sandbox] proxy_port). An off-cluster sandbox (e2b) dials
-# it through an internet-facing LoadBalancer this chart provisions when sandbox_proxy_hostname is
-# set; sandbox_proxy_hostname is the DNS name ExternalDNS publishes for that LoadBalancer (empty for
-# an in-cluster backend, which provisions no proxy LoadBalancer).
-proxy_port: 8888
-sandbox_proxy_hostname: ""
-
 # IRSA role ARN annotated on the ufo-serve ServiceAccount (blob-bucket access + sandbox-fs mount
 # mint). Empty for a deploy that supplies the runtime's AWS identity another way (local/dev).
 serve_role_arn: ""

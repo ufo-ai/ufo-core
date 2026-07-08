@@ -5,7 +5,7 @@ import pytest
 from ufo.accounting import CORE_PRICING
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.ext.manifest import CredentialSlot, InjectionTarget, Manifest
-from ufo.proxy_serve import ProxyServe, _egress_ca, _owner_dsn
+from ufo.proxy_serve import OWNER_DSN_ENV, ProxyServe, _egress_ca, _owner_dsn
 from ufo.sandbox.proxy.rules import ANTHROPIC_HOST, ScopeRule, derive_model_rules
 from ufo.sandbox.session import EGRESS_CA_CERT_ENV, EGRESS_CA_KEY_ENV
 
@@ -88,10 +88,23 @@ def test_egress_ca_fails_loud_when_a_half_is_unset(monkeypatch: pytest.MonkeyPat
         _egress_ca()
 
 
-def test_owner_dsn_reads_the_config_field() -> None:
+def test_owner_dsn_prefers_the_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A k8s secretKeyRef injects the password-bearing DSN as UFO_OWNER_DSN, which wins over the
+    (placeholder) config field the proxy config carries."""
+    monkeypatch.setenv(OWNER_DSN_ENV, "postgresql://env-owner@db/ufo")
+    assert _owner_dsn(_config(owner_url="postgresql://config-owner@db/ufo")) == (
+        "postgresql://env-owner@db/ufo"
+    )
+
+
+def test_owner_dsn_falls_back_to_the_config_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(OWNER_DSN_ENV, raising=False)
     assert _owner_dsn(_config(owner_url="postgresql://owner@db/ufo")) == "postgresql://owner@db/ufo"
 
 
-def test_owner_dsn_fails_loud_when_unset() -> None:
-    with pytest.raises(RuntimeError, match="owner_url"):
+def test_owner_dsn_fails_loud_when_env_and_config_are_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(OWNER_DSN_ENV, raising=False)
+    with pytest.raises(RuntimeError, match=OWNER_DSN_ENV):
         _owner_dsn(_config(owner_url=None))

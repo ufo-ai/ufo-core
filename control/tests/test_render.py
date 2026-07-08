@@ -102,11 +102,10 @@ def test_overlay_writes_the_sandbox_proxy_url_and_preserves_backend() -> None:
         _database_postgres(),
     )
     config = tomllib.loads(render.secret.config_toml)
-    # The operator's backend passes through; the off-cluster proxy URL is overlaid beside it.
+    # The operator's backend passes through; the shared proxy's URL is overlaid beside it so the
+    # off-cluster sandbox dials the ufo-system egress proxy.
     assert config["sandbox"]["backend"] == "e2b"
     assert config["sandbox"]["proxy_public_url"] == "http://sandbox-proxy.ufo.app:8888"
-    # The chart publishes the sandbox-proxy LoadBalancer at the proxy URL's host.
-    assert render.values.sandbox_proxy_hostname == "sandbox-proxy.ufo.app"
 
 
 def test_overlay_includes_blob_s3_url_when_the_platform_sets_it() -> None:
@@ -118,12 +117,11 @@ def test_overlay_includes_blob_s3_url_when_the_platform_sets_it() -> None:
 
 
 def test_overlay_omits_the_proxy_when_the_platform_leaves_it_unset() -> None:
-    # The default _platform() sets no sandbox_proxy_url: an in-cluster backend gets no proxy knob
-    # and no LoadBalancer hostname, so the operator's [sandbox] section passes through untouched.
+    # The default _platform() sets no sandbox_proxy_url: an in-cluster backend gets no proxy knob,
+    # so the operator's [sandbox] section passes through untouched.
     render = render_tenant(_request(), _platform(), _database_postgres())
     config = tomllib.loads(render.secret.config_toml)
     assert "proxy_public_url" not in config["sandbox"]
-    assert render.values.sandbox_proxy_hostname == ""
 
 
 def test_overlay_points_serve_at_the_platform_otlp_collector() -> None:
