@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import threading
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse
@@ -15,6 +16,7 @@ from fastapi import FastAPI
 from starlette.requests import Request
 from starlette.responses import Response
 
+from ufo.accounting import Pricing
 from ufo.blob import BlobStore, blob_store_for
 from ufo.browser import BROWSER_CDP_URL_ENV, CdpProvider, SandboxCdpProvider
 from ufo.config import (
@@ -57,9 +59,12 @@ from ufo.loop.queue import Runtime, init_runtime
 from ufo.loop.subagents import SubagentRegistry
 from ufo.models.registry import model_registry
 from ufo.o11y import init_o11y, log
+from ufo.proxy_serve import model_rule_base
 from ufo.runtime_instance import BootGuard, Heartbeat
 from ufo.sandbox.fs_creds import DEFAULT_S3_REGION, AwsStsClient, SandboxFsCredentialMinter
 from ufo.sandbox.local import LocalCarrier
+from ufo.sandbox.proxy.rules import Rule, derive_credential_rules
+from ufo.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
 from ufo.sandbox.session import EGRESS_CA_CERT_ENV, Carrier, ProxyEndpoint
 from ufo.schema import tables
 from ufo.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION
@@ -76,6 +81,8 @@ from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.surfaces.artifacts import router as artifacts_router
 from ufo.surfaces.cli import CONNECT_CALLBACK_PATH, router
 from ufo.surfaces.hub_tail import HubTailer
+
+PROXY_STARTUP_TIMEOUT_SECONDS = 30
 
 
 def run() -> None:
@@ -118,7 +125,7 @@ def run() -> None:
             carrier=carrier,
             cdp_provider=_select_cdp_provider(config, manifests, workspace_id, credentials),
             search_provider=_select_search_provider(config, manifests, workspace_id, credentials),
-            proxy=_proxy_endpoint(config),
+            proxy=_proxy_endpoint(config, manifests, credentials, registry.pricing),
             dbos=dbos_client,
             subagents=SubagentRegistry((*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests))),
             subagent_grants=turn_subagent_grants(manifests),
@@ -639,13 +646,22 @@ async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]:
         await heartbeat.retire()
 
 
-def _proxy_endpoint(config: Config) -> ProxyEndpoint:
-    """The shared egress proxy's endpoint the carrier threads into every sandbox. The proxy runs as
-    a standalone `ufoctl proxy` service, not in this pod, so serve only carries the address and
-    trust material: the stable platform CA (from env, so the sandbox's trust store validates the
-    proxy's minted leaves), the deploy's stable `proxy_port`, and `proxy_public_url` (the
-    off-cluster sandbox's dial-back base). The CA cert is the sandbox's trust anchor for the
-    proxy's TLS, so an unset one fails loud rather than shipping a sandbox that reaches no host."""
+def _proxy_endpoint(
+    config: Config,
+    manifests: tuple[Manifest, ...],
+    credentials: CredentialStore | None,
+    pricing: Pricing,
+) -> ProxyEndpoint:
+    """The egress proxy endpoint the carrier threads into every sandbox, in the shape this deploy
+    takes. With `[sandbox] proxy_public_url` set (hosted, multi-node) the proxy runs as a standalone
+    `ufoctl proxy` off this pod, so serve only carries the address and trust material: the stable
+    platform CA from env (the sandbox's trust anchor for the proxy's minted leaves), the deploy's
+    stable `proxy_port`, and that off-cluster dial-back base. An unset CA fails loud rather than
+    shipping a sandbox that reaches no host. Unset (local, single-node) serve runs the proxy
+    in-process, minting its own ephemeral CA — no shared trust material to source, no separate
+    service to run alongside."""
+    if config.sandbox.proxy_public_url is None:
+        return _local_egress_proxy(config, manifests, credentials, pricing)
     ca_cert = os.environ.get(EGRESS_CA_CERT_ENV)
     if not ca_cert:
         raise RuntimeError(
@@ -657,6 +673,59 @@ def _proxy_endpoint(config: Config) -> ProxyEndpoint:
         ca_cert=ca_cert,
         public_url=config.sandbox.proxy_public_url,
     )
+
+
+def _local_egress_proxy(
+    config: Config,
+    manifests: tuple[Manifest, ...],
+    credentials: CredentialStore | None,
+    pricing: Pricing,
+) -> ProxyEndpoint:
+    """The single-node sandbox's sole route out, run in-process on its own event loop — a
+    standalone network service, not part of the turn loop, that outlives every turn for the
+    process's life. One workspace's serve owns it, so (unlike the shared `ufoctl proxy`) it mints an
+    ephemeral CA with no shared trust material to carry and injects this workspace's own credential
+    secrets with no injecting-slot ban. The resolver reads the turn's agent and grants per turn
+    through `workspace_tx` — already scoped to this deploy's tenant DB by `init_db` — and authorizes
+    each keyed-host CONNECT against the turn's live status, so a real key is injected only while the
+    turn runs. It binds `proxy_port` and carries no `public_url`: the in-pod sandbox forms a
+    host-local address from the port alone."""
+    resolver = PerAgentRules(
+        base=asyncio.run(_local_rule_base(config, manifests, credentials)),
+        grants=GrantStore() if credentials is not None else None,
+    )
+    loop = asyncio.new_event_loop()
+    threading.Thread(target=loop.run_forever, daemon=True).start()
+
+    async def _boot() -> ProxyEndpoint:
+        ca_cert, ca_key = await generate_ca()
+        return await EgressProxy(
+            resolve=resolver.resolve,
+            authorize=resolver.turn_live,
+            ca_cert=ca_cert,
+            ca_key=ca_key,
+            pricing=pricing,
+        ).start(port=config.sandbox.proxy_port)
+
+    return asyncio.run_coroutine_threadsafe(_boot(), loop).result(PROXY_STARTUP_TIMEOUT_SECONDS)
+
+
+async def _local_rule_base(
+    config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None
+) -> tuple[Rule, ...]:
+    """The local proxy's static base: the shared model-provider egress plus this single workspace's
+    injected credential slots. The shared proxy forbids injecting slots; the local proxy owns the
+    one workspace, so it swaps their stored secrets onto the wire itself. A slot that needs
+    injection with no credential key set fails loud."""
+    base = model_rule_base(config)
+    if not any(slot.injection for manifest in manifests for slot in manifest.credentials):
+        return base
+    if credentials is None:
+        raise RuntimeError(
+            f"credential key env {config.credentials.key_env!r} is unset but a slot needs injection"
+        )
+    workspace_id = await _sole_workspace_id()
+    return (*base, *await derive_credential_rules(manifests, workspace_id, credentials))
 
 
 BIND_ADDRESSES = frozenset({"0.0.0.0", "127.0.0.1", "localhost", "::", "::1"})

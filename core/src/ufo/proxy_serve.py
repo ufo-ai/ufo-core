@@ -29,6 +29,28 @@ MODEL_PROBES = ("claude-opus-4-8", "gpt-5")
 OWNER_DSN_ENV = "UFO_OWNER_DSN"
 
 
+def model_rule_base(config: Config) -> tuple[Rule, ...]:
+    """The proxy's model-provider egress base, shared by the standalone `ProxyServe` and serve's
+    in-process local proxy: each configured provider whose key is set in env is reachable and its
+    sentinel swaps to the real key on the wire; no key set anywhere means the sandbox would have no
+    egress route, so it fails loud. The one place a deploy's model hosts become egress rules."""
+    key_envs = (config.models.anthropic_api_key_env, config.models.openai_api_key_env)
+    hosts: set[str] = set()
+    rules: list[Rule] = []
+    for env_name, probe in zip(key_envs, MODEL_PROBES, strict=True):
+        key = os.environ.get(env_name)
+        if not key:
+            continue
+        for rule in derive_model_rules(probe, key):
+            if isinstance(rule, ScopeRule):
+                hosts |= rule.allowed_hosts
+            else:
+                rules.append(rule)
+    if not hosts:
+        raise RuntimeError("no model provider key set; the sandbox would have no egress route")
+    return (ScopeRule(allowed_hosts=frozenset(hosts)), *rules)
+
+
 def run() -> None:
     """Boot the shared egress proxy: load config the way `serve` does, source the owner DSN and the
     stable CA (failing loud on either unset), meter model usage against the deploy's merged price
@@ -109,11 +131,10 @@ class ProxyServe:
         await asyncio.Event().wait()
 
     def _base(self) -> tuple[Rule, ...]:
-        """The proxy's static rule base: model-provider egress only. Each configured provider whose
-        key is set is reachable and its sentinel swaps to the real key on the wire; no key set
-        anywhere means the sandbox would have no egress route, so it fails loud. The shared proxy
-        cannot inject per-tenant credential secrets, so an injecting credential slot in the active
-        pack fails loud — that deploy needs a per-tenant proxy, not this one."""
+        """The proxy's static rule base: the shared model-provider egress (`model_rule_base`) and
+        nothing tenant-specific. The shared proxy cannot inject per-tenant credential secrets, so an
+        injecting credential slot in the active pack fails loud — that deploy needs a per-tenant
+        proxy, not this one — checked before the model base so the diagnosis is the injection."""
         injecting = sorted(
             slot.name
             for manifest in self.manifests
@@ -125,18 +146,4 @@ class ProxyServe:
                 f"the shared egress proxy cannot inject per-tenant credential secrets, but the "
                 f"active pack declares injecting credential slot(s) {injecting}"
             )
-        key_envs = (self.config.models.anthropic_api_key_env, self.config.models.openai_api_key_env)
-        hosts: set[str] = set()
-        rules: list[Rule] = []
-        for env_name, probe in zip(key_envs, MODEL_PROBES, strict=True):
-            key = os.environ.get(env_name)
-            if not key:
-                continue
-            for rule in derive_model_rules(probe, key):
-                if isinstance(rule, ScopeRule):
-                    hosts |= rule.allowed_hosts
-                else:
-                    rules.append(rule)
-        if not hosts:
-            raise RuntimeError("no model provider key set; the sandbox would have no egress route")
-        return (ScopeRule(allowed_hosts=frozenset(hosts)), *rules)
+        return model_rule_base(self.config)

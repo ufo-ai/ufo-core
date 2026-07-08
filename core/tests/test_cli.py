@@ -1,8 +1,12 @@
 """The chat stream renderer: the live cost meter may never corrupt streamed text."""
 
 import io
+import os
+from pathlib import Path
 
-from ufo.cli import _TurnDisplay
+import pytest
+
+from ufo.cli import _load_dotenv, _TurnDisplay
 
 DONE_FRAME: dict[str, object] = {
     "status": "done",
@@ -129,3 +133,26 @@ def test_cancelled_erases_pending_meter() -> None:
     display.tick(1000, 5000)
     display.terminal({"status": "cancelled", "text": "stopped by user"})
     assert screen(buffer.getvalue()) == ["stopped by user", ""]
+
+
+def test_load_dotenv_fills_unset_vars_without_overriding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`.env` is the smooth default: it fills what the environment leaves unset — an exported var
+    wins, a `#` comment and blank line are skipped, and a leading `export` and surrounding quotes on
+    the value are stripped — so a developer's exports and the file both work."""
+    (tmp_path / ".env").write_text(
+        "# a comment\n"
+        "UFO_TEST_SET=from-file\n"
+        'UFO_TEST_QUOTED="quoted value"\n'
+        "export UFO_TEST_EXPORTED=exported\n"
+        "\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("UFO_TEST_SET", "from-env")
+    monkeypatch.delenv("UFO_TEST_QUOTED", raising=False)
+    monkeypatch.delenv("UFO_TEST_EXPORTED", raising=False)
+    _load_dotenv()
+    assert os.environ["UFO_TEST_SET"] == "from-env"
+    assert os.environ["UFO_TEST_QUOTED"] == "quoted value"
+    assert os.environ["UFO_TEST_EXPORTED"] == "exported"

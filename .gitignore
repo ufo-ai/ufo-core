@@ -9,7 +9,10 @@ dist/
 implementation-details.md
 ufo.toml
 blobs/
+bundle/
+deploy/
 *.db
+ufo.db-*
 .coverage
 .claude/
 .worktrees/

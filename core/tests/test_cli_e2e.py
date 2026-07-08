@@ -109,6 +109,33 @@ def test_init_writes_config_and_token_then_fails_loud_on_rerun(
     assert "already initialized" in second.output
 
 
+def _dotenv(text: str) -> dict[str, str]:
+    return dict(line.split("=", 1) for line in text.splitlines() if line.strip())
+
+
+def test_init_provisions_dev_secrets_into_dotenv(cli_home: CliRunner) -> None:
+    """`init` mints the dev secrets a zero-config `serve` needs into a cwd `.env` — a valid Fernet
+    credential key and the artifact-token secret — and reports that serve auto-loads it, so the next
+    `serve` boots with no manual env export."""
+    result = cli_home.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
+    assert result.exit_code == 0, result.output
+    assert ".env" in result.output
+    env = _dotenv(Path(".env").read_text())
+    Fernet(env["UFO_CREDENTIAL_KEY"].encode())
+    assert env["UFO_ARTIFACT_TOKEN_SECRET"]
+
+
+def test_init_does_not_clobber_an_existing_dotenv_key(cli_home: CliRunner) -> None:
+    """A key already in `.env` is left untouched — init only fills what is missing, so a developer's
+    own value (a real model key, a pinned secret) survives re-provisioning."""
+    Path(".env").write_text("UFO_ARTIFACT_TOKEN_SECRET=preexisting\n")
+    result = cli_home.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
+    assert result.exit_code == 0, result.output
+    env = _dotenv(Path(".env").read_text())
+    assert env["UFO_ARTIFACT_TOKEN_SECRET"] == "preexisting"
+    Fernet(env["UFO_CREDENTIAL_KEY"].encode())
+
+
 def test_spend_cap_set_then_list(cli_home: CliRunner) -> None:
     _init(cli_home)
     created = cli_home.invoke(

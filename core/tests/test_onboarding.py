@@ -283,13 +283,14 @@ def test_init_skip_migrations_onboards_without_migrating(
         assert result.exit_code == 0, result.output
 
 
-def test_cold_start_without_credential_key_fails_cleanly_then_recovers(
+def test_cold_start_mints_the_credential_key_for_onboarding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """O1: init without UFO_CREDENTIAL_KEY, when an active extension's onboarding step needs it
-    (the sample adds one, activated here via an unpinned config that runs the full discovered set),
-    must fail loud BEFORE creating anything, leaving no wedged half-onboarded workspace — setting
-    the key and re-running then succeeds, not hitting AlreadyInitialized."""
+    """O1 (zero-config): init without UFO_CREDENTIAL_KEY — even with an active extension whose
+    onboarding step needs it (the sample adds one, activated here via an unpinned config that runs
+    the full discovered set) — mints the key into `.env` (which `serve` auto-loads), runs the step
+    with it, and onboards cleanly. Re-running is idempotent (AlreadyInitialized), not a second
+    workspace."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-onboard")
     monkeypatch.delenv("UFO_CREDENTIAL_KEY", raising=False)
     monkeypatch.setattr(cli, "UFOCTL_DIR", tmp_path / ".ufoctl")
@@ -300,10 +301,14 @@ def test_cold_start_without_credential_key_fails_cleanly_then_recovers(
             '[blob]\nbackend = "filesystem"\nroot = "./blobs"\n'
         )
         first = runner.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
-        assert first.exit_code != 0
-        assert "UFO_CREDENTIAL_KEY" in first.output
-        assert not (tmp_path / ".ufoctl" / "token").exists()
-        monkeypatch.setenv("UFO_CREDENTIAL_KEY", Fernet.generate_key().decode())
-        recovered = runner.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
-        assert recovered.exit_code == 0, recovered.output
+        assert first.exit_code == 0, first.output
+        env = Path(".env").read_text()
+        minted = next(
+            line.split("=", 1)[1].strip()
+            for line in env.splitlines()
+            if line.startswith("UFO_CREDENTIAL_KEY=")
+        )
+        Fernet(minted.encode())
         assert (tmp_path / ".ufoctl" / "token").read_text()
+        second = runner.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
+        assert second.exit_code != 0

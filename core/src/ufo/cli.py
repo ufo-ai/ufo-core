@@ -61,11 +61,43 @@ name = "assistant"
 [research]
 search_provider = "exa"
 """
+DOTENV_PATH = Path(".env")
+
+
+def _dotenv_pairs(text: str) -> list[tuple[str, str]]:
+    """Parse `.env` text into (key, value) pairs — the whole format: one `KEY=VALUE` per line, blank
+    lines and `#` comments skipped, a leading `export` and matching surrounding quotes stripped."""
+    pairs: list[tuple[str, str]] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        name = key.strip().removeprefix("export ").strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        pairs.append((name, value))
+    return pairs
+
+
+def _load_dotenv() -> None:
+    """Load a cwd `.env` into the environment before any verb reads a key, so exported secrets and
+    `ufoctl init`'s minted dev secrets both arrive with no manual `export` — the smooth local
+    default. An already-set var wins (an explicit `export` overrides the file), so this only fills
+    what is unset."""
+    if not DOTENV_PATH.exists():
+        return
+    for name, value in _dotenv_pairs(DOTENV_PATH.read_text()):
+        os.environ.setdefault(name, value)
 
 
 @click.group()
 def main() -> None:
     """An agent runtime you can run, read, and extend."""
+    _load_dotenv()
 
 
 @main.command()
@@ -85,6 +117,9 @@ def init(email: str, model: str, workspace_id: UUID | None, skip_migrations: boo
         config_path.write_text(DEFAULT_CONFIG)
         click.echo(f"wrote {config_path} (SQLite, filesystem blobs — zero services)")
     config = load_config()
+    added = _write_dev_secrets(config)
+    if added:
+        click.echo(f"wrote {', '.join(added)} to .env — serve auto-loads it")
     if config.database.url.startswith("postgresql"):
         asyncio.run(_create_postgres_system_database(config))
     if not skip_migrations:
@@ -100,6 +135,28 @@ def init(email: str, model: str, workspace_id: UUID | None, skip_migrations: boo
     token_path.chmod(0o600)
     click.echo(f"workspace ready — owner {email}, agent {DEFAULT_AGENT_NAME!r} ({model})")
     click.echo(f"cli token written to {token_path}")
+
+
+def _write_dev_secrets(config: Config) -> tuple[str, ...]:
+    """Mint the dev secrets a zero-config `serve` needs and merge them into the cwd `.env` without
+    clobbering: the Fernet credential key the store seals BYOK secrets with, and the HMAC secret
+    that signs artifact-delivery tokens. `.env` auto-loads on the next verb, so `serve` boots with
+    no manual export; a name already in `.env` (or exported) is left untouched. Returns the names
+    newly written."""
+    minted = {
+        config.credentials.key_env: Fernet.generate_key().decode(),
+        config.artifacts.token_secret_env: secrets.token_urlsafe(32),
+    }
+    existing = DOTENV_PATH.read_text() if DOTENV_PATH.exists() else ""
+    present = {name for name, _ in _dotenv_pairs(existing)}
+    added = {name: value for name, value in minted.items() if name not in present}
+    if not added:
+        return ()
+    prefix = existing if not existing or existing.endswith("\n") else existing + "\n"
+    DOTENV_PATH.write_text(prefix + "".join(f"{name}={value}\n" for name, value in added.items()))
+    for name, value in added.items():
+        os.environ.setdefault(name, value)
+    return tuple(added)
 
 
 async def _onboard(

@@ -3,7 +3,8 @@
 Activating it (config `[pack] name = "assistant"`) narrows the deploy to exactly the extensions it
 names — durable memory and recall over the base-pinned local index and OpenAI embeddings, web
 research (the research tools over the Exa search backend), Composio-brokered connectors and MCP,
-the sandbox browser/computer-use tools, website building and the code REPL, document generation,
+the sandbox browser/computer-use tools with Chrome driven inside each conversation's sandbox (the
+sandbox-chrome cdp provider), website building and the code REPL, document generation,
 todos, scheduled tasks, the web chat surface, an extra OpenRouter model provider, and the coding
 subagent. It runs on core's own local carrier and index with no managed infrastructure — that is
 what distinguishes it from `assistant_hosted`. It bundles only extensions and adds no pack-level
@@ -27,7 +28,9 @@ EXTENSIONS = (
     "connectors",
     "coding",
     "browser",
+    "sandbox_chrome",
     "index_default",
+    "embed_openai",
     "knowledge_graph",
     "ufo",
 )

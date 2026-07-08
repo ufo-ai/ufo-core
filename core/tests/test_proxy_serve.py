@@ -5,7 +5,7 @@ import pytest
 from ufo.accounting import CORE_PRICING
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.ext.manifest import CredentialSlot, InjectionTarget, Manifest
-from ufo.proxy_serve import OWNER_DSN_ENV, ProxyServe, _egress_ca, _owner_dsn
+from ufo.proxy_serve import OWNER_DSN_ENV, ProxyServe, _egress_ca, _owner_dsn, model_rule_base
 from ufo.sandbox.proxy.rules import ANTHROPIC_HOST, ScopeRule, derive_model_rules
 from ufo.sandbox.session import EGRESS_CA_CERT_ENV, EGRESS_CA_KEY_ENV
 
@@ -28,6 +28,20 @@ def _proxy_serve(config: Config, manifests: tuple[Manifest, ...]) -> ProxyServe:
         ca_key="KEY",
         pricing=CORE_PRICING,
     )
+
+
+def test_model_rule_base_derives_provider_egress_from_the_env_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shared model-rule builder — the one both `ProxyServe` and serve's in-process local proxy
+    call — turns each configured provider whose key is set into its reachable host, sentinel→real
+    injection, and token meter; no key set anywhere fails loud."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    assert model_rule_base(_config()) == derive_model_rules("claude-opus-4-8", ANTHROPIC_KEY)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="no model provider key"):
+        model_rule_base(_config())
 
 
 def test_base_is_model_rules_only(monkeypatch: pytest.MonkeyPatch) -> None:
