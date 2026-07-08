@@ -1,7 +1,7 @@
 """The member bearer the client stores in ~/.ufo/credentials and the `ufo` surface verifies.
 
-A self-contained HMAC claim, no server-side state. The codec is a fixed cross-extension contract
-with the `ufo` surface (unit E), so it is spelled out exactly:
+A self-contained HMAC claim, no server-side state. The codec is a fixed contract with the `ufo`
+surface (`extensions/ufo/ufo_ext_ufo/surface.py`), so it is spelled out exactly:
 
     payload_json = {"ws": "<workspace uuid>", "email": "<lower email>", "exp": <unix seconds>}
     body         = base64url(payload_json)            # padding stripped

@@ -1,15 +1,19 @@
-"""Send the 6-digit verification code — `logging` for dev/tests, `ses` for the hosted apex.
+"""Work-email policy and the verification-code sender.
 
-The SES backend speaks SESv2 `SendEmail` over `httpx` with a local SigV4 signer: signing is pure
-CPU (hmac/sha256), so it runs inline, and the send itself is async — no boto3 network client, no
-sync HTTP on the loop. Backend is selected by `UFO_GATEWAY_EMAIL_BACKEND`, failing loud on a missing
-SES field."""
+`WorkEmailPolicy` rejects free, personal, and disposable domains so a tenant maps to a real
+organization — the denylist fails CLOSED and a malformed address is rejected up front. The sender
+delivers the 6-digit code: `logging` for dev/tests, `ses` for the hosted apex. The SES backend
+speaks SESv2 `SendEmail` over `httpx` with a local SigV4 signer — signing is pure CPU (hmac/sha256)
+so it runs inline, and the send itself is async: no boto3 network client, no sync HTTP on the loop.
+The backend is selected by `UFO_GATEWAY_EMAIL_BACKEND`, failing loud on a missing SES field.
+Copy-adapted from metalcraft's `onboard/email_domain.py` and `onboard/email_sender.py`."""
 
 import hashlib
 import hmac
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Protocol
@@ -17,6 +21,51 @@ from typing import Protocol
 import httpx
 
 logger = logging.getLogger(__name__)
+
+EMAIL_PATTERN = re.compile(r"^[^@\s]+@([^@\s]+\.[^@\s]+)$")
+
+FREE_EMAIL_DOMAINS = frozenset(
+    {
+        "gmail.com",
+        "googlemail.com",
+        "yahoo.com",
+        "ymail.com",
+        "hotmail.com",
+        "outlook.com",
+        "live.com",
+        "msn.com",
+        "aol.com",
+        "icloud.com",
+        "me.com",
+        "mac.com",
+        "proton.me",
+        "protonmail.com",
+        "pm.me",
+        "gmx.com",
+        "mail.com",
+        "zoho.com",
+        "yandex.com",
+        "fastmail.com",
+        "hey.com",
+    }
+)
+
+DISPOSABLE_EMAIL_DOMAINS = frozenset(
+    {
+        "mailinator.com",
+        "guerrillamail.com",
+        "10minutemail.com",
+        "tempmail.com",
+        "temp-mail.org",
+        "throwawaymail.com",
+        "yopmail.com",
+        "trashmail.com",
+        "getnada.com",
+        "dispostable.com",
+        "sharklasers.com",
+        "maildrop.cc",
+    }
+)
 
 CODE_SUBJECT = "Your flyingobject.ai verification code"
 CODE_BODY = "Your flyingobject.ai verification code is {code}. It expires shortly."
@@ -31,6 +80,30 @@ AWS_ACCESS_KEY_ENV = "AWS_ACCESS_KEY_ID"
 AWS_SECRET_KEY_ENV = "AWS_SECRET_ACCESS_KEY"
 AWS_SESSION_TOKEN_ENV = "AWS_SESSION_TOKEN"
 DEFAULT_SES_REGION = "us-east-1"
+
+
+class WorkEmailError(ValueError):
+    """The email is not an acceptable work email — bad format or a denylisted domain."""
+
+
+def normalize_email(email: str) -> tuple[str, str]:
+    """Lowercased (address, domain). Raises WorkEmailError on a malformed address."""
+    candidate = email.strip().lower()
+    match = EMAIL_PATTERN.match(candidate)
+    if match is None:
+        raise WorkEmailError("email address is malformed")
+    return candidate, match.group(1)
+
+
+@dataclass(frozen=True)
+class WorkEmailPolicy:
+    denylist: frozenset[str] = FREE_EMAIL_DOMAINS | DISPOSABLE_EMAIL_DOMAINS
+
+    def validate(self, email: str) -> str:
+        _, domain = normalize_email(email)
+        if domain in self.denylist:
+            raise WorkEmailError(f"{domain} is not a work email domain")
+        return domain
 
 
 @dataclass(frozen=True)

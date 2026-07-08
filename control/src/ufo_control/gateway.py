@@ -1,38 +1,41 @@
-"""The apex onboarding backend: `GET /ufo` serves the client, `POST /onboard/{channel}` drives the
-sign-in screen as directives.
+"""The apex onboarding server — a control-plane role, not a tenant workspace.
 
-The state is the `onboard_claim` row keyed by the shell's session, so each POST advances the same
-claim: no email → ask; code pending → verify; verified → resolve the tenant (join or provision) and
-sign in. Provisioning is streamed across the client's polls — a `status` + `poll` each pass until
-the tenant reports Ready — never one blocked request. Copy-adapted from metalcraft's
-`gateway_plugin.handle_onboard_ufo`, with the join-or-provision moved onto the control-plane API."""
+`GET /ufo` serves the version-stamped POSIX client; `POST /v1/onboard/{channel}` drives the sign-in
+screen as directives. The state is the `onboard_claim` row keyed by the shell's session, so each
+POST advances the same claim: no email → ask; code pending → verify; verified → resolve the tenant
+(join or provision) and sign in. Provisioning is streamed across the client's polls — a `status` +
+`poll` each pass until the tenant reports Ready — never one blocked request. This is a plain uvicorn
+app (no agent loop, no turns, no DBOS); it applies Tenant CRs and reads their status through the
+same `KubeClient` the operator uses, and writes the pre-tenant claim ledger as the Postgres owner.
+Copy-adapted from metalcraft's `gateway_plugin.handle_onboard_ufo`."""
 
 import hashlib
 import logging
 import os
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
-import httpx
+import asyncpg
+from fastapi import FastAPI, Request
+from starlette.responses import PlainTextResponse, Response
 
-from ufo.sdk.context import ExtensionContext
-from ufo.sdk.http import PlainTextResponse, Request, Response
-from ufo_ext_gateway.claim import ClaimError, ClaimWorkflow
-from ufo_ext_gateway.directives import PROMPT, directive, first_run_install, render
-from ufo_ext_gateway.email_domain import WorkEmailError, WorkEmailPolicy
-from ufo_ext_gateway.email_sender import email_sender_from_env
-from ufo_ext_gateway.provision import (
+from ufo_control.gateway_claim import ClaimError, ClaimWorkflow
+from ufo_control.gateway_directives import PROMPT, directive, first_run_install, render
+from ufo_control.gateway_email import WorkEmailError, WorkEmailPolicy, email_sender_from_env
+from ufo_control.gateway_provision import (
     DeployTarget,
     JoinOrProvision,
     TooManyTenantsForDomain,
 )
-from ufo_ext_gateway.store import OnboardClaim, OnboardStore
-from ufo_ext_gateway.token import TOKEN_SECRET_ENV, mint_token
+from ufo_control.gateway_store import OnboardClaim, OnboardStore
+from ufo_control.gateway_token import TOKEN_SECRET_ENV, mint_token
+from ufo_control.kube import KubeClient
+from ufo_control.members import owner_dsn
 
 logger = logging.getLogger(__name__)
 
-CONTROL_API_URL_ENV = "UFO_CONTROL_API_URL"
 BASE_DOMAIN_ENV = "UFO_BASE_DOMAIN"
 BUNDLE_IMAGE_ENV = "UFO_BUNDLE_IMAGE"
 PUBLIC_BASE_URL_ENV = "UFO_PUBLIC_BASE_URL"
@@ -58,47 +61,6 @@ def _stamp_script(text: str) -> str:
 
 
 STAMPED_SCRIPT = _stamp_script(_CLIENT_SCRIPT.read_text())
-
-
-async def serve_script(ctx: ExtensionContext, request: Request) -> Response:
-    return PlainTextResponse(STAMPED_SCRIPT, media_type=SHELLSCRIPT_MEDIA_TYPE)
-
-
-async def onboard(ctx: ExtensionContext, request: Request) -> Response:
-    channel = request.path_params["channel"]
-    session = request.headers.get("x-ufo-session")
-    install = first_run_install(request.headers)
-    if not session:
-        return _directives_response(
-            render(install, directive("say", "x-ufo-session header is required"), _exit())
-        )
-    body = (await request.body()).decode("utf-8", "replace").strip()
-    store = OnboardStore(ctx)
-    base_domain = _require_env(BASE_DOMAIN_ENV)
-    async with httpx.AsyncClient(base_url=_require_env(CONTROL_API_URL_ENV)) as http:
-        flow = Onboarding(
-            claims=ClaimWorkflow(
-                store=store,
-                email_policy=WorkEmailPolicy(),
-                email_sender=email_sender_from_env(),
-            ),
-            store=store,
-            join=JoinOrProvision(
-                http=http,
-                target=DeployTarget(
-                    base_domain=base_domain,
-                    bundle_image=_require_env(BUNDLE_IMAGE_ENV),
-                ),
-            ),
-            token_secret=_require_env(TOKEN_SECRET_ENV),
-            base_domain=base_domain,
-        )
-        try:
-            payload = await flow.advance(channel, session, body, install)
-        except Exception as error:
-            logger.exception("onboard.failed channel=%s", channel)
-            payload = render(install, directive("say", f"error: {error}"), _exit())
-    return _directives_response(payload)
 
 
 @dataclass(frozen=True)
@@ -158,12 +120,12 @@ class Onboarding:
                 f"domain {claim.email_domain} maps to {len(tenants)} workspaces — contact support"
             )
         if len(tenants) == 1:
-            name = tenants[0].name
+            name = tenants[0].tenant
             workspace_id = await self.join.join(name, claim.email)
-            await self.store.complete(claim.claim_id, name, workspace_id, datetime.now(UTC))
+            await self.store.complete(claim.claim_id, name, workspace_id)
             return self._signed_in(name, claim.email, workspace_id, install)
         name = await self.join.provision(claim.email_domain, claim.email)
-        await self.store.start_provisioning(claim.claim_id, name, datetime.now(UTC))
+        await self.store.start_provisioning(claim.claim_id, name)
         return render(
             install,
             directive("say", "provisioning your workspace…"),
@@ -175,15 +137,13 @@ class Onboarding:
         assert claim.tenant_name is not None
         view = await self.join.tenant_status(claim.tenant_name)
         if view.phase == "Ready" and view.workspace_id:
-            await self.store.complete(
-                claim.claim_id, claim.tenant_name, view.workspace_id, datetime.now(UTC)
-            )
+            await self.store.complete(claim.claim_id, claim.tenant_name, view.workspace_id)
             return self._signed_in(claim.tenant_name, claim.email, view.workspace_id, install)
         if view.phase == "Failed":
             return render(
                 install,
                 directive("say", "provisioning failed — please try again later"),
-                _exit(),
+                directive("exit", "1"),
             )
         return render(
             install,
@@ -202,16 +162,78 @@ class Onboarding:
         )
 
 
-def _exit(code: str = "1") -> bytes:
-    return directive("exit", code)
-
-
-def _directives_response(body: bytes) -> Response:
-    return PlainTextResponse(body, media_type="text/plain")
-
-
 def _require_env(name: str) -> str:
     value = os.environ.get(name)
     if not value:
-        raise RuntimeError(f"{name} is unset — required by the gateway onboarding backend")
+        raise RuntimeError(f"{name} is unset — required by the gateway onboarding server")
     return value
+
+
+def gateway_app() -> FastAPI:
+    state: dict[str, Any] = {}
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> Any:
+        pool = await asyncpg.create_pool(dsn=owner_dsn())
+        store = OnboardStore(pool=pool)
+        await store.ensure_table()
+        state["store"] = store
+        state["kube"] = KubeClient.from_env()
+        try:
+            yield
+        finally:
+            await state["kube"].close()
+            await pool.close()
+
+    app = FastAPI(lifespan=lifespan)
+
+    @app.get("/healthz")
+    async def healthz() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @app.get("/ufo")
+    async def serve_script() -> Response:
+        return PlainTextResponse(STAMPED_SCRIPT, media_type=SHELLSCRIPT_MEDIA_TYPE)
+
+    @app.post("/v1/onboard/{channel}")
+    async def onboard(channel: str, request: Request) -> Response:
+        session = request.headers.get("x-ufo-session")
+        install = first_run_install(request.headers)
+        if not session:
+            return PlainTextResponse(
+                render(
+                    install,
+                    directive("say", "x-ufo-session header is required"),
+                    directive("exit", "1"),
+                ),
+                media_type="text/plain",
+            )
+        body = (await request.body()).decode("utf-8", "replace").strip()
+        base_domain = _require_env(BASE_DOMAIN_ENV)
+        flow = Onboarding(
+            claims=ClaimWorkflow(
+                store=state["store"],
+                email_policy=WorkEmailPolicy(),
+                email_sender=email_sender_from_env(),
+            ),
+            store=state["store"],
+            join=JoinOrProvision(
+                kube=state["kube"],
+                target=DeployTarget(
+                    base_domain=base_domain, bundle_image=_require_env(BUNDLE_IMAGE_ENV)
+                ),
+            ),
+            token_secret=_require_env(TOKEN_SECRET_ENV),
+            base_domain=base_domain,
+        )
+        try:
+            payload = await flow.advance(channel, session, body, install)
+        except Exception as error:
+            logger.exception("onboard.failed channel=%s", channel)
+            payload = render(install, directive("say", f"error: {error}"), directive("exit", "1"))
+        return PlainTextResponse(payload, media_type="text/plain")
+
+    return app
+
+
+app = gateway_app()

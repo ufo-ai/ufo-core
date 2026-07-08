@@ -49,7 +49,7 @@ jobs:
 
       - uses: aws-actions/amazon-ecr-login@v2
 
-      # Bundle image: `ufoctl bundle` freezes the assistant_hosted + gateway packs into a build context
+      # Bundle image: `ufoctl bundle` freezes the assistant_hosted pack into a build context
       # (Dockerfile + ufo.toml + ufo.lock), then docker build installs the pinned ufo distribution.
       - name: Build + push bundle image
         run: |

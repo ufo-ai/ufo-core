@@ -1,11 +1,13 @@
 """The ``ufo-control`` entry point — one image, one role per Deployment, selected by argument.
 
-``ufo-control api`` runs the deploy endpoint; ``ufo-control operator`` runs the reconcile loop.
-This is metalcraft's one-image/console-script-args deployment shape (``[metalcraft-operator]``),
-stripped to the two processes this control plane needs. Both serve ``/healthz`` for probes.
+``ufo-control api`` runs the deploy endpoint; ``ufo-control operator`` runs the reconcile loop;
+``ufo-control gateway`` runs the apex onboarding server. This is metalcraft's one-image/console-
+script-args deployment shape (``[metalcraft-operator]``), stripped to the processes this control
+plane needs. All serve ``/healthz`` for probes.
 """
 
 import asyncio
+import os
 
 import click
 import uvicorn
@@ -14,6 +16,7 @@ from ufo_control.rls import bootstrap_policies, owner_dsn
 
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8080
+GATEWAY_PORT_ENV = "UFO_GATEWAY_PORT"
 
 
 @click.group()
@@ -37,6 +40,13 @@ def operator(host: str, port: int) -> None:
     uvicorn.run(
         "ufo_control.operator:operator_app", host=host, port=port, factory=True, log_level="info"
     )
+
+
+@main.command()
+def gateway() -> None:
+    """Serve the apex onboarding backend (GET /ufo, POST /v1/onboard/{channel})."""
+    port = int(os.environ.get(GATEWAY_PORT_ENV, str(DEFAULT_PORT)))
+    uvicorn.run("ufo_control.gateway:app", host=DEFAULT_HOST, port=port, log_level="info")
 
 
 @main.command(name="rls-bootstrap")

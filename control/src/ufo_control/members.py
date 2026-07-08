@@ -1,6 +1,6 @@
 """Add a member to an existing tenant — cross-tenant authority the closed control plane owns.
 
-The onboarding backend (the ``gateway`` extension) calls this when a verified user's org domain
+The gateway role (``ufo-control gateway``) calls this in-process when a verified user's org domain
 already has a tenant: it joins them rather than provisioning a second one. The write runs as the
 Postgres OWNER role (which bypasses RLS by design — the platform-worker precedent), inserting the
 ``member`` row idempotently. The tenant's workspace uuid is read from its Tenant CR's

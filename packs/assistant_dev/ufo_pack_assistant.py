@@ -30,7 +30,6 @@ EXTENSIONS = (
     "index_default",
     "knowledge_graph",
     "ufo",
-    "gateway",
 )
 
 

@@ -33,6 +33,11 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/ufo_control"]
 
+# The POSIX `ufo` client the gateway role serves at GET /ufo — a non-Python data file, force-included
+# so it ships in the wheel where `gateway.py` resolves it by `Path(__file__).parent`.
+[tool.hatch.build.targets.wheel.force-include]
+"src/ufo_control/client/ufo" = "ufo_control/client/ufo"
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"

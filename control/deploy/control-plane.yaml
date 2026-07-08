@@ -4,9 +4,12 @@
 #
 # Apply after deploy/crds/tenant.yaml. Set the image, the platform ConfigMap, the
 # ufo-control-secrets Secret (Postgres admin DSN + role seed; owner DSN under postgres-owner-dsn
-# for the migrate Job's RLS bootstrap, deploy/migrate-job.yaml), and the ufo-platform-secrets
-# Secret (model API keys + cloud credentials the tenant pods read from env — the operator replicates
-# it from this namespace into each tenant namespace during provisioning) for your cluster first.
+# for the migrate Job's RLS bootstrap, deploy/migrate-job.yaml, and the gateway's member/claim
+# writes; the apex bearer secret under token-secret; the SES access/secret keys under
+# ses-access-key/ses-secret-key), and the ufo-platform-secrets Secret (model API keys + cloud
+# credentials the tenant pods read from env — the operator replicates it from this namespace into
+# each tenant namespace during provisioning) for your cluster first. The apex gateway Deployment
+# also needs its host, base domain, public base URL, and the digest-pinned bundle image set below.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -168,3 +171,93 @@ spec:
       volumes:
         - name: config
           configMap: {name: ufo-control-platform}
+---
+# The apex onboarding gateway (`ufo-control gateway`): a plain uvicorn server (no agent loop, no
+# turns, no DBOS). It reuses the operator ServiceAccount to apply Tenant CRs + read their status,
+# and the owner DSN to write the pre-tenant onboard_claim ledger + member rows.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ufo-gateway
+  namespace: ufo-system
+  labels: {app: ufo-gateway}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: ufo-gateway}
+  template:
+    metadata:
+      labels: {app: ufo-gateway}
+    spec:
+      serviceAccountName: ufo-operator
+      containers:
+        - name: gateway
+          image: ghcr.io/metalcraftai/ufo-control:latest
+          args: [gateway]
+          ports:
+            - {name: http, containerPort: 8080}
+          env:
+            - name: UFO_PUBLIC_BASE_URL
+              value: https://flyingobject.ai
+            - name: UFO_BASE_DOMAIN
+              value: flyingobject.ai
+            # Digest-pinned bundle image the provisioned tenants run — matches the pushed ufo image.
+            - name: UFO_BUNDLE_IMAGE
+              value: ghcr.io/metalcraftai/ufo@sha256:0000000000000000000000000000000000000000000000000000000000000000
+            - name: UFO_GATEWAY_EMAIL_BACKEND
+              value: ses
+            - name: UFO_SES_SENDER
+              value: no-reply@flyingobject.ai
+            - name: UFO_SES_REGION
+              value: us-east-1
+            - name: UFO_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef: {name: ufo-control-secrets, key: token-secret}
+            - name: UFO_CONTROL_POSTGRES_OWNER_DSN
+              valueFrom:
+                secretKeyRef: {name: ufo-control-secrets, key: postgres-owner-dsn}
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef: {name: ufo-control-secrets, key: ses-access-key}
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: {name: ufo-control-secrets, key: ses-secret-key}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ufo-gateway
+  namespace: ufo-system
+spec:
+  selector: {app: ufo-gateway}
+  ports:
+    - {name: http, port: 80, targetPort: http}
+---
+# The one public front door: the apex host terminates TLS here and routes to the gateway. Set the
+# host and the cluster-issuer for your cluster.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ufo-gateway
+  namespace: ufo-system
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [flyingobject.ai]
+      secretName: ufo-gateway-tls
+  rules:
+    - host: flyingobject.ai
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ufo-gateway
+                port: {name: http}

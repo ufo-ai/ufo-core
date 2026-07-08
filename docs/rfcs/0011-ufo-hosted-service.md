@@ -66,9 +66,9 @@ plane and infra join it:
 ufo/
   core/ extensions/ packs/ docs/ spec.md …   ← selfhost-core, merged with full history
   control/                                    ← selfhost-k8s, subtree with history
-    src/ufo_control/                          ← + the rls arm, the members endpoint (below)
+    src/ufo_control/                          ← + the rls arm, the members write, the gateway role (§4)
     charts/ufo-tenant/
-  extensions/ufo/ extensions/gateway/         ← the member surface + the onboarding backend (§4)
+  extensions/ufo/                             ← the member surface (§4)
   infra/                                      ← metalcraft Terraform, copy-adapted (prod env only)
 ```
 
@@ -202,14 +202,16 @@ server-side as `deploy.py:159` already states — `control/` platform config set
 `postgres_model = "rls"` and that wins. The compose backend and `ufoctl deploy` keep working
 unchanged for self-hosters.
 
-### 4. The ufo surface and the onboarding backend — both extensions
+### 4. The ufo member surface (extension) and the onboarding backend (control-plane role)
 
-Two producers of the same `DeployRequest` contract: the `ufoctl deploy` CLI (operators) and the
-**gateway extension** (members, below). Both end at `POST /v1/deploy` → Tenant CR → operator
-reconcile.
+Two producers of the same `DeployRequest` contract: the `ufoctl deploy` CLI (operators, over the
+deploy API `POST /v1/deploy`) and the **gateway role** (members, below). The gateway lives inside
+the control-plane package, so it applies the Tenant CR directly through `KubeClient` rather than
+over HTTP. Both end at Tenant CR → operator reconcile.
 
-**The client** (`extensions/gateway/ufo_ext_gateway/client/ufo` — packaged in the wheel so the gateway serves it at runtime): metalcraft's script copied verbatim, then two mechanical adapts —
-(a) the `workspace` directive's value becomes the tenant's base URL
+**The client** (`control/src/ufo_control/client/ufo` — force-included in the control wheel so the
+gateway role serves it at runtime): metalcraft's script copied verbatim, then two mechanical adapts
+— (a) the `workspace` directive's value becomes the tenant's base URL
 (`https://<name>.flyingobject.ai`), written to `~/.ufo/workspace`; chat posts go to
 `{WORKSPACE_URL}/surface/ufo/{channel}`; (b) onboarding stays at the apex
 (`https://flyingobject.ai/v1/onboard/{channel}`). The directive grammar (`say`/`note`/`txt`/
@@ -224,24 +226,24 @@ the hub through a directive codec (`LiveFrame` → `txt`/`say`/`note`/`status`/`
 ≤85s then `poll`; empty body = poll). It imports only `ufo.sdk` and runs identically on a laptop
 against SQLite.
 
-**The onboarding backend is an extension too** (`extensions/gateway`, copy-adapted from
-`metalcraft_cloud/onboard/`): the apex is not a bespoke service but an ordinary `ufoctl serve` of
-the **same bundle image**, running a dedicated **platform workspace** (provisioned through the
-control plane like any tenant — `pack="gateway"`, host `flyingobject.ai`). Every capability it
-needs is a published seam:
+**The onboarding backend is a control-plane server role** (`ufo-control gateway`, copy-adapted from
+`metalcraft_cloud/onboard/`): the apex registers only `routes` — no agent loop, no turns, no DBOS —
+so it is not an `ufoctl serve` workspace but a plain uvicorn app in the `ufo-control` image, one
+Deployment behind the apex Ingress. It applies Tenant CRs and reads their status through the same
+`KubeClient` the operator uses, and writes the pre-tenant claim ledger as the Postgres owner:
 
-| Need | Seam it rides |
+| Need | How |
 |---|---|
-| `GET /ufo`, `POST /v1/onboard/{channel}` | `routes`, mounted at `/ext/gateway/*`; the apex Ingress exposes exactly two public paths and rewrites them (`/ufo` → `/ext/gateway/ufo`, `/v1/onboard/{channel}` → `/ext/gateway/onboard/{channel}`) |
-| the claim machine (email → 6-digit code; SES; hash-only storage, 15-min TTL, 5 attempts, constant-time compare) | an extension **migration** — the claim table is workspace-scoped rows in the shared DB, so the same RLS that polices tenants polices claims; async SES via HTTP |
-| provision (0 tenants for the domain) | mint workspace uuid + tenant name, assemble a `DeployRequest` (platform image digests, `pack="assistant_hosted"`, owner = claimant), POST the control plane's `/v1/deploy`, hold the stream on `status` directives while polling `/v1/tenants/{name}` to Ready — **the identical contract `ufoctl deploy` speaks** |
-| join (1 tenant) / >1 → 409 | the control plane grows one endpoint, `POST /v1/tenants/{name}/members` (runs as `ufo_owner`, inserts the `member` row) — **cross-tenant authority stays in the one closed service**; the extension merely calls it. This is the interim answer to RFC 0003's open decision 3; when the member/access seam lands, both become its clients |
-| sign-in completion | emits `token <hmac>` (30-day, stateless, `UFO_TOKEN_SECRET`, payload `{workspace_id, email, exp}`) + `workspace https://<name>.flyingobject.ai` |
+| `GET /ufo`, `POST /v1/onboard/{channel}` | served directly by the role (uvicorn, `UFO_GATEWAY_PORT`, default 8080); the apex Ingress routes the `flyingobject.ai` host at its Service — no path rewrite |
+| the claim machine (email → 6-digit code; SES; hash-only storage, 15-min TTL, 5 attempts, constant-time compare) | `onboard_claim` is a **control-plane platform table** in the `ufo_control` schema of the shared DB — pre-tenant, so it is owned by `ufo_owner`, never granted to a tenant role, never RLS-policed; the role creates schema + table idempotently at startup (no alembic migration); async SES via HTTP + SigV4 |
+| provision (0 tenants for the domain) | mint a deterministic per-domain tenant name (`<slug>-<sha8>`), assemble a `DeployRequest` (platform image digest, `pack="assistant_hosted"`, owner = claimant), `KubeClient.apply_tenant` the Tenant CR, hold the stream on `status` directives while polling `status.workspaceId` to Ready — **the identical contract `ufoctl deploy` speaks**; the operator mints and persists the workspace uuid |
+| join (1 tenant) / >1 → escalate | `members.add_member` in-process (runs as `ufo_owner`, inserts the `member` row) — cross-tenant authority stays in the one closed service; the `POST /v1/tenants/{name}/members` API endpoint remains for external callers (RFC 0003 open decision 3; both become clients of the member/access seam when it lands) |
+| sign-in completion | emits `token <hmac>` (30-day, stateless, `UFO_TOKEN_SECRET`, payload `{ws, email, exp}`) + `workspace https://<name>.flyingobject.ai` |
 
-The control-plane API stays cluster-internal (NetworkPolicy; the gateway reaches it by cluster
-DNS). This shape deletes the bespoke gateway image (three images total), deletes the special
-no-RLS claims schema, and makes the hosted service itself a consumer of the extension seam — the
-strongest conformance probe the seam can have.
+The tenant shared DB carries only `assistant_hosted`'s tables — no pack union, no onboarding schema.
+This keeps the hosted apex on the same two images (`ufo` / `ufo-control`, no bespoke gateway image)
+and puts onboarding where its cluster authority — Tenant apply and owner-role writes — already
+lives, rather than spinning a whole agent runtime for two routes.
 
 ### 5. Metalcraft's product primitives — the import ledger
 
@@ -284,18 +286,17 @@ Cutover sequence:
 
 1. Repo bootstrap + rename (§1); land the execution units below; ufo main green (gates, ruff,
    pytest).
-2. Build + push, digest-pinned: bundle (`ufo.lock` pinning assistant_hosted + gateway + their
-   extensions) and control-plane — two ECR images; the apex runs the bundle image with the
-   `gateway` pack. Publish + boot-verify the `ufo-sbx` E2B template (`sandbox/build_template.py`,
+2. Build + push, digest-pinned: bundle (`ufo.lock` pinning assistant_hosted + its extensions) and
+   control-plane — two ECR images; the apex runs the control-plane image with the `gateway` role.
+   Publish + boot-verify the `ufo-sbx` E2B template (`sandbox/build_template.py`,
    needs `E2B_API_KEY`); tenants reach it via `UFO_E2B_TEMPLATE`.
 3. Secrets Manager entries → External Secrets: pg admin DSN + role seed, model keys, OpenRouter,
    Composio, E2B (+ template), Turbopuffer, Exa, SES sender, `UFO_TOKEN_SECRET`.
 4. RDS: create `ufo` DB + `ufo_owner`; run the migrate-and-RLS-bootstrap Job.
 5. `terraform apply` testing (this removes the metalcraft app and installs ufo in one apply);
-   verify control plane healthy (`/healthz`), operator holds the Lease; provision the platform
-   workspace through the control plane (`pack="gateway"`, host `testing.flyingobject.ai`) and
-   verify it Ready.
-6. Cloudflare: `testing.flyingobject.ai` → the platform workspace's ingress (proxied,
+   verify control plane healthy (`/healthz`), operator holds the Lease; the `gateway` Deployment is
+   up behind the apex Ingress (host `testing.flyingobject.ai`) and serves `GET /ufo`.
+6. Cloudflare: `testing.flyingobject.ai` → the gateway Service's ingress (proxied,
    source-restricted to CF ranges, the existing pattern); `*.testing.flyingobject.ai` → tenant
    ingress LB.
 7. Smoke, in order: `curl -fsSL https://testing.flyingobject.ai/ufo | sh` → onboard with a real
@@ -343,9 +344,9 @@ uses its own `ufo` database and roles).
   enterprise tier since the tier is chosen server-side.
 - **Keep three repos / keep the `selfhost` name**: rejected by owner decision — one closed repo,
   one name; the OSS boundary survives as gates inside it, not as repo topology or naming.
-- **A bespoke apex gateway service** (metalcraft's `cloud-gateway` shape): rejected — every
-  capability it needs is a published seam (§4), and a separate service would fork serve's ops
-  story, add a fourth image, and dodge the extension boundary instead of proving it.
+- **A bespoke apex gateway image** (metalcraft's `cloud-gateway` shape): rejected — a separate
+  service would fork serve's ops story and add a fourth image; the apex is a role in the existing
+  `ufo-control` image (§4), sharing its `KubeClient` and owner DSN, not new infrastructure.
 - **Product objects as CRDs** (metalcraft's 7 kinds): rejected — the DB is the store; member
   actions happen in chat; the operator reconciles exactly one kind, `Tenant` (§5).
 - **Apex-proxied chat** (preserve the script byte-for-byte, proxy `/v1/cli/*` to tenant pods):
@@ -363,7 +364,7 @@ Units land in order, each independently reviewable, each with its proof; B–F p
 | **C. memory gap** | `mem_page` migration 0004 + writer populates `workspace_id` | migration test + writer test against Postgres |
 | **D. RLS tier** | `control/postgres.py` rls arm (roles, GUC pin, `ufo_dbos_*`), policy bootstrap, migrate-as-owner Job, `render.py` emits tenant DSN + system_url + workspace id | pytest against real Postgres (Docker): two tenants provisioned; per-role connections see disjoint single-workspace views; unpoliced-table case fails loud |
 | **E. `extensions/ufo`** | member surface + directive codec + HMAC bearer verify; added to `assistant_hosted` (→ 20) | focused tests: codec frame map; token verify + member link; admit/tail against the web-surface pattern; pack test asserts the set |
-| **F. `extensions/gateway` + members endpoint** | the claim machine (extension migration, SES, directives), join-or-provision via the deploy contract, token mint; `gateway` pack; control plane `POST /v1/tenants/{name}/members` | claim-flow tests (code hash, TTL, attempts); provision assembles a valid `DeployRequest`; join test drives the members endpoint against real Postgres and the surface links the new member |
+| **F. `ufo-control gateway` role + members write** | the claim machine (control-plane `onboard_claim` table, no RLS; SES; directives), join-or-provision applying the Tenant CR through `KubeClient`, token mint; `members.add_member` (also exposed as `POST /v1/tenants/{name}/members`) | claim-flow tests (code hash, TTL, attempts); provision assembles a valid `DeployRequest`; join test drives the member write against real Postgres and the surface links the new member |
 | **G. ship** | images, Terraform apply, DNS, smoke, cutover (§6) | the §6 smoke list, executed in order |
 | **H. channels + agents** *(first post-cutover unit)* | `channel_binding` rows consulted at admission (default-agent fallback); chat tools to create an agent and bind a channel (§5) | two agents bound to two Slack channels route their turns respectively; unbound channel falls back to the default agent |
 
