@@ -71,6 +71,7 @@ web = "ufo_ext_web.manifest:manifest"
 assistant = "ufo_pack_assistant:pack"
 assistant_hosted = "ufo_pack_assistant_hosted:pack"
 apex = "ufo_pack_gateway:pack"
+hosted = "ufo_pack_hosted:pack"
 sample_pack = "ufo_pack_sample:pack"
 
 [project.entry-points.pytest11]
@@ -145,6 +146,7 @@ exclude = ["**/__pycache__", "**/*.pyc"]
 "packs/assistant_dev/ufo_pack_assistant.py" = "ufo_pack_assistant.py"
 "packs/assistant_hosted/ufo_pack_assistant_hosted.py" = "ufo_pack_assistant_hosted.py"
 "packs/gateway/ufo_pack_gateway.py" = "ufo_pack_gateway.py"
+"packs/hosted/ufo_pack_hosted.py" = "ufo_pack_hosted.py"
 "packs/sample_pack/ufo_pack_sample.py" = "ufo_pack_sample/__init__.py"
 "packs/sample_pack/skills" = "ufo_pack_sample/skills"
 
