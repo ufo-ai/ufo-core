@@ -7,6 +7,7 @@ import os
 import secrets
 import subprocess
 import sys
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
@@ -671,6 +672,20 @@ def ext_remove(name: str) -> None:
 DEFAULT_BUNDLE_DIR = Path("bundle")
 
 
+def _ufo_project_dir() -> Path:
+    """The ufo source project `uv build` packages into the bundle's wheel — the nearest ancestor
+    of this module whose ``pyproject.toml`` declares the ``ufo`` distribution. Deriving it (not
+    the cwd) lets ``ufoctl bundle`` build the same wheel from any directory; a wheel-only install
+    carries no source project and fails loud here."""
+    for ancestor in Path(__file__).resolve().parents:
+        pyproject = ancestor / "pyproject.toml"
+        if not pyproject.exists():
+            continue
+        if tomllib.loads(pyproject.read_text()).get("project", {}).get("name") == "ufo":
+            return ancestor
+    raise click.ClickException("ufoctl bundle needs the ufo source project; none found upward")
+
+
 @main.command()
 @click.option(
     "--out", type=click.Path(path_type=Path), default=DEFAULT_BUNDLE_DIR, show_default=True
@@ -680,7 +695,10 @@ def bundle(out: Path) -> None:
     config = load_config()
     catalog = read_catalog(config.ext.store) if config.ext.store is not None else None
     result = Bundle(config_path=config_path(), catalog=catalog, out=out).build()
-    subprocess.run(("uv", "build", "--wheel", "--out-dir", str(result.out)), check=True)
+    subprocess.run(
+        ("uv", "build", "--wheel", str(_ufo_project_dir()), "--out-dir", str(result.out)),
+        check=True,
+    )
     wheel = result.out / wheel_name()
     if not wheel.exists():
         raise click.ClickException(f"wheel build produced no {wheel}")
