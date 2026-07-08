@@ -2,7 +2,6 @@
 
 import asyncio
 import os
-import threading
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse
@@ -16,7 +15,6 @@ from fastapi import FastAPI
 from starlette.requests import Request
 from starlette.responses import Response
 
-from ufo.accounting import Pricing
 from ufo.blob import BlobStore, blob_store_for
 from ufo.browser import BROWSER_CDP_URL_ENV, CdpProvider, SandboxCdpProvider
 from ufo.config import (
@@ -62,14 +60,7 @@ from ufo.o11y import init_o11y, log
 from ufo.runtime_instance import BootGuard, Heartbeat
 from ufo.sandbox.fs_creds import DEFAULT_S3_REGION, AwsStsClient, SandboxFsCredentialMinter
 from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.proxy.rules import (
-    Rule,
-    ScopeRule,
-    derive_credential_rules,
-    derive_model_rules,
-)
-from ufo.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
-from ufo.sandbox.session import Carrier, ProxyEndpoint
+from ufo.sandbox.session import EGRESS_CA_CERT_ENV, Carrier, ProxyEndpoint
 from ufo.schema import tables
 from ufo.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION
 from ufo.search import SearchProvider
@@ -85,8 +76,6 @@ from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.surfaces.artifacts import router as artifacts_router
 from ufo.surfaces.cli import CONNECT_CALLBACK_PATH, router
 from ufo.surfaces.hub_tail import HubTailer
-
-PROXY_STARTUP_TIMEOUT_SECONDS = 30
 
 
 def run() -> None:
@@ -129,12 +118,7 @@ def run() -> None:
             carrier=carrier,
             cdp_provider=_select_cdp_provider(config, manifests, workspace_id, credentials),
             search_provider=_select_search_provider(config, manifests, workspace_id, credentials),
-            proxy=_egress_proxy(
-                asyncio.run(_resolver(config, credentials)),
-                registry.pricing,
-                config.sandbox.proxy_port,
-                config.sandbox.proxy_public_url,
-            ),
+            proxy=_proxy_endpoint(config),
             dbos=dbos_client,
             subagents=SubagentRegistry((*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests))),
             subagent_grants=turn_subagent_grants(manifests),
@@ -655,32 +639,24 @@ async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]:
         await heartbeat.retire()
 
 
-def _egress_proxy(
-    resolver: PerAgentRules, pricing: Pricing, port: int, public_url: str | None
-) -> ProxyEndpoint:
-    """The sandbox's sole route out runs on its own event loop: a standalone network service, not
-    part of the turn loop, that outlives every turn for the life of the process. The proxy resolves
-    each request's rules through `resolver`, which reads the turn's agent and grants per turn, and
-    authorizes each keyed-host CONNECT through `resolver.turn_live`, which reads the turn's status
-    fresh so a real key is injected only while the turn is running. `pricing` is the deploy's merged
-    model price table, so an in-sandbox model call is billed and stamped exactly as the host turn's
-    tokens are — a contributed slug at its real rate, under the same digest. It binds the deploy's
-    stable `port` and carries `public_url` (the off-cluster sandbox's dial-back base) into the
-    endpoint every carrier threads into its sandboxes."""
-    loop = asyncio.new_event_loop()
-    threading.Thread(target=loop.run_forever, daemon=True).start()
-
-    async def _boot() -> ProxyEndpoint:
-        cert, key = await generate_ca()
-        return await EgressProxy(
-            resolve=resolver.resolve,
-            authorize=resolver.turn_live,
-            ca_cert=cert,
-            ca_key=key,
-            pricing=pricing,
-        ).start(port=port, public_url=public_url)
-
-    return asyncio.run_coroutine_threadsafe(_boot(), loop).result(PROXY_STARTUP_TIMEOUT_SECONDS)
+def _proxy_endpoint(config: Config) -> ProxyEndpoint:
+    """The shared egress proxy's endpoint the carrier threads into every sandbox. The proxy runs as
+    a standalone `ufoctl proxy` service, not in this pod, so serve only carries the address and
+    trust material: the stable platform CA (from env, so the sandbox's trust store validates the
+    proxy's minted leaves), the deploy's stable `proxy_port`, and `proxy_public_url` (the
+    off-cluster sandbox's dial-back base). The CA cert is the sandbox's trust anchor for the
+    proxy's TLS, so an unset one fails loud rather than shipping a sandbox that reaches no host."""
+    ca_cert = os.environ.get(EGRESS_CA_CERT_ENV)
+    if not ca_cert:
+        raise RuntimeError(
+            f"{EGRESS_CA_CERT_ENV} must hold the shared egress proxy's CA certificate (PEM) so the "
+            "sandbox trusts the proxy's TLS; the proxy runs as `ufoctl proxy`, not in this pod"
+        )
+    return ProxyEndpoint(
+        port=config.sandbox.proxy_port,
+        ca_cert=ca_cert,
+        public_url=config.sandbox.proxy_public_url,
+    )
 
 
 BIND_ADDRESSES = frozenset({"0.0.0.0", "127.0.0.1", "localhost", "::", "::1"})
@@ -737,53 +713,3 @@ def _connect_redirect_uri(config: Config, providers: Mapping[str, OAuthProvider]
             "OAuth redirect; set the deploy's public URL"
         )
     return f"{base.rstrip('/')}{CONNECT_CALLBACK_PATH}"
-
-
-async def _resolver(config: Config, credentials: CredentialStore | None) -> PerAgentRules:
-    """The per-turn rule resolver the proxy consumes: a static workspace base (the model providers
-    the deploy holds keys for and every stored credential slot, fixed for the serve's life) plus the
-    grant store it derives each turn's agent's granted hosts from. No credential key means no
-    connect flow to record grants, so no grant store — the base alone. Grants layer on per turn."""
-    grants = GrantStore() if credentials is not None else None
-    base = (*_model_rules(config), *await _credential_rules(config))
-    return PerAgentRules(base=base, grants=grants)
-
-
-def _model_rules(config: Config) -> tuple[Rule, ...]:
-    """The model-provider egress: each configured provider host is reachable and its sentinel swaps
-    to the real key on the wire; every other host is refused at CONNECT."""
-    providers = (
-        (config.models.anthropic_api_key_env, "claude-opus-4-8"),
-        (config.models.openai_api_key_env, "gpt-5"),
-    )
-    hosts: set[str] = set()
-    rules: list[Rule] = []
-    for env_name, probe in providers:
-        key = os.environ.get(env_name)
-        if not key:
-            continue
-        for rule in derive_model_rules(probe, key):
-            if isinstance(rule, ScopeRule):
-                hosts |= rule.allowed_hosts
-            else:
-                rules.append(rule)
-    if not hosts:
-        raise RuntimeError("no model provider key set; the sandbox would have no egress route")
-    return (ScopeRule(allowed_hosts=frozenset(hosts)), *rules)
-
-
-async def _credential_rules(config: Config) -> tuple[Rule, ...]:
-    """Every installed extension's injected credential slots become egress rules for this single
-    workspace; fail loud if a slot needs injection but the deploy set no credential key."""
-    manifests = load_manifests(config.pack.name)
-    if not any(slot.injection for manifest in manifests for slot in manifest.credentials):
-        return ()
-    key = os.environ.get(config.credentials.key_env)
-    if not key:
-        raise RuntimeError(
-            f"credential key env {config.credentials.key_env!r} is unset but a slot needs injection"
-        )
-    store = CredentialStore(fernet=Fernet(key.encode()))
-    async with workspace_tx() as connection:
-        workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
-    return await derive_credential_rules(manifests, workspace_id, store)

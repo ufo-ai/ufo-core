@@ -21,11 +21,17 @@ class DatabaseConfig(BaseModel):
     """`system_url` is the DBOS system store's sync-driver url. Unset, it derives as a `_dbos`
     sibling of the schema database — the single-workspace default. A shared-database deploy sets it
     explicitly per tenant so tenants never derive the same system store and cross-recover each
-    other's workflows."""
+    other's workflows.
+
+    `owner_url` is the RLS-bypassing owner-role DSN the shared egress proxy (`ufoctl proxy`) opens:
+    it serves every tenant from one process, so it cannot use a tenant-pinned RLS role, and the
+    proxy's rule resolver scopes each query by the run token's own `workspace_id` instead. Unset for
+    a serve pod (which uses the tenant-scoped `url`); `ufoctl proxy` fails loud without it."""
 
     model_config = ConfigDict(extra="forbid")
     url: str
     system_url: str = ""
+    owner_url: str | None = None
 
     @model_validator(mode="after")
     def _derive_system_url(self) -> "DatabaseConfig":

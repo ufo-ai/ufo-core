@@ -13,7 +13,7 @@ FORBIDDEN_MODULE_NAMES = {"utils", "helpers", "common"}
 DB_MODULE = CORE_SRC / "db.py"
 ENGINE_TOKENS = ("create_async_engine", "async_sessionmaker", ".begin(")
 SDK_EXEMPT_PART = "sdk"
-COMPOSITION_ROOT = CORE_SRC / "serve.py"
+COMPOSITION_ROOTS = (CORE_SRC / "serve.py", CORE_SRC / "proxy_serve.py")
 ROLE_PACKAGES = ("ufo.surfaces", "ufo.loop", "ufo.jobs", "ufo.sandbox.proxy")
 ENVELOPE_COLUMNS = {"workspace_id", "created_at", "updated_at"}
 SCHEMA_TABLES = CORE_SRC / "schema" / "tables.py"
@@ -108,7 +108,7 @@ def _boundary_failures(trees: dict[Path, ast.Module]) -> list[str]:
     failures = []
     for rel, tree in trees.items():
         module = _module_name(rel)
-        if not module or rel == COMPOSITION_ROOT:
+        if not module or rel in COMPOSITION_ROOTS:
             continue
         role = _role_of(module)
         for imported in _imported_modules(tree):
