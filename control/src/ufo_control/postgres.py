@@ -28,6 +28,7 @@ import asyncpg
 PG_ROLE_SEED_ENV = "UFO_CONTROL_PG_ROLE_SEED"
 APP_GROUP_ROLE = "ufo_app"
 OWNER_ROLE = "ufo_owner"
+WORKSPACE_GUC = "app.workspace_id"
 
 
 @dataclass(frozen=True)
@@ -112,9 +113,10 @@ async def _ensure_rls_tenant(
     try:
         await _ensure_group_role(cluster)
         await _ensure_tenant_role(cluster, role, password)
+        await cluster.execute(f'grant set on parameter {WORKSPACE_GUC} to "{OWNER_ROLE}"')
         await cluster.execute(
             f'alter role "{role}" in database "{app_database}" '
-            f"set app.workspace_id = '{workspace_id}'"
+            f"set {WORKSPACE_GUC} = '{workspace_id}'"
         )
         await _ensure_database(cluster, dbos_database, owner=role)
     finally:
