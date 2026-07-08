@@ -7,6 +7,7 @@ plane needs. All serve ``/healthz`` for probes.
 """
 
 import asyncio
+import logging
 import os
 
 import click
@@ -21,6 +22,7 @@ GATEWAY_PORT_ENV = "UFO_GATEWAY_PORT"
 
 @click.group()
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     """The Kubernetes control plane that runs ufo as its per-workspace backend."""
 
 
