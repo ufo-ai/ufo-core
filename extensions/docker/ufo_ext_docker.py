@@ -249,6 +249,15 @@ class DockerCarrier:
         never raises."""
         await _docker("rm", "-f", f"{CONTAINER_NAME_PREFIX}{handle.conversation_id}")
 
+    async def host(self, handle: SandboxHandle, port: int) -> str:
+        """The docker carrier publishes no per-port host, so an in-sandbox service (a browser's CDP
+        endpoint, a site's dev-server preview) has no external route here — a deploy that reaches an
+        in-sandbox port needs a remote carrier (e2b)."""
+        raise RuntimeError(
+            "the docker carrier exposes no external per-port host; reach an in-sandbox service "
+            "through a remote carrier (e2b)"
+        )
+
     async def _running_id(self, name: str) -> str | None:
         code, stdout, _ = await _docker(
             "ps", "-q", "--filter", f"name=^{name}$", "--filter", "status=running"

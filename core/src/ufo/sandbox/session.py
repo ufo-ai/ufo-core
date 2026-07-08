@@ -100,11 +100,14 @@ class SandboxSpec:
 class SandboxHandle:
     """An opaque reference to a created-or-attached container; the carrier reads it, not tools. It
     carries the workspace `mount` so the carrier can stream a produced file straight out of the
-    mount on `export` without a whole-file read across the boundary."""
+    mount on `export` without a whole-file read across the boundary, and the `traffic_token` a
+    carrier that gates its public per-port host behind one (e2b) sets at create so a caller dialing
+    `host` carries it as a connection header."""
 
     conversation_id: UUID
     container_id: str
     mount: MountSpec | None = None
+    traffic_token: str | None = None
 
 
 @dataclass(frozen=True)
@@ -133,6 +136,14 @@ class Carrier(Protocol):
         ...
 
     async def destroy(self, handle: SandboxHandle) -> None: ...
+
+    async def host(self, handle: SandboxHandle, port: int) -> str:
+        """The externally-reachable `host` (optionally `host:port`) a caller outside the sandbox
+        dials to reach any in-sandbox `port` — the generic inbound seam for a service the turn
+        started inside the container (a browser's CDP endpoint, a site's dev-server preview). Each
+        carrier maps its own reachability (e2b's public per-port host); a carrier with no external
+        route raises."""
+        ...
 
 
 def workspace_path(path: str) -> str:
@@ -225,6 +236,18 @@ class SandboxSession:
 
     async def export_file(self, path: str, blob: BlobStore, key: str) -> None:
         await self.carrier.export(self.handle, workspace_path(path), blob, key)
+
+    async def host(self, port: int) -> str:
+        """The externally-reachable host for an in-sandbox `port`, from the carrier's own
+        reachability map — how a caller in the serve process dials any service this turn started
+        inside the container (a browser's CDP endpoint, a site's dev-server preview)."""
+        return await self.carrier.host(self.handle, port)
+
+    @property
+    def traffic_token(self) -> str | None:
+        """The carrier's per-sandbox traffic token when it gates the public per-port host behind
+        one (e2b), else None — carried as a connection header by a caller dialing `host`."""
+        return self.handle.traffic_token
 
 
 SandboxFactory = Callable[[UUID], Awaitable[SandboxSession]]

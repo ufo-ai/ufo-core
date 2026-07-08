@@ -100,10 +100,14 @@ class _Sandbox:
     commands: _Commands = field(default_factory=_Commands)
     files: _Files = field(default_factory=_Files)
     paused: int = 0
+    traffic_access_token: str | None = "traffic-tok"
 
     def pause(self, **opts: object) -> bool:
         self.paused += 1
         return True
+
+    def get_host(self, port: int) -> str:
+        return f"{port}-{self.sandbox_id}.e2b.test"
 
 
 @dataclass
@@ -227,6 +231,18 @@ async def test_create_opens_a_sandbox_on_the_template_and_returns_its_handle() -
     assert created["lifecycle"] == E2B_LIFECYCLE
     assert created["metadata"] == {CONVERSATION_METADATA_KEY: str(conversation)}
     assert WORKSPACE_DIR in sdk.sandboxes["sbx-1"].files.made_dirs
+    assert handle.traffic_token == "traffic-tok"
+
+
+async def test_host_returns_the_sandbox_public_per_port_host() -> None:
+    """The producer half of the browser's `Carrier.host` seam: e2b routes an in-sandbox port over
+    its public per-port host, so the serve process can dial Chrome's CDP endpoint inside the
+    sandbox."""
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    handle = await carrier.create(_spec(uuid4()))
+
+    assert await carrier.host(handle, 9223) == "9223-sbx-1.e2b.test"
 
 
 async def test_second_create_for_the_conversation_resumes_rather_than_recreates() -> None:

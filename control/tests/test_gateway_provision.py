@@ -3,12 +3,15 @@ request is validated against the real `ufo.deploy.DeployRequest`, and the apply/
 checked against a mock transport."""
 
 import json
+import tomllib
 from typing import Any
 
 import httpx
+from ufo.config import BrowserConfig, SandboxConfig
 from ufo.deploy import DeployRequest
 
 from ufo_control.gateway_provision import (
+    CONFIG_TOML,
     DeployTarget,
     JoinOrProvision,
     deploy_request,
@@ -42,6 +45,16 @@ def test_deploy_request_is_wire_valid() -> None:
     assert request.pack == "assistant_hosted"
     assert request.bundle_image.digest == "sha256:" + "a" * 64
     assert request.sandbox_image is None  # the hosted e2b carrier pulls no image
+
+
+def test_hosted_config_selects_the_sandbox_chrome_cdp_provider() -> None:
+    """The browser and sandbox sections the gateway ships parse as the real core config models and
+    select the in-sandbox Chrome transport on the e2b carrier — the hosted tenant drives Chrome
+    inside its own sandbox, not a static endpoint. (database/blob come from the deploy env, so only
+    the sections this TOML carries are validated here.)"""
+    parsed = tomllib.loads(CONFIG_TOML)
+    assert BrowserConfig.model_validate(parsed["browser"]).cdp_provider == "sandbox-chrome"
+    assert SandboxConfig.model_validate(parsed["sandbox"]).backend == "e2b"
 
 
 async def test_tenants_for_domain_counts() -> None:

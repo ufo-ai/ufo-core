@@ -126,11 +126,13 @@ class FakeCdpProvider:
 
     leases: list[FakeCdpLease] = field(default_factory=list)
     reattached: list[str] = field(default_factory=list)
+    leased_sandboxes: list[SandboxSession | None] = field(default_factory=list)
     gone: bool = False
     _minted: int = 0
 
-    async def lease(self) -> CdpLease:
+    async def lease(self, sandbox: SandboxSession | None = None) -> CdpLease:
         self._minted += 1
+        self.leased_sandboxes.append(sandbox)
         lease = FakeCdpLease(session_id=f"session-{self._minted}")
         self.leases.append(lease)
         return lease
@@ -279,6 +281,17 @@ async def test_the_surface_is_built_once_per_turn_leased_and_released_on_cleanup
     assert provider.leases[0].released is False
     await ctx.cleanup.drain()
     assert provider.leases[0].released is True
+
+
+async def test_the_surface_leases_with_the_turns_sandbox(tmp_path: Path) -> None:
+    """The producer half of the sandbox-chrome seam: the surface passes the turn's `SandboxSession`
+    into `lease`, so a per-conversation-sandbox provider can resolve Chrome inside that sandbox. A
+    static or hosted provider ignores it, but the surface always threads it through."""
+    provider = FakeCdpProvider()
+    ctx = _context(WritesCarrier(), tmp_path, cdp_provider=provider)
+    with pytest.raises(_StopAtConnect):
+        await _run("navigate", ctx, url="https://x.test", user_description="open")
+    assert provider.leased_sandboxes == [ctx.sandbox]
 
 
 async def test_a_tool_without_a_cdp_provider_fails_loud(tmp_path: Path) -> None:

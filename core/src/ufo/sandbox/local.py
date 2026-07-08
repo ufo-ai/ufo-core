@@ -124,6 +124,16 @@ class LocalCarrier:
     async def destroy(self, handle: SandboxHandle) -> None:
         self._env.pop(handle.conversation_id, None)
 
+    async def host(self, handle: SandboxHandle, port: int) -> str:
+        """The local carrier runs commands as host subprocesses, not a network-addressable sandbox,
+        so an in-sandbox service (a browser's CDP endpoint, a site's dev-server preview) has no
+        external per-port host — a deploy that reaches an in-sandbox port needs a remote carrier
+        (e2b)."""
+        raise RuntimeError(
+            "the local carrier exposes no external per-port host; reach an in-sandbox service "
+            "through a remote carrier (e2b)"
+        )
+
 
 def _root(host_path: str | None) -> Path:
     if host_path is None:
