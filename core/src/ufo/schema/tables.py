@@ -55,6 +55,7 @@ conversation = sa.Table(
     sa.Column("surface", sa.Text, nullable=False),
     sa.Column("queue_key", sa.Text, nullable=False),
     sa.Column("member_id", sa.Uuid, sa.ForeignKey("member.id"), nullable=True),
+    sa.Column("sandbox_handle", sa.Text, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint("surface", "queue_key"),

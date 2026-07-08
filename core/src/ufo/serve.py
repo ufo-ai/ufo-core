@@ -228,7 +228,7 @@ def _launch_jobs(
         core_jobs(
             sync_driver,
             SpendResume(client=dbos_client),
-            SandboxReaper(carrier=carrier),
+            SandboxReaper(carrier=carrier, backend=config.sandbox.backend),
             page_change_runner,
         ),
     )

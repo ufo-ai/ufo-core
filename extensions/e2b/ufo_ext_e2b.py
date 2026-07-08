@@ -4,10 +4,12 @@ Docker is core's default carrier; this extension registers `e2b` on the `carrier
 so a deploy that sets `[sandbox] backend = "e2b"` runs its sandboxes on E2B without core naming the
 provider. The e2b SDK is synchronous, so every provider call crosses `asyncio.to_thread` — the one
 blocking boundary tolerated, kept to the named SDK callable it wraps. `create` opens a fresh sandbox
-on the deploy's template or resumes the conversation's live one; `exec` runs a command through
-`commands.run`; `export` promotes a produced file into the artifact store with a server-side copy
-inside the bucket; `destroy` pauses the sandbox so its next turn resumes cheaply. The container
-stays a disposable cache over the durable workspace.
+on the deploy's template, resumes the conversation's in-process one, or — when this process holds
+none — reconnects the sandbox a prior process left, from the id core seeds on `spec.resume_id` off
+the conversation's durable handle; `exec` runs a command through `commands.run`; `export` promotes a
+produced file into the artifact store with a server-side copy inside the bucket; `destroy` pauses
+the sandbox so its next turn resumes cheaply. The container stays a disposable cache over the
+durable workspace.
 
 A remote sandbox runs off-cluster, so it reaches the egress proxy at the proxy's externally-
 reachable public URL (not a host-local address): every command runs with `HTTP(S)_PROXY` dialing
@@ -15,8 +17,9 @@ that URL, the turn's run token as the proxy basic-auth username so each metered 
 turn, the model sentinels the proxy swaps for the real key on the wire, and the proxy CA written
 into the sandbox so it terminates TLS the sandbox trusts. The s3fs mount step runs without that env
 — it talks to S3 directly with its own prefix-scoped credential, never through the agent's egress
-proxy. The reaper leans on the provider's own idle-pause to reclaim a sandbox created by a prior
-process; a durable conversation→sandbox map is the depth beyond that."""
+proxy. The reaper reclaims a sandbox a prior process created by reconnecting the stored id and
+pausing it — the conversation's durable `sandbox_handle` is the map, so idle reclaim no longer
+leans on the provider's own timeout alone."""
 
 import asyncio
 import base64
@@ -154,10 +157,11 @@ class E2BCarrier:
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         live = self._live.get(spec.conversation_id)
-        if live is not None:
+        resume_id = live.sandbox_id if live is not None else spec.resume_id
+        if resume_id is not None:
             sandbox = await asyncio.to_thread(
                 self.sdk.connect,
-                live.sandbox_id,
+                resume_id,
                 timeout=self.timeout_seconds,
                 api_key=self.api_key,
             )
@@ -172,8 +176,10 @@ class E2BCarrier:
             )
             await asyncio.to_thread(sandbox.files.make_dir, WORKSPACE_DIR)
         self._live[spec.conversation_id] = sandbox
-        # Write the proxy CA and (re)build the turn's egress env on every create — a resume picks up
-        # this process's CA (the proxy mints a fresh one at boot) and this turn's run token.
+        # Write the proxy CA and (re)build the turn's egress env on every create — a resume (in this
+        # process or a prior one's, reconnected from spec.resume_id) picks up this process's CA (the
+        # proxy mints a fresh one at boot) and this turn's run token, so exec never reads a missing
+        # _egress: create is the one place that seeds it and every turn opens through create.
         await asyncio.to_thread(sandbox.files.write, CA_SANDBOX_PATH, spec.proxy.ca_cert)
         self._egress[spec.conversation_id] = _egress_env(spec.proxy, spec.run_token)
         await self._mount_s3(sandbox, spec.mount)
@@ -289,12 +295,20 @@ class E2BCarrier:
         return sandbox.get_host(port)
 
     async def destroy(self, handle: SandboxHandle) -> None:
-        """Pause and drop the conversation's sandbox. The idle reaper reaps by conversation identity
-        with no container id, so a conversation this process still holds is paused, and one it never
-        held (already gone, or created before a restart) is a no-op that never raises — the
-        provider's own idle-pause reclaims a sandbox this process can no longer address."""
+        """Pause and drop the conversation's sandbox. The reaper passes the stored id, so a sandbox
+        this process still holds is paused directly, and one it never held (a prior process created
+        it) is reconnected from `handle.container_id` and paused too — the durable handle lets idle
+        reclaim reach a sandbox this process could not otherwise address. An empty id (the seam's
+        no-container reap) connects to nothing and is a no-op that never raises."""
         self._egress.pop(handle.conversation_id, None)
         live = self._live.pop(handle.conversation_id, None)
+        if live is None and handle.container_id:
+            live = await asyncio.to_thread(
+                self.sdk.connect,
+                handle.container_id,
+                timeout=self.timeout_seconds,
+                api_key=self.api_key,
+            )
         if live is not None:
             await asyncio.to_thread(live.pause, api_key=self.api_key)
 
