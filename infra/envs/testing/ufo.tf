@@ -109,9 +109,13 @@ data "kubectl_file_documents" "tenant_crd" {
 
 data "kubectl_file_documents" "control_plane" {
   content = templatefile("${path.module}/ufo/control-plane.yaml.tpl", {
-    registry  = module.platform.ecr_registry
-    image_tag = var.image_tag
-    namespace = local.system_namespace
+    registry       = module.platform.ecr_registry
+    image_tag      = var.image_tag
+    namespace      = local.system_namespace
+    apex_host      = var.apex_host
+    base_domain    = var.tenant_base_domain
+    cluster_issuer = "letsencrypt"
+    ingress_class  = "nginx"
   })
 }
 

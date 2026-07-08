@@ -157,3 +157,74 @@ spec:
       volumes:
         - name: config
           configMap: {name: ufo-control-platform}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ufo-gateway
+  namespace: ${namespace}
+  labels: {app: ufo-gateway}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: ufo-gateway}
+  template:
+    metadata:
+      labels: {app: ufo-gateway}
+    spec:
+      serviceAccountName: ufo-operator
+      containers:
+        - name: gateway
+          image: ${registry}/ufo-control:${image_tag}
+          args: [gateway]
+          ports:
+            - {name: http, containerPort: 8080}
+          env:
+            - {name: UFO_PUBLIC_BASE_URL, value: "https://${apex_host}"}
+            - {name: UFO_BASE_DOMAIN, value: "${base_domain}"}
+            - {name: UFO_BUNDLE_IMAGE, value: "${registry}/ufo:${image_tag}"}
+            - {name: UFO_GATEWAY_EMAIL_BACKEND, value: "logging"}
+            - name: UFO_CONTROL_POSTGRES_OWNER_DSN
+              valueFrom:
+                secretKeyRef: {name: ufo-control-secrets, key: postgres-admin-dsn}
+            - name: UFO_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef: {name: ufo-platform-secrets, key: UFO_TOKEN_SECRET}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ufo-gateway
+  namespace: ${namespace}
+spec:
+  selector: {app: ufo-gateway}
+  ports:
+    - {name: http, port: 80, targetPort: http}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ufo-gateway
+  namespace: ${namespace}
+  annotations:
+    cert-manager.io/cluster-issuer: ${cluster_issuer}
+    external-dns.alpha.kubernetes.io/hostname: ${apex_host}
+spec:
+  ingressClassName: ${ingress_class}
+  tls:
+    - hosts: [${apex_host}]
+      secretName: ufo-gateway-tls
+  rules:
+    - host: ${apex_host}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ufo-gateway
+                port: {name: http}
