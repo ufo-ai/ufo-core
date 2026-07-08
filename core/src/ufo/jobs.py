@@ -26,7 +26,7 @@ from ufo.ext.manifest import HookContext, HookSpec, JobSpec, Manifest, PageChang
 from ufo.indexing import EmbedClient, IndexBackend
 from ufo.models.registry import ModelRegistry
 from ufo.o11y import log
-from ufo.sandbox.session import Carrier, SandboxHandle
+from ufo.sandbox.session import Carrier, SandboxHandle, sandbox_handle_id
 from ufo.schema import tables
 from ufo.schema.records import (
     DBOS_APP_VERSION,
@@ -147,19 +147,37 @@ class SandboxReaper:
     ago than the idle TTL, with no turn still in flight, has its sandbox destroyed through the
     carrier seam — the next turn recreates it from the same durable workspace and notices only
     latency. A batch-at-interval sweep, never fired by a turn it reclaims; the carrier's destroy is
-    idempotent, so a container already gone (or one the local carrier never held) is a no-op, and a
-    still-idle conversation re-selected on the next sweep costs one such no-op. The reaper holds
-    only conversation identity — the durable key create-or-attach reuses — so it reaps by
-    conversation, never by the ephemeral container id no durable row carries."""
+    idempotent, so a container already gone is a no-op, and a still-idle conversation re-selected on
+    the next sweep costs one such no-op.
+
+    The durable source of truth is the conversation's `sandbox_handle` (`<backend>:<id>`), not an
+    in-process map, so the reaper reclaims a sandbox this or any PRIOR process created: it reaps by
+    conversation identity plus the stored id, then clears the row so a reaped sandbox is never
+    resumed into a dead (docker) or released (e2b pause) id — the next turn creates fresh. A handle
+    another backend wrote (a deploy that switched carriers) is not this carrier's to reap and is
+    skipped."""
 
     carrier: Carrier
+    backend: str
 
     async def run(self) -> None:
-        for conversation_id in await self._idle_conversations():
+        for conversation_id, stored in await self._idle_sandboxes():
+            container_id = sandbox_handle_id(self.backend, stored)
+            if container_id is None:
+                continue
             if await self._now_active(conversation_id):
                 continue
             await self.carrier.destroy(
-                SandboxHandle(conversation_id=conversation_id, container_id="")
+                SandboxHandle(conversation_id=conversation_id, container_id=container_id)
+            )
+            await self._clear(conversation_id)
+
+    async def _clear(self, conversation_id: UUID) -> None:
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.conversation)
+                .values(sandbox_handle=None)
+                .where(tables.conversation.c.id == conversation_id)
             )
 
     async def _now_active(self, conversation_id: UUID) -> bool:
@@ -182,7 +200,10 @@ class SandboxReaper:
             ).first()
         return found is not None
 
-    async def _idle_conversations(self) -> tuple[UUID, ...]:
+    async def _idle_sandboxes(self) -> tuple[tuple[UUID, str], ...]:
+        """Conversations carrying a persisted sandbox handle whose most recent turn settled past the
+        idle TTL and which have no turn in flight — the durable handle, not an in-process map, is
+        the set the reaper reclaims from, so a sandbox a prior process created is in scope."""
         cutoff = datetime.now(UTC) - timedelta(seconds=SANDBOX_IDLE_TTL_SECONDS)
         in_flight = (
             sa.select(tables.turn.c.conversation_id)
@@ -192,13 +213,17 @@ class SandboxReaper:
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
-                    sa.select(tables.turn.c.conversation_id)
-                    .where(tables.turn.c.conversation_id.notin_(in_flight))
-                    .group_by(tables.turn.c.conversation_id)
+                    sa.select(tables.turn.c.conversation_id, tables.conversation.c.sandbox_handle)
+                    .select_from(tables.turn.join(tables.conversation))
+                    .where(
+                        tables.conversation.c.sandbox_handle.is_not(None),
+                        tables.turn.c.conversation_id.notin_(in_flight),
+                    )
+                    .group_by(tables.turn.c.conversation_id, tables.conversation.c.sandbox_handle)
                     .having(sa.func.max(tables.turn.c.updated_at) < cutoff)
                 )
             ).all()
-        return tuple(row.conversation_id for row in rows)
+        return tuple((row.conversation_id, row.sandbox_handle) for row in rows)
 
 
 @dataclass(frozen=True)

@@ -33,8 +33,11 @@ from ufo.sandbox.session import (
     MountSpec,
     ProxyEndpoint,
     RunToken,
+    SandboxHandle,
     SandboxSession,
     SandboxSpec,
+    format_sandbox_handle,
+    sandbox_handle_id,
 )
 from ufo.schema import tables
 from ufo.schema.records import (
@@ -151,16 +154,13 @@ async def _execute_turn(turn_id: str) -> str:
             max_rounds = profile.max_rounds
         resolved = resolved.model_copy(update={"model": runtime.registry.resolve(resolved.model)})
         model = runtime.registry.client_for(resolved.model)
-        handle = await runtime.carrier.create(
-            SandboxSpec(
-                conversation_id=turn.conversation_id,
-                image_ref=SANDBOX_IMAGE_REF,
-                mount=await _workspace_mount(
-                    runtime.blob, runtime.workspace_fs, turn.conversation_id
-                ),
-                proxy=runtime.proxy,
-                run_token=RunToken(workspace_id=turn.workspace_id, turn_id=turn.id).encode(),
-            )
+        handle = await _open_sandbox(
+            runtime.carrier,
+            runtime.config.sandbox.backend,
+            runtime.blob,
+            runtime.workspace_fs,
+            runtime.proxy,
+            turn,
         )
         engine = TurnEngine(
             turn=turn,
@@ -282,6 +282,63 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, UUID | None]:
         subagent_profile=row.subagent_profile,
     )
     return turn, Agent(prompt=row.prompt, model=row.model), row.member_id
+
+
+async def _open_sandbox(
+    carrier: Carrier,
+    backend: str,
+    blob: BlobStore,
+    workspace_fs: SandboxFsCredentialMinter | None,
+    proxy: ProxyEndpoint,
+    turn: Turn,
+) -> SandboxHandle:
+    """Create-or-resume the conversation's sandbox and keep its durable handle on the conversation
+    row. A prior process's handle survives there, so a fresh serve reattaches the same sandbox from
+    the stored id (seeded into `resume_id`) rather than stranding it; a row with no handle — or one
+    another backend wrote — creates fresh. The returned handle's id is written back as
+    `<backend>:<id>` only when it differs from what the row already holds, so a resume (same id)
+    costs no write and a fresh create (or an overwrite of a reaped id) persists once — the reaper
+    and the next process read this same column."""
+    stored = await _stored_sandbox_handle(turn.conversation_id, turn.workspace_id)
+    resume_id = None if stored is None else sandbox_handle_id(backend, stored)
+    handle = await carrier.create(
+        SandboxSpec(
+            conversation_id=turn.conversation_id,
+            image_ref=SANDBOX_IMAGE_REF,
+            mount=await _workspace_mount(blob, workspace_fs, turn.conversation_id),
+            proxy=proxy,
+            run_token=RunToken(workspace_id=turn.workspace_id, turn_id=turn.id).encode(),
+            resume_id=resume_id,
+        )
+    )
+    persisted = format_sandbox_handle(backend, handle.container_id)
+    if persisted != stored:
+        await _persist_sandbox_handle(turn.conversation_id, turn.workspace_id, persisted)
+    return handle
+
+
+async def _stored_sandbox_handle(conversation_id: UUID, workspace_id: UUID) -> str | None:
+    async with workspace_tx() as connection:
+        return (
+            await connection.execute(
+                sa.select(tables.conversation.c.sandbox_handle).where(
+                    tables.conversation.c.id == conversation_id,
+                    tables.conversation.c.workspace_id == workspace_id,
+                )
+            )
+        ).scalar_one()
+
+
+async def _persist_sandbox_handle(conversation_id: UUID, workspace_id: UUID, handle: str) -> None:
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.conversation)
+            .values(sandbox_handle=handle)
+            .where(
+                tables.conversation.c.id == conversation_id,
+                tables.conversation.c.workspace_id == workspace_id,
+            )
+        )
 
 
 async def _workspace_mount(

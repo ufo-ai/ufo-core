@@ -10,7 +10,7 @@ The two exceptions raised are the real e2b types, so the mapping is exercised ag
 the live SDK throws."""
 
 import base64
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -320,6 +320,44 @@ async def test_second_create_for_the_conversation_resumes_rather_than_recreates(
     assert len(sdk.created) == 1
     assert sdk.connected == ["sbx-1"]
     assert handle.container_id == "sbx-1"
+
+
+async def test_create_resumes_a_prior_process_sandbox_and_exec_works() -> None:
+    """Cross-process resume: a fresh carrier (empty in-process maps, as after a serve restart) given
+    the conversation's stored id via spec.resume_id connects to that sandbox rather than opening a
+    new one, and rebuilds the egress env through create so the following exec never KeyErrors on a
+    missing _egress — create is the one seam that seeds it, and every turn opens through create."""
+    sdk = _Sdk()
+    first = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    conversation = uuid4()
+    opened = await first.create(_spec(conversation))
+
+    restarted = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    resumed = await restarted.create(replace(_spec(conversation), resume_id=opened.container_id))
+
+    assert len(sdk.created) == 1
+    assert sdk.connected == [opened.container_id]
+    assert resumed.container_id == opened.container_id
+    result = await restarted.exec(resumed, ("bash", "-lc", "echo hi"), b"", 60)
+    assert result.exit_code == 0
+
+
+async def test_destroy_connects_to_a_prior_process_sandbox_to_pause_it() -> None:
+    """The reaper reclaims a sandbox a prior process created by passing the stored id: a fresh
+    carrier holds no live sandbox, so destroy reconnects that id and pauses it — idle reclaim
+    reaches across a restart, not only sandboxes this process opened."""
+    sdk = _Sdk()
+    opener = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    conversation = uuid4()
+    opened = await opener.create(_spec(conversation))
+
+    reaper_carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    await reaper_carrier.destroy(
+        SandboxHandle(conversation_id=conversation, container_id=opened.container_id)
+    )
+
+    assert sdk.connected == [opened.container_id]
+    assert sdk.sandboxes[opened.container_id].paused == 1
 
 
 async def test_exec_runs_the_joined_command_in_the_workspace_and_maps_the_result() -> None:

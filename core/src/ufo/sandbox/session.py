@@ -96,11 +96,18 @@ class ProxyEndpoint:
 
 @dataclass(frozen=True)
 class SandboxSpec:
+    """`resume_id` is the sandbox id a prior process persisted on the conversation row: when this
+    process holds no live sandbox for the conversation, the carrier resumes that id rather than
+    opening a fresh sandbox, so a serve restart reattaches instead of stranding it. None means
+    create fresh (no stored handle, or one another backend wrote). A carrier that resumes by
+    conversation identity (docker's container name, the local host directory) ignores it."""
+
     conversation_id: UUID
     image_ref: str
     mount: MountSpec
     proxy: ProxyEndpoint
     run_token: str
+    resume_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -115,6 +122,23 @@ class SandboxHandle:
     container_id: str
     mount: MountSpec | None = None
     traffic_token: str | None = None
+
+
+SANDBOX_HANDLE_SEP = ":"
+
+
+def format_sandbox_handle(backend: str, container_id: str) -> str:
+    """The durable `<backend>:<id>` a conversation row carries so a later process resumes the same
+    sandbox from the id and the reaper reclaims one a prior process created. The backend prefix is
+    load-bearing: a deploy that switched carriers must not resume or reap another backend's id."""
+    return f"{backend}{SANDBOX_HANDLE_SEP}{container_id}"
+
+
+def sandbox_handle_id(backend: str, value: str) -> str | None:
+    """The sandbox id inside a stored handle when it belongs to `backend`, else None — a handle
+    another backend wrote is not this carrier's to resume or reap."""
+    prefix = f"{backend}{SANDBOX_HANDLE_SEP}"
+    return value[len(prefix) :] if value.startswith(prefix) else None
 
 
 @dataclass(frozen=True)
