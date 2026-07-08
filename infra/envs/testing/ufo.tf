@@ -42,6 +42,7 @@ locals {
     blob_region = "${var.region}"
     blob_s3_url = "https://s3.${var.region}.amazonaws.com"
     blob_sts_role_arn = "${module.platform.sandbox_fs_role_arn}"
+    serve_role_arn = "${module.platform.app_s3_role_arn}"
 
     sandbox_proxy_url = "http://sandbox-proxy.${var.tenant_base_domain}:8888"
 

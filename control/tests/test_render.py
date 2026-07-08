@@ -62,6 +62,7 @@ def _platform_with_proxy() -> PlatformConfig:
             "blob_region": "us-east-1",
             "blob_s3_url": "https://s3.us-east-1.amazonaws.com",
             "sandbox_proxy_url": "http://sandbox-proxy.ufo.app:8888",
+            "serve_role_arn": "arn:aws:iam::123456789012:role/ufo-testing-app-s3",
         }
     )
 
@@ -122,6 +123,20 @@ def test_overlay_omits_the_proxy_when_the_platform_leaves_it_unset() -> None:
     config = tomllib.loads(render.secret.config_toml)
     assert "proxy_public_url" not in config["sandbox"]
     assert render.values.sandbox_proxy_hostname == ""
+
+
+def test_serve_role_arn_rides_the_values_for_the_sa_annotation() -> None:
+    # The platform's serve_role_arn becomes the chart value the ufo-serve SA is annotated with, so
+    # the pod assumes the IRSA role for blob access + the sandbox-fs mount mint.
+    render = render_tenant(_request(), _platform_with_proxy(), _database_postgres())
+    assert render.values.serve_role_arn == "arn:aws:iam::123456789012:role/ufo-testing-app-s3"
+
+
+def test_serve_role_arn_defaults_empty_without_platform_irsa() -> None:
+    # The default _platform() supplies no IRSA role: the SA is annotation-free and the chart's
+    # `{{- if .Values.serve_role_arn }}` guard drops the annotation block.
+    render = render_tenant(_request(), _platform(), _database_postgres())
+    assert render.values.serve_role_arn == ""
 
 
 def test_database_tier_omits_system_url_and_workspace_id() -> None:

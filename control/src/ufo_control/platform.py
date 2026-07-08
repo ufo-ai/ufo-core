@@ -89,6 +89,12 @@ class PlatformConfig(BaseModel):
     blob_sts_endpoint: str | None = None
     blob_path_style: bool = False
 
+    # The IRSA role the tenant chart annotates onto the ufo-serve ServiceAccount, so the pod's boto3
+    # reaches the blob bucket and assumes blob_sts_role_arn for the per-conversation s3fs mount. Set
+    # on any deploy whose runtime AWS identity comes from IRSA (EKS); unset for a local/dev backend
+    # that supplies credentials another way.
+    serve_role_arn: str | None = None
+
     # The externally-reachable base an off-cluster sandbox (e2b) dials the tenant's in-pod egress
     # proxy at (e.g. http://sandbox-proxy.<domain>:8888). Set only for an off-cluster sandbox
     # backend; the reconciler overlays it as [sandbox] proxy_public_url and the tenant chart exposes
