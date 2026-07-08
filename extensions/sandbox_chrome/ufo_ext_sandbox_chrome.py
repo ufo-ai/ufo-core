@@ -26,7 +26,7 @@ VERSION = "0.1.0"
 CDP_BACKEND = "sandbox_chrome"
 BROWSER_CDP_PORT = 9222
 BROWSER_CDP_PROXY_PORT = 9223
-BROWSER_START_TIMEOUT_SECONDS = 20
+BROWSER_START_TIMEOUT_SECONDS = 45
 BROWSER_READY_ATTEMPTS = 150
 BROWSER_READY_SLEEP_SECONDS = 0.1
 TRAFFIC_ACCESS_HEADER = "e2b-traffic-access-token"
@@ -47,17 +47,20 @@ nohup "$browser" --headless=new --no-sandbox --disable-dev-shm-usage --disable-g
   --remote-allow-origins='*' --user-data-dir=/tmp/ufo-browser/profile about:blank \
   >/tmp/ufo-browser/chromium.log 2>&1 &
 echo "$!" >/tmp/ufo-browser.pid
-for i in $(seq 1 {BROWSER_READY_ATTEMPTS}); do
-  python3 - <<'PY' && exit 0 || sleep {BROWSER_READY_SLEEP_SECONDS}
+python3 - <<'PY' && exit 0
 import sys
+import time
 import urllib.request
 
-try:
-    urllib.request.urlopen("http://127.0.0.1:{BROWSER_CDP_PORT}/json/version", timeout=0.2).read()
-except Exception:
-    sys.exit(1)
+url = "http://127.0.0.1:{BROWSER_CDP_PORT}/json/version"
+for _ in range({BROWSER_READY_ATTEMPTS}):
+    try:
+        urllib.request.urlopen(url, timeout=0.2).read()
+        sys.exit(0)
+    except Exception:
+        time.sleep({BROWSER_READY_SLEEP_SECONDS})
+sys.exit(1)
 PY
-done
 cat /tmp/ufo-browser/chromium.log >&2
 exit 1
 """.strip()
