@@ -1,4 +1,4 @@
-"""The sandbox-chrome cdp provider driven against a fake carrier: the lease launches Chrome and the
+"""The sandbox_chrome cdp provider driven against a fake carrier: the lease launches Chrome and the
 Host-rewrite proxy inside the sandbox, resolves the DevTools websocket path, and builds the wss
 endpoint over the carrier's public per-port host with the sandbox's traffic token as a header. The
 carrier is a real `SandboxSession` over a fake `Carrier` that records the commands it is asked to
@@ -112,6 +112,6 @@ def test_manifest_registers_the_sandbox_chrome_cdp_provider() -> None:
     manifest = ext.manifest()
     assert manifest.name == "sandbox_chrome"
     specs = {spec.backend: spec for spec in manifest.cdp_providers}
-    assert set(specs) == {"sandbox-chrome"}
-    provider = specs["sandbox-chrome"].build(None)  # the factory ignores the credential reader
+    assert set(specs) == {"sandbox_chrome"}
+    provider = specs["sandbox_chrome"].build(None)  # the factory ignores the credential reader
     assert isinstance(provider, ext.SandboxChromeCdpProvider)

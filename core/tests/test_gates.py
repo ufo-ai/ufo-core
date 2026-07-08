@@ -102,6 +102,28 @@ def test_skill_boundary_gate_allows_stdlib_and_third_party_imports() -> None:
     assert gates._skill_boundary_failures(trees) == []
 
 
+def test_naming_gate_flags_a_dash_in_a_registered_name() -> None:
+    from ufo.ext.manifest import CdpProviderSpec, Manifest, Pack
+
+    bad_ext = Manifest(name="bad-ext", version="0")
+    assert any("bad-ext" in failure for failure in gates._naming_failures((bad_ext,), ()))
+
+    bad_provider = Manifest(
+        name="ok",
+        version="0",
+        cdp_providers=(CdpProviderSpec(backend="bad-cdp", build=lambda _: None),),
+    )
+    provider_failures = gates._naming_failures((bad_provider,), ())
+    assert any("bad-cdp" in failure and "cdp_providers" in failure for failure in provider_failures)
+
+    bad_pack = Pack(name="bad-pack", version="0")
+    assert any("bad-pack" in failure for failure in gates._naming_failures((), (bad_pack,)))
+
+
+def test_naming_gate_passes_on_the_installed_tree() -> None:
+    assert gates._registered_naming_failures() == []
+
+
 def test_skill_content_is_held_out_of_the_code_gates() -> None:
     """A bundled skill script (a .py file under a SKILL.md folder) is sandbox content, not framework
     code: it appears in `_skill_scripts` for the boundary gate and never in `_python_files`, so the

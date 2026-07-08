@@ -1,10 +1,16 @@
 """Repo-wide CI gates. Run: uv run python gates.py"""
 
+from __future__ import annotations
+
 import ast
 import re
 import sys
 from collections import defaultdict
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ufo.ext.manifest import Manifest, Pack
 
 ROOT = Path(__file__).parent
 SOURCE_ROOTS = ("core", "extensions", "packs")
@@ -28,6 +34,7 @@ CORE_SKILL_NAMES = frozenset({"sandbox", "delegation"})
 SKILL_MANIFEST = "SKILL.md"
 MIGRATION_DIR_PART = "migrations"
 CORE_OWNER = "core"
+NAME_SEPARATOR = "-"
 
 
 def _is_skill_content(path: Path) -> bool:
@@ -496,6 +503,56 @@ def _migration_failures(trees: dict[Path, ast.Module]) -> list[str]:
     return failures
 
 
+def _provider_names(manifest: Manifest) -> list[tuple[str, str]]:
+    """Every registered provider name a manifest declares, paired with the point it came from —
+    reading each spec type's own identifier field (cdp and search carry it as `backend`, carrier,
+    embed, and index as `name`)."""
+    return [
+        *(("cdp_providers", spec.backend) for spec in manifest.cdp_providers),
+        *(("carriers", spec.name) for spec in manifest.carriers),
+        *(("search_providers", spec.backend) for spec in manifest.search_providers),
+        *(("embeds", spec.name) for spec in manifest.embeds),
+        *(("indexes", spec.name) for spec in manifest.indexes),
+    ]
+
+
+def _naming_failures(manifests: tuple[Manifest, ...], packs: tuple[Pack, ...]) -> list[str]:
+    """Every name a subsystem selects a component by uses `_`, never `-`: an extension name, a pack
+    name, and each provider name across the cdp/carrier/search/embed/index points. A `-` fractures
+    the selector — a config `cdp_provider = "sandbox_chrome"` would never match a provider
+    registered as `sandbox-chrome` — so it is refused at the registration seam, not left to surface
+    as a boot miss."""
+    failures = [
+        f"naming: extension name {manifest.name!r} uses {NAME_SEPARATOR!r} — names use '_'"
+        for manifest in manifests
+        if NAME_SEPARATOR in manifest.name
+    ]
+    failures.extend(
+        f"naming: {point} name {name!r} in extension {manifest.name!r} uses "
+        f"{NAME_SEPARATOR!r} — names use '_'"
+        for manifest in manifests
+        for point, name in _provider_names(manifest)
+        if NAME_SEPARATOR in name
+    )
+    failures.extend(
+        f"naming: pack name {pack.name!r} uses {NAME_SEPARATOR!r} — names use '_'"
+        for pack in packs
+        if NAME_SEPARATOR in pack.name
+    )
+    return failures
+
+
+def _registered_naming_failures() -> list[str]:
+    """Load the installed manifests and packs the way the loader does — every `ufo.extension` and
+    `ufo.pack` entry point resolved to the value object it declares — and scan their registered
+    names for `-`."""
+    from ufo.ext.loader import discovered, discovered_packs
+
+    manifests = tuple(manifest for manifest, _ in discovered().values())
+    packs = tuple(discovered_packs().values())
+    return _naming_failures(manifests, packs)
+
+
 def main() -> int:
     failures = []
     trees: dict[Path, ast.Module] = {}
@@ -533,6 +590,7 @@ def main() -> int:
     }
     failures.extend(_skill_boundary_failures(skill_trees))
     failures.extend(_migration_failures(trees))
+    failures.extend(_registered_naming_failures())
 
     for failure in failures:
         print(f"GATE: {failure}")

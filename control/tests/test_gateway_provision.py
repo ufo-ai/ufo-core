@@ -53,7 +53,7 @@ def test_hosted_config_selects_the_sandbox_chrome_cdp_provider() -> None:
     inside its own sandbox, not a static endpoint. (database/blob come from the deploy env, so only
     the sections this TOML carries are validated here.)"""
     parsed = tomllib.loads(CONFIG_TOML)
-    assert BrowserConfig.model_validate(parsed["browser"]).cdp_provider == "sandbox-chrome"
+    assert BrowserConfig.model_validate(parsed["browser"]).cdp_provider == "sandbox_chrome"
     assert SandboxConfig.model_validate(parsed["sandbox"]).backend == "e2b"
 
 

@@ -257,7 +257,7 @@ def _cdp_config(cdp_provider: str) -> Config:
 
 def test_core_selects_a_manifest_contributed_cdp_provider() -> None:
     """The `cdp_providers` seam end to end: core's boot-time selection knows only the built-in
-    `sandbox-cdp` default, so resolving the sample's provider name proves the Manifest
+    `sandbox_cdp` default, so resolving the sample's provider name proves the Manifest
     `cdp_providers` point flowed into selection. Selecting a name no manifest registers, and two
     manifests claiming one name, both fail loud; a named provider with no credential key set fails
     loud."""
@@ -265,7 +265,7 @@ def test_core_selects_a_manifest_contributed_cdp_provider() -> None:
     workspace_id = uuid4()
     store = _credential_store()
 
-    default = _select_cdp_provider(_cdp_config("sandbox-cdp"), (), workspace_id, None)
+    default = _select_cdp_provider(_cdp_config("sandbox_cdp"), (), workspace_id, None)
     assert isinstance(default, SandboxCdpProvider)
     selected = _select_cdp_provider(
         _cdp_config(sample.CDP_PROVIDER), (manifest,), workspace_id, store
@@ -296,21 +296,21 @@ def test_boot_validation_of_requires_fails_when_the_cdp_endpoint_is_unset(
 ) -> None:
     """The `requires` + boot-validation seam end to end: an extension declaring `requires` a seam
     whose backend is unusable fails `serve` at boot. With the browser extension's
-    `requires=("cdp_providers",)` and the default `sandbox-cdp` provider selected but no
+    `requires=("cdp_providers",)` and the default `sandbox_cdp` provider selected but no
     `BROWSER_CDP_URL`, `_validate_requires` fails loud, naming the extension and the seam; setting
     the endpoint clears it. A `requires` an extension names that core does not know also fails."""
     monkeypatch.delenv("BROWSER_CDP_URL", raising=False)
     workspace_id = uuid4()
     browser = Manifest(name="browser", version="0", requires=("cdp_providers",))
     with pytest.raises(RuntimeError, match=r"requires the 'cdp_providers' seam"):
-        _validate_requires(_cdp_config("sandbox-cdp"), (browser,), workspace_id, None)
+        _validate_requires(_cdp_config("sandbox_cdp"), (browser,), workspace_id, None)
 
     monkeypatch.setenv("BROWSER_CDP_URL", "ws://127.0.0.1:9222")
-    _validate_requires(_cdp_config("sandbox-cdp"), (browser,), workspace_id, None)
+    _validate_requires(_cdp_config("sandbox_cdp"), (browser,), workspace_id, None)
 
     unknown = Manifest(name="needs-nothing-real", version="0", requires=("nonesuch",))
     with pytest.raises(RuntimeError, match="unknown seam 'nonesuch'"):
-        _validate_requires(_cdp_config("sandbox-cdp"), (unknown,), workspace_id, None)
+        _validate_requires(_cdp_config("sandbox_cdp"), (unknown,), workspace_id, None)
 
 
 def test_core_selects_a_manifest_contributed_auth_proxy() -> None:

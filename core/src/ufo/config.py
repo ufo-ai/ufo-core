@@ -12,7 +12,7 @@ from ufo.models.interface import AUTO_MODEL, DEFAULT_REASONING_EFFORT, Reasoning
 CONFIG_PATH_ENV = "UFO_CONFIG"
 DEFAULT_CONFIG_PATH = Path("ufo.toml")
 IN_PROCESS_BACKEND = "in_process"
-DEFAULT_CDP_PROVIDER = "sandbox-cdp"
+DEFAULT_CDP_PROVIDER = "sandbox_cdp"
 DEFAULT_AUTO_MODEL = "claude-opus-4-8"
 DEFAULT_PROXY_PORT = 8888
 
@@ -201,10 +201,11 @@ class HubConfig(BaseModel):
 
 class BrowserConfig(BaseModel):
     """The browser transport. `cdp_provider` selects where the one BUA engine (the browser
-    extension) connects: core's default `sandbox-cdp` provider (a static lease over the
+    extension) connects: core's default `sandbox_cdp` provider (a static lease over the
     `BROWSER_CDP_URL` endpoint) or any provider an extension registers through its Manifest
-    `cdp_providers` point (browserbase mints a hosted session per turn). Selecting a name no
-    extension registers fails loud at boot."""
+    `cdp_providers` point (the `sandbox_chrome` provider leases CDP from the turn's own sandbox;
+    browserbase mints a hosted session per turn). Selecting a name no extension registers fails
+    loud at boot."""
 
     model_config = ConfigDict(extra="forbid")
     cdp_provider: str = DEFAULT_CDP_PROVIDER

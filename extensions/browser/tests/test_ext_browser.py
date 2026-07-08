@@ -284,7 +284,7 @@ async def test_the_surface_is_built_once_per_turn_leased_and_released_on_cleanup
 
 
 async def test_the_surface_leases_with_the_turns_sandbox(tmp_path: Path) -> None:
-    """The producer half of the sandbox-chrome seam: the surface passes the turn's `SandboxSession`
+    """The producer half of the sandbox_chrome seam: the surface passes the turn's `SandboxSession`
     into `lease`, so a per-conversation-sandbox provider can resolve Chrome inside that sandbox. A
     static or hosted provider ignores it, but the surface always threads it through."""
     provider = FakeCdpProvider()

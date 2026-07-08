@@ -1,8 +1,8 @@
-"""The sandbox-chrome cdp provider: Chrome driven inside each conversation's own sandbox.
+"""The sandbox_chrome cdp provider: Chrome driven inside each conversation's own sandbox.
 
 A hosted deploy runs one headless Chrome per conversation, inside that conversation's sandbox, and
 the serve process reaches its DevTools endpoint over the carrier's public per-port host. Selected by
-`[browser] cdp_provider = "sandbox-chrome"`, this provider's per-turn `lease` receives the turn's
+`[browser] cdp_provider = "sandbox_chrome"`, this provider's per-turn `lease` receives the turn's
 `SandboxSession` and, against it: launches Chrome idempotently on port 9222 (pidfile-guarded,
 backgrounded so the exec returns while it keeps running), starts an in-sandbox TCP proxy on 9223
 that rewrites each request's `Host:` header to `127.0.0.1:9222` (Chrome's DevTools rejects a
@@ -23,7 +23,7 @@ from ufo.sdk.sandbox import SandboxSession
 
 NAME = "sandbox_chrome"
 VERSION = "0.1.0"
-CDP_BACKEND = "sandbox-chrome"
+CDP_BACKEND = "sandbox_chrome"
 BROWSER_CDP_PORT = 9222
 BROWSER_CDP_PROXY_PORT = 9223
 BROWSER_START_TIMEOUT_SECONDS = 20
@@ -209,7 +209,7 @@ class SandboxChromeCdpProvider:
     async def lease(self, sandbox: SandboxSession | None = None) -> CdpLease:
         if sandbox is None:
             raise RuntimeError(
-                "the sandbox-chrome cdp provider needs the turn's sandbox to reach its Chrome"
+                "the sandbox_chrome cdp provider needs the turn's sandbox to reach its Chrome"
             )
         await _run(sandbox, CHROME_START_COMMAND, "start browser")
         await _run(sandbox, PROXY_START_COMMAND, "start browser proxy")
@@ -226,7 +226,7 @@ class SandboxChromeCdpProvider:
 async def _run(sandbox: SandboxSession, command: str, what: str) -> str:
     result = await sandbox.bash(command, timeout_s=BROWSER_START_TIMEOUT_SECONDS)
     if result.exit_code != 0:
-        raise RuntimeError(f"sandbox-chrome failed to {what}: {result.stderr or result.stdout}")
+        raise RuntimeError(f"sandbox_chrome failed to {what}: {result.stderr or result.stdout}")
     return result.stdout
 
 

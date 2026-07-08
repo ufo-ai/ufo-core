@@ -7,7 +7,7 @@ surface and the ufo terminal surface, the OpenRouter model provider, and the cod
 over managed backends instead
 of core's own: the Turbopuffer index (in place of the local index), the Slack surface, the Redis
 live-frame hub, the E2B sandbox carrier, and Chrome driven inside each conversation's sandbox (the
-sandbox-chrome cdp provider, in place of a static `BROWSER_CDP_URL`). Memory still retrieves through
+sandbox_chrome cdp provider, in place of a static `BROWSER_CDP_URL`). Memory still retrieves through
 OpenAI embeddings
 (Turbopuffer is the index seam, embeddings are separate). It bundles only extensions and adds no
 pack-level skills or onboarding of its own — each capability rides its own extension's manifest."""

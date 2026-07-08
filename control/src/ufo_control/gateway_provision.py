@@ -23,7 +23,7 @@ CONFIG_TOML = (
     '[memory]\nindex_backend = "turbopuffer"\n\n'
     '[research]\nsearch_provider = "exa"\n\n'
     '[sandbox]\nbackend = "e2b"\n\n'
-    '[browser]\ncdp_provider = "sandbox-chrome"\n'
+    '[browser]\ncdp_provider = "sandbox_chrome"\n'
 )
 
 

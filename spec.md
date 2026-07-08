@@ -142,7 +142,7 @@ Manifest registers (each optional):
 | `indexes` | Index backends for memory/source retrieval (turbopuffer); the dialect-native default (SQLite FTS5 + local cosine, Postgres tsvector + pgvector) ships as the base-pinned `index_default` extension registering name `"default"`, which core resolves when `memory.index_backend` is unset. |
 | `embeds` | Embedding backends behind `EmbedClient`, selected by `memory.embed_backend`; OpenAI text-embedding-3-large ships as the base-pinned `embed_openai` extension registering name `"default"`. |
 | `hubs` | Stream hubs for multi-instance deploys (Redis). |
-| `cdp_providers` | CDP transport backends the one BUA browser engine (an extension, not core) connects, selected by `[browser] cdp_provider` (default `sandbox-cdp`): core's `sandbox-cdp` wraps the `BROWSER_CDP_URL` endpoint in a static lease; browserbase mints a fresh hosted session per turn. A provider mints a per-turn `CdpLease` the loop releases at turn end. The BUA engine is the browser extension, so only the transport is a core seam, never the engine. |
+| `cdp_providers` | CDP transport backends the one BUA browser engine (an extension, not core) connects, selected by `[browser] cdp_provider` (default `sandbox_cdp`): core's `sandbox_cdp` wraps the `BROWSER_CDP_URL` endpoint in a static lease; browserbase mints a fresh hosted session per turn. A provider mints a per-turn `CdpLease` the loop releases at turn end. The BUA engine is the browser extension, so only the transport is a core seam, never the engine. |
 | `auth_proxies` | Credential backends a feed-sync connector source resolves a provider `Credential` through, selected by `[connectors] auth_backend` (default `composio`): the Composio broker (a proxying transport, token stays server-side) or `direct` BYOK (a member-added key read host-side from the credential store, never reaching the sandbox). No backend installed → connector sources are inert; folder sources need none. |
 | `search_providers` | Web-search backends the research extension's tools call, selected by `[research] search_provider`. A backend runs host-side — it reads its BYOK key in-process and reaches its API over async HTTP, so the key never enters the sandbox — and answers a search query; `supports_fetch` marks whether it also fetches a URL's content (Exa's search + contents does; an answer-with-citations backend need not, and the `fetch_url` tool gates on it). Core ships no default: every backend is an extension, and the research extension `requires` this seam. |
 | `requires` | Sub-seams this extension consumes from another (the browser pack `requires` `cdp_providers`); `serve` resolves each at boot and fails loud — naming the extension and the seam — if the backend is absent, unknown, or unkeyed, so a missing dependency stops startup rather than the first tool call. |
@@ -180,7 +180,7 @@ extension's do. The lockfile is the installed+verified universe; a pack selects 
 so pack integrity derives from the pinned extensions it names. Absent config, the deploy runs the
 unnarrowed set (the lockfile's pins, or every discovered extension in dev). The flagship is
 **assistant** — memory (with its index and embed backends), the browser pack (its BUA engine over
-the default `sandbox-cdp` transport), Composio connectors, and web research (the research tools over
+the default `sandbox_cdp` transport), Composio connectors, and web research (the research tools over
 the Exa search backend).
 
 ## Surfaces
@@ -325,7 +325,7 @@ bundle installs OSS, on-prem, or hosted.
 | Websites | tools (sandbox serving), routes |
 
 Packs (activation bundles, not code — see Packs): **assistant** bundles memory, the browser pack
-(its BUA engine over the default `sandbox-cdp` transport), Composio connectors, and web research
+(its BUA engine over the default `sandbox_cdp` transport), Composio connectors, and web research
 (the research tools over the Exa search backend) (the flagship); **startup** and
 **support bot** name the extensions plus pack-level onboarding a product needs (YC/fundraising docs
 and search; knowledgebase + keys onboarding with the websites plugin). Each activates one coherent
