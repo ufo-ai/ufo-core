@@ -344,10 +344,22 @@ def test_turn_tools_without_manifests_is_builtins_and_empty_map() -> None:
     assert ext_by_tool == {}
 
 
-def test_turn_tools_fails_loud_when_tools_declared_without_credential_key() -> None:
-    manifest = Manifest(name=EXTENSION, version="0.1.0", tools=(NOTE_TOOL,))
-    with pytest.raises(RuntimeError, match="declares tools but no credential key"):
+def test_turn_tools_fails_loud_when_credential_slots_declared_without_key() -> None:
+    manifest = Manifest(
+        name=EXTENSION,
+        version="0.1.0",
+        tools=(NOTE_TOOL,),
+        credentials=(CredentialSlot(name="k", description="key"),),
+    )
+    with pytest.raises(RuntimeError, match="declares credential slots"):
         turn_tools((manifest,), uuid4(), None)
+
+
+def test_turn_tools_builds_slot_free_tools_without_a_credential_key() -> None:
+    manifest = Manifest(name=EXTENSION, version="0.1.0", tools=(NOTE_TOOL,))
+    tools, ext_by_tool = turn_tools((manifest,), uuid4(), None)
+    assert NOTE_TOOL in tools
+    assert NOTE_TOOL.name in ext_by_tool
 
 
 def test_validate_ext_tools_rejects_a_name_colliding_with_a_builtin() -> None:
@@ -364,6 +376,11 @@ def test_validate_ext_tools_rejects_a_name_colliding_with_a_builtin() -> None:
 
 
 def test_validate_ext_tools_fails_loud_without_a_credential_key_at_boot() -> None:
-    manifest = Manifest(name=EXTENSION, version="0.1.0", tools=(NOTE_TOOL,))
-    with pytest.raises(RuntimeError, match="credential key"):
+    manifest = Manifest(
+        name=EXTENSION,
+        version="0.1.0",
+        tools=(NOTE_TOOL,),
+        credentials=(CredentialSlot(name="k", description="key"),),
+    )
+    with pytest.raises(RuntimeError, match="credential"):
         validate_ext_tools((manifest,), uuid4(), None)
