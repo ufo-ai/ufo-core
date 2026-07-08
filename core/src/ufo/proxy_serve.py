@@ -91,7 +91,9 @@ def _owner_dsn(config: Config) -> str:
     One process serves every tenant, so it cannot use a tenant-pinned RLS role; the resolver's
     explicit `workspace_id` filters scope each query. Read from `UFO_OWNER_DSN` (a k8s secretKeyRef
     injects it, since a password-bearing DSN cannot ride a configmap), falling back to `[database]
-    owner_url`; neither set fails loud."""
+    owner_url`; neither set fails loud. The secret's contract is a plain libpq URL (its asyncpg
+    consumers dial it verbatim), which SQLAlchemy would map to the sync psycopg2 dialect — pin the
+    async psycopg driver this distribution ships."""
     dsn = os.environ.get(OWNER_DSN_ENV) or config.database.owner_url
     if not dsn:
         raise RuntimeError(
@@ -99,7 +101,7 @@ def _owner_dsn(config: Config) -> str:
             "proxy bypasses RLS with the owner role and scopes every query by the run token's "
             "workspace_id"
         )
-    return dsn
+    return dsn.replace("postgresql://", "postgresql+psycopg://", 1)
 
 
 @dataclass(frozen=True)

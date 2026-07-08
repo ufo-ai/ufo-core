@@ -102,18 +102,28 @@ def test_egress_ca_fails_loud_when_a_half_is_unset(monkeypatch: pytest.MonkeyPat
         _egress_ca()
 
 
-def test_owner_dsn_prefers_the_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_owner_dsn_prefers_the_env_and_pins_the_async_driver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A k8s secretKeyRef injects the password-bearing DSN as UFO_OWNER_DSN, which wins over the
-    (placeholder) config field the proxy config carries."""
+    (placeholder) config field the proxy config carries. The secret holds a plain libpq URL; the
+    proxy pins the async psycopg driver so SQLAlchemy never resolves the sync psycopg2 dialect."""
     monkeypatch.setenv(OWNER_DSN_ENV, "postgresql://env-owner@db/ufo")
     assert _owner_dsn(_config(owner_url="postgresql://config-owner@db/ufo")) == (
-        "postgresql://env-owner@db/ufo"
+        "postgresql+psycopg://env-owner@db/ufo"
     )
 
 
 def test_owner_dsn_falls_back_to_the_config_field(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(OWNER_DSN_ENV, raising=False)
-    assert _owner_dsn(_config(owner_url="postgresql://owner@db/ufo")) == "postgresql://owner@db/ufo"
+    assert _owner_dsn(_config(owner_url="postgresql://owner@db/ufo")) == (
+        "postgresql+psycopg://owner@db/ufo"
+    )
+
+
+def test_owner_dsn_keeps_an_explicit_driver_scheme(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(OWNER_DSN_ENV, "postgresql+psycopg://owner@db/ufo")
+    assert _owner_dsn(_config(owner_url=None)) == "postgresql+psycopg://owner@db/ufo"
 
 
 def test_owner_dsn_fails_loud_when_env_and_config_are_unset(
