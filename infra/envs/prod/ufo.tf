@@ -38,7 +38,10 @@ locals {
 
     blob_bucket = "${module.platform.blob_bucket}"
     blob_region = "${var.region}"
+    blob_s3_url = "https://s3.${var.region}.amazonaws.com"
     blob_sts_role_arn = "${module.platform.sandbox_fs_role_arn}"
+
+    sandbox_proxy_url = "http://sandbox-proxy.${module.platform.hostname}:8888"
 
     ingress_class = "nginx"
     cluster_issuer = "letsencrypt"

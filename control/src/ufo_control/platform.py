@@ -89,6 +89,12 @@ class PlatformConfig(BaseModel):
     blob_sts_endpoint: str | None = None
     blob_path_style: bool = False
 
+    # The externally-reachable base an off-cluster sandbox (e2b) dials the tenant's in-pod egress
+    # proxy at (e.g. http://sandbox-proxy.<domain>:8888). Set only for an off-cluster sandbox
+    # backend; the reconciler overlays it as [sandbox] proxy_public_url and the tenant chart exposes
+    # the proxy port on a LoadBalancer at this host. Unset for an in-cluster backend (docker/pod).
+    sandbox_proxy_url: str | None = None
+
     ingress_class: str = "nginx"
     cluster_issuer: str = "letsencrypt"
     platform_secret: str = "ufo-platform-secrets"
