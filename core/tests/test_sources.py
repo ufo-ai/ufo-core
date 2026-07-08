@@ -834,7 +834,10 @@ def test_source_sync_spend_resume_and_sandbox_reap_register_as_core_jobs(
         pages=CorePageFeed(blob=FilesystemBlobStore(root=tmp_path / "pages")),
     )
     specs = core_jobs(
-        driver, SpendResume(client=None), SandboxReaper(carrier=LocalCarrier()), runner
+        driver,
+        SpendResume(client=None),
+        SandboxReaper(carrier=LocalCarrier(), backend="local"),
+        runner,
     )
     assert [spec.name for spec in specs] == [
         SOURCE_SYNC_JOB,

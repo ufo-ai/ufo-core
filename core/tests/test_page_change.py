@@ -168,7 +168,7 @@ def test_each_page_change_consumer_registers_as_its_own_job(tmp_path: object) ->
     specs = core_jobs(
         SyncDriver(backends={"folder": FolderSource()}, blob=blob, postgres=False),
         SpendResume(client=None),
-        SandboxReaper(carrier=LocalCarrier()),
+        SandboxReaper(carrier=LocalCarrier(), backend="local"),
         runner,
     )
     page_change = [spec.name for spec in specs if spec.name.startswith(f"{PAGE_CHANGE_JOB}:")]
