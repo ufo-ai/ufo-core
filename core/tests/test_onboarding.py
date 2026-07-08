@@ -260,6 +260,29 @@ def test_init_workspace_id_option_pins_the_workspace_row(
     assert agent_ws == pinned
 
 
+def test_init_skip_migrations_onboards_without_migrating(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--skip-migrations` (the shared-database tenant path) onboards against an already-migrated
+    schema without re-running migrations — so a pack-narrowed re-migration can't fail to resolve
+    another pack's revisions. Migrate once, then init --skip-migrations with `apply_migrations`
+    booby-trapped: it must not be called."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-onboard")
+    monkeypatch.setenv("UFO_CREDENTIAL_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(cli, "UFOCTL_DIR", tmp_path / ".ufoctl")
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        Path("ufo.toml").write_text(cli.DEFAULT_CONFIG)
+        cli.apply_migrations("sqlite+aiosqlite:///ufo.db", None)
+
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("apply_migrations must not run under --skip-migrations")
+
+        monkeypatch.setattr(cli, "apply_migrations", _boom)
+        result = runner.invoke(cli.main, ["init", "--email", OWNER_EMAIL, "--skip-migrations"])
+        assert result.exit_code == 0, result.output
+
+
 def test_cold_start_without_credential_key_fails_cleanly_then_recovers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

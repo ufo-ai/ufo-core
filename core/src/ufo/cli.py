@@ -70,11 +70,14 @@ def main() -> None:
 @click.option("--email", required=True)
 @click.option("--model", default=DEFAULT_AGENT_MODEL, show_default=True)
 @click.option("--workspace-id", type=click.UUID, default=None)
-def init(email: str, model: str, workspace_id: UUID | None) -> None:
+@click.option("--skip-migrations", is_flag=True, default=False)
+def init(email: str, model: str, workspace_id: UUID | None, skip_migrations: bool) -> None:
     """Write ufo.toml if absent, apply the schema, then onboard the workspace, owner, default
     agent and model key (plus any extension onboarding steps) and bind this machine's CLI token.
     `--workspace-id` pins the workspace row's id (the control plane mints it and pins the tenant's
-    RLS GUC to it); unset, one is minted."""
+    RLS GUC to it); unset, one is minted. `--skip-migrations` onboards only — for a shared database
+    whose schema a cluster-scoped job already brought to head over the union of every extension, so
+    a pack-narrowed re-migration here would fail to resolve another pack's revisions."""
     config_path = Path("ufo.toml")
     if not config_path.exists():
         config_path.write_text(DEFAULT_CONFIG)
@@ -82,7 +85,8 @@ def init(email: str, model: str, workspace_id: UUID | None) -> None:
     config = load_config()
     if config.database.url.startswith("postgresql"):
         asyncio.run(_create_postgres_system_database(config))
-    apply_migrations(config.database.url, config.pack.name)
+    if not skip_migrations:
+        apply_migrations(config.database.url, config.pack.name)
     token = secrets.token_hex(32)
     try:
         asyncio.run(_onboard(config, email, model, token, workspace_id))

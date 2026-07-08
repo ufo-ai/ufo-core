@@ -36,6 +36,7 @@ spec:
             {{- if .Values.workspace_id }}
             - --workspace-id
             - {{ .Values.workspace_id | quote }}
+            - --skip-migrations
             {{- end }}
           env:
             - name: UFO_CREDENTIAL_KEY
