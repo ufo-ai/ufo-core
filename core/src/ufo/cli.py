@@ -35,6 +35,7 @@ from ufo.ext.loader import load_manifests, lockfile_path
 from ufo.ext.store import ExtensionStore, read_catalog
 from ufo.grants import GrantSummary, grant_summaries
 from ufo.onboarding import AlreadyInitialized, Onboarded, Onboarding
+from ufo.proxy_serve import run as proxy_run
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME
 from ufo.serve import run as serve_run
@@ -167,6 +168,12 @@ def migrate() -> None:
 def serve() -> None:
     """Run the workspace: surfaces + workers, one process."""
     serve_run()
+
+
+@main.command()
+def proxy() -> None:
+    """Run the shared egress proxy: one service fronting every tenant's sandbox egress."""
+    proxy_run()
 
 
 @main.command()

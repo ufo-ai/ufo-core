@@ -76,6 +76,10 @@ class MountSpec:
     path_style: bool = False
 
 
+EGRESS_CA_CERT_ENV = "UFO_EGRESS_CA_CERT"
+EGRESS_CA_KEY_ENV = "UFO_EGRESS_CA_KEY"
+
+
 @dataclass(frozen=True)
 class ProxyEndpoint:
     """Where the egress proxy listens, backend-neutral: the port plus the CA the sandbox trusts so
