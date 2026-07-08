@@ -1,9 +1,13 @@
 # The control-plane image — one image, two roles (`ufo-control api` / `ufo-control operator`).
-# It bakes the helm binary and the tenant chart the operator applies.
-FROM python:3.12-slim
+# It builds FROM the ufo bundle image so `ufo.deploy` (the shared DeployRequest contract the control
+# plane imports) is present and version-locked to the runtime; it then layers the control package
+# and bakes the helm binary + the tenant chart the operator applies.
+ARG UFO_IMAGE=ufo:latest
+FROM ${UFO_IMAGE}
 
 ARG HELM_VERSION=v3.16.3
 
+USER root
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates \
     && curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" \

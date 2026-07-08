@@ -73,7 +73,7 @@ jobs:
           if aws ecr describe-images --repository-name ufo-control --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
             echo "ufo-control:$IMAGE_TAG already pushed — skipping"
           else
-            docker build -f control/Dockerfile -t "$ECR_REGISTRY/ufo-control:$IMAGE_TAG" control
+            docker build -f control/Dockerfile --build-arg "UFO_IMAGE=$ECR_REGISTRY/ufo:$IMAGE_TAG" -t "$ECR_REGISTRY/ufo-control:$IMAGE_TAG" control
             docker push "$ECR_REGISTRY/ufo-control:$IMAGE_TAG"
           fi
 
