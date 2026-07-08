@@ -150,9 +150,11 @@ data "kubectl_file_documents" "cluster_services" {
 # datadog-api-key Secret (api-keys SM entry). The platform_config points tenants at its OTLP/HTTP port.
 data "kubectl_file_documents" "observability" {
   content = templatefile("${path.module}/ufo/observability.yaml.tpl", {
-    namespace       = local.system_namespace
-    collector_image = "otel/opentelemetry-collector-contrib:0.115.0"
-    dd_site         = "datadoghq.com"
+    namespace = local.system_namespace
+    # 0.114.0 pinned by its amd64 digest: the :0.115.0 tag does not exist and the :0.116.0 build's
+    # binary fails to exec on the nodes; this digest is verified running the datadog exporter.
+    collector_image = "otel/opentelemetry-collector-contrib@sha256:94ac10da6c15fdad4f8091c4292a8c6814b467cd3bcf575ba2279e9dc6346e63"
+    dd_site         = "us5.datadoghq.com"
     secret_api_keys = module.platform.secret_names.api_keys
   })
 }
