@@ -480,7 +480,7 @@ def test_memory_registers_two_independent_page_change_consumers(tmp_path: object
     specs = core_jobs(
         SyncDriver(backends={"folder": FolderSource()}, blob=blob, postgres=False),
         SpendResume(client=None),
-        SandboxReaper(carrier=LocalCarrier()),
+        SandboxReaper(carrier=LocalCarrier(), backend="local"),
         runner,
     )
     page_change = {spec.name for spec in specs if spec.name.startswith("page_change:")}
