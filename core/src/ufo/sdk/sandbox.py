@@ -19,6 +19,7 @@ from ufo.sandbox.session import WORKSPACE_DIR as WORKSPACE_DIR
 from ufo.sandbox.session import Carrier as Carrier
 from ufo.sandbox.session import ExecResult as ExecResult
 from ufo.sandbox.session import MountSpec as MountSpec
+from ufo.sandbox.session import ProxyEndpoint as ProxyEndpoint
 from ufo.sandbox.session import SandboxHandle as SandboxHandle
 from ufo.sandbox.session import SandboxSession as SandboxSession
 from ufo.sandbox.session import SandboxSpec as SandboxSpec

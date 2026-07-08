@@ -14,6 +14,7 @@ DEFAULT_CONFIG_PATH = Path("ufo.toml")
 IN_PROCESS_BACKEND = "in_process"
 DEFAULT_CDP_PROVIDER = "sandbox-cdp"
 DEFAULT_AUTO_MODEL = "claude-opus-4-8"
+DEFAULT_PROXY_PORT = 8888
 
 
 class DatabaseConfig(BaseModel):
@@ -133,10 +134,18 @@ class SandboxConfig(BaseModel):
     zero-dependency `local` carrier ships with core, an extension registers more (`docker`, `e2b`, a
     remote runner) through its `carriers` Manifest point — and `serve` fails loud on a name no
     carrier registers. Each carrier sources its own parameters (template, keys); core config knows
-    only the selected name."""
+    only the selected name.
+
+    `proxy_port` is the stable port the in-process egress proxy binds, so an in-pod sandbox forms a
+    fixed proxy address and an off-cluster deploy exposes one known port. `proxy_public_url` is the
+    externally-reachable base an off-cluster sandbox (e2b) dials that proxy at; unset for an in-pod
+    carrier. `serve` fails loud when an off-cluster carrier is selected with no `proxy_public_url` —
+    open, unmetered egress is never a silent default."""
 
     model_config = ConfigDict(extra="forbid")
     backend: str = "local"
+    proxy_port: int = DEFAULT_PROXY_PORT
+    proxy_public_url: str | None = None
 
 
 class ExtConfig(BaseModel):
