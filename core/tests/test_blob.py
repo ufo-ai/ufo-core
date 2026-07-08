@@ -10,6 +10,7 @@ import pytest
 from aiobotocore.session import get_session
 from botocore.exceptions import BotoCoreError, ClientError
 
+from ufo import blob
 from ufo.blob import (
     S3_MULTIPART_PART_BYTES,
     BlobNotFound,
@@ -65,6 +66,20 @@ async def test_filesystem_put_file_streams_from_disk(tmp_path: Path) -> None:
     store = FilesystemBlobStore(root=tmp_path / "blobs")
     await store.put_file("artifacts/x/artifact.bin", source)
     assert await store.get("artifacts/x/artifact.bin") == payload
+
+
+async def test_filesystem_copy_duplicates_bytes(tmp_path: Path) -> None:
+    store = FilesystemBlobStore(root=tmp_path)
+    payload = bytes(range(256)) * 64
+    await store.put("workspace/report.bin", payload)
+    await store.copy("workspace/report.bin", "artifacts/x/report.bin")
+    assert await store.get("artifacts/x/report.bin") == payload
+    assert await store.get("workspace/report.bin") == payload
+
+
+async def test_filesystem_copy_missing_source_raises(tmp_path: Path) -> None:
+    with pytest.raises(BlobNotFound):
+        await FilesystemBlobStore(root=tmp_path).copy("absent", "artifacts/x/y")
 
 
 def test_blob_store_for_filesystem(tmp_path: Path) -> None:
@@ -166,3 +181,31 @@ async def test_s3_put_file_empty(s3_store: S3BlobStore, tmp_path: Path) -> None:
     source.write_bytes(b"")
     await s3_store.put_file("artifacts/z/empty.bin", source)
     assert await s3_store.get("artifacts/z/empty.bin") == b""
+
+
+async def test_s3_copy_within_bucket(s3_store: S3BlobStore) -> None:
+    await s3_store.put("workspace/report.pdf", b"report-bytes")
+    await s3_store.copy("workspace/report.pdf", "artifacts/abc/report.pdf")
+    assert await s3_store.get("artifacts/abc/report.pdf") == b"report-bytes"
+
+
+async def test_s3_copy_missing_source_raises(s3_store: S3BlobStore) -> None:
+    with pytest.raises(BlobNotFound):
+        await s3_store.copy("absent", "artifacts/x/y")
+
+
+async def test_s3_copy_multipart_within_bucket(
+    s3_store: S3BlobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Above the single-copy ceiling the copy walks server-side UploadPartCopy ranges and completes
+    the multipart. The ceiling and part size are dropped to 5 MiB so a small object exercises the
+    path without a multi-gigabyte object; minio, like S3, still requires every part but the last to
+    be at least 5 MiB, so the two exact-5 MiB parts are valid."""
+    part = 5 * 1024 * 1024
+    monkeypatch.setattr(blob, "S3_SINGLE_COPY_MAX_BYTES", part)
+    monkeypatch.setattr(blob, "S3_COPY_PART_BYTES", part)
+    payload = bytes(range(256)) * (part // 128)
+    assert len(payload) > part
+    await s3_store.put("workspace/big.bin", payload)
+    await s3_store.copy("workspace/big.bin", "artifacts/big/big.bin")
+    assert await s3_store.get("artifacts/big/big.bin") == payload

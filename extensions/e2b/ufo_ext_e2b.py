@@ -5,8 +5,9 @@ so a deploy that sets `[sandbox] backend = "e2b"` runs its sandboxes on E2B with
 provider. The e2b SDK is synchronous, so every provider call crosses `asyncio.to_thread` — the one
 blocking boundary tolerated, kept to the named SDK callable it wraps. `create` opens a fresh sandbox
 on the deploy's template or resumes the conversation's live one; `exec` runs a command through
-`commands.run`; `export` reads a produced file out with `files.read`; `destroy` pauses the sandbox
-so its next turn resumes cheaply. The container stays a disposable cache over the durable workspace.
+`commands.run`; `export` promotes a produced file into the artifact store with a server-side copy
+inside the bucket; `destroy` pauses the sandbox so its next turn resumes cheaply. The container
+stays a disposable cache over the durable workspace.
 
 A remote sandbox runs off-cluster, so it reaches the egress proxy at the proxy's externally-
 reachable public URL (not a host-local address): every command runs with `HTTP(S)_PROXY` dialing
@@ -22,7 +23,8 @@ import base64
 import os
 import shlex
 from dataclasses import dataclass, field
-from typing import Literal, Protocol, cast
+from pathlib import PurePosixPath
+from typing import Protocol, cast
 from uuid import UUID
 
 from e2b import Sandbox as E2BSdkSandbox
@@ -54,7 +56,6 @@ E2B_API_KEY_ENVS = ("E2B_API_KEY", "UFO_E2B_API_KEY")
 E2B_TEMPLATE_ENV = "UFO_E2B_TEMPLATE"
 DEFAULT_TIMEOUT_SECONDS = 300
 EXEC_TIMEOUT_CODE = 124
-READ_FORMAT: Literal["bytes"] = "bytes"
 CONVERSATION_METADATA_KEY = "ufo.conversation_id"
 E2B_LIFECYCLE: SandboxLifecycle = {"on_timeout": "pause", "auto_resume": True}
 CA_SANDBOX_PATH = "/home/user/.ufo-egress-ca.pem"
@@ -109,8 +110,6 @@ class E2BCommands(Protocol):
 
 
 class E2BFiles(Protocol):
-    def read(self, path: str, format: Literal["bytes"]) -> bytes: ...
-
     def make_dir(self, path: str, *, user: str | None = None) -> bool: ...
 
     def write(self, path: str, data: str | bytes) -> object: ...
@@ -267,12 +266,18 @@ class E2BCarrier:
         return ExecResult(stdout=result.stdout, stderr=result.stderr, exit_code=result.exit_code)
 
     async def export(self, handle: SandboxHandle, path: str, blob: BlobStore, key: str) -> None:
-        """Read the produced file out of the remote sandbox and hand it to the blob store. The sync
-        SDK returns the whole file, so this is a single bounded read, not the streaming copy the
-        bind-mounted Docker carrier does — the remote provider has no filesystem the host shares."""
-        sandbox = await self._sandbox(handle)
-        data = await asyncio.to_thread(sandbox.files.read, path, READ_FORMAT)
-        await blob.put(key, data)
+        """Promote a produced workspace file into the artifact store with a server-side copy inside
+        the bucket — the bytes never leave S3, so nothing reads back through the remote pod. The
+        file is already flushed to the workspace S3 prefix by the time export runs: a prior tool
+        wrote and closed it through s3fs and `share_file`'s preflight has already streamed it — the
+        same flush assumption docker's s3 export makes. `handle.mount` carries the `key_prefix`
+        create set from `spec.mount`, so the source object is `<key_prefix>/<rel>` in the same
+        bucket as the store."""
+        mount = handle.mount
+        if mount is None or mount.kind != "s3" or mount.key_prefix is None:
+            raise RuntimeError("e2b export requires an s3 workspace mount")
+        rel = PurePosixPath(path).relative_to(WORKSPACE_DIR)
+        await blob.copy(f"{mount.key_prefix}/{rel}", key)
 
     async def host(self, handle: SandboxHandle, port: int) -> str:
         """The sandbox's public per-port host: e2b routes an in-sandbox port over a per-port

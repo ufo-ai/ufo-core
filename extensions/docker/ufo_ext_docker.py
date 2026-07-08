@@ -152,8 +152,8 @@ class DockerCarrier:
         """Copy a produced workspace file to `key` without the host process ever holding the bytes
         whole — the large-attachment path, distinct from the bounded read. A filesystem bind mount
         already has the file at `host_path/<rel>`, streamed in by the blob store. An s3 mount wrote
-        it through s3fs to `<key_prefix>/<rel>` in the same bucket, so it streams object→object in
-        bounded chunks."""
+        it through s3fs to `<key_prefix>/<rel>` in the same bucket, so it copies server-side within
+        the store — the bytes never leave S3."""
         mount = handle.mount
         if mount is None:
             raise RuntimeError("docker export requires a workspace mount")
@@ -161,7 +161,7 @@ class DockerCarrier:
         if mount.kind == "s3":
             if mount.key_prefix is None:
                 raise RuntimeError("s3 workspace mount is missing its key prefix")
-            await blob.put_stream(key, blob.get_stream(f"{mount.key_prefix}/{rel}"))
+            await blob.copy(f"{mount.key_prefix}/{rel}", key)
             return
         if mount.kind != "filesystem" or mount.host_path is None:
             raise RuntimeError("docker export requires a filesystem or s3 workspace mount")

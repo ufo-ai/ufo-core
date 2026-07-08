@@ -17,6 +17,8 @@ from ufo.config import BlobConfig
 MISSING_KEY_CODES = ("404", "NoSuchKey", "NotFound")
 BLOB_STREAM_CHUNK_BYTES = 1024 * 1024
 S3_MULTIPART_PART_BYTES = 8 * 1024 * 1024
+S3_SINGLE_COPY_MAX_BYTES = 5 * 1024 * 1024 * 1024
+S3_COPY_PART_BYTES = 1024 * 1024 * 1024
 
 
 class BlobNotFound(KeyError):
@@ -42,6 +44,13 @@ class BlobStore(Protocol):
     def get_stream(self, key: str) -> AsyncIterator[bytes]: ...
 
     async def put_stream(self, key: str, chunks: AsyncIterator[bytes]) -> None: ...
+
+    async def copy(self, src_key: str, dst_key: str) -> None:
+        """Duplicate a stored object to another key within the same store — the bytes never cross
+        the calling process. The workspace-file share path: a produced file already in the
+        conversation's workspace prefix is promoted into the artifact prefix of the same store,
+        server-side on S3 (`s3:CopyObject`) with no read-through-the-pod."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -104,6 +113,16 @@ class FilesystemBlobStore:
             await asyncio.to_thread(handle.close)
             await asyncio.to_thread(temp.unlink, missing_ok=True)
             raise
+
+    async def copy(self, src_key: str, dst_key: str) -> None:
+        source = self._resolve(src_key)
+        if not await asyncio.to_thread(source.is_file):
+            raise BlobNotFound(src_key)
+        path = self._resolve(dst_key)
+        await asyncio.to_thread(path.parent.mkdir, parents=True, exist_ok=True)
+        temp = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
+        await asyncio.to_thread(shutil.copyfile, source, temp)
+        await asyncio.to_thread(temp.replace, path)
 
     def _resolve(self, key: str) -> Path:
         root = self.root.resolve()
@@ -242,6 +261,46 @@ class S3BlobStore:
                     await client.abort_multipart_upload(
                         Bucket=self.bucket, Key=key, UploadId=upload_id
                     )
+                raise
+
+    async def copy(self, src_key: str, dst_key: str) -> None:
+        source = {"Bucket": self.bucket, "Key": src_key}
+        async with self._client() as client:
+            try:
+                head = await client.head_object(Bucket=self.bucket, Key=src_key)
+            except ClientError as error:
+                if _is_missing_key(error):
+                    raise BlobNotFound(src_key) from error
+                raise
+            size = head["ContentLength"]
+            if size <= S3_SINGLE_COPY_MAX_BYTES:
+                await client.copy_object(CopySource=source, Bucket=self.bucket, Key=dst_key)
+                return
+            created = await client.create_multipart_upload(Bucket=self.bucket, Key=dst_key)
+            upload_id = created["UploadId"]
+            try:
+                parts: list[dict[str, object]] = []
+                for number, offset in enumerate(range(0, size, S3_COPY_PART_BYTES), start=1):
+                    last = min(offset + S3_COPY_PART_BYTES, size) - 1
+                    copied = await client.upload_part_copy(
+                        Bucket=self.bucket,
+                        Key=dst_key,
+                        PartNumber=number,
+                        UploadId=upload_id,
+                        CopySource=source,
+                        CopySourceRange=f"bytes={offset}-{last}",
+                    )
+                    parts.append({"ETag": copied["CopyPartResult"]["ETag"], "PartNumber": number})
+                await client.complete_multipart_upload(
+                    Bucket=self.bucket,
+                    Key=dst_key,
+                    UploadId=upload_id,
+                    MultipartUpload={"Parts": parts},
+                )
+            except BaseException:
+                await client.abort_multipart_upload(
+                    Bucket=self.bucket, Key=dst_key, UploadId=upload_id
+                )
                 raise
 
     def _client(self) -> ClientCreatorContext:
