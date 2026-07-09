@@ -19,6 +19,7 @@ import asyncpg
 import pytest
 import sqlalchemy as sa
 from click.testing import CliRunner
+from ufo.config import DatabaseConfig
 from ufo.db import (
     apply_migrations,
     current_workspace,
@@ -56,6 +57,9 @@ PG_PORT = 5544
 ADMIN_DSN = f"postgresql://admin:admin@{PG_HOST}:{PG_PORT}/postgres"
 POSTGRES_HOST = f"{PG_HOST}:{PG_PORT}"
 APP_DATABASE = "ufo_rls_test"
+# The admin, connected to the shared app database (not the maintenance db) — what prod's rollout
+# owner DSN is, so ensure_serve_role derives the DBOS sibling from the app database it targets.
+ADMIN_APP_DSN = f"postgresql://admin:admin@{POSTGRES_HOST}/{APP_DATABASE}"
 FAILLOUD_DATABASE = "ufo_rls_failloud"
 OWNER_ROLE = "ufo_owner"
 OWNER_PASSWORD = "ownerpw"
@@ -100,7 +104,7 @@ class RlsEnv:
 async def _reset(database: str) -> None:
     connection = await asyncpg.connect(ADMIN_DSN)
     try:
-        for name in (database, *TENANT_DBOS):
+        for name in (database, f"{database}_dbos", *TENANT_DBOS):
             await connection.execute(f'drop database if exists "{name}" with (force)')
         for role in (*TENANT_ROLES, "ufo_serve", "ufo_serve_shared", "ufo_app", OWNER_ROLE):
             await connection.execute(f'drop role if exists "{role}"')
@@ -234,7 +238,7 @@ def test_rls_bootstrap_cli_is_idempotent(rls_env: RlsEnv) -> None:
     # bootstrap now also creates the ufo_serve role, so it runs as the cluster admin (prod's
     # postgres-admin-dsn), not the non-superuser tenant owner.
     previous = os.environ.get(POSTGRES_OWNER_DSN_ENV)
-    os.environ[POSTGRES_OWNER_DSN_ENV] = f"postgresql://admin:admin@{POSTGRES_HOST}/{APP_DATABASE}"
+    os.environ[POSTGRES_OWNER_DSN_ENV] = ADMIN_APP_DSN
     try:
         result = CliRunner().invoke(main, ["rls-bootstrap"])
     finally:
@@ -285,8 +289,8 @@ def shared_role_env(rls_env: RlsEnv) -> Iterator[SharedRoleEnv]:
     workspace fails loud. The shared fleet also opens the RLS-bypassing ``ufo_owner`` engine
     (``init_owner_db``) that ``owner_tx`` enumerates through, so both the subject and owner ends the
     fleet uses are live here. Built on rls_env's owner + policies + two seeded workspaces; _reset
-    drops the role."""
-    asyncio.run(ensure_serve_role(ADMIN_DSN))
+    drops the role and the DBOS sibling database the bootstrap provisions."""
+    asyncio.run(ensure_serve_role(ADMIN_APP_DSN))
     dsn = serve_dsn(POSTGRES_HOST, APP_DATABASE)
     init_db(dsn)
     init_owner_db(_owner_app_dsn("postgresql+asyncpg", APP_DATABASE))
@@ -297,6 +301,24 @@ def shared_role_env(rls_env: RlsEnv) -> Iterator[SharedRoleEnv]:
         )
     finally:
         asyncio.run(dispose_db())
+
+
+async def test_shared_bootstrap_provisions_the_dbos_system_database(
+    shared_role_env: SharedRoleEnv,
+) -> None:
+    """Core derives the fleet's DBOS system store as the ``<app>_dbos`` sibling of the serve DSN and
+    ``DBOS.launch`` connects there, but the RLS-subject serve role has no CREATEDB to mint it — so
+    the rollout bootstrap creates it, owned by the role. Without it the fleet crash-loops on
+    ``database "<app>_dbos" does not exist``. Connect as the serve role to core's derived system
+    database and create the schema DBOS bootstraps — proving it exists and the role owns it."""
+    system_url = DatabaseConfig(url=serve_dsn(POSTGRES_HOST, APP_DATABASE)).system_url
+    connection = await asyncpg.connect(_libpq(system_url.replace("+psycopg", "+asyncpg", 1)))
+    try:
+        assert await connection.fetchval("select current_database()") == f"{APP_DATABASE}_dbos"
+        await connection.execute("create schema dbos")
+        await connection.execute("drop schema dbos")
+    finally:
+        await connection.close()
 
 
 async def test_shared_role_scopes_each_transaction_via_contextvar(

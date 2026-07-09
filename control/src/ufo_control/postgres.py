@@ -200,8 +200,12 @@ async def ensure_serve_role(admin_dsn: str) -> None:
     GUC per transaction, with NO ``ALTER ROLE … SET`` default: a transaction that never set the
     workspace reads an unset GUC and the policy fails closed rather than leaking. Unlike the
     per-tenant ``ufo_t_<name>`` roles (one pinned workspace each), this is one role for all — the
-    per-request GUC does the scoping. Needs a role-creating connection (the rollout owner DSN is the
-    cluster admin)."""
+    per-request GUC does the scoping. Then provision the fleet's DBOS system database — the
+    ``<app>_dbos`` sibling core derives from the serve DSN (``config._derive_system_url``) and
+    ``DBOS.launch`` connects to. The RLS-subject role has no ``CREATEDB`` to mint it, so the fleet
+    cannot and ``DBOS.launch`` fails loud on the missing database; the rollout owner creates it,
+    owned by the role so DBOS owns its ``dbos`` schema. Needs a role-creating connection to the app
+    database (the rollout owner DSN is the cluster admin, targeting the shared app database)."""
     password = serve_password()
     connection = await asyncpg.connect(admin_dsn)
     try:
@@ -218,6 +222,8 @@ async def ensure_serve_role(admin_dsn: str) -> None:
             )
         await connection.execute(f'grant "{APP_GROUP_ROLE}" to "{SERVE_ROLE}"')
         await connection.execute(f'grant set on parameter {WORKSPACE_GUC} to "{SERVE_ROLE}"')
+        app_database = await connection.fetchval("select current_database()")
+        await _ensure_database(connection, f"{app_database}_dbos", owner=SERVE_ROLE)
     finally:
         await connection.close()
 
