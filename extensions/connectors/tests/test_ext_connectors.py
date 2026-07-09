@@ -226,10 +226,13 @@ async def test_oauth_route_start_leg_redirects_to_composio_consent(
 
 
 async def test_oauth_route_return_leg_hands_the_account_id_to_core_as_code() -> None:
+    """The Composio-appended params are pinned as literals — the documented redirect carries
+    snake_case `status` and `connected_account_id`; asserting our own constant back at itself
+    would let a casing mismatch between the two slip past unnoticed."""
     ctx = context_for(connectors.NAME, frozenset())
     query = (
         f"state=SEALED&callback={EXPECTED_REDIRECT_URI}"
-        f"&{provider.COMPOSIO_ACCOUNT_PARAM}={COMPOSIO_ACCOUNT}"
+        f"&status=success&connected_account_id={COMPOSIO_ACCOUNT}"
     )
     with ws(uuid4()):
         response = await provider.oauth_route(ctx, _request(query))
@@ -239,6 +242,15 @@ async def test_oauth_route_return_leg_hands_the_account_id_to_core_as_code() -> 
     landing_query = parse_qs(landing.query)
     assert landing_query["state"] == ["SEALED"]
     assert landing_query["code"] == [COMPOSIO_ACCOUNT]
+
+
+async def test_oauth_route_failed_consent_answers_loud_instead_of_reminting_consent() -> None:
+    ctx = context_for(connectors.NAME, frozenset())
+    query = f"provider={PROVIDER}&state=SEALED&callback={EXPECTED_REDIRECT_URI}&status=failed"
+    with ws(uuid4()):
+        response = await provider.oauth_route(ctx, _request(query))
+    assert response.status_code == provider.FAILED_CONSENT_STATUS
+    assert "location" not in response.headers
 
 
 def test_serve_registers_every_provider_and_declares_the_dynamic_tools() -> None:
@@ -411,7 +423,7 @@ async def test_call_external_tool_augments_a_404_with_the_real_slugs(
 async def test_complete_rejects_an_account_owned_by_a_foreign_composio_user(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Confused-deputy close: driving `complete` with a connectedAccountId whose owning Composio
+    """Confused-deputy close: driving `complete` with a connected-account id whose owning Composio
     user is not this workspace's brokered user is refused before any token is read, so no grant
     binds to an attacker-controlled account."""
     workspace_id = uuid4()

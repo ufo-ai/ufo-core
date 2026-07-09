@@ -3,10 +3,10 @@
 ufo's connect flow wants a synchronous `authorize_url` and a two-legged handoff, but minting a
 Composio connect link is an async API call — so `authorize_url` points the member's browser at this
 extension's `oauth` route instead. The route (async) mints the link and redirects on to Composio's
-hosted consent; Composio redirects back to the same route with the connected-account id, which the
-route hands to core's callback as the `code`. `exchange` then confirms that account's ownership and
-binds it. The flow reads top to bottom: authorize_url → oauth_route (start leg, then return leg) →
-exchange."""
+hosted consent; Composio redirects back to the same route appending `connected_account_id` (and
+`status`) to the callback it was given, and the route hands that id to core's callback as the
+`code`. `exchange` then confirms that account's ownership and binds it. The flow reads top to
+bottom: authorize_url → oauth_route (start leg, then return leg) → exchange."""
 
 from dataclasses import dataclass
 from urllib.parse import urlencode, urlparse
@@ -20,8 +20,10 @@ from ufo_ext_connectors.composio import CONNECTORS
 
 OAUTH_ROUTE_PATH = "oauth"
 OAUTH_ROUTE_MOUNT = "/ext/connectors/oauth"
-COMPOSIO_ACCOUNT_PARAM = "connectedAccountId"
+COMPOSIO_ACCOUNT_PARAM = "connected_account_id"
+COMPOSIO_STATUS_PARAM = "status"
 REDIRECT_STATUS = 302
+FAILED_CONSENT_STATUS = 502
 
 
 @dataclass(frozen=True)
@@ -49,12 +51,14 @@ class ComposioOAuthProvider:
 
 
 async def oauth_route(ctx: ExtensionContext, request: Request) -> Response:
-    """The browser bridge, both legs. Start leg (no connected-account id yet): mint the Composio
-    connect link for the requested provider's toolkit, scoped to this workspace's Composio user,
-    and redirect the member to the hosted consent — telling Composio to return here. Return leg
-    (Composio appended the connected-account id): redirect on to core's connect callback, handing
-    the account id as the `code` core's `exchange` reads. The sealed `state` and core `callback`
-    ride through untouched, so the grant still binds to the member, agent, and conversation."""
+    """The browser bridge, both legs. Start leg (no Composio-appended params yet): mint the
+    Composio connect link for the requested provider's toolkit, scoped to this workspace's Composio
+    user, and redirect the member to the hosted consent — telling Composio to return here. Return
+    leg (Composio appended `connected_account_id`): redirect on to core's connect callback, handing
+    the account id as the `code` core's `exchange` reads. A return leg carrying `status` but no
+    account id is a consent that did not complete — answered loud, never by re-minting consent. The
+    sealed `state` and core `callback` ride through untouched, so the grant still binds to the
+    member, agent, and conversation."""
     params = request.query_params
     state = params.get("state", "")
     callback = params.get("callback", "")
@@ -64,6 +68,13 @@ async def oauth_route(ctx: ExtensionContext, request: Request) -> Response:
     if account_id:
         landing = f"{callback}?{urlencode({'state': state, 'code': account_id})}"
         return Response(status_code=REDIRECT_STATUS, headers={"location": landing})
+    status = params.get(COMPOSIO_STATUS_PARAM, "")
+    if status:
+        return Response(
+            status_code=FAILED_CONSENT_STATUS,
+            content=f"connector consent did not complete (status {status!r}) — "
+            "return to chat and ask the agent to connect again",
+        )
     provider = params.get("provider", "")
     spec = CONNECTORS.get(provider)
     if spec is None:
