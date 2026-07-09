@@ -51,12 +51,12 @@ SLACK_TEAM_ID_SLOT = "slack_team_id"
 
 
 def url_verified_blob_key(workspace_id: UUID) -> str:
-    """The marker written on each signature-verified `url_verification` handshake — the one event
-    that proves Slack reached this deploy with the right signing secret. Keyed by workspace because
-    hosted tenants share one blob bucket: a fixed key would let every tenant's handshake overwrite
-    every other's. The body records a fingerprint of the verifying secret, so after a rotation the
-    setup surface reads the workspace as pending until Slack re-verifies — never a stale
-    "connected"."""
+    """The marker written on a signature-verified inbound request — proof Slack reached this deploy
+    with the signing secret currently stored, whether by the `url_verification` handshake or a real
+    event. Keyed by workspace because hosted tenants share one blob bucket: a fixed key would let
+    every tenant's marker overwrite every other's. The body records a fingerprint of the verifying
+    secret, so after a rotation the setup surface reads the workspace as pending until Slack's next
+    signed request — never a stale "connected"."""
     return f"workspaces/{workspace_id}/surfaces/slack/url_verified"
 
 
@@ -270,6 +270,27 @@ def _inbound_files(event: Mapping[str, object]) -> tuple[InboundFile, ...]:
     return tuple(files)
 
 
+_URL_VERIFIED_MARKED: set[tuple[UUID, str]] = set()
+
+
+async def _mark_url_verified(ctx: SurfaceContext, signing_secret: str) -> None:
+    """Record that Slack reached this deploy with a request the stored secret verified — the signal
+    the setup surface's `connected` state reads. Any signed request proves it, so the first real
+    event after the slots are filled flips setup to connected with no manual Request-URL re-save;
+    the per-process cache keeps the write off the event hot path after the first proof per secret.
+    Best effort: a blob hiccup must not fail the request Slack needs answered."""
+    fingerprint = signing_secret_fingerprint(signing_secret)
+    if (ctx.workspace_id, fingerprint) in _URL_VERIFIED_MARKED:
+        return
+    marker = json.dumps({"fingerprint": fingerprint, "at": time.time()}).encode()
+    try:
+        await ctx.blob.put(url_verified_blob_key(ctx.workspace_id), marker)
+    except Exception:
+        _LOG.warning("slack url_verified marker write failed", exc_info=True)
+        return
+    _URL_VERIFIED_MARKED.add((ctx.workspace_id, fingerprint))
+
+
 async def ingest(ctx: SurfaceContext, request: Request) -> Response:
     raw = await request.body()
     if len(raw) > MAX_SLACK_EVENT_BYTES:
@@ -278,24 +299,21 @@ async def ingest(ctx: SurfaceContext, request: Request) -> Response:
         signing_secret = await ctx.credential(SLACK_SIGNING_SECRET_SLOT)
     except CredentialSlotUnset:
         # Slack probes the Request URL the moment the app is created from the manifest — before the
-        # owner has filled the slots. That is a clean 401 (verification simply hasn't succeeded
-        # yet), never a 500 with a stack trace.
+        # owner can hold the secret Slack only mints with the app. Echoing the caller's own
+        # challenge stores nothing and grants nothing, so it is safe unsigned, and app creation
+        # verifies clean instead of showing a failed handshake. Real events stay 401 until the
+        # slots are filled.
+        challenge = url_verification_challenge(raw)
+        if challenge is not None:
+            return JSONResponse({"challenge": challenge})
         return Response("Slack signing secret is not configured yet", status_code=401)
     try:
         verify_slack_signature(request.headers, raw, signing_secret)
     except SlackSignatureError as error:
         return Response(str(error), status_code=401)
+    await _mark_url_verified(ctx, signing_secret)
     challenge = url_verification_challenge(raw)
     if challenge is not None:
-        marker = json.dumps(
-            {"fingerprint": signing_secret_fingerprint(signing_secret), "at": time.time()}
-        ).encode()
-        try:
-            await ctx.blob.put(url_verified_blob_key(ctx.workspace_id), marker)
-        except Exception:
-            # The marker is a best-effort setup signal; a blob hiccup must not fail the handshake
-            # Slack needs answered, or the owner can never verify the Request URL.
-            _LOG.warning("slack url_verified marker write failed", exc_info=True)
         return JSONResponse({"challenge": challenge})
     inbound = await _to_inbound(ctx, raw)
     if inbound is None:

@@ -203,8 +203,8 @@ not provided manually.
 
 ## URL verification signal
 
-Slack proves the deploy is reachable by sending a signed `url_verification` request to the Slack
-surface:
+Slack proves it reached the deploy with the stored signing secret on every signature-verified
+request — the `url_verification` handshake or a real event:
 
 ```text
 Slack Events API
@@ -215,21 +215,28 @@ Slack Events API
 slack surface
   |
   +-- read slack_signing_secret
+  |     unset + url_verification -> echo the challenge (nothing stored, no marker)
+  |     unset + event            -> 401
   +-- verify HMAC and replay window
-  +-- parse url_verification challenge
-  +-- best-effort write blob:
+  +-- best-effort write blob (once per (workspace, secret) per process):
   |     workspaces/<workspace_id>/surfaces/slack/url_verified
   |     {"fingerprint": sha256(signing_secret), "at": <seconds>}
   |
-  +-- return {"challenge": "..."}
+  +-- url_verification -> return {"challenge": "..."}
+  +-- event            -> admit turn
 ```
 
-The setup surface trusts that marker only while its fingerprint matches the currently stored
-signing secret. Rotating the signing secret therefore moves the UI back to pending until Slack
-verifies the URL again.
+The unsigned echo exists because Slack probes the request URL the instant the app is created from
+the manifest — before the owner can hold the secret Slack mints with the app. Echoing the caller's
+own challenge stores and grants nothing, and it spares the owner a failed-verification banner with
+no reliable retry. Because any signed request writes the marker, the member's first DM or @mention
+is what flips setup to connected — no manual re-save of the request URL.
 
-If the signing secret is not configured yet, Slack ingest returns 401 instead of raising a 500.
-If the marker write fails, the challenge still succeeds; the marker is only setup status, not the
+The setup surface trusts the marker only while its fingerprint matches the currently stored
+signing secret. Rotating the signing secret therefore moves the UI back to pending until Slack's
+next signed request.
+
+If the marker write fails, the request still succeeds; the marker is only setup status, not the
 Slack contract.
 
 ## Why the core seam changed

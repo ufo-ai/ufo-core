@@ -311,11 +311,12 @@ async def test_url_verification_answers_the_challenge_and_marks_verified(
     assert await blob.exists(slack.url_verified_blob_key(workspace_id))
 
 
-async def test_url_verification_without_signing_secret_is_a_clean_401(
+async def test_handshake_before_the_secret_exists_echoes_and_events_stay_401(
     db: None, tmp_path, monkeypatch
 ) -> None:
-    # Slack probes the Request URL the instant the app is created from the manifest — before any
-    # slot is filled. That is a clean 401, never an unhandled 500, and writes no verified marker.
+    # Slack probes the Request URL the instant the app is created from the manifest — before the
+    # owner can hold the secret Slack mints with the app. The challenge echoes unsigned (nothing
+    # stored, no verified marker), so creation verifies clean; a real event is still a clean 401.
     workspace_id, _ = await _seed()
     _patch_httpx(monkeypatch, _mock_transport([], {}))
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))  # no slots set
@@ -333,15 +334,65 @@ async def test_url_verification_without_signing_secret_is_a_clean_401(
         PUBLIC_BASE_URL,
     )
     client = AsyncClient(transport=ASGITransport(app=app), base_url="http://slack")
-    body = json.dumps({"type": "url_verification", "challenge": "c"}).encode()
+    handshake = json.dumps({"type": "url_verification", "challenge": "c"}).encode()
+    event = _event_body(type="app_mention", user="U1", channel="C1", ts="1.0", text="hi")
     async with client:
-        response = await client.post(
+        echoed = await client.post("/surface/slack", content=handshake)
+        rejected = await client.post(
             "/surface/slack",
-            content=body,
+            content=event,
             headers={"x-slack-request-timestamp": "1", "x-slack-signature": "v0=x"},
         )
-    assert response.status_code == 401
+    assert echoed.status_code == 200
+    assert echoed.json() == {"challenge": "c"}
+    assert rejected.status_code == 401
     assert not await blob.exists(slack.url_verified_blob_key(workspace_id))
+
+
+async def test_first_signed_event_marks_verified_and_a_rotated_secret_re_proves(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    # Any signature-verified request proves Slack reached this deploy with the stored secret — the
+    # first real event flips setup to connected with no manual Request-URL re-save, and a rotated
+    # secret's next signed event re-stamps the marker despite the per-process write cache.
+    workspace_id, _ = await _seed()
+    _patch_httpx(monkeypatch, _mock_transport([], {}))
+    store = await _store(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    app = FastAPI()
+    _mount_surfaces(
+        app,
+        (slack_manifest(),),
+        workspace_id,
+        store,
+        blob,
+        InProcessHub(),
+        StubDbos(),
+        ARTIFACT_SECRET,
+        PUBLIC_BASE_URL,
+    )
+    client = AsyncClient(transport=ASGITransport(app=app), base_url="http://slack")
+    body = _event_body(type="app_mention", user="U1", channel="C1", ts="1.0", text="<@UBOT00000>")
+    async with client:
+        response = await client.post(
+            "/surface/slack", content=body, headers=_sign(body, int(time.time()))
+        )
+        assert response.status_code == 200
+        marker = json.loads(await blob.get(slack.url_verified_blob_key(workspace_id)))
+        assert marker["fingerprint"] == slack.signing_secret_fingerprint(SIGNING_SECRET)
+        rotated = "rotated-secret"
+        await store.put(workspace_id, slack.SLACK_SIGNING_SECRET_SLOT, rotated)
+        ts = int(time.time())
+        base = b"v0:" + str(ts).encode() + b":" + body
+        headers = {
+            "x-slack-request-timestamp": str(ts),
+            "x-slack-signature": "v0="
+            + hmac.new(rotated.encode(), base, hashlib.sha256).hexdigest(),
+        }
+        response = await client.post("/surface/slack", content=body, headers=headers)
+        assert response.status_code == 200
+    marker = json.loads(await blob.get(slack.url_verified_blob_key(workspace_id)))
+    assert marker["fingerprint"] == slack.signing_secret_fingerprint(rotated)
 
 
 async def test_one_mention_admits_exactly_one_turn(db: None, tmp_path, monkeypatch) -> None:

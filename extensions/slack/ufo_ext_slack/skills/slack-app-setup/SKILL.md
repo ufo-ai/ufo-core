@@ -23,11 +23,11 @@ don't know it, ask; never invent one and never emit a placeholder (`example.com`
 
 - **HTTP Events API only.** Never offer Socket Mode; the surface receives events over HTTP at the
   route above. The manifest below sets `socket_mode_enabled: false`.
-- **Signature-verified.** The surface verifies every request's Slack signature against the signing
-  secret *before* anything else — including Slack's one-time `url_verification` handshake. So Slack's
-  request-URL verification only succeeds once the `slack_signing_secret` slot is filled (Step 4) and
-  the deploy is reachable at the URL. If verification fails, that slot is missing or the URL is wrong
-  — not a Slack problem to "Retry".
+- **Signature-verified.** The surface verifies every event's Slack signature against the signing
+  secret before acting on it. The one exception is Slack's `url_verification` handshake while the
+  `slack_signing_secret` slot is still empty — the challenge echoes back (it stores and grants
+  nothing), so the request URL verifies the moment the app is created, before Step 4. If
+  verification fails anyway, the deploy isn't reachable at the URL — the URL is wrong.
 - **Don't probe the URL.** The sandbox egress proxy denies arbitrary hosts, so `curl`/`dig` against
   the deploy or Slack proves nothing. The URL is correct by construction; use it.
 - **Conversational bot.** It answers `@mentions` in channels and direct messages, replying in-thread.
@@ -95,9 +95,8 @@ member speaking in a DM acts with their own rights. The `interactivity` block de
 (the agent's multiple-choice questions) to the surface's interactive route, signature-verified like
 every event. The `app_home` block enables the Messages tab so direct messages reach the bot.
 
-Slack will try to verify the request URL as the app is created. It succeeds once Step 4's
-`slack_signing_secret` is filled and the deploy is reachable; if the slot isn't set yet, finish the
-steps and re-save the Event Subscriptions URL.
+Slack verifies the request URL as the app is created and it succeeds right away — events only
+start being accepted once Step 4 fills the slots.
 
 ## Step 2 — install to the workspace
 
@@ -144,9 +143,8 @@ On a cold start the deploy can instead carry the four values in its environment 
 `SLACK_SIGNING_SECRET`, `SLACK_BOT_USER_ID`, `SLACK_TEAM_ID`) before `ufoctl init` — init seeds
 every declared slot from its upper-cased env var.
 
-Once all four slots are filled and `ufoctl serve` is running behind `<public_base_url>`, re-save
-the Event Subscriptions request URL if it hadn't verified, then invite the bot to a channel and
-`@mention` it (or DM it). It replies in-thread.
+Once all four slots are filled and `ufoctl serve` is running behind `<public_base_url>`, invite
+the bot to a channel and `@mention` it (or DM it). It replies in-thread.
 
 ## Updating an existing app
 

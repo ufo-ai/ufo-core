@@ -5,8 +5,9 @@ Auth is the stateless HMAC bearer the gateway mints at onboarding, verified by t
 ufo terminal surface uses: `GET /surface/setup?token=…` binds the token as an httponly cookie and
 every API route re-verifies it against this workspace, so a token minted for another tenant is
 rejected. The Slack card is a state machine (`not_configured → pending → connected`) computed from
-the slack surface's four credential slots and the marker blob it writes on a signature-verified
-`url_verification` handshake. Saving calls Slack's `auth.test` server-side to validate the bot token
+the slack surface's four credential slots and the marker blob it writes on the first
+signature-verified request — so the member's first DM or @mention is what flips the card to
+connected. Saving calls Slack's `auth.test` server-side to validate the bot token
 and derive the team and bot-user ids, so the owner pastes two values, not four. Everything
 setup-specific lives here, reaching core only through the privileged `SurfaceContext` (credential
 read/write, blob, public base URL) — the SDK surface a CI gate pins."""
@@ -141,7 +142,7 @@ async def status(ctx: SurfaceContext, request: Request) -> Response:
 
 
 async def _verified_at(ctx: SurfaceContext) -> float | None:
-    """The wall-clock second Slack last verified the Request URL *with the signing secret currently
+    """The wall-clock second Slack first reached this deploy *with the signing secret currently
     stored* — or None when there is no marker, no stored secret, or a marker written by a
     since-rotated secret, so a stale marker never reads as connected."""
     key = url_verified_blob_key(ctx.workspace_id)
@@ -179,14 +180,12 @@ async def _status_payload(ctx: SurfaceContext, owner: bool) -> dict[str, object]
         if verified_at is None:
             state = "pending"
             message = (
-                "Credentials stored. Open the Slack app's Event Subscriptions and (re-)save the "
-                "Request URL — it should verify now."
+                "Credentials stored. Invite the bot to a channel and @mention it, or DM it — "
+                "its first message flips this to connected."
             )
         else:
             state = "connected"
-            message = (
-                "Slack verified this deploy. Invite the bot to a channel and @mention it, or DM it."
-            )
+            message = "Slack reached this deploy and the credentials check out. Talk to the bot."
     base = ctx.public_base_url
     return {
         "slack": {"state": state, "message": message, "slots": slots, "verified_at": verified_at},
@@ -291,7 +290,7 @@ async def save_credentials(ctx: SurfaceContext, request: Request) -> Response:
 async def test_slack(ctx: SurfaceContext, request: Request) -> Response:
     """A live diagnosis: `auth.test` with the stored bot token, cross-checked against the stored
     team and bot-user ids — one call validates three of the four slots. The signing secret is only
-    provable by Slack's own Request-URL handshake, which the status state machine reports."""
+    provable by a signed request from Slack, which the status state machine reports."""
     owner = await _authorize_owner(ctx, request)
     if isinstance(owner, Response):
         return owner
@@ -331,8 +330,8 @@ async def test_slack(ctx: SurfaceContext, request: Request) -> Response:
         diagnosis = f"Connected to {result.team} as @{result.user}."
     else:
         diagnosis = (
-            f"Token valid for {result.team} as @{result.user} — waiting on the Request-URL "
-            "verification. Re-save the Request URL under Event Subscriptions."
+            f"Token valid for {result.team} as @{result.user} — waiting on Slack's first "
+            "event. DM the bot or @mention it in a channel."
         )
     return JSONResponse({"ok": True, "diagnosis": diagnosis})
 
@@ -430,6 +429,8 @@ SETUP_PAGE = r"""<!doctype html>
   details { margin-top: 10px; }
   summary { cursor: pointer; font-size: 14px; font-weight: 600; }
   .row { display: flex; gap: 10px; margin-top: 14px; align-items: center; flex-wrap: wrap; }
+  ul.try { margin: 8px 0 0; padding-left: 20px; font-size: 14px; }
+  ul.try li { margin: 6px 0; }
   code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
          background: color-mix(in srgb, CanvasText 8%, transparent);
          padding: 1px 5px; border-radius: 5px; }
@@ -506,8 +507,21 @@ SETUP_PAGE = r"""<!doctype html>
 
   <section class="card">
     <h2>Done</h2>
-    <div class="hint">Once connected, invite the bot to a Slack channel and @mention it, or DM it.
-      Skipping for now is fine — return to this page anytime at <code>/surface/setup</code>.</div>
+    <div class="hint">Invite the bot to a Slack channel and @mention it, or DM it — its first
+      message is also what flips the card above to connected. Skipping for now is fine — return to
+      this page anytime at <code>/surface/setup</code>.</div>
+  </section>
+
+  <section class="card">
+    <h2>Try it</h2>
+    <ul class="try">
+      <li><b>Ask what it can do</b> — DM it <code>what can you do?</code> and it introduces
+        itself and its tools.</li>
+      <li><b>Hand it a file</b> — attach a CSV, PDF, or log to a message and ask for the
+        highlights; attachments land in its workspace.</li>
+      <li><b>Follow up in the thread</b> — each thread is one conversation, so it keeps the
+        context; @mention it in a channel to start one there.</li>
+    </ul>
   </section>
 </main>
 <script>

@@ -404,14 +404,14 @@ async def test_test_endpoint_diagnoses_each_failure_precisely(
         await store.put(workspace_id, "slack_team_id", TEAM_ID)
         pending = (await client.post("/surface/setup/slack/test")).json()
         assert pending["ok"] is True
-        assert "Request-URL" in pending["diagnosis"]
+        assert "first event" in pending["diagnosis"]
         # A marker from a since-rotated secret keeps Test at waiting — never a stale "Connected".
         await store.put(workspace_id, "slack_signing_secret", "current")
         stale = {"fingerprint": signing_secret_fingerprint("rotated-out"), "at": 1.0}
         await blob.put(url_verified_blob_key(workspace_id), json.dumps(stale).encode())
         rotated = (await client.post("/surface/setup/slack/test")).json()
         assert rotated["ok"] is True
-        assert "Request-URL" in rotated["diagnosis"]
+        assert "first event" in rotated["diagnosis"]
         live = {"fingerprint": signing_secret_fingerprint("current"), "at": 2.0}
         await blob.put(url_verified_blob_key(workspace_id), json.dumps(live).encode())
         connected = (await client.post("/surface/setup/slack/test")).json()
