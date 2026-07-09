@@ -2,10 +2,13 @@
 conversation, stream any attached files into the workspace, and admit a turn; then deliver the
 terminal reply and stream the turn's shared files into the conversation's thread.
 
-While the turn runs, a per-turn status task tails its live frames off the hub and keeps a small
-in-thread context message current — "Thinking…", then the model's own narration of each tool call —
-deleted when the turn ends. It rides the lossy live leg by design: the durable reply is the
-poller's job, so a crashed status task costs a stale status line, never a lost answer.
+While the turn runs, a per-turn status task tails its live frames off the hub and keeps the
+thread's native status (`assistant.threads.setStatus`) current — "Thinking…", then the model's own
+narration of each tool call — cleared when the turn ends. The status is thread-keyed state, not a
+message: a duplicate writer (Slack redelivers events, and every replica runs its own task)
+overwrites it rather than stacking a second indicator, and within a process the newest turn is a
+thread's one writer. It rides the lossy live leg by design: the durable reply is the poller's job,
+so a crashed status task costs a stale status, never a lost answer.
 
 A reply whose turn ended by asking the user (`Writeback.question`) renders the question's options
 as Block Kit buttons. The `interactive` route receives the click, admits the answer as the
@@ -68,16 +71,17 @@ def signing_secret_fingerprint(signing_secret: str) -> str:
 
 SLACK_USERS_INFO_URL = "https://slack.com/api/users.info"
 SLACK_CHAT_POST_MESSAGE_URL = "https://slack.com/api/chat.postMessage"
-SLACK_CHAT_UPDATE_URL = "https://slack.com/api/chat.update"
-SLACK_CHAT_DELETE_URL = "https://slack.com/api/chat.delete"
+SLACK_ASSISTANT_STATUS_URL = "https://slack.com/api/assistant.threads.setStatus"
 SLACK_FILES_GET_UPLOAD_URL = "https://slack.com/api/files.getUploadURLExternal"
 SLACK_FILES_COMPLETE_UPLOAD = "https://slack.com/api/files.completeUploadExternal"
 
 STATUS_THINKING_TEXT = "Thinking…"
 STATUS_WORKING_TEXT = "Working… ({tool})"
 STATUS_SKILL_TEXT = "Loading skill {skill}…"
+STATUS_CLEAR_TEXT = ""
 STATUS_TEXT_LIMIT = 200
 STATUS_UPDATE_MIN_SECONDS = 1.0
+STATUS_REFRESH_SECONDS = 90.0
 
 ASK_ACTION_ID_PREFIX = "ask:"
 MAX_ANSWER_BUTTONS = 10
@@ -133,11 +137,13 @@ class InboundFile:
 
 @dataclass(frozen=True)
 class Inbound:
-    """A verified, gated Slack message reduced to what admission and identity need."""
+    """A verified, gated Slack message reduced to what admission, identity, and the thread status
+    need."""
 
     slack_user_id: str
     queue_key: str
     message_id: str
+    ts: str
     is_dm: bool
     body: str
     files: tuple[InboundFile, ...]
@@ -335,7 +341,7 @@ async def ingest(ctx: SurfaceContext, request: Request) -> Response:
         body = f"{inbound.body}{_files_note(downloaded)}"
     agent_id = await ctx.default_agent()
     turn_id = await ctx.admit(conversation_id, agent_id, body, idempotency_key=inbound.message_id)
-    _track_status(ctx, turn_id, inbound.queue_key)
+    _track_status(ctx, turn_id, inbound.queue_key, inbound.ts)
     return JSONResponse({"ok": True})
 
 
@@ -360,6 +366,7 @@ async def _to_inbound(ctx: SurfaceContext, payload: Mapping[str, object]) -> Inb
         slack_user_id=user,
         queue_key=slack_thread_key(channel, root_ts, is_dm),
         message_id=f"{channel}:{ts}",
+        ts=ts,
         is_dm=is_dm,
         body=str(event.get("text") or ""),
         files=_inbound_files(event),
@@ -476,79 +483,42 @@ def _files_note(downloaded: DownloadedFiles) -> str:
     return "\n\n" + "".join(f"[{clause}]" for clause in clauses)
 
 
-def _status_blocks(text: str) -> list[dict[str, object]]:
-    return [{"type": "context", "elements": [{"type": "mrkdwn", "text": f"⏳ _{text}_"}]}]
-
-
 @dataclass(frozen=True)
 class ThreadStatus:
-    """Live feedback for one running turn: post a small context-block status in the thread, keep it
-    current from the turn's hub frames — each tool call as the model's own `user_description` when
-    it gave one — and delete it when the turn ends (the durable reply is the poller's job). An
-    update inside STATUS_UPDATE_MIN_SECONDS of the last send is dropped, not delayed: the next
-    distinct frame refreshes, and the delete ends the message regardless."""
+    """Live feedback for one running turn through the thread's native status
+    (`assistant.threads.setStatus`): "Thinking…" the moment the turn is admitted, then the turn's
+    hub frames — each tool call as the model's own `user_description` when it gave one — cleared
+    when the turn ends (the durable reply is the poller's job). The status is state on the thread,
+    not a message, and the thread has one writer — the newest turn (`_THREAD_WRITERS`) — so an
+    outrun sibling's writes, its clear included, are skipped rather than blanking the status the
+    member is watching. Slack drops a status two minutes after its last write, so a quiet stretch
+    re-stamps the shown text every STATUS_REFRESH_SECONDS. An update inside
+    STATUS_UPDATE_MIN_SECONDS of the last send is dropped, not delayed: the next distinct frame
+    refreshes, and the clear ends the status regardless."""
 
     ctx: SurfaceContext
     turn_id: UUID
     channel: str
-    thread_ts: str | None
+    thread_ts: str
 
     async def run(self) -> None:
         bot_token = await self.ctx.credential(SLACK_BOT_TOKEN_SLOT)
         async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
-            ts = await self._post(client, bot_token)
+            await self._set(client, bot_token, STATUS_THINKING_TEXT)
             try:
-                await self._follow(client, bot_token, ts)
+                await self._follow(client, bot_token)
             finally:
-                await self._send(
-                    client, bot_token, SLACK_CHAT_DELETE_URL, {"channel": self.channel, "ts": ts}
-                )
+                await self._set(client, bot_token, STATUS_CLEAR_TEXT)
 
-    async def _post(self, client: httpx.AsyncClient, bot_token: str) -> str:
-        body: dict[str, object] = {
-            "channel": self.channel,
-            "text": STATUS_THINKING_TEXT,
-            "blocks": _status_blocks(STATUS_THINKING_TEXT),
-        }
-        if self.thread_ts is not None:
-            body["thread_ts"] = self.thread_ts
-        payload = await self._send(client, bot_token, SLACK_CHAT_POST_MESSAGE_URL, body)
-        ts = payload.get("ts")
-        if not isinstance(ts, str) or not ts:
-            raise SlackApiError("Slack status response missing ts")
-        return ts
-
-    async def _follow(self, client: httpx.AsyncClient, bot_token: str, ts: str) -> None:
-        shown = STATUS_THINKING_TEXT
-        sent_at = time.monotonic()
-        async for _cursor, frame in self.ctx.tail(self.turn_id):
-            match frame:
-                case Terminal() | Parked():
-                    return
-                case ToolCall(tool=tool, description=description):
-                    text = description or STATUS_WORKING_TEXT.format(tool=tool)
-                case SkillLoad(skill=skill):
-                    text = STATUS_SKILL_TEXT.format(skill=skill)
-                case _:
-                    continue
-            text = text[:STATUS_TEXT_LIMIT]
-            if text == shown or time.monotonic() - sent_at < STATUS_UPDATE_MIN_SECONDS:
-                continue
-            await self._send(
-                client,
-                bot_token,
-                SLACK_CHAT_UPDATE_URL,
-                {"channel": self.channel, "ts": ts, "text": text, "blocks": _status_blocks(text)},
-            )
-            shown, sent_at = text, time.monotonic()
-
-    async def _send(
-        self, client: httpx.AsyncClient, bot_token: str, url: str, body: dict[str, object]
-    ) -> dict[str, object]:
-        return await _slack_ok(
+    async def _set(self, client: httpx.AsyncClient, bot_token: str, status: str) -> None:
+        if _THREAD_WRITERS.get((self.channel, self.thread_ts)) != self.turn_id:
+            return
+        await _slack_ok(
             client.post(
-                url,
-                content=json.dumps(body),
+                SLACK_ASSISTANT_STATUS_URL,
+                content=json.dumps(
+                    {"channel_id": self.channel, "thread_ts": self.thread_ts, "status": status}
+                ),
                 headers={
                     "Authorization": f"Bearer {bot_token}",
                     "Content-Type": "application/json; charset=utf-8",
@@ -556,24 +526,67 @@ class ThreadStatus:
             )
         )
 
+    async def _follow(self, client: httpx.AsyncClient, bot_token: str) -> None:
+        shown = STATUS_THINKING_TEXT
+        sent_at = time.monotonic()
+        frames = aiter(self.ctx.tail(self.turn_id))
+        upcoming = asyncio.ensure_future(anext(frames))
+        try:
+            while True:
+                done, _pending = await asyncio.wait([upcoming], timeout=STATUS_REFRESH_SECONDS)
+                if not done:
+                    await self._set(client, bot_token, shown)
+                    sent_at = time.monotonic()
+                    continue
+                try:
+                    _cursor, frame = upcoming.result()
+                except StopAsyncIteration:
+                    return
+                upcoming = asyncio.ensure_future(anext(frames))
+                match frame:
+                    case Terminal() | Parked():
+                        return
+                    case ToolCall(tool=tool, description=description):
+                        text = description or STATUS_WORKING_TEXT.format(tool=tool)
+                    case SkillLoad(skill=skill):
+                        text = STATUS_SKILL_TEXT.format(skill=skill)
+                    case _:
+                        continue
+                text = text[:STATUS_TEXT_LIMIT]
+                if text == shown or time.monotonic() - sent_at < STATUS_UPDATE_MIN_SECONDS:
+                    continue
+                await self._set(client, bot_token, text)
+                shown, sent_at = text, time.monotonic()
+        finally:
+            upcoming.cancel()
+
 
 _STATUS_TASKS: dict[UUID, asyncio.Task[None]] = {}
+_THREAD_WRITERS: dict[tuple[str, str], UUID] = {}
 
 
-def _track_status(ctx: SurfaceContext, turn_id: UUID, queue_key: str) -> None:
+def _track_status(ctx: SurfaceContext, turn_id: UUID, queue_key: str, message_ts: str) -> None:
     """Spawn one ThreadStatus task per admitted turn — Slack redelivers events and admission dedupes
-    them to the same turn id, so a redelivery must not spawn a second status message. Best-effort by
-    design: a failure only logs, and the task always ends because the tail ends on the durable
-    terminal state."""
+    them to the same turn id, so a redelivery must not double the tail work. The status anchors to
+    the conversation's thread — the root in a channel, the member's own message in a DM (a DM
+    conversation has no root, and the status API demands a thread) — and the new turn takes over as
+    the thread's writer. Best-effort by design: a failure only logs, and the task always ends
+    because the tail ends on the durable terminal state."""
     if turn_id in _STATUS_TASKS:
         return
-    channel, separator, thread_ts = queue_key.partition(":")
-    status = ThreadStatus(
-        ctx=ctx, turn_id=turn_id, channel=channel, thread_ts=thread_ts if separator else None
-    )
+    channel, separator, root_ts = queue_key.partition(":")
+    thread = (channel, root_ts if separator else message_ts)
+    status = ThreadStatus(ctx=ctx, turn_id=turn_id, channel=thread[0], thread_ts=thread[1])
+    _THREAD_WRITERS[thread] = turn_id
     task = asyncio.create_task(_run_status(status))
     _STATUS_TASKS[turn_id] = task
-    task.add_done_callback(lambda _done: _STATUS_TASKS.pop(turn_id, None))
+
+    def _untrack(_done: asyncio.Task[None]) -> None:
+        _STATUS_TASKS.pop(turn_id, None)
+        if _THREAD_WRITERS.get(thread) == turn_id:
+            del _THREAD_WRITERS[thread]
+
+    task.add_done_callback(_untrack)
 
 
 async def _run_status(status: ThreadStatus) -> None:
@@ -630,7 +643,7 @@ async def interactive(ctx: SurfaceContext, request: Request) -> Response:
         body,
         idempotency_key=f"{click.queue_key}:{click.message_ts}:answer",
     )
-    _track_status(ctx, turn_id, click.queue_key)
+    _track_status(ctx, turn_id, click.queue_key, click.message_ts)
     if await ctx.turn_inbound(turn_id) == body:
         _rewrite_in_background(click)
     return JSONResponse({"ok": True})

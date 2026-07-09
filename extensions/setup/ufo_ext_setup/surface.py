@@ -57,6 +57,8 @@ SLACK_APP_MANIFEST_TEMPLATE = """\
 display_information:
   name: {name}
 features:
+  agent_view:
+    agent_description: Answers @mentions in channels and direct messages, replying in-thread.
   app_home:
     messages_tab_enabled: true
     messages_tab_read_only_enabled: false
@@ -66,6 +68,7 @@ oauth_config:
   scopes:
     bot:
       - app_mentions:read
+      - assistant:write
       - channels:history
       - chat:write
       - files:read

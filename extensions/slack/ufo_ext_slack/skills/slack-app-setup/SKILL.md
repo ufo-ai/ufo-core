@@ -32,8 +32,8 @@ don't know it, ask; never invent one and never emit a placeholder (`example.com`
   the deploy or Slack proves nothing. The URL is correct by construction; use it.
 - **Conversational bot.** It answers `@mentions` in channels and direct messages, replying in-thread.
   Replies render the agent's markdown, and files the agent shares upload into the thread; a message's
-  attachments download into the agent's workspace. While it works it shows a small in-thread status
-  line ("Thinking…", then what it's doing), and when it asks a question with fixed choices it
+  attachments download into the agent's workspace. While it works it shows Slack's native thread
+  status ("Thinking…", then what it's doing), and when it asks a question with fixed choices it
   presents them as buttons — clicking one answers as the member who clicked. There are no slash
   commands or modals — don't offer them, don't tailor the scope set to a request. The Step 2 scopes
   are the whole surface.
@@ -51,6 +51,8 @@ everything else exactly as written — Slack rejects a manifest with extra field
 display_information:
   name: <bot display name>
 features:
+  agent_view:
+    agent_description: Answers @mentions in channels and direct messages, replying in-thread.
   app_home:
     messages_tab_enabled: true
     messages_tab_read_only_enabled: false
@@ -60,6 +62,7 @@ oauth_config:
   scopes:
     bot:
       - app_mentions:read
+      - assistant:write
       - channels:history
       - chat:write
       - files:read
@@ -88,7 +91,9 @@ settings:
 
 Why each piece: `app_mentions:read` + the `message.*` events and matching `*:history` scopes let the
 surface see the messages it's added to and the mentions it must answer; `chat:write` posts the reply
-in-thread (and the live status line while the agent works); `files:read` downloads a message's
+in-thread; the `agent_view` block enables Slack's Agents & AI Apps experience and `assistant:write`
+lets the surface set the thread's native status ("Thinking…", then what the agent is doing) while a
+turn runs; `files:read` downloads a message's
 attachments into the workspace and `files:write` uploads files the agent shares back; `users:read` +
 `users:read.email` let the surface match a Slack user's verified email to a workspace member, so a
 member speaking in a DM acts with their own rights. The `interactivity` block delivers button clicks

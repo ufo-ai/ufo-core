@@ -90,6 +90,7 @@ async def _settle_status_tasks(db: None):
                 asyncio.gather(*tasks.values(), return_exceptions=True), timeout=10
             )
         slack._STATUS_TASKS.clear()
+        slack._THREAD_WRITERS.clear()
     finally:
         patch.undo()
 
@@ -112,8 +113,8 @@ def _mock_transport(recorder: list[httpx.Request], users: dict[str, str]) -> htt
             return httpx.Response(200, json={"ok": True, "user": {"profile": profile}})
         if url == slack.SLACK_CHAT_POST_MESSAGE_URL:
             return httpx.Response(200, json={"ok": True, "channel": "C5", "ts": "999.100"})
-        if url in (slack.SLACK_CHAT_UPDATE_URL, slack.SLACK_CHAT_DELETE_URL):
-            return httpx.Response(200, json={"ok": True, "channel": "C5", "ts": "999.100"})
+        if url == slack.SLACK_ASSISTANT_STATUS_URL:
+            return httpx.Response(200, json={"ok": True})
         if url == RESPONSE_URL:
             return httpx.Response(200, text="ok")
         if url == slack.SLACK_FILES_GET_UPLOAD_URL:
@@ -466,10 +467,13 @@ async def test_one_mention_admits_exactly_one_turn(db: None, tmp_path, monkeypat
     assert writeback == WRITEBACK_PENDING
 
 
-async def test_dm_links_member_by_email(db: None, tmp_path, monkeypatch) -> None:
+async def test_dm_links_member_by_email_and_status_anchors_to_the_message(
+    db: None, tmp_path, monkeypatch
+) -> None:
     workspace_id, member_id = await _seed(member_email="bee@example.com")
+    recorder: list[httpx.Request] = []
     _, client, _ = await _mount(
-        monkeypatch, workspace_id, tmp_path, [], users={"UBEE": "bee@example.com"}
+        monkeypatch, workspace_id, tmp_path, recorder, users={"UBEE": "bee@example.com"}
     )
     dm = _event_body(
         type="message", channel_type="im", user="UBEE", channel="D9", ts="7.0", text="hey"
@@ -479,6 +483,16 @@ async def test_dm_links_member_by_email(db: None, tmp_path, monkeypatch) -> None
             "/surface/slack", content=dm, headers=_sign(dm, int(time.time()))
         )
     assert response.status_code == 200
+    deadline = time.monotonic() + 5
+    while not _requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL):
+        assert time.monotonic() < deadline, "status never reached Slack"
+        await asyncio.sleep(0.01)
+    status = json.loads(_requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)[0].content)
+    assert status == {
+        "channel_id": "D9",
+        "thread_ts": "7.0",
+        "status": slack.STATUS_THINKING_TEXT,
+    }
     async with workspace_tx() as connection:
         linked = (
             await connection.execute(
@@ -893,7 +907,7 @@ def _requests_to(recorder: list[httpx.Request], url: str) -> list[httpx.Request]
     return [r for r in recorder if str(r.url).split("?")[0] == url]
 
 
-async def test_status_message_follows_the_turn_and_is_deleted_at_terminal(
+async def test_status_follows_the_turn_and_clears_at_terminal(
     db: None, tmp_path, monkeypatch
 ) -> None:
     workspace_id, _ = await _seed()
@@ -919,25 +933,107 @@ async def test_status_message_follows_the_turn_and_is_deleted_at_terminal(
 
     await hub.publish(turn_id, ToolCall(tool="bash", preview="{}", description="Reading the repo"))
     deadline = time.monotonic() + 5
-    while not _requests_to(recorder, slack.SLACK_CHAT_UPDATE_URL):
+    while len(_requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)) < 2:
         assert time.monotonic() < deadline, "status update never reached Slack"
         await asyncio.sleep(0.01)
     await hub.publish(turn_id, Terminal(frame=TerminalFrame(status="done", text="hi")))
     await task
 
-    posted = json.loads(_requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)[0].content)
-    assert posted["channel"] == "C1"
-    assert posted["thread_ts"] == "100.5"
-    assert posted["blocks"][0]["type"] == "context"
-    assert slack.STATUS_THINKING_TEXT in posted["blocks"][0]["elements"][0]["text"]
-
-    updated = json.loads(_requests_to(recorder, slack.SLACK_CHAT_UPDATE_URL)[0].content)
-    assert updated["ts"] == "999.100"
-    assert "Reading the repo" in updated["blocks"][0]["elements"][0]["text"]
-
-    deleted = json.loads(_requests_to(recorder, slack.SLACK_CHAT_DELETE_URL)[0].content)
-    assert deleted == {"channel": "C1", "ts": "999.100"}
+    statuses = [
+        json.loads(r.content) for r in _requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)
+    ]
+    assert statuses[0] == {
+        "channel_id": "C1",
+        "thread_ts": "100.5",
+        "status": slack.STATUS_THINKING_TEXT,
+    }
+    assert statuses[1]["status"] == "Reading the repo"
+    assert statuses[-1]["status"] == slack.STATUS_CLEAR_TEXT
+    assert not _requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)
     assert turn_id not in slack._STATUS_TASKS
+
+
+async def test_status_re_stamps_before_slack_drops_it(db: None, tmp_path, monkeypatch) -> None:
+    workspace_id, _ = await _seed()
+    monkeypatch.setattr(slack, "STATUS_REFRESH_SECONDS", 0.05)
+    recorder: list[httpx.Request] = []
+    hub = InProcessHub()
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder, hub=hub)
+    mention = _event_body(
+        type="app_mention", user="U1", channel="C1", ts="100.5", text="<@UBOT00000> hi"
+    )
+    async with client:
+        response = await client.post(
+            "/surface/slack", content=mention, headers=_sign(mention, int(time.time()))
+        )
+    assert response.status_code == 200
+    deadline = time.monotonic() + 5
+    while len(_requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)) < 3:
+        assert time.monotonic() < deadline, "quiet stretch never re-stamped the status"
+        await asyncio.sleep(0.01)
+    statuses = [
+        json.loads(r.content)["status"]
+        for r in _requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)[:3]
+    ]
+    assert statuses == [slack.STATUS_THINKING_TEXT] * 3
+
+
+async def test_newest_turn_owns_the_thread_status(db: None, tmp_path, monkeypatch) -> None:
+    workspace_id, _ = await _seed()
+    monkeypatch.setattr(slack, "STATUS_UPDATE_MIN_SECONDS", 0.0)
+    recorder: list[httpx.Request] = []
+    hub = InProcessHub()
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder, hub=hub)
+    first = _event_body(
+        type="app_mention", user="U1", channel="C1", ts="100.5", text="<@UBOT00000> one"
+    )
+    second = _event_body(
+        type="app_mention",
+        user="U1",
+        channel="C1",
+        ts="101.0",
+        thread_ts="100.5",
+        text="<@UBOT00000> two",
+    )
+    async with client:
+        for body in (first, second):
+            response = await client.post(
+                "/surface/slack", content=body, headers=_sign(body, int(time.time()))
+            )
+            assert response.status_code == 200
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(tables.turn.c.id, tables.turn.c.idempotency_key).where(
+                    tables.turn.c.workspace_id == workspace_id
+                )
+            )
+        ).all()
+    turns = {row.idempotency_key: row.id for row in rows}
+
+    first_task = slack._STATUS_TASKS[turns["C1:100.5"]]
+    await hub.publish(turns["C1:100.5"], Terminal(frame=TerminalFrame(status="done", text="one")))
+    await first_task
+    statuses = [
+        json.loads(r.content) for r in _requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)
+    ]
+    assert all(s["status"] != slack.STATUS_CLEAR_TEXT for s in statuses)
+
+    second_task = slack._STATUS_TASKS[turns["C1:101.0"]]
+    await hub.publish(
+        turns["C1:101.0"], ToolCall(tool="bash", preview="{}", description="Checking the calendar")
+    )
+    deadline = time.monotonic() + 5
+    while not any(
+        json.loads(r.content)["status"] == "Checking the calendar"
+        for r in _requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)
+    ):
+        assert time.monotonic() < deadline, "the surviving turn never wrote its status"
+        await asyncio.sleep(0.01)
+    await hub.publish(turns["C1:101.0"], Terminal(frame=TerminalFrame(status="done", text="two")))
+    await second_task
+    final = json.loads(_requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)[-1].content)
+    assert final == {"channel_id": "C1", "thread_ts": "100.5", "status": slack.STATUS_CLEAR_TEXT}
 
 
 ASK_QUESTION = AskUserInput(
