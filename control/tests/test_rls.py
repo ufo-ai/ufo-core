@@ -17,12 +17,16 @@ from uuid import UUID, uuid4
 
 import asyncpg
 import pytest
+import sqlalchemy as sa
 from click.testing import CliRunner
-from ufo.db import apply_migrations
+from ufo.db import apply_migrations, current_workspace, dispose_db, init_db, workspace_tx
+from ufo.schema import tables
 
 from ufo_control.main import main
 from ufo_control.postgres import (
+    APP_GROUP_ROLE,
     PG_ROLE_SEED_ENV,
+    WORKSPACE_GUC,
     TenantPostgres,
     ensure_tenant_postgres,
 )
@@ -244,3 +248,82 @@ async def test_bootstrap_fails_loud_on_an_unpoliced_table() -> None:
             await cleanup.execute(f'drop database if exists "{FAILLOUD_DATABASE}" with (force)')
         finally:
             await cleanup.close()
+
+
+SHARED_ROLE = "ufo_serve_shared"
+SHARED_PASSWORD = "sharedpw"
+
+
+@dataclass(frozen=True)
+class SharedRoleEnv:
+    workspaces: tuple[str, ...]
+    dsn_libpq: str
+
+
+@pytest.fixture(scope="module")
+def shared_role_env(rls_env: RlsEnv) -> Iterator[SharedRoleEnv]:
+    """The role the shared serve fleet connects as: an RLS-SUBJECT login role in the ufo_app group,
+    GRANTed SET on the workspace GUC, with NO pinned default — so it scopes per transaction from the
+    current_workspace contextvar and an unset workspace fails loud. Built on rls_env's owner +
+    policies + two seeded workspaces."""
+
+    async def _create() -> None:
+        admin = await asyncpg.connect(ADMIN_DSN)
+        try:
+            await admin.execute(f'drop role if exists "{SHARED_ROLE}"')
+            await admin.execute(
+                f'create role "{SHARED_ROLE}" login in role "{APP_GROUP_ROLE}" '
+                f"password '{SHARED_PASSWORD}'"
+            )
+            await admin.execute(f'grant set on parameter {WORKSPACE_GUC} to "{SHARED_ROLE}"')
+        finally:
+            await admin.close()
+
+    async def _drop() -> None:
+        admin = await asyncpg.connect(ADMIN_DSN)
+        try:
+            await admin.execute(f'drop role if exists "{SHARED_ROLE}"')
+        finally:
+            await admin.close()
+
+    asyncio.run(_create())
+    dsn = f"postgresql+asyncpg://{SHARED_ROLE}:{SHARED_PASSWORD}@{POSTGRES_HOST}/{APP_DATABASE}"
+    init_db(dsn)
+    try:
+        yield SharedRoleEnv(
+            workspaces=tuple(tenant.workspace_id for tenant in rls_env.tenants),
+            dsn_libpq=_libpq(dsn),
+        )
+    finally:
+        asyncio.run(dispose_db())
+        asyncio.run(_drop())
+
+
+async def test_shared_role_scopes_each_transaction_via_contextvar(
+    shared_role_env: SharedRoleEnv,
+) -> None:
+    """One shared connection pool, many workspaces: setting current_workspace pins app.workspace_id
+    for the transaction, so RLS presents only that workspace — the shared serve fleet's isolation.
+    The same role, two workspaces, two disjoint views."""
+    for workspace_id in shared_role_env.workspaces:
+        reset = current_workspace.set(UUID(workspace_id))
+        try:
+            async with workspace_tx() as connection:
+                rows = (await connection.execute(sa.select(tables.workspace.c.id))).all()
+                assert [str(row.id) for row in rows] == [workspace_id]
+                members = (await connection.execute(sa.select(tables.member.c.workspace_id))).all()
+                assert [str(row.workspace_id) for row in members] == [workspace_id]
+        finally:
+            current_workspace.reset(reset)
+
+
+async def test_shared_role_without_workspace_fails_closed(
+    shared_role_env: SharedRoleEnv,
+) -> None:
+    """No workspace set → workspace_tx pins no GUC; under the RLS-subject role the policy's strict
+    current_setting errors on the unset custom GUC — fail-loud, never a cross-workspace read."""
+    assert current_workspace.get() is None
+    with pytest.raises(Exception) as caught:
+        async with workspace_tx() as connection:
+            await connection.execute(sa.select(tables.workspace.c.id))
+    assert WORKSPACE_GUC in str(caught.value)

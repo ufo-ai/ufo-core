@@ -1,12 +1,23 @@
-"""The tenancy boundary: module-private engine, workspace_tx as the only session source."""
+"""The tenancy boundary: module-private engine, workspace_tx as the only session source.
+
+Isolation is set per transaction from an ambient workspace, so one shared-serve process (one
+connection pool) safely serves many workspaces: a request/turn/job sets `current_workspace` at its
+boundary, and `workspace_tx` pins the RLS GUC (`app.workspace_id`) for that transaction. The
+contextvar defaults to unset — then `workspace_tx` sets no GUC and the connection's own role
+default scopes it: the single-workspace per-tenant (enterprise) deploy, unchanged.
+The shared-serve role is an RLS *subject* with no pinned default, so a transaction that never set
+the workspace fails closed — the policy's `current_setting` errors on the unset GUC, never a leak.
+"""
 
 import asyncio
 import os
 import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import sqlalchemy as sa
 from alembic import command
@@ -16,8 +27,11 @@ from sqlalchemy.pool import NullPool
 
 MIGRATIONS_DIR = Path(__file__).parent / "schema" / "migrations"
 SQLITE_BUSY_TIMEOUT_MS = 5_000
+WORKSPACE_GUC = "app.workspace_id"
 
 _engine: AsyncEngine | None = None
+
+current_workspace: ContextVar[UUID | None] = ContextVar("current_workspace", default=None)
 
 
 def init_db(url: str) -> None:
@@ -77,6 +91,12 @@ async def workspace_tx() -> AsyncIterator[AsyncConnection]:
     if _engine is None:
         raise RuntimeError("db not initialized (init_db runs in the composition root)")
     async with _engine.begin() as connection:
+        workspace_id = current_workspace.get()
+        if workspace_id is not None and connection.dialect.name == "postgresql":
+            await connection.execute(
+                sa.text("select set_config(:guc, :ws, true)"),
+                {"guc": WORKSPACE_GUC, "ws": str(workspace_id)},
+            )
         yield connection
 
 
