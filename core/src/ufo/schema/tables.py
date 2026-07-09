@@ -74,6 +74,7 @@ turn = sa.Table(
     sa.Column("terminal", sa.JSON(none_as_null=True), nullable=True),
     sa.Column("parent_turn_id", sa.Uuid, nullable=True),
     sa.Column("subagent_profile", sa.Text, nullable=True),
+    sa.Column("traceparent", sa.Text, nullable=True),
     sa.Column("idempotency_key", sa.Text, nullable=True),
     sa.Column("running_attempt", sa.Text, nullable=True),
     sa.Column("resume_enqueued_at", sa.DateTime(timezone=True), nullable=True),

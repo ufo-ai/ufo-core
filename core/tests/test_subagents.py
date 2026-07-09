@@ -4,13 +4,16 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 from dbos import DBOSClient
+from opentelemetry import trace
 from pydantic import BaseModel
 
 from ufo.config import Config
 from ufo.db import workspace_tx
 from ufo.ext.manifest import SUBAGENT_ROUND_LIMIT, SubagentProfile
 from ufo.loop.profiles import CORE_SUBAGENT_PROFILES, GENERAL_PURPOSE
+from ufo.loop.queue import _load_turn
 from ufo.loop.subagents import SubagentRegistry, Subagents, subagent_system_prompt
+from ufo.o11y import current_traceparent
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame, Turn, turn_id_for
 from ufo.tools.builtins import BUILTIN_TOOLS
@@ -261,7 +264,8 @@ async def test_message_admits_the_running_childs_next_turn_and_enqueues_it(
     child_id, child_conversation = await _running_child(workspace_id, agent_id, parent.id)
     client = _RecordingClient()
     subagents = Subagents(client=client, registry=SubagentRegistry(()), parent=parent)
-    status = await subagents.message(child_id, "also summarize the risks")
+    with trace.use_span(_spawning_span()):
+        status = await subagents.message(child_id, "also summarize the risks")
     assert status.status == "queued"
     async with workspace_tx() as connection:
         row = (
@@ -273,6 +277,7 @@ async def test_message_admits_the_running_childs_next_turn_and_enqueues_it(
                     tables.turn.c.inbound,
                     tables.turn.c.subagent_profile,
                     tables.turn.c.parent_turn_id,
+                    tables.turn.c.traceparent,
                 ).where(tables.turn.c.id == status.turn_id)
             )
         ).one()
@@ -280,6 +285,7 @@ async def test_message_admits_the_running_childs_next_turn_and_enqueues_it(
     assert (row.seq, row.status, row.inbound) == (2, "queued", "also summarize the risks")
     assert row.subagent_profile == GENERAL_PURPOSE
     assert row.parent_turn_id == parent.id
+    assert row.traceparent == SPAWNING_TRACEPARENT
     assert client.enqueued == [str(status.turn_id)]
 
 
@@ -447,6 +453,43 @@ async def test_spawn_without_a_dedup_key_mints_a_fresh_child_each_call(
     first = await subagents.spawn("research", {"task": "x"}, background=True)
     second = await subagents.spawn("research", {"task": "x"}, background=True)
     assert first.turn_id != second.turn_id
+
+
+SPAWNING_TRACEPARENT = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+
+
+def _spawning_span() -> trace.NonRecordingSpan:
+    return trace.NonRecordingSpan(
+        trace.SpanContext(
+            trace_id=0x0AF7651916CD43DD8448EB211C80319C,
+            span_id=0xB7AD6B7169203331,
+            is_remote=False,
+            trace_flags=trace.TraceFlags(0x01),
+        )
+    )
+
+
+async def test_spawn_stamps_the_spawning_spans_traceparent_on_the_child_turn(
+    db: None, dbos_launched: Config
+) -> None:
+    """A child admitted inside the parent turn's span carries its W3C traceparent, and the queue
+    loads it back onto the Turn — the two durable halves of the seam that lands a subagent's turn
+    span in the trace that spawned it. A spawn with no active span leaves the child a trace root."""
+    workspace_id, agent_id = await _workspace_agent()
+    parent = await _parent(workspace_id, agent_id)
+    subagents = Subagents(
+        client=_RecordingClient(),
+        registry=SubagentRegistry((_profile("research"),)),
+        parent=parent,
+    )
+    with trace.use_span(_spawning_span()):
+        assert current_traceparent() == SPAWNING_TRACEPARENT
+        traced = await subagents.spawn("research", {"task": "acme"}, background=True)
+    child, _, _ = await _load_turn(traced.turn_id)
+    assert child.traceparent == SPAWNING_TRACEPARENT
+    untraced = await subagents.spawn("research", {"task": "beta"}, background=True)
+    root, _, _ = await _load_turn(untraced.turn_id)
+    assert root.traceparent is None
 
 
 async def test_wait_reports_every_already_finished_childs_status(

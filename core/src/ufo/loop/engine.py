@@ -245,7 +245,7 @@ class TurnEngine:
     skills: SkillRegistry = CORE_SKILL_REGISTRY
 
     async def run(self) -> TerminalFrame | None:
-        with turn_span(self.turn.id, self.turn.conversation_id):
+        with turn_span(self.turn.id, self.turn.conversation_id, self.turn.traceparent):
             emit_metric("turn_started_total")
             log(
                 "turn.started",

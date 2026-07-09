@@ -27,6 +27,7 @@ from ufo.loop.prompts.render import (
     SKILL_INDEX_SLOT,
     render_skill_index,
 )
+from ufo.o11y import current_traceparent
 from ufo.schema import tables
 from ufo.schema.records import (
     DBOS_APP_VERSION,
@@ -198,6 +199,7 @@ class Subagents:
                     terminal=None,
                     parent_turn_id=self.parent.id,
                     subagent_profile=child.subagent_profile,
+                    traceparent=current_traceparent(),
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
@@ -218,9 +220,11 @@ class Subagents:
     async def _admit(
         self, conversation_id: UUID, turn_id: UUID, profile: str, inbound: str
     ) -> None:
-        """Insert the child conversation and its first turn. The inserts do nothing on conflict, so
-        a deterministic (`dedup_key`) child re-admitted by a recovery re-run of the spawning step
-        settles on the rows already there — the first run's child stands, never a duplicate."""
+        """Insert the child conversation and its first turn, stamped with the spawning turn's
+        traceparent so the child's span joins the parent's trace. The inserts do nothing on
+        conflict, so a deterministic (`dedup_key`) child re-admitted by a recovery re-run of the
+        spawning step settles on the rows already there — the first run's child stands, never a
+        duplicate."""
         async with workspace_tx() as connection:
             insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
             member_id = (
@@ -256,6 +260,7 @@ class Subagents:
                     terminal=None,
                     parent_turn_id=self.parent.id,
                     subagent_profile=profile,
+                    traceparent=current_traceparent(),
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )

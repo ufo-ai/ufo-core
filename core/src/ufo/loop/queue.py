@@ -265,6 +265,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, UUID | None]:
                     tables.turn.c.terminal,
                     tables.turn.c.parent_turn_id,
                     tables.turn.c.subagent_profile,
+                    tables.turn.c.traceparent,
                     tables.agent.c.prompt,
                     tables.agent.c.model,
                     tables.conversation.c.member_id,
@@ -284,6 +285,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, UUID | None]:
         terminal=None if row.terminal is None else TerminalFrame.model_validate(row.terminal),
         parent_turn_id=row.parent_turn_id,
         subagent_profile=row.subagent_profile,
+        traceparent=row.traceparent,
     )
     return turn, Agent(prompt=row.prompt, model=row.model), row.member_id
 

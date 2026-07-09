@@ -20,10 +20,13 @@ from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import Span, SpanKind
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 from ufo.db import current_workspace
 
 INSTRUMENTATION_NAME = "ufo"
+TRACEPARENT_HEADER = "traceparent"
+TRACE_CONTEXT_PROPAGATOR = TraceContextTextMapPropagator()
 METRIC_EXPORT_INTERVAL_MILLIS = 30_000
 OTLP_TRACES_PATH = "v1/traces"
 OTLP_METRICS_PATH = "v1/metrics"
@@ -92,9 +95,20 @@ def _ambient_scope() -> dict[str, str]:
     return {} if workspace_id is None else {"workspace_id": str(workspace_id)}
 
 
+def current_traceparent() -> str | None:
+    """The active span as a W3C traceparent header, None when no valid span context is current —
+    captured where a turn is admitted and stored on its row, so the turn's own span joins the
+    admitting trace across the queue hop."""
+    carrier: dict[str, str] = {}
+    TRACE_CONTEXT_PROPAGATOR.inject(carrier)
+    return carrier.get(TRACEPARENT_HEADER)
+
+
 @contextmanager
-def turn_span(turn_id: UUID, conversation_id: UUID) -> Iterator[Span]:
-    """Open the SERVER span wrapping one durable turn, tagged with the ambient workspace."""
+def turn_span(turn_id: UUID, conversation_id: UUID, traceparent: str | None) -> Iterator[Span]:
+    """Open the SERVER span wrapping one durable turn, tagged with the ambient workspace.
+    `traceparent` parents the span on the trace that admitted the turn — a subagent's turn lands
+    in the trace of the turn that spawned it; None roots a fresh trace (a member-facing turn)."""
     attributes = cast(
         dict[str, str],
         redact_payload(
@@ -105,8 +119,15 @@ def turn_span(turn_id: UUID, conversation_id: UUID) -> Iterator[Span]:
             }
         ),
     )
+    parent = (
+        TRACE_CONTEXT_PROPAGATOR.extract({TRACEPARENT_HEADER: traceparent})
+        if traceparent is not None
+        else None
+    )
     tracer = trace.get_tracer(INSTRUMENTATION_NAME)
-    with tracer.start_as_current_span("turn", kind=SpanKind.SERVER, attributes=attributes) as span:
+    with tracer.start_as_current_span(
+        "turn", context=parent, kind=SpanKind.SERVER, attributes=attributes
+    ) as span:
         yield span
 
 

@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
+from opentelemetry import trace
 from pydantic import BaseModel
 
 from ufo.blob import FilesystemBlobStore
@@ -76,6 +77,19 @@ class CapturingModel:
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         self.seen.append(request.messages)
         self.seen_system.append(request.system)
+        yield TextDelta(text="ok")
+        yield Usage(input_tokens=1, output_tokens=1)
+
+
+@dataclass
+class TraceCapturingModel:
+    """Records the span context active during each model call, so a test can assert the whole turn
+    ran inside the trace its stored traceparent names."""
+
+    contexts: list[trace.SpanContext] = field(default_factory=list)
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.contexts.append(trace.get_current_span().get_span_context())
         yield TextDelta(text="ok")
         yield Usage(input_tokens=1, output_tokens=1)
 
@@ -379,6 +393,21 @@ def _engine(
         artifact_token_secret="",
         grants=None,
     )
+
+
+async def test_turn_with_a_traceparent_runs_inside_the_admitting_trace(
+    db: None, tmp_path: Path
+) -> None:
+    """The engine parents its turn span on the turn's stored traceparent, so work inside the turn —
+    here the model call — happens in the trace of the turn that spawned it."""
+    turn = await _seed_turn("queued", None)
+    traced = turn.model_copy(
+        update={"traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"}
+    )
+    model = TraceCapturingModel()
+    frame = await _engine(traced, model, tmp_path).run()
+    assert frame.status == "done"
+    assert [context.trace_id for context in model.contexts] == [0x0AF7651916CD43DD8448EB211C80319C]
 
 
 async def test_already_terminal_turn_republishes_without_clobbering_transcript(

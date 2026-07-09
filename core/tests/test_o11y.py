@@ -56,10 +56,32 @@ def test_emit_metric_caches_instruments():
 
 
 def test_turn_span_yields_and_closes():
-    with o11y.turn_span(uuid4(), uuid4()) as span:
+    with o11y.turn_span(uuid4(), uuid4(), None) as span:
         assert isinstance(span, trace.Span)
         assert trace.get_current_span() is span
     assert trace.get_current_span() is trace.INVALID_SPAN
+
+
+def test_current_traceparent_is_none_without_an_active_span():
+    assert o11y.current_traceparent() is None
+
+
+def test_traceparent_round_trips_a_turn_span_into_the_capturing_trace():
+    """What `current_traceparent` captures under one span, `turn_span` extracts into a span of the
+    same trace — the property that lands a subagent's turn in the trace that spawned it."""
+    capturing = trace.NonRecordingSpan(
+        trace.SpanContext(
+            trace_id=0x0AF7651916CD43DD8448EB211C80319C,
+            span_id=0xB7AD6B7169203331,
+            is_remote=False,
+            trace_flags=trace.TraceFlags(0x01),
+        )
+    )
+    with trace.use_span(capturing):
+        traceparent = o11y.current_traceparent()
+    assert traceparent == "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+    with o11y.turn_span(uuid4(), uuid4(), traceparent) as span:
+        assert span.get_span_context().trace_id == 0x0AF7651916CD43DD8448EB211C80319C
 
 
 def test_init_o11y_none_installs_no_providers():
