@@ -253,7 +253,6 @@ def _launch_jobs(
     )
     registry = model_registry(config, manifests)
     page_change_runner = PageChangeRunner(
-        workspace_id=workspace_id,
         credential_store=credential_store,
         manifests=manifests,
         pages=page_feed,

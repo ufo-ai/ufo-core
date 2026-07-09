@@ -19,7 +19,7 @@ from dbos import DBOS, DBOSClient, EnqueueOptions, Queue, ScheduleInput
 from ufo.accounting import ALLOW, SpendEvaluator
 from ufo.blob import BlobStore
 from ufo.credentials import CredentialStore
-from ufo.db import workspace_tx
+from ufo.db import owner_tx, workspace_tx
 from ufo.ext.context import ExtensionContext, TurnInvoker, context_for
 from ufo.ext.manifest import HookContext, HookSpec, JobSpec, Manifest, PageChangeBatch
 from ufo.indexing import EmbedClient, IndexBackend
@@ -83,22 +83,29 @@ class SpendResume:
     window, bounding a lingering turn to one in-flight resume instead of one per sweep. The stamp is
     advisory, not a status flip — set before the enqueue and cleared by the claim, so a crash
     between stamp and enqueue merely delays re-admission to the end of the grace window rather than
-    orphaning the turn."""
+    orphaning the turn.
+
+    A cross-workspace sweep: it enumerates parked turns across every workspace through `owner_tx`
+    (the one RLS-bypass read), then binds each turn's own workspace with `with ws(...)` before it
+    decides the cap and enqueues — so the decision reads that workspace's spend and the resume is
+    placed on that workspace's partition, exactly as a turn would. On a per-tenant deploy `owner_tx`
+    enumerates the single workspace and the scope binds it, unchanged."""
 
     client: DBOSClient
 
     async def run(self) -> None:
         for turn in await self._parked_turns():
-            async with workspace_tx() as connection:
-                decision = await SpendEvaluator(
-                    turn.workspace_id, turn.member_id, turn.agent_id
-                ).decide(connection, 0)
-            if decision.outcome == ALLOW:
-                await self._enqueue(turn)
+            with ws(turn.workspace_id):
+                async with workspace_tx() as connection:
+                    decision = await SpendEvaluator(
+                        turn.workspace_id, turn.member_id, turn.agent_id
+                    ).decide(connection, 0)
+                if decision.outcome == ALLOW:
+                    await self._enqueue(turn)
 
     async def _parked_turns(self) -> tuple[_ParkedTurn, ...]:
         cutoff = datetime.now(UTC) - timedelta(seconds=RESUME_ENQUEUE_GRACE_SECONDS)
-        async with workspace_tx() as connection:
+        async with owner_tx() as connection:
             rows = (
                 await connection.execute(
                     sa.select(
@@ -155,22 +162,29 @@ class SandboxReaper:
     conversation identity plus the stored id, then clears the row so a reaped sandbox is never
     resumed into a dead (docker) or released (e2b pause) id — the next turn creates fresh. A handle
     another backend wrote (a deploy that switched carriers) is not this carrier's to reap and is
-    skipped."""
+    skipped.
+
+    A cross-workspace sweep: it enumerates idle conversations across every workspace through
+    `owner_tx` (the one RLS-bypass read), then binds each conversation's own workspace with `with
+    ws(...)` for the in-flight re-check and the row clear — so a reap is scoped exactly as that
+    workspace's turn would scope it. On a per-tenant deploy `owner_tx` enumerates the single
+    workspace, unchanged."""
 
     carrier: Carrier
     backend: str
 
     async def run(self) -> None:
-        for conversation_id, stored in await self._idle_sandboxes():
+        for workspace_id, conversation_id, stored in await self._idle_sandboxes():
             container_id = sandbox_handle_id(self.backend, stored)
             if container_id is None:
                 continue
-            if await self._now_active(conversation_id):
-                continue
-            await self.carrier.destroy(
-                SandboxHandle(conversation_id=conversation_id, container_id=container_id)
-            )
-            await self._clear(conversation_id)
+            with ws(workspace_id):
+                if await self._now_active(conversation_id):
+                    continue
+                await self.carrier.destroy(
+                    SandboxHandle(conversation_id=conversation_id, container_id=container_id)
+                )
+                await self._clear(conversation_id)
 
     async def _clear(self, conversation_id: UUID) -> None:
         async with workspace_tx() as connection:
@@ -200,30 +214,40 @@ class SandboxReaper:
             ).first()
         return found is not None
 
-    async def _idle_sandboxes(self) -> tuple[tuple[UUID, str], ...]:
-        """Conversations carrying a persisted sandbox handle whose most recent turn settled past the
-        idle TTL and which have no turn in flight — the durable handle, not an in-process map, is
-        the set the reaper reclaims from, so a sandbox a prior process created is in scope."""
+    async def _idle_sandboxes(self) -> tuple[tuple[UUID, UUID, str], ...]:
+        """Conversations across every workspace carrying a persisted sandbox handle whose most
+        recent turn settled past the idle TTL and which have no turn in flight — the durable handle,
+        not an in-process map, is the set the reaper reclaims from, so a sandbox a prior process
+        created is in scope. Enumerated through `owner_tx` (RLS bypass) so one sweep reclaims across
+        the fleet; each row carries its `workspace_id` so `run` re-binds it before the reap."""
         cutoff = datetime.now(UTC) - timedelta(seconds=SANDBOX_IDLE_TTL_SECONDS)
         in_flight = (
             sa.select(tables.turn.c.conversation_id)
             .where(tables.turn.c.status.in_(NON_TERMINAL_STATUSES))
             .distinct()
         )
-        async with workspace_tx() as connection:
+        async with owner_tx() as connection:
             rows = (
                 await connection.execute(
-                    sa.select(tables.turn.c.conversation_id, tables.conversation.c.sandbox_handle)
+                    sa.select(
+                        tables.conversation.c.workspace_id,
+                        tables.turn.c.conversation_id,
+                        tables.conversation.c.sandbox_handle,
+                    )
                     .select_from(tables.turn.join(tables.conversation))
                     .where(
                         tables.conversation.c.sandbox_handle.is_not(None),
                         tables.turn.c.conversation_id.notin_(in_flight),
                     )
-                    .group_by(tables.turn.c.conversation_id, tables.conversation.c.sandbox_handle)
+                    .group_by(
+                        tables.conversation.c.workspace_id,
+                        tables.turn.c.conversation_id,
+                        tables.conversation.c.sandbox_handle,
+                    )
                     .having(sa.func.max(tables.turn.c.updated_at) < cutoff)
                 )
             ).all()
-        return tuple((row.conversation_id, row.sandbox_handle) for row in rows)
+        return tuple((row.workspace_id, row.conversation_id, row.sandbox_handle) for row in rows)
 
 
 @dataclass(frozen=True)
@@ -262,9 +286,15 @@ class PageChangeRunner:
     handler that raises propagates out of `drive` (failing that one workflow) before its cursor
     advances, so the tick makes no progress and the next tick retries from the same place.
     Batch-at-interval and fed only by the source pipeline, so it can never fire on the derived rows
-    a handler writes."""
+    a handler writes.
 
-    workspace_id: UUID
+    A cross-workspace sweep: `drive` enumerates every workspace holding pages through `owner_tx`
+    (the one RLS-bypass read), then binds each with `with ws(...)` and runs that consumer's cursor
+    loop scoped to it — the page feed reads that workspace's pages, the cursor lives in that
+    workspace's ScopedStore, so one consumer's per-minute workflow replays the fleet with each
+    workspace resuming independently. On a per-tenant deploy `owner_tx` enumerates the single
+    workspace, unchanged."""
+
     credential_store: CredentialStore
     manifests: tuple[Manifest, ...]
     pages: PageFeed
@@ -301,22 +331,36 @@ class PageChangeRunner:
         return tuple(consumers)
 
     async def drive(self, consumer: PageChangeConsumer) -> None:
-        with ws(self.workspace_id):
-            context = self._context_for(consumer.extension, consumer.declared)
-            cursor_key = f"{PAGE_CHANGE_CURSOR_KEY}:{consumer.discriminator}"
-            stored = await context.store.get(cursor_key)
-            cursor = stored if isinstance(stored, str) else None
-            while True:
-                batch = await self.pages.pages_changed_since(cursor, PAGE_CHANGE_BATCH)
-                if not batch.changes:
-                    return
-                await consumer.spec.handler(
-                    HookContext(ext=context, payload=PageChangeBatch(changes=batch.changes))
-                )
-                cursor = batch.next_cursor
-                await context.store.put(cursor_key, cursor)
-                if len(batch.changes) < PAGE_CHANGE_BATCH:
-                    return
+        for workspace_id in await self._workspaces_with_pages():
+            with ws(workspace_id):
+                await self._drive_workspace(consumer)
+
+    async def _workspaces_with_pages(self) -> tuple[UUID, ...]:
+        """Every workspace holding at least one page — the set a consumer replays over. Enumerated
+        through `owner_tx` (RLS bypass) so one workflow drives the fleet; a workspace with no pages
+        has nothing to replay and is skipped."""
+        async with owner_tx() as connection:
+            rows = (
+                await connection.execute(sa.select(tables.page.c.workspace_id).distinct())
+            ).all()
+        return tuple(row.workspace_id for row in rows)
+
+    async def _drive_workspace(self, consumer: PageChangeConsumer) -> None:
+        context = self._context_for(consumer.extension, consumer.declared)
+        cursor_key = f"{PAGE_CHANGE_CURSOR_KEY}:{consumer.discriminator}"
+        stored = await context.store.get(cursor_key)
+        cursor = stored if isinstance(stored, str) else None
+        while True:
+            batch = await self.pages.pages_changed_since(cursor, PAGE_CHANGE_BATCH)
+            if not batch.changes:
+                return
+            await consumer.spec.handler(
+                HookContext(ext=context, payload=PageChangeBatch(changes=batch.changes))
+            )
+            cursor = batch.next_cursor
+            await context.store.put(cursor_key, cursor)
+            if len(batch.changes) < PAGE_CHANGE_BATCH:
+                return
 
     def _context_for(self, extension: str, declared: frozenset[str]) -> ExtensionContext:
         return context_for(

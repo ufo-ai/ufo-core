@@ -1,4 +1,4 @@
-"""The tenancy boundary: module-private engine, workspace_tx as the only session source.
+"""The tenancy boundary: module-private engines, workspace_tx as the only scoped session source.
 
 Isolation is set per transaction from an ambient workspace, so one shared-serve process (one
 connection pool) safely serves many workspaces: a request/turn/job sets `current_workspace` at its
@@ -7,6 +7,9 @@ contextvar defaults to unset — then `workspace_tx` sets no GUC and the connect
 default scopes it: the single-workspace per-tenant (enterprise) deploy, unchanged.
 The shared-serve role is an RLS *subject* with no pinned default, so a transaction that never set
 the workspace fails closed — the policy's `current_setting` errors on the unset GUC, never a leak.
+
+`owner_tx` is the one exception: the RLS-bypassing read the cross-workspace background sweeps
+enumerate through — never a scoped read, and the caller re-binds each row under `with ws(...)`.
 """
 
 import asyncio
@@ -30,25 +33,42 @@ SQLITE_BUSY_TIMEOUT_MS = 5_000
 WORKSPACE_GUC = "app.workspace_id"
 
 _engine: AsyncEngine | None = None
+_owner_engine: AsyncEngine | None = None
 
 current_workspace: ContextVar[UUID | None] = ContextVar("current_workspace", default=None)
 
 
-def init_db(url: str) -> None:
+def _build_engine(url: str) -> AsyncEngine:
     """NullPool: a pooled connection binds to one event loop, and surfaces and DBOS
     workflows run on different loops in the same process. The engine's one-time first-connect
     (dialect init, guarded by the pool's first-connect mutex held across async I/O) is completed
     here, single-threaded, before the engine is published — a first-connect driven concurrently
     from two loops deadlocks that mutex, so an engine is never shared until it is past it."""
-    global _engine
-    if _engine is not None:
-        raise RuntimeError("db already initialized")
     engine = create_async_engine(url, poolclass=NullPool)
     if engine.dialect.name == "sqlite":
         sa.event.listen(engine.sync_engine, "connect", _sqlite_on_connect)
         sa.event.listen(engine.sync_engine, "begin", _sqlite_begin_immediate)
     _first_connect(engine)
-    _engine = engine
+    return engine
+
+
+def init_db(url: str) -> None:
+    global _engine
+    if _engine is not None:
+        raise RuntimeError("db already initialized")
+    _engine = _build_engine(url)
+
+
+def init_owner_db(url: str) -> None:
+    """The RLS-bypassing owner-role engine `owner_tx` enumerates through on the shared fleet, built
+    from the owner DSN (`UFO_OWNER_DSN`, the same secret the shared proxy opens). It owns the tables
+    and is never FORCEd RLS, so it reads across every workspace — the one cross-tenant path. A
+    per-tenant deploy never sets it: `owner_tx` falls to the tenant-scoped `_engine`, whose pinned
+    role default enumerates that deploy's single workspace."""
+    global _owner_engine
+    if _owner_engine is not None:
+        raise RuntimeError("owner db already initialized")
+    _owner_engine = _build_engine(url)
 
 
 def _first_connect(engine: AsyncEngine) -> None:
@@ -80,10 +100,13 @@ async def _open_and_close(engine: AsyncEngine) -> None:
 
 
 async def dispose_db() -> None:
-    global _engine
+    global _engine, _owner_engine
     if _engine is not None:
         await _engine.dispose()
         _engine = None
+    if _owner_engine is not None:
+        await _owner_engine.dispose()
+        _owner_engine = None
 
 
 @asynccontextmanager
@@ -97,6 +120,23 @@ async def workspace_tx() -> AsyncIterator[AsyncConnection]:
                 sa.text("select set_config(:guc, :ws, true)"),
                 {"guc": WORKSPACE_GUC, "ws": str(workspace_id)},
             )
+        yield connection
+
+
+@asynccontextmanager
+async def owner_tx() -> AsyncIterator[AsyncConnection]:
+    """The one cross-workspace read path: a transaction that pins NO workspace GUC, so it enumerates
+    every workspace this deploy serves. The background sweeps find their work across workspaces
+    through it, then re-scope each unit under `with ws(row.workspace_id)`. With an owner engine set
+    (shared fleet) it bypasses RLS and sees all workspaces; without one it falls to the main engine,
+    whose per-tenant role default scopes it to that deploy's single workspace — so a per-tenant
+    deploy enumerates its one workspace and a shared deploy enumerates all, by the same call. It
+    threads no workspace and sets no GUC, so nothing it yields is a tenant boundary: never read a
+    row's contents through it beyond the identifiers needed to re-bind that row's own workspace."""
+    engine = _owner_engine or _engine
+    if engine is None:
+        raise RuntimeError("db not initialized (init_db runs in the composition root)")
+    async with engine.begin() as connection:
         yield connection
 
 

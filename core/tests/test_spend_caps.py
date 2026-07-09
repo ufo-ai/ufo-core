@@ -15,13 +15,16 @@ from ufo.surfaces.admission import Admission
 
 @dataclass
 class StubDbos:
-    """Records the workflow argument (the turn id) each enqueue carries, so a test reads back which
-    turns admission or the resume sweep placed on the queue — never asserting DBOS itself."""
+    """Records the workflow arguments each enqueue carries — the turn id, and the (workspace, turn)
+    pair — so a test reads back which turns admission or the resume sweep placed on the queue and
+    the workspace each was scoped to, never asserting DBOS itself."""
 
     enqueued: list[str] = field(default_factory=list)
+    scoped: list[tuple[str, str]] = field(default_factory=list)
 
     async def enqueue_async(self, options: object, workspace_id: str, turn_id: str) -> None:
         self.enqueued.append(turn_id)
+        self.scoped.append((workspace_id, turn_id))
 
 
 async def _seed(connection: AsyncConnection) -> tuple[UUID, UUID, UUID, UUID]:
@@ -461,3 +464,35 @@ async def test_resume_readmits_when_cap_raised(db: None) -> None:
     # the sweep only enqueues; the turn's own execution claims parked -> running, so with no
     # worker running here the durable status stays parked (a crash pre-claim leaves it re-runnable)
     assert await _status(parked) == "parked"
+
+
+async def test_resume_enumerates_and_scopes_both_workspaces(db: None) -> None:
+    """Two workspaces each holding a parked turn: one owner_tx enumeration finds both, and each is
+    enqueued onto its own workspace — the cross-workspace sweep, scope-per-row."""
+    async with workspace_tx() as connection:
+        ws_a, _, agent_a, conv_a = await _seed(connection)
+        parked_a = await _insert_parked(connection, ws_a, conv_a, agent_a, seq=1)
+        ws_b, _, agent_b, conv_b = await _seed(connection)
+        parked_b = await _insert_parked(connection, ws_b, conv_b, agent_b, seq=1)
+    dbos = StubDbos()
+    await SpendResume(client=dbos).run()
+    assert set(dbos.enqueued) == {str(parked_a), str(parked_b)}
+    assert set(dbos.scoped) == {(str(ws_a), str(parked_a)), (str(ws_b), str(parked_b))}
+
+
+async def test_resume_scopes_the_cap_decision_to_each_workspace(db: None) -> None:
+    """The cap decision binds each turn's own workspace: one sweep enumerates both, but a workspace
+    already over its member cap keeps its turn parked while another with headroom is re-admitted —
+    the decision read each workspace's own spend, never the other's."""
+    async with workspace_tx() as connection:
+        over_ws, over_member, over_agent, over_conv = await _seed(connection)
+        await _bill(connection, over_ws, over_conv, over_agent, 100, seq=1)
+        await _set_cap(connection, over_ws, "member", over_member, 3600, 50, "park")
+        over_parked = await _insert_parked(connection, over_ws, over_conv, over_agent, seq=2)
+        free_ws, _, free_agent, free_conv = await _seed(connection)
+        free_parked = await _insert_parked(connection, free_ws, free_conv, free_agent, seq=1)
+    dbos = StubDbos()
+    await SpendResume(client=dbos).run()
+    assert dbos.enqueued == [str(free_parked)]
+    assert dbos.scoped == [(str(free_ws), str(free_parked))]
+    assert await _status(over_parked) == "parked"

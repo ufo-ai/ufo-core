@@ -128,6 +128,21 @@ async def test_reaper_destroys_a_conversation_idle_past_ttl_but_not_a_fresh_one(
     assert carrier.destroyed == [idle]
 
 
+async def test_reaper_enumerates_and_scopes_across_workspaces(db: None) -> None:
+    """One sweep enumerates idle conversations across every workspace through owner_tx and reaps
+    each scoped to its own workspace, clearing its row — the cross-workspace reaper,
+    scope-per-row."""
+    ws_a, agent_a = await _workspace_agent()
+    idle_a = await _conversation(ws_a, agent_a, "done", IDLE_AGE_SECONDS)
+    ws_b, agent_b = await _workspace_agent()
+    idle_b = await _conversation(ws_b, agent_b, "done", IDLE_AGE_SECONDS)
+    carrier = RecordingCarrier()
+    await SandboxReaper(carrier=carrier, backend=LOCAL_BACKEND).run()
+    assert set(carrier.destroyed) == {idle_a, idle_b}
+    assert await _stored_handle(idle_a) is None
+    assert await _stored_handle(idle_b) is None
+
+
 async def test_reaper_reaps_by_the_stored_id_and_clears_the_row(db: None) -> None:
     """The durable handle is the source of truth: the reaper strips the backend prefix and reaps by
     the stored id — the id a prior process persisted — then clears the row so a reaped sandbox is

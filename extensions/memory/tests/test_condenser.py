@@ -247,14 +247,12 @@ def _store(workspace_id: UUID, vector: tuple[float, ...]) -> MemoryStore:
 
 
 def _runner(
-    workspace_id: UUID,
     blob: FilesystemBlobStore,
     vector: tuple[float, ...],
     registry: ModelRegistry | None,
 ) -> PageChangeRunner:
     embed = StubEmbed(vector)
     return PageChangeRunner(
-        workspace_id=workspace_id,
         credential_store=CredentialStore(fernet=Fernet(Fernet.generate_key())),
         manifests=(memory_manifest.manifest(),),
         pages=CorePageFeed(blob=blob),
@@ -300,7 +298,7 @@ async def test_derive_facts_writes_subject_scoped_facts_through_page_change(
         }
     )
     client = StubModelClient(payload, Usage(input_tokens=50, output_tokens=20))
-    runner = _runner(workspace_id, blob, vec((0, 1.0)), _registry(client))
+    runner = _runner(blob, vec((0, 1.0)), _registry(client))
     await runner.drive(_derive_consumer(runner))
 
     rows = [row for row in await _facts(workspace_id) if row.item_class == FACT]
@@ -335,7 +333,7 @@ async def test_derive_facts_rides_its_own_cursor_independent_of_the_indexer(
         }
     )
     client = StubModelClient(payload, Usage(input_tokens=50, output_tokens=20))
-    runner = _runner(workspace_id, blob, vec((1, 1.0)), _registry(client))
+    runner = _runner(blob, vec((1, 1.0)), _registry(client))
     consumers = {c.discriminator: c for c in runner.consumers()}
 
     await runner.drive(consumers["derive_facts"])
@@ -397,7 +395,7 @@ async def test_derive_facts_without_a_model_skips_but_advances_cursor(
     workspace_id = await _workspace()
     blob = FilesystemBlobStore(root=tmp_path)
     await _seed_page(blob, workspace_id, "A page whose facts nobody derives without a model wired.")
-    runner = _runner(workspace_id, blob, vec((3, 1.0)), registry=None)
+    runner = _runner(blob, vec((3, 1.0)), registry=None)
     await runner.drive(_derive_consumer(runner))
 
     assert [row for row in await _facts(workspace_id) if row.item_class == FACT] == []
@@ -495,7 +493,7 @@ def test_memory_registers_two_independent_page_change_consumers(tmp_path: object
     their handler-name discriminator, and core_jobs names each its own `page_change:memory:<hook>`
     workflow — so the indexer and the fact deriver never collide on JobSpec name or cursor key."""
     blob = FilesystemBlobStore(root=tmp_path)
-    runner = _runner(uuid4(), blob, vec((0, 1.0)), registry=None)
+    runner = _runner(blob, vec((0, 1.0)), registry=None)
     discriminators = {consumer.discriminator for consumer in runner.consumers()}
     assert discriminators == {"index_pages", "derive_facts"}
 
@@ -532,7 +530,6 @@ def test_two_page_change_hooks_sharing_a_discriminator_fail_loud(tmp_path: objec
         ),
     )
     runner = PageChangeRunner(
-        workspace_id=uuid4(),
         credential_store=CredentialStore(fernet=Fernet(Fernet.generate_key())),
         manifests=(collision,),
         pages=CorePageFeed(blob=FilesystemBlobStore(root=tmp_path)),

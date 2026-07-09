@@ -15,7 +15,8 @@ from ufo.blob import FilesystemBlobStore
 from ufo.config import SourceConfig, SourceEntry
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
-from ufo.ext.context import context_for
+from ufo.ext.context import ScopedStore, context_for
+from ufo.ext.manifest import HookContext, HookOutcome, HookSpec, Manifest, PageChangeBatch
 from ufo.indexing import OWNER_KIND_PAGE, Chunk, TextChunker
 from ufo.jobs import (
     CORE_EXTENSION,
@@ -373,7 +374,7 @@ async def test_page_change_runner_cursor_resumes_across_ticks(
     witness. Driven with the real memory page-indexer consumer over the real feed (the memory
     manifest registers two page_change hooks; this selects the indexer by its discriminator),
     proving the runner's producer and the consumer end to end."""
-    workspace_id = await _workspace()
+    await _workspace()
     root = tmp_path / "src"
     root.mkdir()
     (root / "a.md").write_text("alpha document about apples")
@@ -382,7 +383,6 @@ async def test_page_change_runner_cursor_resumes_across_ticks(
     postgres = database_url.startswith("postgresql")
     driver = SyncDriver(backends={FOLDER_BACKEND: FolderSource()}, blob=blob, postgres=postgres)
     runner = PageChangeRunner(
-        workspace_id=workspace_id,
         credential_store=CredentialStore(fernet=Fernet(Fernet.generate_key())),
         manifests=(memory_manifest.manifest(),),
         pages=CorePageFeed(blob=blob),
@@ -405,6 +405,92 @@ async def test_page_change_runner_cursor_resumes_across_ticks(
     await driver.run()
     await runner.drive(consumer)
     assert embed.calls == indexed_a + 1
+
+
+PROBE_EXTENSION = "page_change_probe"
+SEEN_PAGES_KEY = "seen_pages"
+
+
+async def record_pages(ctx: HookContext) -> HookOutcome:
+    """A `page_change` probe consumer: records the page ids it was handed into its own scoped store,
+    so a test reads back — through the public store, scoped to the ambient workspace — which pages
+    each workspace's drive replayed. The discriminator is this handler's `__name__`."""
+    assert isinstance(ctx.payload, PageChangeBatch)
+    await ctx.ext.store.put(
+        SEEN_PAGES_KEY, ",".join(sorted(str(change.page_id) for change in ctx.payload.changes))
+    )
+    return None
+
+
+async def _seed_page(workspace_id: UUID) -> UUID:
+    """A workspace with one source and one (tombstoned) page — enough for the runner to enumerate
+    the workspace and replay the page; tombstoned so the feed inlines an empty body without a blob.
+    Returns the page id the drive should replay to this workspace."""
+    page_id, source_id = uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.source).values(
+                id=source_id,
+                workspace_id=workspace_id,
+                backend=FOLDER_BACKEND,
+                config={},
+                cursor=None,
+                next_sync_at=sa.func.now(),
+                claimed_by=None,
+                claim_expires_at=None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.page).values(
+                id=page_id,
+                workspace_id=workspace_id,
+                source_id=source_id,
+                digest="d",
+                body_ref="",
+                subject=SHARED_SUBJECT,
+                tombstone=True,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return page_id
+
+
+async def test_page_change_drive_enumerates_and_scopes_each_workspace(
+    db: None, tmp_path: Path
+) -> None:
+    """One consumer's drive enumerates every workspace holding pages through owner_tx (two distinct
+    workspaces here) and runs the cursor loop bound to each — the probe writes into its own scoped
+    store per workspace, so each workspace's store is written under its own scope and carries its
+    own page. Two stores written is the witness the drive fanned out per workspace, not once."""
+    ws_a, ws_b = uuid4(), uuid4()
+    page_a = await _seed_page(ws_a)
+    page_b = await _seed_page(ws_b)
+    manifest = Manifest(
+        name=PROBE_EXTENSION,
+        version="0",
+        hooks=(HookSpec(event="page_change", handler=record_pages),),
+    )
+    runner = PageChangeRunner(
+        credential_store=CredentialStore(fernet=Fernet(Fernet.generate_key())),
+        manifests=(manifest,),
+        pages=CorePageFeed(blob=FilesystemBlobStore(root=tmp_path / "blobs")),
+    )
+    (consumer,) = runner.consumers()
+    await runner.drive(consumer)
+    with ws(ws_a):
+        seen_a = await ScopedStore(extension=PROBE_EXTENSION).get(SEEN_PAGES_KEY)
+    with ws(ws_b):
+        seen_b = await ScopedStore(extension=PROBE_EXTENSION).get(SEEN_PAGES_KEY)
+    assert isinstance(seen_a, str) and str(page_a) in seen_a
+    assert isinstance(seen_b, str) and str(page_b) in seen_b
 
 
 async def test_shared_page_scoping_excludes_a_member_only_search(
@@ -828,7 +914,6 @@ def test_source_sync_spend_resume_and_sandbox_reap_register_as_core_jobs(
         postgres=database_url.startswith("postgresql"),
     )
     runner = PageChangeRunner(
-        workspace_id=uuid4(),
         credential_store=CredentialStore(fernet=Fernet(Fernet.generate_key())),
         manifests=(),
         pages=CorePageFeed(blob=FilesystemBlobStore(root=tmp_path / "pages")),

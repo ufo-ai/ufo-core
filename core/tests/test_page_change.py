@@ -96,13 +96,11 @@ async def _seed_page(blob: FilesystemBlobStore, workspace_id: UUID, body: str) -
 
 
 def _runner(
-    workspace_id: UUID,
     blob: FilesystemBlobStore,
     manifests: tuple[object, ...] = (),
     registry: ModelRegistry | None = None,
 ) -> PageChangeRunner:
     return PageChangeRunner(
-        workspace_id=workspace_id,
         credential_store=CredentialStore(fernet=Fernet(Fernet.generate_key())),
         manifests=manifests or (_sample_manifest(),),
         pages=CorePageFeed(blob=blob),
@@ -121,7 +119,7 @@ async def test_runner_delivers_changed_pages_and_advances_the_cursor(
     workspace_id = await _workspace()
     blob = FilesystemBlobStore(root=tmp_path)
     page_one = await _seed_page(blob, workspace_id, "the first page body")
-    runner = _runner(workspace_id, blob)
+    runner = _runner(blob)
     await _drive_all(runner)
 
     with ws(workspace_id):
@@ -141,7 +139,7 @@ async def test_runner_wires_the_model_into_the_off_turn_context(db: None, tmp_pa
     blob = FilesystemBlobStore(root=tmp_path)
     await _seed_page(blob, workspace_id, "a page for model wiring")
     registry = ModelRegistry(providers=(), pricing=CORE_PRICING, auto_model="claude-opus-4-8")
-    await _drive_all(_runner(workspace_id, blob, registry=registry))
+    await _drive_all(_runner(blob, registry=registry))
 
     with ws(workspace_id):
         scoped = ScopedStore(extension=sample.NAME)
@@ -164,7 +162,6 @@ def test_each_page_change_consumer_registers_as_its_own_job(tmp_path: object) ->
         name="boom_ext", version="0", hooks=(HookSpec(event="page_change", handler=_raise),)
     )
     runner = PageChangeRunner(
-        workspace_id=uuid4(),
         credential_store=CredentialStore(fernet=Fernet(Fernet.generate_key())),
         manifests=(_sample_manifest(), boom),
         pages=CorePageFeed(blob=blob),
@@ -194,7 +191,7 @@ async def test_a_failing_consumer_neither_advances_its_cursor_nor_blocks_another
     boom = Manifest(
         name="boom_ext", version="0", hooks=(HookSpec(event="page_change", handler=_raise),)
     )
-    runner = _runner(workspace_id, blob, manifests=(boom, _sample_manifest()))
+    runner = _runner(blob, manifests=(boom, _sample_manifest()))
     consumers = {consumer.extension: consumer for consumer in runner.consumers()}
     boom_consumer, sample_consumer = consumers["boom_ext"], consumers[sample.NAME]
 

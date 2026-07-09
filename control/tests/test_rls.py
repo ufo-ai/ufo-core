@@ -19,7 +19,15 @@ import asyncpg
 import pytest
 import sqlalchemy as sa
 from click.testing import CliRunner
-from ufo.db import apply_migrations, current_workspace, dispose_db, init_db, workspace_tx
+from ufo.db import (
+    apply_migrations,
+    current_workspace,
+    dispose_db,
+    init_db,
+    init_owner_db,
+    owner_tx,
+    workspace_tx,
+)
 from ufo.schema import tables
 from ufo.workspace import ws
 
@@ -274,11 +282,14 @@ def shared_role_env(rls_env: RlsEnv) -> Iterator[SharedRoleEnv]:
     """The real ``ufo_serve`` role the shared fleet connects as, created by the rollout bootstrap
     (``ensure_serve_role``): an RLS-subject login role in ufo_app, GRANTed SET on the workspace GUC,
     with NO pinned default — so it scopes per transaction from current_workspace and an unset
-    workspace fails loud. Built on rls_env's owner + policies + two seeded workspaces; _reset drops
-    the role."""
+    workspace fails loud. The shared fleet also opens the RLS-bypassing ``ufo_owner`` engine
+    (``init_owner_db``) that ``owner_tx`` enumerates through, so both the subject and owner ends the
+    fleet uses are live here. Built on rls_env's owner + policies + two seeded workspaces; _reset
+    drops the role."""
     asyncio.run(ensure_serve_role(ADMIN_DSN))
     dsn = serve_dsn(POSTGRES_HOST, APP_DATABASE)
     init_db(dsn)
+    init_owner_db(_owner_app_dsn("postgresql+asyncpg", APP_DATABASE))
     try:
         yield SharedRoleEnv(
             workspaces=tuple(tenant.workspace_id for tenant in rls_env.tenants),
@@ -382,3 +393,18 @@ async def test_shared_onboard_signs_in_without_a_tenant_cr(
     assert directives["workspace"] == SHARED_WORKSPACE_URL
     assert await _members_in(workspace_id) == ["boss@sharedtwo.io"]
     assert isinstance(flow.resolver, SharedWorkspaces)
+
+
+async def test_owner_tx_enumerates_every_workspace_where_the_subject_fails_closed(
+    shared_role_env: SharedRoleEnv,
+) -> None:
+    """The cross-workspace sweeps enumerate through ``owner_tx``: the RLS-bypassing ``ufo_owner``
+    engine reads across every workspace with no GUC set — exactly where the shared subject role
+    fails closed (prior test). A sweep re-binds each row under ``with ws(...)`` afterward; here we
+    prove only the enumeration half. Superset, not equality: the shared app database accumulates
+    workspaces from the other shared-tier tests, so the proof is that owner_tx sees every seeded
+    tenant at once — which the subject role, with no workspace bound, never can."""
+    assert current_workspace.get() is None
+    async with owner_tx() as connection:
+        rows = (await connection.execute(sa.select(tables.workspace.c.id))).all()
+    assert set(shared_role_env.workspaces) <= {str(row.id) for row in rows}
