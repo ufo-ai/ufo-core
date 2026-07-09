@@ -27,6 +27,7 @@ from ufo.sandbox.session import EGRESS_CA_CERT_ENV, EGRESS_CA_KEY_ENV
 
 MODEL_PROBES = ("claude-opus-4-8", "gpt-5")
 OWNER_DSN_ENV = "UFO_OWNER_DSN"
+OTLP_ENDPOINT_ENV = "UFO_OTLP_ENDPOINT"
 
 
 def model_rule_base(config: Config) -> tuple[Rule, ...]:
@@ -53,10 +54,11 @@ def model_rule_base(config: Config) -> tuple[Rule, ...]:
 
 def run() -> None:
     """Boot the shared egress proxy: load config the way `serve` does, source the owner DSN and the
-    stable CA (failing loud on either unset), meter model usage against the deploy's merged price
-    table, and serve forever."""
+    stable CA (failing loud on either unset), export telemetry to the platform collector
+    (`UFO_OTLP_ENDPOINT` over the baked config, like the owner DSN), meter model usage against the
+    deploy's merged price table, and serve forever."""
     config = load_config()
-    init_o11y(config.o11y.otlp_endpoint)
+    init_o11y(os.environ.get(OTLP_ENDPOINT_ENV) or config.o11y.otlp_endpoint)
     manifests = load_manifests(config.pack.name)
     ca_cert, ca_key = _egress_ca()
     server = ProxyServe(

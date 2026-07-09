@@ -37,6 +37,7 @@ spec:
           image: ${registry}/ufo-control:${image_tag}
           args: [rls-bootstrap]
           env:
+            - {name: UFO_CONTROL_OTLP_ENDPOINT, value: "${otlp_endpoint}"}
             - name: UFO_CONTROL_POSTGRES_OWNER_DSN
               valueFrom:
                 secretKeyRef: {name: ufo-control-secrets, key: postgres-admin-dsn}
@@ -135,6 +136,8 @@ spec:
           args: [api]
           ports:
             - {name: http, containerPort: 8080}
+          env:
+            - {name: UFO_CONTROL_OTLP_ENDPOINT, value: "${otlp_endpoint}"}
           readinessProbe:
             httpGet: {path: /healthz, port: http}
           livenessProbe:
@@ -174,6 +177,7 @@ spec:
           ports:
             - {name: http, containerPort: 8080}
           env:
+            - {name: UFO_CONTROL_OTLP_ENDPOINT, value: "${otlp_endpoint}"}
             - name: POD_NAME
               valueFrom:
                 fieldRef: {fieldPath: metadata.name}
@@ -218,6 +222,7 @@ spec:
           ports:
             - {name: http, containerPort: 8080}
           env:
+            - {name: UFO_CONTROL_OTLP_ENDPOINT, value: "${otlp_endpoint}"}
             - {name: UFO_PUBLIC_BASE_URL, value: "https://${apex_host}"}
             - {name: UFO_BASE_DOMAIN, value: "${base_domain}"}
             - {name: UFO_BUNDLE_IMAGE, value: "${bundle_image}"}
@@ -297,6 +302,7 @@ spec:
           ports:
             - {name: proxy, containerPort: 8888}
           env:
+            - {name: UFO_OTLP_ENDPOINT, value: "${otlp_endpoint}"}
             # The RLS-bypassing owner DSN (password-bearing → a Secret, never a ConfigMap).
             - name: UFO_OWNER_DSN
               valueFrom:
