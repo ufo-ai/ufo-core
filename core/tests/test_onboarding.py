@@ -19,7 +19,7 @@ from ufo import cli
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.credentials import CredentialSlotUnset, CredentialStore
 from ufo.db import workspace_tx
-from ufo.ext.context import ExtensionContext, ScopedStore
+from ufo.ext.context import CredentialAccess, ExtensionContext, ScopedStore
 from ufo.ext.loader import load_manifests
 from ufo.ext.manifest import CredentialSlot, Manifest, OnboardingStep
 from ufo.onboarding import DEFAULT_AGENT_PROMPT, AlreadyInitialized, Onboarding
@@ -133,39 +133,55 @@ async def test_onboarding_runs_each_installed_extensions_steps(
     assert await scoped.get(sample.ONBOARDING_KEY) == {"onboarded": True}
 
 
-async def test_onboarding_seeds_declared_slots_the_environment_provides(
+async def test_platform_credential_is_read_live_not_seeded(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A platform credential the environment provides is read live through CredentialAccess, never
+    copied into the workspace at onboarding — so rotating the deploy's value reaches the workspace
+    with no re-seed, and a per-workspace override still wins."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-onboard")
-    monkeypatch.setenv("SEEDED_API_KEY", "seeded-value")
+    monkeypatch.setenv("SEEDED_API_KEY", "platform-value")
     monkeypatch.delenv("UNSEEDED_API_KEY", raising=False)
     manifest = Manifest(
-        name="seeding_ext",
+        name="platform_ext",
         version="0.1.0",
         credentials=(
-            CredentialSlot(name="seeded_api_key", description="seeded from env"),
-            CredentialSlot(name="unseeded_api_key", description="absent from env"),
+            CredentialSlot(name="seeded_api_key", description="platform default from env"),
+            CredentialSlot(name="unseeded_api_key", description="absent from env and store"),
         ),
     )
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     onboarded = await _onboarding(
         database_url, tmp_path, credentials=store, manifests=(manifest,)
     ).run()
-    assert await store.get(onboarded.workspace_id, "seeded_api_key") == "seeded-value"
+    # Onboarding did NOT seed the env value into the workspace store.
     with pytest.raises(CredentialSlotUnset):
-        await store.get(onboarded.workspace_id, "unseeded_api_key")
+        await store.get(onboarded.workspace_id, "seeded_api_key")
+    access = CredentialAccess(
+        workspace_id=onboarded.workspace_id,
+        declared=frozenset({"seeded_api_key", "unseeded_api_key"}),
+        _store=store,
+    )
+    # Read live from the environment.
+    assert await access.get("seeded_api_key") == "platform-value"
+    # Rotation propagates with no re-onboard.
+    monkeypatch.setenv("SEEDED_API_KEY", "rotated-value")
+    assert await access.get("seeded_api_key") == "rotated-value"
+    # A genuine per-workspace override wins over the platform default.
+    await store.put(onboarded.workspace_id, "seeded_api_key", "workspace-byok")
+    assert await access.get("seeded_api_key") == "workspace-byok"
+    # Unset in both store and env fails loud.
+    with pytest.raises(CredentialSlotUnset):
+        await access.get("unseeded_api_key")
 
 
-async def test_an_environment_credential_without_a_key_fails_before_the_db(
+async def test_onboarding_steps_without_a_credential_key_fail_before_the_db(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """An extension contributing onboarding steps still needs the credential key (a step may store a
+    per-workspace secret); the guard fails before the DB, leaving no half-created workspace."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-onboard")
-    monkeypatch.setenv("SEEDED_API_KEY", "seeded-value")
-    manifest = Manifest(
-        name="seeding_ext",
-        version="0.1.0",
-        credentials=(CredentialSlot(name="seeded_api_key", description="seeded from env"),),
-    )
+    manifest = next(m for m in load_manifests() if m.name == sample.NAME)
     with pytest.raises(RuntimeError, match="UFO_CREDENTIAL_KEY"):
         await _onboarding(database_url, tmp_path, credentials=None, manifests=(manifest,)).run()
     async with workspace_tx() as connection:

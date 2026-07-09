@@ -40,31 +40,16 @@ class Onboarded:
     member_id: UUID
 
 
-def env_credentials(manifest: Manifest) -> dict[str, str]:
-    """Declared slot values the environment provides — a slot seeds from its upper-cased name
-    (`slack_bot_token` ← `SLACK_BOT_TOKEN`), so a cold start connects an extension without a
-    post-init fill step."""
-    return {
-        slot.name: value
-        for slot in manifest.credentials
-        if (value := os.environ.get(slot.name.upper()))
-    }
-
-
 async def run_onboarding_steps(
     manifests: tuple[Manifest, ...], workspace_id: UUID, credentials: CredentialStore | None
 ) -> None:
-    """Seed each extension's environment-provided credential slots, then fire its onboarding steps
-    for a freshly created workspace, every step with that extension's scoped ExtensionContext (its
-    declared credential slots). Seeding runs first so a step that reads a slot it declared finds
-    the deploy-provided value. Steps run AFTER core access is established, and a step that raises
-    is logged and skipped — one add-on's failure can neither strand the core workspace nor block
-    another extension's steps."""
+    """Fire each installed extension's onboarding steps for a freshly created workspace, every step
+    with that extension's scoped ExtensionContext (its declared credential slots). A step that reads
+    a declared slot finds the platform default live from the environment — credentials are read, not
+    seeded per workspace, so rotating a deploy's value reaches every workspace. Steps run AFTER core
+    access is established, and a step that raises is logged and skipped — one add-on's failure can
+    neither strand the core workspace nor block another extension's steps."""
     for manifest in manifests:
-        if credentials is not None:
-            for slot, value in env_credentials(manifest).items():
-                await credentials.put(workspace_id, slot, value)
-                log("onboarding.credential_seeded", extension=manifest.name, slot=slot)
         if not manifest.onboarding_steps:
             continue
         if credentials is None:
@@ -118,18 +103,15 @@ class Onboarding:
 
     def _require_credentials_for_steps(self) -> None:
         """Fail before the DB (like the model key) when installed extensions contribute onboarding
-        steps or the environment provides declared slot values but no credential key is set — the
-        scoped context and the seeding both need the store, and failing here leaves no half-created
-        workspace behind."""
+        steps but no credential key is set — a step's scoped context may store a per-workspace
+        secret, and failing here leaves no half-created workspace behind. Platform defaults are read
+        live from the environment and need no key."""
         if self.credentials is not None:
             return
-        if any(m.onboarding_steps for m in self.manifests) or any(
-            env_credentials(m) for m in self.manifests
-        ):
+        if any(m.onboarding_steps for m in self.manifests):
             raise RuntimeError(
-                "installed extensions contribute onboarding steps or the environment provides "
-                f"credential values that need {self.config.credentials.key_env} set before init "
-                "can run"
+                "installed extensions contribute onboarding steps that need "
+                f"{self.config.credentials.key_env} set before init can run"
             )
 
     def _require_model_key(self) -> None:

@@ -34,7 +34,7 @@ from ufo import cli
 from ufo.accounting import CORE_PRICING
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config, load_config
-from ufo.credentials import CredentialStore
+from ufo.credentials import CredentialSlotUnset, CredentialStore
 from ufo.db import dispose_db, init_db, workspace_tx
 from ufo.ext.loader import skill_registry
 from ufo.ext.manifest import ModelProviderSpec
@@ -194,12 +194,16 @@ def test_credential_set_round_trips_into_the_store_the_surface_reads(cli_home: C
     assert asyncio.run(_read_credential("exa_api")) == "exa-cli-secret"
 
 
-def test_init_seeds_declared_slots_from_env(
+def test_init_does_not_seed_platform_credentials_into_the_store(
     cli_home: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A platform default the environment provides is read live at use, never copied into the
+    workspace at init — so the store holds no seeded exa_api. CredentialAccess resolves it live
+    from env (see the onboarding tests), so a rotation is never shadowed by a stale copy."""
     monkeypatch.setenv("EXA_API", "exa-env-seeded")
     _init(cli_home)
-    assert asyncio.run(_read_credential("exa_api")) == "exa-env-seeded"
+    with pytest.raises(CredentialSlotUnset):
+        asyncio.run(_read_credential("exa_api"))
 
 
 def test_credential_set_rejects_an_undeclared_slot(cli_home: CliRunner) -> None:

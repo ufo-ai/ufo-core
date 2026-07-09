@@ -9,6 +9,7 @@ path an extension does. The `ExtensionContext` shape is open: it carries the sel
 backends, a transaction over the extension's own tables, governed proposals, and invoke, without
 reshaping what handlers already hold."""
 
+import os
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -22,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.accounting import CORE_PRICING, Pricing, record_workspace_usage
 from ufo.blob import BlobNotFound, BlobStore
-from ufo.credentials import CredentialStore
+from ufo.credentials import CredentialSlotUnset, CredentialStore
 from ufo.db import workspace_tx
 from ufo.governance import Governance, prompt_digest
 from ufo.indexing import EmbedClient, IndexBackend
@@ -121,11 +122,22 @@ class CredentialAccess:
     _store: CredentialStore | None
 
     async def get(self, slot: str) -> str:
+        """Resolve a declared slot to its live value: a per-workspace stored secret if the workspace
+        set one (genuine BYOK, sealed), else the platform default read fresh from env (`SLOT`
+        upper-cased). Platform credentials are never copied into a workspace at onboarding, so
+        rotating the deploy's env value reaches every workspace that has not overridden it — no
+        stale seeded copies. Unset in both places fails loud."""
         if slot not in self.declared:
             raise UndeclaredCredentialSlot(slot)
-        if self._store is None:
-            raise RuntimeError(f"credential slot {slot!r} declared but no credential key is set")
-        return await self._store.get(self.workspace_id, slot)
+        if self._store is not None:
+            try:
+                return await self._store.get(self.workspace_id, slot)
+            except CredentialSlotUnset:
+                pass
+        platform = os.environ.get(slot.upper())
+        if platform is not None:
+            return platform
+        raise CredentialSlotUnset(slot)
 
 
 @dataclass(frozen=True)
