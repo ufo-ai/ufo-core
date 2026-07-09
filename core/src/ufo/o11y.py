@@ -6,10 +6,14 @@ from contextlib import contextmanager
 from typing import cast
 from uuid import UUID
 
-from opentelemetry import metrics, trace
+from opentelemetry import _logs, metrics, trace
+from opentelemetry._logs import SeverityNumber
+from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.metrics import Counter
+from opentelemetry.sdk._logs import LoggerProvider
+from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import Resource
@@ -21,6 +25,7 @@ INSTRUMENTATION_NAME = "ufo"
 METRIC_EXPORT_INTERVAL_MILLIS = 30_000
 OTLP_TRACES_PATH = "v1/traces"
 OTLP_METRICS_PATH = "v1/metrics"
+OTLP_LOGS_PATH = "v1/logs"
 METRICS = (
     "turn_started_total",
     "turn_terminal_total",
@@ -51,7 +56,7 @@ def init_o11y(otlp_endpoint: str | None) -> None:
     """Install OTel providers exporting to the OTLP/HTTP collector; None keeps no-op defaults."""
     if otlp_endpoint is None:
         return
-    traces_url, metrics_url = _otlp_signal_urls(otlp_endpoint)
+    traces_url, metrics_url, logs_url = _otlp_signal_urls(otlp_endpoint)
     resource = Resource.create({"service.name": INSTRUMENTATION_NAME})
     tracer_provider = TracerProvider(resource=resource)
     tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=traces_url)))
@@ -61,14 +66,20 @@ def init_o11y(otlp_endpoint: str | None) -> None:
         export_interval_millis=METRIC_EXPORT_INTERVAL_MILLIS,
     )
     metrics.set_meter_provider(MeterProvider(resource=resource, metric_readers=[reader]))
+    logger_provider = LoggerProvider(resource=resource)
+    logger_provider.add_log_record_processor(
+        BatchLogRecordProcessor(OTLPLogExporter(endpoint=logs_url))
+    )
+    _logs.set_logger_provider(logger_provider)
 
 
-def _otlp_signal_urls(otlp_endpoint: str) -> tuple[str, str]:
-    """(traces, metrics) URLs off the collector base. The OTLP/HTTP exporter posts to the exact
-    endpoint it is handed — it never appends a signal path — so the per-signal path the collector
-    receiver serves is built here, else exports hit the base URL and the collector 404s them."""
+def _otlp_signal_urls(otlp_endpoint: str) -> tuple[str, str, str]:
+    """(traces, metrics, logs) URLs off the collector base. The OTLP/HTTP exporter posts to the
+    exact endpoint it is handed — it never appends a signal path — so the per-signal path the
+    collector receiver serves is built here, else exports hit the base URL and the collector 404s
+    them."""
     base = otlp_endpoint.rstrip("/")
-    return f"{base}/{OTLP_TRACES_PATH}", f"{base}/{OTLP_METRICS_PATH}"
+    return f"{base}/{OTLP_TRACES_PATH}", f"{base}/{OTLP_METRICS_PATH}", f"{base}/{OTLP_LOGS_PATH}"
 
 
 @contextmanager
@@ -106,8 +117,13 @@ def redact_value(value: object) -> JsonValue:
 
 
 def log(event: str, **fields: object) -> None:
-    """Emit a structured info record with sensitive fields redacted."""
-    logging.getLogger(INSTRUMENTATION_NAME).info(event, extra={"ufo": redact_payload(fields)})
+    """Emit a structured info record, sensitive fields redacted, to stdlib logging and the OTel
+    logs pipeline; the OTel record correlates to the active span."""
+    redacted = redact_payload(fields)
+    logging.getLogger(INSTRUMENTATION_NAME).info(event, extra={"ufo": redacted})
+    _logs.get_logger(INSTRUMENTATION_NAME).emit(
+        severity_number=SeverityNumber.INFO, severity_text="INFO", body=event, attributes=redacted
+    )
 
 
 def emit_metric(name: str, amount: int = 1, **dimensions: str) -> None:
