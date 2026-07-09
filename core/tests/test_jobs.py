@@ -2,11 +2,9 @@ import asyncio
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
-from cryptography.fernet import Fernet
 from dbos import DBOS
 
 from ufo import jobs as jobs_module
-from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, ScopedStore
 from ufo.ext.manifest import JobSpec
@@ -30,12 +28,8 @@ async def _workspace() -> UUID:
     return workspace_id
 
 
-def _runner(workspace_id: UUID, core_jobs: tuple[JobSpec, ...]) -> JobRunner:
-    return JobRunner(
-        workspace_id=workspace_id,
-        credential_store=CredentialStore(fernet=Fernet(Fernet.generate_key())),
-        bindings=bindings_from((), core_jobs),
-    )
+def _runner(core_jobs: tuple[JobSpec, ...]) -> JobRunner:
+    return JobRunner(bindings=bindings_from((), core_jobs))
 
 
 async def _write_marker(context: ExtensionContext) -> None:
@@ -57,7 +51,7 @@ async def test_recurring_core_job_registers_at_boot_and_fires(
     workspace_id = await _workspace()
     key = f"{CORE_EXTENSION}:tick"
     spec = JobSpec(name="tick", schedule="* * * * * *", handler=_write_marker)
-    runner = _runner(workspace_id, (spec,))
+    runner = _runner((spec,))
     scoped = ScopedStore(extension=CORE_EXTENSION)
     try:
         runner.launch()
@@ -72,7 +66,7 @@ async def test_recurring_core_job_registers_at_boot_and_fires(
 async def test_one_shot_core_job_fires_once_at_boot(db: None, dbos_launched: object) -> None:
     workspace_id = await _workspace()
     spec = JobSpec(name="boot", schedule=None, handler=_write_marker)
-    runner = _runner(workspace_id, (spec,))
+    runner = _runner((spec,))
     scoped = ScopedStore(extension=CORE_EXTENSION)
     try:
         runner.launch()
@@ -80,3 +74,17 @@ async def test_one_shot_core_job_fires_once_at_boot(db: None, dbos_launched: obj
             assert await _await_marker(scoped) == MARKER_VALUE
     finally:
         jobs_module._firing = None
+
+
+async def test_fire_fans_a_core_job_across_every_workspace(db: None) -> None:
+    """One `fire` enumerates every workspace through owner_tx and runs the handler bound to each, so
+    a marker-writing core job lands its marker in BOTH workspaces' scoped stores — the witness the
+    dispatcher fans a job across the fleet rather than a single workspace."""
+    ws_a = await _workspace()
+    ws_b = await _workspace()
+    spec = JobSpec(name="tick", schedule="* * * * * *", handler=_write_marker)
+    await _runner((spec,)).fire(f"{CORE_EXTENSION}:tick")
+    with ws(ws_a):
+        assert await ScopedStore(extension=CORE_EXTENSION).get(MARKER_KEY) == MARKER_VALUE
+    with ws(ws_b):
+        assert await ScopedStore(extension=CORE_EXTENSION).get(MARKER_KEY) == MARKER_VALUE

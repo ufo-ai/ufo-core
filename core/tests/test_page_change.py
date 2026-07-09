@@ -18,11 +18,9 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 import ufo_ext_sample as sample
-from cryptography.fernet import Fernet
 
 from ufo.accounting import CORE_PRICING
 from ufo.blob import FilesystemBlobStore
-from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ScopedStore
 from ufo.ext.loader import load_manifests
@@ -101,7 +99,6 @@ def _runner(
     registry: ModelRegistry | None = None,
 ) -> PageChangeRunner:
     return PageChangeRunner(
-        credential_store=CredentialStore(fernet=Fernet(Fernet.generate_key())),
         manifests=manifests or (_sample_manifest(),),
         pages=CorePageFeed(blob=blob),
         registry=registry,
@@ -120,7 +117,8 @@ async def test_runner_delivers_changed_pages_and_advances_the_cursor(
     blob = FilesystemBlobStore(root=tmp_path)
     page_one = await _seed_page(blob, workspace_id, "the first page body")
     runner = _runner(blob)
-    await _drive_all(runner)
+    with ws(workspace_id):
+        await _drive_all(runner)
 
     with ws(workspace_id):
         scoped = ScopedStore(extension=sample.NAME)
@@ -128,7 +126,8 @@ async def test_runner_delivers_changed_pages_and_advances_the_cursor(
     assert first == {"page_ids": [str(page_one)], "model_wired": False}
 
     page_two = await _seed_page(blob, workspace_id, "the second page body")
-    await _drive_all(runner)
+    with ws(workspace_id):
+        await _drive_all(runner)
     with ws(workspace_id):
         second = await scoped.get(sample.HOOK_PAGE_CHANGE_KEY)
     assert second == {"page_ids": [str(page_two)], "model_wired": False}
@@ -139,7 +138,8 @@ async def test_runner_wires_the_model_into_the_off_turn_context(db: None, tmp_pa
     blob = FilesystemBlobStore(root=tmp_path)
     await _seed_page(blob, workspace_id, "a page for model wiring")
     registry = ModelRegistry(providers=(), pricing=CORE_PRICING, auto_model="claude-opus-4-8")
-    await _drive_all(_runner(blob, registry=registry))
+    with ws(workspace_id):
+        await _drive_all(_runner(blob, registry=registry))
 
     with ws(workspace_id):
         scoped = ScopedStore(extension=sample.NAME)
@@ -162,7 +162,6 @@ def test_each_page_change_consumer_registers_as_its_own_job(tmp_path: object) ->
         name="boom_ext", version="0", hooks=(HookSpec(event="page_change", handler=_raise),)
     )
     runner = PageChangeRunner(
-        credential_store=CredentialStore(fernet=Fernet(Fernet.generate_key())),
         manifests=(_sample_manifest(), boom),
         pages=CorePageFeed(blob=blob),
     )
@@ -195,7 +194,7 @@ async def test_a_failing_consumer_neither_advances_its_cursor_nor_blocks_another
     consumers = {consumer.extension: consumer for consumer in runner.consumers()}
     boom_consumer, sample_consumer = consumers["boom_ext"], consumers[sample.NAME]
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError), ws(workspace_id):
         await runner.drive(boom_consumer)
     with ws(workspace_id):
         boom_cursor = await ScopedStore(extension="boom_ext").get(
@@ -203,8 +202,8 @@ async def test_a_failing_consumer_neither_advances_its_cursor_nor_blocks_another
         )
     assert boom_cursor is None
 
-    await runner.drive(sample_consumer)
     with ws(workspace_id):
+        await runner.drive(sample_consumer)
         scoped = ScopedStore(extension=sample.NAME)
         record = await scoped.get(sample.HOOK_PAGE_CHANGE_KEY)
         sample_cursor = await scoped.get(

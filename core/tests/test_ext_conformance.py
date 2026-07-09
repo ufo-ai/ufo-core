@@ -710,11 +710,7 @@ def test_a_route_without_a_credential_key_fails_loud() -> None:
 async def test_job_fires_through_its_scoped_context(db: None) -> None:
     workspace_id = await _workspace()
     manifest = _sample_manifest()
-    runner = JobRunner(
-        workspace_id=workspace_id,
-        credential_store=_credential_store(),
-        bindings=bindings_from((manifest,), ()),
-    )
+    runner = JobRunner(bindings=bindings_from((manifest,), ()))
     await runner.fire(f"{manifest.name}:{sample.JOB_NAME}")
     with ws(workspace_id):
         scoped = ScopedStore(extension=sample.NAME)
@@ -746,13 +742,11 @@ async def test_route_reaches_its_scoped_context(db: None) -> None:
 
 async def test_a_second_workspace_reaches_none_of_the_firsts_rows(db: None) -> None:
     first = await _workspace()
-    second = await _workspace()
     manifest = _sample_manifest()
-    await JobRunner(
-        workspace_id=first,
-        credential_store=_credential_store(),
-        bindings=bindings_from((manifest,), ()),
-    ).fire(f"{manifest.name}:{sample.JOB_NAME}")
+    await JobRunner(bindings=bindings_from((manifest,), ())).fire(
+        f"{manifest.name}:{sample.JOB_NAME}"
+    )
+    second = await _workspace()
     store = _credential_store()
     await store.put(first, sample.API_SLOT, "sk-first")
 
@@ -835,8 +829,6 @@ async def test_job_reads_trajectories_and_opens_a_governed_proposal(
     blob = FilesystemBlobStore(root=tmp_path)
     agent_id = await _seed_trajectory(workspace_id, blob)
     await JobRunner(
-        workspace_id=workspace_id,
-        credential_store=_credential_store(),
         bindings=bindings_from((manifest,), ()),
         blob=blob,
     ).fire(f"{manifest.name}:{sample.JOB_NAME}")

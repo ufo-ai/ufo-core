@@ -6,10 +6,8 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 import ufo_ext_sample as sample
-from cryptography.fernet import Fernet
 
 from ufo.bundle import Bundle
-from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ScopedStore
 from ufo.ext.loader import (
@@ -184,11 +182,7 @@ async def test_an_installed_extension_fires_through_the_loader(
     write_lockfile(lock, Lockfile(ufo_version="0.1.0"))
     ExtensionStore(catalog=_catalog(), lockfile=lock).install(sample.NAME)
     workspace_id = await _workspace()
-    runner = JobRunner(
-        workspace_id=workspace_id,
-        credential_store=CredentialStore(fernet=Fernet(Fernet.generate_key())),
-        bindings=bindings_from(load_manifests(), ()),
-    )
+    runner = JobRunner(bindings=bindings_from(load_manifests(), ()))
     await runner.fire(f"{sample.NAME}:{sample.JOB_NAME}")
     with ws(workspace_id):
         scoped = ScopedStore(extension=sample.NAME)
@@ -229,11 +223,7 @@ async def test_a_bundle_boots_its_pinned_extension_on_a_clean_lockfile(
     monkeypatch.setenv(LOCKFILE_PATH_ENV, str(result.lockfile))
     assert [manifest.name for manifest in load_manifests()] == [sample.NAME]
     workspace_id = await _workspace()
-    runner = JobRunner(
-        workspace_id=workspace_id,
-        credential_store=CredentialStore(fernet=Fernet(Fernet.generate_key())),
-        bindings=bindings_from(load_manifests(), ()),
-    )
+    runner = JobRunner(bindings=bindings_from(load_manifests(), ()))
     await runner.fire(f"{sample.NAME}:{sample.JOB_NAME}")
     with ws(workspace_id):
         scoped = ScopedStore(extension=sample.NAME)

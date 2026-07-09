@@ -12,7 +12,6 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
-from cryptography.fernet import Fernet
 from ufo_ext_scheduled_tasks.manifest import NAME, RUNNER_JOB, manifest
 from ufo_ext_scheduled_tasks.runner import ScheduledTaskRunner
 from ufo_ext_scheduled_tasks.tasks import (
@@ -24,7 +23,6 @@ from ufo_ext_scheduled_tasks.tasks import (
     schedule_task,
 )
 
-from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, context_for
 from ufo.ext.loader import skill_registry
@@ -90,10 +88,6 @@ async def _seed(surface: str = "cli") -> tuple[UUID, UUID, UUID]:
             )
         )
     return workspace_id, agent_id, conversation_id
-
-
-def _credentials() -> CredentialStore:
-    return CredentialStore(fernet=Fernet(Fernet.generate_key()))
 
 
 async def _unavailable_spawn(
@@ -306,13 +300,10 @@ async def test_manifest_job_fires_through_job_runner(db: None) -> None:
             due_at,
         )
     dbos = StubDbos()
+    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
     runner = JobRunner(
-        workspace_id=workspace_id,
-        credential_store=_credentials(),
         bindings=bindings_from((manifest(),), ()),
-        invoker=AdmissionInvoker(
-            admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
-        ),
+        invoker_factory=lambda wid: AdmissionInvoker(admission=admission, workspace_id=wid),
     )
     await runner.fire(f"{NAME}:{RUNNER_JOB}")
     assert len(await _turns(conversation_id)) == 1

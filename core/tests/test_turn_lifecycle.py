@@ -43,6 +43,7 @@ from ufo.schema.records import TerminalFrame, Usage
 from ufo.surfaces import hub_tail
 from ufo.surfaces.cli import router
 from ufo.transcript import Conversation
+from ufo.workspace import ws
 
 STREAM_TIMEOUT_SECONDS = 30
 STREAM_GATE = StreamGate()
@@ -579,7 +580,8 @@ async def test_member_cap_parks_a_turn_in_surface_then_resumes_when_raised(
             .where(tables.spend_cap.c.id == cap_id)
         )
     assert loop_queue._runtime is not None
-    await SpendResume(client=loop_queue._runtime.dbos).run()
+    with ws(workspace_id):
+        await SpendResume(client=loop_queue._runtime.dbos).run()
     await _await_status(second, "done")
     async with workspace_tx() as connection:
         billed = (

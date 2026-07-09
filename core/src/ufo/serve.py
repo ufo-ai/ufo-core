@@ -163,21 +163,22 @@ def run() -> None:
     app.state.artifact_token_secret = artifact_secret
     app.include_router(router)
     app.include_router(artifacts_router)
-    # The per-tenant / dedicated serve pins one workspace: run its background loops (source sync,
-    # spend-resume, sandbox reaper, extension jobs) bound to it, and mount its extension routes and
-    # installed surfaces. The shared fleet has no single workspace and does none of this here — it
-    # runs turn workers only; each turn binds its workspace via `with ws(...)`, and loops and
-    # surfaces run per-workspace under the same scope through the workspace-scheduled job driver.
+    # Jobs run on both tiers: `fire` enumerates workspaces and binds each, so one launch drives the
+    # whole fleet and a per-tenant deploy is the single-workspace case of the same path. Only the
+    # per-tenant deploy registers its configured sources and mounts its one workspace's extension
+    # routes and installed surfaces here; the shared fleet's per-workspace surfaces are admitted
+    # elsewhere (the control-plane gateway).
+    sync_driver = SyncDriver(
+        backends=_source_backends(manifests),
+        blob=blob,
+        postgres=config.database.url.startswith("postgresql"),
+        auth_proxy=_select_auth_proxy(config, manifests, credentials),
+    )
+    page_feed = CorePageFeed(blob=blob)
     if workspace_id is not None:
-        sync_driver = SyncDriver(
-            backends=_source_backends(manifests),
-            blob=blob,
-            postgres=config.database.url.startswith("postgresql"),
-            auth_proxy=_select_auth_proxy(config, manifests, credentials),
-        )
-        page_feed = CorePageFeed(blob=blob)
         asyncio.run(register_sources(config.sources))
-        _launch_jobs(config, sync_driver, index, embed, page_feed, dbos_client, blob, carrier)
+    _launch_jobs(config, sync_driver, index, embed, page_feed, dbos_client, blob, carrier)
+    if workspace_id is not None:
         _mount_ext_routes(app, manifests, workspace_id, credentials, index, embed)
         _mount_surfaces(
             app,
@@ -191,7 +192,7 @@ def run() -> None:
             config.connect.public_base_url,
         )
     else:
-        log("serve.shared_mode.workspace_loops_and_surfaces_deferred")
+        log("serve.shared_mode.surfaces_deferred")
     log("serve.started", host=config.serve.host, port=config.serve.port, shared_workspace=shared)
     try:
         uvicorn.run(app, host=config.serve.host, port=config.serve.port, log_level="warning")
@@ -245,21 +246,19 @@ def _launch_jobs(
         raise RuntimeError(
             f"credential key env {config.credentials.key_env!r} is unset but jobs are registered"
         )
-    workspace_id = asyncio.run(_sole_workspace_id())
-    credential_store = CredentialStore(fernet=Fernet(key.encode()))
-    invoker = AdmissionInvoker(
-        admission=Admission(dbos=dbos_client, durable_surfaces=durable_surfaces(manifests)),
-        workspace_id=workspace_id,
-    )
+    admission = Admission(dbos=dbos_client, durable_surfaces=durable_surfaces(manifests))
+
+    def invoker_for(workspace_id: UUID) -> AdmissionInvoker:
+        return AdmissionInvoker(admission=admission, workspace_id=workspace_id)
+
     registry = model_registry(config, manifests)
     page_change_runner = PageChangeRunner(
-        credential_store=credential_store,
         manifests=manifests,
         pages=page_feed,
+        invoker_factory=invoker_for,
         index=index,
         embed=embed,
         blob=blob,
-        invoker=invoker,
         registry=registry,
     )
     bindings = bindings_from(
@@ -272,14 +271,12 @@ def _launch_jobs(
         ),
     )
     JobRunner(
-        workspace_id=workspace_id,
-        credential_store=credential_store,
         bindings=bindings,
+        invoker_factory=invoker_for,
         index=index,
         embed=embed,
         pages=page_feed,
         blob=blob,
-        invoker=invoker,
         registry=registry,
     ).launch()
 

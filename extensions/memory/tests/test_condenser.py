@@ -17,7 +17,6 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 import ufo_ext_memory.manifest as memory_manifest
-from cryptography.fernet import Fernet
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.condenser import FactDeriver, MemoryConsolidator
@@ -31,7 +30,6 @@ from ufo_ext_memory.store import (
 
 from ufo.accounting import CORE_PRICING, Pricing
 from ufo.blob import FilesystemBlobStore
-from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ModelAccess, ScopedStore
 from ufo.ext.manifest import (
@@ -253,7 +251,6 @@ def _runner(
 ) -> PageChangeRunner:
     embed = StubEmbed(vector)
     return PageChangeRunner(
-        credential_store=CredentialStore(fernet=Fernet(Fernet.generate_key())),
         manifests=(memory_manifest.manifest(),),
         pages=CorePageFeed(blob=blob),
         index=DefaultIndex(embed=embed, transaction=workspace_tx),
@@ -299,7 +296,8 @@ async def test_derive_facts_writes_subject_scoped_facts_through_page_change(
     )
     client = StubModelClient(payload, Usage(input_tokens=50, output_tokens=20))
     runner = _runner(blob, vec((0, 1.0)), _registry(client))
-    await runner.drive(_derive_consumer(runner))
+    with ws(workspace_id):
+        await runner.drive(_derive_consumer(runner))
 
     rows = [row for row in await _facts(workspace_id) if row.item_class == FACT]
     assert len(rows) == 1
@@ -336,7 +334,8 @@ async def test_derive_facts_rides_its_own_cursor_independent_of_the_indexer(
     runner = _runner(blob, vec((1, 1.0)), _registry(client))
     consumers = {c.discriminator: c for c in runner.consumers()}
 
-    await runner.drive(consumers["derive_facts"])
+    with ws(workspace_id):
+        await runner.drive(consumers["derive_facts"])
     assert client.calls == 1
     assert len([row for row in await _facts(workspace_id) if row.item_class == FACT]) == 1
 
@@ -396,7 +395,8 @@ async def test_derive_facts_without_a_model_skips_but_advances_cursor(
     blob = FilesystemBlobStore(root=tmp_path)
     await _seed_page(blob, workspace_id, "A page whose facts nobody derives without a model wired.")
     runner = _runner(blob, vec((3, 1.0)), registry=None)
-    await runner.drive(_derive_consumer(runner))
+    with ws(workspace_id):
+        await runner.drive(_derive_consumer(runner))
 
     assert [row for row in await _facts(workspace_id) if row.item_class == FACT] == []
     with ws(workspace_id):
@@ -530,7 +530,6 @@ def test_two_page_change_hooks_sharing_a_discriminator_fail_loud(tmp_path: objec
         ),
     )
     runner = PageChangeRunner(
-        credential_store=CredentialStore(fernet=Fernet(Fernet.generate_key())),
         manifests=(collision,),
         pages=CorePageFeed(blob=FilesystemBlobStore(root=tmp_path)),
     )
