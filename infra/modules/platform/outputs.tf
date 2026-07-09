@@ -47,6 +47,29 @@ output "rds_endpoint" {
   value = module.rds.db_instance_endpoint
 }
 
+# The shared serve fleet's identity + minted platform keys (hosted tier). Sensitive: the DSN carries
+# the ufo_serve password and the keys seal credentials/sessions/artifacts. The env's ufo.tf renders
+# them into the ufo-serve Secret (config ufo.toml + the three key env vars).
+output "serve_dsn" {
+  value     = local.serve_dsn
+  sensitive = true
+}
+
+output "serve_credential_key" {
+  value     = local.serve_credential_key
+  sensitive = true
+}
+
+output "serve_session_secret" {
+  value     = random_password.serve_session_secret.result
+  sensitive = true
+}
+
+output "serve_artifact_token" {
+  value     = random_password.serve_artifact_token.result
+  sensitive = true
+}
+
 output "redis_endpoint" {
   value = aws_elasticache_replication_group.redis.primary_endpoint_address
 }

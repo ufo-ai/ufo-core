@@ -25,6 +25,34 @@ resource "random_password" "ufo_token" {
   special = false
 }
 
+# The shared serve fleet's own platform keys (RFC 0011 §2 hosted tier). Unlike a per-tenant serve —
+# whose Fernet + artifact keys the operator's render.py mints into that tenant's Secret — the ONE
+# shared fleet has no per-tenant Secret, so the platform mints its keys here and they live only in the
+# ufo-serve Secret (ufo-system), never replicated to enterprise tenant namespaces.
+#
+# The Fernet credential key seals every hosted workspace's BYOK credential rows, so it is minted once
+# and reused verbatim every apply — a re-minted key orphans every stored credential. A Fernet key is
+# url-safe base64 of 32 bytes; random_id.b64_url is exactly that without padding, so the trailing "="
+# (the single pad byte a 32-byte value needs) is appended in the serve_credential_key local below.
+resource "random_id" "serve_credential_key" {
+  byte_length = 32
+}
+
+# UFO_SESSION_SECRET — the HMAC the shared fleet signs member session tokens with (config
+# serve.session_secret_env); the token carries the workspace claim the surface trusts before any
+# RLS-scoped read.
+resource "random_password" "serve_session_secret" {
+  length  = 48
+  special = false
+}
+
+# UFO_ARTIFACT_TOKEN_SECRET — the shared fleet's artifact-delivery signing secret (config
+# artifacts.token_secret_env), the hosted counterpart to the per-tenant minted artifact token.
+resource "random_password" "serve_artifact_token" {
+  length  = 64
+  special = false
+}
+
 locals {
   rds_endpoint = module.rds.db_instance_endpoint # host:port
 
@@ -32,6 +60,19 @@ locals {
   # database. The control plane's postgres.py dials this with asyncpg to mint per-tenant roles, so it
   # is a plain libpq URL (postgresql://), NOT a SQLAlchemy +driver scheme.
   admin_dsn = "postgresql://ufo_owner:${random_password.rds.result}@${local.rds_endpoint}/${var.app_database_name}"
+
+  # The shared serve fleet's DSN — the RLS-*subject* ufo_serve role on the shared app database, the
+  # one role for every hosted workspace (it sets app.workspace_id per transaction). The password is
+  # derived from the same seed + formula as control/postgres.py serve_password()
+  # (sha256("<seed>:ufo_serve")), reproduced here so the terraform-rendered config matches the role the
+  # rls-bootstrap Job creates — a cross-runtime contract, postgres.py is the source of truth. Core
+  # derives the DBOS system store as the `<name>_dbos` sibling (config.DatabaseConfig), so this url
+  # alone resolves the fleet's shared `ufo_dbos` system database; the rls-bootstrap Job provisions it.
+  serve_password = sha256("${random_password.pg_role_seed.result}:ufo_serve")
+  serve_dsn      = "postgresql+asyncpg://ufo_serve:${local.serve_password}@${local.rds_endpoint}/${var.app_database_name}"
+
+  # Fernet key: url-safe base64 of 32 bytes needs one "=" of padding, which random_id.b64_url omits.
+  serve_credential_key = "${random_id.serve_credential_key.b64_url}="
 }
 
 # 1) Postgres control-plane credentials → operator-only (NOT the replicated platform secret).

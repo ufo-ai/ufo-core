@@ -62,6 +62,77 @@ locals {
     data.kubectl_file_documents.cluster_services.manifests,
     data.kubectl_file_documents.observability.manifests,
   )
+
+  # The one shared serve fleet's host: all hosted workspaces are served by this single fleet (no
+  # per-workspace subdomain — RFC 0011), so one hostname fronts it, alongside the onboarding gateway
+  # at the apex. Cloudflare-proxied like the tenant/gateway ingress.
+  shared_host = "app.${module.platform.hostname}"
+
+  # The shared fleet's ufo.toml, the hosted-tier production config: the assistant_hosted knobs the
+  # gateway authors for a tenant (gateway_provision.CONFIG_TOML) plus the infra overlay the operator's
+  # render.py applies per tenant (database/blob/hub/connect/sandbox/o11y) — here rendered once for the
+  # ONE fleet. It connects as the RLS-subject ufo_serve role and resolves the workspace per request;
+  # system_url is left to core's `<name>_dbos` derivation, so it resolves the shared `ufo_dbos` system
+  # database. Carries the DSN password → the ufo-serve Secret, never a ConfigMap.
+  serve_config = <<-TOML
+    [pack]
+    name = "assistant_hosted"
+
+    [memory]
+    index_backend = "turbopuffer"
+
+    [research]
+    search_provider = "exa"
+
+    [browser]
+    cdp_provider = "sandbox_chrome"
+
+    [serve]
+    host = "0.0.0.0"
+    port = 8710
+    shared_workspace = true
+
+    [database]
+    url = "${module.platform.serve_dsn}"
+
+    [blob]
+    backend = "s3"
+    bucket = "${module.platform.blob_bucket}"
+    region = "${var.region}"
+    s3_url = "https://s3.${var.region}.amazonaws.com"
+    sts_role_arn = "${module.platform.sandbox_fs_role_arn}"
+
+    [hub]
+    backend = "redis"
+    url = "redis://${module.platform.redis_endpoint}:6379/0"
+
+    [sandbox]
+    backend = "e2b"
+    proxy_public_url = "http://sandbox-proxy.${module.platform.hostname}:8888"
+
+    [connect]
+    public_base_url = "https://${local.shared_host}"
+
+    [o11y]
+    otlp_endpoint = "http://otel-collector.${local.system_namespace}.svc.cluster.local:4318"
+  TOML
+}
+
+# The shared serve fleet's Secret (ufo-system): the rendered config (with the ufo_serve DSN, so a
+# Secret) plus the platform Fernet / session / artifact keys the fleet reads from env. Mounted +
+# referenced by the ufo-serve Deployment in control-plane.yaml.tpl. Not replicated to tenants.
+resource "kubernetes_secret_v1" "ufo_serve" {
+  metadata {
+    name      = "ufo-serve"
+    namespace = local.system_namespace
+  }
+  data = {
+    "ufo.toml"                = local.serve_config
+    UFO_CREDENTIAL_KEY        = module.platform.serve_credential_key
+    UFO_SESSION_SECRET        = module.platform.serve_session_secret
+    UFO_ARTIFACT_TOKEN_SECRET = module.platform.serve_artifact_token
+  }
+  depends_on = [kubernetes_namespace_v1.ufo_system]
 }
 
 # Shared ingress: the tenant chart's Ingress uses class "nginx" (RFC 0004 decision 6). Fronted by an
@@ -124,12 +195,16 @@ data "aws_ecr_image" "ufo" {
 
 data "kubectl_file_documents" "control_plane" {
   content = templatefile("${path.module}/ufo/control-plane.yaml.tpl", {
-    registry      = module.platform.ecr_registry
-    image_tag     = var.image_tag
-    namespace     = local.system_namespace
-    base_domain   = module.platform.hostname
-    bundle_image  = local.bundle_image
-    otlp_endpoint = "http://otel-collector.${local.system_namespace}.svc.cluster.local:4318"
+    registry       = module.platform.ecr_registry
+    image_tag      = var.image_tag
+    namespace      = local.system_namespace
+    base_domain    = module.platform.hostname
+    shared_host    = local.shared_host
+    cluster_issuer = "letsencrypt"
+    ingress_class  = "nginx"
+    bundle_image   = local.bundle_image
+    serve_role_arn = module.platform.app_s3_role_arn
+    otlp_endpoint  = "http://otel-collector.${local.system_namespace}.svc.cluster.local:4318"
   })
 }
 
@@ -169,5 +244,6 @@ resource "kubectl_manifest" "ufo" {
     module.platform,
     kubernetes_namespace_v1.ufo_system,
     kubernetes_config_map_v1.ufo_control_platform,
+    kubernetes_secret_v1.ufo_serve,
   ]
 }

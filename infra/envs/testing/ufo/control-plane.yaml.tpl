@@ -354,12 +354,21 @@ spec:
     - {name: proxy, port: 8888, targetPort: proxy}
 ---
 # The shared serve fleet (hosted tier) — ONE Deployment serving turns for every workspace. Runs the
-# bundle image (`ufoctl serve`) reading its baked /app/ufo.toml + platform env, connects as the
-# RLS-SUBJECT role ufo_serve (serve-dsn), and scopes each request/turn to its workspace per
-# transaction (the app.workspace_id GUC). Additive: the per-tenant tenant serve (enterprise tier) is
-# unchanged. replicas:0 — it cannot serve until the sibling wiring lands (serve reads UFO_SERVE_DSN,
-# resolves current_workspace per request, and a production [sandbox]e2b+proxy_public_url / [blob]s3
-# config replaces the baked dev config). Flip to 2 + add the shared host/ingress once wired.
+# bundle image (`ufoctl serve`) over the ufo-serve Secret's ufo.toml (mounted over the image's baked
+# dev config): [serve] shared_workspace=true, the RLS-SUBJECT ufo_serve DSN, and the hosted
+# assistant_hosted backends (s3 blob, e2b sandbox behind the shared proxy, redis hub, turbopuffer +
+# exa). It connects as ufo_serve and scopes each request/turn to its workspace per transaction (the
+# app.workspace_id GUC). Additive: the per-tenant tenant serve (enterprise tier) is unchanged.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ufo-serve
+  namespace: ${namespace}
+  annotations:
+    # IRSA: the pod's boto3 assumes this role for blob-bucket access and the sandbox-fs mount mint —
+    # the role a tenant serve SA carries too (the app_s3 trust admits ufo-serve in any ufo-* namespace).
+    eks.amazonaws.com/role-arn: ${serve_role_arn}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -367,13 +376,14 @@ metadata:
   namespace: ${namespace}
   labels: {app: ufo-serve}
 spec:
-  replicas: 0
+  replicas: 2
   selector:
     matchLabels: {app: ufo-serve}
   template:
     metadata:
       labels: {app: ufo-serve}
     spec:
+      serviceAccountName: ufo-serve
       enableServiceLinks: false
       containers:
         - name: serve
@@ -382,17 +392,27 @@ spec:
           args: [serve]
           ports:
             - {name: http, containerPort: 8710}
-          # Platform service keys as the tenant serve gets them: ANTHROPIC_API_KEY, OPENAI_API_KEY,
-          # EXA_API, TURBOPUFFER_API_KEY, E2B_API_KEY, UFO_E2B_TEMPLATE, UFO_TOKEN_SECRET, and — once
-          # provisioned there (option-a platform Fernet key) — UFO_CREDENTIAL_KEY / UFO_ARTIFACT_TOKEN_SECRET.
+          # Model/provider keys the fleet shares across workspaces (ANTHROPIC/OPENAI/OPENROUTER, EXA,
+          # TURBOPUFFER, E2B + UFO_E2B_TEMPLATE, COMPOSIO, UFO_TOKEN_SECRET) plus the shared egress
+          # proxy's CA (UFO_EGRESS_CA_CERT) the sandbox trusts.
           envFrom:
             - secretRef: {name: ufo-platform-secrets}
           env:
-            # The shared RLS-SUBJECT role DSN (never the RLS-bypassing owner). serve must read this
-            # to override the baked config's database.url; every transaction sets app.workspace_id.
-            - name: UFO_SERVE_DSN
+            # The fleet's platform Fernet key (seals hosted credential rows), session-signing secret,
+            # and artifact-delivery secret — minted for the fleet, in the ufo-serve Secret.
+            - name: UFO_CREDENTIAL_KEY
               valueFrom:
-                secretKeyRef: {name: ufo-control-secrets, key: serve-dsn}
+                secretKeyRef: {name: ufo-serve, key: UFO_CREDENTIAL_KEY}
+            - name: UFO_SESSION_SECRET
+              valueFrom:
+                secretKeyRef: {name: ufo-serve, key: UFO_SESSION_SECRET}
+            - name: UFO_ARTIFACT_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef: {name: ufo-serve, key: UFO_ARTIFACT_TOKEN_SECRET}
+          volumeMounts:
+            # The rendered shared-fleet config replaces the image's baked dev ufo.toml.
+            - {name: config, mountPath: /app/ufo.toml, subPath: ufo.toml}
+          # No /healthz in core; a TCP probe confirms uvicorn is bound after fail-loud boot.
           readinessProbe:
             tcpSocket: {port: http}
             initialDelaySeconds: 10
@@ -401,6 +421,12 @@ spec:
             tcpSocket: {port: http}
             initialDelaySeconds: 30
             periodSeconds: 20
+      volumes:
+        - name: config
+          secret:
+            secretName: ufo-serve
+            items:
+              - {key: ufo.toml, path: ufo.toml}
 ---
 apiVersion: v1
 kind: Service
@@ -412,3 +438,32 @@ spec:
   selector: {app: ufo-serve}
   ports:
     - {name: http, port: 80, targetPort: http}
+---
+# The one member-facing host for every hosted workspace (no per-workspace subdomain — RFC 0011),
+# published alongside the onboarding gateway at the apex. cert-manager issues TLS; ExternalDNS
+# publishes the record Cloudflare-proxied, so the shared NLB (Cloudflare-only) is reachable only
+# through the proxy. `[connect] public_base_url = https://${shared_host}` matches this host.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ufo-serve
+  namespace: ${namespace}
+  annotations:
+    cert-manager.io/cluster-issuer: ${cluster_issuer}
+    external-dns.alpha.kubernetes.io/hostname: ${shared_host}
+    external-dns.alpha.kubernetes.io/cloudflare-proxied: "true"
+spec:
+  ingressClassName: ${ingress_class}
+  tls:
+    - hosts: [${shared_host}]
+      secretName: ufo-serve-tls
+  rules:
+    - host: ${shared_host}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ufo-serve
+                port: {name: http}
