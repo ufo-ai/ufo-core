@@ -12,7 +12,6 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
-from cryptography.fernet import Fernet
 from ufo_ext_page_alerts.alerts import (
     PAGE_EXCERPT_CHARS,
     WATCH_PREFIX,
@@ -26,16 +25,17 @@ from ufo_ext_page_alerts.alerts import (
 )
 from ufo_ext_page_alerts.manifest import NAME, manifest
 
-from ufo.credentials import CredentialStore
+from ufo.accounting import CORE_PRICING, Pricing
 from ufo.db import workspace_tx
 from ufo.ext.context import ScopedStore, context_for
 from ufo.ext.manifest import HookContext, PageChangeBatch
-from ufo.models.interface import ModelRequest, TextDelta
+from ufo.models.interface import ModelClient, ModelRequest, TextDelta
 from ufo.schema import tables
 from ufo.schema.records import WRITEBACK_PENDING, Agent, Turn, Usage
 from ufo.sources.sync import PageChange
 from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.tools.context import SpawnResult, ToolContext
+from ufo.workspace import ws
 
 BILLED_MODEL = "claude-opus-4-8"
 
@@ -44,7 +44,7 @@ BILLED_MODEL = "claude-opus-4-8"
 class StubDbos:
     enqueued: list[str] = field(default_factory=list)
 
-    async def enqueue_async(self, options: object, workflow_id: str) -> None:
+    async def enqueue_async(self, options: object, workspace_id: str, workflow_id: str) -> None:
         self.enqueued.append(workflow_id)
 
 
@@ -60,6 +60,19 @@ class ScriptedClassifier:
         self.requests.append(request)
         yield TextDelta(text=self.verdict)
         yield Usage(input_tokens=3, output_tokens=1)
+
+
+@dataclass
+class _Resolver:
+    """A ModelResolver standing in for the registry: fixed auto_model and pricing, and a client_for
+    that hands back the one scripted classifier the metered seam completes against."""
+
+    auto_model: str
+    client: ModelClient
+    pricing: Pricing = CORE_PRICING
+
+    async def client_for(self, model: str) -> ModelClient:
+        return self.client
 
 
 async def _seed(surface: str = "slack") -> tuple[UUID, UUID, UUID]:
@@ -104,10 +117,6 @@ async def _seed(surface: str = "slack") -> tuple[UUID, UUID, UUID]:
     return workspace_id, agent_id, conversation_id
 
 
-def _credentials() -> CredentialStore:
-    return CredentialStore(fernet=Fernet(Fernet.generate_key()))
-
-
 async def _unavailable_spawn(
     profile: str, payload: dict[str, object], background: bool = False
 ) -> SpawnResult:
@@ -131,7 +140,7 @@ def _tool_ctx(workspace_id: UUID, conversation_id: UUID, agent_id: UUID) -> Tool
         spawn=_unavailable_spawn,
         member_id=None,
         artifact_token_secret="",
-        ext=context_for(workspace_id, NAME, frozenset(), _credentials()),
+        ext=context_for(NAME, frozenset()),
     )
 
 
@@ -139,16 +148,13 @@ def _hook_ctx(
     workspace_id: UUID, classifier: ScriptedClassifier, changes: tuple[PageChange, ...]
 ) -> HookContext:
     ext = context_for(
-        workspace_id,
         NAME,
         frozenset(),
-        _credentials(),
         invoker=AdmissionInvoker(
             admission=Admission(dbos=StubDbos(), durable_surfaces=frozenset({"slack"})),
             workspace_id=workspace_id,
         ),
-        model_client_factory=lambda: classifier,
-        model_name=BILLED_MODEL,
+        model_resolver=_Resolver(BILLED_MODEL, classifier),
     )
     return HookContext(ext=ext, payload=PageChangeBatch(changes=changes))
 
@@ -182,11 +188,10 @@ async def _turns(conversation_id: UUID) -> list[sa.RowMapping]:
 async def test_watch_pages_tool_binds_the_conversation(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     ctx = _tool_ctx(workspace_id, conversation_id, agent_id)
-    result = await watch_pages(ctx, WatchPagesInput(topic="orbital widget fleet"))
-    assert result.is_error is False
-    stored = await ScopedStore(workspace_id=workspace_id, extension=NAME).get(
-        f"{WATCH_PREFIX}orbital-widget-fleet"
-    )
+    with ws(workspace_id):
+        result = await watch_pages(ctx, WatchPagesInput(topic="orbital widget fleet"))
+        assert result.is_error is False
+        stored = await ScopedStore(extension=NAME).get(f"{WATCH_PREFIX}orbital-widget-fleet")
     assert stored == {
         "topic": "orbital widget fleet",
         "conversation_id": str(conversation_id),
@@ -196,15 +201,15 @@ async def test_watch_pages_tool_binds_the_conversation(db: None) -> None:
 
 async def test_matching_page_invokes_a_delivered_alert_turn_idempotently(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed(surface="slack")
-    await watch_pages(
-        _tool_ctx(workspace_id, conversation_id, agent_id),
-        WatchPagesInput(topic="orbital widget fleet"),
-    )
     classifier = ScriptedClassifier(verdict="MATCH")
     changes = (_page("handbook", "the orbital widget fleet migrates next quarter " + "x" * 3000),)
-
-    await on_page_change(_hook_ctx(workspace_id, classifier, changes))
-    await on_page_change(_hook_ctx(workspace_id, classifier, changes))
+    with ws(workspace_id):
+        await watch_pages(
+            _tool_ctx(workspace_id, conversation_id, agent_id),
+            WatchPagesInput(topic="orbital widget fleet"),
+        )
+        await on_page_change(_hook_ctx(workspace_id, classifier, changes))
+        await on_page_change(_hook_ctx(workspace_id, classifier, changes))
 
     turns = await _turns(conversation_id)
     assert len(turns) == 1
@@ -226,13 +231,14 @@ async def test_matching_page_invokes_a_delivered_alert_turn_idempotently(db: Non
 
 async def test_non_matching_page_alerts_nothing(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
-    await watch_pages(
-        _tool_ctx(workspace_id, conversation_id, agent_id), WatchPagesInput(topic="widgets")
-    )
     classifier = ScriptedClassifier(verdict="NO")
-    await on_page_change(
-        _hook_ctx(workspace_id, classifier, (_page("memo", "quarterly parking rota"),))
-    )
+    with ws(workspace_id):
+        await watch_pages(
+            _tool_ctx(workspace_id, conversation_id, agent_id), WatchPagesInput(topic="widgets")
+        )
+        await on_page_change(
+            _hook_ctx(workspace_id, classifier, (_page("memo", "quarterly parking rota"),))
+        )
     assert await _turns(conversation_id) == []
     assert len(classifier.requests) == 1
 
@@ -240,27 +246,33 @@ async def test_non_matching_page_alerts_nothing(db: None) -> None:
 async def test_tombstones_and_watchless_batches_never_reach_the_model(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     classifier = ScriptedClassifier(verdict="MATCH")
-    await on_page_change(_hook_ctx(workspace_id, classifier, (_page("gone", "", tombstone=True),)))
-    assert classifier.requests == []
-    await watch_pages(
-        _tool_ctx(workspace_id, conversation_id, agent_id), WatchPagesInput(topic="widgets")
-    )
-    await on_page_change(_hook_ctx(workspace_id, classifier, (_page("gone", "", tombstone=True),)))
-    assert classifier.requests == []
+    with ws(workspace_id):
+        await on_page_change(
+            _hook_ctx(workspace_id, classifier, (_page("gone", "", tombstone=True),))
+        )
+        assert classifier.requests == []
+        await watch_pages(
+            _tool_ctx(workspace_id, conversation_id, agent_id), WatchPagesInput(topic="widgets")
+        )
+        await on_page_change(
+            _hook_ctx(workspace_id, classifier, (_page("gone", "", tombstone=True),))
+        )
+        assert classifier.requests == []
     assert await _turns(conversation_id) == []
 
 
 async def test_cancel_page_watch_removes_it_and_unknown_fails_loud(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     ctx = _tool_ctx(workspace_id, conversation_id, agent_id)
-    await watch_pages(ctx, WatchPagesInput(topic="widgets", name="fleet watch"))
-    listed = await list_page_watches(ctx, ListPageWatchesInput())
-    assert "fleet-watch" in listed.content[0].text
-    cancelled = await cancel_page_watch(ctx, CancelPageWatchInput(name="fleet-watch"))
-    assert "Cancelled" in cancelled.content[0].text
-    assert await ScopedStore(workspace_id=workspace_id, extension=NAME).list(WATCH_PREFIX) == ()
-    with pytest.raises(ValueError, match="no page watch"):
-        await cancel_page_watch(ctx, CancelPageWatchInput(name="fleet-watch"))
+    with ws(workspace_id):
+        await watch_pages(ctx, WatchPagesInput(topic="widgets", name="fleet watch"))
+        listed = await list_page_watches(ctx, ListPageWatchesInput())
+        assert "fleet-watch" in listed.content[0].text
+        cancelled = await cancel_page_watch(ctx, CancelPageWatchInput(name="fleet-watch"))
+        assert "Cancelled" in cancelled.content[0].text
+        assert await ScopedStore(extension=NAME).list(WATCH_PREFIX) == ()
+        with pytest.raises(ValueError, match="no page watch"):
+            await cancel_page_watch(ctx, CancelPageWatchInput(name="fleet-watch"))
 
 
 def test_manifest_declares_the_tools_and_the_page_change_hook() -> None:

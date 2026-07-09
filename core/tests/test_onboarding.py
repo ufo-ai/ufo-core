@@ -25,6 +25,7 @@ from ufo.ext.manifest import CredentialSlot, Manifest, OnboardingStep
 from ufo.onboarding import DEFAULT_AGENT_PROMPT, AlreadyInitialized, Onboarding
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME
+from ufo.workspace import init_workspace_credentials, ws
 
 OWNER_EMAIL = "owner@example.com"
 DEFAULT_MODEL = "claude-opus-4-8"
@@ -129,8 +130,9 @@ async def test_onboarding_runs_each_installed_extensions_steps(
     onboarded = await _onboarding(
         database_url, tmp_path, credentials=store, manifests=(manifest,)
     ).run()
-    scoped = ScopedStore(workspace_id=onboarded.workspace_id, extension=sample.NAME)
-    assert await scoped.get(sample.ONBOARDING_KEY) == {"onboarded": True}
+    with ws(onboarded.workspace_id):
+        scoped = ScopedStore(extension=sample.NAME)
+        assert await scoped.get(sample.ONBOARDING_KEY) == {"onboarded": True}
 
 
 async def test_platform_credential_is_read_live_not_seeded(
@@ -157,22 +159,20 @@ async def test_platform_credential_is_read_live_not_seeded(
     # Onboarding did NOT seed the env value into the workspace store.
     with pytest.raises(CredentialSlotUnset):
         await store.get(onboarded.workspace_id, "seeded_api_key")
-    access = CredentialAccess(
-        workspace_id=onboarded.workspace_id,
-        declared=frozenset({"seeded_api_key", "unseeded_api_key"}),
-        _store=store,
-    )
-    # Read live from the environment.
-    assert await access.get("seeded_api_key") == "platform-value"
-    # Rotation propagates with no re-onboard.
-    monkeypatch.setenv("SEEDED_API_KEY", "rotated-value")
-    assert await access.get("seeded_api_key") == "rotated-value"
-    # A genuine per-workspace override wins over the platform default.
-    await store.put(onboarded.workspace_id, "seeded_api_key", "workspace-byok")
-    assert await access.get("seeded_api_key") == "workspace-byok"
-    # Unset in both store and env fails loud.
-    with pytest.raises(CredentialSlotUnset):
-        await access.get("unseeded_api_key")
+    init_workspace_credentials(store)
+    access = CredentialAccess(declared=frozenset({"seeded_api_key", "unseeded_api_key"}))
+    with ws(onboarded.workspace_id):
+        # Read live from the environment.
+        assert await access.get("seeded_api_key") == "platform-value"
+        # Rotation propagates with no re-onboard.
+        monkeypatch.setenv("SEEDED_API_KEY", "rotated-value")
+        assert await access.get("seeded_api_key") == "rotated-value"
+        # A genuine per-workspace override wins over the platform default.
+        await store.put(onboarded.workspace_id, "seeded_api_key", "workspace-byok")
+        assert await access.get("seeded_api_key") == "workspace-byok"
+        # Unset in both store and env fails loud.
+        with pytest.raises(CredentialSlotUnset):
+            await access.get("unseeded_api_key")
 
 
 async def test_onboarding_steps_without_a_credential_key_fail_before_the_db(
@@ -216,8 +216,9 @@ async def test_a_failing_onboarding_step_is_isolated_from_its_siblings(
     onboarded = await _onboarding(
         database_url, tmp_path, credentials=store, manifests=(failing, working)
     ).run()
-    scoped = ScopedStore(workspace_id=onboarded.workspace_id, extension="working_ext")
-    assert await scoped.get("recorded") == {"ran": True}
+    with ws(onboarded.workspace_id):
+        scoped = ScopedStore(extension="working_ext")
+        assert await scoped.get("recorded") == {"ran": True}
 
 
 def test_cold_start_init_creates_durable_state_and_then_fails_loud(

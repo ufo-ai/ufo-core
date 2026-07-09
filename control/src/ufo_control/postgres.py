@@ -176,6 +176,52 @@ async def _ensure_database(connection: asyncpg.Connection, name: str, owner: str
         await connection.execute(f'create database "{name}" owner "{owner}"')
 
 
+SERVE_ROLE = "ufo_serve"
+
+
+def serve_password() -> str:
+    """The shared serve role's password, derived from the same cluster seed as the tenant roles —
+    reproduced every rollout, never persisted."""
+    return tenant_password(SERVE_ROLE)
+
+
+def serve_dsn(postgres_host: str, app_database: str) -> str:
+    """The asyncpg DSN the shared serve fleet dials: the RLS-subject ``ufo_serve`` role on the
+    shared app database. It sets ``app.workspace_id`` per transaction (never a pinned default), so
+    it scopes each request to the workspace ``current_workspace`` carries and fails closed when
+    unset — one role for every workspace."""
+    return f"postgresql+asyncpg://{SERVE_ROLE}:{serve_password()}@{postgres_host}/{app_database}"
+
+
+async def ensure_serve_role(admin_dsn: str) -> None:
+    """Create (idempotently) the shared fleet's Postgres role, once per rollout as the owner. An
+    RLS-*subject* LOGIN role in the ``ufo_app`` group — it inherits the CRUD grant, and RLS applies
+    to it because it is not the table owner. GRANTed SET on ``app.workspace_id`` so it can pin the
+    GUC per transaction, with NO ``ALTER ROLE … SET`` default: a transaction that never set the
+    workspace reads an unset GUC and the policy fails closed rather than leaking. Unlike the
+    per-tenant ``ufo_t_<name>`` roles (one pinned workspace each), this is one role for all — the
+    per-request GUC does the scoping. Needs a role-creating connection (the rollout owner DSN is the
+    cluster admin)."""
+    password = serve_password()
+    connection = await asyncpg.connect(admin_dsn)
+    try:
+        await _ensure_group_role(connection)
+        exists = await connection.fetchval("select 1 from pg_roles where rolname = $1", SERVE_ROLE)
+        if exists is None:
+            await connection.execute(
+                f'create role "{SERVE_ROLE}" login in role "{APP_GROUP_ROLE}" '
+                f"password '{password}'"
+            )
+        else:
+            await connection.execute(
+                f"alter role \"{SERVE_ROLE}\" with login password '{password}'"
+            )
+        await connection.execute(f'grant "{APP_GROUP_ROLE}" to "{SERVE_ROLE}"')
+        await connection.execute(f'grant set on parameter {WORKSPACE_GUC} to "{SERVE_ROLE}"')
+    finally:
+        await connection.close()
+
+
 async def ensure_tenant_database(admin_dsn: str, tenant_name: str, postgres_host: str) -> str:
     """The ``database`` tier: create (idempotently) the tenant's LOGIN+CREATEDB role and owned
     database; return its DSN. CREATEDB lets core's ``init`` create the ``_dbos`` sibling

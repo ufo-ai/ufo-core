@@ -66,6 +66,7 @@ from ufo.schema.records import Agent, Turn
 from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.context import SpawnResult
 from ufo.tools.registry import ToolRegistry
+from ufo.workspace import ws
 
 REWRITTEN_COMMAND = "echo modified"
 
@@ -74,10 +75,8 @@ class Args(BaseModel):
     value: str
 
 
-def _ext(workspace_id: UUID) -> ExtensionContext:
-    return context_for(
-        workspace_id, "probe", frozenset(), CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    )
+def _ext() -> ExtensionContext:
+    return context_for("probe", frozenset())
 
 
 def _chain(event: str, ext: ExtensionContext, *specs: HookSpec) -> HookChain:
@@ -120,7 +119,7 @@ async def test_modify_input_folds_left_to_right_each_seeing_the_prior() -> None:
             )
         )
 
-    ext = _ext(uuid4())
+    ext = _ext()
     chain = _chain(
         "pre_tool_use",
         ext,
@@ -140,7 +139,7 @@ async def test_inject_context_user_prompt_submit_concatenates_in_order() -> None
     async def second(ctx: HookContext) -> HookOutcome:
         return InjectContext(text="second")
 
-    ext = _ext(uuid4())
+    ext = _ext()
     chain = _chain(
         "user_prompt_submit",
         ext,
@@ -166,7 +165,7 @@ async def test_deny_wins_and_short_circuits_later_hooks_preserving_order() -> No
         ran.append("after")
         return None
 
-    ext = _ext(uuid4())
+    ext = _ext()
     chain = _chain(
         "pre_tool_use",
         ext,
@@ -183,7 +182,7 @@ async def test_matcher_limits_a_tool_hook_to_its_named_tools() -> None:
     async def deny(ctx: HookContext) -> HookOutcome:
         return Deny(reason="no")
 
-    ext = _ext(uuid4())
+    ext = _ext()
     chain = _chain(
         "pre_tool_use", ext, HookSpec(event="pre_tool_use", handler=deny, tools=("bash",))
     )
@@ -197,7 +196,7 @@ async def test_raising_gating_hook_fails_closed() -> None:
     async def boom(ctx: HookContext) -> HookOutcome:
         raise RuntimeError("hook exploded")
 
-    ext = _ext(uuid4())
+    ext = _ext()
     chain = _chain("pre_tool_use", ext, HookSpec(event="pre_tool_use", handler=boom))
     resolution = await _fire(chain, "pre_tool_use", _pre())
     assert resolution.denied is not None
@@ -212,7 +211,7 @@ async def test_gating_hook_exceeding_the_timeout_fails_closed(monkeypatch: objec
         return None
 
     monkeypatch.setattr(loader, "HOOK_TIMEOUT_SECONDS", 0.05)
-    ext = _ext(uuid4())
+    ext = _ext()
     chain = _chain("user_prompt_submit", ext, HookSpec(event="user_prompt_submit", handler=slow))
     resolution = await _fire(chain, "user_prompt_submit", UserPromptSubmit(text="hi"))
     assert resolution.denied is not None
@@ -223,7 +222,7 @@ async def test_raising_observe_hook_is_swallowed_leaving_the_output_unchanged() 
     async def boom(ctx: HookContext) -> HookOutcome:
         raise RuntimeError("observe exploded")
 
-    ext = _ext(uuid4())
+    ext = _ext()
     chain = _chain("post_tool_use", ext, HookSpec(event="post_tool_use", handler=boom))
     resolution = await _fire(
         chain,
@@ -238,7 +237,7 @@ async def test_a_disallowed_outcome_on_an_observe_event_is_ignored() -> None:
     async def deny(ctx: HookContext) -> HookOutcome:
         return Deny(reason="post cannot deny")
 
-    ext = _ext(uuid4())
+    ext = _ext()
     chain = _chain("post_tool_use", ext, HookSpec(event="post_tool_use", handler=deny))
     resolution = await _fire(
         chain,
@@ -485,16 +484,17 @@ async def test_sample_pre_deny_short_circuits_and_post_captures_the_other(
     turn = await _seed_turn(uuid4())
     manifest = _sample_manifest()
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    tools, tool_ext = turn_tools((manifest,), turn.workspace_id, store)
-    hooks = turn_hooks((manifest,), turn.workspace_id, store)
+    tools, tool_ext = turn_tools((manifest,), store)
+    hooks = turn_hooks((manifest,), store)
     engine = _engine(turn, EchoAndBashModel(), tmp_path, hooks, tools=tools, tool_ext=tool_ext)
-    frame = await engine.run()
-    assert frame.status == "done"
+    with ws(turn.workspace_id):
+        frame = await engine.run()
+        assert frame.status == "done"
 
-    scoped = ScopedStore(workspace_id=turn.workspace_id, extension=sample.NAME)
-    assert await scoped.get(sample.TOOL_KEY) is None
-    assert await scoped.get(sample.HOOK_POST_KEY) == {"tool": "bash"}
-    assert await scoped.get(sample.HOOK_POST_FAILURE_KEY) is None
+        scoped = ScopedStore(extension=sample.NAME)
+        assert await scoped.get(sample.TOOL_KEY) is None
+        assert await scoped.get(sample.HOOK_POST_KEY) == {"tool": "bash"}
+        assert await scoped.get(sample.HOOK_POST_FAILURE_KEY) is None
 
     stored = await engine.transcript.read()
     assert stored is not None
@@ -508,14 +508,15 @@ async def test_stop_fires_with_the_final_answer(db: None, tmp_path: Path) -> Non
     turn = await _seed_turn(uuid4())
     manifest = _sample_manifest()
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    tools, tool_ext = turn_tools((manifest,), turn.workspace_id, store)
-    hooks = turn_hooks((manifest,), turn.workspace_id, store)
-    frame = await _engine(
-        turn, CapturingModel(), tmp_path, hooks, tools=tools, tool_ext=tool_ext
-    ).run()
-    assert frame.status == "done"
-    scoped = ScopedStore(workspace_id=turn.workspace_id, extension=sample.NAME)
-    assert await scoped.get(sample.HOOK_STOP_KEY) == {"answer": "ok"}
+    tools, tool_ext = turn_tools((manifest,), store)
+    hooks = turn_hooks((manifest,), store)
+    with ws(turn.workspace_id):
+        frame = await _engine(
+            turn, CapturingModel(), tmp_path, hooks, tools=tools, tool_ext=tool_ext
+        ).run()
+        assert frame.status == "done"
+        scoped = ScopedStore(extension=sample.NAME)
+        assert await scoped.get(sample.HOOK_STOP_KEY) == {"answer": "ok"}
 
 
 async def test_tool_failure_reaches_post_tool_use_failure_not_post_tool_use(
@@ -524,44 +525,46 @@ async def test_tool_failure_reaches_post_tool_use_failure_not_post_tool_use(
     turn = await _seed_turn(uuid4())
     manifest = _sample_manifest()
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    tools, tool_ext = turn_tools((manifest,), turn.workspace_id, store)
-    hooks = turn_hooks((manifest,), turn.workspace_id, store)
+    tools, tool_ext = turn_tools((manifest,), store)
+    hooks = turn_hooks((manifest,), store)
     carrier = RecordingCarrier(result=ExecResult(stdout="", stderr="boom", exit_code=1))
-    frame = await _engine(
-        turn,
-        BashThenAnswerModel(),
-        tmp_path,
-        hooks,
-        tools=tools,
-        tool_ext=tool_ext,
-        carrier=carrier,
-    ).run()
-    assert frame.status == "done"
-    scoped = ScopedStore(workspace_id=turn.workspace_id, extension=sample.NAME)
-    assert await scoped.get(sample.HOOK_POST_FAILURE_KEY) == {"tool": "bash"}
-    assert await scoped.get(sample.HOOK_POST_KEY) is None
+    with ws(turn.workspace_id):
+        frame = await _engine(
+            turn,
+            BashThenAnswerModel(),
+            tmp_path,
+            hooks,
+            tools=tools,
+            tool_ext=tool_ext,
+            carrier=carrier,
+        ).run()
+        assert frame.status == "done"
+        scoped = ScopedStore(extension=sample.NAME)
+        assert await scoped.get(sample.HOOK_POST_FAILURE_KEY) == {"tool": "bash"}
+        assert await scoped.get(sample.HOOK_POST_KEY) is None
 
 
 async def test_compaction_fires_pre_and_post_compact(db: None, tmp_path: Path) -> None:
     turn = await _seed_turn(uuid4())
     manifest = _sample_manifest()
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    tools, tool_ext = turn_tools((manifest,), turn.workspace_id, store)
-    hooks = turn_hooks((manifest,), turn.workspace_id, store)
-    frame = await _engine(
-        turn,
-        CompactingModel(),
-        tmp_path,
-        hooks,
-        tools=tools,
-        tool_ext=tool_ext,
-        compaction_trigger=1,
-        compaction_keep=2,
-    ).run()
-    assert frame.status == "done"
-    scoped = ScopedStore(workspace_id=turn.workspace_id, extension=sample.NAME)
-    pre = await scoped.get(sample.HOOK_PRE_COMPACT_KEY)
-    post = await scoped.get(sample.HOOK_POST_COMPACT_KEY)
+    tools, tool_ext = turn_tools((manifest,), store)
+    hooks = turn_hooks((manifest,), store)
+    with ws(turn.workspace_id):
+        frame = await _engine(
+            turn,
+            CompactingModel(),
+            tmp_path,
+            hooks,
+            tools=tools,
+            tool_ext=tool_ext,
+            compaction_trigger=1,
+            compaction_keep=2,
+        ).run()
+        assert frame.status == "done"
+        scoped = ScopedStore(extension=sample.NAME)
+        pre = await scoped.get(sample.HOOK_PRE_COMPACT_KEY)
+        post = await scoped.get(sample.HOOK_POST_COMPACT_KEY)
     assert pre is not None and pre["reason"] == "auto" and pre["before_tokens"] > 0
     assert post is not None
     assert post["summary"].startswith(COMPACTED_CONTEXT_PREFIX)
@@ -580,7 +583,7 @@ async def test_user_prompt_submit_inject_reaches_the_system_context(
 
     chain = _chain(
         "user_prompt_submit",
-        _ext(turn.workspace_id),
+        _ext(),
         HookSpec(event="user_prompt_submit", handler=inject),
     )
     model = CapturingModel()
@@ -599,7 +602,7 @@ async def test_user_prompt_submit_deny_refuses_the_turn_before_the_model(
 
     chain = _chain(
         "user_prompt_submit",
-        _ext(turn.workspace_id),
+        _ext(),
         HookSpec(event="user_prompt_submit", handler=deny),
     )
     model = CapturingModel()
@@ -619,7 +622,7 @@ async def test_pre_modify_input_alters_the_dispatched_args(db: None, tmp_path: P
 
     chain = _chain(
         "pre_tool_use",
-        _ext(turn.workspace_id),
+        _ext(),
         HookSpec(event="pre_tool_use", handler=rewrite, tools=("bash",)),
     )
     carrier = RecordingCarrier()
@@ -644,7 +647,7 @@ async def test_post_modify_output_and_inject_reach_the_tool_result(
 
     chain = _chain(
         "post_tool_use",
-        _ext(turn.workspace_id),
+        _ext(),
         HookSpec(event="post_tool_use", handler=replace_output),
         HookSpec(event="post_tool_use", handler=inject),
     )
@@ -670,7 +673,7 @@ async def test_pre_hook_that_raises_fails_closed_and_the_tool_never_dispatches(
 
     chain = _chain(
         "pre_tool_use",
-        _ext(turn.workspace_id),
+        _ext(),
         HookSpec(event="pre_tool_use", handler=boom, tools=("bash",)),
     )
     carrier = RecordingCarrier()
@@ -694,7 +697,7 @@ async def test_a_tool_outside_the_matcher_is_not_denied(db: None, tmp_path: Path
 
     chain = _chain(
         "pre_tool_use",
-        _ext(turn.workspace_id),
+        _ext(),
         HookSpec(event="pre_tool_use", handler=deny, tools=("some_other_tool",)),
     )
     carrier = RecordingCarrier()

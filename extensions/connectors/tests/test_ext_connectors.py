@@ -41,6 +41,7 @@ from ufo.schema.records import Agent, Turn
 from ufo.serve import _connect_flow
 from ufo.tools.builtins import ConnectAccountInput, connect_account_handler
 from ufo.tools.context import ToolContext
+from ufo.workspace import ws
 
 PUBLIC_BASE_URL = "https://ufo.example.com"
 EXPECTED_REDIRECT_URI = "https://ufo.example.com/v1/connect/callback"
@@ -216,20 +217,22 @@ async def test_oauth_route_start_leg_redirects_to_composio_consent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(composio, "composio_client", _mock_client)
-    ctx = context_for(uuid4(), connectors.NAME, frozenset(), _credentials())
+    ctx = context_for(connectors.NAME, frozenset())
     query = f"provider={PROVIDER}&state=SEALED&callback={EXPECTED_REDIRECT_URI}"
-    response = await provider.oauth_route(ctx, _request(query))
+    with ws(uuid4()):
+        response = await provider.oauth_route(ctx, _request(query))
     assert response.status_code == provider.REDIRECT_STATUS
     assert response.headers["location"] == COMPOSIO_CONSENT_URL
 
 
 async def test_oauth_route_return_leg_hands_the_account_id_to_core_as_code() -> None:
-    ctx = context_for(uuid4(), connectors.NAME, frozenset(), _credentials())
+    ctx = context_for(connectors.NAME, frozenset())
     query = (
         f"state=SEALED&callback={EXPECTED_REDIRECT_URI}"
         f"&{provider.COMPOSIO_ACCOUNT_PARAM}={COMPOSIO_ACCOUNT}"
     )
-    response = await provider.oauth_route(ctx, _request(query))
+    with ws(uuid4()):
+        response = await provider.oauth_route(ctx, _request(query))
     assert response.status_code == provider.REDIRECT_STATUS
     landing = urlparse(response.headers["location"])
     assert f"{landing.scheme}://{landing.netloc}{landing.path}" == EXPECTED_REDIRECT_URI
@@ -244,7 +247,7 @@ def test_serve_registers_every_provider_and_declares_the_dynamic_tools() -> None
     assert set(flow.providers) == set(composio.CONNECTORS)
     assert flow.providers[PROVIDER].host == PROVIDER_HOST
     assert flow.redirect_uri == EXPECTED_REDIRECT_URI
-    tools, _ = turn_tools((connectors.manifest(),), uuid4(), _credentials())
+    tools, _ = turn_tools((connectors.manifest(),), _credentials())
     names = {tool.name for tool in tools}
     assert {"list_external_tools", "describe_external_tools", "call_external_tool"} <= names
 

@@ -68,7 +68,7 @@ STANDIN_REGISTRY = ModelRegistry(
         ModelProviderSpec(
             name="standin",
             matches=lambda model: True,
-            client=lambda model: StandInModel(),
+            client=lambda model, key: StandInModel(),
         ),
     ),
     pricing=CORE_PRICING,

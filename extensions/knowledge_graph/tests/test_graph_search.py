@@ -27,6 +27,7 @@ from ufo.sdk.manifest import HookContext, InjectContext, UserPromptSubmit
 from ufo.sources.sync import CorePageFeed
 from ufo.subjects import SHARED_SUBJECT
 from ufo.tools.context import SpawnResult, ToolContext
+from ufo.workspace import ws
 
 EXTENSION = "knowledge_graph"
 WHEN = datetime(2026, 1, 1, tzinfo=UTC)
@@ -130,39 +131,43 @@ def test_extension_is_discovered_and_registers_its_page_change_hook() -> None:
 
 async def test_graph_search_returns_cited_relations(db: None, tmp_path) -> None:
     workspace_id = await _workspace()
-    await _seed(
-        FilesystemBlobStore(root=tmp_path), workspace_id, "# Sam Altman\n[[founded::OpenAI]]"
-    )
-    ext = context_for(workspace_id, EXTENSION, frozenset(), None)
+    with ws(workspace_id):
+        await _seed(
+            FilesystemBlobStore(root=tmp_path), workspace_id, "# Sam Altman\n[[founded::OpenAI]]"
+        )
+        ext = context_for(EXTENSION, frozenset())
 
-    result = await kg.graph_search_handler(_tool_ctx(ext), kg.GraphSearchInput(entity="Sam Altman"))
-    text = result.content[0].text
-    assert "founded" in text
-    assert "OpenAI" in text
-    assert "[page " in text
+        result = await kg.graph_search_handler(
+            _tool_ctx(ext), kg.GraphSearchInput(entity="Sam Altman")
+        )
+        text = result.content[0].text
+        assert "founded" in text
+        assert "OpenAI" in text
+        assert "[page " in text
 
 
 async def test_graph_search_filters_by_edge_type(db: None, tmp_path) -> None:
     workspace_id = await _workspace()
-    await _seed(
-        FilesystemBlobStore(root=tmp_path),
-        workspace_id,
-        "# Sam Altman\n[[founded::OpenAI]] and [[advises::Acme]]",
-    )
-    ext = context_for(workspace_id, EXTENSION, frozenset(), None)
+    with ws(workspace_id):
+        await _seed(
+            FilesystemBlobStore(root=tmp_path),
+            workspace_id,
+            "# Sam Altman\n[[founded::OpenAI]] and [[advises::Acme]]",
+        )
+        ext = context_for(EXTENSION, frozenset())
 
-    result = await kg.graph_search_handler(
-        _tool_ctx(ext), kg.GraphSearchInput(entity="Sam Altman", edge_types=("founded",))
-    )
-    text = result.content[0].text
-    assert "OpenAI" in text
-    assert "Acme" not in text
+        result = await kg.graph_search_handler(
+            _tool_ctx(ext), kg.GraphSearchInput(entity="Sam Altman", edge_types=("founded",))
+        )
+        text = result.content[0].text
+        assert "OpenAI" in text
+        assert "Acme" not in text
 
 
 async def test_graph_search_rejects_an_unknown_edge_type(db: None, tmp_path) -> None:
     workspace_id = await _workspace()
-    ext = context_for(workspace_id, EXTENSION, frozenset(), None)
-    with pytest.raises(UnknownEdgeType):
+    with ws(workspace_id), pytest.raises(UnknownEdgeType):
+        ext = context_for(EXTENSION, frozenset())
         await kg.graph_search_handler(
             _tool_ctx(ext), kg.GraphSearchInput(entity="x", edge_types=("acquired",))
         )
@@ -170,28 +175,31 @@ async def test_graph_search_rejects_an_unknown_edge_type(db: None, tmp_path) -> 
 
 async def test_graph_search_reports_no_relations_on_an_empty_graph(db: None, tmp_path) -> None:
     workspace_id = await _workspace()
-    ext = context_for(workspace_id, EXTENSION, frozenset(), None)
-    result = await kg.graph_search_handler(_tool_ctx(ext), kg.GraphSearchInput(entity="nobody"))
-    assert "No graph relations" in result.content[0].text
+    with ws(workspace_id):
+        ext = context_for(EXTENSION, frozenset())
+        result = await kg.graph_search_handler(_tool_ctx(ext), kg.GraphSearchInput(entity="nobody"))
+        assert "No graph relations" in result.content[0].text
 
 
 async def test_user_prompt_submit_hook_injects_the_relevant_subgraph(db: None, tmp_path) -> None:
     workspace_id = await _workspace()
-    await _seed(
-        FilesystemBlobStore(root=tmp_path), workspace_id, "# Sam Altman\n[[founded::OpenAI]]"
-    )
-    ext = context_for(workspace_id, EXTENSION, frozenset(), None)
-
-    outcome = await kg.graph_context_hook(
-        _hook_ctx(
-            ext, "tell me about Sam Altman", UserPromptSubmit(text="tell me about Sam Altman")
+    with ws(workspace_id):
+        await _seed(
+            FilesystemBlobStore(root=tmp_path), workspace_id, "# Sam Altman\n[[founded::OpenAI]]"
         )
-    )
-    assert isinstance(outcome, InjectContext)
-    assert "OpenAI" in outcome.text
+        ext = context_for(EXTENSION, frozenset())
+
+        outcome = await kg.graph_context_hook(
+            _hook_ctx(
+                ext, "tell me about Sam Altman", UserPromptSubmit(text="tell me about Sam Altman")
+            )
+        )
+        assert isinstance(outcome, InjectContext)
+        assert "OpenAI" in outcome.text
 
 
 async def test_user_prompt_submit_hook_ignores_a_non_prompt_payload(db: None, tmp_path) -> None:
     workspace_id = await _workspace()
-    ext = context_for(workspace_id, EXTENSION, frozenset(), None)
-    assert await kg.graph_context_hook(_hook_ctx(ext, "hi", None)) is None
+    with ws(workspace_id):
+        ext = context_for(EXTENSION, frozenset())
+        assert await kg.graph_context_hook(_hook_ctx(ext, "hi", None)) is None

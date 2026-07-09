@@ -27,11 +27,12 @@ from fastmcp.server.dependencies import get_http_headers
 from mcp.types import TextContent
 
 from ufo.credentials import CredentialStore
-from ufo.db import workspace_tx
+from ufo.db import current_workspace, workspace_tx
 from ufo.ext.loader import turn_tools
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.tools.context import ToolContext
+from ufo.workspace import init_workspace_credentials
 
 ENDPOINT = "http://mcp.test/mcp"
 SERVER_NAME = "docs"
@@ -266,7 +267,9 @@ async def _tool_context() -> ToolContext:
         servers={SERVER_NAME: mcp.McpServer(url=ENDPOINT, auth=AUTH_TOKEN)}
     )
     await store.put(workspace_id, mcp.MCP_SERVERS_SLOT, config.model_dump_json())
-    _, ext_by_tool = turn_tools((mcp.manifest(),), workspace_id, store)
+    init_workspace_credentials(store)
+    current_workspace.set(workspace_id)
+    _, ext_by_tool = turn_tools((mcp.manifest(),), store)
     return ToolContext(
         sandbox=None,
         blob=None,

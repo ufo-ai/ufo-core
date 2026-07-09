@@ -22,6 +22,7 @@ from ufo.db import workspace_tx
 from ufo.ext.context import CredentialAccess, context_for
 from ufo.indexing import Chunk, IndexScope
 from ufo.schema import tables
+from ufo.workspace import init_workspace_credentials, ws
 
 SHARED = "shared"
 OWNER_KIND = "memory_item"
@@ -55,8 +56,9 @@ async def _workspace() -> UUID:
 
 async def _access(workspace_id: UUID) -> CredentialAccess:
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    init_workspace_credentials(store)
     await store.put(workspace_id, tpuf.API_KEY_SLOT, API_KEY)
-    return context_for(workspace_id, tpuf.NAME, frozenset({tpuf.API_KEY_SLOT}), store).credentials
+    return context_for(tpuf.NAME, frozenset({tpuf.API_KEY_SLOT})).credentials
 
 
 def _recorder(
@@ -102,12 +104,13 @@ async def test_upsert_posts_columnar_batches_under_the_bearer_key(db: None) -> N
         embed=_StubEmbed((1.0, 0.0)), credentials=await _access(workspace_id), transport=transport
     )
     d1, d2 = _digest("a"), _digest("b")
-    await index.upsert(
-        (
-            Chunk(d1, OWNER_KIND, "m1", SHARED, 0, "orbital widget fleet", (1.0, 0.0)),
-            Chunk(d2, OWNER_KIND, "m2", SHARED, 1, "second chunk", (0.0, 1.0)),
+    with ws(workspace_id):
+        await index.upsert(
+            (
+                Chunk(d1, OWNER_KIND, "m1", SHARED, 0, "orbital widget fleet", (1.0, 0.0)),
+                Chunk(d2, OWNER_KIND, "m2", SHARED, 1, "second chunk", (0.0, 1.0)),
+            )
         )
-    )
     assert len(seen) == 1
     request, body = seen[0]
     assert request.headers["authorization"] == f"Bearer {API_KEY}"
@@ -149,23 +152,24 @@ async def test_lexical_and_vector_queries_filter_and_parse_hits(db: None) -> Non
         embed=_StubEmbed((1.0, 0.0)), credentials=await _access(workspace_id), transport=transport
     )
 
-    lexical = await index.lexical("orbital", frozenset({SHARED}), OWNER_KIND, 10)
-    _, lex_body = seen[-1]
-    assert lex_body["rank_by"] == ["text", "BM25", "orbital"]
-    assert lex_body["top_k"] == 10
-    assert lex_body["filters"] == [
-        "And",
-        [["owner_kind", "Eq", OWNER_KIND], ["subject", "In", [SHARED]]],
-    ]
-    assert [hit.chunk_digest for hit in lexical] == [d1, d2]
-    assert lexical[0].text == "orbital widget" and lexical[0].score > lexical[1].score
+    with ws(workspace_id):
+        lexical = await index.lexical("orbital", frozenset({SHARED}), OWNER_KIND, 10)
+        _, lex_body = seen[-1]
+        assert lex_body["rank_by"] == ["text", "BM25", "orbital"]
+        assert lex_body["top_k"] == 10
+        assert lex_body["filters"] == [
+            "And",
+            [["owner_kind", "Eq", OWNER_KIND], ["subject", "In", [SHARED]]],
+        ]
+        assert [hit.chunk_digest for hit in lexical] == [d1, d2]
+        assert lexical[0].text == "orbital widget" and lexical[0].score > lexical[1].score
 
-    vector = await index.vector((1.0, 0.0), frozenset({SHARED}), OWNER_KIND, 10)
-    _, vec_body = seen[-1]
-    assert vec_body["rank_by"] == ["vector", "ANN", [1.0, 0.0]]
-    assert [hit.chunk_digest for hit in vector] == [d1, d2]
-    assert vector[0].score == pytest.approx(0.75)
-    assert vector[1].score == pytest.approx(0.25)
+        vector = await index.vector((1.0, 0.0), frozenset({SHARED}), OWNER_KIND, 10)
+        _, vec_body = seen[-1]
+        assert vec_body["rank_by"] == ["vector", "ANN", [1.0, 0.0]]
+        assert [hit.chunk_digest for hit in vector] == [d1, d2]
+        assert vector[0].score == pytest.approx(0.75)
+        assert vector[1].score == pytest.approx(0.25)
 
 
 async def test_delete_enumerates_a_scope_then_posts_id_deletes(db: None) -> None:
@@ -183,7 +187,8 @@ async def test_delete_enumerates_a_scope_then_posts_id_deletes(db: None) -> None
     index = tpuf.TurbopufferIndex(
         embed=_StubEmbed((1.0, 0.0)), credentials=await _access(workspace_id), transport=transport
     )
-    await index.delete(IndexScope(OWNER_KIND, "m1"))
+    with ws(workspace_id):
+        await index.delete(IndexScope(OWNER_KIND, "m1"))
     query_request, query_body = seen[0]
     assert query_request.url.path.endswith("/query")
     assert query_body["filters"] == [
@@ -206,5 +211,6 @@ async def test_query_on_a_missing_namespace_returns_no_hits(db: None) -> None:
         credentials=await _access(workspace_id),
         transport=httpx.MockTransport(handle),
     )
-    assert await index.lexical("x", frozenset({SHARED}), OWNER_KIND, 5) == ()
-    assert await index.vector((1.0, 0.0), frozenset({SHARED}), OWNER_KIND, 5) == ()
+    with ws(workspace_id):
+        assert await index.lexical("x", frozenset({SHARED}), OWNER_KIND, 5) == ()
+        assert await index.vector((1.0, 0.0), frozenset({SHARED}), OWNER_KIND, 5) == ()

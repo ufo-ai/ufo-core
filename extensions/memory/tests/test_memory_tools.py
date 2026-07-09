@@ -32,6 +32,7 @@ from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.context import SpawnResult, ToolContext, ToolResult
 from ufo.tools.registry import ToolRegistry
 from ufo.transcript import Conversation, encode, transcript_key
+from ufo.workspace import ws
 
 BUILTIN_REGISTRY = ToolRegistry(BUILTIN_TOOLS)
 MEMORY_TOOLS = {tool.name: tool for tool in memory.manifest().tools}
@@ -86,8 +87,8 @@ async def _workspace() -> UUID:
     return workspace_id
 
 
-def _ext(index: object, embed: object, workspace_id: UUID) -> ExtensionContext:
-    return context_for(workspace_id, "memory", frozenset(), None, index=index, embed=embed)
+def _ext(index: object, embed: object) -> ExtensionContext:
+    return context_for("memory", frozenset(), index=index, embed=embed)
 
 
 def _indexer(embed: object) -> MemoryIndexer:
@@ -138,16 +139,19 @@ async def test_memory_update_then_search_recalls_in_a_new_conversation(
     workspace_id = await _workspace()
     member = uuid4()
     embed = StubEmbed(vec((6, 1.0)))
-    ext = _ext(DefaultIndex(embed=embed, transaction=workspace_tx), embed, workspace_id)
+    ext = _ext(DefaultIndex(embed=embed, transaction=workspace_tx), embed)
 
-    stored = await _run(
-        "memory_update", _tool_ctx(ext, member, tmp_path), body="the deploy password is hunter2"
-    )
-    assert stored.is_error is False
-    await _indexer(embed).run()
+    with ws(workspace_id):
+        stored = await _run(
+            "memory_update",
+            _tool_ctx(ext, member, tmp_path),
+            body="the deploy password is hunter2",
+        )
+        assert stored.is_error is False
+        await _indexer(embed).run()
 
-    found = await _run("memory_search", _tool_ctx(ext, member, tmp_path), queries=["hunter2"])
-    assert "hunter2" in found.content[0].text
+        found = await _run("memory_search", _tool_ctx(ext, member, tmp_path), queries=["hunter2"])
+        assert "hunter2" in found.content[0].text
 
 
 async def test_user_prompt_submit_hook_injects_a_recalled_fact(clean: None) -> None:
@@ -156,49 +160,50 @@ async def test_user_prompt_submit_hook_injects_a_recalled_fact(clean: None) -> N
     workspace_id = await _workspace()
     member = uuid4()
     embed = StubEmbed(vec((7, 1.0)))
-    ext = _ext(DefaultIndex(embed=embed, transaction=workspace_tx), embed, workspace_id)
-    await MEMORY_TOOLS["memory_update"].handler(
-        ToolContext(
-            sandbox=None,
-            blob=None,
-            turn=Turn(
-                id=uuid4(),
-                workspace_id=workspace_id,
-                conversation_id=uuid4(),
-                agent_id=uuid4(),
-                seq=1,
-                status="running",
-                inbound="hi",
+    ext = _ext(DefaultIndex(embed=embed, transaction=workspace_tx), embed)
+    with ws(workspace_id):
+        await MEMORY_TOOLS["memory_update"].handler(
+            ToolContext(
+                sandbox=None,
+                blob=None,
+                turn=Turn(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    conversation_id=uuid4(),
+                    agent_id=uuid4(),
+                    seq=1,
+                    status="running",
+                    inbound="hi",
+                ),
+                agent=Agent(prompt="p", model="claude-opus-4-8"),
+                spawn=_unavailable_spawn,
+                member_id=member,
+                artifact_token_secret="",
+                ext=ext,
             ),
-            agent=Agent(prompt="p", model="claude-opus-4-8"),
-            spawn=_unavailable_spawn,
-            member_id=member,
-            artifact_token_secret="",
-            ext=ext,
-        ),
-        memory.MemoryUpdateInput(body="the vault code is 4821"),
-    )
-    await _indexer(embed).run()
-
-    outcome = await memory.recall_hook(
-        HookContext(
-            ext=ext,
-            turn=Turn(
-                id=uuid4(),
-                workspace_id=workspace_id,
-                conversation_id=uuid4(),
-                agent_id=uuid4(),
-                seq=1,
-                status="running",
-                inbound="what is the vault code",
-            ),
-            agent=Agent(prompt="p", model="claude-opus-4-8"),
-            member_id=member,
-            payload=UserPromptSubmit(text="what is the vault code"),
+            memory.MemoryUpdateInput(body="the vault code is 4821"),
         )
-    )
-    assert isinstance(outcome, InjectContext)
-    assert "the vault code is 4821" in outcome.text
+        await _indexer(embed).run()
+
+        outcome = await memory.recall_hook(
+            HookContext(
+                ext=ext,
+                turn=Turn(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    conversation_id=uuid4(),
+                    agent_id=uuid4(),
+                    seq=1,
+                    status="running",
+                    inbound="what is the vault code",
+                ),
+                agent=Agent(prompt="p", model="claude-opus-4-8"),
+                member_id=member,
+                payload=UserPromptSubmit(text="what is the vault code"),
+            )
+        )
+        assert isinstance(outcome, InjectContext)
+        assert "the vault code is 4821" in outcome.text
 
 
 async def test_recall_hook_excludes_episodic_topic_pointers(clean: None, tmp_path: Path) -> None:
@@ -208,62 +213,64 @@ async def test_recall_hook_excludes_episodic_topic_pointers(clean: None, tmp_pat
     workspace_id = await _workspace()
     member = uuid4()
     embed = StubEmbed(vec((9, 1.0)))
-    ext = _ext(DefaultIndex(embed=embed, transaction=workspace_tx), embed, workspace_id)
-    await _run(
-        "memory_update", _tool_ctx(ext, member, tmp_path), body="the api key rotates monthly"
-    )
-    await _run(
-        "memory_update",
-        _tool_ctx(ext, member, tmp_path),
-        body="browsed the pricing page once",
-        item_class="episodic",
-    )
-    await _indexer(embed).run()
-
-    outcome = await memory.recall_hook(
-        HookContext(
-            ext=ext,
-            turn=Turn(
-                id=uuid4(),
-                workspace_id=workspace_id,
-                conversation_id=uuid4(),
-                agent_id=uuid4(),
-                seq=1,
-                status="running",
-                inbound="api key pricing",
-            ),
-            agent=Agent(prompt="p", model="claude-opus-4-8"),
-            member_id=member,
-            payload=UserPromptSubmit(text="api key pricing"),
+    ext = _ext(DefaultIndex(embed=embed, transaction=workspace_tx), embed)
+    with ws(workspace_id):
+        await _run(
+            "memory_update", _tool_ctx(ext, member, tmp_path), body="the api key rotates monthly"
         )
-    )
-    assert isinstance(outcome, InjectContext)
-    assert "the api key rotates monthly" in outcome.text
-    assert "browsed the pricing page once" not in outcome.text
+        await _run(
+            "memory_update",
+            _tool_ctx(ext, member, tmp_path),
+            body="browsed the pricing page once",
+            item_class="episodic",
+        )
+        await _indexer(embed).run()
+
+        outcome = await memory.recall_hook(
+            HookContext(
+                ext=ext,
+                turn=Turn(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    conversation_id=uuid4(),
+                    agent_id=uuid4(),
+                    seq=1,
+                    status="running",
+                    inbound="api key pricing",
+                ),
+                agent=Agent(prompt="p", model="claude-opus-4-8"),
+                member_id=member,
+                payload=UserPromptSubmit(text="api key pricing"),
+            )
+        )
+        assert isinstance(outcome, InjectContext)
+        assert "the api key rotates monthly" in outcome.text
+        assert "browsed the pricing page once" not in outcome.text
 
 
 async def test_recall_hook_ignores_a_non_prompt_payload(clean: None) -> None:
     workspace_id = await _workspace()
     embed = StubEmbed(vec((0, 1.0)))
-    ext = _ext(DefaultIndex(embed=embed, transaction=workspace_tx), embed, workspace_id)
-    outcome = await memory.recall_hook(
-        HookContext(
-            ext=ext,
-            turn=Turn(
-                id=uuid4(),
-                workspace_id=workspace_id,
-                conversation_id=uuid4(),
-                agent_id=uuid4(),
-                seq=1,
-                status="running",
-                inbound="hi",
-            ),
-            agent=Agent(prompt="p", model="claude-opus-4-8"),
-            member_id=None,
-            payload=None,
+    ext = _ext(DefaultIndex(embed=embed, transaction=workspace_tx), embed)
+    with ws(workspace_id):
+        outcome = await memory.recall_hook(
+            HookContext(
+                ext=ext,
+                turn=Turn(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    conversation_id=uuid4(),
+                    agent_id=uuid4(),
+                    seq=1,
+                    status="running",
+                    inbound="hi",
+                ),
+                agent=Agent(prompt="p", model="claude-opus-4-8"),
+                member_id=None,
+                payload=None,
+            )
         )
-    )
-    assert outcome is None
+        assert outcome is None
 
 
 async def test_memory_update_scopes_to_member_by_default_and_shared_on_flag(
@@ -272,24 +279,28 @@ async def test_memory_update_scopes_to_member_by_default_and_shared_on_flag(
     workspace_id = await _workspace()
     member = uuid4()
     embed = StubEmbed(vec((0, 1.0)))
-    ext = _ext(DefaultIndex(embed=embed, transaction=workspace_tx), embed, workspace_id)
+    ext = _ext(DefaultIndex(embed=embed, transaction=workspace_tx), embed)
     ctx = _tool_ctx(ext, member, tmp_path)
-    await _run("memory_update", ctx, body="a private note")
-    await _run("memory_update", ctx, body="a team note", shared=True)
-    async with workspace_tx() as connection:
-        subjects = sorted(
-            row.subject
-            for row in (await connection.execute(sa.select(memory_item.c.subject))).all()
-        )
+    with ws(workspace_id):
+        await _run("memory_update", ctx, body="a private note")
+        await _run("memory_update", ctx, body="a team note", shared=True)
+        async with workspace_tx() as connection:
+            subjects = sorted(
+                row.subject
+                for row in (await connection.execute(sa.select(memory_item.c.subject))).all()
+            )
     assert subjects == sorted([member_subject(member), "shared"])
 
 
 async def test_memory_search_reports_no_match_on_empty_memory(clean: None, tmp_path: Path) -> None:
     workspace_id = await _workspace()
     embed = StubEmbed(vec((0, 1.0)))
-    ext = _ext(DefaultIndex(embed=embed, transaction=workspace_tx), embed, workspace_id)
-    result = await _run("memory_search", _tool_ctx(ext, uuid4(), tmp_path), queries=["anything"])
-    assert result.content[0].text == "No matching memory."
+    ext = _ext(DefaultIndex(embed=embed, transaction=workspace_tx), embed)
+    with ws(workspace_id):
+        result = await _run(
+            "memory_search", _tool_ctx(ext, uuid4(), tmp_path), queries=["anything"]
+        )
+        assert result.content[0].text == "No matching memory."
 
 
 def test_date_bound_reads_a_bare_end_date_as_the_whole_day() -> None:
@@ -306,17 +317,18 @@ async def test_memory_search_merges_and_dedups_across_queries(clean: None, tmp_p
     member = uuid4()
     working = StubEmbed(vec((0, 1.0)))
     index = DefaultIndex(embed=working, transaction=workspace_tx)
-    ext = _ext(index, BrokenEmbed(), workspace_id)
+    ext = _ext(index, BrokenEmbed())
     ctx = _tool_ctx(ext, member, tmp_path)
-    for body in ("apple orchard notes", "banana bread recipe", "apple and banana smoothie"):
-        await _run("memory_update", ctx, body=body)
-    await _indexer(working).run()
+    with ws(workspace_id):
+        for body in ("apple orchard notes", "banana bread recipe", "apple and banana smoothie"):
+            await _run("memory_update", ctx, body=body)
+        await _indexer(working).run()
 
-    found = await _run("memory_search", ctx, queries=["apple", "banana"])
-    text = found.content[0].text
-    assert "apple orchard notes" in text
-    assert "banana bread recipe" in text
-    assert text.count("apple and banana smoothie") == 1
+        found = await _run("memory_search", ctx, queries=["apple", "banana"])
+        text = found.content[0].text
+        assert "apple orchard notes" in text
+        assert "banana bread recipe" in text
+        assert text.count("apple and banana smoothie") == 1
 
 
 async def test_memory_search_bounds_the_merged_result_across_queries(
@@ -326,15 +338,16 @@ async def test_memory_search_bounds_the_merged_result_across_queries(
     member = uuid4()
     working = StubEmbed(vec((0, 1.0)))
     index = DefaultIndex(embed=working, transaction=workspace_tx)
-    ext = _ext(index, BrokenEmbed(), workspace_id)
+    ext = _ext(index, BrokenEmbed())
     ctx = _tool_ctx(ext, member, tmp_path)
-    for index_n in range(6):
-        await _run("memory_update", ctx, body=f"alpha memo {index_n}")
-        await _run("memory_update", ctx, body=f"beta memo {index_n}")
-    await _indexer(working).run()
+    with ws(workspace_id):
+        for index_n in range(6):
+            await _run("memory_update", ctx, body=f"alpha memo {index_n}")
+            await _run("memory_update", ctx, body=f"beta memo {index_n}")
+        await _indexer(working).run()
 
-    found = await _run("memory_search", ctx, queries=["alpha", "beta"])
-    assert len(found.content[0].text.splitlines()) == memory.MEMORY_SEARCH_LIMIT
+        found = await _run("memory_search", ctx, queries=["alpha", "beta"])
+        assert len(found.content[0].text.splitlines()) == memory.MEMORY_SEARCH_LIMIT
 
 
 async def test_memory_search_interleaves_per_query_results(
@@ -374,8 +387,9 @@ async def test_memory_search_interleaves_per_query_results(
             return ()
 
     monkeypatch.setattr(memory, "store_for", lambda ext: _Store())
-    ctx = _tool_ctx(_ext(object(), object(), uuid4()), uuid4(), tmp_path)
-    found = await _run("memory_search", ctx, queries=["alpha", "beta"])
+    ctx = _tool_ctx(_ext(object(), object()), uuid4(), tmp_path)
+    with ws(uuid4()):
+        found = await _run("memory_search", ctx, queries=["alpha", "beta"])
     bodies = [line.split("] ", 1)[1] for line in found.content[0].text.splitlines()]
     assert bodies == ["a-one", "b-one", "a-two"]
 
@@ -439,10 +453,11 @@ async def test_load_sessions_returns_named_transcripts_and_reports_the_rest(
     )
     ctx = _tool_ctx(None, member, tmp_path, workspace_id=workspace_id, blob=blob)
 
-    result = await _load_sessions(
-        ctx,
-        session_ids=[str(conversation_id), str(other_conversation_id), str(unknown)],
-    )
+    with ws(workspace_id):
+        result = await _load_sessions(
+            ctx,
+            session_ids=[str(conversation_id), str(other_conversation_id), str(unknown)],
+        )
     payload = json.loads(result.content[0].text)
 
     assert [session["session_id"] for session in payload["sessions"]] == [str(conversation_id)]

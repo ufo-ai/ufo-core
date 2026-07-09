@@ -42,6 +42,7 @@ from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.context import ImageContent, SpawnResult, ToolContext, TurnCleanup
+from ufo.workspace import ws
 
 
 @dataclass
@@ -485,7 +486,7 @@ async def _token_store(workspace_id: UUID) -> ScopedStore:
                 id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
             )
         )
-    return ScopedStore(workspace_id=workspace_id, extension="browser")
+    return ScopedStore(extension="browser")
 
 
 def _surface(provider: FakeCdpProvider, store: ScopedStore, conversation_id: UUID) -> BuaSurface:
@@ -510,17 +511,18 @@ async def test_a_recovered_turn_reattaches_to_the_live_cdp_session_via_the_durab
     store = await _token_store(workspace_id)
     provider = FakeCdpProvider()
 
-    with pytest.raises(_StopAtConnect):
-        await _surface(provider, store, conversation_id)._open()
-    assert len(provider.leases) == 1
-    assert provider.reattached == []
-    token = provider.leases[0].session_id
-    assert await store.get(CDP_TOKEN_KEY.format(conversation_id=conversation_id)) == token
+    with ws(workspace_id):
+        with pytest.raises(_StopAtConnect):
+            await _surface(provider, store, conversation_id)._open()
+        assert len(provider.leases) == 1
+        assert provider.reattached == []
+        token = provider.leases[0].session_id
+        assert await store.get(CDP_TOKEN_KEY.format(conversation_id=conversation_id)) == token
 
-    with pytest.raises(_StopAtConnect):
-        await _surface(provider, store, conversation_id)._open()
-    assert provider.reattached == [token]
-    assert len(provider.leases) == 1
+        with pytest.raises(_StopAtConnect):
+            await _surface(provider, store, conversation_id)._open()
+        assert provider.reattached == [token]
+        assert len(provider.leases) == 1
 
 
 async def test_a_reaped_session_clears_the_token_and_mints_a_fresh_lease(db: None) -> None:
@@ -528,15 +530,16 @@ async def test_a_reaped_session_clears_the_token_and_mints_a_fresh_lease(db: Non
     surface mints fresh — the task re-grounds rather than resuming a page that no longer exists."""
     workspace_id, conversation_id = uuid4(), uuid4()
     store = await _token_store(workspace_id)
-    await store.put(CDP_TOKEN_KEY.format(conversation_id=conversation_id), "stale-session")
     provider = FakeCdpProvider(gone=True)
 
-    with pytest.raises(_StopAtConnect):
-        await _surface(provider, store, conversation_id)._open()
-    assert provider.reattached == ["stale-session"]
-    assert len(provider.leases) == 1
-    fresh = provider.leases[0].session_id
-    assert await store.get(CDP_TOKEN_KEY.format(conversation_id=conversation_id)) == fresh
+    with ws(workspace_id):
+        await store.put(CDP_TOKEN_KEY.format(conversation_id=conversation_id), "stale-session")
+        with pytest.raises(_StopAtConnect):
+            await _surface(provider, store, conversation_id)._open()
+        assert provider.reattached == ["stale-session"]
+        assert len(provider.leases) == 1
+        fresh = provider.leases[0].session_id
+        assert await store.get(CDP_TOKEN_KEY.format(conversation_id=conversation_id)) == fresh
 
 
 async def test_aclose_clears_the_durable_token_so_a_later_turn_never_reattaches_it(
@@ -549,9 +552,10 @@ async def test_aclose_clears_the_durable_token_so_a_later_turn_never_reattaches_
     provider = FakeCdpProvider()
     surface = _surface(provider, store, conversation_id)
 
-    with pytest.raises(_StopAtConnect):
-        await surface._open()
-    assert await store.get(CDP_TOKEN_KEY.format(conversation_id=conversation_id)) is not None
-    await surface.aclose()
-    assert await store.get(CDP_TOKEN_KEY.format(conversation_id=conversation_id)) is None
-    assert provider.leases[0].released is True
+    with ws(workspace_id):
+        with pytest.raises(_StopAtConnect):
+            await surface._open()
+        assert await store.get(CDP_TOKEN_KEY.format(conversation_id=conversation_id)) is not None
+        await surface.aclose()
+        assert await store.get(CDP_TOKEN_KEY.format(conversation_id=conversation_id)) is None
+        assert provider.leases[0].released is True

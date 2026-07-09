@@ -163,6 +163,7 @@ async def test_cli_approve_endpoint_applies_the_change(db: None) -> None:
         )
     )
     app = FastAPI()
+    app.state.shared_workspace = False
     app.include_router(router)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://surface") as client:
         response = await client.post(

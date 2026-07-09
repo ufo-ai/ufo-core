@@ -7,11 +7,11 @@ prices against. A provider resolves its own API key when the turn selects it, so
 key runs fine until an agent pinned to that backend actually runs; a model no provider claims fails
 loud rather than guessing a backend."""
 
-import os
 from dataclasses import dataclass
 
 from ufo.accounting import Pricing, pricing_with
 from ufo.config import Config
+from ufo.credentials import CredentialSlotUnset
 from ufo.ext.manifest import Manifest, ModelProviderSpec
 from ufo.models.anthropic import AnthropicClient, anthropic_sdk_client
 from ufo.models.interface import (
@@ -23,13 +23,10 @@ from ufo.models.interface import (
     ModelClient,
 )
 from ufo.models.openai import OpenAIClient, openai_sdk_client
+from ufo.workspace import ws_current
 
-
-def _api_key(env_name: str) -> str:
-    key = os.environ.get(env_name, "")
-    if not key:
-        raise RuntimeError(f"model api key env var {env_name} is not set")
-    return key
+ANTHROPIC_KEY_SLOT = "anthropic_api_key"
+OPENAI_KEY_SLOT = "openai_api_key"
 
 
 @dataclass(frozen=True)
@@ -50,8 +47,24 @@ class ModelRegistry:
         runtime concern the turn applies before selecting a client and pricing the run."""
         return self.auto_model if model == AUTO_MODEL else model
 
-    def client_for(self, model: str) -> ModelClient:
-        return self._provider_for(model).client(model)
+    async def client_for(self, model: str) -> ModelClient:
+        """The client serving `model`, built for the ambient workspace from the key resolved for its
+        provider — the workspace's BYOK secret if set, else the platform default from env. Built per
+        call so a workspace's own key is honoured and a rotated platform key takes effect without a
+        restart. Fetching the key asserts a bound workspace (`ws_current`), so a call is always
+        attributable to the workspace that made it; a key set nowhere fails loud."""
+        spec = self._provider_for(model)
+        if not spec.key_slot and not spec.key_env:
+            return spec.client(model, "")
+        try:
+            key = await ws_current().credential(spec.key_slot, spec.key_env or None)
+        except CredentialSlotUnset as unset:
+            needed = spec.key_env or spec.key_slot.upper()
+            raise RuntimeError(
+                f"model provider {spec.name!r} needs a key: set env {needed} or the workspace's "
+                f"{spec.key_slot!r} BYOK slot"
+            ) from unset
+        return spec.client(model, key)
 
     def model_key_env(self, model: str, config: Config) -> str | None:
         """The env var onboarding requires set before this model's first turn: a core provider's
@@ -79,16 +92,16 @@ def model_registry(config: Config, manifests: tuple[Manifest, ...]) -> ModelRegi
         ModelProviderSpec(
             name=PROVIDER_ANTHROPIC,
             matches=lambda model: model.startswith(ANTHROPIC_MODEL_PREFIXES),
-            client=lambda model: AnthropicClient(
-                client=anthropic_sdk_client(_api_key(config.models.anthropic_api_key_env))
-            ),
+            client=lambda model, key: AnthropicClient(client=anthropic_sdk_client(key)),
+            key_slot=ANTHROPIC_KEY_SLOT,
+            key_env=config.models.anthropic_api_key_env,
         ),
         ModelProviderSpec(
             name=PROVIDER_OPENAI,
             matches=lambda model: model.startswith(OPENAI_MODEL_PREFIXES),
-            client=lambda model: OpenAIClient(
-                client=openai_sdk_client(_api_key(config.models.openai_api_key_env))
-            ),
+            client=lambda model, key: OpenAIClient(client=openai_sdk_client(key)),
+            key_slot=OPENAI_KEY_SLOT,
+            key_env=config.models.openai_api_key_env,
         ),
     )
     providers = (*core, *(spec for manifest in manifests for spec in manifest.models))

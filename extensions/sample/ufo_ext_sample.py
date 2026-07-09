@@ -772,7 +772,7 @@ def manifest() -> Manifest:
             ModelProviderSpec(
                 name=MODEL_PROVIDER_NAME,
                 matches=lambda model: model == SAMPLE_MODEL,
-                client=lambda model: SampleModelClient(model=model),
+                client=lambda model, key: SampleModelClient(model=model),
                 prices=((SAMPLE_MODEL, SAMPLE_MODEL_PRICE),),
             ),
         ),

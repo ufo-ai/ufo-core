@@ -17,6 +17,7 @@ import sqlalchemy as sa
 
 from ufo.db import workspace_tx
 from ufo.schema import tables
+from ufo.workspace import ws_current
 
 
 @dataclass(frozen=True)
@@ -66,9 +67,12 @@ def _task(row: sa.RowMapping) -> ScheduledTask:
 @dataclass(frozen=True)
 class ScheduleStore:
     """One workspace's scheduled-task rows, reached only through workspace_tx. Every query is scoped
-    to this workspace, so a handler holding the store can never see or advance another's tasks."""
+    to the ambient workspace the turn or job bound, so a handler holding the store can never see or
+    advance another's tasks."""
 
-    workspace_id: UUID
+    @property
+    def workspace_id(self) -> UUID:
+        return ws_current().workspace_id
 
     async def create(
         self,

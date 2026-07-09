@@ -24,6 +24,7 @@ from sqlalchemy.engine import make_url
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.db import apply_migrations, dispose_db, init_db, workspace_tx
 from ufo.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION
+from ufo.workspace import init_workspace_credentials
 from ufo_testsupport.tables import DELETE_ORDER
 
 POSTGRES_TEST_URL = os.environ.get(
@@ -69,6 +70,18 @@ def database_url(
     asyncio.run(reset_postgres_database(url.database))
     apply_migrations(dsn)
     return dsn
+
+
+@pytest.fixture(autouse=True)
+def _reset_workspace_credentials() -> Iterator[None]:
+    """The workspace credential store is a process global installed once at boot; a test that
+    installs one must not leak it into the next — especially a test that never inits the db, where a
+    leaked store drives `ws_current().credential` into `workspace_tx` and fails with 'db not
+    initialized' rather than resolving the platform env default. Reset around every test so
+    credential resolution falls to env unless a test explicitly installs a store."""
+    init_workspace_credentials(None)
+    yield
+    init_workspace_credentials(None)
 
 
 @pytest.fixture

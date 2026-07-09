@@ -44,6 +44,7 @@ from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.skills.runtime import CORE_SKILL_NAMES, CORE_SKILL_REGISTRY, RuntimeSkill
 from ufo.tools.context import SpawnResult, ToolContext
+from ufo.workspace import ws
 
 
 def _skill_md(name: str, description: str, body: str = "Follow the steps.") -> bytes:
@@ -54,12 +55,12 @@ def _credential_store() -> CredentialStore:
     return CredentialStore(fernet=Fernet(Fernet.generate_key()))
 
 
-def _ext(workspace_id: UUID) -> ExtensionContext:
-    return context_for(workspace_id, "skill_create", frozenset(), None)
+def _ext() -> ExtensionContext:
+    return context_for("skill_create", frozenset())
 
 
-def _store(workspace_id: UUID) -> UserSkillStore:
-    return UserSkillStore(_ext(workspace_id))
+def _store() -> UserSkillStore:
+    return UserSkillStore(_ext())
 
 
 async def _workspace() -> UUID:
@@ -81,7 +82,7 @@ async def _unavailable_spawn(
 
 async def test_save_persists_and_load_all_round_trips(db: None) -> None:
     workspace_id = await _workspace()
-    store = _store(workspace_id)
+    store = _store()
     files = {"SKILL.md": _skill_md("greet", "greets people"), "references/tone.md": b"warm"}
 
     saved = await store.save(workspace_id, "greet", files, frozenset(CORE_SKILL_NAMES))
@@ -107,7 +108,7 @@ async def test_save_persists_and_load_all_round_trips(db: None) -> None:
 
 async def test_merged_registry_resolves_a_saved_user_skill(db: None) -> None:
     workspace_id = await _workspace()
-    store = _store(workspace_id)
+    store = _store()
     await store.save(
         workspace_id, "greet", {"SKILL.md": _skill_md("greet", "greets people")}, frozenset()
     )
@@ -120,19 +121,19 @@ async def test_merged_registry_resolves_a_saved_user_skill(db: None) -> None:
 
 async def test_a_saved_skill_is_scoped_to_its_workspace(db: None) -> None:
     author, other = await _workspace(), await _workspace()
-    await _store(author).save(
+    await _store().save(
         author, "greet", {"SKILL.md": _skill_md("greet", "greets people")}, frozenset()
     )
 
-    assert [skill.name for skill in await _store(author).load_all(author)] == ["greet"]
-    assert await _store(other).load_all(other) == ()
-    merged_other = CORE_SKILL_REGISTRY.merged_with(await _store(other).load_all(other))
+    assert [skill.name for skill in await _store().load_all(author)] == ["greet"]
+    assert await _store().load_all(other) == ()
+    merged_other = CORE_SKILL_REGISTRY.merged_with(await _store().load_all(other))
     assert "greet" not in merged_other.by_name
 
 
 async def test_save_refuses_a_name_that_shadows_a_core_skill(db: None) -> None:
     workspace_id = await _workspace()
-    store = _store(workspace_id)
+    store = _store()
     files = {"SKILL.md": _skill_md("sandbox", "a hijack attempt")}
 
     with pytest.raises(SkillCollidesWithCoreSkill):
@@ -145,7 +146,7 @@ async def test_save_refuses_a_name_that_shadows_a_core_skill(db: None) -> None:
 )
 async def test_save_refuses_an_unsafe_skill_name(db: None, bad_name: str) -> None:
     workspace_id = await _workspace()
-    store = _store(workspace_id)
+    store = _store()
     with pytest.raises(InvalidSkillName):
         await store.save(
             workspace_id, bad_name, {"SKILL.md": _skill_md(bad_name, "d")}, frozenset()
@@ -155,7 +156,7 @@ async def test_save_refuses_an_unsafe_skill_name(db: None, bad_name: str) -> Non
 
 async def test_save_accepts_a_valid_slug_name(db: None) -> None:
     workspace_id = await _workspace()
-    saved = await _store(workspace_id).save(
+    saved = await _store().save(
         workspace_id, "weekly-report", {"SKILL.md": _skill_md("weekly-report", "d")}, frozenset()
     )
     assert saved.name == "weekly-report"
@@ -174,7 +175,7 @@ async def test_load_all_skips_a_corrupt_skill_and_keeps_the_rest(db: None) -> No
     """A saved skill whose stored bundle no longer parses is dropped with a log, not raised — one
     bad skill must never wedge the workspace's turns, and the member's other skills still load."""
     workspace_id = await _workspace()
-    store = _store(workspace_id)
+    store = _store()
     await store.save(workspace_id, "alpha", {"SKILL.md": _skill_md("alpha", "A")}, frozenset())
     await store.save(workspace_id, "beta", {"SKILL.md": _skill_md("beta", "B")}, frozenset())
     async with workspace_tx() as connection:
@@ -195,7 +196,7 @@ async def test_save_refuses_over_the_skill_cap_but_allows_a_resave(
 ) -> None:
     monkeypatch.setattr("ufo_ext_skill_create.store.MAX_USER_SKILLS_PER_WORKSPACE", 2)
     workspace_id = await _workspace()
-    store = _store(workspace_id)
+    store = _store()
     await store.save(workspace_id, "one", {"SKILL.md": _skill_md("one", "1")}, frozenset())
     await store.save(workspace_id, "two", {"SKILL.md": _skill_md("two", "2")}, frozenset())
 
@@ -208,7 +209,7 @@ async def test_save_refuses_over_the_skill_cap_but_allows_a_resave(
 
 async def test_resaving_an_owned_skill_replaces_it_in_place(db: None) -> None:
     workspace_id = await _workspace()
-    store = _store(workspace_id)
+    store = _store()
     await store.save(workspace_id, "greet", {"SKILL.md": _skill_md("greet", "v1")}, frozenset())
 
     await store.save(
@@ -225,21 +226,23 @@ async def test_turn_runtime_skills_feeds_a_saved_skill_into_the_merge(db: None) 
     `turn_runtime_skills` collector the consumer — a saved skill flows through into the merged
     registry, and a second workspace's turn sees none of it."""
     author, other = await _workspace(), await _workspace()
-    await _store(author).save(
+    await _store().save(
         author, "greet", {"SKILL.md": _skill_md("greet", "greets people")}, frozenset()
     )
 
-    provided = await turn_runtime_skills((manifest(),), author, _credential_store())
+    with ws(author):
+        provided = await turn_runtime_skills((manifest(),), _credential_store())
     assert [skill.name for skill in provided] == ["greet"]
     merged = CORE_SKILL_REGISTRY.merged_with(provided)
     assert ("greet", "greets people") in merged.index()
 
-    assert await turn_runtime_skills((manifest(),), other, _credential_store()) == ()
+    with ws(other):
+        assert await turn_runtime_skills((manifest(),), _credential_store()) == ()
 
 
 async def test_turn_runtime_skills_without_a_credential_key_fails_loud() -> None:
     with pytest.raises(RuntimeError):
-        await turn_runtime_skills((manifest(),), uuid4(), None)
+        await turn_runtime_skills((manifest(),), None)
 
 
 async def test_save_custom_skill_tool_round_trips_through_the_sandbox(db: None, tmp_path) -> None:
@@ -274,7 +277,7 @@ async def test_save_custom_skill_tool_round_trips_through_the_sandbox(db: None, 
         spawn=_unavailable_spawn,
         member_id=None,
         artifact_token_secret="secret",
-        ext=_ext(workspace_id),
+        ext=_ext(),
     )
 
     result = await save_custom_skill_handler(ctx, SaveCustomSkillInput(path="greet"))
@@ -282,7 +285,7 @@ async def test_save_custom_skill_tool_round_trips_through_the_sandbox(db: None, 
     assert payload["skill"] == "greet"
     assert payload["files"] == 2
 
-    merged = CORE_SKILL_REGISTRY.merged_with(await _store(workspace_id).load_all(workspace_id))
+    merged = CORE_SKILL_REGISTRY.merged_with(await _store().load_all(workspace_id))
     assert [skill.name for skill in merged.tree("greet")] == ["greet"]
     assert ("references/tone.md", b"warm") in merged.named("greet").files
 
@@ -322,11 +325,11 @@ async def test_save_custom_skill_tool_skips_a_non_regular_file(db: None, tmp_pat
         spawn=_unavailable_spawn,
         member_id=None,
         artifact_token_secret="secret",
-        ext=_ext(workspace_id),
+        ext=_ext(),
     )
 
     result = await save_custom_skill_handler(ctx, SaveCustomSkillInput(path="greet"))
     payload = json.loads(result.content[0].text)
     assert payload["files"] == 1
-    loaded = await _store(workspace_id).load_all(workspace_id)
+    loaded = await _store().load_all(workspace_id)
     assert [path for path, _ in loaded[0].files] == []

@@ -20,8 +20,8 @@ class StubDbos:
 
     enqueued: list[str] = field(default_factory=list)
 
-    async def enqueue_async(self, options: object, workflow_arg: str) -> None:
-        self.enqueued.append(workflow_arg)
+    async def enqueue_async(self, options: object, workspace_id: str, turn_id: str) -> None:
+        self.enqueued.append(turn_id)
 
 
 async def _seed(connection: AsyncConnection) -> tuple[UUID, UUID, UUID, UUID]:

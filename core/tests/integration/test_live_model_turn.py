@@ -99,6 +99,7 @@ async def live_surface(
     app.state.hub = hub
     app.state.dbos = DBOSClient(system_database_url=config.database.system_url)
     app.state.durable_surfaces = frozenset()
+    app.state.shared_workspace = False
     app.include_router(router)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://live") as client:
         yield client, blob

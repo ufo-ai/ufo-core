@@ -28,7 +28,7 @@ from ufo.config import (
 from ufo.connectors import AuthProxy
 from ufo.credentials import CredentialStore
 from ufo.db import init_db, workspace_tx
-from ufo.ext.context import context_for
+from ufo.ext.context import CredentialAccess, context_for
 from ufo.ext.loader import (
     NotRegisteredError,
     durable_surfaces,
@@ -80,6 +80,7 @@ from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.surfaces.artifacts import router as artifacts_router
 from ufo.surfaces.cli import CONNECT_CALLBACK_PATH, router
 from ufo.surfaces.hub_tail import HubTailer
+from ufo.workspace import init_workspace_credentials, ws
 
 PROXY_STARTUP_TIMEOUT_SECONDS = 30
 
@@ -88,33 +89,35 @@ def run() -> None:
     config = load_config()
     init_o11y(config.o11y.otlp_endpoint)
     init_db(config.database.url)
-    asyncio.run(_require_bootstrap())
     manifests = load_manifests(config.pack.name)
-    workspace_id = asyncio.run(_sole_workspace_id())
+    shared = config.serve.shared_workspace
+    # The shared fleet has no single workspace to bootstrap-check, admit a seat for, or pin: it
+    # connects as an RLS-subject role and resolves the workspace per request/turn. workspace_id
+    # stays None, so every provider below builds ambient (context_for(None)) and scopes at use.
+    if not shared:
+        asyncio.run(_require_bootstrap())
+    workspace_id = None if shared else asyncio.run(_sole_workspace_id())
     instance_id = uuid4()
-    guard = BootGuard(config=config, workspace_id=workspace_id, instance_id=instance_id)
-    asyncio.run(guard.admit())
+    if workspace_id is not None:
+        guard = BootGuard(config=config, workspace_id=workspace_id, instance_id=instance_id)
+        asyncio.run(guard.admit())
+    session_secret = _session_secret(config) if shared else ""
     key = os.environ.get(config.credentials.key_env)
     credentials = CredentialStore(fernet=Fernet(key.encode())) if key else None
-    validate_ext_tools(manifests, workspace_id, credentials)
-    _validate_requires(config, manifests, workspace_id, credentials)
-    embed = embed_backend(manifests, config.memory.embed_backend, workspace_id, credentials)
-    index = index_backend(manifests, config.memory.index_backend, embed, workspace_id, credentials)
+    validate_ext_tools(manifests, credentials)
+    _validate_requires(config, manifests, credentials)
+    init_workspace_credentials(credentials)
     blob = blob_store_for(config.blob)
     artifact_secret = os.environ.get(config.artifacts.token_secret_env, "")
-    postgres = config.database.url.startswith("postgresql")
-    page_feed = CorePageFeed(blob=blob)
-    sync_driver = SyncDriver(
-        backends=_source_backends(manifests),
-        blob=blob,
-        postgres=postgres,
-        auth_proxy=_select_auth_proxy(config, manifests, workspace_id, credentials),
-    )
-    asyncio.run(register_sources(config.sources))
     hub = _select_hub(config, manifests)
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
     carrier = _select_carrier(config, manifests)
     registry = model_registry(config, manifests)
+    # Deploy-global providers built once, with no workspace: each holds a credential reader that
+    # resolves the ambient workspace's key (else the platform key) at use, and the index reads the
+    # ambient workspace's vector namespace per query — so one boot-built set serves every workspace.
+    embed = embed_backend(manifests, config.memory.embed_backend, credentials)
+    index = index_backend(manifests, config.memory.index_backend, embed, credentials)
     init_runtime(
         Runtime(
             config=config,
@@ -122,8 +125,8 @@ def run() -> None:
             workspace_fs=_sandbox_fs_minter(config.blob),
             hub=hub,
             carrier=carrier,
-            cdp_provider=_select_cdp_provider(config, manifests, workspace_id, credentials),
-            search_provider=_select_search_provider(config, manifests, workspace_id, credentials),
+            cdp_provider=_select_cdp_provider(config, manifests, credentials),
+            search_provider=_select_search_provider(config, manifests, credentials),
             proxy=_proxy_endpoint(config, manifests, credentials, registry.pricing),
             dbos=dbos_client,
             subagents=SubagentRegistry((*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests))),
@@ -147,31 +150,49 @@ def run() -> None:
         }
     )
     DBOS.launch()
-    _launch_jobs(config, sync_driver, index, embed, page_feed, dbos_client, blob, carrier)
     app = FastAPI(lifespan=_serve_lifespan)
     app.state.hub = hub
     app.state.dbos = dbos_client
     app.state.instance_id = instance_id
     app.state.workspace_id = workspace_id
+    app.state.shared_workspace = shared
+    app.state.session_token_secret = session_secret
     app.state.durable_surfaces = durable_surfaces(manifests)
     app.state.writeback_poller = None
     app.state.blob = blob
     app.state.artifact_token_secret = artifact_secret
     app.include_router(router)
     app.include_router(artifacts_router)
-    _mount_ext_routes(app, manifests, workspace_id, credentials, index, embed)
-    _mount_surfaces(
-        app,
-        manifests,
-        workspace_id,
-        credentials,
-        blob,
-        hub,
-        dbos_client,
-        artifact_secret,
-        config.connect.public_base_url,
-    )
-    log("serve.started", host=config.serve.host, port=config.serve.port)
+    # The per-tenant / dedicated serve pins one workspace: run its background loops (source sync,
+    # spend-resume, sandbox reaper, extension jobs) bound to it, and mount its extension routes and
+    # installed surfaces. The shared fleet has no single workspace and does none of this here — it
+    # runs turn workers only; each turn binds its workspace via `with ws(...)`, and loops and
+    # surfaces run per-workspace under the same scope through the workspace-scheduled job driver.
+    if workspace_id is not None:
+        sync_driver = SyncDriver(
+            backends=_source_backends(manifests),
+            blob=blob,
+            postgres=config.database.url.startswith("postgresql"),
+            auth_proxy=_select_auth_proxy(config, manifests, credentials),
+        )
+        page_feed = CorePageFeed(blob=blob)
+        asyncio.run(register_sources(config.sources))
+        _launch_jobs(config, sync_driver, index, embed, page_feed, dbos_client, blob, carrier)
+        _mount_ext_routes(app, manifests, workspace_id, credentials, index, embed)
+        _mount_surfaces(
+            app,
+            manifests,
+            workspace_id,
+            credentials,
+            blob,
+            hub,
+            dbos_client,
+            artifact_secret,
+            config.connect.public_base_url,
+        )
+    else:
+        log("serve.shared_mode.workspace_loops_and_surfaces_deferred")
+    log("serve.started", host=config.serve.host, port=config.serve.port, shared_workspace=shared)
     try:
         uvicorn.run(app, host=config.serve.host, port=config.serve.port, log_level="warning")
     finally:
@@ -186,6 +207,19 @@ async def _require_bootstrap() -> None:
         raise RuntimeError("schema missing — run `ufoctl init` first") from error
     if row is None:
         raise RuntimeError("workspace missing — run `ufoctl init` first")
+
+
+def _session_secret(config: Config) -> str:
+    """The shared fleet's session-signing secret, read once at boot. The surface verifies every
+    member token against it before any RLS-scoped read, so an unset secret leaves the fleet unable
+    to authenticate anyone — fail loud here, not on the first request."""
+    secret = os.environ.get(config.serve.session_secret_env)
+    if not secret:
+        raise RuntimeError(
+            f"shared serve needs {config.serve.session_secret_env} set to sign and verify member "
+            "session tokens"
+        )
+    return secret
 
 
 def _launch_jobs(
@@ -345,16 +379,15 @@ def _select_hub(config: Config, manifests: tuple[Manifest, ...]) -> Hub:
 def _select_cdp_provider(
     config: Config,
     manifests: tuple[Manifest, ...],
-    workspace_id: UUID,
     credentials: CredentialStore | None,
 ) -> CdpProvider | None:
-    """The process-wide cdp provider the deploy selects, or None when no active extension registers
-    that name — core ships no provider, so a deploy without a browser extension needs none and boots
-    with None here. A provider an extension contributes at its `cdp_providers` Manifest point is
-    built once at boot, only when selected, with a credential reader scoped to its slots (its
-    factory reads a BYOK slot host-side). Two extensions claiming one name fail loud; a provider
-    whose extension declares credential slots with no key set fails loud. A browser extension's
-    `requires` turns a None into a boot failure through `_validate_requires`."""
+    """The process-wide cdp provider the deploy selects, built once at boot with a credential reader
+    over its declared slots — or None when no active extension registers that name (core ships none,
+    so a deploy without a browser extension boots with None). The reader resolves the ambient
+    workspace's BYOK key (else the platform key) at each browse, so one boot-built provider serves
+    every workspace. Two extensions claiming one name fail loud; a provider whose extension declares
+    slots with no key set fails loud; a browser extension's `requires` turns a None into a boot
+    failure through `_validate_requires`."""
     specs: dict[str, tuple[CdpProviderSpec, Manifest]] = {}
     for manifest in manifests:
         for spec in manifest.cdp_providers:
@@ -371,20 +404,19 @@ def _select_cdp_provider(
             f"cdp provider {config.browser.cdp_provider!r} declares credential slots "
             "but no credential key is set"
         )
-    context = context_for(workspace_id, manifest.name, declared, credentials)
-    return spec.build(context.credentials)
+    return spec.build(CredentialAccess(declared=declared))
 
 
 def _validate_requires(
     config: Config,
     manifests: tuple[Manifest, ...],
-    workspace_id: UUID,
     credentials: CredentialStore | None,
 ) -> None:
     """Boot-validation for every active extension's declared `requires`: eagerly resolve each named
     sub-seam so a consumer whose backend is absent, unknown, or unkeyed fails `serve` here — naming
     the extension and the seam — rather than on the first tool call. A seam an extension names that
-    core does not know is itself a boot error."""
+    core does not know is itself a boot error. Deploy-level: the checks resolve the selected backend
+    and its key presence, never a per-workspace build."""
     for manifest in manifests:
         for seam in manifest.requires:
             check = _REQUIRED_SEAM_CHECKS.get(seam)
@@ -394,7 +426,7 @@ def _validate_requires(
                     f"(have {sorted(_REQUIRED_SEAM_CHECKS)})"
                 )
             try:
-                check(config, manifests, workspace_id, credentials)
+                check(config, manifests, credentials)
             except Exception as error:
                 raise RuntimeError(
                     f"extension {manifest.name!r} requires the {seam!r} seam but it is "
@@ -405,7 +437,6 @@ def _validate_requires(
 def _require_cdp_provider(
     config: Config,
     manifests: tuple[Manifest, ...],
-    workspace_id: UUID,
     credentials: CredentialStore | None,
 ) -> None:
     """The `cdp_providers` readiness contract for an active browser extension: the selected provider
@@ -413,7 +444,7 @@ def _require_cdp_provider(
     keyed) — else boot fails here naming it, rather than the first browse failing. Core ships no
     provider, so a name no active extension registers resolves to None and fails loud here only
     because a browser extension requires it."""
-    if _select_cdp_provider(config, manifests, workspace_id, credentials) is None:
+    if _select_cdp_provider(config, manifests, credentials) is None:
         raise RuntimeError(
             f"cdp provider {config.browser.cdp_provider!r} is required but no active extension "
             "registers it"
@@ -423,17 +454,15 @@ def _require_cdp_provider(
 def _select_search_provider(
     config: Config,
     manifests: tuple[Manifest, ...],
-    workspace_id: UUID,
     credentials: CredentialStore | None,
 ) -> SearchProvider | None:
-    """The process-wide search provider the deploy selects, chosen by `[research] search_provider`:
-    a backend an extension registers through its Manifest `search_providers` point, built once at
-    boot with a credential reader scoped to its slots (the backend reads its BYOK key in-process,
-    host-side, never in the sandbox). Core ships no default, so an unset knob yields None — a deploy
-    without a research extension still boots. Two extensions claiming one name fail loud, as does
-    selecting a name no extension registers or building a selected backend with no credential key
-    set; a research extension's `requires` turns the unset knob into a boot failure through
-    `_validate_requires`."""
+    """The process-wide search provider the deploy selects (by `[research] search_provider`), built
+    once at boot with a credential reader over its declared slots — or None when the knob is unset
+    (a deploy without a research extension still boots). The reader resolves the ambient workspace's
+    BYOK key (else the platform key) at each search, so one boot-built backend serves every
+    workspace. Selecting a name no extension registers, a name collision, or a keyless selected
+    backend each fail loud; a research extension's `requires` turns the unset knob into a boot
+    failure through `_validate_requires`."""
     specs: dict[str, tuple[SearchProviderSpec, Manifest]] = {}
     for manifest in manifests:
         for spec in manifest.search_providers:
@@ -457,14 +486,12 @@ def _select_search_provider(
             "but none is set"
         )
     declared = frozenset(slot.name for slot in manifest.credentials)
-    context = context_for(workspace_id, manifest.name, declared, credentials)
-    return spec.build(context.credentials)
+    return spec.build(CredentialAccess(declared=declared))
 
 
 def _require_search_provider(
     config: Config,
     manifests: tuple[Manifest, ...],
-    workspace_id: UUID,
     credentials: CredentialStore | None,
 ) -> None:
     """The `search_providers` readiness contract: `[research] search_provider` is set and the named
@@ -475,18 +502,17 @@ def _require_search_provider(
             "[research] search_provider is unset; set it to a registered search backend so the "
             "research tools have a provider"
         )
-    _select_search_provider(config, manifests, workspace_id, credentials)
+    _select_search_provider(config, manifests, credentials)
 
 
 _REQUIRED_SEAM_CHECKS: dict[
-    str, Callable[[Config, tuple[Manifest, ...], UUID, CredentialStore | None], None]
+    str, Callable[[Config, tuple[Manifest, ...], CredentialStore | None], None]
 ] = {"cdp_providers": _require_cdp_provider, "search_providers": _require_search_provider}
 
 
 def _select_auth_proxy(
     config: Config,
     manifests: tuple[Manifest, ...],
-    workspace_id: UUID,
     credentials: CredentialStore | None,
 ) -> AuthProxy | None:
     """The one auth-proxy backend feed-sync resolves connector credentials through, chosen by
@@ -517,8 +543,7 @@ def _select_auth_proxy(
             "but none is set"
         )
     declared = frozenset(slot.name for slot in manifest.credentials)
-    context = context_for(workspace_id, manifest.name, declared, credentials)
-    return spec.build(context.credentials)
+    return spec.build(CredentialAccess(declared=declared))
 
 
 def _mount_ext_routes(
@@ -540,13 +565,17 @@ def _mount_ext_routes(
                 f"extension {manifest.name!r} serves routes but no credential key is set"
             )
         declared = frozenset(slot.name for slot in manifest.credentials)
-        context = context_for(workspace_id, manifest.name, declared, credentials, index, embed)
+        context = context_for(manifest.name, declared, index, embed)
         for spec in manifest.routes:
 
             async def endpoint(
-                request: Request, handler=spec.handler, extension_context=context
+                request: Request,
+                handler=spec.handler,
+                extension_context=context,
+                wsid=workspace_id,
             ) -> Response:
-                return await handler(extension_context, request)
+                with ws(wsid):
+                    return await handler(extension_context, request)
 
             app.add_route(
                 f"/ext/{manifest.name}/{spec.path.lstrip('/')}",
@@ -599,9 +628,13 @@ def _mount_surfaces(
             for route in spec.routes:
 
                 async def endpoint(
-                    request: Request, handler=route.handler, surface_context=context
+                    request: Request,
+                    handler=route.handler,
+                    surface_context=context,
+                    wsid=workspace_id,
                 ) -> Response:
-                    return await handler(surface_context, request)
+                    with ws(wsid):
+                        return await handler(surface_context, request)
 
                 app.add_route(
                     f"/surface/{spec.name}/{route.path}".rstrip("/"),
@@ -619,8 +652,13 @@ async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Run this instance's background loops for the life of the process: the heartbeat that keeps
     its runtime_instance row live — and retires it on graceful shutdown so peers see the seat free
     at once — and, when a durable surface is installed, the writeback poller, the durable half of
-    surface delivery off the hub and off the turn loop."""
-    heartbeat = Heartbeat(instance_id=app.state.instance_id, workspace_id=app.state.workspace_id)
+    surface delivery off the hub and off the turn loop. The shared fleet holds no single workspace
+    to heartbeat a seat for or poll writebacks under, so it runs neither."""
+    workspace_id: UUID | None = app.state.workspace_id
+    if workspace_id is None:
+        yield
+        return
+    heartbeat = Heartbeat(instance_id=app.state.instance_id, workspace_id=workspace_id)
     tasks = [asyncio.create_task(heartbeat.run())]
     poller = app.state.writeback_poller
     if poller is not None:

@@ -18,6 +18,7 @@ from opentelemetry.sdk._logs import LoggerProvider
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.resources import Resource
 
+from ufo_control.postgres import ensure_serve_role
 from ufo_control.rls import bootstrap_policies, owner_dsn
 
 DEFAULT_HOST = "0.0.0.0"
@@ -90,7 +91,13 @@ def gateway() -> None:
 
 @main.command(name="rls-bootstrap")
 def rls_bootstrap() -> None:
-    """Enable RLS + workspace policies on the shared app database, as the owner. The cluster migrate
-    Job runs this after ``ufoctl migrate``, once per bundle rollout."""
-    asyncio.run(bootstrap_policies(owner_dsn()))
+    """Bring the shared app database to the RLS tier, as the owner: create the shared ``ufo_serve``
+    role the fleet connects as, then enable RLS + the workspace policies. The cluster migrate Job
+    runs this after ``ufoctl migrate``, once per bundle rollout."""
+    asyncio.run(_bootstrap())
     click.echo("rls policies at head")
+
+
+async def _bootstrap() -> None:
+    await ensure_serve_role(owner_dsn())
+    await bootstrap_policies(owner_dsn())

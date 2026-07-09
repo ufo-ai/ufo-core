@@ -5,6 +5,7 @@ SDK; the ModelEvents and recorded request kwargs are what the tests assert, neve
 
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 import ufo_ext_openrouter as openrouter
@@ -16,6 +17,7 @@ from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.models.interface import Message, ModelRequest, ModelResponseTruncated, TextDelta
 from ufo.models.registry import model_registry
 from ufo.schema.records import Usage
+from ufo.workspace import ws
 
 REQUEST = ModelRequest(
     model="google/gemini-2.5-pro",
@@ -143,13 +145,18 @@ def test_manifest_registers_a_catch_all_model_provider_with_slug_prices() -> Non
     assert dict(provider.prices)["z-ai/glm-5.2"].output == 3_000_000
 
 
-def test_model_client_factory_requires_its_key(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_model_client_requires_its_key(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     monkeypatch.delenv(openrouter.OPENROUTER_API_KEY_ENV, raising=False)
-    with pytest.raises(RuntimeError, match=openrouter.OPENROUTER_API_KEY_ENV):
-        openrouter._model_client("google/gemini-2.5-pro")
+    config = Config(
+        database=DatabaseConfig(url="sqlite+aiosqlite:///:memory:"),
+        blob=BlobConfig(backend="filesystem", root=tmp_path),
+    )
+    registry = model_registry(config, (openrouter.manifest(),))
+    with ws(uuid4()), pytest.raises(RuntimeError, match=openrouter.OPENROUTER_API_KEY_ENV):
+        await registry.client_for("google/gemini-2.5-pro")
 
 
-def test_registry_selects_openrouter_and_prices_its_slug(
+async def test_registry_selects_openrouter_and_prices_its_slug(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv(openrouter.OPENROUTER_API_KEY_ENV, "sk-openrouter-test")
@@ -158,7 +165,8 @@ def test_registry_selects_openrouter_and_prices_its_slug(
         blob=BlobConfig(backend="filesystem", root=tmp_path),
     )
     registry = model_registry(config, (openrouter.manifest(),))
-    client = registry.client_for("google/gemini-2.5-pro")
+    with ws(uuid4()):
+        client = await registry.client_for("google/gemini-2.5-pro")
     assert isinstance(client, openrouter.OpenRouterModelClient)
     priced = registry.pricing.micro_usd(
         "google/gemini-2.5-pro", Usage(input_tokens=1_000_000, output_tokens=1_000_000)

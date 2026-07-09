@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
-from cryptography.fernet import Fernet
 from ufo_ext_eval_harness import manifest as eh
 from ufo_ext_eval_harness.capability import (
     CapabilityCase,
@@ -30,7 +29,6 @@ from ufo_ext_eval_harness.scorers import (
 from ufo_ext_eval_harness.target import InProcessTarget, capability_output
 
 from ufo.blob import FilesystemBlobStore
-from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import Trajectory, context_for
 from ufo.ext.loader import load_manifests
@@ -38,6 +36,7 @@ from ufo.loop.transcript import Transcript
 from ufo.models.interface import Message, ToolResultBlock, ToolUseBlock
 from ufo.schema import tables
 from ufo.transcript import Conversation
+from ufo.workspace import ws
 
 MODEL = "claude-opus-4-8"
 PROMPT = "You are a helpful assistant."
@@ -159,15 +158,8 @@ async def _seed_agent(workspace_id: UUID) -> UUID:
     return agent_id
 
 
-def _context(workspace_id: UUID, blob: FilesystemBlobStore, invoker: StubWorker):
-    return context_for(
-        workspace_id,
-        eh.NAME,
-        frozenset(),
-        CredentialStore(fernet=Fernet(Fernet.generate_key())),
-        blob=blob,
-        invoker=invoker,
-    )
+def _context(blob: FilesystemBlobStore, invoker: StubWorker):
+    return context_for(eh.NAME, frozenset(), blob=blob, invoker=invoker)
 
 
 async def test_capability_case_runs_through_invoke_and_scores_the_trajectory(
@@ -177,7 +169,7 @@ async def test_capability_case_runs_through_invoke_and_scores_the_trajectory(
     agent_id = await _seed_agent(workspace_id)
     blob = FilesystemBlobStore(root=tmp_path)
     worker = StubWorker(blob, workspace_id, _research_transcript())
-    ctx = _context(workspace_id, blob, worker)
+    ctx = _context(blob, worker)
     target = InProcessTarget(
         ctx=ctx,
         agent_id=agent_id,
@@ -190,7 +182,8 @@ async def test_capability_case_runs_through_invoke_and_scores_the_trajectory(
         required_tools_scorer(("search_web", "memory_update"), (("search_web", "memory_update"),)),
     )
 
-    result = await run_capability_case(case, target)
+    with ws(workspace_id):
+        result = await run_capability_case(case, target)
 
     assert result.passed
     assert result.evidence["tools"] == ["search_web", "memory_update"]
@@ -202,7 +195,7 @@ async def test_capability_case_fails_when_a_required_tool_is_absent(db: None, tm
     agent_id = await _seed_agent(workspace_id)
     blob = FilesystemBlobStore(root=tmp_path)
     worker = StubWorker(blob, workspace_id, _research_transcript())
-    ctx = _context(workspace_id, blob, worker)
+    ctx = _context(blob, worker)
     target = InProcessTarget(
         ctx=ctx,
         agent_id=agent_id,
@@ -215,7 +208,8 @@ async def test_capability_case_fails_when_a_required_tool_is_absent(db: None, tm
         required_tools_scorer(("fetch_url",)),
     )
 
-    result = await run_capability_case(case, target)
+    with ws(workspace_id):
+        result = await run_capability_case(case, target)
 
     assert not result.passed
     assert "fetch_url" in result.reason
@@ -246,7 +240,7 @@ async def test_web_dependent_case_behind_an_infra_outage_is_excluded_not_passed(
         Message(role="assistant", content="I could not reach the web."),
     )
     worker = StubWorker(blob, workspace_id, transcript)
-    ctx = _context(workspace_id, blob, worker)
+    ctx = _context(blob, worker)
     target = InProcessTarget(
         ctx=ctx,
         agent_id=agent_id,
@@ -260,7 +254,8 @@ async def test_web_dependent_case_behind_an_infra_outage_is_excluded_not_passed(
         web_dependent=True,
     )
 
-    result = await run_capability_case(case, target)
+    with ws(workspace_id):
+        result = await run_capability_case(case, target)
 
     assert result.excluded
     assert not result.passed

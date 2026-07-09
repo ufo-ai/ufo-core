@@ -22,15 +22,16 @@ from ufo_ext_knowledge_graph.store import (
     render_subgraph,
 )
 
-from ufo.accounting import CORE_PRICING
+from ufo.accounting import CORE_PRICING, Pricing
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ModelAccess
-from ufo.models.interface import ModelEvent, ModelRequest, TextDelta
+from ufo.models.interface import ModelClient, ModelEvent, ModelRequest, TextDelta
 from ufo.schema import tables
 from ufo.schema.records import Usage
 from ufo.sources.sync import CorePageFeed
 from ufo.subjects import SHARED_SUBJECT
+from ufo.workspace import ws
 
 EXTENSION = "knowledge_graph"
 WHEN = datetime(2026, 1, 1, tzinfo=UTC)
@@ -49,10 +50,21 @@ class StubModelClient:
         yield self.usage
 
 
-def _model(workspace_id: UUID, payload: str, usage: Usage) -> ModelAccess:
-    return ModelAccess(
-        workspace_id, "claude-opus-4-8", CORE_PRICING, lambda: StubModelClient(payload, usage)
-    )
+@dataclass
+class _Resolver:
+    """A ModelResolver standing in for the registry: fixes the deploy default and price table and
+    hands back the stub client, so ModelAccess meters a canned burn without a live registry."""
+
+    auto_model: str
+    pricing: Pricing
+    client: ModelClient
+
+    async def client_for(self, model: str) -> ModelClient:
+        return self.client
+
+
+def _model(payload: str, usage: Usage) -> ModelAccess:
+    return ModelAccess(_Resolver("claude-opus-4-8", CORE_PRICING, StubModelClient(payload, usage)))
 
 
 async def _workspace() -> UUID:
@@ -99,9 +111,10 @@ async def _seed_page(blob: FilesystemBlobStore, workspace_id: UUID, body: str) -
 
 async def _run(blob: FilesystemBlobStore, workspace_id: UUID, model: ModelAccess) -> None:
     batch = await CorePageFeed(blob=blob).pages_changed_since(None, 50)
-    await GraphExtractor(transaction=workspace_tx, workspace_id=workspace_id, model=model).apply(
-        batch.changes
-    )
+    with ws(workspace_id):
+        await GraphExtractor(
+            transaction=workspace_tx, workspace_id=workspace_id, model=model
+        ).apply(batch.changes)
 
 
 async def test_tier_b_lands_typed_edges_and_meters_the_call(db: None, tmp_path) -> None:
@@ -113,9 +126,7 @@ async def test_tier_b_lands_typed_edges_and_meters_the_call(db: None, tmp_path) 
         '{"edge_type": "works_at", "target": "Acme", "confidence": 0.8},'
         '{"edge_type": "advises", "target": "Globex", "confidence": 0.6}]}'
     )
-    await _run(
-        blob, workspace_id, _model(workspace_id, payload, Usage(input_tokens=100, output_tokens=50))
-    )
+    await _run(blob, workspace_id, _model(payload, Usage(input_tokens=100, output_tokens=50)))
 
     async with workspace_tx() as connection:
         edges = (
@@ -158,4 +169,4 @@ async def test_tier_b_rejects_an_out_of_vocab_edge_type(db: None, tmp_path) -> N
     await _seed_page(blob, workspace_id, "# Jane Doe\nJane acquired Foo.")
     payload = '{"relations": [{"edge_type": "acquired", "target": "Foo", "confidence": 0.9}]}'
     with pytest.raises(UnknownEdgeType):
-        await _run(blob, workspace_id, _model(workspace_id, payload, Usage(input_tokens=10)))
+        await _run(blob, workspace_id, _model(payload, Usage(input_tokens=10)))

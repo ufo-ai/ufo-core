@@ -3,6 +3,7 @@
 import hashlib
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -10,7 +11,7 @@ from dbos import DBOSClient
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
-from ufo.db import workspace_tx
+from ufo.db import current_workspace, workspace_tx
 from ufo.governance import Governance
 from ufo.grants import (
     ConnectStateInvalid,
@@ -22,6 +23,7 @@ from ufo.hub import Hub, Terminal
 from ufo.o11y import log
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME, TerminalFrame
+from ufo.session_token import SessionTokenError, verify_session_token
 from ufo.surfaces.admission import Admission
 from ufo.surfaces.hub_tail import tail_frames, terminal_frame
 
@@ -38,10 +40,12 @@ class CliIdentity:
     workspace_id: UUID
 
 
-async def _authenticate(authorization: str) -> CliIdentity:
+async def _authenticate(request: Request, authorization: str) -> CliIdentity:
     scheme, _, token = authorization.partition(" ")
     if scheme.lower() != "bearer" or not token:
         raise HTTPException(401, "missing bearer token")
+    if request.app.state.shared_workspace:
+        return _authenticate_shared(request, token)
     digest = hashlib.sha256(token.encode()).hexdigest()
     async with workspace_tx() as connection:
         row = (
@@ -59,6 +63,21 @@ async def _authenticate(authorization: str) -> CliIdentity:
     return CliIdentity(member_id=row.member_id, workspace_id=row.workspace_id)
 
 
+def _authenticate_shared(request: Request, token: str) -> CliIdentity:
+    """On the shared fleet the token *is* the identity: verify its signature, trust its workspace
+    claim, and bind it as the ambient workspace so every RLS-scoped read this request makes scopes
+    to it. There is no surface_identity lookup — that read would itself need the scope the token
+    supplies, the chicken-and-egg the signed claim exists to break."""
+    try:
+        claims = verify_session_token(
+            token, request.app.state.session_token_secret, datetime.now(UTC)
+        )
+    except SessionTokenError as error:
+        raise HTTPException(401, str(error)) from error
+    current_workspace.set(claims.workspace_id)
+    return CliIdentity(member_id=claims.member_id, workspace_id=claims.workspace_id)
+
+
 @router.post("/chat")
 async def chat(
     request: Request,
@@ -66,7 +85,7 @@ async def chat(
     x_ufo_session: str = Header(default=""),
     x_ufo_agent: str = Header(default=DEFAULT_AGENT_NAME),
 ) -> dict[str, str]:
-    identity = await _authenticate(authorization)
+    identity = await _authenticate(request, authorization)
     if not x_ufo_session:
         raise HTTPException(400, "missing x-ufo-session header")
     inbound = (await request.body()).decode()
@@ -98,7 +117,7 @@ async def chat(
 async def stream_turn(
     turn_id: UUID, request: Request, authorization: str = Header(default="")
 ) -> StreamingResponse:
-    identity = await _authenticate(authorization)
+    identity = await _authenticate(request, authorization)
     await _require_turn(turn_id, identity)
     hub: Hub = request.app.state.hub
     return StreamingResponse(_frame_lines(hub, turn_id), media_type="application/x-ndjson")
@@ -108,7 +127,7 @@ async def stream_turn(
 async def cancel_turn(
     turn_id: UUID, request: Request, authorization: str = Header(default="")
 ) -> dict[str, str]:
-    identity = await _authenticate(authorization)
+    identity = await _authenticate(request, authorization)
     await _require_turn(turn_id, identity)
     frame = TerminalFrame(status="cancelled")
     async with workspace_tx() as connection:
@@ -135,9 +154,9 @@ async def cancel_turn(
 
 @router.post("/proposals/{proposal_id}/approve")
 async def approve_proposal(
-    proposal_id: UUID, authorization: str = Header(default="")
+    proposal_id: UUID, request: Request, authorization: str = Header(default="")
 ) -> dict[str, str]:
-    identity = await _authenticate(authorization)
+    identity = await _authenticate(request, authorization)
     governance = Governance(workspace_id=identity.workspace_id, extension=CORE_PROPOSER)
     await governance.approve_proposal(proposal_id, identity.member_id)
     async with workspace_tx() as connection:

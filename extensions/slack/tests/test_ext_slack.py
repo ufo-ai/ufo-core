@@ -98,7 +98,7 @@ async def _settle_status_tasks(db: None):
 class StubDbos:
     enqueued: list[str] = field(default_factory=list)
 
-    async def enqueue_async(self, options: object, workflow_id: str) -> None:
+    async def enqueue_async(self, options: object, workspace_id: str, workflow_id: str) -> None:
         self.enqueued.append(workflow_id)
 
 

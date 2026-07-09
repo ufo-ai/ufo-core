@@ -8,7 +8,6 @@ the running loop's default executor at DBOS's shared pool, so a short-lived boot
 shut that pool down. One durable workflow fires each handler with the extension's scoped
 ExtensionContext, so a core job and an extension job run the identical path."""
 
-import functools
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -17,7 +16,7 @@ from uuid import UUID, uuid4
 import sqlalchemy as sa
 from dbos import DBOS, DBOSClient, EnqueueOptions, Queue, ScheduleInput
 
-from ufo.accounting import ALLOW, CORE_PRICING, SpendEvaluator
+from ufo.accounting import ALLOW, SpendEvaluator
 from ufo.blob import BlobStore
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
@@ -41,6 +40,7 @@ from ufo.sources.sync import (
     PageFeed,
     SyncDriver,
 )
+from ufo.workspace import ws
 
 JOB_QUEUE_NAME = "jobs"
 JOB_WORKFLOW_NAME = "job"
@@ -137,7 +137,7 @@ class SpendResume:
             "queue_partition_key": str(turn.conversation_id),
             "app_version": DBOS_APP_VERSION,
         }
-        await self.client.enqueue_async(options, str(turn.id))
+        await self.client.enqueue_async(options, str(turn.workspace_id), str(turn.id))
 
 
 @dataclass(frozen=True)
@@ -301,39 +301,33 @@ class PageChangeRunner:
         return tuple(consumers)
 
     async def drive(self, consumer: PageChangeConsumer) -> None:
-        context = self._context_for(consumer.extension, consumer.declared)
-        cursor_key = f"{PAGE_CHANGE_CURSOR_KEY}:{consumer.discriminator}"
-        stored = await context.store.get(cursor_key)
-        cursor = stored if isinstance(stored, str) else None
-        while True:
-            batch = await self.pages.pages_changed_since(cursor, PAGE_CHANGE_BATCH)
-            if not batch.changes:
-                return
-            await consumer.spec.handler(
-                HookContext(ext=context, payload=PageChangeBatch(changes=batch.changes))
-            )
-            cursor = batch.next_cursor
-            await context.store.put(cursor_key, cursor)
-            if len(batch.changes) < PAGE_CHANGE_BATCH:
-                return
+        with ws(self.workspace_id):
+            context = self._context_for(consumer.extension, consumer.declared)
+            cursor_key = f"{PAGE_CHANGE_CURSOR_KEY}:{consumer.discriminator}"
+            stored = await context.store.get(cursor_key)
+            cursor = stored if isinstance(stored, str) else None
+            while True:
+                batch = await self.pages.pages_changed_since(cursor, PAGE_CHANGE_BATCH)
+                if not batch.changes:
+                    return
+                await consumer.spec.handler(
+                    HookContext(ext=context, payload=PageChangeBatch(changes=batch.changes))
+                )
+                cursor = batch.next_cursor
+                await context.store.put(cursor_key, cursor)
+                if len(batch.changes) < PAGE_CHANGE_BATCH:
+                    return
 
     def _context_for(self, extension: str, declared: frozenset[str]) -> ExtensionContext:
-        registry = self.registry
         return context_for(
-            self.workspace_id,
             extension,
             declared,
-            self.credential_store,
             self.index,
             self.embed,
             self.pages,
             self.blob,
             self.invoker,
-            None
-            if registry is None
-            else functools.partial(registry.client_for, registry.auto_model),
-            "" if registry is None else registry.auto_model,
-            CORE_PRICING if registry is None else registry.pricing,
+            self.registry,
         )
 
 
@@ -464,24 +458,18 @@ class JobRunner:
         binding = next((b for b in self.bindings if b.key == key), None)
         if binding is None:
             raise RuntimeError(f"no job registered for key {key!r}")
-        registry = self.registry
-        context = context_for(
-            self.workspace_id,
-            binding.extension,
-            binding.declared,
-            self.credential_store,
-            self.index,
-            self.embed,
-            self.pages,
-            self.blob,
-            self.invoker,
-            None
-            if registry is None
-            else functools.partial(registry.client_for, registry.auto_model),
-            "" if registry is None else registry.auto_model,
-            CORE_PRICING if registry is None else registry.pricing,
-        )
-        await binding.spec.handler(context)
+        with ws(self.workspace_id):
+            context = context_for(
+                binding.extension,
+                binding.declared,
+                self.index,
+                self.embed,
+                self.pages,
+                self.blob,
+                self.invoker,
+                self.registry,
+            )
+            await binding.spec.handler(context)
 
 
 _firing: JobRunner | None = None

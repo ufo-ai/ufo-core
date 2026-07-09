@@ -42,6 +42,7 @@ from ufo.sandbox.local import LocalCarrier
 from ufo.schema import tables
 from ufo.sources.sync import CorePageFeed, FolderSource, SyncDriver
 from ufo.subjects import SHARED_SUBJECT
+from ufo.workspace import ws
 
 
 def _sample_manifest() -> object:
@@ -123,13 +124,15 @@ async def test_runner_delivers_changed_pages_and_advances_the_cursor(
     runner = _runner(workspace_id, blob)
     await _drive_all(runner)
 
-    scoped = ScopedStore(workspace_id=workspace_id, extension=sample.NAME)
-    first = await scoped.get(sample.HOOK_PAGE_CHANGE_KEY)
+    with ws(workspace_id):
+        scoped = ScopedStore(extension=sample.NAME)
+        first = await scoped.get(sample.HOOK_PAGE_CHANGE_KEY)
     assert first == {"page_ids": [str(page_one)], "model_wired": False}
 
     page_two = await _seed_page(blob, workspace_id, "the second page body")
     await _drive_all(runner)
-    second = await scoped.get(sample.HOOK_PAGE_CHANGE_KEY)
+    with ws(workspace_id):
+        second = await scoped.get(sample.HOOK_PAGE_CHANGE_KEY)
     assert second == {"page_ids": [str(page_two)], "model_wired": False}
 
 
@@ -140,8 +143,9 @@ async def test_runner_wires_the_model_into_the_off_turn_context(db: None, tmp_pa
     registry = ModelRegistry(providers=(), pricing=CORE_PRICING, auto_model="claude-opus-4-8")
     await _drive_all(_runner(workspace_id, blob, registry=registry))
 
-    scoped = ScopedStore(workspace_id=workspace_id, extension=sample.NAME)
-    record = await scoped.get(sample.HOOK_PAGE_CHANGE_KEY)
+    with ws(workspace_id):
+        scoped = ScopedStore(extension=sample.NAME)
+        record = await scoped.get(sample.HOOK_PAGE_CHANGE_KEY)
     assert record is not None
     assert record["model_wired"] is True
 
@@ -196,14 +200,18 @@ async def test_a_failing_consumer_neither_advances_its_cursor_nor_blocks_another
 
     with pytest.raises(RuntimeError):
         await runner.drive(boom_consumer)
-    boom_cursor = await ScopedStore(workspace_id=workspace_id, extension="boom_ext").get(
-        f"{PAGE_CHANGE_CURSOR_KEY}:{boom_consumer.discriminator}"
-    )
+    with ws(workspace_id):
+        boom_cursor = await ScopedStore(extension="boom_ext").get(
+            f"{PAGE_CHANGE_CURSOR_KEY}:{boom_consumer.discriminator}"
+        )
     assert boom_cursor is None
 
     await runner.drive(sample_consumer)
-    scoped = ScopedStore(workspace_id=workspace_id, extension=sample.NAME)
-    record = await scoped.get(sample.HOOK_PAGE_CHANGE_KEY)
+    with ws(workspace_id):
+        scoped = ScopedStore(extension=sample.NAME)
+        record = await scoped.get(sample.HOOK_PAGE_CHANGE_KEY)
+        sample_cursor = await scoped.get(
+            f"{PAGE_CHANGE_CURSOR_KEY}:{sample_consumer.discriminator}"
+        )
     assert record == {"page_ids": [str(page)], "model_wired": False}
-    sample_cursor = await scoped.get(f"{PAGE_CHANGE_CURSOR_KEY}:{sample_consumer.discriminator}")
     assert isinstance(sample_cursor, str) and sample_cursor != boom_cursor

@@ -12,6 +12,7 @@ from ufo.ext.context import ExtensionContext, ScopedStore
 from ufo.ext.manifest import JobSpec
 from ufo.jobs import CORE_EXTENSION, JobRunner, bindings_from
 from ufo.schema import tables
+from ufo.workspace import ws
 
 FIRE_TIMEOUT_SECONDS = 25
 MARKER_KEY = "fired"
@@ -57,11 +58,12 @@ async def test_recurring_core_job_registers_at_boot_and_fires(
     key = f"{CORE_EXTENSION}:tick"
     spec = JobSpec(name="tick", schedule="* * * * * *", handler=_write_marker)
     runner = _runner(workspace_id, (spec,))
-    scoped = ScopedStore(workspace_id=workspace_id, extension=CORE_EXTENSION)
+    scoped = ScopedStore(extension=CORE_EXTENSION)
     try:
         runner.launch()
         assert key in {schedule["schedule_name"] for schedule in DBOS.list_schedules()}
-        assert await _await_marker(scoped) == MARKER_VALUE
+        with ws(workspace_id):
+            assert await _await_marker(scoped) == MARKER_VALUE
     finally:
         DBOS.delete_schedule(key)
         jobs_module._firing = None
@@ -71,9 +73,10 @@ async def test_one_shot_core_job_fires_once_at_boot(db: None, dbos_launched: obj
     workspace_id = await _workspace()
     spec = JobSpec(name="boot", schedule=None, handler=_write_marker)
     runner = _runner(workspace_id, (spec,))
-    scoped = ScopedStore(workspace_id=workspace_id, extension=CORE_EXTENSION)
+    scoped = ScopedStore(extension=CORE_EXTENSION)
     try:
         runner.launch()
-        assert await _await_marker(scoped) == MARKER_VALUE
+        with ws(workspace_id):
+            assert await _await_marker(scoped) == MARKER_VALUE
     finally:
         jobs_module._firing = None

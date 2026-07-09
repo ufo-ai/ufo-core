@@ -21,6 +21,8 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import Span, SpanKind
 
+from ufo.db import current_workspace
+
 INSTRUMENTATION_NAME = "ufo"
 METRIC_EXPORT_INTERVAL_MILLIS = 30_000
 OTLP_TRACES_PATH = "v1/traces"
@@ -82,12 +84,26 @@ def _otlp_signal_urls(otlp_endpoint: str) -> tuple[str, str, str]:
     return f"{base}/{OTLP_TRACES_PATH}", f"{base}/{OTLP_METRICS_PATH}", f"{base}/{OTLP_LOGS_PATH}"
 
 
+def _ambient_scope() -> dict[str, str]:
+    """The ambient workspace as log/trace metadata, read from the `with ws(...)` scope the turn or
+    job bound — so every record and span inside a scope is tagged with the workspace it ran under,
+    no call site passing it. Empty outside a scope (deploy-level boot work)."""
+    workspace_id = current_workspace.get()
+    return {} if workspace_id is None else {"workspace_id": str(workspace_id)}
+
+
 @contextmanager
 def turn_span(turn_id: UUID, conversation_id: UUID) -> Iterator[Span]:
-    """Open the SERVER span wrapping one durable turn."""
+    """Open the SERVER span wrapping one durable turn, tagged with the ambient workspace."""
     attributes = cast(
         dict[str, str],
-        redact_payload({"ufo.turn_id": str(turn_id), "ufo.conversation_id": str(conversation_id)}),
+        redact_payload(
+            {
+                "ufo.turn_id": str(turn_id),
+                "ufo.conversation_id": str(conversation_id),
+                **{f"ufo.{key}": value for key, value in _ambient_scope().items()},
+            }
+        ),
     )
     tracer = trace.get_tracer(INSTRUMENTATION_NAME)
     with tracer.start_as_current_span("turn", kind=SpanKind.SERVER, attributes=attributes) as span:
@@ -117,9 +133,11 @@ def redact_value(value: object) -> JsonValue:
 
 
 def log(event: str, **fields: object) -> None:
-    """Emit a structured info record, sensitive fields redacted, to stdlib logging and the OTel
-    logs pipeline; the OTel record correlates to the active span."""
-    redacted = redact_payload(fields)
+    """Emit a structured info record — tagged with the ambient workspace, sensitive fields redacted
+    — to stdlib logging and the OTel logs pipeline; the OTel record correlates to the active span.
+    The workspace is read from the `with ws(...)` scope, never passed, so every record inside a turn
+    or job carries the workspace it ran under."""
+    redacted = redact_payload({**_ambient_scope(), **fields})
     logging.getLogger(INSTRUMENTATION_NAME).info(event, extra={"ufo": redacted})
     _logs.get_logger(INSTRUMENTATION_NAME).emit(
         severity_number=SeverityNumber.INFO, severity_text="INFO", body=event, attributes=redacted

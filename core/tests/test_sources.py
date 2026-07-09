@@ -47,6 +47,7 @@ from ufo.sources.sync import (
 )
 from ufo.subjects import SHARED_SUBJECT, member_subject
 from ufo.tools.context import SpawnResult, ToolContext, ToolResult
+from ufo.workspace import ws
 
 MEMORY_TOOLS = {tool.name: tool for tool in memory_manifest.manifest().tools}
 
@@ -175,10 +176,8 @@ async def _make_due() -> None:
 
 def _context(memory: MemoryStore, member_id: UUID | None, blob_root: Path) -> ToolContext:
     ext = context_for(
-        memory.workspace_id,
         "memory",
         frozenset(),
-        None,
         index=memory.index,
         embed=memory.embed,
     )
@@ -204,10 +203,11 @@ def _context(memory: MemoryStore, member_id: UUID | None, blob_root: Path) -> To
 
 async def _search(memory: MemoryStore, member_id: UUID | None, blob_root: Path, query: str) -> str:
     tool = MEMORY_TOOLS["memory_search"]
-    result: ToolResult = await tool.handler(
-        _context(memory, member_id, blob_root),
-        tool.input_model.model_validate({"queries": [query]}),
-    )
+    with ws(memory.workspace_id):
+        result: ToolResult = await tool.handler(
+            _context(memory, member_id, blob_root),
+            tool.input_model.model_validate({"queries": [query]}),
+        )
     return result.content[0].text
 
 

@@ -352,3 +352,63 @@ spec:
   selector: {app: ufo-sandbox-proxy}
   ports:
     - {name: proxy, port: 8888, targetPort: proxy}
+---
+# The shared serve fleet (hosted tier) — ONE Deployment serving turns for every workspace. Runs the
+# bundle image (`ufoctl serve`) reading its baked /app/ufo.toml + platform env, connects as the
+# RLS-SUBJECT role ufo_serve (serve-dsn), and scopes each request/turn to its workspace per
+# transaction (the app.workspace_id GUC). Additive: the per-tenant tenant serve (enterprise tier) is
+# unchanged. replicas:0 — it cannot serve until the sibling wiring lands (serve reads UFO_SERVE_DSN,
+# resolves current_workspace per request, and a production [sandbox]e2b+proxy_public_url / [blob]s3
+# config replaces the baked dev config). Flip to 2 + add the shared host/ingress once wired.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ufo-serve
+  namespace: ${namespace}
+  labels: {app: ufo-serve}
+spec:
+  replicas: 0
+  selector:
+    matchLabels: {app: ufo-serve}
+  template:
+    metadata:
+      labels: {app: ufo-serve}
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: serve
+          image: ${bundle_image}
+          # ENTRYPOINT ["ufoctl"] is baked in; `serve` runs the shared fleet.
+          args: [serve]
+          ports:
+            - {name: http, containerPort: 8710}
+          # Platform service keys as the tenant serve gets them: ANTHROPIC_API_KEY, OPENAI_API_KEY,
+          # EXA_API, TURBOPUFFER_API_KEY, E2B_API_KEY, UFO_E2B_TEMPLATE, UFO_TOKEN_SECRET, and — once
+          # provisioned there (option-a platform Fernet key) — UFO_CREDENTIAL_KEY / UFO_ARTIFACT_TOKEN_SECRET.
+          envFrom:
+            - secretRef: {name: ufo-platform-secrets}
+          env:
+            # The shared RLS-SUBJECT role DSN (never the RLS-bypassing owner). serve must read this
+            # to override the baked config's database.url; every transaction sets app.workspace_id.
+            - name: UFO_SERVE_DSN
+              valueFrom:
+                secretKeyRef: {name: ufo-control-secrets, key: serve-dsn}
+          readinessProbe:
+            tcpSocket: {port: http}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: {port: http}
+            initialDelaySeconds: 30
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ufo-serve
+  namespace: ${namespace}
+  labels: {app: ufo-serve}
+spec:
+  selector: {app: ufo-serve}
+  ports:
+    - {name: http, port: 80, targetPort: http}

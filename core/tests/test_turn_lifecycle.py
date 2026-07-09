@@ -20,8 +20,8 @@ from ufo.accounting import CORE_PRICING
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
 from ufo.db import workspace_tx
-from ufo.ext.loader import skill_registry
-from ufo.ext.manifest import ModelProviderSpec
+from ufo.ext.loader import embed_backend, index_backend, skill_registry
+from ufo.ext.manifest import EmbedBackendSpec, IndexBackendSpec, Manifest, ModelProviderSpec
 from ufo.hub import Hub, InProcessHub
 from ufo.jobs import SpendResume
 from ufo.loop import queue as loop_queue
@@ -55,6 +55,19 @@ class StubEmbed:
 
     async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
         return tuple(() for _ in texts)
+
+
+STUB_BACKENDS = Manifest(
+    name="stub_backends",
+    version="1",
+    embeds=(EmbedBackendSpec(name="default", factory=lambda ctx: StubEmbed()),),
+    indexes=(
+        IndexBackendSpec(
+            name="default",
+            factory=lambda embed, ctx: DefaultIndex(embed=embed, transaction=workspace_tx),
+        ),
+    ),
+)
 
 
 class RoundTripInput(BaseModel):
@@ -158,7 +171,7 @@ STANDIN_REGISTRY = ModelRegistry(
         ModelProviderSpec(
             name="standin",
             matches=lambda model: True,
-            client=lambda model: StandInModel(),
+            client=lambda model, key: StandInModel(),
         ),
     ),
     pricing=CORE_PRICING,
@@ -191,6 +204,8 @@ def dbos_runtime(
     blob = FilesystemBlobStore(root=config.blob.root)
     proxy = ProxyEndpoint(port=0, ca_cert="test-ca")
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
+    embed = embed_backend((STUB_BACKENDS,), None, None)
+    index = index_backend((STUB_BACKENDS,), None, embed, None)
     loop_queue.reset_runtime()
     loop_queue.init_runtime(
         loop_queue.Runtime(
@@ -205,12 +220,12 @@ def dbos_runtime(
             dbos=dbos_client,
             subagents=SubagentRegistry((ROUNDTRIP_PROFILE, EXHAUST_PROFILE, PINNED_PROFILE)),
             subagent_grants={},
-            manifests=(),
+            manifests=(STUB_BACKENDS,),
             registry=STANDIN_REGISTRY,
-            skills=skill_registry(()),
+            skills=skill_registry((STUB_BACKENDS,)),
             credentials=None,
-            index=DefaultIndex(embed=StubEmbed(), transaction=workspace_tx),
-            embed=StubEmbed(),
+            index=index,
+            embed=embed,
             artifact_token_secret="",
         )
     )
@@ -234,6 +249,7 @@ async def surface(
     app.state.hub = hub
     app.state.dbos = DBOSClient(system_database_url=config.database.system_url)
     app.state.durable_surfaces = frozenset()
+    app.state.shared_workspace = False
     app.include_router(router)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://surface") as client:
         yield client

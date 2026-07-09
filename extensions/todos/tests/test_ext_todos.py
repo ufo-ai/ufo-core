@@ -6,15 +6,14 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 import ufo_ext_todos as todos
-from cryptography.fernet import Fernet
 
 from ufo.blob import FilesystemBlobStore
-from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ScopedStore, context_for
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.tools.context import SpawnResult, ToolContext
+from ufo.workspace import ws
 
 
 @dataclass
@@ -48,8 +47,7 @@ async def _seed_workspace() -> UUID:
 
 
 def _context(workspace_id: UUID, conversation_id: UUID, tmp_path: Path) -> ToolContext:
-    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    ext = context_for(workspace_id, todos.NAME, frozenset(), store)
+    ext = context_for(todos.NAME, frozenset())
     turn = Turn(
         id=uuid4(),
         workspace_id=workspace_id,
@@ -86,40 +84,41 @@ async def test_update_status_round_trips_through_the_store(db: None, tmp_path: P
     workspace_id = await _seed_workspace()
     conversation_id = uuid4()
     ctx = _context(workspace_id, conversation_id, tmp_path)
-    created = await todos.update_todo_list(
-        ctx,
-        todos.UpdateTodoListInput(
-            title="Launch",
-            tasks=(
-                todos.TodoTask(description="build"),
-                todos.TodoTask(description="test"),
+    with ws(workspace_id):
+        created = await todos.update_todo_list(
+            ctx,
+            todos.UpdateTodoListInput(
+                title="Launch",
+                tasks=(
+                    todos.TodoTask(description="build"),
+                    todos.TodoTask(description="test"),
+                ),
+                user_description="tracking the launch",
             ),
-            user_description="tracking the launch",
-        ),
-    )
-    board = json.loads(created.content[0].text)
-    assert board["title"] == "Launch"
-    assert [task["status"] for task in board["tasks"]] == ["pending", "pending"]
+        )
+        board = json.loads(created.content[0].text)
+        assert board["title"] == "Launch"
+        assert [task["status"] for task in board["tasks"]] == ["pending", "pending"]
 
-    updated = await todos.update_todo_status(
-        ctx,
-        todos.UpdateTodoStatusInput(
-            updates=(todos.TodoStatusUpdate(index=1, status="completed"),),
-            user_description="finished the build",
-        ),
-    )
-    updated_board = json.loads(updated.content[0].text)
-    assert [task["status"] for task in updated_board["tasks"]] == ["completed", "pending"]
+        updated = await todos.update_todo_status(
+            ctx,
+            todos.UpdateTodoStatusInput(
+                updates=(todos.TodoStatusUpdate(index=1, status="completed"),),
+                user_description="finished the build",
+            ),
+        )
+        updated_board = json.loads(updated.content[0].text)
+        assert [task["status"] for task in updated_board["tasks"]] == ["completed", "pending"]
 
-    scoped = ScopedStore(workspace_id=workspace_id, extension=todos.NAME)
-    stored = await scoped.get(f"{todos.TODO_KEY_PREFIX}{conversation_id}")
-    assert stored["tasks"][0]["status"] == "completed"
+        scoped = ScopedStore(extension=todos.NAME)
+        stored = await scoped.get(f"{todos.TODO_KEY_PREFIX}{conversation_id}")
+        assert stored["tasks"][0]["status"] == "completed"
 
 
 async def test_status_before_any_list_fails_loud(db: None, tmp_path: Path) -> None:
     workspace_id = await _seed_workspace()
     ctx = _context(workspace_id, uuid4(), tmp_path)
-    with pytest.raises(ValueError, match="no todo list"):
+    with ws(workspace_id), pytest.raises(ValueError, match="no todo list"):
         await todos.update_todo_status(
             ctx,
             todos.UpdateTodoStatusInput(
@@ -132,22 +131,23 @@ async def test_status_before_any_list_fails_loud(db: None, tmp_path: Path) -> No
 async def test_an_out_of_range_index_fails_loud(db: None, tmp_path: Path) -> None:
     workspace_id = await _seed_workspace()
     ctx = _context(workspace_id, uuid4(), tmp_path)
-    await todos.update_todo_list(
-        ctx,
-        todos.UpdateTodoListInput(
-            title="Small",
-            tasks=(todos.TodoTask(description="only one"),),
-            user_description="one task",
-        ),
-    )
-    with pytest.raises(ValueError, match="todo index 5 out of range"):
-        await todos.update_todo_status(
+    with ws(workspace_id):
+        await todos.update_todo_list(
             ctx,
-            todos.UpdateTodoStatusInput(
-                updates=(todos.TodoStatusUpdate(index=5, status="completed"),),
-                user_description="bad index",
+            todos.UpdateTodoListInput(
+                title="Small",
+                tasks=(todos.TodoTask(description="only one"),),
+                user_description="one task",
             ),
         )
+        with pytest.raises(ValueError, match="todo index 5 out of range"):
+            await todos.update_todo_status(
+                ctx,
+                todos.UpdateTodoStatusInput(
+                    updates=(todos.TodoStatusUpdate(index=5, status="completed"),),
+                    user_description="bad index",
+                ),
+            )
 
 
 async def test_requires_the_extension_context(tmp_path: Path) -> None:

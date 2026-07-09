@@ -10,7 +10,6 @@ Anthropic/OpenAI ids first, so this serves everything else — plus the rates fo
 pins."""
 
 import asyncio
-import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
@@ -38,6 +37,7 @@ VERSION = "0.1.0"
 PROVIDER_NAME = "openrouter"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
+OPENROUTER_KEY_SLOT = "openrouter_api_key"
 OPENAI_MODEL_PREFIXES = ("gpt-", "o1", "o3", "o4", "chatgpt-")
 
 MAX_PROVIDER_RETRIES = 6
@@ -199,12 +199,7 @@ class OpenRouterModelClient:
         return kwargs
 
 
-def _model_client(model: str) -> OpenRouterModelClient:
-    key = os.environ.get(OPENROUTER_API_KEY_ENV, "")
-    if not key:
-        raise RuntimeError(
-            f"{OPENROUTER_API_KEY_ENV} is required for the openrouter model provider"
-        )
+def _model_client(model: str, key: str) -> OpenRouterModelClient:
     return OpenRouterModelClient(client=openai_sdk_client(key, base_url=OPENROUTER_BASE_URL))
 
 
@@ -217,6 +212,8 @@ def manifest() -> Manifest:
                 name=PROVIDER_NAME,
                 matches=lambda model: True,
                 client=_model_client,
+                key_slot=OPENROUTER_KEY_SLOT,
+                key_env=OPENROUTER_API_KEY_ENV,
                 prices=OPENROUTER_PRICES,
             ),
         ),

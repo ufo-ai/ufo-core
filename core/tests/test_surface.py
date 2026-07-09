@@ -41,8 +41,8 @@ SURFACE = "test_surface"
 class StubDbos:
     enqueued: list[str] = field(default_factory=list)
 
-    async def enqueue_async(self, options: object, workflow_id: str) -> None:
-        self.enqueued.append(workflow_id)
+    async def enqueue_async(self, options: object, workspace_id: str, turn_id: str) -> None:
+        self.enqueued.append(turn_id)
 
 
 @dataclass

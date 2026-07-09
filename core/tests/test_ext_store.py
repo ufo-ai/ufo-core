@@ -23,6 +23,7 @@ from ufo.ext.loader import (
 from ufo.ext.store import Catalog, CatalogEntry, ExtensionStore, ufo_version
 from ufo.jobs import JobRunner, bindings_from
 from ufo.schema import tables
+from ufo.workspace import ws
 
 CONFIG_TOML = """\
 [database]
@@ -189,8 +190,9 @@ async def test_an_installed_extension_fires_through_the_loader(
         bindings=bindings_from(load_manifests(), ()),
     )
     await runner.fire(f"{sample.NAME}:{sample.JOB_NAME}")
-    scoped = ScopedStore(workspace_id=workspace_id, extension=sample.NAME)
-    assert await scoped.get(sample.JOB_KEY) == {"ran": True}
+    with ws(workspace_id):
+        scoped = ScopedStore(extension=sample.NAME)
+        assert await scoped.get(sample.JOB_KEY) == {"ran": True}
 
 
 def test_bundle_pins_a_bundle_only_extension_and_writes_a_build_context(
@@ -233,5 +235,6 @@ async def test_a_bundle_boots_its_pinned_extension_on_a_clean_lockfile(
         bindings=bindings_from(load_manifests(), ()),
     )
     await runner.fire(f"{sample.NAME}:{sample.JOB_NAME}")
-    scoped = ScopedStore(workspace_id=workspace_id, extension=sample.NAME)
-    assert await scoped.get(sample.JOB_KEY) == {"ran": True}
+    with ws(workspace_id):
+        scoped = ScopedStore(extension=sample.NAME)
+        assert await scoped.get(sample.JOB_KEY) == {"ran": True}

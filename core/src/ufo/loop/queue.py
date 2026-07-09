@@ -50,6 +50,7 @@ from ufo.schema.records import (
 from ufo.search import SearchProvider
 from ufo.skills.runtime import SkillRegistry
 from ufo.tools.registry import ToolRegistry
+from ufo.workspace import ws
 
 SANDBOX_IMAGE_REF = "ufo-sandbox:latest"
 TURN_QUEUE_POLL_SECONDS = 0.1
@@ -103,31 +104,34 @@ def reset_runtime() -> None:
     _runtime = None
 
 
-async def _execute_turn(turn_id: str) -> str:
+async def _execute_turn(workspace_id: str, turn_id: str) -> str:
     """The turn body, run directly in the `turn_workflow` DBOS workflow — not wrapped in a step, so
     the model-round, tool-dispatch, and compaction steps inside `engine.run()` are the workflow's
-    own steps and memoize for crash-recovery replay. Setup here (load, sandbox create-or-attach,
-    engine build) re-runs each recovery and is idempotent; a failure outside the engine commits the
-    terminal through the backstop so the client's wait still ends."""
+    own steps and memoize for crash-recovery replay. Setup (load, sandbox create-or-attach, engine
+    build) re-runs each recovery and is idempotent; a fault outside the engine commits the terminal
+    through the backstop so the client's wait still ends. The workspace is bound from the workflow
+    argument for the whole body via `with ws(...)`: every query, credential read, and model call
+    inside runs under it — the RLS scope on the shared RLS-subject role, the workspace's BYOK keys,
+    and the ledger it bills. One fleet serves many workspaces from one pool; a single-workspace
+    deploy binds its sole one."""
     runtime = _runtime
     if runtime is None:
         raise RuntimeError("runtime not initialized (init_runtime runs in serve)")
+    with ws(UUID(workspace_id)):
+        return await _run_turn(runtime, turn_id)
+
+
+async def _run_turn(runtime: Runtime, turn_id: str) -> str:
     try:
         turn, agent, member_id = await _load_turn(UUID(turn_id))
         subagents = Subagents(client=runtime.dbos, registry=runtime.subagents, parent=turn)
         all_tools, tool_ext = turn_tools(
-            runtime.manifests, turn.workspace_id, runtime.credentials, runtime.index, runtime.embed
+            runtime.manifests, runtime.credentials, runtime.index, runtime.embed
         )
-        hooks = turn_hooks(
-            runtime.manifests, turn.workspace_id, runtime.credentials, runtime.index, runtime.embed
-        )
+        hooks = turn_hooks(runtime.manifests, runtime.credentials, runtime.index, runtime.embed)
         skills = runtime.skills.merged_with(
             await turn_runtime_skills(
-                runtime.manifests,
-                turn.workspace_id,
-                runtime.credentials,
-                runtime.index,
-                runtime.embed,
+                runtime.manifests, runtime.credentials, runtime.index, runtime.embed
             )
         )
         sections = tuple(
@@ -153,7 +157,7 @@ async def _execute_turn(turn_id: str) -> str:
             system_prompt = rendered_prompt(resolved.prompt)
             max_rounds = profile.max_rounds
         resolved = resolved.model_copy(update={"model": runtime.registry.resolve(resolved.model)})
-        model = runtime.registry.client_for(resolved.model)
+        model = await runtime.registry.client_for(resolved.model)
         handle = await _open_sandbox(
             runtime.carrier,
             runtime.config.sandbox.backend,
@@ -240,8 +244,8 @@ async def _commit_failed_terminal(hub: Hub, turn_id: UUID, error_class: str) -> 
 
 
 @DBOS.workflow(name=TURN_WORKFLOW_NAME)
-async def turn_workflow(turn_id: str) -> str:
-    return await _execute_turn(turn_id)
+async def turn_workflow(workspace_id: str, turn_id: str) -> str:
+    return await _execute_turn(workspace_id, turn_id)
 
 
 async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, UUID | None]:

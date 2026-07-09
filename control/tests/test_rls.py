@@ -24,11 +24,12 @@ from ufo.schema import tables
 
 from ufo_control.main import main
 from ufo_control.postgres import (
-    APP_GROUP_ROLE,
     PG_ROLE_SEED_ENV,
     WORKSPACE_GUC,
     TenantPostgres,
+    ensure_serve_role,
     ensure_tenant_postgres,
+    serve_dsn,
 )
 from ufo_control.rls import POSTGRES_OWNER_DSN_ENV, bootstrap_policies
 
@@ -83,7 +84,7 @@ async def _reset(database: str) -> None:
     try:
         for name in (database, *TENANT_DBOS):
             await connection.execute(f'drop database if exists "{name}" with (force)')
-        for role in (*TENANT_ROLES, "ufo_app", OWNER_ROLE):
+        for role in (*TENANT_ROLES, "ufo_serve", "ufo_serve_shared", "ufo_app", OWNER_ROLE):
             await connection.execute(f'drop role if exists "{role}"')
         await connection.execute(f"create role \"{OWNER_ROLE}\" login password '{OWNER_PASSWORD}'")
         await connection.execute(f'create database "{database}" owner "{OWNER_ROLE}"')
@@ -211,9 +212,11 @@ async def test_with_check_rejects_a_foreign_workspace_insert(rls_env: RlsEnv) ->
 
 
 def test_rls_bootstrap_cli_is_idempotent(rls_env: RlsEnv) -> None:
-    # A sync test: the CLI command drives ``asyncio.run`` itself, which cannot nest in a loop.
+    # A sync test: the CLI command drives ``asyncio.run`` itself, which cannot nest in a loop. The
+    # bootstrap now also creates the ufo_serve role, so it runs as the cluster admin (prod's
+    # postgres-admin-dsn), not the non-superuser tenant owner.
     previous = os.environ.get(POSTGRES_OWNER_DSN_ENV)
-    os.environ[POSTGRES_OWNER_DSN_ENV] = rls_env.owner_libpq_dsn
+    os.environ[POSTGRES_OWNER_DSN_ENV] = f"postgresql://admin:admin@{POSTGRES_HOST}/{APP_DATABASE}"
     try:
         result = CliRunner().invoke(main, ["rls-bootstrap"])
     finally:
@@ -250,10 +253,6 @@ async def test_bootstrap_fails_loud_on_an_unpoliced_table() -> None:
             await cleanup.close()
 
 
-SHARED_ROLE = "ufo_serve_shared"
-SHARED_PASSWORD = "sharedpw"
-
-
 @dataclass(frozen=True)
 class SharedRoleEnv:
     workspaces: tuple[str, ...]
@@ -262,32 +261,13 @@ class SharedRoleEnv:
 
 @pytest.fixture(scope="module")
 def shared_role_env(rls_env: RlsEnv) -> Iterator[SharedRoleEnv]:
-    """The role the shared serve fleet connects as: an RLS-SUBJECT login role in the ufo_app group,
-    GRANTed SET on the workspace GUC, with NO pinned default — so it scopes per transaction from the
-    current_workspace contextvar and an unset workspace fails loud. Built on rls_env's owner +
-    policies + two seeded workspaces."""
-
-    async def _create() -> None:
-        admin = await asyncpg.connect(ADMIN_DSN)
-        try:
-            await admin.execute(f'drop role if exists "{SHARED_ROLE}"')
-            await admin.execute(
-                f'create role "{SHARED_ROLE}" login in role "{APP_GROUP_ROLE}" '
-                f"password '{SHARED_PASSWORD}'"
-            )
-            await admin.execute(f'grant set on parameter {WORKSPACE_GUC} to "{SHARED_ROLE}"')
-        finally:
-            await admin.close()
-
-    async def _drop() -> None:
-        admin = await asyncpg.connect(ADMIN_DSN)
-        try:
-            await admin.execute(f'drop role if exists "{SHARED_ROLE}"')
-        finally:
-            await admin.close()
-
-    asyncio.run(_create())
-    dsn = f"postgresql+asyncpg://{SHARED_ROLE}:{SHARED_PASSWORD}@{POSTGRES_HOST}/{APP_DATABASE}"
+    """The real ``ufo_serve`` role the shared fleet connects as, created by the rollout bootstrap
+    (``ensure_serve_role``): an RLS-subject login role in ufo_app, GRANTed SET on the workspace GUC,
+    with NO pinned default — so it scopes per transaction from current_workspace and an unset
+    workspace fails loud. Built on rls_env's owner + policies + two seeded workspaces; _reset drops
+    the role."""
+    asyncio.run(ensure_serve_role(ADMIN_DSN))
+    dsn = serve_dsn(POSTGRES_HOST, APP_DATABASE)
     init_db(dsn)
     try:
         yield SharedRoleEnv(
@@ -296,7 +276,6 @@ def shared_role_env(rls_env: RlsEnv) -> Iterator[SharedRoleEnv]:
         )
     finally:
         asyncio.run(dispose_db())
-        asyncio.run(_drop())
 
 
 async def test_shared_role_scopes_each_transaction_via_contextvar(

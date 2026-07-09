@@ -270,7 +270,7 @@ class Subagents:
             "queue_partition_key": str(conversation_id),
             "app_version": DBOS_APP_VERSION,
         }
-        await self.client.enqueue_async(options, str(turn_id))
+        await self.client.enqueue_async(options, str(self.parent.workspace_id), str(turn_id))
 
     async def _await_terminal(self, turn_id: UUID) -> TerminalFrame:
         while True:

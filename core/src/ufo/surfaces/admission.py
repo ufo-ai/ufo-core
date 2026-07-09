@@ -124,10 +124,10 @@ class Admission:
                         )
                     )
         if status == QUEUED:
-            await self._enqueue(conversation_id, turn_id)
+            await self._enqueue(workspace_id, conversation_id, turn_id)
         return turn_id
 
-    async def _enqueue(self, conversation_id: UUID, turn_id: UUID) -> None:
+    async def _enqueue(self, workspace_id: UUID, conversation_id: UUID, turn_id: UUID) -> None:
         options: EnqueueOptions = {
             "queue_name": TURN_QUEUE_NAME,
             "workflow_name": TURN_WORKFLOW_NAME,
@@ -136,7 +136,7 @@ class Admission:
             "app_version": DBOS_APP_VERSION,
         }
         try:
-            await self.dbos.enqueue_async(options, str(turn_id))
+            await self.dbos.enqueue_async(options, str(workspace_id), str(turn_id))
         except Exception:
             frame = TerminalFrame(status="failed", error_class="EnqueueFailed")
             async with workspace_tx() as connection:

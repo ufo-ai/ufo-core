@@ -92,7 +92,7 @@ class _CountingCarrier:
     async def destroy(self, handle: SandboxHandle) -> None: ...
 
 
-async def _seed_turn(model: str = "claude-opus-4-8") -> UUID:
+async def _seed_turn(model: str = "claude-opus-4-8") -> tuple[UUID, UUID]:
     workspace_id, member_id, agent_id, conversation_id, turn_id = (uuid4() for _ in range(5))
     async with workspace_tx() as connection:
         await connection.execute(
@@ -145,7 +145,7 @@ async def _seed_turn(model: str = "claude-opus-4-8") -> UUID:
                 updated_at=sa.func.now(),
             )
         )
-    return turn_id
+    return workspace_id, turn_id
 
 
 def _install_runtime(config: Config, registry: ModelRegistry, carrier: _CountingCarrier) -> None:
@@ -204,13 +204,13 @@ async def test_crash_mid_turn_recovers_without_re_executing_completed_work(
             ModelProviderSpec(
                 name="crash",
                 matches=lambda model: True,
-                client=lambda model: _CrashOnceModel(crashed=crashed),
+                client=lambda model, key: _CrashOnceModel(crashed=crashed),
             ),
         ),
         pricing=CORE_PRICING,
         auto_model="claude-opus-4-8",
     )
-    turn_id = await _seed_turn()
+    workspace_id, turn_id = await _seed_turn()
 
     saved = loop_queue._runtime
     loop_queue.reset_runtime()
@@ -218,7 +218,7 @@ async def test_crash_mid_turn_recovers_without_re_executing_completed_work(
     try:
         with SetWorkflowID(str(turn_id)):
             with pytest.raises(_WorkerCrash):
-                await loop_queue.turn_workflow(str(turn_id))
+                await loop_queue.turn_workflow(str(workspace_id), str(turn_id))
 
         assert execs == [("bash", "-lc", "echo hi")]
         assert crashed[0] is True

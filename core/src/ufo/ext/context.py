@@ -9,8 +9,7 @@ path an extension does. The `ExtensionContext` shape is open: it carries the sel
 backends, a transaction over the extension's own tables, governed proposals, and invoke, without
 reshaping what handlers already hold."""
 
-import os
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -21,9 +20,8 @@ import sqlalchemy as sa
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ufo.accounting import CORE_PRICING, Pricing, record_workspace_usage
+from ufo.accounting import Pricing
 from ufo.blob import BlobNotFound, BlobStore
-from ufo.credentials import CredentialSlotUnset, CredentialStore
 from ufo.db import workspace_tx
 from ufo.governance import Governance, prompt_digest
 from ufo.indexing import EmbedClient, IndexBackend
@@ -34,6 +32,7 @@ from ufo.schema import tables
 from ufo.schema.records import AgentChange, ProposalRef, Usage
 from ufo.sources.sync import PageFeed, source_row_id
 from ufo.transcript import TranscriptDecodeError, decode, transcript_key
+from ufo.workspace import ws_current
 
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 
@@ -44,10 +43,14 @@ class UndeclaredCredentialSlot(KeyError):
 
 @dataclass(frozen=True)
 class ScopedStore:
-    """One extension's durable key space within one workspace, reached only through workspace_tx."""
+    """One extension's durable key space within one workspace, reached only through workspace_tx.
+    The workspace is the ambient one the turn or job bound — never passed, never another's."""
 
-    workspace_id: UUID
     extension: str
+
+    @property
+    def workspace_id(self) -> UUID:
+        return ws_current().workspace_id
 
     async def get(self, key: str) -> JsonValue | None:
         async with workspace_tx() as connection:
@@ -113,31 +116,25 @@ class ScopedStore:
 
 @dataclass(frozen=True)
 class CredentialAccess:
-    """Reads only the slots a manifest declared; an undeclared slot never reaches the store. The
-    store stays module-private (`_store`), so `get` — which checks the declaration first — is the
-    only path to a secret; the raw store is never a public field an undeclared read could bypass."""
+    """The declared-slot gate over the ambient workspace's secrets: a handler reads only the slots
+    its manifest declared, and each resolves to the bound workspace's value through
+    `ws_current().credential`. The declared set is all this holds — workspace and secret both come
+    from the scope the turn or job bound, so a handler can read neither an undeclared slot nor a
+    workspace it did not name."""
 
-    workspace_id: UUID
     declared: frozenset[str]
-    _store: CredentialStore | None
+
+    @property
+    def workspace_id(self) -> UUID:
+        return ws_current().workspace_id
 
     async def get(self, slot: str) -> str:
-        """Resolve a declared slot to its live value: a per-workspace stored secret if the workspace
-        set one (genuine BYOK, sealed), else the platform default read fresh from env (`SLOT`
-        upper-cased). Platform credentials are never copied into a workspace at onboarding, so
-        rotating the deploy's env value reaches every workspace that has not overridden it — no
-        stale seeded copies. Unset in both places fails loud."""
+        """Resolve a declared slot to the bound workspace's live value — its stored BYOK secret if
+        set, else the platform default from env. An undeclared slot never reaches a secret; a slot
+        set in neither place fails loud."""
         if slot not in self.declared:
             raise UndeclaredCredentialSlot(slot)
-        if self._store is not None:
-            try:
-                return await self._store.get(self.workspace_id, slot)
-            except CredentialSlotUnset:
-                pass
-        platform = os.environ.get(slot.upper())
-        if platform is not None:
-            return platform
-        raise CredentialSlotUnset(slot)
+        return await ws_current().credential(slot)
 
 
 @dataclass(frozen=True)
@@ -161,8 +158,11 @@ class TrajectoryCorpus:
     artifact. A conversation whose transcript is missing or corrupt is skipped-with-log, never
     aborting the whole corpus."""
 
-    workspace_id: UUID
     _blob: BlobStore
+
+    @property
+    def workspace_id(self) -> UUID:
+        return ws_current().workspace_id
 
     async def trajectories(self) -> tuple[Trajectory, ...]:
         async with workspace_tx() as connection:
@@ -221,45 +221,61 @@ class TurnInvoker(Protocol):
     ) -> UUID: ...
 
 
+class ModelResolver(Protocol):
+    """The model registry as the background model seam sees it: the deploy's default model, its
+    per-workspace client (keyed through `ws_current().credential`), and the price table. Held as a
+    Protocol so core's model layer stays out of the `ext.context` import cycle; read-only members so
+    the frozen `ModelRegistry` dataclass satisfies it."""
+
+    @property
+    def auto_model(self) -> str: ...
+
+    @property
+    def pricing(self) -> Pricing: ...
+
+    async def client_for(self, model: str) -> ModelClient: ...
+
+
 @dataclass(frozen=True)
 class ModelAccess:
     """The metered LLM a background handler reaches: one completion against the deploy's default
-    model, its token usage priced and written to the workspace ledger under `ctx.store.workspace_id`
-    (turn_id NULL, workspace-anchored) on every call — so extension model spend is visible in
-    `ufoctl spend` and moves workspace-scoped spend caps, never an unmetered direct egress. The
-    underlying client is built lazily through `_client_factory` on first use, so a deploy with no
-    model key only fails when a handler actually calls the model, mirroring the other optional
-    accessors. `complete` fixes the request's model to the deploy default (`model`), so the model
-    billed is always the model called."""
+    model, keyed to and billed to the ambient workspace. It resolves its client through the same
+    `client_for` a turn uses (the workspace's BYOK key, else the platform key) and books usage
+    through the same `billable_event`, so the key's workspace and the billed workspace are one, by
+    construction — never an unmetered direct egress. `complete` fixes the request's model to the
+    deploy default, so the model billed is always the model called."""
 
-    workspace_id: UUID
-    model: str
-    pricing: Pricing
-    _client_factory: Callable[[], ModelClient]
+    _resolver: ModelResolver
+
+    @property
+    def model(self) -> str:
+        """The deploy default this seam bills and calls — the id fixed onto every completion."""
+        return self._resolver.auto_model
 
     async def complete(self, request: ModelRequest) -> str:
-        """Stream one completion, accumulate its text and token usage, meter the usage to the
-        workspace ledger, and return the assembled text. Bound `request.max_tokens` and the input
-        payload at the call site — this seam prices whatever the provider returns."""
+        """Stream one completion against the deploy default, book its token usage to the bound
+        workspace when the block succeeds, and return the assembled text. Bound `request.max_tokens`
+        and the payload at the call site — this seam prices whatever the provider returns."""
+        model = self._resolver.auto_model
+        client = await self._resolver.client_for(model)
         parts: list[str] = []
         usages: list[Usage] = []
-        async for event in self._client_factory().complete(
-            request.model_copy(update={"model": self.model})
-        ):
-            match event:
-                case TextDelta(text=text):
-                    parts.append(text)
-                case Usage():
-                    usages.append(event)
-        usage = Usage(
-            input_tokens=sum(u.input_tokens for u in usages),
-            output_tokens=sum(u.output_tokens for u in usages),
-            cache_read_tokens=sum(u.cache_read_tokens for u in usages),
-            cache_write_tokens=sum(u.cache_write_tokens for u in usages),
-        )
-        async with workspace_tx() as connection:
-            await record_workspace_usage(
-                connection, self.workspace_id, self.model, usage, self.pricing
+        async with ws_current().billable_event() as bill:
+            async for event in client.complete(request.model_copy(update={"model": model})):
+                match event:
+                    case TextDelta(text=text):
+                        parts.append(text)
+                    case Usage():
+                        usages.append(event)
+            bill.usage(
+                model,
+                Usage(
+                    input_tokens=sum(u.input_tokens for u in usages),
+                    output_tokens=sum(u.output_tokens for u in usages),
+                    cache_read_tokens=sum(u.cache_read_tokens for u in usages),
+                    cache_write_tokens=sum(u.cache_write_tokens for u in usages),
+                ),
+                self._resolver.pricing,
             )
         return "".join(parts)
 
@@ -346,37 +362,28 @@ class ExtensionContext:
 
 
 def context_for(
-    workspace_id: UUID,
     extension: str,
     declared: frozenset[str],
-    credential_store: CredentialStore | None,
     index: IndexBackend | None = None,
     embed: EmbedClient | None = None,
     pages: PageFeed | None = None,
     blob: BlobStore | None = None,
     invoker: TurnInvoker | None = None,
-    model_client_factory: Callable[[], ModelClient] | None = None,
-    model_name: str = "",
-    pricing: Pricing = CORE_PRICING,
+    model_resolver: ModelResolver | None = None,
 ) -> ExtensionContext:
-    store = ScopedStore(workspace_id=workspace_id, extension=extension)
-    credentials = CredentialAccess(
-        workspace_id=workspace_id, declared=declared, _store=credential_store
-    )
-    corpus = None if blob is None else TrajectoryCorpus(workspace_id, blob)
-    model = (
-        None
-        if model_client_factory is None
-        else ModelAccess(workspace_id, model_name, pricing, model_client_factory)
-    )
+    """The scoped handle a handler receives — no workspace passed: every accessor reads the ambient
+    workspace the turn or job bound (`ws_current()`), so the one context object serves whichever
+    workspace is bound when a handler runs. `declared` gates which credential slots it may read; a
+    `model_resolver` (the registry) wires the metered model seam, keyed and billed to that same
+    workspace."""
     return ExtensionContext(
-        store=store,
-        credentials=credentials,
+        store=ScopedStore(extension=extension),
+        credentials=CredentialAccess(declared=declared),
         index=index,
         embed=embed,
         pages=pages,
-        corpus=corpus,
-        scheduler=ScheduleStore(workspace_id=workspace_id),
+        corpus=None if blob is None else TrajectoryCorpus(blob),
+        scheduler=ScheduleStore(),
         invoker=invoker,
-        model=model,
+        model=None if model_resolver is None else ModelAccess(model_resolver),
     )

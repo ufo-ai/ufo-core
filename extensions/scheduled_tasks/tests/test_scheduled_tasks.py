@@ -34,6 +34,7 @@ from ufo.schema import tables
 from ufo.schema.records import WRITEBACK_PENDING, Agent, Turn
 from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.tools.context import SpawnResult, ToolContext
+from ufo.workspace import ws
 
 DAILY_9AM = "0 9 * * *"
 
@@ -45,8 +46,8 @@ class StubDbos:
 
     enqueued: list[str] = field(default_factory=list)
 
-    async def enqueue_async(self, options: object, workflow_id: str) -> None:
-        self.enqueued.append(workflow_id)
+    async def enqueue_async(self, options: object, workspace_id: str, turn_id: str) -> None:
+        self.enqueued.append(turn_id)
 
 
 async def _seed(surface: str = "cli") -> tuple[UUID, UUID, UUID]:
@@ -118,12 +119,12 @@ def _tool_ctx(workspace_id: UUID, conversation_id: UUID, agent_id: UUID) -> Tool
         spawn=_unavailable_spawn,
         member_id=None,
         artifact_token_secret="",
-        ext=context_for(workspace_id, NAME, frozenset(), _credentials()),
+        ext=context_for(NAME, frozenset()),
     )
 
 
-def _runner_ctx(workspace_id: UUID, invoker: AdmissionInvoker) -> ExtensionContext:
-    return context_for(workspace_id, NAME, frozenset(), _credentials(), invoker=invoker)
+def _runner_ctx(invoker: AdmissionInvoker) -> ExtensionContext:
+    return context_for(NAME, frozenset(), invoker=invoker)
 
 
 async def _turns(conversation_id: UUID) -> list[sa.RowMapping]:
@@ -142,11 +143,13 @@ async def _turns(conversation_id: UUID) -> list[sa.RowMapping]:
 async def test_schedule_task_tool_writes_durable_row(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     ctx = _tool_ctx(workspace_id, conversation_id, agent_id)
-    result = await schedule_task(
-        ctx, ScheduleTaskInput(schedule=DAILY_9AM, prompt="check the inbox for investor replies")
-    )
-    assert result.is_error is False
-    tasks = await ScheduleStore(workspace_id=workspace_id).list()
+    with ws(workspace_id):
+        result = await schedule_task(
+            ctx,
+            ScheduleTaskInput(schedule=DAILY_9AM, prompt="check the inbox for investor replies"),
+        )
+        assert result.is_error is False
+        tasks = await ScheduleStore().list()
     assert len(tasks) == 1
     assert tasks[0].schedule == DAILY_9AM
     assert tasks[0].prompt == "check the inbox for investor replies"
@@ -158,11 +161,14 @@ async def test_schedule_task_tool_writes_durable_row(db: None) -> None:
 async def test_reschedule_same_name_updates_in_place(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     ctx = _tool_ctx(workspace_id, conversation_id, agent_id)
-    await schedule_task(ctx, ScheduleTaskInput(schedule=DAILY_9AM, prompt="daily", name="report"))
-    await schedule_task(
-        ctx, ScheduleTaskInput(schedule="0 17 * * 1", prompt="weekly", name="report")
-    )
-    tasks = await ScheduleStore(workspace_id=workspace_id).list()
+    with ws(workspace_id):
+        await schedule_task(
+            ctx, ScheduleTaskInput(schedule=DAILY_9AM, prompt="daily", name="report")
+        )
+        await schedule_task(
+            ctx, ScheduleTaskInput(schedule="0 17 * * 1", prompt="weekly", name="report")
+        )
+        tasks = await ScheduleStore().list()
     assert len(tasks) == 1
     assert tasks[0].schedule == "0 17 * * 1"
     assert tasks[0].prompt == "weekly"
@@ -170,32 +176,32 @@ async def test_reschedule_same_name_updates_in_place(db: None) -> None:
 
 async def test_runner_fires_due_task_into_a_turn(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
-    store = ScheduleStore(workspace_id=workspace_id)
+    store = ScheduleStore()
     due_at = datetime.now(UTC) - timedelta(minutes=1)
-    await store.create(
-        conversation_id,
-        agent_id,
-        "scheduled-daily",
-        DAILY_9AM,
-        "check inbox",
-        "check inbox",
-        due_at,
-    )
     dbos = StubDbos()
     invoker = AdmissionInvoker(
         admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
     )
+    with ws(workspace_id):
+        await store.create(
+            conversation_id,
+            agent_id,
+            "scheduled-daily",
+            DAILY_9AM,
+            "check inbox",
+            "check inbox",
+            due_at,
+        )
+        await ScheduledTaskRunner(ctx=_runner_ctx(invoker)).run()
 
-    await ScheduledTaskRunner(ctx=_runner_ctx(workspace_id, invoker)).run()
-
-    turns = await _turns(conversation_id)
-    assert len(turns) == 1
-    assert turns[0]["inbound"] == "check inbox"
-    assert turns[0]["status"] == "queued"
-    assert dbos.enqueued == [str(turns[0]["id"])]
-    advanced = (await store.list())[0]
-    assert advanced.last_run_at is not None
-    assert await store.claim_due(datetime.now(UTC), 300) == ()
+        turns = await _turns(conversation_id)
+        assert len(turns) == 1
+        assert turns[0]["inbound"] == "check inbox"
+        assert turns[0]["status"] == "queued"
+        assert dbos.enqueued == [str(turns[0]["id"])]
+        advanced = (await store.list())[0]
+        assert advanced.last_run_at is not None
+        assert await store.claim_due(datetime.now(UTC), 300) == ()
 
 
 async def test_fire_into_a_durable_surface_conversation_registers_delivery(db: None) -> None:
@@ -203,75 +209,79 @@ async def test_fire_into_a_durable_surface_conversation_registers_delivery(db: N
     so a task scheduled in a Slack thread delivers its reply there — the writeback row rides the
     turn insert, never a surface handler."""
     workspace_id, agent_id, conversation_id = await _seed(surface="slack")
-    store = ScheduleStore(workspace_id=workspace_id)
+    store = ScheduleStore()
     due_at = datetime.now(UTC) - timedelta(minutes=1)
-    await store.create(
-        conversation_id,
-        agent_id,
-        "scheduled-daily",
-        DAILY_9AM,
-        "check inbox",
-        "check inbox",
-        due_at,
-    )
     invoker = AdmissionInvoker(
         admission=Admission(dbos=StubDbos(), durable_surfaces=frozenset({"slack"})),
         workspace_id=workspace_id,
     )
-    await ScheduledTaskRunner(ctx=_runner_ctx(workspace_id, invoker)).run()
-    turns = await _turns(conversation_id)
-    assert len(turns) == 1
-    async with workspace_tx() as connection:
-        status = (
-            await connection.execute(
-                sa.select(tables.writeback.c.status).where(
-                    tables.writeback.c.turn_id == turns[0]["id"]
+    with ws(workspace_id):
+        await store.create(
+            conversation_id,
+            agent_id,
+            "scheduled-daily",
+            DAILY_9AM,
+            "check inbox",
+            "check inbox",
+            due_at,
+        )
+        await ScheduledTaskRunner(ctx=_runner_ctx(invoker)).run()
+        turns = await _turns(conversation_id)
+        assert len(turns) == 1
+        async with workspace_tx() as connection:
+            status = (
+                await connection.execute(
+                    sa.select(tables.writeback.c.status).where(
+                        tables.writeback.c.turn_id == turns[0]["id"]
+                    )
                 )
-            )
-        ).scalar_one()
-    assert status == WRITEBACK_PENDING
+            ).scalar_one()
+        assert status == WRITEBACK_PENDING
 
 
 async def test_second_poll_does_not_refire_an_advanced_task(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
-    store = ScheduleStore(workspace_id=workspace_id)
+    store = ScheduleStore()
     due_at = datetime.now(UTC) - timedelta(minutes=1)
-    await store.create(
-        conversation_id,
-        agent_id,
-        "scheduled-daily",
-        DAILY_9AM,
-        "check inbox",
-        "check inbox",
-        due_at,
-    )
     dbos = StubDbos()
     ctx = _runner_ctx(
-        workspace_id,
         AdmissionInvoker(
             admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
         ),
     )
-    await ScheduledTaskRunner(ctx=ctx).run()
-    await ScheduledTaskRunner(ctx=ctx).run()
-    assert len(await _turns(conversation_id)) == 1
+    with ws(workspace_id):
+        await store.create(
+            conversation_id,
+            agent_id,
+            "scheduled-daily",
+            DAILY_9AM,
+            "check inbox",
+            "check inbox",
+            due_at,
+        )
+        await ScheduledTaskRunner(ctx=ctx).run()
+        await ScheduledTaskRunner(ctx=ctx).run()
+        assert len(await _turns(conversation_id)) == 1
 
 
 async def test_cancel_scheduled_task_removes_it(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     ctx = _tool_ctx(workspace_id, conversation_id, agent_id)
-    await schedule_task(ctx, ScheduleTaskInput(schedule=DAILY_9AM, prompt="x", name="watcher"))
-    cancelled = await cancel_scheduled_task(ctx, CancelScheduledTaskInput(name="scheduled-watcher"))
-    assert "Cancelled" in cancelled.content[0].text
-    assert await ScheduleStore(workspace_id=workspace_id).list() == ()
-    listed = await list_scheduled_tasks(ctx, ListScheduledTasksInput())
-    assert listed.content[0].text == "No scheduled tasks."
+    with ws(workspace_id):
+        await schedule_task(ctx, ScheduleTaskInput(schedule=DAILY_9AM, prompt="x", name="watcher"))
+        cancelled = await cancel_scheduled_task(
+            ctx, CancelScheduledTaskInput(name="scheduled-watcher")
+        )
+        assert "Cancelled" in cancelled.content[0].text
+        assert await ScheduleStore().list() == ()
+        listed = await list_scheduled_tasks(ctx, ListScheduledTasksInput())
+        assert listed.content[0].text == "No scheduled tasks."
 
 
 async def test_schedule_task_rejects_non_five_field_cron(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     ctx = _tool_ctx(workspace_id, conversation_id, agent_id)
-    with pytest.raises(ValueError, match="5-field"):
+    with ws(workspace_id), pytest.raises(ValueError, match="5-field"):
         await schedule_task(
             ctx, ScheduleTaskInput(schedule="0 9 * * * *", prompt="too many fields")
         )
@@ -285,15 +295,16 @@ def test_task_scheduling_skill_parses_and_indexes() -> None:
 async def test_manifest_job_fires_through_job_runner(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     due_at = datetime.now(UTC) - timedelta(minutes=1)
-    await ScheduleStore(workspace_id=workspace_id).create(
-        conversation_id,
-        agent_id,
-        "scheduled-daily",
-        DAILY_9AM,
-        "check inbox",
-        "check inbox",
-        due_at,
-    )
+    with ws(workspace_id):
+        await ScheduleStore().create(
+            conversation_id,
+            agent_id,
+            "scheduled-daily",
+            DAILY_9AM,
+            "check inbox",
+            "check inbox",
+            due_at,
+        )
     dbos = StubDbos()
     runner = JobRunner(
         workspace_id=workspace_id,
@@ -309,11 +320,12 @@ async def test_manifest_job_fires_through_job_runner(db: None) -> None:
 
 async def test_invoke_without_invoker_fails_loud(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
-    store = ScheduleStore(workspace_id=workspace_id)
+    store = ScheduleStore()
     due_at = datetime.now(UTC) - timedelta(minutes=1)
-    await store.create(
-        conversation_id, agent_id, "scheduled-x", DAILY_9AM, "do it", "do it", due_at
-    )
-    ctx = context_for(workspace_id, NAME, frozenset(), _credentials())
-    with pytest.raises(RuntimeError, match="scheduled task fires failed"):
-        await ScheduledTaskRunner(ctx=ctx).run()
+    ctx = context_for(NAME, frozenset())
+    with ws(workspace_id):
+        await store.create(
+            conversation_id, agent_id, "scheduled-x", DAILY_9AM, "do it", "do it", due_at
+        )
+        with pytest.raises(RuntimeError, match="scheduled task fires failed"):
+            await ScheduledTaskRunner(ctx=ctx).run()

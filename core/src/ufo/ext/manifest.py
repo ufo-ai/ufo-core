@@ -165,15 +165,21 @@ class EmbedBackendSpec:
 class ModelProviderSpec:
     """One model backend an extension contributes. `matches` claims the model ids this backend
     serves — an explicit-slug test, a prefix test, or a catch-all router; `client` builds the
-    `ModelClient` for a served id, resolving its own API key when the turn selects it (once per
-    turn, never at boot); `prices` are the `(model_id, ModelPrice)` rates it knows, merged over
-    core's table so its slugs are billed and stamped. The registry tries providers in order — core's
-    direct Anthropic + OpenAI first — so a contributed router serves only what core does not
-    claim."""
+    `ModelClient` for a served id from the api key the registry resolves and hands it, once per
+    turn, never at boot; `prices` are the `(model_id, ModelPrice)` rates it knows, merged over
+    core's table so its slugs are billed and stamped. The registry tries providers in order —
+    core's direct Anthropic + OpenAI first — so a contributed router serves only what core lacks.
+
+    `key_slot`/`key_env` name where the registry resolves this provider's api key per turn: the
+    workspace's stored BYOK secret under `key_slot` if set, else the platform default in env
+    `key_env`. Both empty means the provider needs no key (a stub or a keyless local backend) and
+    `client` is handed the empty string."""
 
     name: str
     matches: Callable[[str], bool]
-    client: Callable[[str], ModelClient]
+    client: Callable[[str, str], ModelClient]
+    key_slot: str = ""
+    key_env: str = ""
     prices: tuple[tuple[str, ModelPrice], ...] = ()
 
 

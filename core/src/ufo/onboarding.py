@@ -24,6 +24,7 @@ from ufo.models.registry import model_registry
 from ufo.o11y import log
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME
+from ufo.workspace import ws
 
 DEFAULT_AGENT_PROMPT = "You are a helpful assistant."
 
@@ -49,28 +50,26 @@ async def run_onboarding_steps(
     seeded per workspace, so rotating a deploy's value reaches every workspace. Steps run AFTER core
     access is established, and a step that raises is logged and skipped — one add-on's failure can
     neither strand the core workspace nor block another extension's steps."""
-    for manifest in manifests:
-        if not manifest.onboarding_steps:
-            continue
-        if credentials is None:
-            log("onboarding.steps_skipped_no_credential_key", extension=manifest.name)
-            continue
-        context = context_for(
-            workspace_id,
-            manifest.name,
-            frozenset(slot.name for slot in manifest.credentials),
-            credentials,
-        )
-        for step in manifest.onboarding_steps:
-            try:
-                await step.handler(context)
-            except Exception as error:
-                log(
-                    "onboarding.step_failed",
-                    extension=manifest.name,
-                    step=step.name,
-                    error_class=type(error).__name__,
-                )
+    with ws(workspace_id):
+        for manifest in manifests:
+            if not manifest.onboarding_steps:
+                continue
+            if credentials is None:
+                log("onboarding.steps_skipped_no_credential_key", extension=manifest.name)
+                continue
+            context = context_for(
+                manifest.name, frozenset(slot.name for slot in manifest.credentials)
+            )
+            for step in manifest.onboarding_steps:
+                try:
+                    await step.handler(context)
+                except Exception as error:
+                    log(
+                        "onboarding.step_failed",
+                        extension=manifest.name,
+                        step=step.name,
+                        error_class=type(error).__name__,
+                    )
 
 
 @dataclass(frozen=True)

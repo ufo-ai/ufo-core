@@ -9,7 +9,7 @@ credential store, so the host-side key read is exercised end to end (the key lan
 wire; the mapping is what the model ultimately sees."""
 
 import json
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -22,6 +22,7 @@ from ufo.db import workspace_tx
 from ufo.ext.context import context_for
 from ufo.schema import tables
 from ufo.sdk.search import FetchRequest, SearchQuery
+from ufo.workspace import init_workspace_credentials, ws
 
 EXA_KEY = "exa-live-secret-0xdeadbeef"
 
@@ -40,7 +41,7 @@ class _Recorder:
         return httpx.Response(self._status, json=self._payload)
 
 
-async def _keyed_provider(recorder: _Recorder) -> exa.ExaSearchProvider:
+async def _keyed_provider(recorder: _Recorder) -> tuple[exa.ExaSearchProvider, UUID]:
     workspace_id = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -49,11 +50,13 @@ async def _keyed_provider(recorder: _Recorder) -> exa.ExaSearchProvider:
             )
         )
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    init_workspace_credentials(store)
     await store.put(workspace_id, exa.EXA_SLOT, EXA_KEY)
-    credentials = context_for(workspace_id, exa.NAME, frozenset({exa.EXA_SLOT}), store).credentials
-    return exa.ExaSearchProvider(
+    credentials = context_for(exa.NAME, frozenset({exa.EXA_SLOT})).credentials
+    provider = exa.ExaSearchProvider(
         credentials=credentials, transport=httpx.MockTransport(recorder.handle)
     )
+    return provider, workspace_id
 
 
 def _body(recorder: _Recorder) -> dict[str, object]:
@@ -88,10 +91,13 @@ async def test_search_posts_one_exa_search_body_and_maps_the_results(db: None) -
             ]
         }
     )
-    provider = await _keyed_provider(recorder)
-    results = await provider.search(
-        SearchQuery(query="alpha", num_results=5, recency="week", allowed_domains=("docs.x.test",))
-    )
+    provider, workspace_id = await _keyed_provider(recorder)
+    with ws(workspace_id):
+        results = await provider.search(
+            SearchQuery(
+                query="alpha", num_results=5, recency="week", allowed_domains=("docs.x.test",)
+            )
+        )
     request = recorder.requests[-1]
     assert request.url.path == "/search"
     assert request.headers["x-api-key"] == EXA_KEY
@@ -115,8 +121,9 @@ async def test_search_posts_one_exa_search_body_and_maps_the_results(db: None) -
 
 async def test_search_omits_domain_and_recency_filters_when_unset(db: None) -> None:
     recorder = _Recorder({"results": []})
-    provider = await _keyed_provider(recorder)
-    await provider.search(SearchQuery(query="solo", num_results=5))
+    provider, workspace_id = await _keyed_provider(recorder)
+    with ws(workspace_id):
+        await provider.search(SearchQuery(query="solo", num_results=5))
     body = _body(recorder)
     assert "includeDomains" not in body
     assert "startPublishedDate" not in body
@@ -124,10 +131,11 @@ async def test_search_omits_domain_and_recency_filters_when_unset(db: None) -> N
 
 async def test_vertical_search_carries_its_category_and_narrower_snippet(db: None) -> None:
     recorder = _Recorder({"results": [{"title": "paper"}]})
-    provider = await _keyed_provider(recorder)
-    await provider.search(
-        SearchQuery(query="graph transformers", num_results=5, vertical="academic")
-    )
+    provider, workspace_id = await _keyed_provider(recorder)
+    with ws(workspace_id):
+        await provider.search(
+            SearchQuery(query="graph transformers", num_results=5, vertical="academic")
+        )
     body = _body(recorder)
     assert body["category"] == "research paper"
     assert body["contents"] == {"text": {"maxCharacters": 500}}
@@ -135,8 +143,9 @@ async def test_vertical_search_carries_its_category_and_narrower_snippet(db: Non
 
 async def test_vertical_search_without_a_mapped_category_sends_none(db: None) -> None:
     recorder = _Recorder({"results": []})
-    provider = await _keyed_provider(recorder)
-    await provider.search(SearchQuery(query="how to knit", num_results=5, vertical="video"))
+    provider, workspace_id = await _keyed_provider(recorder)
+    with ws(workspace_id):
+        await provider.search(SearchQuery(query="how to knit", num_results=5, vertical="video"))
     body = _body(recorder)
     assert "category" not in body
 
@@ -145,10 +154,13 @@ async def test_fetch_posts_contents_with_summary_livecrawl_and_clamped_length(db
     recorder = _Recorder(
         {"results": [{"url": "https://ex.test/a", "text": "page text", "summary": "the summary"}]}
     )
-    provider = await _keyed_provider(recorder)
-    page = await provider.fetch(
-        FetchRequest(url="https://ex.test/a", prompt="summarize it", max_chars=999_999, force=True)
-    )
+    provider, workspace_id = await _keyed_provider(recorder)
+    with ws(workspace_id):
+        page = await provider.fetch(
+            FetchRequest(
+                url="https://ex.test/a", prompt="summarize it", max_chars=999_999, force=True
+            )
+        )
     request = recorder.requests[-1]
     assert request.url.path == "/contents"
     assert request.headers["x-api-key"] == EXA_KEY
@@ -162,8 +174,9 @@ async def test_fetch_posts_contents_with_summary_livecrawl_and_clamped_length(db
 
 async def test_fetch_defaults_omit_summary_and_livecrawl(db: None) -> None:
     recorder = _Recorder({"results": [{"url": "u", "text": "t"}]})
-    provider = await _keyed_provider(recorder)
-    page = await provider.fetch(FetchRequest(url="https://ex.test"))
+    provider, workspace_id = await _keyed_provider(recorder)
+    with ws(workspace_id):
+        page = await provider.fetch(FetchRequest(url="https://ex.test"))
     body = _body(recorder)
     assert body["text"] == {"maxCharacters": 20_000}
     assert "summary" not in body
@@ -173,6 +186,6 @@ async def test_fetch_defaults_omit_summary_and_livecrawl(db: None) -> None:
 
 async def test_a_non_2xx_status_raises_carrying_the_body(db: None) -> None:
     recorder = _Recorder({"error": "unauthorized"}, status=401)
-    provider = await _keyed_provider(recorder)
-    with pytest.raises(exa.ExaError, match="unauthorized"):
+    provider, workspace_id = await _keyed_provider(recorder)
+    with ws(workspace_id), pytest.raises(exa.ExaError, match="unauthorized"):
         await provider.fetch(FetchRequest(url="https://ex.test"))

@@ -46,6 +46,7 @@ from ufo.sdk.sources import (
 )
 from ufo.sources.sync import CorePageFeed, SourceAuth, StreamSkipped, SyncDriver
 from ufo.subjects import SHARED_SUBJECT
+from ufo.workspace import init_workspace_credentials, ws
 
 ACCOUNT = "acct-1"
 
@@ -498,20 +499,20 @@ async def test_direct_backend_returns_a_bearer_read_from_the_credential_store(db
     it as a bearer — the secret is decrypted in-process, never surfaced to the sandbox or agent."""
     workspace_id = await _workspace()
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    init_workspace_credentials(store)
     await store.put(workspace_id, "github", "ghp_realkey")
-    access = CredentialAccess(
-        workspace_id=workspace_id, declared=frozenset({"github"}), _store=store
-    )
-    credential = await DirectAuthProxy(credentials=access).credential(
-        workspace_id, "github", ACCOUNT
-    )
+    access = CredentialAccess(declared=frozenset({"github"}))
+    with ws(workspace_id):
+        credential = await DirectAuthProxy(credentials=access).credential(
+            workspace_id, "github", ACCOUNT
+        )
     assert credential == Credential(bearer="ghp_realkey")
 
 
 async def test_direct_backend_refuses_a_provider_slot_it_never_declared() -> None:
     from ufo.ext.context import UndeclaredCredentialSlot
 
-    access = CredentialAccess(workspace_id=uuid4(), declared=frozenset(), _store=None)
+    access = CredentialAccess(declared=frozenset())
     with pytest.raises(UndeclaredCredentialSlot):
         await DirectAuthProxy(credentials=access).credential(uuid4(), "github", ACCOUNT)
 
@@ -582,11 +583,11 @@ async def test_asana_source_syncs_through_the_driver_into_recallable_memory(
         if database_url.startswith("sqlite"):
             await connection.execute(sa.text("delete from chunk_fts"))
 
-    credentials = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    context = context_for(workspace_id, "sources", frozenset(), credentials)
-    await context.register_source(
-        "asana", ConnectorSourceConfig(account=ACCOUNT, stream="workspaces")
-    )
+    context = context_for("sources", frozenset())
+    with ws(workspace_id):
+        await context.register_source(
+            "asana", ConnectorSourceConfig(account=ACCOUNT, stream="workspaces")
+        )
 
     handler = _asana_handler({None: {"data": [{"gid": "111", "name": "Acme HQ workspace"}]}})
     embed = _StubEmbed(_vec((6, 1.0)))

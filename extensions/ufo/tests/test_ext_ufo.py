@@ -179,7 +179,7 @@ class StandInModel:
 STANDIN_REGISTRY = ModelRegistry(
     providers=(
         ModelProviderSpec(
-            name="standin", matches=lambda model: True, client=lambda model: StandInModel()
+            name="standin", matches=lambda model: True, client=lambda model, key: StandInModel()
         ),
     ),
     pricing=CORE_PRICING,

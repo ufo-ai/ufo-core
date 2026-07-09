@@ -106,6 +106,17 @@ class ServeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     host: str = "127.0.0.1"
     port: int = 8710
+    shared_workspace: bool = False
+    """The shared serve fleet: one process serves every workspace, resolving the workspace per
+    request (from the member's token) and per turn (from the workflow argument) instead of pinning
+    one at boot. It connects as an RLS-*subject* role and scopes each transaction by the ambient
+    `current_workspace`. Default off: the single-workspace per-tenant / dedicated (enterprise)
+    serve, unchanged."""
+    session_secret_env: str = "UFO_SESSION_SECRET"
+    """Env holding the HMAC secret the shared fleet signs member session tokens with — the token
+    carries the workspace claim the surface trusts before any RLS-scoped read. Read only when
+    `shared_workspace` is set; the per-tenant surface authenticates by the stored opaque token and
+    needs no signing secret."""
 
 
 class ConnectConfig(BaseModel):

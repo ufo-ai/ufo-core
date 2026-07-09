@@ -34,6 +34,7 @@ from ufo.schema.records import Agent, Turn, Usage
 from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.context import SpawnResult, TextContent, ToolContext, ToolResult
 from ufo.tools.registry import ToolDef, ToolRegistry
+from ufo.workspace import ws
 
 EXTENSION = "sample"
 
@@ -249,8 +250,7 @@ async def test_extension_tool_runs_in_turn_with_its_scoped_context(
     db: None, tmp_path: Path
 ) -> None:
     turn = await _seed_turn()
-    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    context = context_for(turn.workspace_id, EXTENSION, frozenset(), store)
+    context = context_for(EXTENSION, frozenset())
     engine = _engine(
         turn,
         OneToolModel(tool_name="record_note", args_json='{"note": "from the turn"}'),
@@ -258,10 +258,11 @@ async def test_extension_tool_runs_in_turn_with_its_scoped_context(
         (*BUILTIN_TOOLS, NOTE_TOOL),
         {"record_note": context},
     )
-    frame = await engine.run()
-    assert frame.status == "done"
-    scoped = ScopedStore(workspace_id=turn.workspace_id, extension=EXTENSION)
-    assert await scoped.get("note") == {"text": "from the turn"}
+    with ws(turn.workspace_id):
+        frame = await engine.run()
+        assert frame.status == "done"
+        scoped = ScopedStore(extension=EXTENSION)
+        assert await scoped.get("note") == {"text": "from the turn"}
 
 
 async def test_builtin_shaped_tool_dispatches_with_ext_none(db: None, tmp_path: Path) -> None:
@@ -325,20 +326,21 @@ def test_turn_tools_maps_extension_tools_to_owning_context_and_leaves_builtins_u
         tools=(NOTE_TOOL,),
         credentials=(CredentialSlot(name="sample_api", description="key"),),
     )
-    tools, ext_by_tool = turn_tools((manifest,), workspace_id, store)
+    tools, ext_by_tool = turn_tools((manifest,), store)
     names = {tool.name for tool in tools}
     assert {builtin.name for builtin in BUILTIN_TOOLS} <= names
     assert "record_note" in names
     assert set(ext_by_tool) == {"record_note"}
     context = ext_by_tool["record_note"]
     assert context.store.extension == EXTENSION
-    assert context.store.workspace_id == workspace_id
+    with ws(workspace_id):
+        assert context.store.workspace_id == workspace_id
     assert context.credentials.declared == frozenset({"sample_api"})
     assert not any(builtin.name in ext_by_tool for builtin in BUILTIN_TOOLS)
 
 
 def test_turn_tools_without_manifests_is_builtins_and_empty_map() -> None:
-    tools, ext_by_tool = turn_tools((), uuid4(), None)
+    tools, ext_by_tool = turn_tools((), None)
     assert tools == BUILTIN_TOOLS
     assert ext_by_tool == {}
 
@@ -351,12 +353,12 @@ def test_turn_tools_fails_loud_when_credential_slots_declared_without_key() -> N
         credentials=(CredentialSlot(name="k", description="key"),),
     )
     with pytest.raises(RuntimeError, match="declares credential slots"):
-        turn_tools((manifest,), uuid4(), None)
+        turn_tools((manifest,), None)
 
 
 def test_turn_tools_builds_slot_free_tools_without_a_credential_key() -> None:
     manifest = Manifest(name=EXTENSION, version="0.1.0", tools=(NOTE_TOOL,))
-    tools, ext_by_tool = turn_tools((manifest,), uuid4(), None)
+    tools, ext_by_tool = turn_tools((manifest,), None)
     assert NOTE_TOOL in tools
     assert NOTE_TOOL.name in ext_by_tool
 
@@ -371,7 +373,7 @@ def test_validate_ext_tools_rejects_a_name_colliding_with_a_builtin() -> None:
     )
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     with pytest.raises(ValueError, match="bash"):
-        validate_ext_tools((manifest,), uuid4(), store)
+        validate_ext_tools((manifest,), store)
 
 
 def test_validate_ext_tools_fails_loud_without_a_credential_key_at_boot() -> None:
@@ -382,4 +384,4 @@ def test_validate_ext_tools_fails_loud_without_a_credential_key_at_boot() -> Non
         credentials=(CredentialSlot(name="k", description="key"),),
     )
     with pytest.raises(RuntimeError, match="credential"):
-        validate_ext_tools((manifest,), uuid4(), None)
+        validate_ext_tools((manifest,), None)

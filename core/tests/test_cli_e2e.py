@@ -295,7 +295,7 @@ STANDIN_REGISTRY = ModelRegistry(
         ModelProviderSpec(
             name="standin",
             matches=lambda model: True,
-            client=lambda model: StandInModel(),
+            client=lambda model, key: StandInModel(),
         ),
     ),
     pricing=CORE_PRICING,
@@ -440,6 +440,7 @@ def chat_server(
     app.state.hub = hub
     app.state.dbos = dbos_client
     app.state.durable_surfaces = frozenset()
+    app.state.shared_workspace = False
     app.include_router(router)
     server = _ThreadedServer(app, port)
     server.start()

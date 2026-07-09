@@ -89,6 +89,7 @@ from ufo.sources.sync import CorePageFeed, SyncDriver
 from ufo.subjects import SHARED_SUBJECT
 from ufo.tools.context import SpawnResult, ToolContext
 from ufo.transcript import Conversation, transcript_key
+from ufo.workspace import ws
 
 SANDBOX_UNTOUCHED = "the sample tool records through its store and must not reach the sandbox"
 
@@ -261,21 +262,16 @@ def test_core_selects_a_manifest_contributed_cdp_provider() -> None:
     manifests claiming one name fails loud; a provider whose extension declares credential slots
     with no key set fails loud."""
     manifest = _sample_manifest()
-    workspace_id = uuid4()
     store = _credential_store()
 
-    assert _select_cdp_provider(_cdp_config("nonesuch"), (), workspace_id, None) is None
-    selected = _select_cdp_provider(
-        _cdp_config(sample.CDP_PROVIDER), (manifest,), workspace_id, store
-    )
+    assert _select_cdp_provider(_cdp_config("nonesuch"), (), None) is None
+    selected = _select_cdp_provider(_cdp_config(sample.CDP_PROVIDER), (manifest,), store)
     assert isinstance(selected, sample.SampleCdpProvider)
-    assert _select_cdp_provider(_cdp_config(sample.CDP_PROVIDER), (), workspace_id, store) is None
+    assert _select_cdp_provider(_cdp_config(sample.CDP_PROVIDER), (), store) is None
     with pytest.raises(RuntimeError, match="two extensions register cdp provider"):
-        _select_cdp_provider(
-            _cdp_config(sample.CDP_PROVIDER), (manifest, manifest), workspace_id, store
-        )
+        _select_cdp_provider(_cdp_config(sample.CDP_PROVIDER), (manifest, manifest), store)
     with pytest.raises(RuntimeError, match="declares credential slots"):
-        _select_cdp_provider(_cdp_config(sample.CDP_PROVIDER), (manifest,), workspace_id, None)
+        _select_cdp_provider(_cdp_config(sample.CDP_PROVIDER), (manifest,), None)
 
 
 async def test_sample_cdp_provider_yields_a_drivable_lease() -> None:
@@ -294,19 +290,16 @@ def test_boot_validation_of_requires_fails_when_no_cdp_provider_is_registered() 
     `requires=("cdp_providers",)` and the selected provider registered by no active extension,
     `_validate_requires` fails loud naming the extension and the seam; registering that provider
     clears it. A `requires` an extension names that core does not know also fails."""
-    workspace_id = uuid4()
     browser = Manifest(name="browser", version="0", requires=("cdp_providers",))
     with pytest.raises(RuntimeError, match=r"requires the 'cdp_providers' seam"):
-        _validate_requires(_cdp_config(sample.CDP_PROVIDER), (browser,), workspace_id, None)
+        _validate_requires(_cdp_config(sample.CDP_PROVIDER), (browser,), None)
 
     provider = _sample_manifest()
-    _validate_requires(
-        _cdp_config(sample.CDP_PROVIDER), (browser, provider), workspace_id, _credential_store()
-    )
+    _validate_requires(_cdp_config(sample.CDP_PROVIDER), (browser, provider), _credential_store())
 
     unknown = Manifest(name="needs-nothing-real", version="0", requires=("nonesuch",))
     with pytest.raises(RuntimeError, match="unknown seam 'nonesuch'"):
-        _validate_requires(_cdp_config(sample.CDP_PROVIDER), (unknown,), workspace_id, None)
+        _validate_requires(_cdp_config(sample.CDP_PROVIDER), (unknown,), None)
 
 
 def test_core_selects_a_manifest_contributed_auth_proxy() -> None:
@@ -316,7 +309,6 @@ def test_core_selects_a_manifest_contributed_auth_proxy() -> None:
     None (folder sources need none); selecting a name no extension registers, two extensions
     claiming one name, and a selected backend with no credential key each fail loud."""
     manifest = _sample_manifest()
-    workspace_id = uuid4()
     store = _credential_store()
 
     def _config(backend: str) -> Config:
@@ -326,19 +318,15 @@ def test_core_selects_a_manifest_contributed_auth_proxy() -> None:
             connectors=ConnectorsConfig(auth_backend=backend),
         )
 
-    selected = _select_auth_proxy(
-        _config(sample.AUTH_PROXY_BACKEND), (manifest,), workspace_id, store
-    )
+    selected = _select_auth_proxy(_config(sample.AUTH_PROXY_BACKEND), (manifest,), store)
     assert isinstance(selected, sample.SampleAuthProxy)
-    assert _select_auth_proxy(_config("composio"), (), workspace_id, store) is None
+    assert _select_auth_proxy(_config("composio"), (), store) is None
     with pytest.raises(RuntimeError, match="no extension registers it"):
-        _select_auth_proxy(_config("nope"), (manifest,), workspace_id, store)
+        _select_auth_proxy(_config("nope"), (manifest,), store)
     with pytest.raises(RuntimeError, match="two extensions register auth proxy"):
-        _select_auth_proxy(
-            _config(sample.AUTH_PROXY_BACKEND), (manifest, manifest), workspace_id, store
-        )
+        _select_auth_proxy(_config(sample.AUTH_PROXY_BACKEND), (manifest, manifest), store)
     with pytest.raises(RuntimeError, match="needs a credential key"):
-        _select_auth_proxy(_config(sample.AUTH_PROXY_BACKEND), (manifest,), workspace_id, None)
+        _select_auth_proxy(_config(sample.AUTH_PROXY_BACKEND), (manifest,), None)
 
 
 async def test_sample_auth_proxy_resolves_a_credential() -> None:
@@ -365,24 +353,17 @@ def test_core_selects_a_manifest_contributed_search_provider() -> None:
     selecting a name no extension registers, two extensions claiming one name, and a selected
     backend with no credential key each fail loud."""
     manifest = _sample_manifest()
-    workspace_id = uuid4()
     store = _credential_store()
 
-    assert _select_search_provider(_search_config(None), (manifest,), workspace_id, store) is None
-    selected = _select_search_provider(
-        _search_config(sample.SEARCH_PROVIDER), (manifest,), workspace_id, store
-    )
+    assert _select_search_provider(_search_config(None), (manifest,), store) is None
+    selected = _select_search_provider(_search_config(sample.SEARCH_PROVIDER), (manifest,), store)
     assert isinstance(selected, sample.SampleSearchProvider)
     with pytest.raises(RuntimeError, match="no extension registers it"):
-        _select_search_provider(_search_config("nope"), (manifest,), workspace_id, store)
+        _select_search_provider(_search_config("nope"), (manifest,), store)
     with pytest.raises(RuntimeError, match="two extensions register search provider"):
-        _select_search_provider(
-            _search_config(sample.SEARCH_PROVIDER), (manifest, manifest), workspace_id, store
-        )
+        _select_search_provider(_search_config(sample.SEARCH_PROVIDER), (manifest, manifest), store)
     with pytest.raises(RuntimeError, match="needs a credential key"):
-        _select_search_provider(
-            _search_config(sample.SEARCH_PROVIDER), (manifest,), workspace_id, None
-        )
+        _select_search_provider(_search_config(sample.SEARCH_PROVIDER), (manifest,), None)
 
 
 async def test_sample_search_provider_answers_a_query_and_fetches() -> None:
@@ -403,17 +384,14 @@ def test_boot_validation_of_requires_fails_when_no_search_backend_is_configured(
     """The `requires` + boot-validation seam for search: an extension declaring `requires`
     `search_providers` fails `serve` at boot when `[research] search_provider` is unset or names no
     registered backend, and clears once the knob names a registered backend the sample provides."""
-    workspace_id = uuid4()
     store = _credential_store()
     manifest = _sample_manifest()
     research = Manifest(name="research", version="0", requires=("search_providers",))
     with pytest.raises(RuntimeError, match=r"requires the 'search_providers' seam"):
-        _validate_requires(_search_config(None), (research, manifest), workspace_id, store)
+        _validate_requires(_search_config(None), (research, manifest), store)
     with pytest.raises(RuntimeError, match=r"requires the 'search_providers' seam"):
-        _validate_requires(_search_config("nope"), (research, manifest), workspace_id, store)
-    _validate_requires(
-        _search_config(sample.SEARCH_PROVIDER), (research, manifest), workspace_id, store
-    )
+        _validate_requires(_search_config("nope"), (research, manifest), store)
+    _validate_requires(_search_config(sample.SEARCH_PROVIDER), (research, manifest), store)
 
 
 def _carrier_config(backend: str) -> Config:
@@ -507,9 +485,8 @@ async def test_subagent_tool_grant_and_default_widen_a_child_beyond_its_named_to
     the research docs list, cross-extension, without the profile hard-coding a foreign name.
     Resolved here exactly as the turn loop does (own names plus grants, plus any subagent-default
     tool) over the real tool pool."""
-    workspace_id = await _workspace()
     manifest = _sample_manifest()
-    all_tools, _ = turn_tools((manifest,), workspace_id, _credential_store())
+    all_tools, _ = turn_tools((manifest,), _credential_store())
     profile = SubagentRegistry(turn_subagents((manifest,))).get(sample.SUBAGENT_NAME)
     grants = turn_subagent_grants((manifest,))
     assert grants[sample.SUBAGENT_NAME] == frozenset({sample.NOTE_TOOL_NAME})
@@ -532,7 +509,7 @@ async def test_sample_model_provider_is_selected_priced_and_streams(tmp_path: Pa
         blob=BlobConfig(backend="filesystem", root=tmp_path),
     )
     registry = model_registry(config, (manifest,))
-    client = registry.client_for(sample.SAMPLE_MODEL)
+    client = await registry.client_for(sample.SAMPLE_MODEL)
     assert isinstance(client, sample.SampleModelClient)
     request = ModelRequest(
         model=sample.SAMPLE_MODEL,
@@ -551,7 +528,7 @@ async def test_sample_model_provider_is_selected_priced_and_streams(tmp_path: Pa
 async def test_tool_dispatches_with_its_scoped_context(db: None, tmp_path: Path) -> None:
     workspace_id = await _workspace()
     manifest = _sample_manifest()
-    tools, ext_by_tool = turn_tools((manifest,), workspace_id, _credential_store())
+    tools, ext_by_tool = turn_tools((manifest,), _credential_store())
     tool = next(tool for tool in tools if tool.name == sample.TOOL_NAME)
     context = ToolContext(
         sandbox=SandboxSession(
@@ -575,10 +552,11 @@ async def test_tool_dispatches_with_its_scoped_context(db: None, tmp_path: Path)
         ext=ext_by_tool[tool.name],
     )
     args = tool.input_model.model_validate({"message": "conformance-echo"})
-    result = await tool.handler(context, args)
-    assert result.is_error is False
-    scoped = ScopedStore(workspace_id=workspace_id, extension=sample.NAME)
-    assert await scoped.get(sample.TOOL_KEY) == {"message": "conformance-echo"}
+    with ws(workspace_id):
+        result = await tool.handler(context, args)
+        assert result.is_error is False
+        scoped = ScopedStore(extension=sample.NAME)
+        assert await scoped.get(sample.TOOL_KEY) == {"message": "conformance-echo"}
 
 
 async def test_extension_owns_a_table_through_its_own_migration(db: None, tmp_path: Path) -> None:
@@ -588,21 +566,23 @@ async def test_extension_owns_a_table_through_its_own_migration(db: None, tmp_pa
     extension owns a real table and reaches only its own workspace's rows."""
     manifest = _sample_manifest()
     first, second = await _workspace(), await _workspace()
-    tools, ext_by_tool = turn_tools((manifest,), first, _credential_store())
+    tools, ext_by_tool = turn_tools((manifest,), _credential_store())
     note = next(tool for tool in tools if tool.name == sample.NOTE_TOOL_NAME)
 
-    write = await note.handler(
-        _tool_context(first, ext_by_tool[note.name], tmp_path),
-        note.input_model.model_validate({"text": "first note"}),
-    )
-    assert write.is_error is False
-    assert write.content[0].text == "first note"
+    with ws(first):
+        write = await note.handler(
+            _tool_context(first, ext_by_tool[note.name], tmp_path),
+            note.input_model.model_validate({"text": "first note"}),
+        )
+        assert write.is_error is False
+        assert write.content[0].text == "first note"
 
-    _, other_ext = turn_tools((manifest,), second, _credential_store())
-    await note.handler(
-        _tool_context(second, other_ext[note.name], tmp_path),
-        note.input_model.model_validate({"text": "second note"}),
-    )
+    _, other_ext = turn_tools((manifest,), _credential_store())
+    with ws(second):
+        await note.handler(
+            _tool_context(second, other_ext[note.name], tmp_path),
+            note.input_model.model_validate({"text": "second note"}),
+        )
 
     async with workspace_tx() as connection:
         rows = (
@@ -637,7 +617,7 @@ async def test_connector_execute_tool_resolves_the_bound_account_without_the_san
         conversation_id=conversation_id,
     )
     manifest = _sample_manifest()
-    tools, ext_by_tool = turn_tools((manifest,), workspace_id, _credential_store())
+    tools, ext_by_tool = turn_tools((manifest,), _credential_store())
     tool = next(tool for tool in tools if tool.name == sample.CONNECTOR_EXECUTE_TOOL_NAME)
     context = ToolContext(
         sandbox=SandboxSession(
@@ -663,15 +643,16 @@ async def test_connector_execute_tool_resolves_the_bound_account_without_the_san
     )
     args = tool.input_model.model_validate({"tool_name": "sample_list"})
     idempotency_key = f"{context.turn.id}/{sample.CONNECTOR_EXECUTE_TOOL_NAME}/c1"
-    result = await tool.handler(replace(context, idempotency_key=idempotency_key), args)
-    assert result.is_error is False
-    assert result.content[0].text == sample.CONNECTOR_ACCOUNT
-    scoped = ScopedStore(workspace_id=workspace_id, extension=sample.NAME)
-    assert await scoped.get(sample.CONNECTOR_EXECUTE_KEY) == {
-        "account": sample.CONNECTOR_ACCOUNT,
-        "tool_name": "sample_list",
-        "idempotency_key": idempotency_key,
-    }
+    with ws(workspace_id):
+        result = await tool.handler(replace(context, idempotency_key=idempotency_key), args)
+        assert result.is_error is False
+        assert result.content[0].text == sample.CONNECTOR_ACCOUNT
+        scoped = ScopedStore(extension=sample.NAME)
+        assert await scoped.get(sample.CONNECTOR_EXECUTE_KEY) == {
+            "account": sample.CONNECTOR_ACCOUNT,
+            "tool_name": "sample_list",
+            "idempotency_key": idempotency_key,
+        }
 
 
 async def test_credential_slot_derives_its_injection_and_meter_rules(db: None) -> None:
@@ -692,10 +673,9 @@ async def test_credential_slot_derives_its_injection_and_meter_rules(db: None) -
 
 
 async def test_undeclared_credential_slot_is_refused(db: None) -> None:
-    workspace_id = await _workspace()
     manifest = _sample_manifest()
     declared = frozenset(slot.name for slot in manifest.credentials)
-    context = context_for(workspace_id, manifest.name, declared, _credential_store())
+    context = context_for(manifest.name, declared)
     assert sample.UNDECLARED_SLOT not in declared
     with pytest.raises(UndeclaredCredentialSlot, match=sample.UNDECLARED_SLOT):
         await context.credentials.get(sample.UNDECLARED_SLOT)
@@ -705,12 +685,11 @@ async def test_context_confines_the_credential_handle(db: None) -> None:
     """The credential handle a context carries exposes only its gated methods: no raw
     CredentialStore field to read an undeclared slot. The same confinement holds whether the context
     is built for a job/route (`context_for`) or a tool (`turn_tools`)."""
-    workspace_id = await _workspace()
     manifest = _sample_manifest()
     declared = frozenset(slot.name for slot in manifest.credentials)
-    _, ext_by_tool = turn_tools((manifest,), workspace_id, _credential_store())
+    _, ext_by_tool = turn_tools((manifest,), _credential_store())
     for context in (
-        context_for(workspace_id, manifest.name, declared, _credential_store()),
+        context_for(manifest.name, declared),
         ext_by_tool[sample.TOOL_NAME],
     ):
         assert {name for name in dir(context.credentials) if not name.startswith("_")} == {
@@ -737,16 +716,18 @@ async def test_job_fires_through_its_scoped_context(db: None) -> None:
         bindings=bindings_from((manifest,), ()),
     )
     await runner.fire(f"{manifest.name}:{sample.JOB_NAME}")
-    scoped = ScopedStore(workspace_id=workspace_id, extension=sample.NAME)
-    assert await scoped.get(sample.JOB_KEY) == {"ran": True}
+    with ws(workspace_id):
+        scoped = ScopedStore(extension=sample.NAME)
+        assert await scoped.get(sample.JOB_KEY) == {"ran": True}
 
 
 async def test_onboarding_step_runs_through_its_scoped_context(db: None) -> None:
     workspace_id = await _workspace()
     manifest = _sample_manifest()
     await run_onboarding_steps((manifest,), workspace_id, _credential_store())
-    scoped = ScopedStore(workspace_id=workspace_id, extension=sample.NAME)
-    assert await scoped.get(sample.ONBOARDING_KEY) == {"onboarded": True}
+    with ws(workspace_id):
+        scoped = ScopedStore(extension=sample.NAME)
+        assert await scoped.get(sample.ONBOARDING_KEY) == {"onboarded": True}
 
 
 async def test_route_reaches_its_scoped_context(db: None) -> None:
@@ -758,8 +739,9 @@ async def test_route_reaches_its_scoped_context(db: None) -> None:
         response = await client.post(f"/ext/{sample.NAME}/{sample.ROUTE_PATH}", content="ping")
     assert response.status_code == 200
     assert response.text == "ping"
-    scoped = ScopedStore(workspace_id=workspace_id, extension=sample.NAME)
-    assert await scoped.get(sample.ROUTE_KEY) == {"body": "ping"}
+    with ws(workspace_id):
+        scoped = ScopedStore(extension=sample.NAME)
+        assert await scoped.get(sample.ROUTE_KEY) == {"body": "ping"}
 
 
 async def test_a_second_workspace_reaches_none_of_the_firsts_rows(db: None) -> None:
@@ -774,13 +756,13 @@ async def test_a_second_workspace_reaches_none_of_the_firsts_rows(db: None) -> N
     store = _credential_store()
     await store.put(first, sample.API_SLOT, "sk-first")
 
-    assert await ScopedStore(workspace_id=second, extension=sample.NAME).get(sample.JOB_KEY) is None
+    with ws(second):
+        assert await ScopedStore(extension=sample.NAME).get(sample.JOB_KEY) is None
     with pytest.raises(CredentialSlotUnset):
         await store.get(second, sample.API_SLOT)
 
-    assert await ScopedStore(workspace_id=first, extension=sample.NAME).get(sample.JOB_KEY) == {
-        "ran": True
-    }
+    with ws(first):
+        assert await ScopedStore(extension=sample.NAME).get(sample.JOB_KEY) == {"ran": True}
 
 
 SEED_PROMPT = "You are helpful."
@@ -859,9 +841,10 @@ async def test_job_reads_trajectories_and_opens_a_governed_proposal(
         blob=blob,
     ).fire(f"{manifest.name}:{sample.JOB_NAME}")
 
-    scoped = ScopedStore(workspace_id=workspace_id, extension=sample.NAME)
-    assert await scoped.get(sample.TRAJECTORY_KEY) == {"count": 1}
-    assert await scoped.get(sample.PROPOSAL_KEY) is not None
+    with ws(workspace_id):
+        scoped = ScopedStore(extension=sample.NAME)
+        assert await scoped.get(sample.TRAJECTORY_KEY) == {"count": 1}
+        assert await scoped.get(sample.PROPOSAL_KEY) is not None
 
     async with workspace_tx() as connection:
         proposal = (
@@ -901,7 +884,7 @@ async def test_job_context_confines_blob_to_a_workspace_scoped_trajectory_read(
     await _seed_trajectory(second, blob)
     await blob.put("artifacts/leak/report.txt", b"private")
 
-    context = context_for(first, sample.NAME, frozenset(), _credential_store(), blob=blob)
+    context = context_for(sample.NAME, frozenset(), blob=blob)
 
     assert "blob" not in {field.name for field in fields(context)}
     assert isinstance(context.corpus, TrajectoryCorpus)
@@ -910,7 +893,8 @@ async def test_job_context_confines_blob_to_a_workspace_scoped_trajectory_read(
         "workspace_id",
     }
 
-    trajectories = await context.trajectories()
+    with ws(first):
+        trajectories = await context.trajectories()
     assert len(trajectories) == 1
     assert trajectories[0].agent_id == first_agent
 
@@ -923,8 +907,9 @@ async def test_a_corrupt_transcript_is_skipped_not_aborting_the_corpus(
     good_agent = await _seed_trajectory(workspace_id, blob)
     await _seed_trajectory(workspace_id, blob, corrupt=True)
 
-    context = context_for(workspace_id, sample.NAME, frozenset(), _credential_store(), blob=blob)
-    trajectories = await context.trajectories()
+    context = context_for(sample.NAME, frozenset(), blob=blob)
+    with ws(workspace_id):
+        trajectories = await context.trajectories()
     assert len(trajectories) == 1
     assert trajectories[0].agent_id == good_agent
 
@@ -933,8 +918,8 @@ async def test_a_corrupt_transcript_is_skipped_not_aborting_the_corpus(
 class _StubDbos:
     enqueued: list[str] = field(default_factory=list)
 
-    async def enqueue_async(self, options: object, workflow_id: str) -> None:
-        self.enqueued.append(workflow_id)
+    async def enqueue_async(self, options: object, workspace_id: str, turn_id: str) -> None:
+        self.enqueued.append(turn_id)
 
 
 async def _surface_workspace() -> tuple[UUID, UUID, str]:
@@ -1223,21 +1208,28 @@ async def test_core_selects_a_manifest_index_backend_by_name(db: None, database_
     embed = _StubEmbed(_vec((0, 1.0)))
     store = _credential_store()
 
-    selected = index_backend((manifest,), sample.INDEX_BACKEND, embed, workspace_id, store)
+    selected = index_backend((manifest,), sample.INDEX_BACKEND, embed, store)
     assert isinstance(selected, sample.SampleIndex)
-    await selected.upsert(
-        (Chunk("d1", OWNER_KIND_MEMORY_ITEM, "m1", SHARED_SUBJECT, 0, "orbital", _vec((0, 1.0))),)
-    )
-    hits = await selected.lexical("orbital", frozenset({SHARED_SUBJECT}), OWNER_KIND_MEMORY_ITEM, 5)
+    with ws(workspace_id):
+        await selected.upsert(
+            (
+                Chunk(
+                    "d1", OWNER_KIND_MEMORY_ITEM, "m1", SHARED_SUBJECT, 0, "orbital", _vec((0, 1.0))
+                ),
+            )
+        )
+        hits = await selected.lexical(
+            "orbital", frozenset({SHARED_SUBJECT}), OWNER_KIND_MEMORY_ITEM, 5
+        )
     assert [hit.chunk_digest for hit in hits] == ["d1"]
 
-    default = index_backend((manifest, index_default.manifest()), None, embed, workspace_id, store)
+    default = index_backend((manifest, index_default.manifest()), None, embed, store)
     assert isinstance(default, DefaultIndex)
 
     with pytest.raises(RuntimeError, match="no extension registers"):
-        index_backend((manifest,), "nonesuch", embed, workspace_id, store)
+        index_backend((manifest,), "nonesuch", embed, store)
     with pytest.raises(RuntimeError, match="needs a credential key"):
-        index_backend((manifest,), sample.INDEX_BACKEND, embed, workspace_id, None)
+        index_backend((manifest,), sample.INDEX_BACKEND, embed, None)
 
 
 async def test_core_selects_a_manifest_embed_backend_by_name(db: None, database_url: str) -> None:
@@ -1245,17 +1237,16 @@ async def test_core_selects_a_manifest_embed_backend_by_name(db: None, database_
     sample's backend, core builds the manifest-contributed EmbedClient and it is driven through the
     protocol. Unset resolves the base-pinned `embed_openai` extension's `"default"` backend; an
     unknown name fails loud."""
-    workspace_id = await _workspace()
     manifest = _sample_manifest()
     store = _credential_store()
 
-    selected = embed_backend((manifest,), sample.EMBED_BACKEND, workspace_id, store)
+    selected = embed_backend((manifest,), sample.EMBED_BACKEND, store)
     assert isinstance(selected, sample.SampleEmbed)
     vectors = await selected.embed(("one", "two"))
     assert vectors == (sample.SAMPLE_EMBED_VECTOR, sample.SAMPLE_EMBED_VECTOR)
 
     with pytest.raises(RuntimeError, match="no extension registers"):
-        embed_backend((manifest,), "nonesuch", workspace_id, store)
+        embed_backend((manifest,), "nonesuch", store)
 
 
 def test_sample_pack_activates_its_bundled_extension_and_own_contributions() -> None:
@@ -1294,5 +1285,6 @@ async def test_sample_pack_onboarding_step_runs_through_its_scoped_context(db: N
     — read back here through the same public surface, proving the step ran scoped to the pack."""
     workspace_id = await _workspace()
     await run_onboarding_steps(load_manifests(sample_pack.NAME), workspace_id, _credential_store())
-    scoped = ScopedStore(workspace_id=workspace_id, extension=sample_pack.NAME)
-    assert await scoped.get(sample_pack.ONBOARDING_KEY) == {"pack_onboarded": True}
+    with ws(workspace_id):
+        scoped = ScopedStore(extension=sample_pack.NAME)
+        assert await scoped.get(sample_pack.ONBOARDING_KEY) == {"pack_onboarded": True}

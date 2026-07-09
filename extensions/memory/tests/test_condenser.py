@@ -29,7 +29,7 @@ from ufo_ext_memory.store import (
     memory_item,
 )
 
-from ufo.accounting import CORE_PRICING
+from ufo.accounting import CORE_PRICING, Pricing
 from ufo.blob import FilesystemBlobStore
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
@@ -43,13 +43,14 @@ from ufo.ext.manifest import (
 )
 from ufo.indexing import OWNER_KIND_MEMORY_ITEM, Chunk
 from ufo.jobs import PageChangeRunner, SandboxReaper, SpendResume, core_jobs
-from ufo.models.interface import ModelEvent, ModelRequest, TextDelta
+from ufo.models.interface import ModelClient, ModelEvent, ModelRequest, TextDelta
 from ufo.models.registry import ModelRegistry
 from ufo.sandbox.local import LocalCarrier
 from ufo.schema import tables
 from ufo.schema.records import Usage
 from ufo.sources.sync import CorePageFeed, FolderSource, PageChange, SyncDriver
 from ufo.subjects import SHARED_SUBJECT
+from ufo.workspace import ws
 
 WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 AUTO_MODEL = "claude-opus-4-8"
@@ -90,19 +91,35 @@ class StubModelClient:
 def _registry(client: StubModelClient) -> ModelRegistry:
     return ModelRegistry(
         providers=(
-            ModelProviderSpec(name="stub", matches=lambda model: True, client=lambda model: client),
+            ModelProviderSpec(
+                name="stub", matches=lambda model: True, client=lambda model, key: client
+            ),
         ),
         pricing=CORE_PRICING,
         auto_model=AUTO_MODEL,
     )
 
 
-def _model(workspace_id: UUID, payload: str) -> ModelAccess:
+@dataclass
+class _Resolver:
+    """A ModelResolver standing in for the registry: fixes the deploy default and price table and
+    hands back the stub client, so the direct ModelAccess meters without a registry."""
+
+    auto_model: str
+    pricing: Pricing
+    client: ModelClient
+
+    async def client_for(self, model: str) -> ModelClient:
+        return self.client
+
+
+def _model(payload: str) -> ModelAccess:
     return ModelAccess(
-        workspace_id,
-        AUTO_MODEL,
-        CORE_PRICING,
-        lambda: StubModelClient(payload, Usage(input_tokens=10, output_tokens=5)),
+        _Resolver(
+            AUTO_MODEL,
+            CORE_PRICING,
+            StubModelClient(payload, Usage(input_tokens=10, output_tokens=5)),
+        )
     )
 
 
@@ -325,17 +342,18 @@ async def test_derive_facts_rides_its_own_cursor_independent_of_the_indexer(
     assert client.calls == 1
     assert len([row for row in await _facts(workspace_id) if row.item_class == FACT]) == 1
 
-    scoped = ScopedStore(workspace_id=workspace_id, extension=memory_manifest.NAME)
-    derive_cursor = await scoped.get("page_change_cursor:derive_facts")
-    assert isinstance(derive_cursor, str)
-    assert await scoped.get("page_change_cursor:index_pages") is None
+    with ws(workspace_id):
+        scoped = ScopedStore(extension=memory_manifest.NAME)
+        derive_cursor = await scoped.get("page_change_cursor:derive_facts")
+        assert isinstance(derive_cursor, str)
+        assert await scoped.get("page_change_cursor:index_pages") is None
 
-    await runner.drive(consumers["derive_facts"])
-    assert client.calls == 1
+        await runner.drive(consumers["derive_facts"])
+        assert client.calls == 1
 
-    await runner.drive(consumers["index_pages"])
-    assert isinstance(await scoped.get("page_change_cursor:index_pages"), str)
-    assert await scoped.get("page_change_cursor:derive_facts") == derive_cursor
+        await runner.drive(consumers["index_pages"])
+        assert isinstance(await scoped.get("page_change_cursor:index_pages"), str)
+        assert await scoped.get("page_change_cursor:derive_facts") == derive_cursor
 
 
 async def test_derive_facts_is_idempotent(db: None) -> None:
@@ -363,11 +381,10 @@ async def test_derive_facts_is_idempotent(db: None) -> None:
         created_at=WHEN,
         changed_at=WHEN,
     )
-    deriver = FactDeriver(
-        store=_store(workspace_id, vec((2, 1.0))), model=_model(workspace_id, payload)
-    )
-    await deriver.apply((change,))
-    await deriver.apply((change,))
+    deriver = FactDeriver(store=_store(workspace_id, vec((2, 1.0))), model=_model(payload))
+    with ws(workspace_id):
+        await deriver.apply((change,))
+        await deriver.apply((change,))
 
     rows = [row for row in await _facts(workspace_id) if row.item_class == FACT]
     assert len(rows) == 1
@@ -384,8 +401,9 @@ async def test_derive_facts_without_a_model_skips_but_advances_cursor(
     await runner.drive(_derive_consumer(runner))
 
     assert [row for row in await _facts(workspace_id) if row.item_class == FACT] == []
-    scoped = ScopedStore(workspace_id=workspace_id, extension=memory_manifest.NAME)
-    assert isinstance(await scoped.get("page_change_cursor:derive_facts"), str)
+    with ws(workspace_id):
+        scoped = ScopedStore(extension=memory_manifest.NAME)
+        assert isinstance(await scoped.get("page_change_cursor:derive_facts"), str)
 
 
 # --- consolidation -----------------------------------------------------------
@@ -410,12 +428,13 @@ async def test_consolidation_supersedes_originals_and_recall_surfaces_the_summar
     summary_text = (
         "the zephyr protocol handshake rotates hourly with a nonce and a short-lived token"
     )
-    await MemoryConsolidator(
-        embed=StubEmbed(probe),
-        transaction=workspace_tx,
-        workspace_id=workspace_id,
-        model=_model(workspace_id, summary_text),
-    ).run()
+    with ws(workspace_id):
+        await MemoryConsolidator(
+            embed=StubEmbed(probe),
+            transaction=workspace_tx,
+            workspace_id=workspace_id,
+            model=_model(summary_text),
+        ).run()
 
     rows = await _facts(workspace_id)
     summaries = [row for row in rows if row.item_class == SEMANTIC]
@@ -426,18 +445,20 @@ async def test_consolidation_supersedes_originals_and_recall_surfaces_the_summar
     assert summary.confidence == 8
     assert {row.superseded_by for row in rows if row.id in originals} == {summary.id}
 
-    recalled = await _store(workspace_id, probe).recall(
-        "zephyr protocol handshake", frozenset({SHARED_SUBJECT}), 10
-    )
+    with ws(workspace_id):
+        recalled = await _store(workspace_id, probe).recall(
+            "zephyr protocol handshake", frozenset({SHARED_SUBJECT}), 10
+        )
     assert [item.memory_id for item in recalled] == [summary.id]
     assert recalled[0].item_class == SEMANTIC
 
-    await MemoryConsolidator(
-        embed=StubEmbed(probe),
-        transaction=workspace_tx,
-        workspace_id=workspace_id,
-        model=_model(workspace_id, summary_text),
-    ).run()
+    with ws(workspace_id):
+        await MemoryConsolidator(
+            embed=StubEmbed(probe),
+            transaction=workspace_tx,
+            workspace_id=workspace_id,
+            model=_model(summary_text),
+        ).run()
     after = [row for row in await _facts(workspace_id) if row.item_class == SEMANTIC]
     assert len(after) == 1
 
@@ -456,9 +477,10 @@ async def test_consolidation_without_a_model_writes_nothing(clean: None) -> None
             workspace_id, "the atlas ledger closes once reconciliations finish", probe, 5
         ),
     ]
-    await MemoryConsolidator(
-        embed=StubEmbed(probe), transaction=workspace_tx, workspace_id=workspace_id, model=None
-    ).run()
+    with ws(workspace_id):
+        await MemoryConsolidator(
+            embed=StubEmbed(probe), transaction=workspace_tx, workspace_id=workspace_id, model=None
+        ).run()
 
     rows = await _facts(workspace_id)
     assert [row for row in rows if row.item_class == SEMANTIC] == []

@@ -1,5 +1,4 @@
 from types import SimpleNamespace
-from uuid import uuid4
 
 import pytest
 from openai.resources.embeddings import AsyncEmbeddings
@@ -18,10 +17,9 @@ from ufo.ext.context import CredentialAccess, ExtensionContext, ScopedStore
 
 
 def _ctx() -> ExtensionContext:
-    workspace_id = uuid4()
     return ExtensionContext(
-        store=ScopedStore(workspace_id=workspace_id, extension="embed_openai"),
-        credentials=CredentialAccess(workspace_id=workspace_id, declared=frozenset(), _store=None),
+        store=ScopedStore(extension="embed_openai"),
+        credentials=CredentialAccess(declared=frozenset()),
     )
 
 

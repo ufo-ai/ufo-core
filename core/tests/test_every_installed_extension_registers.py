@@ -113,7 +113,7 @@ class _StubDbos:
     """Stands in for the DBOS client the surface mount threads into its admission invoker; mounting
     only registers routes, so no method is called — the mounted route is what is asserted."""
 
-    async def enqueue_async(self, options: object, workflow_id: str) -> None: ...
+    async def enqueue_async(self, options: object, workspace_id: str, turn_id: str) -> None: ...
 
 
 def _resolve_backend(select) -> None:
@@ -138,7 +138,7 @@ def _check_tools(manifest: Manifest, store: CredentialStore) -> None:
     )
     if not declared:
         return
-    tools, ext_by_tool = turn_tools((manifest,), WORKSPACE_ID, store)
+    tools, ext_by_tool = turn_tools((manifest,), store)
     registry = ToolRegistry(tools)
     for tool in declared:
         assert registry.get(tool.name).name == tool.name
@@ -157,17 +157,13 @@ def _check_connectors(manifest: Manifest, store: CredentialStore) -> None:
 def _check_indexes(manifest: Manifest, store: CredentialStore) -> None:
     for spec in manifest.indexes:
         _resolve_backend(
-            lambda spec=spec: index_backend(
-                (manifest,), spec.name, _StubEmbed(), WORKSPACE_ID, store
-            )
+            lambda spec=spec: index_backend((manifest,), spec.name, _StubEmbed(), store)
         )
 
 
 def _check_embeds(manifest: Manifest, store: CredentialStore) -> None:
     for spec in manifest.embeds:
-        _resolve_backend(
-            lambda spec=spec: embed_backend((manifest,), spec.name, WORKSPACE_ID, store)
-        )
+        _resolve_backend(lambda spec=spec: embed_backend((manifest,), spec.name, store))
 
 
 def _check_hubs(manifest: Manifest) -> None:
@@ -190,7 +186,7 @@ def _check_cdp_providers(manifest: Manifest, store: CredentialStore) -> None:
     for spec in manifest.cdp_providers:
         _resolve_backend(
             lambda spec=spec: _select_cdp_provider(
-                _config(cdp_provider=spec.backend), (manifest,), WORKSPACE_ID, store
+                _config(cdp_provider=spec.backend), (manifest,), store
             )
         )
 
@@ -217,7 +213,7 @@ def _check_auth_proxies(manifest: Manifest, store: CredentialStore) -> None:
     for spec in manifest.auth_proxies:
         _resolve_backend(
             lambda spec=spec: _select_auth_proxy(
-                _config(auth_backend=spec.backend), (manifest,), WORKSPACE_ID, store
+                _config(auth_backend=spec.backend), (manifest,), store
             )
         )
 
@@ -226,7 +222,7 @@ def _check_search_providers(manifest: Manifest, store: CredentialStore) -> None:
     for spec in manifest.search_providers:
         _resolve_backend(
             lambda spec=spec: _select_search_provider(
-                _config(search_provider=spec.backend), (manifest,), WORKSPACE_ID, store
+                _config(search_provider=spec.backend), (manifest,), store
             )
         )
 
@@ -265,7 +261,7 @@ def _check_routes(manifest: Manifest, store: CredentialStore) -> None:
 def _check_hooks(manifest: Manifest, store: CredentialStore) -> None:
     if not manifest.hooks:
         return
-    chain = turn_hooks((manifest,), WORKSPACE_ID, store)
+    chain = turn_hooks((manifest,), store)
     for spec in manifest.hooks:
         if spec.event == "page_change":
             assert "page_change" not in chain.hooks
@@ -295,7 +291,7 @@ def _check_subagents(manifest: Manifest) -> None:
 
 def _check_credentials(manifest: Manifest, store: CredentialStore) -> None:
     declared = frozenset(slot.name for slot in manifest.credentials)
-    context = context_for(WORKSPACE_ID, manifest.name, declared, store)
+    context = context_for(manifest.name, declared)
     for slot in manifest.credentials:
         assert slot.name in context.credentials.declared
 
@@ -304,7 +300,7 @@ def _check_onboarding(manifest: Manifest, store: CredentialStore) -> None:
     if not manifest.onboarding_steps:
         return
     declared = frozenset(slot.name for slot in manifest.credentials)
-    context = context_for(WORKSPACE_ID, manifest.name, declared, store)
+    context = context_for(manifest.name, declared)
     for step in manifest.onboarding_steps:
         assert callable(step.handler)
     assert context.store is not None

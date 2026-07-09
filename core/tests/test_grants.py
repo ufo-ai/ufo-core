@@ -412,6 +412,7 @@ async def test_connect_account_tool_yields_authorize_url_and_callback_binds_the_
     assert url.startswith("https://stub.test/oauth")
     state = parse_qs(urlparse(url).query)["state"][0]
     app = FastAPI()
+    app.state.shared_workspace = False
     app.include_router(router)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://surface") as client:
         for _ in range(2):
@@ -453,6 +454,7 @@ async def test_the_begin_route_is_gone_and_the_callback_reports_unavailable_with
 ):
     install_connect_flow(None)
     app = FastAPI()
+    app.state.shared_workspace = False
     app.include_router(router)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://surface") as client:
         begun = await client.post("/v1/connect", params={"provider": "stub"})

@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
-from cryptography.fernet import Fernet
 from ufo_ext_self_improvement import manifest as si
 from ufo_ext_self_improvement.corpus import task_classes
 from ufo_ext_self_improvement.cron import (
@@ -33,7 +32,6 @@ from ufo_ext_self_improvement.proposer import PromptProposer
 from ufo_ext_self_improvement.replay import ReplayEvaluation
 
 from ufo.blob import FilesystemBlobStore
-from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import Trajectory, context_for
 from ufo.ext.loader import load_manifests
@@ -42,6 +40,7 @@ from ufo.loop.transcript import Transcript
 from ufo.models.interface import Message, TextBlock, ToolResultBlock, ToolUseBlock
 from ufo.schema import tables
 from ufo.transcript import Conversation
+from ufo.workspace import ws
 
 SEED_PROMPT = "You are a helpful assistant."
 IMPROVED_MARKER = "IMPROVED"
@@ -159,14 +158,8 @@ async def _seed_agent(workspace_id: UUID, blob: FilesystemBlobStore, count: int)
     return agent_id
 
 
-def _context(workspace_id: UUID, blob: FilesystemBlobStore):
-    return context_for(
-        workspace_id,
-        si.NAME,
-        frozenset({si.MODEL_KEY_SLOT}),
-        CredentialStore(fernet=Fernet(Fernet.generate_key())),
-        blob=blob,
-    )
+def _context(blob: FilesystemBlobStore):
+    return context_for(si.NAME, frozenset({si.MODEL_KEY_SLOT}), blob=blob)
 
 
 def _cron(ctx, judge_marker: str = IMPROVED_MARKER) -> ImproveCron:
@@ -240,50 +233,52 @@ async def test_loop_withholds_promotion_until_it_stabilizes(db: None, tmp_path) 
     workspace_id = await _workspace()
     blob = FilesystemBlobStore(root=tmp_path)
     agent_id = await _seed_agent(workspace_id, blob, count=8)
-    ctx = _context(workspace_id, blob)
+    ctx = _context(blob)
     cron = _cron(ctx)
 
-    await cron.run()
-    first = await _state(ctx, agent_id)
-    assert first.status == EVALUATING
-    assert first.gate_passes == 1
-    assert await _proposals(workspace_id) == []
+    with ws(workspace_id):
+        await cron.run()
+        first = await _state(ctx, agent_id)
+        assert first.status == EVALUATING
+        assert first.gate_passes == 1
+        assert await _proposals(workspace_id) == []
 
-    await cron.run()
-    promoted = await _state(ctx, agent_id)
-    assert promoted.status == PROMOTED
-    assert promoted.proposal_id is not None
+        await cron.run()
+        promoted = await _state(ctx, agent_id)
+        assert promoted.status == PROMOTED
+        assert promoted.proposal_id is not None
 
-    proposals = await _proposals(workspace_id)
-    assert len(proposals) == 1
-    proposal = proposals[0]
-    assert proposal.extension == si.NAME
-    assert proposal.agent_id == agent_id
-    assert proposal.status == "pending"
-    assert proposal.from_digest == prompt_digest(SEED_PROMPT)
-    assert proposal.body == {"prompt": IMPROVED_PROMPT}
-    assert await _agent_prompt(workspace_id, agent_id) == SEED_PROMPT
+        proposals = await _proposals(workspace_id)
+        assert len(proposals) == 1
+        proposal = proposals[0]
+        assert proposal.extension == si.NAME
+        assert proposal.agent_id == agent_id
+        assert proposal.status == "pending"
+        assert proposal.from_digest == prompt_digest(SEED_PROMPT)
+        assert proposal.body == {"prompt": IMPROVED_PROMPT}
+        assert await _agent_prompt(workspace_id, agent_id) == SEED_PROMPT
 
-    await cron.run()
-    assert len(await _proposals(workspace_id)) == 1
+        await cron.run()
+        assert len(await _proposals(workspace_id)) == 1
 
 
 async def test_loop_rejects_and_suppresses_a_candidate_without_lift(db: None, tmp_path) -> None:
     workspace_id = await _workspace()
     blob = FilesystemBlobStore(root=tmp_path)
     agent_id = await _seed_agent(workspace_id, blob, count=8)
-    ctx = _context(workspace_id, blob)
+    ctx = _context(blob)
     cron = _cron(ctx, judge_marker="NEVER_IN_ANY_ANSWER")
 
-    await cron.run()
-    rejected = await _state(ctx, agent_id)
-    assert rejected.status == REJECTED
-    assert rejected.gate_passes == 0
-    assert await _proposals(workspace_id) == []
+    with ws(workspace_id):
+        await cron.run()
+        rejected = await _state(ctx, agent_id)
+        assert rejected.status == REJECTED
+        assert rejected.gate_passes == 0
+        assert await _proposals(workspace_id) == []
 
-    await cron.run()
-    assert await _proposals(workspace_id) == []
-    assert (await _state(ctx, agent_id)).status == REJECTED
+        await cron.run()
+        assert await _proposals(workspace_id) == []
+        assert (await _state(ctx, agent_id)).status == REJECTED
 
 
 @dataclass

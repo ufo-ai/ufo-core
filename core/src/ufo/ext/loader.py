@@ -275,7 +275,6 @@ def _pack_manifests(pack: str, active: dict[str, Manifest]) -> tuple[Manifest, .
 
 def turn_tools(
     manifests: tuple[Manifest, ...],
-    workspace_id: UUID,
     credential_store: CredentialStore | None,
     index: IndexBackend | None = None,
     embed: EmbedClient | None = None,
@@ -302,7 +301,7 @@ def turn_tools(
                 f"extension {manifest.name!r} declares credential slots {sorted(declared)} "
                 "but no credential key is set"
             )
-        context = context_for(workspace_id, manifest.name, declared, credential_store, index, embed)
+        context = context_for(manifest.name, declared, index, embed)
         for tool in declared_tools:
             tools.append(tool)
             ext_by_tool[tool.name] = context
@@ -359,7 +358,6 @@ def turn_subagent_grants(manifests: tuple[Manifest, ...]) -> dict[str, frozenset
 
 async def turn_runtime_skills(
     manifests: tuple[Manifest, ...],
-    workspace_id: UUID,
     credential_store: CredentialStore | None,
     index: IndexBackend | None = None,
     embed: EmbedClient | None = None,
@@ -378,7 +376,7 @@ async def turn_runtime_skills(
                 f"extension {manifest.name!r} provides runtime skills but no credential key is set"
             )
         declared = frozenset(slot.name for slot in manifest.credentials)
-        context = context_for(workspace_id, manifest.name, declared, credential_store, index, embed)
+        context = context_for(manifest.name, declared, index, embed)
         skills.extend(await manifest.runtime_skills(context))
     return tuple(skills)
 
@@ -390,7 +388,6 @@ def index_backend(
     manifests: tuple[Manifest, ...],
     configured: str | None,
     embed: EmbedClient,
-    workspace_id: UUID,
     credential_store: CredentialStore | None,
 ) -> IndexBackend:
     """The workspace's index backend: the named backend an extension contributes through its
@@ -406,7 +403,7 @@ def index_backend(
             declared = frozenset(slot.name for slot in manifest.credentials)
             if declared and credential_store is None:
                 raise RuntimeError(f"index backend {name!r} needs a credential key but none is set")
-            context = context_for(workspace_id, manifest.name, declared, credential_store)
+            context = context_for(manifest.name, declared)
             return spec.factory(embed, context)
     raise NotRegisteredError(f"config selects index backend {name!r} but no extension registers it")
 
@@ -414,7 +411,6 @@ def index_backend(
 def embed_backend(
     manifests: tuple[Manifest, ...],
     configured: str | None,
-    workspace_id: UUID,
     credential_store: CredentialStore | None,
 ) -> EmbedClient:
     """The deploy's embed client: the named backend an extension contributes through its `embeds`
@@ -430,21 +426,35 @@ def embed_backend(
             declared = frozenset(slot.name for slot in manifest.credentials)
             if declared and credential_store is None:
                 raise RuntimeError(f"embed backend {name!r} needs a credential key but none is set")
-            context = context_for(workspace_id, manifest.name, declared, credential_store)
+            context = context_for(manifest.name, declared)
             return spec.factory(context)
     raise NotRegisteredError(f"config selects embed backend {name!r} but no extension registers it")
 
 
 def validate_ext_tools(
     manifests: tuple[Manifest, ...],
-    workspace_id: UUID,
     credential_store: CredentialStore | None,
 ) -> None:
     """Fail loud at boot on a misconfigured extension — a tool whose name collides with a builtin or
     another extension, or a tools-declaring extension with no credential key — so a deploy fails to
-    start rather than coming up healthy and then failing every turn that builds the registry."""
-    tools, _ = turn_tools(manifests, workspace_id, credential_store)
-    ToolRegistry(tools)
+    start rather than coming up healthy and then failing every turn that builds the registry.
+    Deploy-level: it checks the tool defs and key presence, never builds a per-workspace context (a
+    shared fleet has no workspace at boot; the turn builds each tool's context per request)."""
+    tools: list[ToolDef] = list(BUILTIN_TOOLS)
+    for manifest in manifests:
+        declared_tools = (
+            *manifest.tools,
+            *(tool for connector in manifest.connectors for tool in connector.tools),
+        )
+        if not declared_tools:
+            continue
+        if manifest.credentials and credential_store is None:
+            raise RuntimeError(
+                f"extension {manifest.name!r} declares credential slots "
+                f"{sorted(slot.name for slot in manifest.credentials)} but no credential key is set"
+            )
+        tools.extend(declared_tools)
+    ToolRegistry(tuple(tools))
 
 
 class HookOutcomeNotAllowed(TypeError):
@@ -554,7 +564,6 @@ class HookChain:
 
 def turn_hooks(
     manifests: tuple[Manifest, ...],
-    workspace_id: UUID,
     credential_store: CredentialStore | None,
     index: IndexBackend | None = None,
     embed: EmbedClient | None = None,
@@ -574,7 +583,7 @@ def turn_hooks(
                 f"extension {manifest.name!r} declares hooks but no credential key is set"
             )
         declared = frozenset(slot.name for slot in manifest.credentials)
-        context = context_for(workspace_id, manifest.name, declared, credential_store, index, embed)
+        context = context_for(manifest.name, declared, index, embed)
         for spec in manifest.hooks:
             if spec.event == "page_change":
                 continue
