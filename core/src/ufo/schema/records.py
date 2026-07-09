@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Literal
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 TurnStatus = Literal["queued", "running", "parked", "done", "failed", "cancelled"]
 TerminalStatus = Literal["done", "failed", "cancelled"]
@@ -49,6 +49,47 @@ class Usage(BaseModel):
     cache_write_tokens: int = 0
 
 
+MAX_USER_QUESTIONS = 4
+
+
+class QuestionOption(BaseModel):
+    label: str = Field(description="The choice shown to the user.")
+    description: str | None = Field(
+        default=None, description="Optional explanation of what the choice means."
+    )
+
+
+class AskQuestion(BaseModel):
+    question: str = Field(description="The question to ask.")
+    options: tuple[QuestionOption, ...] | None = Field(
+        default=None, description="The choices to present; omit for a free-text answer."
+    )
+    multi_select: bool | None = Field(
+        default=None, description="Allow selecting more than one option."
+    )
+    free_text_only: bool | None = Field(
+        default=None, description="Force a free-text answer even when options are given."
+    )
+    header: str | None = Field(default=None, description="Short label shown above the question.")
+    allow_attachments: bool | None = Field(
+        default=None, description="Let the user attach files in their answer."
+    )
+
+
+class AskUserInput(BaseModel):
+    """The `ask_user` tool's input and, verbatim, the structured question a terminal frame carries
+    when asking was the turn's final act — one record from the model's call to the surface that
+    renders it (buttons on Slack), never re-shaped in between."""
+
+    title: str = Field(
+        description="Brief, friendly prompt explaining why you need more info, shown at the top. "
+        "Should feel conversational and explain the value of answering."
+    )
+    questions: tuple[AskQuestion, ...] = Field(
+        min_length=1, max_length=MAX_USER_QUESTIONS, description="1-4 questions to ask."
+    )
+
+
 class TerminalFrame(BaseModel):
     status: TerminalStatus
     text: str = ""
@@ -56,6 +97,7 @@ class TerminalFrame(BaseModel):
     tokens: int = 0
     cost_micro_usd: int = 0
     model: str = ""
+    question: AskUserInput | None = None
 
 
 class Agent(BaseModel):

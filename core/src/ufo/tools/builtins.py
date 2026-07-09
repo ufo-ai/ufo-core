@@ -49,6 +49,7 @@ from ufo.grants import installed_connect_flow
 from ufo.models.interface import TextBlock
 from ufo.sandbox.session import WORKSPACE_DIR, workspace_path
 from ufo.schema import tables
+from ufo.schema.records import AskUserInput
 from ufo.skills.runtime import mount_skill
 from ufo.tools.context import ImageContent, TextContent, ToolContext, ToolResult
 from ufo.tools.registry import ToolDef
@@ -199,43 +200,6 @@ class LoadSessionsInput(BaseModel):
     user_description: str | None = Field(
         default=None,
         description="Brief plain-language description shown in the activity timeline.",
-    )
-
-
-MAX_USER_QUESTIONS = 4
-
-
-class QuestionOption(BaseModel):
-    label: str = Field(description="The choice shown to the user.")
-    description: str | None = Field(
-        default=None, description="Optional explanation of what the choice means."
-    )
-
-
-class AskQuestion(BaseModel):
-    question: str = Field(description="The question to ask.")
-    options: tuple[QuestionOption, ...] | None = Field(
-        default=None, description="The choices to present; omit for a free-text answer."
-    )
-    multi_select: bool | None = Field(
-        default=None, description="Allow selecting more than one option."
-    )
-    free_text_only: bool | None = Field(
-        default=None, description="Force a free-text answer even when options are given."
-    )
-    header: str | None = Field(default=None, description="Short label shown above the question.")
-    allow_attachments: bool | None = Field(
-        default=None, description="Let the user attach files in their answer."
-    )
-
-
-class AskUserInput(BaseModel):
-    title: str = Field(
-        description="Brief, friendly prompt explaining why you need more info, shown at the top. "
-        "Should feel conversational and explain the value of answering."
-    )
-    questions: tuple[AskQuestion, ...] = Field(
-        min_length=1, max_length=MAX_USER_QUESTIONS, description="1-4 questions to ask."
     )
 
 

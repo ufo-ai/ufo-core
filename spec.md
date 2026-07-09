@@ -200,7 +200,12 @@ one context. The seam supports two delivery modes; a surface uses only the subse
   surface ingest, a scheduled fire, an extension invoke alike. A `WritebackPoller` delivers the
   terminal reply at-least-once (the hub is lossy), two-phase: `post` returns the reply's durable
   reference (recorded before any upload), then `attach` streams the turn's shared files into that
-  reply, with rich rendering.
+  reply, with rich rendering. A turn that ended by asking (`ask_user` as its final act) rides the
+  writeback as a structured `question`, so the surface can render the options as its own answer
+  affordance (Slack buttons) whose use admits the answer as the conversation's next turn — the
+  first answer wins the idempotent admit, and `turn_inbound` is how the surface confirms which
+  landed before rewriting the affordance; a durable surface may also `tail` a turn it admitted for
+  ephemeral live feedback (Slack's in-thread status line), never for delivery.
 - **Live** (web; core's CLI is the built-in twin) — the member's connection is held open, so
   admission registers nothing and the surface delivers by `tail`-ing the turn's frames off the hub
   over SSE in its own route. The poller only processes turns that registered a writeback, so it is a

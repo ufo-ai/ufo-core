@@ -32,8 +32,11 @@ don't know it, ask; never invent one and never emit a placeholder (`example.com`
   the deploy or Slack proves nothing. The URL is correct by construction; use it.
 - **Conversational bot.** It answers `@mentions` in channels and direct messages, replying in-thread.
   Replies render the agent's markdown, and files the agent shares upload into the thread; a message's
-  attachments download into the agent's workspace. There are no slash commands, buttons, or modals —
-  don't offer them, don't tailor the scope set to a request. The Step 2 scopes are the whole surface.
+  attachments download into the agent's workspace. While it works it shows a small in-thread status
+  line ("Thinking…", then what it's doing), and when it asks a question with fixed choices it
+  presents them as buttons — clicking one answers as the member who clicked. There are no slash
+  commands or modals — don't offer them, don't tailor the scope set to a request. The Step 2 scopes
+  are the whole surface.
 
 **Produce the manifest in the same reply.** Once you have the app's display name, render the filled-in
 manifest immediately — don't promise it and stall.
@@ -75,6 +78,9 @@ settings:
       - message.groups
       - message.im
       - message.mpim
+  interactivity:
+    is_enabled: true
+    request_url: <public_base_url>/surface/slack/interactive
   org_deploy_enabled: false
   socket_mode_enabled: false
   token_rotation_enabled: false
@@ -82,10 +88,12 @@ settings:
 
 Why each piece: `app_mentions:read` + the `message.*` events and matching `*:history` scopes let the
 surface see the messages it's added to and the mentions it must answer; `chat:write` posts the reply
-in-thread; `files:read` downloads a message's attachments into the workspace and `files:write`
-uploads files the agent shares back; `users:read` + `users:read.email` let the surface match a Slack
-user's verified email to a workspace member, so a member speaking in a DM acts with their own rights.
-The `app_home` block enables the Messages tab so direct messages reach the bot.
+in-thread (and the live status line while the agent works); `files:read` downloads a message's
+attachments into the workspace and `files:write` uploads files the agent shares back; `users:read` +
+`users:read.email` let the surface match a Slack user's verified email to a workspace member, so a
+member speaking in a DM acts with their own rights. The `interactivity` block delivers button clicks
+(the agent's multiple-choice questions) to the surface's interactive route, signature-verified like
+every event. The `app_home` block enables the Messages tab so direct messages reach the bot.
 
 Slack will try to verify the request URL as the app is created. It succeeds once Step 4's
 `slack_signing_secret` is filled and the deploy is reachable; if the slot isn't set yet, finish the
@@ -139,6 +147,15 @@ every declared slot from its upper-cased env var.
 Once all four slots are filled and `ufoctl serve` is running behind `<public_base_url>`, re-save
 the Event Subscriptions request URL if it hadn't verified, then invite the bot to a channel and
 `@mention` it (or DM it). It replies in-thread.
+
+## Updating an existing app
+
+Every settings change ships through the same manifest — never walk the user through individual
+settings pages. Open the app at <https://api.slack.com/apps> → **App Manifest** (left sidebar,
+under *Features*), replace the YAML with Step 1's (same display name and request URLs), and **Save
+Changes**. Slack applies it in place: event subscriptions, the interactivity request URL, and
+scopes all update at once. Only a scope change needs more — Slack then shows a reinstall banner;
+reinstalling rotates nothing, the credential slots stay valid.
 
 ## A second bot in the same workspace
 

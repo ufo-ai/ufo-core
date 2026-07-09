@@ -48,6 +48,7 @@ async def tail_frames(
     finally:
         pump.cancel()
         poll.cancel()
+        await asyncio.gather(pump, poll, return_exceptions=True)
 
 
 async def _pump(

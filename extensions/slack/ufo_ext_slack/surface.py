@@ -2,13 +2,23 @@
 conversation, stream any attached files into the workspace, and admit a turn; then deliver the
 terminal reply and stream the turn's shared files into that reply's thread.
 
+While the turn runs, a per-turn status task tails its live frames off the hub and keeps a small
+in-thread context message current — "Thinking…", then the model's own narration of each tool call —
+deleted when the turn ends. It rides the lossy live leg by design: the durable reply is the
+poller's job, so a crashed status task costs a stale status line, never a lost answer.
+
+A reply whose turn ended by asking the user (`Writeback.question`) renders the question's options
+as Block Kit buttons. The `interactive` route receives the click, admits the answer as the
+conversation's next turn (idempotent per question message — the first click wins), and rewrites the
+buttons into the chosen answer with who gave it.
+
 Everything Slack-specific lives here — signature verification, thread keying, Block Kit rendering,
 the chunked external-upload flow, the `url_private` download — reaching core only through the
-privileged `SurfaceContext` (admit, identity, workspace write, credential read) and the streaming
-`BlobStore`. Attachments move without ever buffering a whole file: an inbound file streams from
-`url_private` straight into the workspace before the turn runs, and a shared file streams from the
-blob store straight to Slack's external-upload URL. Uploads fan out with `asyncio.gather` on the one
-event loop — never a thread pool."""
+privileged `SurfaceContext` (admit, identity, workspace write, credential read, tail) and the
+streaming `BlobStore`. Attachments move without ever buffering a whole file: an inbound file
+streams from `url_private` straight into the workspace before the turn runs, and a shared file
+streams from the blob store straight to Slack's external-upload URL. Uploads fan out with
+`asyncio.gather` on the one event loop — never a thread pool."""
 
 import asyncio
 import hashlib
@@ -18,13 +28,20 @@ import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Mapping
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from uuid import UUID
 
 import httpx
 
 from ufo.sdk.http import JSONResponse, Request, Response
-from ufo.sdk.surfaces import CredentialSlotUnset, SharedArtifact, SurfaceContext, Writeback
+from ufo.sdk.hub import Parked, SkillLoad, Terminal, ToolCall
+from ufo.sdk.surfaces import (
+    AskUserInput,
+    CredentialSlotUnset,
+    SharedArtifact,
+    SurfaceContext,
+    Writeback,
+)
 
 SURFACE_SLACK = "slack"
 SLACK_BOT_TOKEN_SLOT = "slack_bot_token"
@@ -51,12 +68,26 @@ def signing_secret_fingerprint(signing_secret: str) -> str:
 
 SLACK_USERS_INFO_URL = "https://slack.com/api/users.info"
 SLACK_CHAT_POST_MESSAGE_URL = "https://slack.com/api/chat.postMessage"
+SLACK_CHAT_UPDATE_URL = "https://slack.com/api/chat.update"
+SLACK_CHAT_DELETE_URL = "https://slack.com/api/chat.delete"
 SLACK_FILES_GET_UPLOAD_URL = "https://slack.com/api/files.getUploadURLExternal"
 SLACK_FILES_COMPLETE_UPLOAD = "https://slack.com/api/files.completeUploadExternal"
+
+STATUS_THINKING_TEXT = "Thinking…"
+STATUS_WORKING_TEXT = "Working… ({tool})"
+STATUS_SKILL_TEXT = "Loading skill {skill}…"
+STATUS_TEXT_LIMIT = 200
+STATUS_UPDATE_MIN_SECONDS = 1.0
+
+ASK_ACTION_ID_PREFIX = "ask:"
+MAX_ANSWER_BUTTONS = 10
+SLACK_BUTTON_TEXT_LIMIT = 75
+SLACK_BUTTON_VALUE_LIMIT = 2_000
 
 SLACK_REPLAY_SECONDS = 300
 MAX_SLACK_EVENT_BYTES = 1_000_000
 MESSAGE_EVENT_TYPES = ("app_mention", "message")
+MEMBER_MESSAGE_SUBTYPES = (None, "file_share")
 SLACK_MARKDOWN_TEXT_LIMIT = 12_000
 MAX_SLACK_MESSAGE_BYTES = 40_000
 SLACK_UPLOAD_MAX_BYTES = 25 * 1024 * 1024
@@ -158,18 +189,29 @@ def slack_message_gated(event: Mapping[str, object], bot_user_id: str, is_dm: bo
     return f"<@{bot_user_id}>" in str(event.get("text") or "")
 
 
-def slack_reply_body(channel: str, thread_ts: str | None, text: str, blocks: bool = True) -> bytes:
+def slack_reply_body(
+    channel: str,
+    thread_ts: str | None,
+    text: str,
+    blocks: bool = True,
+    actions: dict[str, object] | None = None,
+) -> bytes:
     """The chat.postMessage body: one Block Kit `markdown` block so Slack renders the agent's own
-    markdown natively, degrading to a text-only body when the reply exceeds Slack's block-character
+    markdown natively, plus the answer-button `actions` block when the turn ended on a question —
+    degrading to a text-only body (buttons and all) when the reply exceeds Slack's block-character
     or payload-byte caps, or when `blocks=False` forces plain text after Slack rejects the blocks as
-    `invalid_blocks`. `text` always carries the whole reply as the notification fallback."""
+    `invalid_blocks`. `text` always carries the whole reply as the notification fallback, and the
+    question rides it in prose, so a degraded reply is still answerable by a typed reply."""
     if not text:
         raise ValueError("Slack reply text is required")
     base: dict[str, object] = {"channel": channel, "text": text}
     if thread_ts is not None:
         base["thread_ts"] = thread_ts
     if blocks and len(text) <= SLACK_MARKDOWN_TEXT_LIMIT:
-        with_blocks = {**base, "blocks": [{"type": "markdown", "text": text}]}
+        block_list: list[dict[str, object]] = [{"type": "markdown", "text": text}]
+        if actions is not None:
+            block_list.append(actions)
+        with_blocks = {**base, "blocks": block_list}
         encoded = json.dumps(with_blocks, separators=(",", ":")).encode()
         if len(encoded) <= MAX_SLACK_MESSAGE_BYTES:
             return encoded
@@ -177,6 +219,33 @@ def slack_reply_body(channel: str, thread_ts: str | None, text: str, blocks: boo
     if len(encoded) > MAX_SLACK_MESSAGE_BYTES:
         raise ValueError("Slack reply text is too large")
     return encoded
+
+
+def slack_answer_actions(question: AskUserInput | None) -> dict[str, object] | None:
+    """The actions block of answer buttons for a reply whose turn ended on a buttonable question: a
+    single ask, with options, single-select, not free-text, and few enough choices for one row.
+    Anything richer renders as prose alone — the member answers by replying in the thread, the flow
+    every question supports regardless. The option label rides each button's `value`, so the click
+    carries the answer itself and the interactive route never re-parses the message."""
+    if question is None or len(question.questions) != 1:
+        return None
+    only = question.questions[0]
+    if not only.options or len(only.options) > MAX_ANSWER_BUTTONS:
+        return None
+    if only.multi_select or only.free_text_only or only.allow_attachments:
+        return None
+    return {
+        "type": "actions",
+        "elements": [
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": option.label[:SLACK_BUTTON_TEXT_LIMIT]},
+                "action_id": f"{ASK_ACTION_ID_PREFIX}{index}",
+                "value": option.label[:SLACK_BUTTON_VALUE_LIMIT],
+            }
+            for index, option in enumerate(only.options)
+        ],
+    }
 
 
 def _string_field(event: Mapping[str, object], field: str) -> str:
@@ -239,7 +308,8 @@ async def ingest(ctx: SurfaceContext, request: Request) -> Response:
         downloaded = await _download_files(ctx, conversation_id, bot_token, inbound.files)
         body = f"{inbound.body}{_files_note(downloaded)}"
     agent_id = await ctx.default_agent()
-    await ctx.admit(conversation_id, agent_id, body, idempotency_key=inbound.message_id)
+    turn_id = await ctx.admit(conversation_id, agent_id, body, idempotency_key=inbound.message_id)
+    _track_status(ctx, turn_id, inbound.queue_key)
     return JSONResponse({"ok": True})
 
 
@@ -252,7 +322,7 @@ async def _to_inbound(ctx: SurfaceContext, raw: bytes) -> Inbound | None:
     event = payload.get("event")
     if not isinstance(event, dict) or event.get("type") not in MESSAGE_EVENT_TYPES:
         return None
-    if event.get("bot_id") is not None or event.get("subtype") is not None:
+    if event.get("bot_id") is not None or event.get("subtype") not in MEMBER_MESSAGE_SUBTYPES:
         return None
     bot_user_id = await ctx.credential(SLACK_BOT_USER_ID_SLOT)
     user = event.get("user")
@@ -385,6 +455,253 @@ def _files_note(downloaded: DownloadedFiles) -> str:
     return "\n\n" + "".join(f"[{clause}]" for clause in clauses)
 
 
+def _status_blocks(text: str) -> list[dict[str, object]]:
+    return [{"type": "context", "elements": [{"type": "mrkdwn", "text": f"⏳ _{text}_"}]}]
+
+
+@dataclass(frozen=True)
+class ThreadStatus:
+    """Live feedback for one running turn: post a small context-block status in the thread, keep it
+    current from the turn's hub frames — each tool call as the model's own `user_description` when
+    it gave one — and delete it when the turn ends (the durable reply is the poller's job). An
+    update inside STATUS_UPDATE_MIN_SECONDS of the last send is dropped, not delayed: the next
+    distinct frame refreshes, and the delete ends the message regardless."""
+
+    ctx: SurfaceContext
+    turn_id: UUID
+    channel: str
+    thread_ts: str | None
+
+    async def run(self) -> None:
+        bot_token = await self.ctx.credential(SLACK_BOT_TOKEN_SLOT)
+        async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
+            ts = await self._post(client, bot_token)
+            try:
+                await self._follow(client, bot_token, ts)
+            finally:
+                await self._send(
+                    client, bot_token, SLACK_CHAT_DELETE_URL, {"channel": self.channel, "ts": ts}
+                )
+
+    async def _post(self, client: httpx.AsyncClient, bot_token: str) -> str:
+        body: dict[str, object] = {
+            "channel": self.channel,
+            "text": STATUS_THINKING_TEXT,
+            "blocks": _status_blocks(STATUS_THINKING_TEXT),
+        }
+        if self.thread_ts is not None:
+            body["thread_ts"] = self.thread_ts
+        payload = await self._send(client, bot_token, SLACK_CHAT_POST_MESSAGE_URL, body)
+        ts = payload.get("ts")
+        if not isinstance(ts, str) or not ts:
+            raise SlackApiError("Slack status response missing ts")
+        return ts
+
+    async def _follow(self, client: httpx.AsyncClient, bot_token: str, ts: str) -> None:
+        shown = STATUS_THINKING_TEXT
+        sent_at = time.monotonic()
+        async for _cursor, frame in self.ctx.tail(self.turn_id):
+            match frame:
+                case Terminal() | Parked():
+                    return
+                case ToolCall(tool=tool, description=description):
+                    text = description or STATUS_WORKING_TEXT.format(tool=tool)
+                case SkillLoad(skill=skill):
+                    text = STATUS_SKILL_TEXT.format(skill=skill)
+                case _:
+                    continue
+            text = text[:STATUS_TEXT_LIMIT]
+            if text == shown or time.monotonic() - sent_at < STATUS_UPDATE_MIN_SECONDS:
+                continue
+            await self._send(
+                client,
+                bot_token,
+                SLACK_CHAT_UPDATE_URL,
+                {"channel": self.channel, "ts": ts, "text": text, "blocks": _status_blocks(text)},
+            )
+            shown, sent_at = text, time.monotonic()
+
+    async def _send(
+        self, client: httpx.AsyncClient, bot_token: str, url: str, body: dict[str, object]
+    ) -> dict[str, object]:
+        return await _slack_ok(
+            client.post(
+                url,
+                content=json.dumps(body),
+                headers={
+                    "Authorization": f"Bearer {bot_token}",
+                    "Content-Type": "application/json; charset=utf-8",
+                },
+            )
+        )
+
+
+_STATUS_TASKS: dict[UUID, asyncio.Task[None]] = {}
+
+
+def _track_status(ctx: SurfaceContext, turn_id: UUID, queue_key: str) -> None:
+    """Spawn one ThreadStatus task per admitted turn — Slack redelivers events and admission dedupes
+    them to the same turn id, so a redelivery must not spawn a second status message. Best-effort by
+    design: a failure only logs, and the task always ends because the tail ends on the durable
+    terminal state."""
+    if turn_id in _STATUS_TASKS:
+        return
+    channel, separator, thread_ts = queue_key.partition(":")
+    status = ThreadStatus(
+        ctx=ctx, turn_id=turn_id, channel=channel, thread_ts=thread_ts if separator else None
+    )
+    task = asyncio.create_task(_run_status(status))
+    _STATUS_TASKS[turn_id] = task
+    task.add_done_callback(lambda _done: _STATUS_TASKS.pop(turn_id, None))
+
+
+async def _run_status(status: ThreadStatus) -> None:
+    try:
+        await status.run()
+    except Exception as error:
+        _LOG.warning("slack status feedback failed for turn %s: %s", status.turn_id, error)
+
+
+@dataclass(frozen=True)
+class AnswerClick:
+    """A verified button click on an ask_user question, reduced to what admission and the message
+    rewrite need. The clicked option's label rides the button `value`; the message's fallback `text`
+    is the reply prose the rewrite re-renders above the answer line."""
+
+    slack_user_id: str
+    queue_key: str
+    message_ts: str
+    message_text: str
+    label: str
+    response_url: str
+
+
+async def interactive(ctx: SurfaceContext, request: Request) -> Response:
+    """Slack interactivity ingest: verify the signed form payload, decode a click on an ask_user
+    answer button, admit the answer as the conversation's next turn — idempotent per question
+    message, so a double click or a second member's click joins the turn the first click won — and
+    rewrite the buttons into the winning answer with who answered. Only the click whose body the
+    turn stored rewrites (a losing click must not display an answer the agent never saw), and the
+    rewrite rides its own task so the ack beats Slack's three-second budget — Block Kit allows no
+    message in the direct response, only the ack."""
+    raw = await request.body()
+    if len(raw) > MAX_SLACK_EVENT_BYTES:
+        return Response("Slack payload too large", status_code=413)
+    try:
+        signing_secret = await ctx.credential(SLACK_SIGNING_SECRET_SLOT)
+    except CredentialSlotUnset:
+        return Response("Slack signing secret is not configured yet", status_code=401)
+    try:
+        verify_slack_signature(request.headers, raw, signing_secret)
+    except SlackSignatureError as error:
+        return Response(str(error), status_code=401)
+    click = await _to_click(ctx, raw)
+    if click is None:
+        return JSONResponse({"ok": True, "ignored": True})
+    member_id = await ctx.linked_member(click.slack_user_id)
+    conversation_id = await ctx.conversation_for(click.queue_key, member_id)
+    agent_id = await ctx.default_agent()
+    body = f"[Answered by <@{click.slack_user_id}> via button] {click.label}"
+    turn_id = await ctx.admit(
+        conversation_id,
+        agent_id,
+        body,
+        idempotency_key=f"{click.queue_key}:{click.message_ts}:answer",
+    )
+    _track_status(ctx, turn_id, click.queue_key)
+    if await ctx.turn_inbound(turn_id) == body:
+        _rewrite_in_background(click)
+    return JSONResponse({"ok": True})
+
+
+_REWRITE_TASKS: set[asyncio.Task[None]] = set()
+
+
+def _rewrite_in_background(click: AnswerClick) -> None:
+    task = asyncio.create_task(_run_rewrite(click))
+    _REWRITE_TASKS.add(task)
+    task.add_done_callback(_REWRITE_TASKS.discard)
+
+
+async def _run_rewrite(click: AnswerClick) -> None:
+    try:
+        await _replace_buttons_with_answer(click)
+    except Exception as error:
+        _LOG.warning("slack answer rewrite failed for %s: %s", click.message_ts, error)
+
+
+async def _to_click(ctx: SurfaceContext, raw: bytes) -> AnswerClick | None:
+    form = parse_qs(raw.decode())
+    encoded = form.get("payload")
+    if not encoded:
+        raise ValueError("Slack interactive body must carry a payload field")
+    payload = json.loads(encoded[0])
+    if not isinstance(payload, dict) or payload.get("type") != "block_actions":
+        return None
+    team = payload.get("team")
+    team_id = team.get("id") if isinstance(team, dict) else None
+    if team_id != await ctx.credential(SLACK_TEAM_ID_SLOT):
+        return None
+    label = _clicked_answer(payload)
+    if label is None:
+        return None
+    channel_id = _string_field(_dict_field(payload, "channel"), "id")
+    message = _dict_field(payload, "message")
+    thread = message.get("thread_ts")
+    return AnswerClick(
+        slack_user_id=_string_field(_dict_field(payload, "user"), "id"),
+        queue_key=(f"{channel_id}:{thread}" if isinstance(thread, str) and thread else channel_id),
+        message_ts=_string_field(message, "ts"),
+        message_text=str(message.get("text") or ""),
+        label=label,
+        response_url=_string_field(payload, "response_url"),
+    )
+
+
+def _clicked_answer(payload: Mapping[str, object]) -> str | None:
+    """The clicked option's label when the click is on one of this surface's ask buttons, else None
+    — any other interactive payload is ignored, not an error."""
+    actions = payload.get("actions")
+    action = actions[0] if isinstance(actions, list) and actions else None
+    if not isinstance(action, dict):
+        return None
+    if not str(action.get("action_id") or "").startswith(ASK_ACTION_ID_PREFIX):
+        return None
+    value = action.get("value")
+    return value if isinstance(value, str) and value else None
+
+
+def _dict_field(payload: Mapping[str, object], field: str) -> Mapping[str, object]:
+    value = payload.get(field)
+    if not isinstance(value, dict):
+        raise ValueError(f"Slack payload field {field!r} is required")
+    return value
+
+
+async def _replace_buttons_with_answer(click: AnswerClick) -> None:
+    """Rewrite the question message through its `response_url`: the reply prose stays, the buttons
+    become one small context line — the chosen answer and who answered. The URL comes from a
+    signature-verified payload and must still be a Slack host before this surface will POST to
+    it."""
+    if not _slack_download_host_ok(click.response_url):
+        raise ValueError("refusing to answer a non-Slack response_url")
+    answered = f"✅ *{click.label}* · Answered by <@{click.slack_user_id}>"
+    blocks: list[dict[str, object]] = []
+    if click.message_text:
+        blocks.append({"type": "markdown", "text": click.message_text})
+    blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": answered}]})
+    async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
+        response = await client.post(
+            click.response_url,
+            json={
+                "replace_original": True,
+                "text": click.message_text or answered,
+                "blocks": blocks,
+            },
+        )
+        response.raise_for_status()
+
+
 def _reply_text(writeback: Writeback) -> str:
     """What to post for a terminal turn: the agent's reply for a done turn (a placeholder when it
     produced none), or a short outcome line so a failed or cancelled turn still answers."""
@@ -421,8 +738,11 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
     thread = thread_ts if separator else None
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
     text = _reply_with_oversize_links(ctx, writeback)
+    actions = slack_answer_actions(writeback.question)
     async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
-        payload = await _chat_post(client, bot_token, slack_reply_body(channel, thread, text))
+        payload = await _chat_post(
+            client, bot_token, slack_reply_body(channel, thread, text, actions=actions)
+        )
         if payload.get("error") == SLACK_INVALID_BLOCKS_ERROR:
             payload = await _chat_post(
                 client, bot_token, slack_reply_body(channel, thread, text, blocks=False)

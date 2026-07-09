@@ -54,6 +54,7 @@ from ufo.schema.records import (
     WRITEBACK_DELIVERED,
     WRITEBACK_FAILED,
     WRITEBACK_PENDING,
+    AskUserInput,
     TerminalFrame,
     TerminalStatus,
 )
@@ -120,14 +121,17 @@ class SharedArtifact:
 @dataclass(frozen=True)
 class Writeback:
     """One terminal turn ready for delivery: the conversation's `queue_key` (the surface decodes its
-    own channel/thread from it), the terminal outcome (`status` + the agent's `text`), and the files
-    the turn shared. A surface renders the reply from `status`/`text` and uploads `artifacts`."""
+    own channel/thread from it), the terminal outcome (`status` + the agent's `text`), the files
+    the turn shared, and the structured `question` when asking the user was the turn's final act. A
+    surface renders the reply from `status`/`text`, uploads `artifacts`, and may render `question`
+    as its own answer affordance (buttons) — the answer arrives as the conversation's next turn."""
 
     turn_id: UUID
     queue_key: str
     status: TerminalStatus
     text: str
     artifacts: tuple[SharedArtifact, ...]
+    question: AskUserInput | None
 
 
 @dataclass(frozen=True)
@@ -334,6 +338,22 @@ class SurfaceContext:
         return await self._invoker.invoke(
             conversation_id, agent_id, body, idempotency_key=idempotency_key
         )
+
+    async def turn_inbound(self, turn_id: UUID) -> str | None:
+        """The inbound message a turn was admitted with, or None when no such turn exists — how a
+        surface whose answer affordance raced (an idempotent admit joins the turn the first click
+        won) confirms which answer landed: only the click whose body is the stored inbound may
+        rewrite the affordance into its answer."""
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(tables.turn.c.inbound).where(
+                        tables.turn.c.id == turn_id,
+                        tables.turn.c.workspace_id == self.workspace_id,
+                    )
+                )
+            ).one_or_none()
+        return None if row is None else row.inbound
 
     async def turn_owner(self, turn_id: UUID) -> UUID | None:
         """The member whose conversation owns a turn, or None when no such turn exists — the check a
@@ -566,6 +586,7 @@ class WritebackPoller:
             queue_key=row.queue_key,
             status=terminal.status,
             text=terminal.text,
+            question=terminal.question,
             artifacts=tuple(
                 SharedArtifact(
                     blob_key=artifact.blob_key,

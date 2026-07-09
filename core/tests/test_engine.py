@@ -32,6 +32,7 @@ from ufo.loop.engine import (
     UNTRUSTED_RESULT_OPEN,
     TurnEngine,
     TurnParked,
+    _asked_question,
     _bounded,
 )
 from ufo.loop.prompts.render import COMPACTION_SYSTEM_PROMPT, rendered_prompt
@@ -499,6 +500,102 @@ async def test_tool_activity_frame_carries_the_models_user_description(
     await engine.run()
     tool_frames = [frame for frame in hub.frames if isinstance(frame, ToolCall)]
     assert tool_frames and tool_frames[0].description == "greeting the shell"
+
+
+ASK_INPUT = {
+    "title": "Need a decision",
+    "questions": [{"question": "Ship it?", "options": [{"label": "Ship"}, {"label": "Hold"}]}],
+}
+
+
+@dataclass(frozen=True)
+class AskThenEndModel:
+    """Calls ask_user, then (seeing the directive result) poses the question and ends its turn —
+    the chat-native ask flow, so the terminal frame must carry the structured question."""
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        answered = any(
+            isinstance(message.content, tuple)
+            and any(isinstance(block, ToolResultBlock) for block in message.content)
+            for message in request.messages
+        )
+        if answered:
+            yield TextDelta(text="Ship it? (Ship / Hold)")
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        yield ToolCallStart(id="q1", name="ask_user")
+        yield ToolCallDelta(id="q1", partial_json=json.dumps(ASK_INPUT))
+        yield Usage(input_tokens=2, output_tokens=2)
+
+
+@dataclass
+class AskThenWorkModel:
+    """Asks, then ignores the directive and keeps working with bash before answering — the stale
+    question must not reach the terminal frame."""
+
+    calls: int = 0
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.calls += 1
+        if self.calls == 1:
+            yield ToolCallStart(id="q1", name="ask_user")
+            yield ToolCallDelta(id="q1", partial_json=json.dumps(ASK_INPUT))
+        elif self.calls == 2:
+            yield ToolCallStart(id="c1", name="bash")
+            yield ToolCallDelta(id="c1", partial_json='{"command": "echo hi"}')
+        else:
+            yield TextDelta(text="done without asking")
+        yield Usage(input_tokens=1, output_tokens=1)
+
+
+async def test_ask_user_as_the_final_tool_call_rides_the_terminal_frame(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    engine = _engine(turn, AskThenEndModel(), tmp_path)
+    frame = await engine.run()
+    assert frame.status == "done"
+    assert frame.question is not None
+    assert frame.question.title == "Need a decision"
+    assert frame.question.questions[0].question == "Ship it?"
+    assert [o.label for o in frame.question.questions[0].options] == ["Ship", "Hold"]
+    async with workspace_tx() as connection:
+        stored = (
+            await connection.execute(
+                sa.select(tables.turn.c.terminal).where(tables.turn.c.id == turn.id)
+            )
+        ).scalar_one()
+    assert TerminalFrame.model_validate(stored).question == frame.question
+
+
+def test_asked_question_reads_the_handlers_result_not_the_raw_call() -> None:
+    folded = {
+        "title": "Folded",
+        "questions": [{"question": "Really?", "options": [{"label": "Yes"}]}],
+    }
+    content = "Ask these in your reply.\n" + json.dumps({"awaiting": "question", **folded})
+    calls = (ToolUseBlock(id="q1", name="ask_user", input=ASK_INPUT),)
+    results = (ToolResultBlock(tool_use_id="q1", content=content),)
+    question = _asked_question(calls, results)
+    assert question is not None
+    assert question.title == "Folded"
+    assert question.questions[0].question == "Really?"
+    rewritten = (ToolResultBlock(tool_use_id="q1", content="a hook replaced this output"),)
+    assert _asked_question(calls, rewritten) is None
+    errored = (ToolResultBlock(tool_use_id="q1", content=content, is_error=True),)
+    assert _asked_question(calls, errored) is None
+    assert _asked_question((ToolUseBlock(id="c1", name="bash", input={}),), results) is None
+
+
+async def test_question_is_cleared_when_the_turn_works_on_after_asking(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    engine = _engine(turn, AskThenWorkModel(), tmp_path)
+    frame = await engine.run()
+    assert frame.status == "done"
+    assert frame.text == "done without asking"
+    assert frame.question is None
 
 
 async def test_round_budget_exhaustion_forces_a_final_answer_instead_of_failing(

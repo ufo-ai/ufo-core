@@ -16,6 +16,7 @@ from ufo_ext_slack.surface import (
     SURFACE_SLACK,
     attach,
     ingest,
+    interactive,
     post,
 )
 
@@ -39,7 +40,10 @@ def manifest() -> Manifest:
         surfaces=(
             SurfaceSpec(
                 name=SURFACE_SLACK,
-                routes=(SurfaceRoute(method="POST", path="", handler=ingest),),
+                routes=(
+                    SurfaceRoute(method="POST", path="", handler=ingest),
+                    SurfaceRoute(method="POST", path="interactive", handler=interactive),
+                ),
                 post=post,
                 attach=attach,
             ),

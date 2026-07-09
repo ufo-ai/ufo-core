@@ -5,6 +5,7 @@ shared file streamed to Slack's chunked external-upload API. Slack's HTTP is a M
 dependency stand-in); every assertion reads the durable rows and blobs core wrote, or the exact
 requests the handlers emitted."""
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -12,6 +13,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from urllib.parse import urlencode
 from uuid import UUID, uuid4
 
 import httpx
@@ -23,15 +25,22 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from ufo_ext_slack.manifest import manifest as slack_manifest
 
+import ufo.surfaces.hub_tail as hub_tail
 from ufo.artifact_token import verify_artifact_token
 from ufo.blob import BlobNotFound, FilesystemBlobStore
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.loader import skill_registry
 from ufo.ext.surface import WRITEBACK_DELIVERED, workspace_key
-from ufo.hub import InProcessHub
+from ufo.hub import InProcessHub, Terminal, ToolCall
 from ufo.schema import tables
-from ufo.schema.records import WRITEBACK_PENDING, TerminalFrame
+from ufo.schema.records import (
+    WRITEBACK_PENDING,
+    AskQuestion,
+    AskUserInput,
+    QuestionOption,
+    TerminalFrame,
+)
 from ufo.serve import _mount_surfaces
 
 TEAM_ID = "T0000001"
@@ -39,8 +48,50 @@ BOT_USER_ID = "UBOT00000"
 SIGNING_SECRET = "signing-secret"
 BOT_TOKEN = "xoxb-test"
 UPLOAD_URL = "https://files.slack.com/upload/session-1"
+RESPONSE_URL = "https://hooks.slack.com/actions/T0000001/123/abc"
 ARTIFACT_SECRET = "artifact-token-secret"
 PUBLIC_BASE_URL = "https://ufo.example.test"
+
+REAL_ASYNC_CLIENT = httpx.AsyncClient
+
+
+@pytest.fixture(autouse=True)
+async def _settle_status_tasks(db: None):
+    """A status task lives as long as its turn, and no turn ever terminates under the stubbed
+    queue — settle them so no task outlives its test. Layered UNDER the test's own patches: a
+    fallback Slack transport (a task ending after the test's mock is undone must never dial the
+    real API) and a fast durable poll; teardown marks the tracked turns cancelled and waits for
+    each task to end on that durable state — ended, not cancelled, so no query is abandoned
+    mid-flight."""
+    patch = pytest.MonkeyPatch()
+    fallback = httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"ok": True, "channel": "C0", "ts": "0.0"})
+    )
+
+    def factory(**kwargs: object) -> httpx.AsyncClient:
+        kwargs.pop("transport", None)
+        return REAL_ASYNC_CLIENT(transport=fallback, **kwargs)
+
+    patch.setattr(slack.httpx, "AsyncClient", factory)
+    patch.setattr(hub_tail, "TERMINAL_POLL_SECONDS", 0.05)
+    try:
+        yield
+        await asyncio.gather(*slack._REWRITE_TASKS, return_exceptions=True)
+        tasks = dict(slack._STATUS_TASKS)
+        if tasks:
+            frame = TerminalFrame(status="cancelled").model_dump(mode="json")
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.update(tables.turn)
+                    .where(tables.turn.c.id.in_(list(tasks)))
+                    .values(status="cancelled", terminal=frame, updated_at=sa.func.now())
+                )
+            await asyncio.wait_for(
+                asyncio.gather(*tasks.values(), return_exceptions=True), timeout=10
+            )
+        slack._STATUS_TASKS.clear()
+    finally:
+        patch.undo()
 
 
 @dataclass
@@ -61,6 +112,10 @@ def _mock_transport(recorder: list[httpx.Request], users: dict[str, str]) -> htt
             return httpx.Response(200, json={"ok": True, "user": {"profile": profile}})
         if url == slack.SLACK_CHAT_POST_MESSAGE_URL:
             return httpx.Response(200, json={"ok": True, "channel": "C5", "ts": "999.100"})
+        if url in (slack.SLACK_CHAT_UPDATE_URL, slack.SLACK_CHAT_DELETE_URL):
+            return httpx.Response(200, json={"ok": True, "channel": "C5", "ts": "999.100"})
+        if url == RESPONSE_URL:
+            return httpx.Response(200, text="ok")
         if url == slack.SLACK_FILES_GET_UPLOAD_URL:
             return httpx.Response(200, json={"ok": True, "upload_url": UPLOAD_URL, "file_id": "F1"})
         if url == UPLOAD_URL:
@@ -75,11 +130,9 @@ def _mock_transport(recorder: list[httpx.Request], users: dict[str, str]) -> htt
 
 
 def _patch_httpx(monkeypatch: pytest.MonkeyPatch, transport: httpx.MockTransport) -> None:
-    real = httpx.AsyncClient
-
     def factory(**kwargs: object) -> httpx.AsyncClient:
         kwargs.pop("transport", None)
-        return real(transport=transport, **kwargs)
+        return REAL_ASYNC_CLIENT(transport=transport, **kwargs)
 
     monkeypatch.setattr(slack.httpx, "AsyncClient", factory)
 
@@ -137,7 +190,11 @@ def _event_body(**event: object) -> bytes:
 
 
 async def _mount_transport(
-    monkeypatch: pytest.MonkeyPatch, workspace_id: UUID, tmp_path, transport: httpx.MockTransport
+    monkeypatch: pytest.MonkeyPatch,
+    workspace_id: UUID,
+    tmp_path,
+    transport: httpx.MockTransport,
+    hub: InProcessHub | None = None,
 ):
     _patch_httpx(monkeypatch, transport)
     store = await _store(workspace_id)
@@ -149,7 +206,7 @@ async def _mount_transport(
         workspace_id,
         store,
         blob,
-        InProcessHub(),
+        hub or InProcessHub(),
         StubDbos(),
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
@@ -164,9 +221,10 @@ async def _mount(
     tmp_path,
     recorder: list[httpx.Request],
     users: dict[str, str] | None = None,
+    hub: InProcessHub | None = None,
 ):
     return await _mount_transport(
-        monkeypatch, workspace_id, tmp_path, _mock_transport(recorder, users or {})
+        monkeypatch, workspace_id, tmp_path, _mock_transport(recorder, users or {}), hub=hub
     )
 
 
@@ -209,6 +267,7 @@ def test_slack_app_setup_skill_parses_indexes_and_names_the_real_route_and_slots
     assert "slack-app-setup" in index
     body = registry.named("slack-app-setup").instructions
     assert "/surface/slack" in body
+    assert "/surface/slack/interactive" in body
     for slot in (
         slack.SLACK_BOT_TOKEN_SLOT,
         slack.SLACK_SIGNING_SECRET_SLOT,
@@ -380,6 +439,63 @@ async def test_inbound_file_streams_into_the_workspace(db: None, tmp_path, monke
     assert stored == b"INBOUND-BYTES"
 
 
+async def test_file_share_subtype_is_a_member_message_whose_file_lands(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, _ = await _seed()
+    _, client, blob = await _mount(monkeypatch, workspace_id, tmp_path, [])
+    file = {
+        "id": "F7",
+        "name": "notes.txt",
+        "url_private_download": "https://files.slack.com/files-pri/T-F7/notes.txt",
+        "mimetype": "text/plain",
+    }
+    shared = _event_body(
+        type="message",
+        channel_type="im",
+        subtype="file_share",
+        user="U1",
+        channel="D9",
+        ts="9.0",
+        text="see attached",
+        files=[file],
+    )
+    edited = _event_body(
+        type="message",
+        channel_type="im",
+        subtype="message_changed",
+        user="U1",
+        channel="D9",
+        ts="9.1",
+        text="edited",
+    )
+    async with client:
+        admitted = await client.post(
+            "/surface/slack", content=shared, headers=_sign(shared, int(time.time()))
+        )
+        ignored = await client.post(
+            "/surface/slack", content=edited, headers=_sign(edited, int(time.time()))
+        )
+    assert admitted.status_code == 200
+    assert ignored.json() == {"ok": True, "ignored": True}
+    async with workspace_tx() as connection:
+        conversation_id = (
+            await connection.execute(
+                sa.select(tables.conversation.c.id).where(tables.conversation.c.queue_key == "D9")
+            )
+        ).scalar_one()
+        inbound = (
+            await connection.execute(
+                sa.select(tables.turn.c.inbound).where(
+                    tables.turn.c.conversation_id == conversation_id
+                )
+            )
+        ).scalar_one()
+    stored = await blob.get(workspace_key(conversation_id, f"{slack.SLACK_INBOX_DIR}/notes.txt"))
+    assert stored == b"INBOUND-BYTES"
+    assert f"{slack.SLACK_INBOX_DIR}/notes.txt" in inbound
+
+
 async def _seed_done_turn(
     workspace_id: UUID,
     queue_key: str,
@@ -391,6 +507,7 @@ async def _seed_done_turn(
     artifact_key: str = "artifacts/a/report.pdf",
     artifact_size: int = 11,
     artifact_media_type: str = "application/pdf",
+    question: AskUserInput | None = None,
 ) -> UUID:
     conversation_id, turn_id = uuid4(), uuid4()
     async with workspace_tx() as connection:
@@ -419,7 +536,9 @@ async def _seed_done_turn(
                 seq=1,
                 status="done",
                 inbound="ask",
-                terminal=TerminalFrame(status="done", text=text).model_dump(mode="json"),
+                terminal=TerminalFrame(status="done", text=text, question=question).model_dump(
+                    mode="json"
+                ),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -648,3 +767,199 @@ async def test_inbound_oversize_file_is_skipped_and_reported(
     assert f"{slack.SLACK_INBOX_DIR}/small.txt" in inbound
     assert "Skipped files" in inbound
     assert "big.bin" in inbound
+
+
+def _requests_to(recorder: list[httpx.Request], url: str) -> list[httpx.Request]:
+    return [r for r in recorder if str(r.url).split("?")[0] == url]
+
+
+async def test_status_message_follows_the_turn_and_is_deleted_at_terminal(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, _ = await _seed()
+    monkeypatch.setattr(slack, "STATUS_UPDATE_MIN_SECONDS", 0.0)
+    recorder: list[httpx.Request] = []
+    hub = InProcessHub()
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder, hub=hub)
+    mention = _event_body(
+        type="app_mention", user="U1", channel="C1", ts="100.5", text="<@UBOT00000> hi"
+    )
+    async with client:
+        response = await client.post(
+            "/surface/slack", content=mention, headers=_sign(mention, int(time.time()))
+        )
+    assert response.status_code == 200
+    async with workspace_tx() as connection:
+        turn_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    task = slack._STATUS_TASKS[turn_id]
+
+    await hub.publish(turn_id, ToolCall(tool="bash", preview="{}", description="Reading the repo"))
+    deadline = time.monotonic() + 5
+    while not _requests_to(recorder, slack.SLACK_CHAT_UPDATE_URL):
+        assert time.monotonic() < deadline, "status update never reached Slack"
+        await asyncio.sleep(0.01)
+    await hub.publish(turn_id, Terminal(frame=TerminalFrame(status="done", text="hi")))
+    await task
+
+    posted = json.loads(_requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)[0].content)
+    assert posted["channel"] == "C1"
+    assert posted["thread_ts"] == "100.5"
+    assert posted["blocks"][0]["type"] == "context"
+    assert slack.STATUS_THINKING_TEXT in posted["blocks"][0]["elements"][0]["text"]
+
+    updated = json.loads(_requests_to(recorder, slack.SLACK_CHAT_UPDATE_URL)[0].content)
+    assert updated["ts"] == "999.100"
+    assert "Reading the repo" in updated["blocks"][0]["elements"][0]["text"]
+
+    deleted = json.loads(_requests_to(recorder, slack.SLACK_CHAT_DELETE_URL)[0].content)
+    assert deleted == {"channel": "C1", "ts": "999.100"}
+    assert turn_id not in slack._STATUS_TASKS
+
+
+ASK_QUESTION = AskUserInput(
+    title="Need a decision",
+    questions=(
+        AskQuestion(
+            question="Ship it?",
+            options=(QuestionOption(label="Ship"), QuestionOption(label="Hold")),
+        ),
+    ),
+)
+
+
+def test_only_a_single_choice_question_renders_buttons() -> None:
+    single = ASK_QUESTION.questions[0]
+    actions = slack.slack_answer_actions(ASK_QUESTION)
+    assert actions is not None and actions["type"] == "actions"
+    assert [b["text"]["text"] for b in actions["elements"]] == ["Ship", "Hold"]
+    assert slack.slack_answer_actions(None) is None
+    two = AskUserInput(title="t", questions=(single, single))
+    assert slack.slack_answer_actions(two) is None
+    multi = AskUserInput(title="t", questions=(single.model_copy(update={"multi_select": True}),))
+    assert slack.slack_answer_actions(multi) is None
+    free = AskUserInput(title="t", questions=(single.model_copy(update={"free_text_only": True}),))
+    assert slack.slack_answer_actions(free) is None
+    prose = AskUserInput(title="t", questions=(AskQuestion(question="Ship it?"),))
+    assert slack.slack_answer_actions(prose) is None
+    attach = AskUserInput(
+        title="t", questions=(single.model_copy(update={"allow_attachments": True}),)
+    )
+    assert slack.slack_answer_actions(attach) is None
+    crowded = AskUserInput(
+        title="t",
+        questions=(
+            AskQuestion(
+                question="q",
+                options=tuple(
+                    QuestionOption(label=f"o{i}") for i in range(slack.MAX_ANSWER_BUTTONS + 1)
+                ),
+            ),
+        ),
+    )
+    assert slack.slack_answer_actions(crowded) is None
+
+
+async def test_question_writeback_posts_answer_buttons(db: None, tmp_path, monkeypatch) -> None:
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    await _seed_done_turn(
+        workspace_id,
+        "C5:200.0",
+        "Ship it? (Ship / Hold)",
+        blob,
+        artifact=False,
+        question=ASK_QUESTION,
+    )
+
+    await app.state.writeback_poller.drain()
+
+    reply = json.loads(_requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)[0].content)
+    assert reply["blocks"][0] == {"type": "markdown", "text": "Ship it? (Ship / Hold)"}
+    actions = reply["blocks"][1]
+    assert actions["type"] == "actions"
+    assert [b["text"]["text"] for b in actions["elements"]] == ["Ship", "Hold"]
+    assert [b["action_id"] for b in actions["elements"]] == ["ask:0", "ask:1"]
+    assert [b["value"] for b in actions["elements"]] == ["Ship", "Hold"]
+
+
+def _click_body(action_id: str = "ask:0", value: str = "Ship", user: str = "U9") -> bytes:
+    payload = {
+        "type": "block_actions",
+        "team": {"id": TEAM_ID},
+        "user": {"id": user},
+        "channel": {"id": "C5"},
+        "message": {"ts": "999.100", "thread_ts": "200.0", "text": "Ship it? (Ship / Hold)"},
+        "actions": [{"action_id": action_id, "value": value}],
+        "response_url": RESPONSE_URL,
+    }
+    return urlencode({"payload": json.dumps(payload)}).encode()
+
+
+def _signed_form(body: bytes) -> dict[str, str]:
+    return {
+        **_sign(body, int(time.time())),
+        "content-type": "application/x-www-form-urlencoded",
+    }
+
+
+async def test_first_click_wins_and_alone_rewrites_the_message(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    winner = _click_body()
+    async with client:
+        unsigned = await client.post("/surface/slack/interactive", content=winner)
+        assert unsigned.status_code == 401
+        first = await client.post(
+            "/surface/slack/interactive", content=winner, headers=_signed_form(winner)
+        )
+        assert first.status_code == 200
+        await asyncio.gather(*slack._REWRITE_TASKS)
+        loser = _click_body(value="Hold", user="U8")
+        second = await client.post(
+            "/surface/slack/interactive", content=loser, headers=_signed_form(loser)
+        )
+        assert second.status_code == 200
+        await asyncio.gather(*slack._REWRITE_TASKS)
+        foreign = _click_body(action_id="other:0")
+        ignored = await client.post(
+            "/surface/slack/interactive", content=foreign, headers=_signed_form(foreign)
+        )
+        assert ignored.json() == {"ok": True, "ignored": True}
+
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(
+                sa.select(tables.turn.c.inbound, tables.turn.c.idempotency_key).where(
+                    tables.turn.c.workspace_id == workspace_id
+                )
+            )
+        ).all()
+        queue_key = (
+            await connection.execute(
+                sa.select(tables.conversation.c.queue_key).where(
+                    tables.conversation.c.workspace_id == workspace_id
+                )
+            )
+        ).scalar_one()
+    assert len(turns) == 1
+    assert turns[0].inbound == "[Answered by <@U9> via button] Ship"
+    assert turns[0].idempotency_key == "C5:200.0:999.100:answer"
+    assert queue_key == "C5:200.0"
+
+    rewrites = _requests_to(recorder, RESPONSE_URL)
+    assert len(rewrites) == 1
+    rewrite = json.loads(rewrites[0].content)
+    assert rewrite["replace_original"] is True
+    assert rewrite["blocks"][0] == {"type": "markdown", "text": "Ship it? (Ship / Hold)"}
+    answered = rewrite["blocks"][1]
+    assert answered["type"] == "context"
+    assert "Answered by <@U9>" in answered["elements"][0]["text"]
+    assert "Ship" in answered["elements"][0]["text"]

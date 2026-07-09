@@ -39,6 +39,21 @@ async def test_tail_streams_live_frames_until_a_terminal(db: None) -> None:
     keep.cancel()
 
 
+async def test_ended_tail_leaves_no_pump_or_poll_behind(db: None) -> None:
+    hub = InProcessHub()
+    turn_id = uuid4()
+    keep = await _keepalive(hub, turn_id)
+    await hub.publish(turn_id, Terminal(frame=TerminalFrame(status="done")))
+    await _drain(tail_frames(hub, turn_id))
+    lingering = [
+        task
+        for task in asyncio.all_tasks()
+        if task.get_coro().__qualname__ in ("_pump", "_poll_status")
+    ]
+    assert lingering == []
+    keep.cancel()
+
+
 async def test_tail_resumes_from_a_covered_cursor(db: None) -> None:
     hub = InProcessHub()
     turn_id = uuid4()

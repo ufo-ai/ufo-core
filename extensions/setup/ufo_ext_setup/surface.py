@@ -83,6 +83,9 @@ settings:
       - message.groups
       - message.im
       - message.mpim
+  interactivity:
+    is_enabled: true
+    request_url: {interactivity_url}
   org_deploy_enabled: false
   socket_mode_enabled: false
   token_rotation_enabled: false
@@ -206,8 +209,11 @@ async def slack_manifest_yaml(ctx: SurfaceContext, request: Request) -> Response
     name = request.query_params.get("name") or "ufo"
     if not re.match(BOT_NAME_PATTERN, name):
         return Response("bot display name must be 1-35 plain characters", status_code=400)
+    events_url = _events_url(base)
     return PlainTextResponse(
-        SLACK_APP_MANIFEST_TEMPLATE.format(name=name, request_url=_events_url(base))
+        SLACK_APP_MANIFEST_TEMPLATE.format(
+            name=name, request_url=events_url, interactivity_url=f"{events_url}/interactive"
+        )
     )
 
 
