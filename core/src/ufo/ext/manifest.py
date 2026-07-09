@@ -20,6 +20,7 @@ from starlette.responses import Response
 
 from ufo.accounting import ModelPrice
 from ufo.browser import CdpProvider
+from ufo.candidates import WorkspaceCandidates
 from ufo.connectors import AuthProxy
 from ufo.ext.context import CredentialAccess, ExtensionContext
 from ufo.ext.surface import SurfaceSpec
@@ -60,11 +61,17 @@ class CredentialSlot:
 class JobSpec:
     """Recurring or one-shot background work. `schedule` is a cron string (6 fields, seconds first)
     for recurring jobs, or None to fire once at boot; `handler` runs with the extension's scoped
-    ExtensionContext, never a raw handle."""
+    ExtensionContext, never a raw handle. `candidates` names the workspaces this job has work in —
+    the dispatcher binds each with `with ws(...)` and runs `handler` scoped to it, so a handler
+    never runs unbound and never fans the fleet itself. It is required and has no fleet-wide value:
+    an extension declares it through `owner_candidates` (a select over its own tables projecting
+    distinct `workspace_id`, run for it under the one RLS-bypass read), so a job that would fire
+    across every workspace regardless of work cannot be expressed."""
 
     name: str
     schedule: str | None
     handler: Callable[[ExtensionContext], Awaitable[None]]
+    candidates: WorkspaceCandidates
 
 
 @dataclass(frozen=True)

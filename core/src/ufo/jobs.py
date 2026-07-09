@@ -18,7 +18,8 @@ from dbos import DBOS, DBOSClient, EnqueueOptions, Queue, ScheduleInput
 
 from ufo.accounting import ALLOW, SpendEvaluator
 from ufo.blob import BlobStore
-from ufo.db import current_workspace, owner_tx, workspace_tx
+from ufo.candidates import WorkspaceCandidates
+from ufo.db import owner_tx, workspace_tx
 from ufo.ext.context import ExtensionContext, TurnInvoker, context_for
 from ufo.ext.manifest import HookContext, HookSpec, JobSpec, Manifest, PageChangeBatch
 from ufo.indexing import EmbedClient, IndexBackend
@@ -86,28 +87,50 @@ class SpendResume:
     between stamp and enqueue merely delays re-admission to the end of the grace window rather than
     orphaning the turn.
 
-    A selective cross-workspace sweep: one `owner_tx` read (the RLS-bypass path) finds the parked
-    turns across every workspace, touching only the workspaces that hold one, then binds each turn's
-    own workspace with `with ws(...)` before it decides the cap and enqueues — so the decision reads
-    that workspace's spend and the resume is placed on that workspace's partition, exactly as a turn
-    would. A workspace with no parked turn is never opened. On a per-tenant deploy `owner_tx`
-    resolves to the single workspace and the scope binds it, unchanged."""
+    `run` operates on the bound workspace alone: the dispatcher names the candidate workspaces
+    through `candidate_workspaces` and binds each, so `run` reads that workspace's parked turns
+    through RLS, decides each cap against that workspace's spend, and places the resume on that
+    workspace's partition — exactly as a turn would. `candidate_workspaces` is the one `owner_tx`
+    read (the RLS-bypass path) naming only the workspaces that hold a resumable parked turn, so a
+    workspace with none is never bound. On a per-tenant deploy `owner_tx` resolves to the single
+    workspace, unchanged."""
 
     client: DBOSClient
 
     async def run(self) -> None:
         for turn in await self._parked_turns():
-            with ws(turn.workspace_id):
-                async with workspace_tx() as connection:
-                    decision = await SpendEvaluator(
-                        turn.workspace_id, turn.member_id, turn.agent_id
-                    ).decide(connection, 0)
-                if decision.outcome == ALLOW:
-                    await self._enqueue(turn)
+            async with workspace_tx() as connection:
+                decision = await SpendEvaluator(
+                    turn.workspace_id, turn.member_id, turn.agent_id
+                ).decide(connection, 0)
+            if decision.outcome == ALLOW:
+                await self._enqueue(turn)
+
+    async def candidate_workspaces(self) -> tuple[UUID, ...]:
+        """Workspaces holding a resumable parked turn — one distinct `workspace_id` per workspace
+        with a turn PARKED and unstamped or past its resume grace window, read in one `owner_tx`
+        (RLS bypass). A workspace with none is never bound, so no transaction runs against it on
+        the tick."""
+        cutoff = datetime.now(UTC) - timedelta(seconds=RESUME_ENQUEUE_GRACE_SECONDS)
+        async with owner_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(tables.turn.c.workspace_id)
+                    .where(
+                        tables.turn.c.status == PARKED,
+                        sa.or_(
+                            tables.turn.c.resume_enqueued_at.is_(None),
+                            tables.turn.c.resume_enqueued_at < cutoff,
+                        ),
+                    )
+                    .distinct()
+                )
+            ).all()
+        return tuple(row.workspace_id for row in rows)
 
     async def _parked_turns(self) -> tuple[_ParkedTurn, ...]:
         cutoff = datetime.now(UTC) - timedelta(seconds=RESUME_ENQUEUE_GRACE_SECONDS)
-        async with owner_tx() as connection:
+        async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
                     sa.select(
@@ -166,28 +189,53 @@ class SandboxReaper:
     another backend wrote (a deploy that switched carriers) is not this carrier's to reap and is
     skipped.
 
-    A selective cross-workspace sweep: one `owner_tx` read (the RLS-bypass path) finds the idle
-    conversations across every workspace, touching only the workspaces that hold one, then binds
-    each conversation's own workspace with `with ws(...)` for the in-flight re-check and the row
-    clear — so a reap is scoped exactly as that workspace's turn would scope it. A workspace with no
-    idle sandbox is never opened. On a per-tenant deploy `owner_tx` resolves to the single
+    `run` operates on the bound workspace alone: the dispatcher names the candidate workspaces
+    through `candidate_workspaces` and binds each, so the in-flight re-check and the row clear are
+    scoped exactly as that workspace's turn would scope them. `candidate_workspaces` is the one
+    `owner_tx` read (the RLS-bypass path) naming only the workspaces holding an idle sandbox, so a
+    workspace with none is never bound. On a per-tenant deploy `owner_tx` resolves to the single
     workspace, unchanged."""
 
     carrier: Carrier
     backend: str
 
     async def run(self) -> None:
-        for workspace_id, conversation_id, stored in await self._idle_sandboxes():
+        for conversation_id, stored in await self._idle_sandboxes():
             container_id = sandbox_handle_id(self.backend, stored)
             if container_id is None:
                 continue
-            with ws(workspace_id):
-                if await self._now_active(conversation_id):
-                    continue
-                await self.carrier.destroy(
-                    SandboxHandle(conversation_id=conversation_id, container_id=container_id)
+            if await self._now_active(conversation_id):
+                continue
+            await self.carrier.destroy(
+                SandboxHandle(conversation_id=conversation_id, container_id=container_id)
+            )
+            await self._clear(conversation_id)
+
+    async def candidate_workspaces(self) -> tuple[UUID, ...]:
+        """The workspaces holding a conversation whose sandbox is idle past the TTL — one distinct
+        `workspace_id` per such workspace, read in one `owner_tx` (RLS bypass). A workspace with no
+        idle sandbox is never bound, so no transaction runs against it on the sweep."""
+        cutoff = datetime.now(UTC) - timedelta(seconds=SANDBOX_IDLE_TTL_SECONDS)
+        in_flight = (
+            sa.select(tables.turn.c.conversation_id)
+            .where(tables.turn.c.status.in_(NON_TERMINAL_STATUSES))
+            .distinct()
+        )
+        async with owner_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(tables.conversation.c.workspace_id)
+                    .select_from(tables.turn.join(tables.conversation))
+                    .where(
+                        tables.conversation.c.sandbox_handle.is_not(None),
+                        tables.turn.c.conversation_id.notin_(in_flight),
+                    )
+                    .group_by(tables.conversation.c.workspace_id, tables.turn.c.conversation_id)
+                    .having(sa.func.max(tables.turn.c.updated_at) < cutoff)
+                    .distinct()
                 )
-                await self._clear(conversation_id)
+            ).all()
+        return tuple(row.workspace_id for row in rows)
 
     async def _clear(self, conversation_id: UUID) -> None:
         async with workspace_tx() as connection:
@@ -217,24 +265,21 @@ class SandboxReaper:
             ).first()
         return found is not None
 
-    async def _idle_sandboxes(self) -> tuple[tuple[UUID, UUID, str], ...]:
-        """Conversations across every workspace carrying a persisted sandbox handle whose most
-        recent turn settled past the idle TTL and which have no turn in flight — the durable handle,
-        not an in-process map, is the set the reaper reclaims from, so a sandbox a prior process
-        created is in scope. Found in one `owner_tx` read (RLS bypass) so a workspace with no idle
-        sandbox is never opened; each row carries its `workspace_id` so `run` re-binds it before the
-        reap."""
+    async def _idle_sandboxes(self) -> tuple[tuple[UUID, str], ...]:
+        """The bound workspace's conversations carrying a persisted sandbox handle whose most recent
+        turn settled past the idle TTL and which have no turn in flight — the durable handle, not an
+        in-process map, is the set the reaper reclaims from, so a sandbox a prior process created is
+        in scope. Read through RLS, so the sweep sees only the workspace the dispatcher bound."""
         cutoff = datetime.now(UTC) - timedelta(seconds=SANDBOX_IDLE_TTL_SECONDS)
         in_flight = (
             sa.select(tables.turn.c.conversation_id)
             .where(tables.turn.c.status.in_(NON_TERMINAL_STATUSES))
             .distinct()
         )
-        async with owner_tx() as connection:
+        async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
                     sa.select(
-                        tables.conversation.c.workspace_id,
                         tables.turn.c.conversation_id,
                         tables.conversation.c.sandbox_handle,
                     )
@@ -244,14 +289,13 @@ class SandboxReaper:
                         tables.turn.c.conversation_id.notin_(in_flight),
                     )
                     .group_by(
-                        tables.conversation.c.workspace_id,
                         tables.turn.c.conversation_id,
                         tables.conversation.c.sandbox_handle,
                     )
                     .having(sa.func.max(tables.turn.c.updated_at) < cutoff)
                 )
             ).all()
-        return tuple((row.workspace_id, row.conversation_id, row.sandbox_handle) for row in rows)
+        return tuple((row.conversation_id, row.sandbox_handle) for row in rows)
 
 
 def _page_beyond_cursor(updated_at: datetime, page_id: UUID, cursor: object) -> bool:
@@ -307,13 +351,14 @@ class PageChangeRunner:
     Batch-at-interval and fed only by the source pipeline, so it can never fire on the derived rows
     a handler writes.
 
-    A selective cross-workspace sweep: `drive` finds every workspace holding pages through one
-    `owner_tx` read (the RLS-bypass path), touching only those, then binds each with `with ws(...)`
-    and runs that consumer's cursor loop scoped to it — the page feed reads that workspace's pages,
-    the cursor lives in that workspace's ScopedStore, so one consumer's per-minute workflow replays
-    the fleet with each workspace resuming independently. A workspace with no pages has nothing to
-    replay and is never opened. On a per-tenant deploy `owner_tx` resolves to the single workspace,
-    unchanged."""
+    A selective cross-workspace sweep: the dispatcher names the candidate workspaces through
+    `workspaces_with_changes` (one `owner_tx` read, the RLS-bypass path, taking only those whose
+    high-water page lies beyond this consumer's cursor) and binds each, so `drive` runs that
+    consumer's cursor loop scoped to the bound workspace — the page feed reads that workspace's
+    pages, the cursor lives in that workspace's ScopedStore, so one consumer's per-minute workflow
+    replays the fleet with each workspace resuming independently. A workspace with nothing changed
+    since its cursor is never bound. On a per-tenant deploy `owner_tx` resolves to the single
+    workspace, unchanged."""
 
     manifests: tuple[Manifest, ...]
     pages: PageFeed
@@ -349,12 +394,7 @@ class PageChangeRunner:
                 )
         return tuple(consumers)
 
-    async def drive(self, consumer: PageChangeConsumer) -> None:
-        for workspace_id in await self._workspaces_with_changes(consumer):
-            with ws(workspace_id):
-                await self._drive_workspace(consumer)
-
-    async def _workspaces_with_changes(self, consumer: PageChangeConsumer) -> tuple[UUID, ...]:
+    async def workspaces_with_changes(self, consumer: PageChangeConsumer) -> tuple[UUID, ...]:
         """The workspaces this consumer has actual pending work in — those whose newest page lies
         beyond the consumer's own stored cursor. One `owner_tx` read (RLS bypass) takes each
         workspace's high-water page (the maximum in the feed's `(updated_at, id)` order) and each
@@ -398,7 +438,10 @@ class PageChangeRunner:
                 pending.append(row.workspace_id)
         return tuple(pending)
 
-    async def _drive_workspace(self, consumer: PageChangeConsumer) -> None:
+    async def drive(self, consumer: PageChangeConsumer) -> None:
+        """Replay the workspace's pages changed since this consumer's cursor to its handler and
+        advance the cursor — the dispatcher binds the workspace, so this runs scoped to it and never
+        enumerates the fleet itself."""
         context = self._context_for(consumer.extension, consumer.declared)
         cursor_key = f"{PAGE_CHANGE_CURSOR_KEY}:{consumer.discriminator}"
         stored = await context.store.get(cursor_key)
@@ -467,19 +510,41 @@ def core_jobs(
 
         return _handler
 
+    def _consumer_candidates(consumer: PageChangeConsumer) -> WorkspaceCandidates:
+        async def _candidates() -> tuple[UUID, ...]:
+            return await page_change_runner.workspaces_with_changes(consumer)
+
+        return _candidates
+
     page_change = tuple(
         JobSpec(
             name=f"{PAGE_CHANGE_JOB}:{consumer.extension}:{consumer.discriminator}",
             schedule=PAGE_CHANGE_SCHEDULE,
             handler=_drive_consumer(consumer),
+            candidates=_consumer_candidates(consumer),
         )
         for consumer in page_change_runner.consumers()
     )
     return (
-        JobSpec(name=SOURCE_SYNC_JOB, schedule=SOURCE_SYNC_SCHEDULE, handler=_sync_sources),
+        JobSpec(
+            name=SOURCE_SYNC_JOB,
+            schedule=SOURCE_SYNC_SCHEDULE,
+            handler=_sync_sources,
+            candidates=sync_driver.candidate_workspaces,
+        ),
         *page_change,
-        JobSpec(name=SPEND_RESUME_JOB, schedule=SPEND_RESUME_SCHEDULE, handler=_resume_spend),
-        JobSpec(name=SANDBOX_REAP_JOB, schedule=SANDBOX_REAP_SCHEDULE, handler=_reap_sandboxes),
+        JobSpec(
+            name=SPEND_RESUME_JOB,
+            schedule=SPEND_RESUME_SCHEDULE,
+            handler=_resume_spend,
+            candidates=spend_resume.candidate_workspaces,
+        ),
+        JobSpec(
+            name=SANDBOX_REAP_JOB,
+            schedule=SANDBOX_REAP_SCHEDULE,
+            handler=_reap_sandboxes,
+            candidates=reaper.candidate_workspaces,
+        ),
     )
 
 
@@ -522,13 +587,13 @@ def bindings_from(
 @dataclass(frozen=True)
 class JobRunner:
     """Boot registration for the deploy: publish the firing table, then register each cron job and
-    enqueue each one-shot. `fire` is the per-execution dispatch the durable workflow calls — it runs
-    the handler once, in whatever workspace scope is bound (none on the durable path). A core sweep
-    needs no bound scope: it finds the workspaces that actually hold pending work in one `owner_tx`
-    read and binds each itself, so one fire drives the fleet without a transaction per idle
-    workspace. (An extension job operating on the ambient workspace has no such candidate query and
-    so is not fanned — it runs only under a scope the caller binds; a fleet-wide selection for it is
-    the deferred shared-DBOS concern.)"""
+    enqueue each one-shot. `fire` is the per-execution dispatch the durable workflow calls; it is
+    the sole path a handler runs on: it names the job's candidate workspaces (one `owner_tx` read
+    returning only the ids with work) and, for each, opens `with ws(id)` and runs the handler
+    scoped to it. There is no branch that runs a handler outside a bound workspace — an empty
+    candidate set runs the handler zero times, and every core and extension job rides the identical
+    fan-and-bind, so an unbound handler call cannot exist. On a per-tenant deploy the candidate read
+    resolves to the single workspace, unchanged."""
 
     bindings: tuple[_Binding, ...]
     invoker_factory: InvokerFactory | None = None
@@ -564,21 +629,22 @@ class JobRunner:
         binding = next((b for b in self.bindings if b.key == key), None)
         if binding is None:
             raise RuntimeError(f"no job registered for key {key!r}")
-        bound = current_workspace.get()
-        invoker = (
-            None if self.invoker_factory is None or bound is None else self.invoker_factory(bound)
-        )
-        context = context_for(
-            binding.extension,
-            binding.declared,
-            self.index,
-            self.embed,
-            self.pages,
-            self.blob,
-            invoker,
-            self.registry,
-        )
-        await binding.spec.handler(context)
+        for workspace_id in await binding.spec.candidates():
+            with ws(workspace_id):
+                invoker = (
+                    None if self.invoker_factory is None else self.invoker_factory(workspace_id)
+                )
+                context = context_for(
+                    binding.extension,
+                    binding.declared,
+                    self.index,
+                    self.embed,
+                    self.pages,
+                    self.blob,
+                    invoker,
+                    self.registry,
+                )
+                await binding.spec.handler(context)
 
 
 _firing: JobRunner | None = None

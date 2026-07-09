@@ -19,11 +19,12 @@ from itertools import zip_longest
 from pathlib import Path
 from uuid import UUID
 
+import sqlalchemy as sa
 from pydantic import BaseModel, Field
 
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.index import TextChunker
-from ufo.sdk.jobs import JobSpec
+from ufo.sdk.jobs import JobSpec, owner_candidates
 from ufo.sdk.manifest import (
     HookContext,
     HookOutcome,
@@ -49,6 +50,7 @@ from ufo_ext_memory.store import (
     PageIndexer,
     Recalled,
     SourceMatch,
+    memory_item,
     recall_subjects,
     store_for,
 )
@@ -310,9 +312,28 @@ def manifest() -> Manifest:
             HookSpec(event="page_change", handler=derive_facts),
         ),
         jobs=(
-            JobSpec(name=MEMORY_INDEX_JOB, schedule=MEMORY_INDEX_SCHEDULE, handler=index_memory),
             JobSpec(
-                name=CONSOLIDATE_JOB, schedule=CONSOLIDATE_SCHEDULE, handler=consolidate_memory
+                name=MEMORY_INDEX_JOB,
+                schedule=MEMORY_INDEX_SCHEDULE,
+                handler=index_memory,
+                candidates=owner_candidates(
+                    sa.select(memory_item.c.workspace_id)
+                    .where(memory_item.c.embedding_digest.is_(None))
+                    .distinct()
+                ),
+            ),
+            JobSpec(
+                name=CONSOLIDATE_JOB,
+                schedule=CONSOLIDATE_SCHEDULE,
+                handler=consolidate_memory,
+                candidates=owner_candidates(
+                    sa.select(memory_item.c.workspace_id)
+                    .where(
+                        memory_item.c.item_class == FACT,
+                        memory_item.c.superseded_by.is_(None),
+                    )
+                    .distinct()
+                ),
             ),
         ),
         skills=(SkillSpec(path=SKILL_DIR),),

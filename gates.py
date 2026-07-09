@@ -35,6 +35,7 @@ SKILL_MANIFEST = "SKILL.md"
 MIGRATION_DIR_PART = "migrations"
 CORE_OWNER = "core"
 NAME_SEPARATOR = "-"
+CANDIDATES_FIELD = "candidates"
 
 
 def _is_skill_content(path: Path) -> bool:
@@ -216,6 +217,36 @@ def _conformance_failures(trees: dict[Path, ast.Module]) -> list[str]:
             for point in sorted(declared - points)
         ),
     ]
+
+
+def _job_selector_failures(trees: dict[Path, ast.Module]) -> list[str]:
+    """Every JobSpec declares a `candidates` selector — the workspaces it has work in — so the
+    dispatcher binds each before the handler runs and no handler ever runs unbound or fans the fleet
+    itself. `candidates` is a required field with no fleet-wide value, so omission is already a
+    construction error; this refuses it statically at every call site too, so a new core or
+    extension job physically cannot ship without naming its candidate workspaces, and a
+    `candidates=None`
+    (a would-be unbound selector) is refused the same."""
+    failures = []
+    for rel, tree in trees.items():
+        for node in ast.walk(tree):
+            match node:
+                case ast.Call(
+                    func=ast.Name(id="JobSpec") | ast.Attribute(attr="JobSpec"),
+                    keywords=keywords,
+                ):
+                    selector = next((kw for kw in keywords if kw.arg == CANDIDATES_FIELD), None)
+                    if selector is None:
+                        failures.append(
+                            f"{rel}: JobSpec declares no {CANDIDATES_FIELD!r} — every job names "
+                            f"the workspaces it has work in (no fleet-wide or unbound job)"
+                        )
+                    elif isinstance(selector.value, ast.Constant) and selector.value.value is None:
+                        failures.append(
+                            f"{rel}: JobSpec {CANDIDATES_FIELD}=None — a job selector must name "
+                            f"candidate workspaces, never None"
+                        )
+    return failures
 
 
 def _schema_columns(trees: dict[Path, ast.Module]) -> tuple[list[tuple[str, str]], set[str]]:
@@ -580,6 +611,7 @@ def main() -> int:
     failures.extend(_boundary_failures(trees))
     failures.extend(_sdk_import_failures(trees))
     failures.extend(_conformance_failures(trees))
+    failures.extend(_job_selector_failures(trees))
     failures.extend(_wiring_failures(trees))
     failures.extend(_live_frame_failures(trees))
     failures.extend(_to_thread_failures(trees))

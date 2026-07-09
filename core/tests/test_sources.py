@@ -14,13 +14,23 @@ from ufo_ext_memory.store import MemoryStore, PageIndexer, mem_page, recall_subj
 from ufo.blob import FilesystemBlobStore
 from ufo.config import SourceConfig, SourceEntry
 from ufo.db import workspace_tx
-from ufo.ext.context import ScopedStore, context_for
-from ufo.ext.manifest import HookContext, HookOutcome, HookSpec, Manifest, PageChangeBatch
+from ufo.ext.context import ExtensionContext, ScopedStore, context_for
+from ufo.ext.manifest import (
+    HookContext,
+    HookOutcome,
+    HookSpec,
+    JobSpec,
+    Manifest,
+    PageChangeBatch,
+)
 from ufo.indexing import OWNER_KIND_PAGE, Chunk, TextChunker
 from ufo.jobs import (
     CORE_EXTENSION,
+    PAGE_CHANGE_JOB,
     SANDBOX_REAP_JOB,
     SPEND_RESUME_JOB,
+    JobRunner,
+    PageChangeConsumer,
     PageChangeRunner,
     SandboxReaper,
     SpendResume,
@@ -148,6 +158,42 @@ async def _register_folder(root: Path) -> None:
     )
 
 
+async def _sync(driver: SyncDriver) -> None:
+    """Drive the sync job through the real dispatch: the source-sync JobSpec's candidate names the
+    workspaces holding a due source, and `fire` binds each before running the driver — so the claim,
+    fetch, and commit run scoped per workspace and never unbound, exactly as the fleet fires it."""
+
+    async def _handler(context: ExtensionContext) -> None:
+        await driver.run()
+
+    spec = JobSpec(
+        name=SOURCE_SYNC_JOB,
+        schedule=None,
+        handler=_handler,
+        candidates=driver.candidate_workspaces,
+    )
+    runner = JobRunner(bindings=bindings_from((), (spec,)))
+    await runner.fire(f"{CORE_EXTENSION}:{SOURCE_SYNC_JOB}")
+
+
+async def _fire_page_change(runner: PageChangeRunner, consumer: PageChangeConsumer) -> None:
+    """Drive one page-change consumer through the real dispatch: its JobSpec candidate names the
+    workspaces with pages changed since the consumer's cursor, and `fire` binds each before running
+    the consumer's cursor loop — so the replay runs scoped per workspace and a change-free workspace
+    (absent from the candidates) is never opened."""
+
+    async def _handler(context: ExtensionContext) -> None:
+        await runner.drive(consumer)
+
+    async def _candidates() -> tuple[UUID, ...]:
+        return await runner.workspaces_with_changes(consumer)
+
+    name = f"{PAGE_CHANGE_JOB}:{consumer.extension}:{consumer.discriminator}"
+    spec = JobSpec(name=name, schedule=None, handler=_handler, candidates=_candidates)
+    job_runner = JobRunner(bindings=bindings_from((), (spec,)))
+    await job_runner.fire(f"{CORE_EXTENSION}:{name}")
+
+
 async def _pages() -> list[sa.RowMapping]:
     async with workspace_tx() as connection:
         return list(
@@ -223,7 +269,7 @@ async def test_folder_syncs_a_page_body_to_blob_no_chunk_until_indexed(
     driver, index_pages, _ = _wire(database_url, vec((7, 1.0)), tmp_path / "blobs", workspace_id)
     await _register_folder(root)
 
-    await driver.run()
+    await _sync(driver)
     pages = await _pages()
     assert len(pages) == 1
     assert pages[0]["subject"] == SHARED_SUBJECT
@@ -248,7 +294,7 @@ async def test_synced_page_content_is_found_via_memory_search(
         database_url, vec((8, 1.0)), tmp_path / "blobs", workspace_id
     )
     await _register_folder(root)
-    await driver.run()
+    await _sync(driver)
     await index_pages()
 
     found = await _search(service, uuid4(), tmp_path / "blobs", "fire assembly point")
@@ -265,13 +311,13 @@ async def test_unchanged_doc_resync_does_not_reindex_or_duplicate(
     (root / "note.md").write_text("the mascot is a friendly otter named pip")
     driver, index_pages, _ = _wire(database_url, vec((9, 1.0)), tmp_path / "blobs", workspace_id)
     await _register_folder(root)
-    await driver.run()
+    await _sync(driver)
     await index_pages()
     stamped = (await _pages())[0]["updated_at"]
     chunks = await _chunk_count()
 
     await _make_due()
-    await driver.run()
+    await _sync(driver)
     resynced = await _pages()
     assert len(resynced) == 1
     assert resynced[0]["updated_at"] == stamped
@@ -291,13 +337,13 @@ async def test_changed_doc_resync_marks_due_and_reindexes(
         database_url, vec((10, 1.0)), tmp_path / "blobs", workspace_id
     )
     await _register_folder(root)
-    await driver.run()
+    await _sync(driver)
     await index_pages()
     first_digest = (await _pages())[0]["digest"]
 
     doc.write_text("the release date is monday")
     await _make_due()
-    await driver.run()
+    await _sync(driver)
     pages = await _pages()
     assert len(pages) == 1
     assert pages[0]["digest"] != first_digest
@@ -321,14 +367,14 @@ async def test_edited_page_leaves_no_stale_chunk_in_search_sources(
         database_url, vec((16, 1.0)), tmp_path / "blobs", workspace_id
     )
     await _register_folder(root)
-    await driver.run()
+    await _sync(driver)
     await index_pages()
     before = await service.search_sources("launch codename", frozenset({SHARED_SUBJECT}), 8)
     assert before and "thunderbird" in before[0].text
 
     doc.write_text("the launch codename is nighthawk")
     await _make_due()
-    await driver.run()
+    await _sync(driver)
     await index_pages()
 
     matches = await service.search_sources(
@@ -351,13 +397,13 @@ async def test_removed_file_tombstones_page_and_index_drops_its_chunks(
         database_url, vec((11, 1.0)), tmp_path / "blobs", workspace_id
     )
     await _register_folder(root)
-    await driver.run()
+    await _sync(driver)
     await index_pages()
     assert "magma" in await _search(service, uuid4(), tmp_path / "blobs", "volcano magma chamber")
 
     gone.unlink()
     await _make_due()
-    await driver.run()
+    await _sync(driver)
     tombstoned = [p for p in await _pages() if p["tombstone"] not in (False, 0)]
     assert len(tombstoned) == 1
     await index_pages()
@@ -392,7 +438,7 @@ async def test_page_change_runner_cursor_resumes_across_ticks(
     consumer = next(c for c in runner.consumers() if c.discriminator == "index_pages")
 
     await _register_folder(root)
-    await driver.run()
+    await _sync(driver)
     with ws(workspace_id):
         await runner.drive(consumer)
     indexed_a = embed.calls
@@ -404,7 +450,7 @@ async def test_page_change_runner_cursor_resumes_across_ticks(
 
     (root / "b.md").write_text("beta document about bananas")
     await _make_due()
-    await driver.run()
+    await _sync(driver)
     with ws(workspace_id):
         await runner.drive(consumer)
     assert embed.calls == indexed_a + 1
@@ -470,8 +516,9 @@ async def _seed_page(workspace_id: UUID) -> UUID:
 class _RecordingFeed:
     """Wraps the real `CorePageFeed` and records the workspace each `pages_changed_since` runs
     under — the witness of which workspaces a drive actually opened, since the feed is read only
-    inside `_drive_workspace`'s `with ws(...)` block. A real feed delegated to, never a fake: the
-    delivered pages come from Postgres/SQLite as always; this only observes the scope."""
+    inside `drive`, under the `with ws(...)` block the dispatcher opens per candidate. A real feed
+    delegated to, never a fake: the delivered pages come from Postgres/SQLite as always; this only
+    observes the scope."""
 
     inner: CorePageFeed
     opened: list[UUID] = field(default_factory=list)
@@ -507,7 +554,7 @@ async def test_page_change_drive_enumerates_workspaces_with_changes(
     runner = _probe_runner(tmp_path)
     (consumer,) = runner.consumers()
 
-    await runner.drive(consumer)
+    await _fire_page_change(runner, consumer)
 
     with ws(ws_a):
         seen_a = await ScopedStore(extension=PROBE_EXTENSION).get(SEEN_PAGES_KEY)
@@ -531,7 +578,7 @@ async def test_page_change_drive_skips_a_workspace_unchanged_since_its_cursor(
     runner = _probe_runner(tmp_path, pages=feed)
     (consumer,) = runner.consumers()
 
-    await runner.drive(consumer)
+    await _fire_page_change(runner, consumer)
     assert feed.opened == [ws_a]
     with ws(ws_a):
         drained = await ScopedStore(extension=PROBE_EXTENSION).get(SEEN_PAGES_KEY)
@@ -539,7 +586,7 @@ async def test_page_change_drive_skips_a_workspace_unchanged_since_its_cursor(
 
     page_b = await _seed_page(ws_b)
     feed.opened.clear()
-    await runner.drive(consumer)
+    await _fire_page_change(runner, consumer)
     assert feed.opened == [ws_b]
     with ws(ws_b):
         seen_b = await ScopedStore(extension=PROBE_EXTENSION).get(SEEN_PAGES_KEY)
@@ -557,7 +604,7 @@ async def test_shared_page_scoping_excludes_a_member_only_search(
         database_url, vec((12, 1.0)), tmp_path / "blobs", workspace_id
     )
     await _register_folder(root)
-    await driver.run()
+    await _sync(driver)
     await index_pages()
 
     shared = await service.search_sources("expense reports due", frozenset({SHARED_SUBJECT}), 8)
@@ -670,7 +717,7 @@ async def test_a_failing_source_is_isolated_and_released(
 
     before = (await _row(missing))["next_sync_at"]
 
-    await driver.run()
+    await _sync(driver)
 
     assert len(await _pages()) == 1  # the good source synced despite the bad sibling
     good_row, missing_row = await _row(good), await _row(missing)
@@ -808,14 +855,14 @@ async def test_cursor_expired_clears_stored_cursor_and_next_run_refetches(
         tmp_path / "blobs",
     )
 
-    await driver.run()
+    await _sync(driver)
     expired = await _source_state(source_id)
     assert backend.cursors == ["stale-token"]
     assert expired["cursor"] is None
     assert expired["consecutive_errors"] == 1
 
     await _make_due()
-    await driver.run()
+    await _sync(driver)
     refetched = await _source_state(source_id)
     assert backend.cursors == ["stale-token", None]
     assert refetched["cursor"] == "fresh-token"
@@ -837,21 +884,21 @@ async def test_consecutive_errors_back_off_and_a_success_resets_the_counter(
     )
 
     baseline_first = (await _source_state(source_id))["next_sync_at"]
-    await driver.run()
+    await _sync(driver)
     first = await _source_state(source_id)
     assert first["consecutive_errors"] == 1
     gap_first = first["next_sync_at"] - baseline_first
 
     await _make_due()
     baseline_second = (await _source_state(source_id))["next_sync_at"]
-    await driver.run()
+    await _sync(driver)
     second = await _source_state(source_id)
     assert second["consecutive_errors"] == 2
     gap_second = second["next_sync_at"] - baseline_second
     assert gap_second > gap_first
 
     await _make_due()
-    await driver.run()
+    await _sync(driver)
     assert (await _source_state(source_id))["consecutive_errors"] == 0
 
 
@@ -880,12 +927,12 @@ async def test_delta_delete_tombstones_only_named_page_never_blanket_sweeps(
         tmp_path / "blobs",
     )
 
-    await driver.run()
+    await _sync(driver)
     assert await _tombstone(delta_id) is False
     assert await _tombstone(kept_id) is False  # delta run 1 did not sweep the unseen prior page
 
     await _make_due()
-    await driver.run()
+    await _sync(driver)
     assert await _tombstone(delta_id) is True  # explicitly deleted → tombstoned
     assert await _tombstone(kept_id) is False  # survives: no blanket sweep on a delta run
 
@@ -909,7 +956,7 @@ async def test_snapshot_fetch_tombstones_prior_pages_absent_from_the_fetch(
         [SyncResult(pages=(kept,), snapshot=True)], database_url, tmp_path / "blobs"
     )
 
-    await driver.run()
+    await _sync(driver)
     assert await _tombstone(gone_id) is True  # absent from the authoritative snapshot → swept
     assert await _tombstone(kept_id) is False
 
@@ -943,7 +990,7 @@ async def test_stream_skipped_records_a_skip_not_a_failure_and_never_tombstones(
     await _register_folder(missing)
     baseline = (await _source_state(skipped_id))["next_sync_at"]
 
-    await driver.run()
+    await _sync(driver)
 
     skip_state = await _source_state(skipped_id)
     assert skip_state["consecutive_errors"] == 0  # a skip is not a failure

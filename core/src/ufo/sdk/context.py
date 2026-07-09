@@ -24,6 +24,9 @@ from ufo.ext.context import (
 from ufo.ext.context import (
     UndeclaredCredentialSlot as UndeclaredCredentialSlot,
 )
+from ufo.ext.context import (
+    trajectory_workspaces as trajectory_workspaces,
+)
 from ufo.schema.records import (
     AgentChange as AgentChange,
 )

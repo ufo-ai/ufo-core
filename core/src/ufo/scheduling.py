@@ -10,12 +10,13 @@ stores the schedule string opaquely and orders on the `next_run_at` a caller com
 dialect lives with the extension that owns it, never in core."""
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 
-from ufo.db import workspace_tx
+from ufo.candidates import WorkspaceCandidates
+from ufo.db import owner_tx, workspace_tx
 from ufo.schema import tables
 from ufo.workspace import ws_current
 
@@ -62,6 +63,35 @@ def _task(row: sa.RowMapping) -> ScheduledTask:
         next_run_at=row["next_run_at"],
         last_run_at=row["last_run_at"],
     )
+
+
+def due_task_workspaces() -> WorkspaceCandidates:
+    """The candidate seam the scheduled-task runner declares: the workspaces holding a task due to
+    fire — one distinct `workspace_id` per workspace with a due, unclaimed-or-expired row, read in
+    one `owner_tx` (the RLS-bypass path) so the dispatcher binds only those. Core owns the
+    `scheduled_task` table, so it owns this query and hands the runner a ready selector — the
+    extension never reaches `owner_tx`. The claim lease is folded in, matching the runner's own
+    `claim_due`, so a workspace whose only due task is mid-fire under a lease is not reopened."""
+
+    async def candidates() -> tuple[UUID, ...]:
+        now = datetime.now(UTC)
+        async with owner_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(tables.scheduled_task.c.workspace_id)
+                    .where(
+                        tables.scheduled_task.c.next_run_at <= now,
+                        sa.or_(
+                            tables.scheduled_task.c.claimed_by.is_(None),
+                            tables.scheduled_task.c.claim_expires_at < now,
+                        ),
+                    )
+                    .distinct()
+                )
+            ).all()
+        return tuple(row.workspace_id for row in rows)
+
+    return candidates
 
 
 @dataclass(frozen=True)

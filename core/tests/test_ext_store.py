@@ -56,6 +56,16 @@ async def _workspace() -> UUID:
     return workspace_id
 
 
+async def _seed_note(workspace_id: UUID) -> None:
+    """Give the workspace a row in the sample's own `sample_ext_note` table — the table its tick
+    job's candidate selector reads. With one present the dispatcher names this workspace and binds
+    it before firing the handler, so the job runs scoped to it exactly as the fleet fires it."""
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(sample.NOTE_TABLE).values(workspace_id=workspace_id, note="seed")
+        )
+
+
 def test_an_empty_lockfile_deactivates_every_discovered_extension(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -182,6 +192,7 @@ async def test_an_installed_extension_fires_through_the_loader(
     write_lockfile(lock, Lockfile(ufo_version="0.1.0"))
     ExtensionStore(catalog=_catalog(), lockfile=lock).install(sample.NAME)
     workspace_id = await _workspace()
+    await _seed_note(workspace_id)
     runner = JobRunner(bindings=bindings_from(load_manifests(), ()))
     with ws(workspace_id):
         await runner.fire(f"{sample.NAME}:{sample.JOB_NAME}")
@@ -223,6 +234,7 @@ async def test_a_bundle_boots_its_pinned_extension_on_a_clean_lockfile(
     monkeypatch.setenv(LOCKFILE_PATH_ENV, str(result.lockfile))
     assert [manifest.name for manifest in load_manifests()] == [sample.NAME]
     workspace_id = await _workspace()
+    await _seed_note(workspace_id)
     runner = JobRunner(bindings=bindings_from(load_manifests(), ()))
     with ws(workspace_id):
         await runner.fire(f"{sample.NAME}:{sample.JOB_NAME}")

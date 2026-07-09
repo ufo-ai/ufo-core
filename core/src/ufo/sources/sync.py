@@ -36,7 +36,6 @@ from ufo.db import owner_tx, workspace_tx
 from ufo.o11y import log
 from ufo.schema import tables
 from ufo.subjects import SHARED_SUBJECT
-from ufo.workspace import ws
 
 FOLDER_BACKEND = "folder"
 SOURCE_SYNC_JOB = "source_sync"
@@ -226,28 +225,22 @@ class ClaimedSource:
 
 @dataclass(frozen=True)
 class SyncDriver:
-    """The core sync job: find the workspaces holding a due source through one `owner_tx` read, then
-    per workspace claim its due sources, fetch each backend, and commit its pages — bound to that
-    workspace with `with ws(...)` so the claim and every write go through RLS. Runs downward —
-    select, claim, fetch, commit — one source at a time, so a slow backend never blocks the claim
-    and a workspace with nothing due is never opened. On a per-tenant deploy `owner_tx` resolves to
-    the single workspace, unchanged."""
+    """The core sync job: for the workspace the dispatcher bound, claim its due sources, fetch each
+    backend, and commit its pages — the claim and every write go through RLS on that workspace. Runs
+    downward — claim, fetch, commit — one source at a time, so a slow backend never blocks the run.
+    `candidate_workspaces` names the workspaces holding a due source through one `owner_tx` read, so
+    the dispatcher binds only those and a workspace with nothing due is never opened. On a
+    per-tenant deploy `owner_tx` resolves to the single workspace, unchanged."""
 
     backends: Mapping[str, SourceBackend]
     blob: BlobStore
     postgres: bool
     auth_proxy: AuthProxy | None = None
 
-    async def run(self) -> None:
-        for workspace_id in await self._workspaces_with_due_sources():
-            with ws(workspace_id):
-                await self._sync_workspace()
-
-    async def _workspaces_with_due_sources(self) -> tuple[UUID, ...]:
-        """Workspaces holding at least one source due for sync — the candidates one tick touches,
-        found in a single `owner_tx` read (RLS bypass) so a workspace with nothing due is never
-        opened. Each is re-bound with `with ws(...)` before its due sources are claimed and synced
-        through RLS."""
+    async def candidate_workspaces(self) -> tuple[UUID, ...]:
+        """Workspaces holding a source due for sync — one distinct `workspace_id` per such
+        workspace, found in a single `owner_tx` read (RLS bypass) so the dispatcher binds only those
+        and a workspace with nothing due runs no per-workspace transaction on the tick."""
         now = datetime.now(UTC)
         async with owner_tx() as connection:
             rows = (
@@ -265,7 +258,7 @@ class SyncDriver:
             ).all()
         return tuple(row.workspace_id for row in rows)
 
-    async def _sync_workspace(self) -> None:
+    async def run(self) -> None:
         claim = uuid4().hex
         for source in await self._claim_due(claim):
             try:

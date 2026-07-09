@@ -24,9 +24,10 @@ from ufo_ext_memory.store import (
 
 from ufo.db import workspace_tx
 from ufo.indexing import TextChunker
-from ufo.jobs import CORE_EXTENSION, bindings_from
+from ufo.jobs import CORE_EXTENSION, JobRunner, bindings_from
 from ufo.schema import tables
 from ufo.subjects import member_subject
+from ufo.workspace import ws
 
 
 def vec(*axes: tuple[int, float]) -> tuple[float, ...]:
@@ -169,6 +170,40 @@ async def test_member_memory_is_invisible_to_another_member(clean: None) -> None
     assert await store.recall("window seat", recall_subjects(bob), 5) == ()
     mine = await store.recall("window seat", recall_subjects(alice), 5)
     assert len(mine) == 1 and "alice" in mine[0].body
+
+
+async def test_memory_index_job_fires_bound_only_on_workspaces_with_unindexed_items(
+    clean: None,
+) -> None:
+    """The memory-index job runs through the real dispatch: its candidate names only the workspaces
+    holding an un-indexed memory_item (read through the RLS-bypass path, never `ws_current`, so no
+    WorkspaceUnbound), and `fire` binds each before the indexer derives its chunks — so the job runs
+    scoped to that workspace as the fleet fires it. A workspace with nothing pending is not a
+    candidate and is never opened."""
+    embed = StubEmbed(vec((0, 1.0)))
+    index = DefaultIndex(embed=embed, transaction=workspace_tx)
+    ws_with_work = await _workspace()
+    ws_empty = await _workspace()
+    with ws(ws_with_work):
+        store = MemoryStore(
+            index=index, embed=embed, transaction=workspace_tx, workspace_id=ws_with_work
+        )
+        await store.commit(MemoryWrite(subject="shared", body="the capital of france is paris"))
+
+    manifest = memory_manifest.manifest()
+    job = next(j for j in manifest.jobs if j.name == memory_manifest.MEMORY_INDEX_JOB)
+    assert set(await job.candidates()) == {ws_with_work}
+
+    runner = JobRunner(bindings=bindings_from((manifest,), ()), index=index, embed=embed)
+    await runner.fire(f"{memory_manifest.NAME}:{memory_manifest.MEMORY_INDEX_JOB}")
+
+    with ws(ws_with_work):
+        async with workspace_tx() as connection:
+            digest = (
+                await connection.execute(sa.select(memory_item.c.embedding_digest))
+            ).scalar_one()
+    assert digest is not None and digest.startswith("sha256:")
+    assert ws_empty not in set(await job.candidates())
 
 
 def test_memory_index_registers_as_an_extension_job() -> None:

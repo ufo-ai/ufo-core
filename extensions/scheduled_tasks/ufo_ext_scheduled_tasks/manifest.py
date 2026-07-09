@@ -11,6 +11,7 @@ from pathlib import Path
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.jobs import JobSpec
 from ufo.sdk.manifest import Manifest, SkillSpec
+from ufo.sdk.scheduling import due_task_workspaces
 from ufo.sdk.tools import ToolDef
 from ufo_ext_scheduled_tasks.runner import ScheduledTaskRunner
 from ufo_ext_scheduled_tasks.tasks import (
@@ -69,6 +70,13 @@ def manifest() -> Manifest:
                 handler=list_scheduled_tasks,
             ),
         ),
-        jobs=(JobSpec(name=RUNNER_JOB, schedule=RUNNER_SCHEDULE, handler=_run),),
+        jobs=(
+            JobSpec(
+                name=RUNNER_JOB,
+                schedule=RUNNER_SCHEDULE,
+                handler=_run,
+                candidates=due_task_workspaces(),
+            ),
+        ),
         skills=tuple(SkillSpec(path=SKILLS_ROOT / name) for name in SKILL_NAMES),
     )

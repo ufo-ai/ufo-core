@@ -7,7 +7,16 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.accounting import SpendEvaluator, record_sandbox_tokens, record_workspace_usage
 from ufo.db import workspace_tx
-from ufo.jobs import RESUME_ENQUEUE_GRACE_SECONDS, SpendResume
+from ufo.ext.context import ExtensionContext
+from ufo.ext.manifest import JobSpec
+from ufo.jobs import (
+    CORE_EXTENSION,
+    RESUME_ENQUEUE_GRACE_SECONDS,
+    SPEND_RESUME_JOB,
+    JobRunner,
+    SpendResume,
+    bindings_from,
+)
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame, Usage
 from ufo.surfaces.admission import Admission
@@ -25,6 +34,26 @@ class StubDbos:
     async def enqueue_async(self, options: object, workspace_id: str, turn_id: str) -> None:
         self.enqueued.append(turn_id)
         self.scoped.append((workspace_id, turn_id))
+
+
+async def _resume(client: object) -> None:
+    """Drive the resume sweep through the real dispatch: the spend-resume JobSpec's candidate names
+    the workspaces holding a resumable parked turn, and `fire` binds each before running the sweep —
+    so the cap decision and enqueue run scoped per workspace and never unbound, and a workspace with
+    no resumable parked turn (absent from the candidates) is never opened."""
+    resume = SpendResume(client=client)
+
+    async def _handler(context: ExtensionContext) -> None:
+        await resume.run()
+
+    spec = JobSpec(
+        name=SPEND_RESUME_JOB,
+        schedule=None,
+        handler=_handler,
+        candidates=resume.candidate_workspaces,
+    )
+    runner = JobRunner(bindings=bindings_from((), (spec,)))
+    await runner.fire(f"{CORE_EXTENSION}:{SPEND_RESUME_JOB}")
 
 
 async def _seed(connection: AsyncConnection) -> tuple[UUID, UUID, UUID, UUID]:
@@ -408,7 +437,7 @@ async def test_resume_skips_turn_still_over_cap(db: None) -> None:
         await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "park")
         parked = await _insert_parked(connection, workspace_id, conversation_id, agent_id, seq=2)
     dbos = StubDbos()
-    await SpendResume(client=dbos).run()
+    await _resume(dbos)
     assert dbos.enqueued == []
     assert await _status(parked) == "parked"
 
@@ -423,7 +452,7 @@ async def test_resume_skips_a_recently_enqueued_parked_turn(db: None) -> None:
             .where(tables.turn.c.id == recent)
         )
     dbos = StubDbos()
-    await SpendResume(client=dbos).run()
+    await _resume(dbos)
     assert dbos.enqueued == []
     assert await _status(recent) == "parked"
 
@@ -439,10 +468,10 @@ async def test_resume_reenqueues_a_parked_turn_past_the_grace_window(db: None) -
             .where(tables.turn.c.id == parked)
         )
     dbos = StubDbos()
-    await SpendResume(client=dbos).run()
+    await _resume(dbos)
     assert dbos.enqueued == [str(parked)]
     again = StubDbos()
-    await SpendResume(client=again).run()
+    await _resume(again)
     assert again.enqueued == []
 
 
@@ -459,7 +488,7 @@ async def test_resume_readmits_when_cap_raised(db: None) -> None:
             .where(tables.spend_cap.c.id == cap_id)
         )
     dbos = StubDbos()
-    await SpendResume(client=dbos).run()
+    await _resume(dbos)
     assert dbos.enqueued == [str(parked)]
     # the sweep only enqueues; the turn's own execution claims parked -> running, so with no
     # worker running here the durable status stays parked (a crash pre-claim leaves it re-runnable)
@@ -476,7 +505,7 @@ async def test_resume_touches_only_the_workspace_holding_a_parked_turn(db: None)
         parked_a = await _insert_parked(connection, ws_a, conv_a, agent_a, seq=1)
         ws_b, _, _, _ = await _seed(connection)
     dbos = StubDbos()
-    await SpendResume(client=dbos).run()
+    await _resume(dbos)
     assert dbos.enqueued == [str(parked_a)]
     assert dbos.scoped == [(str(ws_a), str(parked_a))]
     assert all(scoped_ws != str(ws_b) for scoped_ws, _ in dbos.scoped)
@@ -495,7 +524,7 @@ async def test_resume_scopes_the_cap_decision_to_each_workspace(db: None) -> Non
         free_ws, _, free_agent, free_conv = await _seed(connection)
         free_parked = await _insert_parked(connection, free_ws, free_conv, free_agent, seq=1)
     dbos = StubDbos()
-    await SpendResume(client=dbos).run()
+    await _resume(dbos)
     assert dbos.enqueued == [str(free_parked)]
     assert dbos.scoped == [(str(free_ws), str(free_parked))]
     assert await _status(over_parked) == "parked"

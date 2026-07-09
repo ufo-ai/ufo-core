@@ -115,6 +115,16 @@ async def _workspace() -> UUID:
     return workspace_id
 
 
+async def _seed_note(workspace_id: UUID) -> None:
+    """Give the workspace a row in the sample's own `sample_ext_note` table — the table its tick
+    job's candidate selector reads — so the dispatcher names this workspace and binds it before
+    firing the handler, exactly as the fleet fires the job."""
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(sample.NOTE_TABLE).values(workspace_id=workspace_id, note="seed")
+        )
+
+
 async def _grantable(workspace_id: UUID) -> tuple[UUID, UUID, UUID]:
     """A member, an agent, and their conversation — the foreign-key rows a recorded grant
     references, so the connector tool can authenticate the turn-agent's grant."""
@@ -709,6 +719,7 @@ def test_a_route_without_a_credential_key_fails_loud() -> None:
 
 async def test_job_fires_through_its_scoped_context(db: None) -> None:
     workspace_id = await _workspace()
+    await _seed_note(workspace_id)
     manifest = _sample_manifest()
     runner = JobRunner(bindings=bindings_from((manifest,), ()))
     with ws(workspace_id):
@@ -742,6 +753,7 @@ async def test_route_reaches_its_scoped_context(db: None) -> None:
 
 async def test_a_second_workspace_reaches_none_of_the_firsts_rows(db: None) -> None:
     first = await _workspace()
+    await _seed_note(first)
     manifest = _sample_manifest()
     with ws(first):
         await JobRunner(bindings=bindings_from((manifest,), ())).fire(
@@ -826,6 +838,7 @@ async def test_job_reads_trajectories_and_opens_a_governed_proposal(
     db: None, tmp_path: Path
 ) -> None:
     workspace_id = await _workspace()
+    await _seed_note(workspace_id)
     manifest = _sample_manifest()
     blob = FilesystemBlobStore(root=tmp_path)
     agent_id = await _seed_trajectory(workspace_id, blob)

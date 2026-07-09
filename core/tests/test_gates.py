@@ -146,3 +146,20 @@ def test_skill_content_is_held_out_of_the_code_gates() -> None:
         gates.SAMPLE_MODULE: ast.parse(sample_src),
     }
     assert gates._conformance_failures(trees) == []
+
+
+def test_job_selector_gate_rejects_a_jobspec_without_candidates() -> None:
+    trees = {CORE_FILE: ast.parse("JobSpec(name='x', schedule=None, handler=h)\n")}
+    failures = gates._job_selector_failures(trees)
+    assert failures and "candidates" in failures[0]
+
+
+def test_job_selector_gate_rejects_a_none_selector() -> None:
+    trees = {CORE_FILE: ast.parse("JobSpec(name='x', schedule=None, handler=h, candidates=None)\n")}
+    failures = gates._job_selector_failures(trees)
+    assert failures and "None" in failures[0]
+
+
+def test_job_selector_gate_allows_a_declared_selector() -> None:
+    trees = {CORE_FILE: ast.parse("JobSpec(name='x', schedule=None, handler=h, candidates=sel)\n")}
+    assert gates._job_selector_failures(trees) == []

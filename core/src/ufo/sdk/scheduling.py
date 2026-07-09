@@ -10,3 +10,6 @@ from ufo.scheduling import (
 from ufo.scheduling import (
     ScheduleStore as ScheduleStore,
 )
+from ufo.scheduling import (
+    due_task_workspaces as due_task_workspaces,
+)

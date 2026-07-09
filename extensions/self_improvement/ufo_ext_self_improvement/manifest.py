@@ -7,7 +7,7 @@ extension's scoped context."""
 
 import anthropic
 
-from ufo.sdk.context import ExtensionContext
+from ufo.sdk.context import ExtensionContext, trajectory_workspaces
 from ufo.sdk.jobs import JobSpec
 from ufo.sdk.manifest import CredentialSlot, Manifest
 from ufo_ext_self_improvement.cron import ImproveCron
@@ -43,7 +43,14 @@ def manifest() -> Manifest:
     return Manifest(
         name=NAME,
         version=VERSION,
-        jobs=(JobSpec(name=EVAL_JOB, schedule=EVAL_SCHEDULE, handler=_tick),),
+        jobs=(
+            JobSpec(
+                name=EVAL_JOB,
+                schedule=EVAL_SCHEDULE,
+                handler=_tick,
+                candidates=trajectory_workspaces(),
+            ),
+        ),
         credentials=(
             CredentialSlot(
                 name=MODEL_KEY_SLOT,

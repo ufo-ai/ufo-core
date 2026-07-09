@@ -32,7 +32,7 @@ from ufo.sdk.http import (
 )
 from ufo.sdk.hub import InProcessHub
 from ufo.sdk.index import Chunk, EmbedClient, Hit, IndexScope
-from ufo.sdk.jobs import JobSpec
+from ufo.sdk.jobs import JobSpec, owner_candidates
 from ufo.sdk.manifest import (
     CdpProviderSpec,
     ConnectorProvider,
@@ -688,7 +688,14 @@ def manifest() -> Manifest:
                 handler=_note,
             ),
         ),
-        jobs=(JobSpec(name=JOB_NAME, schedule=None, handler=_tick),),
+        jobs=(
+            JobSpec(
+                name=JOB_NAME,
+                schedule=None,
+                handler=_tick,
+                candidates=owner_candidates(sa.select(NOTE_TABLE.c.workspace_id).distinct()),
+            ),
+        ),
         routes=(RouteSpec(method="POST", path=ROUTE_PATH, handler=_hook),),
         onboarding_steps=(OnboardingStep(name=ONBOARDING_NAME, handler=_setup),),
         prompt_sections=(PromptSection(name=SECTION_NAME, body=SECTION_BODY),),

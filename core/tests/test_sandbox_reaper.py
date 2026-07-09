@@ -5,7 +5,16 @@ from uuid import UUID, uuid4
 import sqlalchemy as sa
 
 from ufo.db import workspace_tx
-from ufo.jobs import SANDBOX_IDLE_TTL_SECONDS, SandboxReaper
+from ufo.ext.context import ExtensionContext
+from ufo.ext.manifest import JobSpec
+from ufo.jobs import (
+    CORE_EXTENSION,
+    SANDBOX_IDLE_TTL_SECONDS,
+    SANDBOX_REAP_JOB,
+    JobRunner,
+    SandboxReaper,
+    bindings_from,
+)
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import SandboxHandle, SandboxSpec, format_sandbox_handle
 from ufo.schema import tables
@@ -14,6 +23,26 @@ from ufo.schema.records import NON_TERMINAL_STATUSES, TerminalFrame
 IDLE_AGE_SECONDS = SANDBOX_IDLE_TTL_SECONDS + 3600
 FRESH_AGE_SECONDS = 60
 LOCAL_BACKEND = "local"
+
+
+async def _reap(carrier: object) -> None:
+    """Drive the reaper through the real dispatch: the sandbox-reap JobSpec's candidate names the
+    workspaces holding an idle sandbox, and `fire` binds each before running it — so the reap
+    runs exactly as the fleet fires it, scoped per workspace and never unbound, and an idle-free
+    workspace (absent from the candidates) is never opened."""
+    reaper = SandboxReaper(carrier=carrier, backend=LOCAL_BACKEND)
+
+    async def _handler(context: ExtensionContext) -> None:
+        await reaper.run()
+
+    spec = JobSpec(
+        name=SANDBOX_REAP_JOB,
+        schedule=None,
+        handler=_handler,
+        candidates=reaper.candidate_workspaces,
+    )
+    runner = JobRunner(bindings=bindings_from((), (spec,)))
+    await runner.fire(f"{CORE_EXTENSION}:{SANDBOX_REAP_JOB}")
 
 
 @dataclass
@@ -124,7 +153,7 @@ async def test_reaper_destroys_a_conversation_idle_past_ttl_but_not_a_fresh_one(
     idle = await _conversation(workspace_id, agent_id, "done", IDLE_AGE_SECONDS)
     await _conversation(workspace_id, agent_id, "done", FRESH_AGE_SECONDS)
     carrier = RecordingCarrier()
-    await SandboxReaper(carrier=carrier, backend=LOCAL_BACKEND).run()
+    await _reap(carrier)
     assert carrier.destroyed == [idle]
 
 
@@ -137,7 +166,7 @@ async def test_reaper_enumerates_and_scopes_across_workspaces(db: None) -> None:
     ws_b, agent_b = await _workspace_agent()
     idle_b = await _conversation(ws_b, agent_b, "done", IDLE_AGE_SECONDS)
     carrier = RecordingCarrier()
-    await SandboxReaper(carrier=carrier, backend=LOCAL_BACKEND).run()
+    await _reap(carrier)
     assert set(carrier.destroyed) == {idle_a, idle_b}
     assert await _stored_handle(idle_a) is None
     assert await _stored_handle(idle_b) is None
@@ -153,7 +182,7 @@ async def test_reaper_touches_only_the_workspace_with_an_idle_sandbox(db: None) 
     ws_b, agent_b = await _workspace_agent()
     fresh_b = await _conversation(ws_b, agent_b, "done", FRESH_AGE_SECONDS)
     carrier = RecordingCarrier()
-    await SandboxReaper(carrier=carrier, backend=LOCAL_BACKEND).run()
+    await _reap(carrier)
     assert carrier.destroyed == [idle_a]
     assert await _stored_handle(idle_a) is None
     assert await _stored_handle(fresh_b) == "local:sbx"
@@ -172,7 +201,7 @@ async def test_reaper_reaps_by_the_stored_id_and_clears_the_row(db: None) -> Non
         handle=format_sandbox_handle("local", "sbx-42"),
     )
     carrier = RecordingCarrier()
-    await SandboxReaper(carrier=carrier, backend=LOCAL_BACKEND).run()
+    await _reap(carrier)
     assert [(h.conversation_id, h.container_id) for h in carrier.reaped] == [
         (conversation, "sbx-42")
     ]
@@ -214,7 +243,7 @@ async def test_reaper_skips_a_conversation_with_no_persisted_handle(db: None) ->
             )
         )
     carrier = RecordingCarrier()
-    await SandboxReaper(carrier=carrier, backend=LOCAL_BACKEND).run()
+    await _reap(carrier)
     assert carrier.reaped == []
 
 
@@ -226,7 +255,7 @@ async def test_reaper_skips_a_handle_another_backend_wrote(db: None) -> None:
         workspace_id, agent_id, "done", IDLE_AGE_SECONDS, handle="docker:cid-1"
     )
     carrier = RecordingCarrier()
-    await SandboxReaper(carrier=carrier, backend=LOCAL_BACKEND).run()
+    await _reap(carrier)
     assert carrier.reaped == []
     assert await _stored_handle(conversation) == "docker:cid-1"
 
@@ -238,7 +267,7 @@ async def test_reaper_skips_a_conversation_with_an_in_flight_turn(db: None) -> N
     await _conversation(workspace_id, agent_id, "running", IDLE_AGE_SECONDS)
     idle = await _conversation(workspace_id, agent_id, "done", IDLE_AGE_SECONDS)
     carrier = RecordingCarrier()
-    await SandboxReaper(carrier=carrier, backend=LOCAL_BACKEND).run()
+    await _reap(carrier)
     assert carrier.destroyed == [idle]
 
 
@@ -278,7 +307,7 @@ async def test_reaper_rechecks_and_skips_a_conversation_that_went_active_after_t
                 await _go_active(b if handle.conversation_id == a else a)
 
     carrier = _RacingCarrier()
-    await SandboxReaper(carrier=carrier, backend=LOCAL_BACKEND).run()
+    await _reap(carrier)
     assert len(carrier.destroyed) == 1
 
 
@@ -288,5 +317,5 @@ async def test_reaper_destroy_on_a_never_created_sandbox_is_a_no_op(db: None) ->
     row is cleared all the same."""
     workspace_id, agent_id = await _workspace_agent()
     conversation = await _conversation(workspace_id, agent_id, "done", IDLE_AGE_SECONDS)
-    await SandboxReaper(carrier=LocalCarrier(), backend=LOCAL_BACKEND).run()
+    await _reap(LocalCarrier())
     assert await _stored_handle(conversation) is None

@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.accounting import Pricing
 from ufo.blob import BlobNotFound, BlobStore
+from ufo.candidates import WorkspaceCandidates, owner_candidates
 from ufo.db import workspace_tx
 from ufo.governance import Governance, prompt_digest
 from ufo.indexing import EmbedClient, IndexBackend
@@ -209,6 +210,25 @@ class TrajectoryCorpus:
                 )
             )
         return tuple(trajectories)
+
+
+def trajectory_workspaces() -> WorkspaceCandidates:
+    """The candidate seam a trajectory-reading job declares: the workspaces holding a conversation
+    with at least one turn — one distinct `workspace_id` per such workspace, read for the extension
+    through the one RLS-bypass path. Core owns the `conversation`/`turn` tables, so it owns this
+    query and the extension declares `candidates=trajectory_workspaces()` without reaching
+    `owner_tx`; the dispatcher binds each and the corpus read runs RLS-scoped, exactly as a turn
+    would scope it."""
+    with_a_turn = (
+        sa.select(tables.conversation.c.workspace_id)
+        .select_from(
+            tables.conversation.join(
+                tables.turn, tables.turn.c.conversation_id == tables.conversation.c.id
+            )
+        )
+        .distinct()
+    )
+    return owner_candidates(with_a_turn)
 
 
 class TurnInvoker(Protocol):
