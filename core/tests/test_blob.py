@@ -3,7 +3,7 @@ import shutil
 import socket
 import subprocess
 import time
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
 import pytest
@@ -163,6 +163,26 @@ async def test_s3_overwrite_replaces(s3_store: S3BlobStore) -> None:
     await s3_store.put("versioned", b"first")
     await s3_store.put("versioned", b"second")
     assert await s3_store.get("versioned") == b"second"
+
+
+async def test_s3_stream_round_trip(s3_store: S3BlobStore) -> None:
+    payload = bytes(range(256)) * 64
+
+    async def chunks() -> AsyncIterator[bytes]:
+        yield payload[:1000]
+        yield payload[1000:]
+
+    await s3_store.put_stream("artifacts/s/stream.bin", chunks())
+    collected = bytearray()
+    async for chunk in s3_store.get_stream("artifacts/s/stream.bin"):
+        collected += chunk
+    assert bytes(collected) == payload
+
+
+async def test_s3_get_stream_missing_raises(s3_store: S3BlobStore) -> None:
+    with pytest.raises(BlobNotFound):
+        async for _ in s3_store.get_stream("absent"):
+            pass
 
 
 async def test_s3_put_file_multipart_streams_from_disk(

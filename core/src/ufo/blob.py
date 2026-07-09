@@ -190,7 +190,8 @@ class S3BlobStore:
                 if _is_missing_key(error):
                     raise BlobNotFound(key) from error
                 raise
-            async with response["Body"] as body:
+            body = response["Body"]
+            async with body:
                 return await body.read()
 
     async def exists(self, key: str) -> bool:
@@ -211,7 +212,8 @@ class S3BlobStore:
                 if _is_missing_key(error):
                     raise BlobNotFound(key) from error
                 raise
-            async with response["Body"] as body:
+            body = response["Body"]
+            async with body:
                 async for chunk in body.iter_chunks(BLOB_STREAM_CHUNK_BYTES):
                     yield chunk
 
