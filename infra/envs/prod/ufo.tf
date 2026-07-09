@@ -27,11 +27,16 @@ locals {
 
   system_namespace = module.platform.system_namespace
 
+  # The digest-pinned bundle this deploy runs everywhere: the gateway seeds new tenants with it
+  # (UFO_BUNDLE_IMAGE) and the operator advances every existing Tenant to it (platform.toml).
+  bundle_image = "${module.platform.ecr_registry}/ufo@${data.aws_ecr_image.ufo.image_digest}"
+
   # PlatformConfig (ufo_control.platform) the operator mounts at /config/platform.toml. Names the
   # shared backing services + cluster facts the reconciler overlays onto every tenant's core config.
   platform_config = <<-TOML
     chart_path = "/charts/ufo-tenant"
     registry = "${module.platform.ecr_registry}"
+    bundle_image = "${local.bundle_image}"
 
     tenant_postgres_host = "${module.platform.rds_endpoint}"
     redis_url = "redis://${module.platform.redis_endpoint}:6379/0"
@@ -123,7 +128,7 @@ data "kubectl_file_documents" "control_plane" {
     image_tag     = var.image_tag
     namespace     = local.system_namespace
     base_domain   = module.platform.hostname
-    bundle_image  = "${module.platform.ecr_registry}/ufo@${data.aws_ecr_image.ufo.image_digest}"
+    bundle_image  = local.bundle_image
     otlp_endpoint = "http://otel-collector.${local.system_namespace}.svc.cluster.local:4318"
   })
 }

@@ -1,10 +1,13 @@
 """Reconcile one tenant to Ready — the control-plane workflow (RFC 0004 "provisioning workflow").
 
 One frozen dataclass, one public method (``reconcile``), private steps beneath it in execution
-order: namespace → platform Secret → Postgres → render → tenant Secret → Helm → observe.
-Level-triggered like the operator: every step is idempotent server-side-apply or ``helm upgrade
---install``, so re-running the whole flow each interval converges without special-casing create vs
-update — and a failed first install is uninstalled so its ``post-install`` hook re-runs.
+order: bundle advance → namespace → platform Secret → Postgres → render → tenant Secret → Helm →
+observe. The advance re-applies a Tenant pinning an older bundle at the platform's current image
+before anything renders — a control-plane deploy thereby rolls every tenant, and the CR spec stays
+the record of what runs. Level-triggered like the operator: every step is idempotent
+server-side-apply or ``helm upgrade --install``, so re-running the whole flow each interval
+converges without special-casing create vs update — and a failed first install is uninstalled so
+its ``post-install`` hook re-runs.
 
 The declarative substrate — Deployment, HPA, Service, Ingress+TLS, NetworkPolicy, RBAC, the
 ``ufoctl init`` Job — lives in the ``ufo-tenant`` Helm chart; this workflow renders its
@@ -50,6 +53,7 @@ class TenantReconciler:
     async def reconcile(self, request: DeployRequest, workspace_id: str) -> DeployStatus:
         name = request.tenant.name
         try:
+            request = await self._advance_bundle_image(request)
             await self._ensure_namespace(request)
             await self._ensure_platform_secret(request)
             postgres = await ensure_tenant_postgres(
@@ -66,6 +70,13 @@ class TenantReconciler:
             return await self._observe(request)
         except Exception as error:
             return DeployStatus(tenant=name, phase="Failed", message=str(error))
+
+    async def _advance_bundle_image(self, request: DeployRequest) -> DeployRequest:
+        if request.bundle_image == self.platform.bundle_image:
+            return request
+        advanced = request.model_copy(update={"bundle_image": self.platform.bundle_image})
+        await self.kube.apply_tenant(advanced)
+        return advanced
 
     async def _ensure_namespace(self, request: DeployRequest) -> None:
         await self.kube.apply_namespace(

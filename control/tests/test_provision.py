@@ -24,11 +24,12 @@ def _kube(handler: httpx.MockTransport) -> KubeClient:
     return KubeClient(http=httpx.AsyncClient(transport=handler, base_url="https://kube.test"))
 
 
-def _platform() -> PlatformConfig:
+def _platform(bundle_image: str = f"ghcr.io/acme/ufo@{DIGEST}") -> PlatformConfig:
     return PlatformConfig.model_validate(
         {
             "chart_path": "/charts/ufo-tenant",
             "registry": "ghcr.io/acme",
+            "bundle_image": bundle_image,
             "tenant_postgres_host": "pg.svc:5432",
             "redis_url": "redis://redis.svc:6379",
             "blob_bucket": "acme-blobs",
@@ -91,6 +92,38 @@ async def test_missing_platform_secret_fails_loud() -> None:
     reconciler = TenantReconciler(kube=_kube(httpx.MockTransport(handler)), platform=_platform())
     with pytest.raises(RuntimeError, match="absent"):
         await reconciler._ensure_platform_secret(_request())
+
+
+async def test_reconcile_advances_a_stale_bundle_image_on_the_tenant() -> None:
+    new_digest = "sha256:" + "0" * 64
+    applied: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/tenants/acme"):
+            applied["spec"] = json.loads(request.content)["spec"]
+            return httpx.Response(200, json={})
+        return httpx.Response(500, json={})
+
+    reconciler = TenantReconciler(
+        kube=_kube(httpx.MockTransport(handler)),
+        platform=_platform(bundle_image=f"ghcr.io/acme/ufo@{new_digest}"),
+    )
+    await reconciler.reconcile(_request(), "3f8c1e2a-0b4d-4c6e-9a1f-2b3c4d5e6f70")
+
+    assert applied["spec"]["bundle_image"] == {
+        "repository": "ghcr.io/acme/ufo",
+        "digest": new_digest,
+    }
+    assert applied["spec"]["sandbox_image"]["digest"] == DIGEST
+
+
+async def test_a_tenant_on_the_current_bundle_is_not_reapplied() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("must not apply the tenant when its bundle image is current")
+
+    reconciler = TenantReconciler(kube=_kube(httpx.MockTransport(handler)), platform=_platform())
+    request = _request()
+    assert await reconciler._advance_bundle_image(request) is request
 
 
 async def test_reconcile_surfaces_any_error_as_failed_status() -> None:

@@ -16,7 +16,8 @@ import tomllib
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
+from ufo.deploy import DeployImage
 
 API_GROUP = "flyingobject.ai"
 API_VERSION = "v1"
@@ -57,6 +58,9 @@ DEFAULT_CONFIG_PATH = Path("platform.toml")
 class PlatformConfig(BaseModel):
     """The shared services and cluster facts the reconciler overlays onto every tenant.
 
+    ``bundle_image`` is the digest-pinned bundle every tenant runs — one bundle, never per-tenant
+    (RFC 0011): the reconciler advances any Tenant pinning an older image, so a control-plane
+    deploy rolls every tenant, not only new provisions.
     ``postgres_model`` picks the tenant Postgres tier server-side (``DeployRequest.postgres`` is a
     request the platform overrides): ``rls`` — the hosted default — mints an RLS-subject role on the
     one shared ``app_database`` and a per-tenant DBOS sibling; ``database`` mints a whole database
@@ -73,6 +77,7 @@ class PlatformConfig(BaseModel):
 
     chart_path: Path
     registry: str
+    bundle_image: DeployImage
 
     postgres_model: Literal["database", "rls"] = "rls"
     postgres_admin_dsn_env: str = "UFO_CONTROL_POSTGRES_ADMIN_DSN"
@@ -108,6 +113,11 @@ class PlatformConfig(BaseModel):
     otlp_endpoint: str | None = None
 
     reconcile_interval_seconds: int = RECONCILE_INTERVAL_SECONDS
+
+    @field_validator("bundle_image", mode="before")
+    @classmethod
+    def _parse_bundle_image(cls, value: str | DeployImage) -> DeployImage:
+        return DeployImage.parse(value) if isinstance(value, str) else value
 
     @property
     def postgres_admin_dsn(self) -> str:

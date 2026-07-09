@@ -43,6 +43,7 @@ def _platform() -> PlatformConfig:
         {
             "chart_path": "/charts/ufo-tenant",
             "registry": "ghcr.io/acme",
+            "bundle_image": f"ghcr.io/acme/ufo@{DIGEST}",
             "tenant_postgres_host": "pg.svc:5432",
             "redis_url": "redis://redis.svc:6379",
             "blob_bucket": "acme-blobs",
@@ -56,6 +57,7 @@ def _platform_with_proxy() -> PlatformConfig:
         {
             "chart_path": "/charts/ufo-tenant",
             "registry": "ghcr.io/acme",
+            "bundle_image": f"ghcr.io/acme/ufo@{DIGEST}",
             "tenant_postgres_host": "pg.svc:5432",
             "redis_url": "redis://redis.svc:6379",
             "blob_bucket": "acme-blobs",
