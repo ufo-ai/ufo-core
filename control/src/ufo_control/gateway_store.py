@@ -117,7 +117,9 @@ class OnboardStore:
     async def start_provisioning(self, claim_id: UUID, tenant_name: str) -> None:
         await self._update("tenant_name = $2", claim_id, tenant_name)
 
-    async def complete(self, claim_id: UUID, tenant_name: str, resulting_workspace_id: str) -> None:
+    async def complete(
+        self, claim_id: UUID, tenant_name: str | None, resulting_workspace_id: str
+    ) -> None:
         await self._update(
             "tenant_name = $2, resulting_workspace_id = $3",
             claim_id,

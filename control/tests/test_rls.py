@@ -13,7 +13,7 @@ import os
 import socket
 from collections.abc import Iterator
 from dataclasses import dataclass
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5
 
 import asyncpg
 import pytest
@@ -21,7 +21,14 @@ import sqlalchemy as sa
 from click.testing import CliRunner
 from ufo.db import apply_migrations, current_workspace, dispose_db, init_db, workspace_tx
 from ufo.schema import tables
+from ufo.workspace import ws
 
+from ufo_control.gateway import Onboarding
+from ufo_control.gateway_claim import ClaimWorkflow
+from ufo_control.gateway_email import LoggingEmailSender, WorkEmailPolicy
+from ufo_control.gateway_shared import SharedWorkspaces
+from ufo_control.gateway_store import OnboardStore
+from ufo_control.gateway_token import verify_token
 from ufo_control.main import main
 from ufo_control.postgres import (
     PG_ROLE_SEED_ENV,
@@ -32,6 +39,9 @@ from ufo_control.postgres import (
     serve_dsn,
 )
 from ufo_control.rls import POSTGRES_OWNER_DSN_ENV, bootstrap_policies
+
+SHARED_TOKEN_SECRET = "shared-tier-secret"
+SHARED_WORKSPACE_URL = "https://flyingobject.ai"
 
 PG_HOST = "127.0.0.1"
 PG_PORT = 5544
@@ -306,3 +316,69 @@ async def test_shared_role_without_workspace_fails_closed(
         async with workspace_tx() as connection:
             await connection.execute(sa.select(tables.workspace.c.id))
     assert WORKSPACE_GUC in str(caught.value)
+
+
+async def _members_in(workspace_id: str) -> list[str]:
+    with ws(UUID(workspace_id)):
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(tables.member.c.email).order_by(tables.member.c.email)
+                )
+            ).all()
+    return [row.email for row in rows]
+
+
+async def test_shared_ensure_writes_workspace_and_owner_under_rls(
+    shared_role_env: SharedRoleEnv,
+) -> None:
+    """The shared tier's core act: a verified org domain resolves to its workspace row and the
+    member's owner row, written as the RLS-subject serve role under `ws(workspace_id)`. The uuid is
+    derived from the domain, so the write is idempotent and a colleague joins the one workspace."""
+    shared = SharedWorkspaces(workspace_url=SHARED_WORKSPACE_URL)
+    workspace_id = await shared.ensure("sharedco.io", "Founder@Sharedco.io")
+    assert workspace_id == str(uuid5(NAMESPACE_DNS, "sharedco.io"))
+    with ws(UUID(workspace_id)):
+        async with workspace_tx() as connection:
+            rows = (await connection.execute(sa.select(tables.workspace.c.id))).all()
+            assert [str(row.id) for row in rows] == [workspace_id]
+    assert await _members_in(workspace_id) == ["founder@sharedco.io"]
+    # Re-onboard is a no-op; a colleague of the same domain joins the one workspace.
+    assert await shared.ensure("sharedco.io", "founder@sharedco.io") == workspace_id
+    assert await shared.ensure("sharedco.io", "colleague@sharedco.io") == workspace_id
+    assert await _members_in(workspace_id) == ["colleague@sharedco.io", "founder@sharedco.io"]
+
+
+async def test_shared_onboard_signs_in_without_a_tenant_cr(
+    shared_role_env: SharedRoleEnv, rls_env: RlsEnv
+) -> None:
+    """The full shared flow over the real claim ledger + RLS database: email → code → verify → a
+    signed-in bearer carrying the domain's workspace uuid, surfacing the apex (no subdomain). The
+    resolver holds no kube client, so no Tenant CR can be applied."""
+    pool = await asyncpg.create_pool(rls_env.owner_libpq_dsn)
+    store = OnboardStore(pool=pool)
+    await store.ensure_table()
+    async with pool.acquire() as connection:
+        await connection.execute("truncate ufo_control.onboard_claim")
+    sender = LoggingEmailSender()
+    flow = Onboarding(
+        claims=ClaimWorkflow(store=store, email_policy=WorkEmailPolicy(), email_sender=sender),
+        store=store,
+        resolver=SharedWorkspaces(workspace_url=SHARED_WORKSPACE_URL),
+        token_secret=SHARED_TOKEN_SECRET,
+    )
+    try:
+        await flow.advance("ufo", "sess", "", b"")
+        await flow.advance("ufo", "sess", "boss@sharedtwo.io", b"")
+        code = sender.last_code("boss@sharedtwo.io")
+        signed_in = await flow.advance("ufo", "sess", code, b"")
+    finally:
+        await pool.close()
+    workspace_id = str(uuid5(NAMESPACE_DNS, "sharedtwo.io"))
+    directives = dict(
+        line.split("\t", 1) for line in signed_in.decode().splitlines() if "\t" in line
+    )
+    assert verify_token(directives["token"], SHARED_TOKEN_SECRET)["ws"] == workspace_id
+    assert directives["workspace"] == SHARED_WORKSPACE_URL
+    assert await _members_in(workspace_id) == ["boss@sharedtwo.io"]
+    assert isinstance(flow.resolver, SharedWorkspaces)

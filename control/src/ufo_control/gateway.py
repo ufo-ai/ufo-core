@@ -1,12 +1,21 @@
 """The apex onboarding server — a control-plane role, not a tenant workspace.
 
 `GET /ufo` serves the version-stamped POSIX client; `POST /v1/onboard/{channel}` drives the sign-in
-screen as directives. The state is the `onboard_claim` row keyed by the shell's session, so each
-POST advances the same claim: no email → ask; code pending → verify; verified → resolve the tenant
-(join or provision) and sign in. Provisioning is streamed across the client's polls — a `status` +
-`poll` each pass until the tenant reports Ready — never one blocked request. This is a plain uvicorn
-app (no agent loop, no turns, no DBOS); it applies Tenant CRs and reads their status through the
-same `KubeClient` the operator uses, and writes the pre-tenant claim ledger as the Postgres owner.
+screen as directives. `GET /` and `POST /v1/onboard/web` present the identical machine as a
+self-contained web portal (the same directives returned as JSON; see `gateway_web`). The state is
+the `onboard_claim` row keyed by the client's session, so each POST advances the same claim: no
+email → ask; code pending → verify; verified → resolve to a workspace and sign in. The claim ledger
+is written as the Postgres owner (`onboard_claim` is a platform record, no RLS).
+
+Resolution has two tiers, picked by `UFO_ONBOARD_TIER`:
+
+    shared (default)  → `SharedWorkspaces` ensures the org's workspace ROW in the shared database
+                        and adds the member as owner, under `ws(workspace_id)` as the RLS-subject
+                        serve role — no Tenant CR, no poll, no subdomain; signs in immediately.
+    enterprise        → `JoinOrProvision` applies a `Tenant` CR through the same `KubeClient` the
+                        operator uses, streaming provisioning across the client's polls (a `status`
+                        + `poll` each pass until Ready) before joining the member.
+
 Copy-adapted from metalcraft's `gateway_plugin.handle_onboard_ufo`."""
 
 import hashlib
@@ -20,6 +29,7 @@ from typing import Any
 import asyncpg
 from fastapi import FastAPI, Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
+from ufo.db import dispose_db, init_db
 
 from ufo_control.gateway_claim import ClaimError, ClaimWorkflow
 from ufo_control.gateway_directives import PROMPT, directive, first_run_install, render
@@ -29,6 +39,7 @@ from ufo_control.gateway_provision import (
     JoinOrProvision,
     TooManyTenantsForDomain,
 )
+from ufo_control.gateway_shared import SharedWorkspaces, serve_dsn
 from ufo_control.gateway_store import OnboardClaim, OnboardStore
 from ufo_control.gateway_token import TOKEN_SECRET_ENV, mint_token
 from ufo_control.gateway_web import PORTAL_PAGE, WEB_CHANNEL, parse_directives
@@ -37,6 +48,9 @@ from ufo_control.members import owner_dsn
 
 logger = logging.getLogger(__name__)
 
+ONBOARD_TIER_ENV = "UFO_ONBOARD_TIER"
+SHARED_TIER = "shared"
+ENTERPRISE_TIER = "enterprise"
 BASE_DOMAIN_ENV = "UFO_BASE_DOMAIN"
 BUNDLE_IMAGE_ENV = "UFO_BUNDLE_IMAGE"
 PUBLIC_BASE_URL_ENV = "UFO_PUBLIC_BASE_URL"
@@ -66,11 +80,15 @@ STAMPED_SCRIPT = _stamp_script(_CLIENT_SCRIPT.read_text())
 
 @dataclass(frozen=True)
 class Onboarding:
+    """The claim state machine, tier-agnostic through verification, then resolving through whichever
+    tier the `resolver` is: a `SharedWorkspaces` signs in on the spot; a `JoinOrProvision` may
+    stream provisioning across polls first. The resolver's type IS the tier — the composition root
+    builds exactly one."""
+
     claims: ClaimWorkflow
     store: OnboardStore
-    join: JoinOrProvision
+    resolver: SharedWorkspaces | JoinOrProvision
     token_secret: str
-    base_domain: str
 
     async def advance(self, channel: str, session: str, body: str, install: bytes) -> bytes:
         claim = await self.store.live_claim(channel, session)
@@ -78,7 +96,7 @@ class Onboarding:
             return await self._collect_email(channel, session, body, install)
         if claim.verified_at is None:
             return await self._verify_code(claim, body, install)
-        return await self._resolve_tenant(claim, install)
+        return await self._resolve(claim, install)
 
     async def _collect_email(self, channel: str, session: str, body: str, install: bytes) -> bytes:
         if not body:
@@ -107,25 +125,34 @@ class Onboarding:
             return render(
                 install, directive("say", str(error)), directive("ask", "enter the code:")
             )
-        return await self._resolve_tenant(claim, install)
+        return await self._resolve(claim, install)
 
-    async def _resolve_tenant(self, claim: OnboardClaim, install: bytes) -> bytes:
-        if claim.tenant_name is None:
-            return await self._decide(claim, install)
-        return await self._poll_provisioning(claim, install)
+    async def _resolve(self, claim: OnboardClaim, install: bytes) -> bytes:
+        match self.resolver:
+            case SharedWorkspaces() as shared:
+                workspace_id = await shared.ensure(claim.email_domain, claim.email)
+                await self.store.complete(claim.claim_id, None, workspace_id)
+                return self._signed_in(claim.email, workspace_id, shared.workspace_url, install)
+            case JoinOrProvision() as enterprise:
+                if claim.tenant_name is None:
+                    return await self._decide(enterprise, claim, install)
+                return await self._poll_provisioning(enterprise, claim, install)
 
-    async def _decide(self, claim: OnboardClaim, install: bytes) -> bytes:
-        tenants = await self.join.tenants_for_domain(claim.email_domain)
+    async def _decide(
+        self, enterprise: JoinOrProvision, claim: OnboardClaim, install: bytes
+    ) -> bytes:
+        tenants = await enterprise.tenants_for_domain(claim.email_domain)
         if len(tenants) > 1:
             raise TooManyTenantsForDomain(
                 f"domain {claim.email_domain} maps to {len(tenants)} workspaces — contact support"
             )
         if len(tenants) == 1:
             name = tenants[0].tenant
-            workspace_id = await self.join.join(name, claim.email)
+            workspace_id = await enterprise.join(name, claim.email)
             await self.store.complete(claim.claim_id, name, workspace_id)
-            return self._signed_in(name, claim.email, workspace_id, install)
-        name = await self.join.provision(claim.email_domain, claim.email)
+            url = enterprise.workspace_url(name)
+            return self._signed_in(claim.email, workspace_id, url, install)
+        name = await enterprise.provision(claim.email_domain, claim.email)
         await self.store.start_provisioning(claim.claim_id, name)
         return render(
             install,
@@ -134,12 +161,15 @@ class Onboarding:
             directive("poll", POLL_SECONDS),
         )
 
-    async def _poll_provisioning(self, claim: OnboardClaim, install: bytes) -> bytes:
+    async def _poll_provisioning(
+        self, enterprise: JoinOrProvision, claim: OnboardClaim, install: bytes
+    ) -> bytes:
         assert claim.tenant_name is not None
-        view = await self.join.tenant_status(claim.tenant_name)
+        view = await enterprise.tenant_status(claim.tenant_name)
         if view.phase == "Ready" and view.workspace_id:
             await self.store.complete(claim.claim_id, claim.tenant_name, view.workspace_id)
-            return self._signed_in(claim.tenant_name, claim.email, view.workspace_id, install)
+            url = enterprise.workspace_url(claim.tenant_name)
+            return self._signed_in(claim.email, view.workspace_id, url, install)
         if view.phase == "Failed":
             return render(
                 install,
@@ -152,7 +182,9 @@ class Onboarding:
             directive("poll", POLL_SECONDS),
         )
 
-    def _signed_in(self, name: str, email: str, workspace_id: str, install: bytes) -> bytes:
+    def _signed_in(
+        self, email: str, workspace_id: str, workspace_url: str, install: bytes
+    ) -> bytes:
         # The token travels only in the machine-consumed `token` directive (the client writes it to
         # a chmod-600 credentials file, never printing it). The web portal builds the tokened
         # /surface/setup handoff link from this token client-side; the terminal never echoes it.
@@ -160,7 +192,7 @@ class Onboarding:
         return render(
             install,
             directive("token", token),
-            directive("workspace", f"https://{name}.{self.base_domain}"),
+            directive("workspace", workspace_url),
             directive("say", f"✓ signed in as {email}"),
             directive("ask", PROMPT),
         )
@@ -173,10 +205,33 @@ def _require_env(name: str) -> str:
     return value
 
 
+def _tier() -> str:
+    tier = os.environ.get(ONBOARD_TIER_ENV, SHARED_TIER)
+    if tier not in (SHARED_TIER, ENTERPRISE_TIER):
+        raise RuntimeError(
+            f"{ONBOARD_TIER_ENV}={tier!r} is not a known tier (set it to {SHARED_TIER!r} or "
+            f"{ENTERPRISE_TIER!r})"
+        )
+    return tier
+
+
+def _resolver(tier: str, state: dict[str, Any]) -> SharedWorkspaces | JoinOrProvision:
+    if tier == SHARED_TIER:
+        return SharedWorkspaces(
+            workspace_url=os.environ.get(PUBLIC_BASE_URL_ENV, DEFAULT_PUBLIC_BASE_URL)
+        )
+    return JoinOrProvision(
+        kube=state["kube"],
+        target=DeployTarget(
+            base_domain=_require_env(BASE_DOMAIN_ENV),
+            bundle_image=_require_env(BUNDLE_IMAGE_ENV),
+        ),
+    )
+
+
 def _onboarding(state: dict[str, Any]) -> Onboarding:
-    """One request's flow over the lifespan's store and kube client — assembled per request so a
-    misconfigured env fails the request loudly, never the boot."""
-    base_domain = _require_env(BASE_DOMAIN_ENV)
+    """One request's flow over the lifespan's store and the tier's resolver — assembled per request
+    so a misconfigured env fails the request loudly, never the boot."""
     return Onboarding(
         claims=ClaimWorkflow(
             store=state["store"],
@@ -184,14 +239,8 @@ def _onboarding(state: dict[str, Any]) -> Onboarding:
             email_sender=email_sender_from_env(),
         ),
         store=state["store"],
-        join=JoinOrProvision(
-            kube=state["kube"],
-            target=DeployTarget(
-                base_domain=base_domain, bundle_image=_require_env(BUNDLE_IMAGE_ENV)
-            ),
-        ),
+        resolver=_resolver(state["tier"], state),
         token_secret=_require_env(TOKEN_SECRET_ENV),
-        base_domain=base_domain,
     )
 
 
@@ -200,15 +249,23 @@ def gateway_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> Any:
+        tier = _tier()
         pool = await asyncpg.create_pool(dsn=owner_dsn())
         store = OnboardStore(pool=pool)
         await store.ensure_table()
         state["store"] = store
-        state["kube"] = KubeClient.from_env()
+        state["tier"] = tier
+        if tier == SHARED_TIER:
+            init_db(serve_dsn())
+        else:
+            state["kube"] = KubeClient.from_env()
         try:
             yield
         finally:
-            await state["kube"].close()
+            if tier == SHARED_TIER:
+                await dispose_db()
+            else:
+                await state["kube"].close()
             await pool.close()
 
     app = FastAPI(lifespan=lifespan)

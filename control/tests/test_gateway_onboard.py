@@ -91,9 +91,8 @@ def _flow(store: OnboardStore, sender: LoggingEmailSender, kube: KubeClient) -> 
     return Onboarding(
         claims=ClaimWorkflow(store=store, email_policy=WorkEmailPolicy(), email_sender=sender),
         store=store,
-        join=JoinOrProvision(kube=kube, target=TARGET),
+        resolver=JoinOrProvision(kube=kube, target=TARGET),
         token_secret=SECRET,
-        base_domain="flyingobject.ai",
     )
 
 

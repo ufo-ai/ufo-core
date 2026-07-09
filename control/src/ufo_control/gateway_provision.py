@@ -70,6 +70,10 @@ class JoinOrProvision:
     kube: KubeClient
     target: DeployTarget
 
+    def workspace_url(self, name: str) -> str:
+        """The tenant's public URL surfaced on sign-in — its own subdomain under the deploy base."""
+        return f"https://{name}.{self.target.base_domain}"
+
     async def tenants_for_domain(self, domain: str) -> tuple[DeployStatus, ...]:
         objs = await self.kube.list_tenants(org_domain=domain)
         return tuple(status_from_tenant(obj) for obj in objs)

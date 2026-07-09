@@ -67,6 +67,12 @@ async def test_tenants_for_domain_counts() -> None:
     await kube.http.aclose()
 
 
+def test_workspace_url_is_the_tenant_subdomain() -> None:
+    kube = _kube(httpx.MockTransport(lambda r: httpx.Response(200)))
+    join = JoinOrProvision(kube=kube, target=TARGET)
+    assert join.workspace_url("acme-com-1a2b3c4d") == "https://acme-com-1a2b3c4d.flyingobject.ai"
+
+
 async def test_provision_applies_a_wire_valid_tenant() -> None:
     seen: dict[str, Any] = {}
 
