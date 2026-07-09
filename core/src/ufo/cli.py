@@ -35,7 +35,7 @@ from ufo.deploy import (
 from ufo.ext.loader import load_manifests, lockfile_path
 from ufo.ext.store import ExtensionStore, read_catalog
 from ufo.grants import GrantSummary, grant_summaries
-from ufo.onboarding import AlreadyInitialized, Onboarded, Onboarding
+from ufo.onboarding import DEFAULT_AGENT_MODEL, AlreadyInitialized, Onboarded, Onboarding
 from ufo.proxy_serve import OWNER_DSN_ENV
 from ufo.proxy_serve import run as proxy_run
 from ufo.schema import tables
@@ -43,7 +43,6 @@ from ufo.schema.records import DEFAULT_AGENT_NAME
 from ufo.serve import run as serve_run
 
 UFOCTL_DIR = Path.home() / ".ufoctl"
-DEFAULT_AGENT_MODEL = "claude-opus-4-8"
 RECONNECT_SECONDS = 1.0
 TURN_REQUEST_TIMEOUT_SECONDS = 90.0
 ERASE_LINE = "\r\x1b[K"

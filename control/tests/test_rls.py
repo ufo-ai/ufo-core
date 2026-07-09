@@ -29,7 +29,9 @@ from ufo.db import (
     owner_tx,
     workspace_tx,
 )
+from ufo.onboarding import DEFAULT_AGENT_MODEL, DEFAULT_AGENT_PROMPT
 from ufo.schema import tables
+from ufo.schema.records import DEFAULT_AGENT_NAME
 from ufo.workspace import ws
 
 from ufo_control.gateway import Onboarding
@@ -380,6 +382,31 @@ async def test_shared_ensure_writes_workspace_and_owner_under_rls(
     assert await shared.ensure("sharedco.io", "founder@sharedco.io") == workspace_id
     assert await shared.ensure("sharedco.io", "colleague@sharedco.io") == workspace_id
     assert await _members_in(workspace_id) == ["colleague@sharedco.io", "founder@sharedco.io"]
+
+
+async def _default_agents_in(workspace_id: str) -> list[tuple[str, str, str]]:
+    with ws(UUID(workspace_id)):
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(tables.agent.c.name, tables.agent.c.prompt, tables.agent.c.model)
+                    .where(tables.agent.c.name == DEFAULT_AGENT_NAME)
+                    .order_by(tables.agent.c.name)
+                )
+            ).all()
+    return [(row.name, row.prompt, row.model) for row in rows]
+
+
+async def test_shared_ensure_seeds_the_default_agent(shared_role_env: SharedRoleEnv) -> None:
+    """The shared tier seeds the same default `assistant` agent `ufoctl init` seeds per tenant, so
+    the first turn's `default_agent()` resolves a row. Seeded from core's own defaults — identical
+    to a per-tenant agent — and idempotent: a re-onboard neither duplicates the row nor errors."""
+    shared = SharedWorkspaces(workspace_url=SHARED_WORKSPACE_URL)
+    workspace_id = await shared.ensure("agentco.io", "founder@agentco.io")
+    seeded = [(DEFAULT_AGENT_NAME, DEFAULT_AGENT_PROMPT, DEFAULT_AGENT_MODEL)]
+    assert await _default_agents_in(workspace_id) == seeded
+    assert await shared.ensure("agentco.io", "founder@agentco.io") == workspace_id
+    assert await _default_agents_in(workspace_id) == seeded
 
 
 async def test_shared_onboard_signs_in_without_a_tenant_cr(

@@ -27,6 +27,7 @@ from ufo.schema.records import DEFAULT_AGENT_NAME
 from ufo.workspace import ws
 
 DEFAULT_AGENT_PROMPT = "You are a helpful assistant."
+DEFAULT_AGENT_MODEL = "claude-opus-4-8"
 
 
 class AlreadyInitialized(RuntimeError):
