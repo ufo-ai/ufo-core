@@ -199,8 +199,8 @@ one context. The seam supports two delivery modes; a surface uses only the subse
   durable, and admission registers a writeback for every turn entering its conversations — a
   surface ingest, a scheduled fire, an extension invoke alike. A `WritebackPoller` delivers the
   terminal reply at-least-once (the hub is lossy), two-phase: `post` returns the reply's durable
-  reference (recorded before any upload), then `attach` streams the turn's shared files into that
-  reply, with rich rendering. A turn that ended by asking (`ask_user` as its final act) rides the
+  reference (recorded before any upload), then `attach` streams the turn's shared files into the
+  conversation, with rich rendering. A turn that ended by asking (`ask_user` as its final act) rides the
   writeback as a structured `question`, so the surface can render the options as its own answer
   affordance (Slack buttons) whose use admits the answer as the conversation's next turn — the
   first answer wins the idempotent admit, and `turn_inbound` is how the surface confirms which
@@ -220,7 +220,7 @@ one context. The seam supports two delivery modes; a surface uses only the subse
 Two-way attachments stream end to end, never buffering a whole file: an inbound Slack file streams
 from `url_private` into the conversation's workspace before the turn runs; a shared file
 (`share_file` → a `shared_artifact` record) streams from the blob store to Slack's chunked
-external-upload API, into the posted reply's thread. `surface_identity` and `conversation.surface`
+external-upload API, into the conversation's thread (Slack forbids threading on a reply's ts). `surface_identity` and `conversation.surface`
 are open namespaces validated by surface registration, not a fixed enum.
 
 Onboarding flow engine is core (steps are contributed by extensions/packs); first-run creates the
