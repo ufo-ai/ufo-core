@@ -15,6 +15,7 @@ host: acme.ufo.app
 owner_email: you@acme.com
 bundle_image: ghcr.io/acme/ufo@{DIGEST}
 sandbox_image: ghcr.io/acme/sandbox@{DIGEST}
+tenant_secret_checksum: cafe1234
 """
 
 pytestmark = pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
@@ -80,6 +81,8 @@ def test_chart_renders_the_tenant_workload(tmp_path: Path) -> None:
     assert "ufo-platform-secrets" in rendered
     # The database tier omits workspace_id, so init mints its own workspace uuid.
     assert "--workspace-id" not in rendered
+    # The tenant Secret checksum rides the pod template so a changed Secret rolls the serve pods.
+    assert 'checksum/tenant-secret: "cafe1234"' in rendered
 
 
 def test_init_job_pins_workspace_id_for_the_rls_tier(tmp_path: Path) -> None:

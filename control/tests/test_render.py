@@ -194,6 +194,16 @@ def test_render_carries_the_given_keys_verbatim() -> None:
     assert render.secret.artifact_token_secret == minted.artifact_token_secret
 
 
+def test_secret_checksum_is_stable_for_the_same_keys_and_tracks_changes() -> None:
+    # The checksum rides the serve pod template: stable keys must not roll pods, changed keys must.
+    minted = mint_keys()
+    first = render_tenant(_request(), _platform(), _database_postgres(), minted)
+    second = render_tenant(_request(), _platform(), _database_postgres(), minted)
+    rotated = render_tenant(_request(), _platform(), _database_postgres(), mint_keys())
+    assert first.values.tenant_secret_checksum == second.values.tenant_secret_checksum
+    assert first.values.tenant_secret_checksum != rotated.values.tenant_secret_checksum
+
+
 def test_values_carry_digest_pinned_refs() -> None:
     render = render_tenant(_request(), _platform(), _database_postgres(), mint_keys())
     assert render.values.namespace == "ufo-acme"

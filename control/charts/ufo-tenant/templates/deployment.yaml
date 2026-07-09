@@ -15,6 +15,9 @@ spec:
       labels:
         {{- include "ufo-tenant.labels" . | nindent 8 }}
         app: ufo-serve
+      annotations:
+        # A changed tenant Secret rolls the pods; the platform Secret (envFrom) is not covered.
+        checksum/tenant-secret: {{ .Values.tenant_secret_checksum | quote }}
     spec:
       serviceAccountName: ufo-serve
       containers:

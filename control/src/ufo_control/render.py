@@ -12,6 +12,8 @@ are replaced with what the control plane provisions, while the operator's own se
 """
 
 import base64
+import hashlib
+import json
 import secrets
 import tomllib
 from dataclasses import dataclass
@@ -50,6 +52,9 @@ class TenantChartValues(BaseModel):
     sandbox_image: str
     serve_port: int = SERVE_PORT
     tenant_secret: str
+    # sha256 of the tenant Secret payload; stamped on the serve pod template so a changed
+    # Secret rolls the Deployment.
+    tenant_secret_checksum: str
     platform_secret: str
     ingress_class: str
     cluster_issuer: str
@@ -123,6 +128,9 @@ def render_tenant(
         bundle_image=_image_ref(request.bundle_image),
         sandbox_image=_image_ref(request.sandbox_image) if request.sandbox_image else "",
         tenant_secret="ufo-tenant",
+        tenant_secret_checksum=hashlib.sha256(
+            json.dumps(secret.data(), sort_keys=True).encode()
+        ).hexdigest(),
         platform_secret=platform.platform_secret,
         ingress_class=platform.ingress_class,
         cluster_issuer=platform.cluster_issuer,

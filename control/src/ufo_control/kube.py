@@ -194,7 +194,14 @@ class KubeClient:
         await self.apply(f"/api/v1/namespaces/{namespace}/secrets/{name}", body)
 
     async def read_secret(self, namespace: str, name: str) -> dict[str, Any] | None:
-        return await self.get(f"/api/v1/namespaces/{namespace}/secrets/{name}")
+        # None means proven-absent: only a 404 may report a Secret missing. A 403 raises — the
+        # reconciler mints tenant keys when this returns None, and minting on an RBAC failure
+        # would rotate the Fernet key sealing the workspace's credential rows.
+        response = await self.http.get(f"/api/v1/namespaces/{namespace}/secrets/{name}")
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return response.json()
 
     async def get_lease(self, namespace: str, name: str) -> dict[str, Any] | None:
         return await self.get(self._lease_path(namespace, name))

@@ -22,6 +22,7 @@ serve_role_arn: ""
 # The per-tenant Secret (config + minted keys) the control plane applies out of band, and the
 # cluster Secret carrying model + cloud credentials. Referenced by name only — no secret in values.
 tenant_secret: ufo-tenant
+tenant_secret_checksum: ""
 platform_secret: ufo-platform-secrets
 
 # Ingress / TLS (RFC 0004 decision 6: cert-manager + ExternalDNS).

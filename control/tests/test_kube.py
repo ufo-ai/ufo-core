@@ -89,3 +89,17 @@ async def test_list_tenants_empty_when_crd_absent(status: int) -> None:
     client = _client(httpx.MockTransport(lambda request: httpx.Response(status)))
     assert await client.list_tenants() == []
     await client.close()
+
+
+async def test_read_secret_returns_none_only_on_a_true_404() -> None:
+    client = _client(httpx.MockTransport(lambda request: httpx.Response(404)))
+    assert await client.read_secret("ufo-acme", "ufo-tenant") is None
+    await client.close()
+
+
+async def test_read_secret_raises_on_forbidden() -> None:
+    # A 403 must fail the reconcile, never read as absence — absence mints fresh tenant keys.
+    client = _client(httpx.MockTransport(lambda request: httpx.Response(403)))
+    with pytest.raises(httpx.HTTPStatusError):
+        await client.read_secret("ufo-acme", "ufo-tenant")
+    await client.close()
