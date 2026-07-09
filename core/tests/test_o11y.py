@@ -110,3 +110,18 @@ def test_log_exports_redacted_otel_record():
     assert record.body == "turn.started"
     assert record.severity_number == SeverityNumber.INFO
     assert dict(record.attributes) == {"turn_id": "abc"}
+
+
+def test_stdlib_warnings_export_through_the_logs_pipeline():
+    exporter = InMemoryLogRecordExporter()
+    provider = LoggerProvider()
+    provider.add_log_record_processor(SimpleLogRecordProcessor(exporter))
+    o11y._bridge_warning_logs(provider)
+    handler = logging.getLogger().handlers[-1]
+    try:
+        logging.getLogger("ufo_ext_slack").warning("upload failed for %s", "report.pdf")
+        logging.getLogger("ufo_ext_slack").info("below the bridge level")
+        bodies = [item.log_record.body for item in exporter.get_finished_logs()]
+        assert bodies == ["upload failed for report.pdf"]
+    finally:
+        logging.getLogger().removeHandler(handler)

@@ -992,5 +992,5 @@ async def _slack_ok(request: Awaitable[httpx.Response]) -> dict[str, object]:
     response.raise_for_status()
     payload = response.json()
     if payload.get("ok") is not True:
-        raise SlackApiError(str(payload.get("error")))
+        raise SlackApiError(f"{response.url.path}: {payload.get('error')}")
     return payload

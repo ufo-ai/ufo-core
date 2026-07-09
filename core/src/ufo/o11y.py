@@ -12,7 +12,7 @@ from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.metrics import Counter
-from opentelemetry.sdk._logs import LoggerProvider
+from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
@@ -76,6 +76,17 @@ def init_o11y(otlp_endpoint: str | None) -> None:
         BatchLogRecordProcessor(OTLPLogExporter(endpoint=logs_url))
     )
     _logs.set_logger_provider(logger_provider)
+    _bridge_warning_logs(logger_provider)
+
+
+def _bridge_warning_logs(logger_provider: LoggerProvider) -> None:
+    """Root-logger handler exporting WARNING-and-up stdlib records through the logs pipeline, so a
+    warning from any module — an extension surface's swallowed delivery failure, a library fault —
+    reaches the collector instead of dying in an unhandled stdlib logger. `log()` stays INFO and
+    emits through the Logs API directly, below this handler's level, so nothing double-exports."""
+    logging.getLogger().addHandler(
+        LoggingHandler(level=logging.WARNING, logger_provider=logger_provider)
+    )
 
 
 def _otlp_signal_urls(otlp_endpoint: str) -> tuple[str, str, str]:
