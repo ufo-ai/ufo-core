@@ -490,12 +490,17 @@ async def test_one_mention_admits_exactly_one_turn(db: None, tmp_path, monkeypat
         _event_body(type="app_mention", user="U1", channel="C1", ts="100.5", text=mention),
         _event_body(type="message", user="U1", channel="C1", ts="100.5", text=mention),
     ]
+    home_opened = _event_body(type="app_home_opened", user="U1", channel="D9", tab="messages")
     async with client:
         for body in deliveries:
             response = await client.post(
                 "/surface/slack", content=body, headers=_sign(body, int(time.time()))
             )
             assert response.status_code == 200
+        opened = await client.post(
+            "/surface/slack", content=home_opened, headers=_sign(home_opened, int(time.time()))
+        )
+        assert opened.json() == {"ok": True, "ignored": True}
     async with workspace_tx() as connection:
         turns = (
             await connection.execute(

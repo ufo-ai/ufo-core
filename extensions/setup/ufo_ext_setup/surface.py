@@ -82,6 +82,7 @@ settings:
   event_subscriptions:
     request_url: {request_url}
     bot_events:
+      - app_home_opened
       - app_mention
       - message.channels
       - message.groups

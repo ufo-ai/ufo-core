@@ -78,6 +78,7 @@ settings:
   event_subscriptions:
     request_url: <public_base_url>/surface/slack
     bot_events:
+      - app_home_opened
       - app_mention
       - message.channels
       - message.groups
@@ -95,7 +96,8 @@ Why each piece: `app_mentions:read` + the `message.*` events and matching `*:his
 surface see the messages it's added to and the mentions it must answer; `chat:write` posts the reply
 in-thread; the `agent_view` block enables Slack's Agents & AI Apps experience and `assistant:write`
 lets the surface set the thread's native status ("Thinking…", then what the agent is doing) while a
-turn runs; `files:read` downloads a message's
+turn runs — Slack's validator pairs `agent_view` with the `app_home_opened` event, which the
+surface receives and ignores; `files:read` downloads a message's
 attachments into the workspace and `files:write` uploads files the agent shares back; `users:read` +
 `users:read.email` let the surface match a Slack user's verified email to a workspace member, so a
 member speaking in a DM acts with their own rights. The `interactivity` block delivers button clicks
