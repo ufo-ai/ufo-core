@@ -82,11 +82,11 @@ def init_o11y(otlp_endpoint: str | None) -> None:
 def _bridge_warning_logs(logger_provider: LoggerProvider) -> None:
     """Root-logger handler exporting WARNING-and-up stdlib records through the logs pipeline, so a
     warning from any module — an extension surface's swallowed delivery failure, a library fault —
-    reaches the collector instead of dying in an unhandled stdlib logger. `log()` stays INFO and
-    emits through the Logs API directly, below this handler's level, so nothing double-exports."""
-    logging.getLogger().addHandler(
-        LoggingHandler(level=logging.WARNING, logger_provider=logger_provider)
-    )
+    reaches the collector instead of dying in an unhandled stdlib logger. OTel's own exporter logs
+    are excluded so export failures report locally instead of feeding the failing pipeline."""
+    handler = LoggingHandler(level=logging.WARNING, logger_provider=logger_provider)
+    handler.addFilter(lambda record: not record.name.startswith("opentelemetry"))
+    logging.getLogger().addHandler(handler)
 
 
 def _otlp_signal_urls(otlp_endpoint: str) -> tuple[str, str, str]:

@@ -121,6 +121,7 @@ def test_stdlib_warnings_export_through_the_logs_pipeline():
     try:
         logging.getLogger("ufo_ext_slack").warning("upload failed for %s", "report.pdf")
         logging.getLogger("ufo_ext_slack").info("below the bridge level")
+        logging.getLogger("opentelemetry.exporter.otlp").warning("export failed")
         bodies = [item.log_record.body for item in exporter.get_finished_logs()]
         assert bodies == ["upload failed for report.pdf"]
     finally:
