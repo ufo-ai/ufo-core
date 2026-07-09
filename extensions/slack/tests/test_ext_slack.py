@@ -111,6 +111,8 @@ def _mock_transport(recorder: list[httpx.Request], users: dict[str, str]) -> htt
             email = users.get(str(request.url.params.get("user")))
             profile = {"email": email} if email else {}
             return httpx.Response(200, json={"ok": True, "user": {"profile": profile}})
+        if url in (slack.SLACK_CONVERSATIONS_REPLIES_URL, slack.SLACK_CONVERSATIONS_HISTORY_URL):
+            return httpx.Response(200, json={"ok": True, "messages": []})
         if url == slack.SLACK_CHAT_POST_MESSAGE_URL:
             return httpx.Response(200, json={"ok": True, "channel": "C5", "ts": "999.100"})
         if url == slack.SLACK_ASSISTANT_STATUS_URL:
@@ -260,6 +262,47 @@ def test_thread_keying_and_gating() -> None:
     assert slack.slack_message_gated(
         {"type": "message", "text": f"<@{BOT_USER_ID}> hi"}, BOT_USER_ID, False
     )
+
+
+def test_ambient_digest_filters_and_bounds() -> None:
+    messages = [
+        {"user": "U2", "ts": "1700000060.000200", "text": "x" * 500},
+        {"user": "U1", "ts": "1700000000.000100", "text": "kicking off the incident thread"},
+        {"user": BOT_USER_ID, "ts": "1700000070.000250", "text": "my own reply"},
+        {"user": "U3", "ts": "1700000080.000300", "text": f"<@{BOT_USER_ID}> already a turn"},
+        {"user": "U4", "ts": "1700000090.000400", "text": "joined", "subtype": "channel_join"},
+        {"bot_id": "B1", "ts": "1700000100.000500", "text": "workflow noise"},
+        {"user": "U5", "ts": "1700000110.000600", "text": "   "},
+        {"user": "U6", "ts": "not-a-ts", "text": "malformed timestamp"},
+        {"user": "U7", "ts": "nan", "text": "unrenderable timestamp"},
+        {"user": "U8", "ts": "1e300", "text": "overflowing timestamp"},
+        {
+            "user": "U9",
+            "ts": "1700000055.000150",
+            "text": "broadcast reply",
+            "subtype": "thread_broadcast",
+        },
+    ]
+    digest = slack._ambient_digest(messages, BOT_USER_ID, slack.AMBIENT_THREAD_HEADER)
+    assert digest == (
+        f"{slack.AMBIENT_THREAD_HEADER}\n"
+        "[2023-11-14 22:13] <@U1>: kicking off the incident thread\n"
+        "[2023-11-14 22:14] <@U9>: broadcast reply\n"
+        f"[2023-11-14 22:14] <@U2>: {'x' * slack.AMBIENT_MESSAGE_CHAR_LIMIT}\n\n"
+    )
+    assert slack._ambient_digest([], BOT_USER_ID, slack.AMBIENT_THREAD_HEADER) == ""
+    only_bot = [{"user": BOT_USER_ID, "ts": "1.0", "text": "hi"}]
+    assert slack._ambient_digest(only_bot, BOT_USER_ID, slack.AMBIENT_THREAD_HEADER) == ""
+    many = [
+        {"user": f"U{i}", "ts": f"{1700000000 + i}.0", "text": f"message {i:03d} " + "y" * 380}
+        for i in range(30)
+    ]
+    capped = slack._ambient_digest(many, BOT_USER_ID, slack.AMBIENT_THREAD_HEADER)
+    assert len(capped) <= slack.AMBIENT_DIGEST_MAX_CHARS + len(slack.AMBIENT_THREAD_HEADER) + 3
+    assert slack.AMBIENT_OMITTED_MARKER in capped
+    assert "message 000" in capped
+    assert "message 029" in capped
+    assert "message 001" not in capped
 
 
 def test_slack_app_setup_skill_parses_indexes_and_names_the_real_route_and_slots() -> None:
@@ -465,6 +508,196 @@ async def test_one_mention_admits_exactly_one_turn(db: None, tmp_path, monkeypat
     assert len(turns) == 1
     assert turns[0].idempotency_key == "C1:100.5"
     assert writeback == WRITEBACK_PENDING
+
+
+def _ambient_transport(
+    recorder: list[httpx.Request], replies: object = (), history: object = ()
+) -> httpx.MockTransport:
+    """A transport whose `conversations.replies` / `conversations.history` answer with the given
+    messages — or with `ok: false` when the fixture is None, the fetch-failure case."""
+
+    def _messages(fixture: object) -> httpx.Response:
+        if fixture is None:
+            return httpx.Response(200, json={"ok": False, "error": "thread_not_found"})
+        return httpx.Response(200, json={"ok": True, "messages": fixture})
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        recorder.append(request)
+        url = str(request.url).split("?")[0]
+        if url == slack.SLACK_CONVERSATIONS_REPLIES_URL:
+            return _messages(replies)
+        if url == slack.SLACK_CONVERSATIONS_HISTORY_URL:
+            return _messages(history)
+        if url == slack.SLACK_USERS_INFO_URL:
+            return httpx.Response(200, json={"ok": True, "user": {"profile": {}}})
+        if url in (
+            slack.SLACK_CHAT_POST_MESSAGE_URL,
+            slack.SLACK_CHAT_UPDATE_URL,
+            slack.SLACK_CHAT_DELETE_URL,
+        ):
+            return httpx.Response(200, json={"ok": True, "channel": "C5", "ts": "999.100"})
+        return httpx.Response(404, json={"ok": False, "error": "not_mocked"})
+
+    return httpx.MockTransport(handler)
+
+
+async def _turn_inbound(workspace_id: UUID) -> str:
+    async with workspace_tx() as connection:
+        return (
+            await connection.execute(
+                sa.select(tables.turn.c.inbound).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+
+
+def _fetches(recorder: list[httpx.Request], url: str) -> list[httpx.Request]:
+    return [request for request in recorder if str(request.url).startswith(url)]
+
+
+async def test_mid_thread_mention_prepends_unseen_thread_history(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    replies = [
+        {"user": "U1", "ts": "1700000000.000100", "text": "we saw errors spike at noon"},
+        {"user": BOT_USER_ID, "ts": "1700000060.000200", "text": "earlier bot reply"},
+        {"user": "U2", "ts": "1700000120.000300", "text": "restarting did not help"},
+    ]
+    _, client, _ = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, _ambient_transport(recorder, replies)
+    )
+    body = _event_body(
+        type="app_mention",
+        user="U3",
+        channel="C7",
+        ts="1700000180.000400",
+        thread_ts="1700000000.000100",
+        text="<@UBOT00000> summarize this thread",
+    )
+    async with client:
+        response = await client.post(
+            "/surface/slack", content=body, headers=_sign(body, int(time.time()))
+        )
+    assert response.status_code == 200
+    fetches = _fetches(recorder, slack.SLACK_CONVERSATIONS_REPLIES_URL)
+    assert len(fetches) == 1
+    params = fetches[0].url.params
+    assert params["channel"] == "C7"
+    assert params["ts"] == "1700000000.000100"
+    assert params["latest"] == "1700000180.000400"
+    assert params["inclusive"] == "false"
+    assert params["limit"] == str(slack.AMBIENT_FETCH_LIMIT)
+    assert not _fetches(recorder, slack.SLACK_CONVERSATIONS_HISTORY_URL)
+    assert await _turn_inbound(workspace_id) == (
+        f"{slack.AMBIENT_THREAD_HEADER}\n"
+        "[2023-11-14 22:13] <@U1>: we saw errors spike at noon\n"
+        "[2023-11-14 22:15] <@U2>: restarting did not help\n\n"
+        "<@UBOT00000> summarize this thread"
+    )
+
+
+async def test_new_mention_prepends_recent_channel_history(db: None, tmp_path, monkeypatch) -> None:
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    history = [
+        {"user": "U2", "ts": "1700000060.000200", "text": f"<@{BOT_USER_ID}> old ask"},
+        {"user": "U1", "ts": "1700000000.000100", "text": "deploy going out at 3"},
+        {"user": BOT_USER_ID, "ts": "1700000030.000150", "text": "old bot reply"},
+    ]
+    _, client, _ = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, _ambient_transport(recorder, history=history)
+    )
+    body = _event_body(
+        type="app_mention",
+        user="U3",
+        channel="C9",
+        ts="1700000180.000400",
+        text="<@UBOT00000> what's the plan?",
+    )
+    async with client:
+        response = await client.post(
+            "/surface/slack", content=body, headers=_sign(body, int(time.time()))
+        )
+    assert response.status_code == 200
+    fetches = _fetches(recorder, slack.SLACK_CONVERSATIONS_HISTORY_URL)
+    assert len(fetches) == 1
+    params = fetches[0].url.params
+    assert params["channel"] == "C9"
+    assert params["latest"] == "1700000180.000400"
+    assert params["inclusive"] == "false"
+    assert params["limit"] == str(slack.AMBIENT_CHANNEL_FETCH_LIMIT)
+    assert not _fetches(recorder, slack.SLACK_CONVERSATIONS_REPLIES_URL)
+    assert await _turn_inbound(workspace_id) == (
+        f"{slack.AMBIENT_CHANNEL_HEADER}\n"
+        "[2023-11-14 22:13] <@U1>: deploy going out at 3\n\n"
+        "<@UBOT00000> what's the plan?"
+    )
+
+
+async def test_thread_root_mention_in_a_quiet_channel_admits_the_plain_body(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    body = _event_body(
+        type="app_mention", user="U1", channel="C1", ts="50.0", text="<@UBOT00000> hi"
+    )
+    async with client:
+        response = await client.post(
+            "/surface/slack", content=body, headers=_sign(body, int(time.time()))
+        )
+    assert response.status_code == 200
+    assert not _fetches(recorder, slack.SLACK_CONVERSATIONS_REPLIES_URL)
+    assert len(_fetches(recorder, slack.SLACK_CONVERSATIONS_HISTORY_URL)) == 1
+    assert await _turn_inbound(workspace_id) == "<@UBOT00000> hi"
+
+
+async def test_dm_never_fetches_thread_context(db: None, tmp_path, monkeypatch) -> None:
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    dm = _event_body(
+        type="message",
+        channel_type="im",
+        user="U8",
+        channel="D3",
+        ts="60.5",
+        thread_ts="10.0",
+        text="hello",
+    )
+    async with client:
+        response = await client.post(
+            "/surface/slack", content=dm, headers=_sign(dm, int(time.time()))
+        )
+    assert response.status_code == 200
+    assert not _fetches(recorder, slack.SLACK_CONVERSATIONS_REPLIES_URL)
+    assert not _fetches(recorder, slack.SLACK_CONVERSATIONS_HISTORY_URL)
+    assert await _turn_inbound(workspace_id) == "hello"
+
+
+async def test_replies_fetch_failure_still_admits(db: None, tmp_path, monkeypatch) -> None:
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    _, client, _ = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, _ambient_transport(recorder, replies=None)
+    )
+    body = _event_body(
+        type="app_mention",
+        user="U1",
+        channel="C7",
+        ts="200.5",
+        thread_ts="100.0",
+        text="<@UBOT00000> ping",
+    )
+    async with client:
+        response = await client.post(
+            "/surface/slack", content=body, headers=_sign(body, int(time.time()))
+        )
+    assert response.status_code == 200
+    assert len(_fetches(recorder, slack.SLACK_CONVERSATIONS_REPLIES_URL)) == 1
+    assert await _turn_inbound(workspace_id) == "<@UBOT00000> ping"
 
 
 async def test_dm_links_member_by_email_and_status_anchors_to_the_message(

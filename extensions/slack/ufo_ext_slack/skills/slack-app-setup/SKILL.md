@@ -30,7 +30,9 @@ don't know it, ask; never invent one and never emit a placeholder (`example.com`
   verification fails anyway, the deploy isn't reachable at the URL — the URL is wrong.
 - **Don't probe the URL.** The sandbox egress proxy denies arbitrary hosts, so `curl`/`dig` against
   the deploy or Slack proves nothing. The URL is correct by construction; use it.
-- **Conversational bot.** It answers `@mentions` in channels and direct messages, replying in-thread.
+- **Conversational bot.** It answers `@mentions` in channels and direct messages, replying in-thread;
+  when mentioned in a thread it reads the earlier thread messages for context, and when first
+  addressed it reads the channel's recent messages — though it only ever answers when addressed.
   Replies render the agent's markdown, and files the agent shares upload into the thread; a message's
   attachments download into the agent's workspace. While it works it shows Slack's native thread
   status ("Thinking…", then what it's doing), and when it asks a question with fixed choices it

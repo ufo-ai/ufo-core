@@ -1,6 +1,10 @@
 """The Slack surface on the core surface seam: verify an inbound event, key it to a thread
 conversation, stream any attached files into the workspace, and admit a turn; then deliver the
-terminal reply and stream the turn's shared files into the conversation's thread.
+terminal reply and stream the turn's shared files into the conversation's thread. A channel
+mention carries a bounded digest of ambient context fetched from Slack at admit time — the
+thread's earlier un-addressed messages when mentioned mid-thread, the channel's recent messages
+when starting a fresh thread — so the agent reads the room while only ever answering when
+addressed.
 
 While the turn runs, a per-turn status task tails its live frames off the hub and keeps the
 thread's native status (`assistant.threads.setStatus`) current — "Thinking…", then the model's own
@@ -31,6 +35,7 @@ import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID
 
@@ -70,6 +75,8 @@ def signing_secret_fingerprint(signing_secret: str) -> str:
 
 
 SLACK_USERS_INFO_URL = "https://slack.com/api/users.info"
+SLACK_CONVERSATIONS_REPLIES_URL = "https://slack.com/api/conversations.replies"
+SLACK_CONVERSATIONS_HISTORY_URL = "https://slack.com/api/conversations.history"
 SLACK_CHAT_POST_MESSAGE_URL = "https://slack.com/api/chat.postMessage"
 SLACK_ASSISTANT_STATUS_URL = "https://slack.com/api/assistant.threads.setStatus"
 SLACK_FILES_GET_UPLOAD_URL = "https://slack.com/api/files.getUploadURLExternal"
@@ -92,6 +99,20 @@ SLACK_REPLAY_SECONDS = 300
 MAX_SLACK_EVENT_BYTES = 1_000_000
 MESSAGE_EVENT_TYPES = ("app_mention", "message")
 MEMBER_MESSAGE_SUBTYPES = (None, "file_share")
+
+AMBIENT_FETCH_LIMIT = 100
+AMBIENT_CHANNEL_FETCH_LIMIT = 15
+AMBIENT_FETCH_TIMEOUT_SECONDS = 2.5
+AMBIENT_MESSAGE_SUBTYPES = (None, "file_share", "thread_broadcast")
+AMBIENT_MESSAGE_CHAR_LIMIT = 400
+AMBIENT_DIGEST_MAX_CHARS = 8_000
+AMBIENT_THREAD_HEADER = (
+    "[Thread messages for context — not addressed to you; answer the final message:]"
+)
+AMBIENT_CHANNEL_HEADER = (
+    "[Recent channel messages for context — not addressed to you; answer the final message:]"
+)
+AMBIENT_OMITTED_MARKER = "[… earlier messages omitted …]"
 SLACK_MARKDOWN_TEXT_LIMIT = 12_000
 MAX_SLACK_MESSAGE_BYTES = 40_000
 SLACK_UPLOAD_MAX_BYTES = 25 * 1024 * 1024
@@ -335,10 +356,11 @@ async def ingest(ctx: SurfaceContext, request: Request) -> Response:
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
     member_id = await _resolve_member(ctx, bot_token, inbound) if inbound.is_dm else None
     conversation_id = await ctx.conversation_for(inbound.queue_key, member_id)
-    body = inbound.body
+    context = await _ambient_context(ctx, bot_token, inbound)
+    body = f"{context}{inbound.body}"
     if inbound.files:
         downloaded = await _download_files(ctx, conversation_id, bot_token, inbound.files)
-        body = f"{inbound.body}{_files_note(downloaded)}"
+        body = f"{body}{_files_note(downloaded)}"
     agent_id = await ctx.default_agent()
     turn_id = await ctx.admit(conversation_id, agent_id, body, idempotency_key=inbound.message_id)
     _track_status(ctx, turn_id, inbound.queue_key, inbound.ts)
@@ -400,6 +422,94 @@ async def _slack_user_email(bot_token: str, slack_user_id: str) -> str | None:
     if isinstance(email, str) and email.strip():
         return email.strip()
     return None
+
+
+async def _ambient_context(ctx: SurfaceContext, bot_token: str, inbound: Inbound) -> str:
+    """A digest of the ambient messages around the trigger — the un-addressed traffic the gate
+    never admits. A mid-thread mention reads the thread's earlier messages (the whole history when
+    the bot is first mentioned); a top-level mention reads the channel's recent messages as context
+    for its fresh thread. One bounded page per admitted channel turn, no stored watermark:
+    already-digested lines may repeat across turns, but no message is ever lost to state that races
+    a running turn; a thread past the page limit keeps its earliest page — the root anchor — and
+    drops the overflow. Best-effort by design with its own short timeout, so ingest answers inside
+    Slack's three-second event ack — a failed or slow fetch logs and the mention is admitted with
+    its plain body."""
+    if inbound.is_dm:
+        return ""
+    channel, _, root_ts = inbound.queue_key.partition(":")
+    trigger_ts = inbound.message_id.partition(":")[2]
+    if root_ts == trigger_ts:
+        url = SLACK_CONVERSATIONS_HISTORY_URL
+        header = AMBIENT_CHANNEL_HEADER
+        params: dict[str, str | int] = {
+            "channel": channel,
+            "latest": trigger_ts,
+            "inclusive": "false",
+            "limit": AMBIENT_CHANNEL_FETCH_LIMIT,
+        }
+    else:
+        url = SLACK_CONVERSATIONS_REPLIES_URL
+        header = AMBIENT_THREAD_HEADER
+        params = {
+            "channel": channel,
+            "ts": root_ts,
+            "latest": trigger_ts,
+            "inclusive": "false",
+            "limit": AMBIENT_FETCH_LIMIT,
+        }
+    bot_user_id = await ctx.credential(SLACK_BOT_USER_ID_SLOT)
+    try:
+        async with httpx.AsyncClient(timeout=AMBIENT_FETCH_TIMEOUT_SECONDS) as client:
+            payload = await _slack_ok(
+                client.get(url, params=params, headers={"Authorization": f"Bearer {bot_token}"})
+            )
+    except Exception as error:
+        _LOG.warning("slack ambient context fetch failed for %s: %s", inbound.queue_key, error)
+        return ""
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return ""
+    return _ambient_digest(messages, bot_user_id, header)
+
+
+def _ambient_digest(messages: list[object], bot_user_id: str, header: str) -> str:
+    """Fetched Slack messages rendered as bounded context lines: member messages only, the bot's
+    own replies and any bot-mentioning message dropped — every mention was gated in as its own turn,
+    so it already lives in the transcript. Over the digest cap, the oldest line (the thread root,
+    the "summarize this" anchor) and the newest lines that fit survive, with the omission marked."""
+    kept: list[tuple[float, str]] = []
+    for item in messages:
+        if not isinstance(item, dict):
+            continue
+        if item.get("bot_id") is not None or item.get("subtype") not in AMBIENT_MESSAGE_SUBTYPES:
+            continue
+        user, ts = item.get("user"), item.get("ts")
+        text = str(item.get("text") or "").strip()
+        if not isinstance(user, str) or not user or user == bot_user_id:
+            continue
+        if not isinstance(ts, str) or not text or f"<@{bot_user_id}>" in text:
+            continue
+        try:
+            stamp = float(ts)
+            minute = datetime.fromtimestamp(stamp, tz=UTC).strftime("%Y-%m-%d %H:%M")
+        except (ValueError, OverflowError, OSError):
+            continue
+        kept.append((stamp, f"[{minute}] <@{user}>: {text[:AMBIENT_MESSAGE_CHAR_LIMIT]}"))
+    kept.sort(key=lambda entry: entry[0])
+    lines = [line for _, line in kept]
+    if not lines:
+        return ""
+    if sum(len(line) + 1 for line in lines) > AMBIENT_DIGEST_MAX_CHARS:
+        budget = AMBIENT_DIGEST_MAX_CHARS - len(lines[0]) - len(AMBIENT_OMITTED_MARKER) - 2
+        tail: list[str] = []
+        for line in reversed(lines[1:]):
+            if budget < len(line) + 1:
+                break
+            tail.append(line)
+            budget -= len(line) + 1
+        lines = [lines[0], AMBIENT_OMITTED_MARKER, *reversed(tail)]
+    joined = "\n".join(lines)
+    return f"{header}\n{joined}\n\n"
 
 
 def _slack_download_host_ok(url: str) -> bool:
