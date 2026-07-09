@@ -122,7 +122,9 @@ locals {
 
 # The shared serve fleet's Secret (ufo-system): the rendered config (with the ufo_serve DSN, so a
 # Secret) plus the platform Fernet / session / artifact keys the fleet reads from env. Mounted +
-# referenced by the ufo-serve Deployment in control-plane.yaml.tpl. Not replicated to tenants.
+# referenced by the ufo-serve Deployment in control-plane.yaml.tpl. The apex gateway reads the same
+# RLS-subject serve DSN (UFO_CONTROL_SERVE_DSN) to land shared-tier workspace rows under RLS as the
+# serve role the fleet dials. Not replicated to tenants.
 resource "kubernetes_secret_v1" "ufo_serve" {
   metadata {
     name      = "ufo-serve"
@@ -130,6 +132,7 @@ resource "kubernetes_secret_v1" "ufo_serve" {
   }
   data = {
     "ufo.toml"                = local.serve_config
+    UFO_CONTROL_SERVE_DSN     = module.platform.serve_dsn
     UFO_CREDENTIAL_KEY        = module.platform.serve_credential_key
     UFO_SESSION_SECRET        = module.platform.serve_session_secret
     UFO_ARTIFACT_TOKEN_SECRET = module.platform.serve_artifact_token

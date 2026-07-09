@@ -233,6 +233,11 @@ spec:
             - name: UFO_TOKEN_SECRET
               valueFrom:
                 secretKeyRef: {name: ufo-platform-secrets, key: UFO_TOKEN_SECRET}
+            # Shared-tier onboarding writes the workspace + owner rows as the RLS-subject serve role
+            # (password-bearing → a Secret); the same DSN the shared serve fleet dials.
+            - name: UFO_CONTROL_SERVE_DSN
+              valueFrom:
+                secretKeyRef: {name: ufo-serve, key: UFO_CONTROL_SERVE_DSN}
           readinessProbe:
             httpGet: {path: /healthz, port: http}
           livenessProbe:
