@@ -270,17 +270,19 @@ def _inbound_files(event: Mapping[str, object]) -> tuple[InboundFile, ...]:
     return tuple(files)
 
 
-_URL_VERIFIED_MARKED: set[tuple[UUID, str]] = set()
+_URL_VERIFIED_WRITTEN: dict[UUID, str] = {}
 
 
 async def _mark_url_verified(ctx: SurfaceContext, signing_secret: str) -> None:
     """Record that Slack reached this deploy with a request the stored secret verified — the signal
-    the setup surface's `connected` state reads. Any signed request proves it, so the first real
-    event after the slots are filled flips setup to connected with no manual Request-URL re-save;
-    the per-process cache keeps the write off the event hot path after the first proof per secret.
-    Best effort: a blob hiccup must not fail the request Slack needs answered."""
+    the setup surface's `connected` state reads. Callers gate what counts as proof: the
+    `url_verification` handshake (Slack's own URL check, which carries no team) or a request from
+    the configured team — never a stray on-team-mismatch event, which would read as connected while
+    the team gate drops everything. The cache holds the fingerprint this process last wrote, so the
+    write stays off the hot path yet any rotation — including back to an earlier secret — re-stamps
+    on the next proof. Best effort: a blob hiccup must not fail the request Slack needs answered."""
     fingerprint = signing_secret_fingerprint(signing_secret)
-    if (ctx.workspace_id, fingerprint) in _URL_VERIFIED_MARKED:
+    if _URL_VERIFIED_WRITTEN.get(ctx.workspace_id) == fingerprint:
         return
     marker = json.dumps({"fingerprint": fingerprint, "at": time.time()}).encode()
     try:
@@ -288,7 +290,7 @@ async def _mark_url_verified(ctx: SurfaceContext, signing_secret: str) -> None:
     except Exception:
         _LOG.warning("slack url_verified marker write failed", exc_info=True)
         return
-    _URL_VERIFIED_MARKED.add((ctx.workspace_id, fingerprint))
+    _URL_VERIFIED_WRITTEN[ctx.workspace_id] = fingerprint
 
 
 async def ingest(ctx: SurfaceContext, request: Request) -> Response:
@@ -311,11 +313,17 @@ async def ingest(ctx: SurfaceContext, request: Request) -> Response:
         verify_slack_signature(request.headers, raw, signing_secret)
     except SlackSignatureError as error:
         return Response(str(error), status_code=401)
-    await _mark_url_verified(ctx, signing_secret)
     challenge = url_verification_challenge(raw)
     if challenge is not None:
+        await _mark_url_verified(ctx, signing_secret)
         return JSONResponse({"challenge": challenge})
-    inbound = await _to_inbound(ctx, raw)
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise ValueError("Slack body must be an object")
+    if payload.get("team_id") != await ctx.credential(SLACK_TEAM_ID_SLOT):
+        return JSONResponse({"ok": True, "ignored": True})
+    await _mark_url_verified(ctx, signing_secret)
+    inbound = await _to_inbound(ctx, payload)
     if inbound is None:
         return JSONResponse({"ok": True, "ignored": True})
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
@@ -331,12 +339,7 @@ async def ingest(ctx: SurfaceContext, request: Request) -> Response:
     return JSONResponse({"ok": True})
 
 
-async def _to_inbound(ctx: SurfaceContext, raw: bytes) -> Inbound | None:
-    payload = json.loads(raw)
-    if not isinstance(payload, dict):
-        raise ValueError("Slack body must be an object")
-    if payload.get("team_id") != await ctx.credential(SLACK_TEAM_ID_SLOT):
-        return None
+async def _to_inbound(ctx: SurfaceContext, payload: Mapping[str, object]) -> Inbound | None:
     event = payload.get("event")
     if not isinstance(event, dict) or event.get("type") not in MESSAGE_EVENT_TYPES:
         return None
@@ -616,6 +619,7 @@ async def interactive(ctx: SurfaceContext, request: Request) -> Response:
     click = await _to_click(ctx, raw)
     if click is None:
         return JSONResponse({"ok": True, "ignored": True})
+    await _mark_url_verified(ctx, signing_secret)
     member_id = await ctx.linked_member(click.slack_user_id)
     conversation_id = await ctx.conversation_for(click.queue_key, member_id)
     agent_id = await ctx.default_agent()

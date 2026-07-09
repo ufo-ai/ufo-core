@@ -218,19 +218,25 @@ slack surface
   |     unset + url_verification -> echo the challenge (nothing stored, no marker)
   |     unset + event            -> 401
   +-- verify HMAC and replay window
-  +-- best-effort write blob (once per (workspace, secret) per process):
-  |     workspaces/<workspace_id>/surfaces/slack/url_verified
-  |     {"fingerprint": sha256(signing_secret), "at": <seconds>}
-  |
-  +-- url_verification -> return {"challenge": "..."}
-  +-- event            -> admit turn
+  +-- url_verification -> write marker, return {"challenge": "..."}
+  +-- foreign team_id  -> ignored, no marker
+  +-- event / click    -> write marker, admit turn
+```
+
+The marker (best-effort, written once per stored secret per process):
+
+```text
+workspaces/<workspace_id>/surfaces/slack/url_verified
+{"fingerprint": sha256(signing_secret), "at": <seconds>}
 ```
 
 The unsigned echo exists because Slack probes the request URL the instant the app is created from
 the manifest — before the owner can hold the secret Slack mints with the app. Echoing the caller's
 own challenge stores and grants nothing, and it spares the owner a failed-verification banner with
-no reliable retry. Because any signed request writes the marker, the member's first DM or @mention
-is what flips setup to connected — no manual re-save of the request URL.
+no reliable retry. Because any signed request from the configured team writes the marker (the
+handshake carries no team and always counts), the member's first DM or @mention is what flips setup
+to connected — no manual re-save of the request URL, and no false green from an event the team gate
+drops.
 
 The setup surface trusts the marker only while its fingerprint matches the currently stored
 signing secret. Rotating the signing secret therefore moves the UI back to pending until Slack's

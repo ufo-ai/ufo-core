@@ -382,17 +382,60 @@ async def test_first_signed_event_marks_verified_and_a_rotated_secret_re_proves(
         assert marker["fingerprint"] == slack.signing_secret_fingerprint(SIGNING_SECRET)
         rotated = "rotated-secret"
         await store.put(workspace_id, slack.SLACK_SIGNING_SECRET_SLOT, rotated)
-        ts = int(time.time())
-        base = b"v0:" + str(ts).encode() + b":" + body
-        headers = {
-            "x-slack-request-timestamp": str(ts),
-            "x-slack-signature": "v0="
-            + hmac.new(rotated.encode(), base, hashlib.sha256).hexdigest(),
-        }
-        response = await client.post("/surface/slack", content=body, headers=headers)
+        response = await client.post(
+            "/surface/slack", content=body, headers=_sign_with(rotated, body)
+        )
+        assert response.status_code == 200
+        marker = json.loads(await blob.get(slack.url_verified_blob_key(workspace_id)))
+        assert marker["fingerprint"] == slack.signing_secret_fingerprint(rotated)
+        # Rotating back to an earlier secret must re-stamp too — the process cache holds the last
+        # written fingerprint, not every fingerprint ever written.
+        await store.put(workspace_id, slack.SLACK_SIGNING_SECRET_SLOT, SIGNING_SECRET)
+        response = await client.post(
+            "/surface/slack", content=body, headers=_sign_with(SIGNING_SECRET, body)
+        )
         assert response.status_code == 200
     marker = json.loads(await blob.get(slack.url_verified_blob_key(workspace_id)))
-    assert marker["fingerprint"] == slack.signing_secret_fingerprint(rotated)
+    assert marker["fingerprint"] == slack.signing_secret_fingerprint(SIGNING_SECRET)
+
+
+def _sign_with(secret: str, body: bytes) -> dict[str, str]:
+    ts = int(time.time())
+    base = b"v0:" + str(ts).encode() + b":" + body
+    return {
+        "x-slack-request-timestamp": str(ts),
+        "x-slack-signature": "v0=" + hmac.new(secret.encode(), base, hashlib.sha256).hexdigest(),
+    }
+
+
+async def test_marker_needs_the_configured_team_but_a_click_counts(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    # A signed event from another team is dropped by the team gate and must not read as connected —
+    # a mixed-app config (secret from one app, token from another) stays pending, never green and
+    # dead. A decoded answer click is team-gated too, so it proves the secret like an event does.
+    workspace_id, _ = await _seed()
+    _, client, blob = await _mount(monkeypatch, workspace_id, tmp_path, [])
+    foreign = json.dumps(
+        {
+            "team_id": "T0FOREIGN",
+            "event": {"type": "app_mention", "user": "U1", "channel": "C1", "ts": "1.0"},
+        }
+    ).encode()
+    click = _click_body()
+    async with client:
+        ignored = await client.post(
+            "/surface/slack", content=foreign, headers=_sign(foreign, int(time.time()))
+        )
+        assert ignored.json() == {"ok": True, "ignored": True}
+        assert not await blob.exists(slack.url_verified_blob_key(workspace_id))
+        answered = await client.post(
+            "/surface/slack/interactive", content=click, headers=_signed_form(click)
+        )
+        assert answered.status_code == 200
+        await asyncio.gather(*slack._REWRITE_TASKS)
+    marker = json.loads(await blob.get(slack.url_verified_blob_key(workspace_id)))
+    assert marker["fingerprint"] == slack.signing_secret_fingerprint(SIGNING_SECRET)
 
 
 async def test_one_mention_admits_exactly_one_turn(db: None, tmp_path, monkeypatch) -> None:
