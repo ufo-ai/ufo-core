@@ -1,0 +1,17 @@
+name: Deploy (testing)
+
+# Twin of deploy.yml with the inverse paths filter: a PR with no deploy-relevant changes gets a
+# green no-op `deploy` check instead of branch protection waiting forever on "Expected". Skipped
+# runs satisfy required checks; never-created ones do not. The ignore list below must stay the
+# exact inverse of deploy.yml's pull_request paths.
+on:
+  pull_request:
+    paths-ignore:
+      - infra/**
+      - .github/workflows/deploy.yml
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "No deploy-relevant changes."

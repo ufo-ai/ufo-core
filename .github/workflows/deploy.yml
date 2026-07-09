@@ -30,9 +30,10 @@ on:
         required: false
         default: ""
 
-# Serialize deploys; never cancel an in-flight apply.
+# Serialize deploys; never cancel an in-flight apply. PR runs get a per-PR group so they can
+# never displace a queued deploy.
 concurrency:
-  group: deploy-testing
+  group: ${{ github.event_name == 'pull_request' && format('deploy-testing-pr-{0}', github.event.pull_request.number) || 'deploy-testing' }}
   cancel-in-progress: false
 
 permissions:
@@ -113,12 +114,14 @@ jobs:
         run: terraform init -input=false
 
       # image_tag via -var: it must beat the placeholder in terraform.tfvars (tfvars beats TF_VAR_*).
+      # -lock=false: plans are read-only and run outside the deploy concurrency group, so they must
+      # not contend for the state lock a concurrent apply holds.
       - name: Terraform plan
         if: github.event_name == 'pull_request'
         working-directory: ${{ env.TF_DIR }}
         env:
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: terraform plan -input=false -no-color -var "image_tag=$IMAGE_TAG"
+        run: terraform plan -input=false -no-color -lock=false -var "image_tag=$IMAGE_TAG"
 
       - name: Terraform apply
         if: github.event_name != 'pull_request'
