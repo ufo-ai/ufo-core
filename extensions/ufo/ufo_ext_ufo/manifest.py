@@ -6,7 +6,7 @@ writeback and tails the hub in that same route."""
 
 from ufo.sdk.manifest import Manifest
 from ufo.sdk.surfaces import SurfaceSpec
-from ufo_ext_ufo.surface import ROUTES, SURFACE_UFO
+from ufo_ext_ufo.surface import ROUTES, SURFACE_UFO, resolve_workspace
 
 NAME = "ufo"
 VERSION = "0.1.0"
@@ -16,5 +16,5 @@ def manifest() -> Manifest:
     return Manifest(
         name=NAME,
         version=VERSION,
-        surfaces=(SurfaceSpec(name=SURFACE_UFO, routes=ROUTES),),
+        surfaces=(SurfaceSpec(name=SURFACE_UFO, routes=ROUTES, identify=resolve_workspace),),
     )

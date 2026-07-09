@@ -27,7 +27,7 @@ from ufo.config import (
 )
 from ufo.connectors import AuthProxy
 from ufo.credentials import CredentialStore
-from ufo.db import init_db, init_owner_db, workspace_tx
+from ufo.db import current_workspace, init_db, init_owner_db, workspace_tx
 from ufo.ext.context import CredentialAccess, context_for
 from ufo.ext.loader import (
     NotRegisteredError,
@@ -197,7 +197,16 @@ def run() -> None:
             config.connect.public_base_url,
         )
     else:
-        log("serve.shared_mode.surfaces_deferred")
+        _mount_shared_surfaces(
+            app,
+            manifests,
+            credentials,
+            blob,
+            hub,
+            dbos_client,
+            artifact_secret,
+            config.connect.public_base_url,
+        )
     log("serve.started", host=config.serve.host, port=config.serve.port, shared_workspace=shared)
     try:
         uvicorn.run(app, host=config.serve.host, port=config.serve.port, log_level="warning")
@@ -665,6 +674,72 @@ def _mount_surfaces(
         app.state.writeback_poller = WritebackPoller(
             workspace_id=workspace_id, worker_id=uuid4().hex, surfaces=registered
         )
+
+
+def _mount_shared_surfaces(
+    app: FastAPI,
+    manifests: tuple[Manifest, ...],
+    credentials: CredentialStore | None,
+    blob: BlobStore,
+    hub: Hub,
+    dbos_client: DBOSClient,
+    artifact_secret: str,
+    public_base_url: str | None,
+) -> None:
+    """Mount each shared-fleet-capable surface's routes on the shared fleet, resolving the workspace
+    per request instead of pinning one at boot: `SurfaceSpec.identify` verifies the request's signed
+    bearer and returns the workspace it claims, which the endpoint binds for the whole request (an
+    unresolved token is a 401). It binds via `current_workspace.set`, not a `with ws(...)` block,
+    because a live surface returns a StreamingResponse whose hub tail runs — and reads the durable
+    turn under RLS — after the handler returns; the scope must outlive the call. The per-request
+    SurfaceContext carries an `AdmissionInvoker` bound to that workspace so its admitted turn lands
+    scoped to the token's workspace and no other.
+
+    A surface that declares no `identify` cannot scope a shared request and is per-tenant-only, so
+    it is skipped here (logged); a durable surface would need the fleet-wide, per-workspace
+    writeback poller the shared fleet does not run (`_serve_lifespan`), so only live surfaces mount
+    — a durable one is skipped the same way. The turn path is the live `ufo` surface; Slack and the
+    setup portal stay per-tenant until the shared fleet grows fleet-wide writeback."""
+    admission = Admission(dbos=dbos_client, durable_surfaces=durable_surfaces(manifests))
+    tailer = HubTailer(hub=hub)
+    for manifest in manifests:
+        for spec in manifest.surfaces:
+            resolver = spec.identify
+            if resolver is None or spec.post is not None:
+                log("serve.shared_surface.deferred", surface=spec.name)
+                continue
+            if manifest.credentials and credentials is None:
+                raise RuntimeError(f"surface {spec.name!r} needs a credential key but none is set")
+            for route in spec.routes:
+
+                async def endpoint(
+                    request: Request,
+                    handler=route.handler,
+                    identify=resolver,
+                    surface=spec.name,
+                ) -> Response:
+                    workspace_id = identify(request)
+                    if workspace_id is None:
+                        return Response("unauthorized", status_code=401)
+                    current_workspace.set(workspace_id)
+                    context = SurfaceContext(
+                        workspace_id=workspace_id,
+                        surface=surface,
+                        blob=blob,
+                        _invoker=AdmissionInvoker(admission=admission, workspace_id=workspace_id),
+                        _tailer=tailer,
+                        _credentials=credentials,
+                        _artifact_token_secret=artifact_secret,
+                        _public_base_url=public_base_url,
+                    )
+                    return await handler(context, request)
+
+                app.add_route(
+                    f"/surface/{spec.name}/{route.path}".rstrip("/"),
+                    endpoint,
+                    methods=[route.method],
+                )
+            log("serve.shared_surface.mounted", surface=spec.name)
 
 
 @asynccontextmanager

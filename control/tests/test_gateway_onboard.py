@@ -9,10 +9,18 @@ from typing import Any
 import httpx
 import pytest
 
-from ufo_control.gateway import STAMPED_SCRIPT, Onboarding, _stamp_script
+from ufo_control.gateway import (
+    SHARED_TIER,
+    STAMPED_SCRIPT,
+    WORKSPACE_BASE_URL_ENV,
+    Onboarding,
+    _resolver,
+    _stamp_script,
+)
 from ufo_control.gateway_claim import ClaimWorkflow
 from ufo_control.gateway_email import LoggingEmailSender, WorkEmailPolicy
 from ufo_control.gateway_provision import DeployTarget, JoinOrProvision
+from ufo_control.gateway_shared import SharedWorkspaces
 from ufo_control.gateway_store import OnboardStore
 from ufo_control.gateway_token import verify_token
 from ufo_control.kube import KubeClient
@@ -31,6 +39,24 @@ def test_stamp_substitutes_version_and_public_base_url(monkeypatch: pytest.Monke
     assert "UFO_SCRIPT_VERSION=dev" not in stamped
     assert re.search(r"UFO_SCRIPT_VERSION=[0-9a-f]{12}", stamped) is not None
     assert 'UFO_URL="${UFO_URL:-https://testing.flyingobject.ai}"' in stamped
+
+
+def test_shared_resolver_uses_the_workspace_serve_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shared tier signs a member in against the serve host their `ufo` surface talks to
+    (`app.<apex>`), not the onboarding apex — separate hosts, so the `workspace` directive must
+    carry the serve host or the member's turns 404 on the gateway."""
+    monkeypatch.setenv(WORKSPACE_BASE_URL_ENV, "https://app.testing.flyingobject.ai")
+    resolver = _resolver(SHARED_TIER, {})
+    assert isinstance(resolver, SharedWorkspaces)
+    assert resolver.workspace_url == "https://app.testing.flyingobject.ai"
+
+
+def test_shared_resolver_fails_loud_without_the_workspace_serve_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(WORKSPACE_BASE_URL_ENV, raising=False)
+    with pytest.raises(RuntimeError, match=WORKSPACE_BASE_URL_ENV):
+        _resolver(SHARED_TIER, {})
 
 
 def test_shipped_script_is_stamped_and_carries_the_adapted_chat_target() -> None:

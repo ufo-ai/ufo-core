@@ -54,6 +54,7 @@ ENTERPRISE_TIER = "enterprise"
 BASE_DOMAIN_ENV = "UFO_BASE_DOMAIN"
 BUNDLE_IMAGE_ENV = "UFO_BUNDLE_IMAGE"
 PUBLIC_BASE_URL_ENV = "UFO_PUBLIC_BASE_URL"
+WORKSPACE_BASE_URL_ENV = "UFO_WORKSPACE_BASE_URL"
 DEFAULT_PUBLIC_BASE_URL = "https://flyingobject.ai"
 SCRIPT_URL_DEFAULT = 'UFO_URL="${UFO_URL:-https://flyingobject.ai}"'
 
@@ -217,9 +218,11 @@ def _tier() -> str:
 
 def _resolver(tier: str, state: dict[str, Any]) -> SharedWorkspaces | JoinOrProvision:
     if tier == SHARED_TIER:
-        return SharedWorkspaces(
-            workspace_url=os.environ.get(PUBLIC_BASE_URL_ENV, DEFAULT_PUBLIC_BASE_URL)
-        )
+        # The workspace serve host the member's `ufo` surface talks to (`app.<apex>`) — distinct
+        # from UFO_PUBLIC_BASE_URL, the onboarding apex the client fetches `/ufo` and boards at,
+        # which has no `/surface` route. Conflating them handed the member the apex and their turns
+        # 404'd; the shared serve fleet is a separate host.
+        return SharedWorkspaces(workspace_url=_require_env(WORKSPACE_BASE_URL_ENV))
     return JoinOrProvision(
         kube=state["kube"],
         target=DeployTarget(

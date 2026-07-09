@@ -54,10 +54,10 @@ def directive(verb: str, *fields: str) -> bytes:
     return ("\t".join([verb, *escaped]) + "\n").encode()
 
 
-def verify_token(secret: str, token: str, workspace_id: UUID, now: int | None = None) -> str | None:
-    """The lowercased member email a bearer token authenticates for this workspace, or None when its
-    signature, expiry, or workspace claim fails. Constant-time compare; the workspace claim must
-    equal this deploy's so a token minted for another tenant is rejected."""
+def _verified_claims(secret: str, token: str, now: int | None) -> tuple[str, str] | None:
+    """The `(ws, email)` a bearer proves — signature (constant-time) and expiry checked, else None.
+    Neither field is trusted before the HMAC over this deploy's secret matches, so a forged or
+    expired token yields nothing to scope or identify by."""
     moment = int(datetime.now(tz=UTC).timestamp()) if now is None else now
     payload_b64, separator, signature = token.partition(TOKEN_SEPARATOR)
     if not separator or not signature:
@@ -74,9 +74,47 @@ def verify_token(secret: str, token: str, workspace_id: UUID, now: int | None = 
     ws, email, exp = payload.get("ws"), payload.get("email"), payload.get("exp")
     if not isinstance(ws, str) or not isinstance(email, str) or not isinstance(exp, int):
         return None
-    if ws != str(workspace_id) or exp <= moment:
+    if exp <= moment:
+        return None
+    return ws, email
+
+
+def verify_token(secret: str, token: str, workspace_id: UUID, now: int | None = None) -> str | None:
+    """The lowercased member email a bearer token authenticates for this workspace, or None when its
+    signature, expiry, or workspace claim fails. The claim must equal this deploy's, so a token
+    minted for another tenant is rejected — the per-tenant check, where the deploy pins one
+    workspace; the shared fleet has none pinned and resolves it through `workspace_claim`."""
+    claims = _verified_claims(secret, token, now)
+    if claims is None:
+        return None
+    ws, email = claims
+    if ws != str(workspace_id):
         return None
     return email.lower()
+
+
+def workspace_claim(secret: str, token: str, now: int | None = None) -> UUID | None:
+    """The workspace a bearer claims, signature- and expiry-verified — the shared fleet's
+    per-request scope, resolved from the signed claim itself because one process serves every
+    workspace with none pinned to match against. None when verification fails or `ws` is not a
+    uuid."""
+    claims = _verified_claims(secret, token, now)
+    if claims is None:
+        return None
+    try:
+        return UUID(claims[0])
+    except ValueError:
+        return None
+
+
+def resolve_workspace(request: Request) -> UUID | None:
+    """The `SurfaceSpec.identify` the shared fleet calls to scope a request before its handler runs:
+    the workspace the request's bearer claims, or None to reject. The same bearer the handler
+    re-verifies for the member email — workspace here, identity there, from the one signature."""
+    scheme, _, token = request.headers.get("authorization", "").partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        return None
+    return workspace_claim(_token_secret(), token.strip())
 
 
 def _b64url_decode(value: str) -> bytes:

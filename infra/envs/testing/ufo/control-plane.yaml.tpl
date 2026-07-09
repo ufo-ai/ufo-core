@@ -224,6 +224,9 @@ spec:
           env:
             - {name: UFO_CONTROL_OTLP_ENDPOINT, value: "${otlp_endpoint}"}
             - {name: UFO_PUBLIC_BASE_URL, value: "https://${apex_host}"}
+            # The workspace serve host the member's `ufo` surface talks to (has the `/surface` route),
+            # distinct from the onboarding apex above — signed in, the member's turns go here.
+            - {name: UFO_WORKSPACE_BASE_URL, value: "https://${shared_host}"}
             - {name: UFO_BASE_DOMAIN, value: "${base_domain}"}
             - {name: UFO_BUNDLE_IMAGE, value: "${bundle_image}"}
             - {name: UFO_GATEWAY_EMAIL_BACKEND, value: "logging"}

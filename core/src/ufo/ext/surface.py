@@ -413,6 +413,7 @@ class SurfaceContext:
 RouteHandler = Callable[[SurfaceContext, Request], Awaitable[Response]]
 PostHandler = Callable[[SurfaceContext, Writeback], Awaitable[str]]
 AttachHandler = Callable[[SurfaceContext, Writeback, str], Awaitable[None]]
+WorkspaceResolver = Callable[[Request], UUID | None]
 
 
 @dataclass(frozen=True)
@@ -442,6 +443,12 @@ class SurfaceSpec:
     routes: tuple[SurfaceRoute, ...]
     post: PostHandler | None = None
     attach: AttachHandler | None = None
+    identify: WorkspaceResolver | None = None
+    """How the shared fleet resolves a request's workspace before binding it — verify the surface's
+    own signed bearer and return the workspace it claims (the signature is the authority; no pinned
+    workspace to match against), or None to reject as unauthenticated. A per-tenant deploy pins one
+    workspace at boot and never calls this; a surface that omits it is per-tenant-only and is not
+    mounted on the shared fleet, where a request carries no boot-pinned scope."""
 
 
 @dataclass(frozen=True)

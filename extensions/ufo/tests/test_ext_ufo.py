@@ -13,6 +13,7 @@ import sqlalchemy as sa
 from dbos import DBOSClient
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from starlette.requests import Request as StarletteRequest
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_ufo.manifest import manifest as ufo_manifest
 from ufo_ext_ufo.surface import (
@@ -20,8 +21,10 @@ from ufo_ext_ufo.surface import (
     PROMPT,
     directive,
     directives_for,
+    resolve_workspace,
     stream_directives,
     verify_token,
+    workspace_claim,
 )
 
 from ufo.accounting import CORE_PRICING
@@ -38,7 +41,7 @@ from ufo.models.registry import ModelRegistry
 from ufo.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame, Usage
-from ufo.serve import _mount_surfaces
+from ufo.serve import _mount_shared_surfaces, _mount_surfaces
 
 SECRET = "ufo-token-secret"
 STREAM_TIMEOUT_SECONDS = 30
@@ -126,6 +129,33 @@ def test_tampered_signature_is_rejected() -> None:
     assert verify_token(SECRET, forged, workspace_id) is None
     assert verify_token(SECRET, "not-a-token", workspace_id) is None
     assert verify_token("other-secret", token, workspace_id) is None
+
+
+def test_workspace_claim_returns_the_signed_workspace() -> None:
+    """The shared fleet resolves scope from the signed claim itself — no pinned workspace to match
+    against. A valid token yields its `ws` uuid; forged, expired, or non-uuid yields None."""
+    workspace_id = uuid4()
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    assert workspace_claim(SECRET, token) == workspace_id
+    assert workspace_claim(SECRET, _mint(SECRET, workspace_id, "o@x.com", _future() - 7200)) is None
+    assert workspace_claim("other-secret", token) is None
+    assert workspace_claim(SECRET, "not-a-token") is None
+
+
+def _get_request(headers: dict[str, str]) -> StarletteRequest:
+    raw = [(k.lower().encode(), v.encode()) for k, v in headers.items()]
+    return StarletteRequest({"type": "http", "method": "POST", "headers": raw})
+
+
+def test_resolve_workspace_reads_the_bearer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """SurfaceSpec.identify: the workspace a request's bearer claims, or None to reject — the shared
+    fleet binds it before the handler runs. A missing or non-bearer authorization yields None."""
+    monkeypatch.setenv("UFO_TOKEN_SECRET", SECRET)
+    workspace_id = uuid4()
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    assert resolve_workspace(_get_request({"authorization": f"Bearer {token}"})) == workspace_id
+    assert resolve_workspace(_get_request({})) is None
+    assert resolve_workspace(_get_request({"authorization": token})) is None
 
 
 @dataclass(frozen=True)
@@ -292,6 +322,74 @@ async def ufo(
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://ufo") as client:
         yield client, workspace_id
     dbos_client.destroy()
+
+
+@pytest.fixture
+async def shared_ufo(
+    db: None,
+    runtime: tuple[Config, InProcessHub, FilesystemBlobStore],
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncIterator[AsyncClient]:
+    """The ufo surface on the shared fleet: mounted with no boot-pinned workspace, so every request
+    scopes itself from its bearer through `_mount_shared_surfaces`. One app, every workspace."""
+    config, hub, blob = runtime
+    monkeypatch.setenv("UFO_TOKEN_SECRET", SECRET)
+    dbos_client = DBOSClient(system_database_url=config.database.system_url)
+    app = FastAPI()
+    _mount_shared_surfaces(app, (ufo_manifest(),), None, blob, hub, dbos_client, "", None)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://fleet") as client:
+        yield client
+    dbos_client.destroy()
+
+
+async def _sole_turn(workspace_id: UUID) -> tuple[UUID, str]:
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.turn.c.id, tables.turn.c.status).where(
+                    tables.turn.c.workspace_id == workspace_id
+                )
+            )
+        ).one()
+    return row.id, row.status
+
+
+async def test_shared_fleet_scopes_each_turn_to_its_token_workspace(
+    shared_ufo: AsyncClient,
+) -> None:
+    """No boot-pinned workspace: `_mount_shared_surfaces` resolves each request's workspace from its
+    signed `{ws,email}` bearer, binds it, and admits the turn under exactly that workspace — two
+    workspaces through one mounted app, each scoped by its token, and the live turn streams to
+    done."""
+    ws_a, ws_b = await _seed_workspace(), await _seed_workspace()
+    await _seed_member(ws_a, "a@example.com")
+    await _seed_member(ws_b, "b@example.com")
+    token_a = _mint(SECRET, ws_a, "a@example.com", _future())
+    token_b = _mint(SECRET, ws_b, "b@example.com", _future())
+    lines_a = await _post(shared_ufo, "main", token_a, b"hi a")
+    lines_b = await _post(shared_ufo, "main", token_b, b"hi b")
+    for lines in (lines_a, lines_b):
+        answer = "".join(f for verb, *rest in lines if verb in ("txt", "say") for f in rest)
+        assert "echo:1" in answer
+        assert lines[-1] == ["ask", ">"]
+    turn_a, status_a = await _sole_turn(ws_a)
+    turn_b, status_b = await _sole_turn(ws_b)
+    assert (status_a, status_b) == ("done", "done")
+    assert turn_a != turn_b
+
+
+async def test_shared_fleet_rejects_a_forged_or_missing_bearer(shared_ufo: AsyncClient) -> None:
+    """A token this fleet's secret did not sign, and no token at all, are both 401 before any turn
+    is admitted — the signed workspace claim is the only authority the shared fleet trusts."""
+    ws = await _seed_workspace()
+    forged = _mint("wrong-secret", ws, "a@example.com", _future())
+    denied = await shared_ufo.post(
+        "/surface/ufo/main", content=b"hi", headers={"authorization": f"Bearer {forged}"}
+    )
+    missing = await shared_ufo.post("/surface/ufo/main", content=b"hi")
+    assert denied.status_code == 401
+    assert missing.status_code == 401
+    assert await _turn_count(ws) == 0
 
 
 async def _post(client: AsyncClient, channel: str, token: str, body: bytes) -> list[list[str]]:

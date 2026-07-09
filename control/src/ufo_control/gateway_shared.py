@@ -39,7 +39,8 @@ def serve_dsn() -> str:
 class SharedWorkspaces:
     """Resolve a verified org domain to its workspace row in the shared database, adding the member
     as owner. Holds no Kubernetes client — the shared tier applies no `Tenant`. `workspace_url` is
-    the apex the member's `ufo` surface talks to (there is no per-workspace subdomain)."""
+    the shared serve host the member's `ufo` surface talks to (`app.<apex>`, one fleet for every
+    workspace — no per-workspace subdomain), distinct from the onboarding apex."""
 
     workspace_url: str
 
