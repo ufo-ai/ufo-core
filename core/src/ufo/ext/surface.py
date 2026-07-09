@@ -156,6 +156,19 @@ class SurfaceContext:
             raise RuntimeError(f"surface {self.surface!r} reads a credential but holds no store")
         return await self._credentials.get(self.workspace_id, slot)
 
+    async def put_credential(self, slot: str, value: str) -> None:
+        """The write half of `credential`: a setup surface fills a peer surface's slots (slots are
+        workspace-global, keyed by `(workspace_id, slot)`, not namespaced per extension)."""
+        if self._credentials is None:
+            raise RuntimeError(f"surface {self.surface!r} writes a credential but holds no store")
+        await self._credentials.put(self.workspace_id, slot, value)
+
+    @property
+    def public_base_url(self) -> str | None:
+        """The deploy's public base (`[connect] public_base_url`), or None when unset — a setup
+        surface renders a channel's callback URL (Slack's Events request URL) from it."""
+        return self._public_base_url
+
     def artifact_link(self, artifact: SharedArtifact) -> str | None:
         """A TTL download link for a shared file the surface cannot upload inline, or None when
         artifact delivery is unconfigured (no token secret or no public base URL) — the surface then
@@ -200,6 +213,23 @@ class SurfaceContext:
 
     async def linked_member(self, external_id: str) -> UUID | None:
         return await self._identity_member(self.surface, external_id)
+
+    async def is_workspace_owner(self, email: str) -> bool:
+        """Whether `email` is the workspace owner — the earliest-created member, inserted at
+        provisioning before any later join. There is no owner column; the first member is the
+        owner (RFC 0011 defers roles). A setup surface gates workspace-wide changes — connecting
+        the one shared Slack app every member talks to — to the owner, so a joined teammate cannot
+        overwrite the whole workspace's channel credentials."""
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(tables.member.c.email)
+                    .where(tables.member.c.workspace_id == self.workspace_id)
+                    .order_by(tables.member.c.created_at.asc(), tables.member.c.id.asc())
+                    .limit(1)
+                )
+            ).one_or_none()
+        return row is not None and row.email.strip().lower() == email.strip().lower()
 
     async def adopt_identity(self, peer_surface: str, external_id: str) -> UUID | None:
         """Link this surface's external id to the member a peer surface already knows it by, so one

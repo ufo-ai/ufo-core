@@ -24,13 +24,30 @@ from uuid import UUID
 import httpx
 
 from ufo.sdk.http import JSONResponse, Request, Response
-from ufo.sdk.surfaces import SharedArtifact, SurfaceContext, Writeback
+from ufo.sdk.surfaces import CredentialSlotUnset, SharedArtifact, SurfaceContext, Writeback
 
 SURFACE_SLACK = "slack"
 SLACK_BOT_TOKEN_SLOT = "slack_bot_token"
 SLACK_SIGNING_SECRET_SLOT = "slack_signing_secret"
 SLACK_BOT_USER_ID_SLOT = "slack_bot_user_id"
 SLACK_TEAM_ID_SLOT = "slack_team_id"
+
+
+def url_verified_blob_key(workspace_id: UUID) -> str:
+    """The marker written on each signature-verified `url_verification` handshake — the one event
+    that proves Slack reached this deploy with the right signing secret. Keyed by workspace because
+    hosted tenants share one blob bucket: a fixed key would let every tenant's handshake overwrite
+    every other's. The body records a fingerprint of the verifying secret, so after a rotation the
+    setup surface reads the workspace as pending until Slack re-verifies — never a stale
+    "connected"."""
+    return f"workspaces/{workspace_id}/surfaces/slack/url_verified"
+
+
+def signing_secret_fingerprint(signing_secret: str) -> str:
+    """A non-reversible fingerprint of the signing secret — stamped into the url-verified marker so
+    the setup surface can tell a live verification from one left over from a rotated-out secret."""
+    return hashlib.sha256(signing_secret.encode()).hexdigest()
+
 
 SLACK_USERS_INFO_URL = "https://slack.com/api/users.info"
 SLACK_CHAT_POST_MESSAGE_URL = "https://slack.com/api/chat.postMessage"
@@ -188,13 +205,28 @@ async def ingest(ctx: SurfaceContext, request: Request) -> Response:
     raw = await request.body()
     if len(raw) > MAX_SLACK_EVENT_BYTES:
         return Response("Slack event too large", status_code=413)
-    signing_secret = await ctx.credential(SLACK_SIGNING_SECRET_SLOT)
+    try:
+        signing_secret = await ctx.credential(SLACK_SIGNING_SECRET_SLOT)
+    except CredentialSlotUnset:
+        # Slack probes the Request URL the moment the app is created from the manifest — before the
+        # owner has filled the slots. That is a clean 401 (verification simply hasn't succeeded
+        # yet), never a 500 with a stack trace.
+        return Response("Slack signing secret is not configured yet", status_code=401)
     try:
         verify_slack_signature(request.headers, raw, signing_secret)
     except SlackSignatureError as error:
         return Response(str(error), status_code=401)
     challenge = url_verification_challenge(raw)
     if challenge is not None:
+        marker = json.dumps(
+            {"fingerprint": signing_secret_fingerprint(signing_secret), "at": time.time()}
+        ).encode()
+        try:
+            await ctx.blob.put(url_verified_blob_key(ctx.workspace_id), marker)
+        except Exception:
+            # The marker is a best-effort setup signal; a blob hiccup must not fail the handshake
+            # Slack needs answered, or the owner can never verify the Request URL.
+            _LOG.warning("slack url_verified marker write failed", exc_info=True)
         return JSONResponse({"challenge": challenge})
     inbound = await _to_inbound(ctx, raw)
     if inbound is None:

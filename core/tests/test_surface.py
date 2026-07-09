@@ -4,7 +4,7 @@ dependency, never the thing asserted; every assertion reads durable rows (turn, 
 writeback) and blob bytes that core wrote. The full end-to-end through a real registered surface is
 proven by the sample-extension conformance probe and the Slack extension's own tests."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -295,6 +295,47 @@ async def test_write_workspace_file_streams_into_the_workspace_subtree(db: None,
     await context.write_workspace_file(conversation_id, "slack-inbox/note.txt", _chunks())
     stored = await blob.get(workspace_key(conversation_id, "slack-inbox/note.txt"))
     assert stored == b"hello world"
+
+
+async def test_is_workspace_owner_is_the_earliest_member(db: None, tmp_path) -> None:
+    workspace_id, _, _ = await _seed()
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    early = datetime(2026, 1, 1, tzinfo=UTC)
+    async with workspace_tx() as connection:
+        for offset, email in ((0, "owner@example.com"), (5, "joiner@example.com")):
+            await connection.execute(
+                sa.insert(tables.member).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    email=email,
+                    created_at=early + timedelta(minutes=offset),
+                    updated_at=early + timedelta(minutes=offset),
+                )
+            )
+    assert await context.is_workspace_owner("OWNER@example.com") is True
+    assert await context.is_workspace_owner("joiner@example.com") is False
+    assert await context.is_workspace_owner("stranger@example.com") is False
+
+
+async def test_put_credential_round_trips_through_the_store(db: None, tmp_path) -> None:
+    workspace_id, _, _ = await _seed()
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    await context.put_credential("slack_bot_token", "xoxb-secret")
+    assert await context.credential("slack_bot_token") == "xoxb-secret"
+
+
+async def test_put_credential_fails_loud_without_a_store(tmp_path) -> None:
+    context = replace(
+        _context(uuid4(), StubDbos(), FilesystemBlobStore(root=tmp_path)), _credentials=None
+    )
+    with pytest.raises(RuntimeError, match="writes a credential but holds no store"):
+        await context.put_credential("slot", "value")
+
+
+def test_public_base_url_is_the_wired_connect_base(tmp_path) -> None:
+    context = _context(uuid4(), StubDbos(), FilesystemBlobStore(root=tmp_path))
+    assert context.public_base_url == "https://ufo.example.test"
+    assert replace(context, _public_base_url=None).public_base_url is None
 
 
 async def test_poller_delivers_a_done_turn_and_attaches_its_files(db: None, tmp_path) -> None:

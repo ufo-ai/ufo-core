@@ -234,6 +234,57 @@ async def test_bad_signature_is_rejected(db: None, tmp_path, monkeypatch) -> Non
     assert response.status_code == 401
 
 
+async def test_url_verification_answers_the_challenge_and_marks_verified(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, _ = await _seed()
+    _, client, blob = await _mount(monkeypatch, workspace_id, tmp_path, [])
+    body = json.dumps({"type": "url_verification", "challenge": "chal-1"}).encode()
+    async with client:
+        unsigned = await client.post("/surface/slack", content=body)
+        assert unsigned.status_code == 401
+        assert not await blob.exists(slack.url_verified_blob_key(workspace_id))
+        answered = await client.post(
+            "/surface/slack", content=body, headers=_sign(body, int(time.time()))
+        )
+    assert answered.status_code == 200
+    assert answered.json() == {"challenge": "chal-1"}
+    assert await blob.exists(slack.url_verified_blob_key(workspace_id))
+
+
+async def test_url_verification_without_signing_secret_is_a_clean_401(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    # Slack probes the Request URL the instant the app is created from the manifest — before any
+    # slot is filled. That is a clean 401, never an unhandled 500, and writes no verified marker.
+    workspace_id, _ = await _seed()
+    _patch_httpx(monkeypatch, _mock_transport([], {}))
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))  # no slots set
+    blob = FilesystemBlobStore(root=tmp_path)
+    app = FastAPI()
+    _mount_surfaces(
+        app,
+        (slack_manifest(),),
+        workspace_id,
+        store,
+        blob,
+        InProcessHub(),
+        StubDbos(),
+        ARTIFACT_SECRET,
+        PUBLIC_BASE_URL,
+    )
+    client = AsyncClient(transport=ASGITransport(app=app), base_url="http://slack")
+    body = json.dumps({"type": "url_verification", "challenge": "c"}).encode()
+    async with client:
+        response = await client.post(
+            "/surface/slack",
+            content=body,
+            headers={"x-slack-request-timestamp": "1", "x-slack-signature": "v0=x"},
+        )
+    assert response.status_code == 401
+    assert not await blob.exists(slack.url_verified_blob_key(workspace_id))
+
+
 async def test_one_mention_admits_exactly_one_turn(db: None, tmp_path, monkeypatch) -> None:
     workspace_id, _ = await _seed()
     _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, [])

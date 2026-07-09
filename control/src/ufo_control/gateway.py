@@ -19,7 +19,7 @@ from typing import Any
 
 import asyncpg
 from fastapi import FastAPI, Request
-from starlette.responses import PlainTextResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 
 from ufo_control.gateway_claim import ClaimError, ClaimWorkflow
 from ufo_control.gateway_directives import PROMPT, directive, first_run_install, render
@@ -31,6 +31,7 @@ from ufo_control.gateway_provision import (
 )
 from ufo_control.gateway_store import OnboardClaim, OnboardStore
 from ufo_control.gateway_token import TOKEN_SECRET_ENV, mint_token
+from ufo_control.gateway_web import PORTAL_PAGE, WEB_CHANNEL, parse_directives
 from ufo_control.kube import KubeClient
 from ufo_control.members import owner_dsn
 
@@ -152,6 +153,9 @@ class Onboarding:
         )
 
     def _signed_in(self, name: str, email: str, workspace_id: str, install: bytes) -> bytes:
+        # The token travels only in the machine-consumed `token` directive (the client writes it to
+        # a chmod-600 credentials file, never printing it). The web portal builds the tokened
+        # /surface/setup handoff link from this token client-side; the terminal never echoes it.
         token = mint_token(self.token_secret, workspace_id, email)
         return render(
             install,
@@ -167,6 +171,28 @@ def _require_env(name: str) -> str:
     if not value:
         raise RuntimeError(f"{name} is unset — required by the gateway onboarding server")
     return value
+
+
+def _onboarding(state: dict[str, Any]) -> Onboarding:
+    """One request's flow over the lifespan's store and kube client — assembled per request so a
+    misconfigured env fails the request loudly, never the boot."""
+    base_domain = _require_env(BASE_DOMAIN_ENV)
+    return Onboarding(
+        claims=ClaimWorkflow(
+            store=state["store"],
+            email_policy=WorkEmailPolicy(),
+            email_sender=email_sender_from_env(),
+        ),
+        store=state["store"],
+        join=JoinOrProvision(
+            kube=state["kube"],
+            target=DeployTarget(
+                base_domain=base_domain, bundle_image=_require_env(BUNDLE_IMAGE_ENV)
+            ),
+        ),
+        token_secret=_require_env(TOKEN_SECRET_ENV),
+        base_domain=base_domain,
+    )
 
 
 def gateway_app() -> FastAPI:
@@ -191,9 +217,29 @@ def gateway_app() -> FastAPI:
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.get("/")
+    async def portal() -> Response:
+        return HTMLResponse(PORTAL_PAGE)
+
     @app.get("/ufo")
     async def serve_script() -> Response:
         return PlainTextResponse(STAMPED_SCRIPT, media_type=SHELLSCRIPT_MEDIA_TYPE)
+
+    @app.post("/v1/onboard/web")
+    async def onboard_web(request: Request) -> Response:
+        """The portal page's wire: the same machine as the terminal channel, its directives
+        returned as JSON for the page's renderer instead of tab-separated lines for the shell."""
+        session = request.headers.get("x-ufo-session")
+        if not session:
+            return JSONResponse({"error": "x-ufo-session header is required"}, status_code=400)
+        body = (await request.body()).decode("utf-8", "replace").strip()
+        flow = _onboarding(state)  # env misconfig raises here → 500, distinct from a flow error
+        try:
+            payload = await flow.advance(WEB_CHANNEL, session, body, b"")
+        except Exception as error:
+            logger.exception("onboard.failed channel=%s", WEB_CHANNEL)
+            payload = render(directive("say", f"error: {error}"), directive("exit", "1"))
+        return JSONResponse({"directives": parse_directives(payload)})
 
     @app.post("/v1/onboard/{channel}")
     async def onboard(channel: str, request: Request) -> Response:
@@ -209,23 +255,7 @@ def gateway_app() -> FastAPI:
                 media_type="text/plain",
             )
         body = (await request.body()).decode("utf-8", "replace").strip()
-        base_domain = _require_env(BASE_DOMAIN_ENV)
-        flow = Onboarding(
-            claims=ClaimWorkflow(
-                store=state["store"],
-                email_policy=WorkEmailPolicy(),
-                email_sender=email_sender_from_env(),
-            ),
-            store=state["store"],
-            join=JoinOrProvision(
-                kube=state["kube"],
-                target=DeployTarget(
-                    base_domain=base_domain, bundle_image=_require_env(BUNDLE_IMAGE_ENV)
-                ),
-            ),
-            token_secret=_require_env(TOKEN_SECRET_ENV),
-            base_domain=base_domain,
-        )
+        flow = _onboarding(state)  # env misconfig raises here → 500, distinct from a flow error
         try:
             payload = await flow.advance(channel, session, body, install)
         except Exception as error:
