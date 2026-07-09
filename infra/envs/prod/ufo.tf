@@ -151,6 +151,7 @@ data "kubectl_file_documents" "observability" {
     # binary fails to exec on the nodes; this digest is verified running the datadog exporter.
     collector_image = "otel/opentelemetry-collector-contrib@sha256:94ac10da6c15fdad4f8091c4292a8c6814b467cd3bcf575ba2279e9dc6346e63"
     dd_site         = "us5.datadoghq.com"
+    dd_env          = "prod"
     secret_api_keys = module.platform.secret_names.api_keys
   })
 }

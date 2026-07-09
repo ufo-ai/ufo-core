@@ -25,6 +25,11 @@ data:
         endpoint: 0.0.0.0:13133
     processors:
       batch: {}
+      # Tenant exporters don't set deployment.environment; the collector stamps its cluster's env
+      # on everything it forwards so Datadog's env tag separates prod from testing telemetry.
+      resource:
+        attributes:
+          - {key: deployment.environment, value: "${dd_env}", action: upsert}
     connectors:
       datadog/connector: {}
     exporters:
@@ -37,15 +42,15 @@ data:
       pipelines:
         traces:
           receivers: [otlp]
-          processors: [batch]
+          processors: [resource, batch]
           exporters: [datadog/connector, datadog]
         metrics:
           receivers: [otlp, datadog/connector]
-          processors: [batch]
+          processors: [resource, batch]
           exporters: [datadog]
         logs:
           receivers: [otlp]
-          processors: [batch]
+          processors: [resource, batch]
           exporters: [datadog]
 ---
 apiVersion: apps/v1
