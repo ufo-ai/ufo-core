@@ -43,6 +43,7 @@ def tenant_namespace(name: str) -> str:
 
 
 FIELD_MANAGER = f"{API_GROUP}/operator"
+BUNDLE_ADVANCE_FIELD_MANAGER = f"{API_GROUP}/bundle-advance"
 OPERATOR_LEASE_NAME = "ufo-operator"
 
 RECONCILE_INTERVAL_SECONDS = 15

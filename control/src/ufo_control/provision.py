@@ -2,14 +2,15 @@
 
 One frozen dataclass, one public method (``reconcile``), private steps beneath it in execution
 order: bundle advance → namespace → platform Secret → Postgres → minted keys → render → tenant
-Secret → Helm → observe. The advance re-applies a Tenant pinning an older bundle at the platform's
-current image before anything renders — a control-plane deploy thereby rolls every tenant, and the
-CR spec stays the record of what runs. The minted keys are read back from the applied tenant Secret
-and minted only when absent, so re-reconciles never rotate the Fernet key sealing the workspace's
-credential rows. Level-triggered like the operator: every step is idempotent server-side-apply or
-``helm upgrade --install``, so re-running the whole flow each interval converges without
-special-casing create vs update — and a failed first install is uninstalled so its ``post-install``
-hook re-runs.
+Secret → Helm → observe. The advance patches only ``spec.bundle_image`` (a single-field SSA under
+its own manager) on a Tenant pinning an image other than the platform's, then reconciles onward
+from the refetched CR — a control-plane deploy thereby rolls every tenant, the CR spec stays the
+record of what runs, and a concurrent re-deploy's spec is neither overwritten nor rendered stale.
+The minted keys are read back from the applied tenant Secret and minted only when absent, so
+re-reconciles never rotate the Fernet key sealing the workspace's credential rows. Level-triggered
+like the operator: every step is idempotent server-side-apply or ``helm upgrade --install``, so
+re-running the whole flow each interval converges without special-casing create vs update — and a
+failed first install is uninstalled so its ``post-install`` hook re-runs.
 
 The declarative substrate — Deployment, HPA, Service, Ingress+TLS, NetworkPolicy, RBAC, the
 ``ufoctl init`` Job — lives in the ``ufo-tenant`` Helm chart; this workflow renders its
@@ -26,7 +27,7 @@ from pathlib import Path
 
 from ufo.deploy import DeployRequest, DeployStatus
 
-from ufo_control.kube import KubeClient
+from ufo_control.kube import KubeClient, request_from_tenant
 from ufo_control.platform import (
     PLATFORM_NAMESPACE,
     TENANT_NAME_LABEL,
@@ -85,9 +86,12 @@ class TenantReconciler:
     async def _advance_bundle_image(self, request: DeployRequest) -> DeployRequest:
         if request.bundle_image == self.platform.bundle_image:
             return request
-        advanced = request.model_copy(update={"bundle_image": self.platform.bundle_image})
-        await self.kube.apply_tenant(advanced)
-        return advanced
+        name = request.tenant.name
+        await self.kube.patch_tenant_bundle_image(name, self.platform.bundle_image)
+        obj = await self.kube.get_tenant(name)
+        if obj is None:
+            raise RuntimeError(f"tenant {name!r} disappeared during its bundle advance")
+        return request_from_tenant(obj)
 
     async def _ensure_namespace(self, request: DeployRequest) -> None:
         await self.kube.apply_namespace(

@@ -27,8 +27,8 @@ locals {
 
   system_namespace = module.platform.system_namespace
 
-  # The digest-pinned bundle this deploy runs everywhere: the gateway seeds new tenants with it
-  # (UFO_BUNDLE_IMAGE) and the operator advances every existing Tenant to it (platform.toml).
+  # The digest-pinned bundle this deploy runs everywhere: the migrate Job and sandbox proxy run it
+  # directly, and the operator advances every Tenant to it (platform.toml).
   bundle_image = "${module.platform.ecr_registry}/ufo@${data.aws_ecr_image.ufo.image_digest}"
 
   # PlatformConfig (ufo_control.platform) the operator mounts at /config/platform.toml. Names the

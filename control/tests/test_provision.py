@@ -94,14 +94,24 @@ async def test_missing_platform_secret_fails_loud() -> None:
         await reconciler._ensure_platform_secret(_request())
 
 
+def _advanced_tenant_obj(new_digest: str, **spec_overrides: object) -> dict[str, Any]:
+    spec = _request().model_dump(mode="json", exclude_none=True)
+    spec["bundle_image"]["digest"] = new_digest
+    spec.update(spec_overrides)
+    return {"metadata": {"name": "acme"}, "spec": spec}
+
+
 async def test_reconcile_advances_a_stale_bundle_image_on_the_tenant() -> None:
     new_digest = "sha256:" + "0" * 64
     applied: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/tenants/acme"):
+        if request.method == "PATCH" and request.url.path.endswith("/tenants/acme"):
+            applied["params"] = dict(request.url.params)
             applied["spec"] = json.loads(request.content)["spec"]
             return httpx.Response(200, json={})
+        if request.method == "GET" and request.url.path.endswith("/tenants/acme"):
+            return httpx.Response(200, json=_advanced_tenant_obj(new_digest))
         return httpx.Response(500, json={})
 
     reconciler = TenantReconciler(
@@ -110,11 +120,30 @@ async def test_reconcile_advances_a_stale_bundle_image_on_the_tenant() -> None:
     )
     await reconciler.reconcile(_request(), "3f8c1e2a-0b4d-4c6e-9a1f-2b3c4d5e6f70")
 
-    assert applied["spec"]["bundle_image"] == {
-        "repository": "ghcr.io/acme/ufo",
-        "digest": new_digest,
+    assert applied["spec"] == {
+        "bundle_image": {"repository": "ghcr.io/acme/ufo", "digest": new_digest}
     }
-    assert applied["spec"]["sandbox_image"]["digest"] == DIGEST
+    assert applied["params"]["fieldManager"] == "flyingobject.ai/bundle-advance"
+
+
+async def test_the_advance_reconciles_onward_from_the_refetched_tenant() -> None:
+    new_digest = "sha256:" + "0" * 64
+    redeployed_config = "[pack]\nname='assistant-next'\n"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(
+                200, json=_advanced_tenant_obj(new_digest, config_toml=redeployed_config)
+            )
+        return httpx.Response(200, json={})
+
+    reconciler = TenantReconciler(
+        kube=_kube(httpx.MockTransport(handler)),
+        platform=_platform(bundle_image=f"ghcr.io/acme/ufo@{new_digest}"),
+    )
+    advanced = await reconciler._advance_bundle_image(_request())
+    assert advanced.bundle_image == reconciler.platform.bundle_image
+    assert advanced.config_toml == redeployed_config
 
 
 async def test_a_tenant_on_the_current_bundle_is_not_reapplied() -> None:

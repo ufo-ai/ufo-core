@@ -9,7 +9,8 @@ chart_path = "/charts/ufo-tenant"
 registry = "ghcr.io/metalcraftai"
 
 # The digest-pinned bundle image every tenant runs — one bundle, never per-tenant. The reconciler
-# advances any Tenant pinning an older image, so a rollout (new platform.toml) rolls every tenant.
+# advances any Tenant pinning a different image, so a control-plane deploy rolls every tenant
+# (the operator reads this file at boot; a deploy restarts it).
 bundle_image = "ghcr.io/metalcraftai/ufo@sha256:0000000000000000000000000000000000000000000000000000000000000000"
 
 # Shared Postgres. postgres_model picks the tenant tier server-side (overrides DeployRequest.postgres):

@@ -20,10 +20,11 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from ufo.deploy import DeployRequest, DeployStatus
+from ufo.deploy import DeployImage, DeployRequest, DeployStatus
 
 from ufo_control.platform import (
     API_GROUP_VERSION,
+    BUNDLE_ADVANCE_FIELD_MANAGER,
     FIELD_MANAGER,
     ORG_DOMAIN_LABEL,
     PACK_LABEL,
@@ -112,12 +113,14 @@ class KubeClient:
     async def close(self) -> None:
         await self.http.aclose()
 
-    async def apply(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+    async def apply(
+        self, path: str, body: dict[str, Any], field_manager: str = FIELD_MANAGER
+    ) -> dict[str, Any]:
         response = await self.http.patch(
             path,
             content=json.dumps(body).encode(),
             headers={"Content-Type": APPLY_CONTENT_TYPE},
-            params={"fieldManager": FIELD_MANAGER, "force": "true"},
+            params={"fieldManager": field_manager, "force": "true"},
         )
         response.raise_for_status()
         return response.json()
@@ -144,6 +147,17 @@ class KubeClient:
 
     async def apply_tenant(self, request: DeployRequest) -> None:
         await self.apply(self._tenant_path(request.tenant.name), tenant_body(request))
+
+    async def patch_tenant_bundle_image(self, name: str, image: DeployImage) -> None:
+        # A single-field SSA under its own manager: the advance owns spec.bundle_image and nothing
+        # else, so it can never overwrite a concurrent re-deploy's config_toml/pack/secrets.
+        body = {
+            "apiVersion": API_GROUP_VERSION,
+            "kind": TENANT_KIND,
+            "metadata": {"name": name, "namespace": PLATFORM_NAMESPACE},
+            "spec": {"bundle_image": image.model_dump(mode="json")},
+        }
+        await self.apply(self._tenant_path(name), body, BUNDLE_ADVANCE_FIELD_MANAGER)
 
     async def patch_tenant_status(self, name: str, status: DeployStatus, workspace_id: str) -> None:
         # exclude_none: a Failed status carries no url, and the CRD's status.url is a non-nullable
