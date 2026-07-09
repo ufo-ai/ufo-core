@@ -335,6 +335,13 @@ spec:
             - name: UFO_ARTIFACT_TOKEN_SECRET
               valueFrom:
                 secretKeyRef: {name: ufo-serve, key: UFO_ARTIFACT_TOKEN_SECRET}
+            # The RLS-bypassing owner DSN owner_tx enumerates every workspace through for the
+            # fleet-wide job sweeps — the same secret the migrate Job + shared proxy open. Without it
+            # owner_tx falls back to the RLS-subject engine and the enumeration reads an unset
+            # app.workspace_id GUC. Password-bearing → a Secret, never the ConfigMap.
+            - name: UFO_OWNER_DSN
+              valueFrom:
+                secretKeyRef: {name: ufo-control-secrets, key: postgres-admin-dsn}
           volumeMounts:
             # The rendered shared-fleet config replaces the image's baked dev ufo.toml.
             - {name: config, mountPath: /app/ufo.toml, subPath: ufo.toml}

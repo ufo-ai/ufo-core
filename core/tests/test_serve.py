@@ -6,13 +6,15 @@ from ufo import serve
 from ufo.accounting import CORE_PRICING
 from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
 from ufo.ext.manifest import CredentialSlot, InjectionTarget, Manifest
-from ufo.proxy_serve import model_rule_base
+from ufo.proxy_serve import OWNER_DSN_ENV, model_rule_base
 from ufo.sandbox.proxy.rules import ANTHROPIC_HOST, ScopeRule
 from ufo.sandbox.session import EGRESS_CA_CERT_ENV
 
 CA_PEM = "-----BEGIN CERTIFICATE-----\nshared\n-----END CERTIFICATE-----\n"
 ANTHROPIC_KEY = "sk-ant-test"
 LEAF_PEM_PREFIX = "-----BEGIN CERTIFICATE-----"
+OWNER_LIBPQ_DSN = "postgresql://ufo_owner:pw@db.test/ufo"
+OWNER_ASYNCPG_DSN = "postgresql+asyncpg://ufo_owner:pw@db.test/ufo"
 
 
 def _hosted_config() -> Config:
@@ -84,6 +86,37 @@ async def test_local_rule_base_is_the_model_base_when_no_slot_injects(
     assert {rule.allowed_hosts for rule in base if isinstance(rule, ScopeRule)} == {
         frozenset({ANTHROPIC_HOST})
     }
+
+
+def test_shared_owner_dsn_from_env_pins_the_async_driver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shared fleet opens owner_tx's engine from UFO_OWNER_DSN (a secretKeyRef). The secret's
+    contract is a plain libpq URL; serve pins the asyncpg driver its subject engine also dials so
+    the owner engine bypasses RLS through the table owner rather than falling back to it."""
+    monkeypatch.setenv(OWNER_DSN_ENV, OWNER_LIBPQ_DSN)
+    assert serve._shared_owner_dsn(_local_config()) == OWNER_ASYNCPG_DSN
+
+
+def test_shared_owner_dsn_falls_back_to_config_owner_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(OWNER_DSN_ENV, raising=False)
+    config = Config(
+        database=DatabaseConfig(url="sqlite+aiosqlite:///tenant.db", owner_url=OWNER_LIBPQ_DSN),
+        blob=BlobConfig(backend="filesystem", root=Path("/tmp/blobs")),
+        sandbox=SandboxConfig(backend="local", proxy_port=0),
+    )
+    assert serve._shared_owner_dsn(config) == OWNER_ASYNCPG_DSN
+
+
+def test_shared_owner_dsn_fails_loud_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without the owner DSN owner_tx falls back to the RLS-subject engine and the fleet-wide job
+    enumeration reads an unset app.workspace_id GUC and crash-loops the dispatcher — fail loud at
+    boot instead, naming the missing secret."""
+    monkeypatch.delenv(OWNER_DSN_ENV, raising=False)
+    with pytest.raises(RuntimeError, match=OWNER_DSN_ENV):
+        serve._shared_owner_dsn(_local_config())
 
 
 async def test_local_rule_base_fails_loud_on_an_injecting_slot_without_a_key(

@@ -27,7 +27,7 @@ from ufo.config import (
 )
 from ufo.connectors import AuthProxy
 from ufo.credentials import CredentialStore
-from ufo.db import init_db, workspace_tx
+from ufo.db import init_db, init_owner_db, workspace_tx
 from ufo.ext.context import CredentialAccess, context_for
 from ufo.ext.loader import (
     NotRegisteredError,
@@ -58,7 +58,7 @@ from ufo.loop.queue import Runtime, init_runtime
 from ufo.loop.subagents import SubagentRegistry
 from ufo.models.registry import model_registry
 from ufo.o11y import init_o11y, log
-from ufo.proxy_serve import model_rule_base
+from ufo.proxy_serve import OWNER_DSN_ENV, model_rule_base
 from ufo.runtime_instance import BootGuard, Heartbeat
 from ufo.sandbox.fs_creds import DEFAULT_S3_REGION, AwsStsClient, SandboxFsCredentialMinter
 from ufo.sandbox.local import LocalCarrier
@@ -93,8 +93,13 @@ def run() -> None:
     shared = config.serve.shared_workspace
     # The shared fleet has no single workspace to bootstrap-check, admit a seat for, or pin: it
     # connects as an RLS-subject role and resolves the workspace per request/turn. workspace_id
-    # stays None, so every provider below builds ambient (context_for(None)) and scopes at use.
-    if not shared:
+    # stays None, so every provider below builds ambient (context_for(None)) and scopes at use. It
+    # also opens the RLS-bypassing owner engine owner_tx enumerates through — the per-tenant deploy
+    # pins one workspace by its role default, so its owner_tx falls through the subject engine and
+    # needs none.
+    if shared:
+        init_owner_db(_shared_owner_dsn(config))
+    else:
         asyncio.run(_require_bootstrap())
     workspace_id = None if shared else asyncio.run(_sole_workspace_id())
     instance_id = uuid4()
@@ -221,6 +226,25 @@ def _session_secret(config: Config) -> str:
             "session tokens"
         )
     return secret
+
+
+def _shared_owner_dsn(config: Config) -> str:
+    """The RLS-bypassing owner DSN the shared fleet opens as `owner_tx`'s engine — the one
+    cross-workspace read the fleet-wide job sweeps enumerate through before re-binding each row
+    under `ws(...)`. One process serves every workspace, so it carries no tenant-pinned role
+    default; `owner_tx` must bypass RLS through the table-owner role, else it falls back to the
+    RLS-subject engine and the enumeration reads an unset `app.workspace_id` GUC and crashes. Read
+    from `UFO_OWNER_DSN` (a k8s secretKeyRef injects it — a password-bearing DSN cannot ride a
+    configmap), falling back to `[database] owner_url`; neither set fails loud. The secret's
+    contract is a plain libpq URL; pin the asyncpg driver the fleet's subject engine also dials."""
+    dsn = os.environ.get(OWNER_DSN_ENV) or config.database.owner_url
+    if not dsn:
+        raise RuntimeError(
+            f"{OWNER_DSN_ENV} or [database] owner_url must be set for the shared serve fleet — "
+            "owner_tx bypasses RLS with the owner role to enumerate every workspace the job sweeps "
+            "fan across; without it the enumeration reads an unset app.workspace_id GUC and crashes"
+        )
+    return dsn.replace("postgresql://", "postgresql+asyncpg://", 1)
 
 
 def _launch_jobs(
