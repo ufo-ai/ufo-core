@@ -538,6 +538,7 @@ const diagnosis = document.getElementById('diagnosis');
 const manifestPre = document.getElementById('manifest');
 const botName = document.getElementById('bot-name');
 let pollTimer = null;
+let manifestLoaded = false;
 
 function note(el, text, cls) {
   el.textContent = text;
@@ -559,7 +560,7 @@ function render(status) {
   document.getElementById('not-owner').hidden = status.owner;
   document.getElementById('owner-only').hidden = !status.owner;
   if (!status.owner) return;
-  if (manifestPre.textContent === '…') loadManifest();
+  if (!manifestLoaded) loadManifest();
   document.getElementById('create-app').open = slack.state === 'not_configured';
   document.getElementById('fill-creds').open = slack.state !== 'connected';
   for (const field of FIELDS) {
@@ -570,22 +571,34 @@ function render(status) {
   if (slack.state === 'pending') pollTimer = setTimeout(refresh, 5000);
 }
 
+function statusFailed(reason) {
+  badge.textContent = 'error';
+  badge.className = 'badge err';
+  message.textContent = 'Status check failed (' + reason + ') — retrying every 5 seconds.';
+  if (pollTimer) clearTimeout(pollTimer);
+  pollTimer = setTimeout(refresh, 5000);
+}
+
 async function refresh() {
   let res;
   try { res = await fetch(BASE + '/status', { credentials: 'same-origin' }); }
-  catch (err) { return; }
+  catch (err) { return statusFailed('network error'); }
   if (res.status === 401) {
     document.getElementById('unauth').style.display = 'block';
     badge.textContent = 'sign in required';
     badge.className = 'badge err';
     return;
   }
-  if (res.ok) render(await res.json());
+  if (!res.ok) return statusFailed('HTTP ' + res.status);
+  render(await res.json());
 }
 
 async function loadManifest() {
   const name = encodeURIComponent(botName.value || 'ufo');
-  const res = await fetch(BASE + '/slack/manifest?name=' + name, { credentials: 'same-origin' });
+  let res;
+  try { res = await fetch(BASE + '/slack/manifest?name=' + name, { credentials: 'same-origin' }); }
+  catch (err) { manifestPre.textContent = '(network error — edit the bot name to retry)'; return; }
+  manifestLoaded = res.ok;
   manifestPre.textContent = res.ok ? await res.text() : '(' + await res.text() + ')';
 }
 
