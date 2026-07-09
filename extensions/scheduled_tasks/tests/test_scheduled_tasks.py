@@ -305,7 +305,8 @@ async def test_manifest_job_fires_through_job_runner(db: None) -> None:
         bindings=bindings_from((manifest(),), ()),
         invoker_factory=lambda wid: AdmissionInvoker(admission=admission, workspace_id=wid),
     )
-    await runner.fire(f"{NAME}:{RUNNER_JOB}")
+    with ws(workspace_id):
+        await runner.fire(f"{NAME}:{RUNNER_JOB}")
     assert len(await _turns(conversation_id)) == 1
 
 

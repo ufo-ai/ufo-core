@@ -5,7 +5,7 @@ import sqlalchemy as sa
 from dbos import DBOS
 
 from ufo import jobs as jobs_module
-from ufo.db import workspace_tx
+from ufo.db import owner_tx, workspace_tx
 from ufo.ext.context import ExtensionContext, ScopedStore
 from ufo.ext.manifest import JobSpec
 from ufo.jobs import CORE_EXTENSION, JobRunner, bindings_from
@@ -33,7 +33,14 @@ def _runner(core_jobs: tuple[JobSpec, ...]) -> JobRunner:
 
 
 async def _write_marker(context: ExtensionContext) -> None:
-    await context.store.put(MARKER_KEY, MARKER_VALUE)
+    """A core-sweep-shaped handler: it finds its workspaces through the one owner_tx read and writes
+    the marker scoped to each, so it runs correctly on the durable fire path where no workspace is
+    bound — the same self-enumerate-then-`with ws(...)` shape the real sweeps use."""
+    async with owner_tx() as connection:
+        rows = (await connection.execute(sa.select(tables.workspace.c.id))).all()
+    for row in rows:
+        with ws(row.id):
+            await context.store.put(MARKER_KEY, MARKER_VALUE)
 
 
 async def _await_marker(scoped: ScopedStore) -> object:
@@ -76,15 +83,19 @@ async def test_one_shot_core_job_fires_once_at_boot(db: None, dbos_launched: obj
         jobs_module._firing = None
 
 
-async def test_fire_fans_a_core_job_across_every_workspace(db: None) -> None:
-    """One `fire` enumerates every workspace through owner_tx and runs the handler bound to each, so
-    a marker-writing core job lands its marker in BOTH workspaces' scoped stores — the witness the
-    dispatcher fans a job across the fleet rather than a single workspace."""
-    ws_a = await _workspace()
-    ws_b = await _workspace()
-    spec = JobSpec(name="tick", schedule="* * * * * *", handler=_write_marker)
-    await _runner((spec,)).fire(f"{CORE_EXTENSION}:tick")
-    with ws(ws_a):
-        assert await ScopedStore(extension=CORE_EXTENSION).get(MARKER_KEY) == MARKER_VALUE
-    with ws(ws_b):
-        assert await ScopedStore(extension=CORE_EXTENSION).get(MARKER_KEY) == MARKER_VALUE
+async def test_fire_dispatches_the_handler_once_not_per_workspace(db: None) -> None:
+    """`fire` hands the handler off a single time — it no longer loops the fleet binding each
+    workspace. Two workspaces exist, yet a counting handler fired once records exactly one call:
+    the dispatcher dispatches once and a core sweep self-selects the workspaces it touches, so no
+    transaction runs against an idle workspace on every tick."""
+    await _workspace()
+    await _workspace()
+    calls = 0
+
+    async def _count(context: ExtensionContext) -> None:
+        nonlocal calls
+        calls += 1
+
+    spec = JobSpec(name="count", schedule="* * * * * *", handler=_count)
+    await _runner((spec,)).fire(f"{CORE_EXTENSION}:count")
+    assert calls == 1

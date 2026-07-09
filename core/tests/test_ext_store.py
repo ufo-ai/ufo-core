@@ -183,8 +183,8 @@ async def test_an_installed_extension_fires_through_the_loader(
     ExtensionStore(catalog=_catalog(), lockfile=lock).install(sample.NAME)
     workspace_id = await _workspace()
     runner = JobRunner(bindings=bindings_from(load_manifests(), ()))
-    await runner.fire(f"{sample.NAME}:{sample.JOB_NAME}")
     with ws(workspace_id):
+        await runner.fire(f"{sample.NAME}:{sample.JOB_NAME}")
         scoped = ScopedStore(extension=sample.NAME)
         assert await scoped.get(sample.JOB_KEY) == {"ran": True}
 
@@ -224,7 +224,7 @@ async def test_a_bundle_boots_its_pinned_extension_on_a_clean_lockfile(
     assert [manifest.name for manifest in load_manifests()] == [sample.NAME]
     workspace_id = await _workspace()
     runner = JobRunner(bindings=bindings_from(load_manifests(), ()))
-    await runner.fire(f"{sample.NAME}:{sample.JOB_NAME}")
     with ws(workspace_id):
+        await runner.fire(f"{sample.NAME}:{sample.JOB_NAME}")
         scoped = ScopedStore(extension=sample.NAME)
         assert await scoped.get(sample.JOB_KEY) == {"ran": True}

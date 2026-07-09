@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
 from uuid import UUID, uuid4
@@ -36,6 +37,8 @@ from ufo.sources.sync import (
     CursorExpired,
     FolderSource,
     Page,
+    PageBatch,
+    PageFeed,
     SourceAuth,
     StreamSkipped,
     SyncDriver,
@@ -46,7 +49,7 @@ from ufo.sources.sync import (
 )
 from ufo.subjects import SHARED_SUBJECT, member_subject
 from ufo.tools.context import SpawnResult, ToolContext, ToolResult
-from ufo.workspace import ws
+from ufo.workspace import ws, ws_current
 
 MEMORY_TOOLS = {tool.name: tool for tool in memory_manifest.manifest().tools}
 
@@ -463,37 +466,82 @@ async def _seed_page(workspace_id: UUID) -> UUID:
     return page_id
 
 
-async def test_page_change_drive_scopes_each_bound_workspace(db: None, tmp_path: Path) -> None:
-    """A consumer's drive runs the cursor loop bound to whichever workspace the caller established,
-    and writes only into that workspace's scoped store — the dispatcher binds each workspace in turn
-    and fans the drive across the fleet (the fan itself is proven in test_jobs). Bound to ws_a, the
-    probe records into ws_a's store and ws_b's stays untouched; bound to ws_b, ws_b's store is
-    written — each drive's effect lands under exactly its bound scope, never the other's."""
-    ws_a, ws_b = uuid4(), uuid4()
-    page_a = await _seed_page(ws_a)
-    page_b = await _seed_page(ws_b)
+@dataclass
+class _RecordingFeed:
+    """Wraps the real `CorePageFeed` and records the workspace each `pages_changed_since` runs
+    under — the witness of which workspaces a drive actually opened, since the feed is read only
+    inside `_drive_workspace`'s `with ws(...)` block. A real feed delegated to, never a fake: the
+    delivered pages come from Postgres/SQLite as always; this only observes the scope."""
+
+    inner: CorePageFeed
+    opened: list[UUID] = field(default_factory=list)
+
+    async def pages_changed_since(self, cursor: str | None, limit: int) -> PageBatch:
+        self.opened.append(ws_current().workspace_id)
+        return await self.inner.pages_changed_since(cursor, limit)
+
+
+def _probe_runner(tmp_path: Path, pages: PageFeed | None = None) -> PageChangeRunner:
     manifest = Manifest(
         name=PROBE_EXTENSION,
         version="0",
         hooks=(HookSpec(event="page_change", handler=record_pages),),
     )
-    runner = PageChangeRunner(
+    return PageChangeRunner(
         manifests=(manifest,),
-        pages=CorePageFeed(blob=FilesystemBlobStore(root=tmp_path / "blobs")),
+        pages=pages or CorePageFeed(blob=FilesystemBlobStore(root=tmp_path / "blobs")),
     )
+
+
+async def test_page_change_drive_enumerates_workspaces_with_changes(
+    db: None, tmp_path: Path
+) -> None:
+    """One consumer's drive finds every workspace with pages changed since its cursor through the
+    single owner_tx read (two freshly-seeded workspaces here, neither driven before) and runs the
+    cursor loop bound to each — no caller binds a workspace. Each workspace's probe records its own
+    page into its own scoped store, so two stores written, each carrying its own page, is the
+    witness the drive fanned per workspace and scoped each."""
+    ws_a, ws_b = uuid4(), uuid4()
+    page_a = await _seed_page(ws_a)
+    page_b = await _seed_page(ws_b)
+    runner = _probe_runner(tmp_path)
     (consumer,) = runner.consumers()
 
-    with ws(ws_a):
-        await runner.drive(consumer)
+    await runner.drive(consumer)
+
     with ws(ws_a):
         seen_a = await ScopedStore(extension=PROBE_EXTENSION).get(SEEN_PAGES_KEY)
     with ws(ws_b):
-        untouched_b = await ScopedStore(extension=PROBE_EXTENSION).get(SEEN_PAGES_KEY)
+        seen_b = await ScopedStore(extension=PROBE_EXTENSION).get(SEEN_PAGES_KEY)
     assert isinstance(seen_a, str) and str(page_a) in seen_a
-    assert untouched_b is None
+    assert isinstance(seen_b, str) and str(page_b) in seen_b
 
+
+async def test_page_change_drive_skips_a_workspace_unchanged_since_its_cursor(
+    db: None, tmp_path: Path
+) -> None:
+    """Selectivity: a workspace that holds pages but has none changed since this consumer's cursor
+    is never opened. The recording feed logs the workspace each drive opens. ws_a is seeded and
+    drained by a first drive (opened once); then ws_b is seeded fresh. The second drive opens ws_b
+    alone — ws_a, still holding its page but unchanged since its cursor, is not a candidate, so no
+    transaction runs against it on the tick."""
+    ws_a, ws_b = uuid4(), uuid4()
+    page_a = await _seed_page(ws_a)
+    feed = _RecordingFeed(inner=CorePageFeed(blob=FilesystemBlobStore(root=tmp_path / "blobs")))
+    runner = _probe_runner(tmp_path, pages=feed)
+    (consumer,) = runner.consumers()
+
+    await runner.drive(consumer)
+    assert feed.opened == [ws_a]
+    with ws(ws_a):
+        drained = await ScopedStore(extension=PROBE_EXTENSION).get(SEEN_PAGES_KEY)
+    assert isinstance(drained, str) and str(page_a) in drained
+
+    page_b = await _seed_page(ws_b)
+    feed.opened.clear()
+    await runner.drive(consumer)
+    assert feed.opened == [ws_b]
     with ws(ws_b):
-        await runner.drive(consumer)
         seen_b = await ScopedStore(extension=PROBE_EXTENSION).get(SEEN_PAGES_KEY)
     assert isinstance(seen_b, str) and str(page_b) in seen_b
 

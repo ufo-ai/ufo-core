@@ -711,8 +711,8 @@ async def test_job_fires_through_its_scoped_context(db: None) -> None:
     workspace_id = await _workspace()
     manifest = _sample_manifest()
     runner = JobRunner(bindings=bindings_from((manifest,), ()))
-    await runner.fire(f"{manifest.name}:{sample.JOB_NAME}")
     with ws(workspace_id):
+        await runner.fire(f"{manifest.name}:{sample.JOB_NAME}")
         scoped = ScopedStore(extension=sample.NAME)
         assert await scoped.get(sample.JOB_KEY) == {"ran": True}
 
@@ -743,9 +743,10 @@ async def test_route_reaches_its_scoped_context(db: None) -> None:
 async def test_a_second_workspace_reaches_none_of_the_firsts_rows(db: None) -> None:
     first = await _workspace()
     manifest = _sample_manifest()
-    await JobRunner(bindings=bindings_from((manifest,), ())).fire(
-        f"{manifest.name}:{sample.JOB_NAME}"
-    )
+    with ws(first):
+        await JobRunner(bindings=bindings_from((manifest,), ())).fire(
+            f"{manifest.name}:{sample.JOB_NAME}"
+        )
     second = await _workspace()
     store = _credential_store()
     await store.put(first, sample.API_SLOT, "sk-first")
@@ -828,12 +829,9 @@ async def test_job_reads_trajectories_and_opens_a_governed_proposal(
     manifest = _sample_manifest()
     blob = FilesystemBlobStore(root=tmp_path)
     agent_id = await _seed_trajectory(workspace_id, blob)
-    await JobRunner(
-        bindings=bindings_from((manifest,), ()),
-        blob=blob,
-    ).fire(f"{manifest.name}:{sample.JOB_NAME}")
-
+    runner = JobRunner(bindings=bindings_from((manifest,), ()), blob=blob)
     with ws(workspace_id):
+        await runner.fire(f"{manifest.name}:{sample.JOB_NAME}")
         scoped = ScopedStore(extension=sample.NAME)
         assert await scoped.get(sample.TRAJECTORY_KEY) == {"count": 1}
         assert await scoped.get(sample.PROPOSAL_KEY) is not None
