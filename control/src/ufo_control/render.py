@@ -82,13 +82,25 @@ class TenantRender:
     secret: TenantSecret
 
 
-def mint_fernet_key() -> str:
+@dataclass(frozen=True)
+class MintedKeys:
+    """Minted once at first provision and reused verbatim by every later reconcile — the Fernet key
+    seals the workspace's credential rows, so a re-minted key orphans every credential stored."""
+
+    credential_key: str
+    artifact_token_secret: str
+
+
+def mint_keys() -> MintedKeys:
     """A Fernet key is url-safe base64 of 32 random bytes — core seals its BYOK store with it."""
-    return base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()
+    return MintedKeys(
+        credential_key=base64.urlsafe_b64encode(secrets.token_bytes(32)).decode(),
+        artifact_token_secret=secrets.token_hex(32),
+    )
 
 
 def render_tenant(
-    request: DeployRequest, platform: PlatformConfig, postgres: TenantPostgres
+    request: DeployRequest, platform: PlatformConfig, postgres: TenantPostgres, minted: MintedKeys
 ) -> TenantRender:
     config_toml = _overlay_config(request, platform, postgres)
     backend = tomllib.loads(config_toml).get("sandbox", {}).get("backend", "local")
@@ -99,8 +111,8 @@ def render_tenant(
         )
     secret = TenantSecret(
         config_toml=config_toml,
-        credential_key=mint_fernet_key(),
-        artifact_token_secret=secrets.token_hex(32),
+        credential_key=minted.credential_key,
+        artifact_token_secret=minted.artifact_token_secret,
     )
     values = TenantChartValues(
         namespace=tenant_namespace(request.tenant.name),

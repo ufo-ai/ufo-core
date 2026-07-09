@@ -1,13 +1,15 @@
 """Reconcile one tenant to Ready — the control-plane workflow (RFC 0004 "provisioning workflow").
 
 One frozen dataclass, one public method (``reconcile``), private steps beneath it in execution
-order: bundle advance → namespace → platform Secret → Postgres → render → tenant Secret → Helm →
-observe. The advance re-applies a Tenant pinning an older bundle at the platform's current image
-before anything renders — a control-plane deploy thereby rolls every tenant, and the CR spec stays
-the record of what runs. Level-triggered like the operator: every step is idempotent
-server-side-apply or ``helm upgrade --install``, so re-running the whole flow each interval
-converges without special-casing create vs update — and a failed first install is uninstalled so
-its ``post-install`` hook re-runs.
+order: bundle advance → namespace → platform Secret → Postgres → minted keys → render → tenant
+Secret → Helm → observe. The advance re-applies a Tenant pinning an older bundle at the platform's
+current image before anything renders — a control-plane deploy thereby rolls every tenant, and the
+CR spec stays the record of what runs. The minted keys are read back from the applied tenant Secret
+and minted only when absent, so re-reconciles never rotate the Fernet key sealing the workspace's
+credential rows. Level-triggered like the operator: every step is idempotent server-side-apply or
+``helm upgrade --install``, so re-running the whole flow each interval converges without
+special-casing create vs update — and a failed first install is uninstalled so its ``post-install``
+hook re-runs.
 
 The declarative substrate — Deployment, HPA, Service, Ingress+TLS, NetworkPolicy, RBAC, the
 ``ufoctl init`` Job — lives in the ``ufo-tenant`` Helm chart; this workflow renders its
@@ -16,6 +18,7 @@ directly by the control plane, out of band from the chart, so no secret ever rid
 """
 
 import asyncio
+import base64
 import json
 import tempfile
 from dataclasses import dataclass
@@ -32,7 +35,14 @@ from ufo_control.platform import (
     tenant_namespace,
 )
 from ufo_control.postgres import TenantPostgres, ensure_tenant_postgres
-from ufo_control.render import TenantChartValues, render_tenant
+from ufo_control.render import (
+    SECRET_ARTIFACT_TOKEN,
+    SECRET_CREDENTIAL_KEY,
+    MintedKeys,
+    TenantChartValues,
+    mint_keys,
+    render_tenant,
+)
 
 SERVE_DEPLOYMENT = "ufo-serve"
 INIT_JOB = "ufo-init"
@@ -64,7 +74,8 @@ class TenantReconciler:
                 self.platform.app_database,
                 workspace_id,
             )
-            values, secret_data = self._render(request, postgres)
+            minted = await self._minted_keys(name)
+            values, secret_data = self._render(request, postgres, minted)
             await self.kube.apply_secret(tenant_namespace(name), TENANT_SECRET, secret_data)
             await self._helm_apply(values)
             return await self._observe(request)
@@ -97,10 +108,20 @@ class TenantReconciler:
             tenant_namespace(request.tenant.name), secret, source.get("data", {})
         )
 
+    async def _minted_keys(self, name: str) -> MintedKeys:
+        secret = await self.kube.read_secret(tenant_namespace(name), TENANT_SECRET)
+        if secret is None:
+            return mint_keys()
+        data = secret["data"]
+        return MintedKeys(
+            credential_key=base64.b64decode(data[SECRET_CREDENTIAL_KEY]).decode(),
+            artifact_token_secret=base64.b64decode(data[SECRET_ARTIFACT_TOKEN]).decode(),
+        )
+
     def _render(
-        self, request: DeployRequest, postgres: TenantPostgres
+        self, request: DeployRequest, postgres: TenantPostgres, minted: MintedKeys
     ) -> tuple[TenantChartValues, dict[str, str]]:
-        rendered = render_tenant(request, self.platform, postgres)
+        rendered = render_tenant(request, self.platform, postgres, minted)
         return rendered.values, rendered.secret.data()
 
     async def _helm_apply(self, values: TenantChartValues) -> None:

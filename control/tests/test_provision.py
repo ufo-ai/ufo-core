@@ -126,6 +126,40 @@ async def test_a_tenant_on_the_current_bundle_is_not_reapplied() -> None:
     assert await reconciler._advance_bundle_image(request) is request
 
 
+async def test_minted_keys_are_reused_from_the_applied_tenant_secret() -> None:
+    key = base64.urlsafe_b64encode(b"k" * 32).decode()
+    token = "a" * 64
+    existing = {
+        "kind": "Secret",
+        "metadata": {"name": "ufo-tenant", "namespace": "ufo-acme"},
+        "type": "Opaque",
+        "data": {
+            "UFO_CREDENTIAL_KEY": base64.b64encode(key.encode()).decode(),
+            "UFO_ARTIFACT_TOKEN_SECRET": base64.b64encode(token.encode()).decode(),
+        },
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/ufo-acme/secrets/ufo-tenant")
+        return httpx.Response(200, json=existing)
+
+    reconciler = TenantReconciler(kube=_kube(httpx.MockTransport(handler)), platform=_platform())
+    minted = await reconciler._minted_keys("acme")
+    assert minted.credential_key == key
+    assert minted.artifact_token_secret == token
+
+
+async def test_minted_keys_are_minted_only_when_the_tenant_secret_is_absent() -> None:
+    reconciler = TenantReconciler(
+        kube=_kube(httpx.MockTransport(lambda request: httpx.Response(404))),
+        platform=_platform(),
+    )
+    first = await reconciler._minted_keys("acme")
+    second = await reconciler._minted_keys("acme")
+    assert first.credential_key and first.artifact_token_secret
+    assert first.credential_key != second.credential_key
+
+
 async def test_reconcile_surfaces_any_error_as_failed_status() -> None:
     reconciler = TenantReconciler(
         kube=_kube(httpx.MockTransport(lambda request: httpx.Response(500, json={"m": "boom"}))),
