@@ -251,6 +251,7 @@ metadata:
   annotations:
     cert-manager.io/cluster-issuer: ${cluster_issuer}
     external-dns.alpha.kubernetes.io/hostname: ${apex_host}
+    external-dns.alpha.kubernetes.io/cloudflare-proxied: "true"
 spec:
   ingressClassName: ${ingress_class}
   tls:

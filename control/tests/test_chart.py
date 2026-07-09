@@ -67,6 +67,9 @@ def test_chart_renders_the_tenant_workload(tmp_path: Path) -> None:
     assert "kind: Ingress" in rendered
     assert 'cert-manager.io/cluster-issuer: "letsencrypt"' in rendered
     assert "external-dns.alpha.kubernetes.io/hostname" in rendered
+    # Proxied (orange-cloud) is load-bearing: the shared NLB admits only Cloudflare's edge ranges,
+    # so a DNS-only tenant record is unreachable from the internet.
+    assert 'external-dns.alpha.kubernetes.io/cloudflare-proxied: "true"' in rendered
     assert f"ghcr.io/acme/ufo@{DIGEST}" in rendered
     # The init Job runs once, on install only.
     assert '"helm.sh/hook": post-install' in rendered

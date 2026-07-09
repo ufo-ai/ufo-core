@@ -1,6 +1,8 @@
 # Terminating ingress at the tenant host: cert-manager issues the TLS cert, ExternalDNS publishes the
-# record (RFC 0004 decision 6). `[connect] public_base_url = https://<host>` in the rendered config
-# matches this host, so provider OAuth callbacks reach /v1/connect/callback.
+# record (RFC 0004 decision 6) Cloudflare-proxied — the shared NLB admits only Cloudflare's edge
+# ranges, so a DNS-only record is unreachable from the internet. `[connect] public_base_url =
+# https://<host>` in the rendered config matches this host, so provider OAuth callbacks reach
+# /v1/connect/callback.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -10,6 +12,7 @@ metadata:
   annotations:
     cert-manager.io/cluster-issuer: {{ .Values.cluster_issuer | quote }}
     external-dns.alpha.kubernetes.io/hostname: {{ .Values.host | quote }}
+    external-dns.alpha.kubernetes.io/cloudflare-proxied: "true"
 spec:
   ingressClassName: {{ .Values.ingress_class | quote }}
   tls:
