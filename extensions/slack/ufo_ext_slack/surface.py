@@ -1,6 +1,6 @@
 """The Slack surface on the core surface seam: verify an inbound event, key it to a thread
 conversation, stream any attached files into the workspace, and admit a turn; then deliver the
-terminal reply and stream the turn's shared files into that reply's thread.
+terminal reply and stream the turn's shared files into the conversation's thread.
 
 While the turn runs, a per-turn status task tails its live frames off the hub and keeps a small
 in-thread context message current — "Thinking…", then the model's own narration of each tool call —
@@ -752,9 +752,8 @@ def _oversize_link_line(ctx: SurfaceContext, artifact: SharedArtifact) -> str:
 
 
 async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
-    """Post the reply to the thread and return its message ref (`channel:ts`) — the ref both records
-    the delivery and, as the posted reply's own thread ts, roots any attached files under it. An
-    `invalid_blocks` rejection is deterministic, so the reply re-posts once as plain text rather
+    """Post the reply to the thread and return its message ref (`channel:ts`), the delivery record.
+    An `invalid_blocks` rejection is deterministic, so the reply re-posts once as plain text rather
     than the poller retrying the identical Block Kit body until it ages out."""
     channel, separator, thread_ts = writeback.queue_key.partition(":")
     thread = thread_ts if separator else None
@@ -795,17 +794,20 @@ async def _chat_post(
 
 
 async def attach(ctx: SurfaceContext, writeback: Writeback, reply_ref: str) -> None:
-    """Stream each shared file that fits the upload cap into the posted reply's thread, all at once
-    on the event loop; an over-cap file is delivered as a link in `post`, not here. Best effort: a
-    rejected file is logged and the rest still deliver, so an upload never re-posts the reply or
+    """Stream each shared file that fits the upload cap into the conversation, all at once on the
+    event loop; an over-cap file is delivered as a link in `post`, not here. The upload targets the
+    queue key — the member's thread in a channel, the channel itself in a DM — because Slack forbids
+    threading on a reply's ts, and the bot reply is itself a thread reply in a channel. Best effort:
+    a rejected file is logged and the rest still deliver, so an upload never re-posts the reply or
     blocks its siblings."""
     inline = tuple(a for a in writeback.artifacts if a.size_bytes <= SLACK_UPLOAD_MAX_BYTES)
     if not inline:
         return
-    channel, _, reply_ts = reply_ref.partition(":")
+    channel, separator, thread_ts = writeback.queue_key.partition(":")
+    thread = thread_ts if separator else None
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
     results = await asyncio.gather(
-        *(_upload_artifact(ctx, bot_token, channel, reply_ts, artifact) for artifact in inline),
+        *(_upload_artifact(ctx, bot_token, channel, thread, artifact) for artifact in inline),
         return_exceptions=True,
     )
     for artifact, result in zip(inline, results, strict=True):
@@ -814,11 +816,15 @@ async def attach(ctx: SurfaceContext, writeback: Writeback, reply_ref: str) -> N
 
 
 async def _upload_artifact(
-    ctx: SurfaceContext, bot_token: str, channel: str, thread_ts: str, artifact: SharedArtifact
+    ctx: SurfaceContext,
+    bot_token: str,
+    channel: str,
+    thread_ts: str | None,
+    artifact: SharedArtifact,
 ) -> None:
     """The three-step external upload, streamed: reserve an upload URL for the exact byte length,
     POST the blob's bytes to it (streamed from the blob store, never buffered), then complete the
-    upload into the thread with the caption or the plain filename as its title."""
+    upload into the channel or parent thread with the caption or the plain filename as its title."""
     timeout = httpx.Timeout(
         SLACK_UPLOAD_READ_TIMEOUT_SECONDS, write=SLACK_UPLOAD_WRITE_TIMEOUT_SECONDS
     )
@@ -851,7 +857,7 @@ async def _upload_artifact(
                     {
                         "files": [{"id": file_id, "title": artifact.subject or artifact.filename}],
                         "channel_id": channel,
-                        "thread_ts": thread_ts,
+                        **({"thread_ts": thread_ts} if thread_ts is not None else {}),
                     }
                 ),
             )

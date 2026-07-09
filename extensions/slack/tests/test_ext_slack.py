@@ -687,7 +687,8 @@ async def test_writeback_posts_block_kit_reply_and_streams_the_attachment(
     assert len(reserve) == 1 and len(uploads) == 1 and len(completes) == 1
     assert uploads[0].content == b"PDF-CONTENT"
     complete_body = json.loads(completes[0].content)
-    assert complete_body["thread_ts"] == "999.100"
+    assert complete_body["channel_id"] == "C5"
+    assert complete_body["thread_ts"] == "200.0"
     assert complete_body["files"] == [{"id": "F1", "title": "report.pdf"}]
 
     async with workspace_tx() as connection:
@@ -700,6 +701,31 @@ async def test_writeback_posts_block_kit_reply_and_streams_the_attachment(
         ).one()
     assert row.status == WRITEBACK_DELIVERED
     assert row.reply_ref == "C5:999.100"
+
+
+async def test_writeback_streams_dm_attachment_without_threading_under_the_bot_reply(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    await blob.put("artifacts/a/report.pdf", b"PDF-CONTENT")
+    await _seed_done_turn(workspace_id, "D5", "here", blob, artifact=True)
+
+    await app.state.writeback_poller.drain()
+
+    posts = [r for r in recorder if str(r.url) == slack.SLACK_CHAT_POST_MESSAGE_URL]
+    assert len(posts) == 1
+    reply = json.loads(posts[0].content)
+    assert reply["channel"] == "D5"
+    assert "thread_ts" not in reply
+
+    completes = [r for r in recorder if str(r.url) == slack.SLACK_FILES_COMPLETE_UPLOAD]
+    assert len(completes) == 1
+    complete_body = json.loads(completes[0].content)
+    assert complete_body["channel_id"] == "D5"
+    assert "thread_ts" not in complete_body
+    assert complete_body["files"] == [{"id": "F1", "title": "report.pdf"}]
 
 
 async def test_oversize_artifact_is_delivered_as_a_download_link(
