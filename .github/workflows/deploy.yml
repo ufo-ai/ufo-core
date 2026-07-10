@@ -5,7 +5,8 @@ name: Deploy (testing)
 # the control-plane rollout. PRs touching infra run terraform plan only (against the newest pushed
 # image, since the ECR digest data source needs a real tag). workflow_dispatch redeploys a chosen
 # tag. Targets envs/testing (stage 1); repoint TF_DIR to envs/prod for stage 2. AWS auth is GitHub
-# OIDC → the github-deploy role (no static keys).
+# OIDC → the github-deploy role (no static keys). The edge job applies envs/edge — the zone-level
+# Cloudflare worker fronting both apexes — from its own state, in parallel with the deploy.
 on:
   push:
     branches: [main]
@@ -132,3 +133,35 @@ jobs:
         env:
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: terraform apply -auto-approve -input=false -var "image_tag=$IMAGE_TAG"
+
+  edge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.14.9"
+
+      - name: Terraform init
+        working-directory: infra/envs/edge
+        run: terraform init -input=false
+
+      - name: Terraform plan
+        if: github.event_name == 'pull_request'
+        working-directory: infra/envs/edge
+        env:
+          TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: terraform plan -input=false -no-color -lock=false
+
+      - name: Terraform apply
+        if: github.event_name != 'pull_request'
+        working-directory: infra/envs/edge
+        env:
+          TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: terraform apply -auto-approve -input=false

@@ -26,6 +26,8 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run python gates.py
       - run: uv run mypy core/src/ufo extensions gates.py
+      # The apex edge worker's behavior proof — plain node:test, no dependencies.
+      - run: node --test infra/modules/edge/*.test.mjs
       # Rot-guard: the gated integration suite must always import + collect, even where its live
       # dependencies (a model key, extra services) are absent, so it can't silently bit-rot. The
       # whole tree is swept — core's live suite plus each extension's own tests/integration.
