@@ -67,6 +67,10 @@ async function waitlistCount(db) {
 
 async function landing(request, env, url) {
   if (!CLI_UA.test(request.headers.get("user-agent") ?? "")) {
+    if (url.protocol === "http:") {
+      url.protocol = "https:";
+      return Response.redirect(url.href, 301);
+    }
     const site = `${env.SITE_BASE}/${url.search}`;
     if (url.hostname !== new URL(env.SITE_BASE).hostname) {
       return Response.redirect(site, 302);

@@ -54,6 +54,19 @@ test("curl landing renders the card with the live count and https commands", asy
   assert.match(body, /curl -fsSL https:\/\/flyingobject\.ai\/install \| sh/);
 });
 
+test("curl landing over plain http gets the card directly", async () => {
+  const reply = await request("http://flyingobject.ai/");
+  assert.equal(reply.status, 200);
+  assert.equal(reply.headers.get("content-type"), "text/plain; charset=utf-8");
+  assert.match(await reply.text(), /identified flying object/);
+});
+
+test("browser landing over plain http is bounced to https with its query intact", async () => {
+  const reply = await request("http://flyingobject.ai/?ref=x", { ua: "Mozilla/5.0" });
+  assert.equal(reply.status, 301);
+  assert.equal(reply.headers.get("location"), "https://flyingobject.ai/?ref=x");
+});
+
 test("browser landing on the site's own apex proxies root with its query intact", async () => {
   const reply = await request("https://flyingobject.ai/?utm_source=card", { ua: "Mozilla/5.0" });
   assert.equal(await reply.text(), "origin:https://flyingobject.ai/?utm_source=card");
