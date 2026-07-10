@@ -21,6 +21,9 @@ variable "ses_sender" {
 
 locals {
   ses_enabled = var.ses_sender != ""
+  # Shared by the role and the gateway_ses_role_arn output, which constructs the ARN so it is
+  # plan-known (the env's manifest for_each cannot take apply-time keys).
+  gateway_ses_role_name = "${local.name}-gateway-ses"
   # The verified identity is the sender's domain. It is SES-account-global, so a second env in the
   # same AWS account must reference this identity (data source), not recreate it.
   ses_domain = local.ses_enabled ? element(split("@", var.ses_sender), 1) : ""
@@ -62,7 +65,7 @@ module "irsa_gateway_ses" {
   source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
   version = "~> 5.48"
 
-  role_name        = "${local.name}-gateway-ses"
+  role_name        = local.gateway_ses_role_name
   role_policy_arns = { ses = aws_iam_policy.gateway_ses[0].arn }
 
   oidc_providers = {

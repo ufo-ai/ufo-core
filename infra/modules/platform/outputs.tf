@@ -44,8 +44,8 @@ output "app_s3_role_arn" {
 }
 
 output "gateway_ses_role_arn" {
-  description = "IRSA role annotated on the ufo-operator ServiceAccount — the apex gateway exchanges its web identity for ses:SendEmail credentials. Empty when ses_sender is unset."
-  value       = local.ses_enabled ? module.irsa_gateway_ses[0].iam_role_arn : ""
+  description = "IRSA role annotated on the ufo-operator ServiceAccount — the apex gateway exchanges its web identity for ses:SendEmail credentials. Empty when ses_sender is unset. Constructed, not the module output, so it stays plan-known: the env's manifest for_each rejects apply-time keys."
+  value       = local.ses_enabled ? "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.gateway_ses_role_name}" : ""
 }
 
 output "rds_endpoint" {
