@@ -3,6 +3,8 @@ const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MAX_EMAIL = 254;
 const COUNT_TTL_MS = 3_600_000;
 
+const LANDING_HTML = "__LANDING_HTML__";
+
 const SCHEMA =
   "create table if not exists waitlist (" +
   "  email text primary key," +
@@ -14,13 +16,13 @@ function card(host, count) {
   return `
        .  *   .      .
 
-   .     ___
-      _/     \\_      you found us.
-     /  o o    \\
-     \\_________/     ${host}
+   .      ╭─◠◠◠─╮
+      ╾══╡ ◉ ◉ ◉ ╞══╼      you found us.
+         ╰┄┄┄┄┄┄┄╯         ${host}
+           ˙ ✦ ˙
        .   *  .    .
 
-  ${count} identified flying object${count === 1 ? "" : "s"}.
+  ${count} craft${count === 1 ? "" : "s"} on waitlist.
 
   join the waitlist:
     curl https://${host}/waitlist -d email=you@yourco.com
@@ -71,11 +73,12 @@ async function landing(request, env, url) {
       url.protocol = "https:";
       return Response.redirect(url.href, 301);
     }
-    const site = `${env.SITE_BASE}/${url.search}`;
     if (url.hostname !== new URL(env.SITE_BASE).hostname) {
-      return Response.redirect(site, 302);
+      return Response.redirect(`${env.SITE_BASE}/${url.search}`, 302);
     }
-    return fetch(new Request(site, request));
+    return new Response(LANDING_HTML, {
+      headers: { "content-type": "text/html; charset=utf-8" },
+    });
   }
   return text(card(url.hostname, await waitlistCount(env.DB)));
 }

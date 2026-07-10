@@ -25,5 +25,5 @@ variable "origin_base" {
 
 variable "site_base" {
   type        = string
-  description = "Site base URL browsers hitting / are proxied to (the host's landing page)."
+  description = "Site base URL browsers hitting / land on: its own host serves the embedded landing page, every other host redirects to it."
 }

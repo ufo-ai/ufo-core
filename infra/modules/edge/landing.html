@@ -1,0 +1,715 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ufo</title>
+<style>
+  /* The craft's shimmer palette — the only colors used. */
+  :root{
+    --hull:#8b8fb8; --gold:#ffd35e; --gold-dim:#b8923e; --party:#ff9ee6;
+    --gray:#595d80; --green:#9dffb0; --cyan:#8be9ff; --amber:#ffb86b;
+    --violet:#c5a6ff; --ice:#b8ecff; --rust:#e0a06a; --spark:#fff4c2;
+    --mono:"DejaVu Sans Mono","SFMono-Regular",ui-monospace,"Cascadia Code",
+           "Source Code Pro",Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:#000;
+    min-height:100vh;
+    overflow:hidden;          /* no scrollbars as the craft roams */
+  }
+  #stage{
+    position:fixed;
+    left:0; top:0;
+    will-change:transform, opacity;  /* moved + faded in JS */
+    font-family:var(--mono);
+    font-size:clamp(13px,3.75vw,22px);
+    line-height:1.16;
+    white-space:pre;
+    text-align:left;
+    color:var(--hull);
+    text-shadow:0 0 12px currentColor;
+    user-select:none;
+    pointer-events:none;       /* never intercepts the cursor */
+  }
+  #stage .hull {color:var(--hull); text-shadow:0 0 6px #8b8fb855}
+  #stage .lit  {color:var(--gold); text-shadow:0 0 10px var(--gold)}
+  #stage .spark{color:var(--spark);text-shadow:0 0 12px var(--spark)}
+  #stage .c    {color:var(--c); text-shadow:0 0 10px var(--c)}
+  @media (prefers-reduced-motion: reduce){
+    #stage{text-shadow:0 0 6px currentColor}
+  }
+</style>
+</head>
+<body>
+  <div id="stage" role="img" aria-label="An animated ASCII flying saucer that continuously re-forms into different craft"></div>
+
+<script>
+"use strict";
+/* ═══════════════════════════════════════════════════════════════════════
+   ufo morph — JavaScript port of the Python renderer.
+
+   A craft is built from a grammar of parts (domes, struts, cores, rims,
+   fins, antennae, beams). Thirteen SILHOUETTE FAMILIES cover the recognized
+   UFO-sighting taxonomy — the disc family (saucer, ring, bell, mother, orb,
+   saturn) plus triangle/delta, cigar/cylinder, tic-tac, egg/oval, diamond,
+   and the exotic needle & manta. Each distributes the same fixed canvas
+   (19×5) into a different shape. Morphing eases same-family craft slot by
+   slot, and CROSS-DISSOLVES between families at the cell level with an even,
+   percentile-paced wipe (no popping).
+
+   Cells are [glyph, role] where role picks a color:
+     'hull'  → linework        'a'/'b' → the two shimmer phases
+     'spark' → dissolve edge    ''      → blank
+   Lit cells also carry an explicit color string in role 'lit:<hex>'.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+const CSS = getComputedStyle(document.documentElement);
+const COL = n => CSS.getPropertyValue(n).trim();
+const C = {
+  hull: COL('--hull'), gold: COL('--gold'), goldDim: COL('--gold-dim'),
+  party: COL('--party'), gray: COL('--gray'), green: COL('--green'),
+  cyan: COL('--cyan'), amber: COL('--amber'), violet: COL('--violet'),
+  ice: COL('--ice'), rust: COL('--rust'), spark: COL('--spark'),
+};
+
+// ── part pools (verbatim from the Python) ───────────────────────────────
+const DOMES = ["╭─=─╮","╒═══╕","╭───╮","╭◠◠◠╮","▟███▙","╭╌◊╌╮",
+               "⌒⌒⌒⌒⌒","╓─┰─╖","◜◠◠◠◝","╭─▣─╮","╱◠◠◠╲","▁▄█▄▁"];
+const CAPS  = ["╭▾╮","◜●◝","╱◊╲","┌╨┐","▗▄▖","╭⊙╮"];
+const STRUTS= [["╾══╡","╞══╼"],["╾─═[","]═─╼"],["╺═╡(",")╞═╸"],
+               ["╞(",")╡"],["╺══╱","╲══╸"],["◄═╣","╠═►"],
+               ["«┤","├»"],["╾╌┤","├╌╼"],["⟨═","═⟩"],["┣━","━┫"]];
+const CORES = [["═",null],["┄",null],["▌",null],["─",null],["┆",null],
+               ["•",null],["◇",null],["▪",null],["≡",null],
+               [null,"<=>"],[null,"▐▌"],[null,"oOo"],[null,"·∆·"],
+               [null,"[#]"],[null,"◉◉◉"]];
+const RIM_GLYPHS = ["┄","─","═","~","•","◦","˅","╍","‗","∿"];
+const FINS = [["",""],["╲","╱"],["◣","◢"],["╚","╝"],["⟍","⟋"],
+              ["◞","◟"],["┕","┙"],["ʌ","ʌ"]];
+const ANTENNAE = ["","╵","│","┊","╿","⌇","✢","☍"];
+const BEAMS = ["","' . '",".  '  .","' '"," : : ","˙ ✦ ˙",
+               "\\ | /"," v v ","  ¦  ","·˙·˙·"," ▽ ▽ ","˖ ⋆ ˖"];
+// shimmer schemes as [colorA, colorB]
+const LIGHT_SCHEMES = [
+  [C.gold,C.goldDim],[C.gold,C.gold],[C.goldDim,C.gold],
+  [C.green,C.goldDim],[C.cyan,C.gold],[C.amber,C.goldDim],
+  [C.party,C.gold],[C.gray,C.gray],[C.violet,C.ice],
+  [C.ice,C.cyan],[C.rust,C.amber],[C.party,C.violet],
+];
+const CROWNS = [["",null],["?",C.gold],["!",C.gold],["✦",C.gold],
+                ["°",C.cyan],["*",C.party],["◌",C.amber]];
+
+const FAMILIES = ["saucer","orb","ring","mother","needle","bell","manta",
+                  "triangle","cigar","tictac","saturn","egg","diamond"];
+const CANVAS_W = 19, CANVAS_H = 5;
+
+// ── cell helpers ────────────────────────────────────────────────────────
+// A "row" is an array of cells: {ch, color}. color is a hex string or 'hull'.
+const hull = ch => ({ch, color:'hull'});
+const lit  = (ch, col) => ({ch, color:col});
+const blank = () => ({ch:' ', color:''});
+
+function strToCells(str, color){ return [...str].map(ch => ({ch, color})); }
+
+// chips: alternating two-color run of `glyph`, phase-shifted
+function chips(n, glyph, scheme, phase){
+  const out=[];
+  for(let i=0;i<n;i++) out.push(lit(glyph, scheme[(i+phase)&1]));
+  return out;
+}
+// a fixed label, single phase color
+function litText(text, scheme, phase){ return strToCells(text, scheme[phase&1]); }
+// underglow pattern: spaces stay blank, glyphs are phase-lit
+function glow(pattern, scheme, phase){
+  const trimmed = pattern.replace(/^ +| +$/g,'');
+  const out=[]; let idx=0;
+  for(const ch of trimmed){
+    if(ch===' ') out.push(blank());
+    else { out.push(lit(ch, scheme[(idx+phase)&1])); idx++; }
+  }
+  return out;
+}
+const odd = n => (n%2===1)? n : n+1;
+const width = row => row.length;
+
+// ── genome ──────────────────────────────────────────────────────────────
+function randint(rng,a,b){ return a + Math.floor(rng()*(b-a+1)); }
+function choice(rng,arr){ return arr[Math.floor(rng()*arr.length)]; }
+
+function randomCraft(rng){
+  return {
+    family: randint(rng,0,FAMILIES.length-1),
+    dome:   randint(rng,0,DOMES.length-1),
+    cap:    randint(rng,0,CAPS.length-1),
+    strut:  randint(rng,0,STRUTS.length-1),
+    core:   randint(rng,0,CORES.length-1),
+    rim:    randint(rng,0,RIM_GLYPHS.length-1),
+    fin:    randint(rng,0,FINS.length-1),
+    ant:    randint(rng,0,ANTENNAE.length-1),
+    beam:   randint(rng,0,BEAMS.length-1),
+    crown:  randint(rng,0,CROWNS.length-1),
+    lights: randint(rng,0,LIGHT_SCHEMES.length-1),
+    width:  choice(rng,[3,5,7]),
+    phase:  randint(rng,0,1),
+  };
+}
+
+// ── shared sub-parts ────────────────────────────────────────────────────
+function mastRow(c){
+  const ant = ANTENNAE[c.ant], [crownCh,crownCol] = CROWNS[c.crown];
+  if(!ant && !crownCh) return null;
+  if(crownCh) return [ lit(crownCh, crownCol || C.gold) ];
+  return [ hull(ant) ];
+}
+function hullRow(c, scheme, coreN){
+  const [ls,rs] = STRUTS[c.strut];
+  const [glyph,text] = CORES[c.core];
+  let body;
+  if(text!==null){
+    const label = (text.length%2)? text : text+" ";
+    body = litText(label, scheme, c.phase);
+  } else {
+    body = chips(coreN, glyph, scheme, c.phase);
+  }
+  const [lf,rf] = FINS[c.fin];
+  const row = [];
+  if(lf) row.push(hull(lf));
+  row.push(...strToCells(ls,'hull'));
+  row.push(blank());
+  row.push(...body);
+  row.push(blank());
+  row.push(...strToCells(rs,'hull'));
+  if(rf) row.push(hull(rf));
+  return row;
+}
+function rimRow(c, scheme, rimN){
+  return [ hull('╰'), ...chips(rimN, RIM_GLYPHS[c.rim], scheme, c.phase), hull('╯') ];
+}
+
+// ── silhouette builders ─────────────────────────────────────────────────
+function buildSaucer(c, scheme){
+  const coreN = odd(c.width);
+  const rows = [];
+  const m = mastRow(c); if(m) rows.push(m);
+  rows.push(strToCells(DOMES[c.dome],'hull'));
+  rows.push(hullRow(c, scheme, coreN));
+  rows.push(rimRow(c, scheme, odd(Math.max(3, coreN-2))));
+  if(BEAMS[c.beam]) rows.push(glow(BEAMS[c.beam], scheme, c.phase));
+  return rows;
+}
+function buildOrb(c, scheme){
+  const [glyph,text] = CORES[c.core];
+  let body, bodyW;
+  if(text!==null){ const label=(text.length%2)?text:text+" "; body=litText(label,scheme,c.phase); bodyW=label.length; }
+  else { body=chips(3, glyph, scheme, c.phase); bodyW=3; }
+  const rows=[];
+  const m = mastRow(c); if(m) rows.push(m);
+  rows.push(strToCells(CAPS[c.cap],'hull'));
+  rows.push([ hull('('), hull('('), ...body, hull(')'), hull(')') ]);
+  rows.push([ hull('╰'), ...chips(bodyW, RIM_GLYPHS[c.rim], scheme, c.phase), hull('╯') ]);
+  if(BEAMS[c.beam]) rows.push(glow(BEAMS[c.beam], scheme, c.phase));
+  return rows;
+}
+function buildRing(c, scheme){
+  const coreN = odd(c.width);
+  const [ls,rs] = STRUTS[c.strut];
+  const half = Math.max(1, (coreN-1)>>1);
+  const arcN = half*2+1;
+  const rows=[];
+  const m = mastRow(c); if(m) rows.push(m);
+  rows.push([ hull('◜'), ...chips(arcN,'═',scheme,c.phase), hull('◝') ]);
+  rows.push([ ...strToCells(ls,'hull'),
+              ...chips(half, RIM_GLYPHS[c.rim], scheme, c.phase),
+              blank(),
+              ...chips(half, RIM_GLYPHS[c.rim], scheme, c.phase+1),
+              ...strToCells(rs,'hull') ]);
+  rows.push([ hull('◟'), ...chips(arcN,'═',scheme,c.phase+1), hull('◞') ]);
+  if(BEAMS[c.beam]) rows.push(glow(BEAMS[c.beam], scheme, c.phase));
+  return rows;
+}
+function buildMother(c, scheme){
+  const coreN = odd(c.width);
+  const rows=[];
+  const m = mastRow(c); if(m) rows.push(m);
+  rows.push(strToCells("▟▆▆▆▙",'hull'));
+  rows.push(hullRow(c, scheme, coreN));
+  const bandN = odd(coreN+2);
+  rows.push([ hull('╘'), ...chips(bandN, RIM_GLYPHS[c.rim], scheme, c.phase+1), hull('╛') ]);
+  if(BEAMS[c.beam]) rows.push(glow(BEAMS[c.beam], scheme, c.phase));
+  return rows;
+}
+function buildNeedle(c, scheme){
+  const [glyph,text] = CORES[c.core];
+  const g = text!==null ? "▐" : glyph;
+  const rows=[];
+  const m = mastRow(c); if(m) rows.push(m);
+  rows.push(strToCells(CAPS[c.cap],'hull'));
+  rows.push([ hull('┤'), lit(g, scheme[c.phase&1]), hull('├') ]);
+  rows.push([ hull('┤'), lit(g, scheme[(c.phase+1)&1]), hull('├') ]);
+  rows.push([ lit('▼', scheme[c.phase&1]) ]);
+  return rows;
+}
+function buildBell(c, scheme){
+  const coreN = odd(c.width);
+  const rows=[];
+  const m = mastRow(c); if(m) rows.push(m);
+  rows.push(strToCells(DOMES[c.dome],'hull'));
+  const g0 = CORES[c.core][0] || '═';
+  rows.push([ hull('╲'), ...chips(coreN, g0, scheme, c.phase), hull('╱') ]);
+  const inner = Math.max(1, coreN-2);
+  rows.push([ hull('╲'), ...chips(inner, RIM_GLYPHS[c.rim], scheme, c.phase+1), hull('╱') ]);
+  if(BEAMS[c.beam]) rows.push(glow(BEAMS[c.beam], scheme, c.phase));
+  return rows;
+}
+function buildManta(c, scheme){
+  const coreN = odd(c.width);
+  const [glyph,text] = CORES[c.core];
+  let body;
+  if(text!==null && text.length%2) body = litText(text, scheme, c.phase);
+  else body = chips(coreN, glyph || '▬', scheme, c.phase);
+  const rows=[];
+  const m = mastRow(c); if(m) rows.push(m);
+  rows.push(strToCells(DOMES[c.dome],'hull'));
+  // symmetric swept wing band (◜══╣ ... ╠══◝) so it shares the body axis;
+  // the "banked" character comes from the fin glyphs, not a lopsided wing.
+  rows.push([ ...strToCells('◜══╣','hull'), blank(), ...body, blank(), ...strToCells('╠══◝','hull') ]);
+  rows.push([ hull('╰'), ...chips(coreN, RIM_GLYPHS[c.rim], scheme, c.phase), hull('╯') ]);
+  if(BEAMS[c.beam]) rows.push(glow(BEAMS[c.beam], scheme, c.phase));
+  return rows;
+}
+function buildTriangle(c, scheme){
+  // Delta / chevron — #2 most-reported shape. Wide lit base tapering to an
+  // apex, with corner lights. Three rows of increasing width + a beam.
+  const w = odd(c.width);                 // base width 3/5/7
+  const g = CORES[c.core][0] || '═';
+  const rows=[];
+  const [crownCh,crownCol] = CROWNS[c.crown];
+  // apex: a single bright corner light (or hull tip)
+  rows.push([ crownCh ? lit(crownCh, crownCol||C.gold) : hull('▲') ]);
+  // middle band: a short lit run flanked by the sloping edges
+  const midN = Math.max(1, w-4>0? w-4 : 1);
+  rows.push([ hull('╱'), ...chips(midN, g, scheme, c.phase), hull('╲') ]);
+  // base: full lit underside between two corner lights
+  rows.push([ lit('◆', scheme[c.phase&1]),
+              ...chips(w, RIM_GLYPHS[c.rim], scheme, c.phase),
+              lit('◆', scheme[(c.phase+1)&1]) ]);
+  if(BEAMS[c.beam]) rows.push(glow(BEAMS[c.beam], scheme, c.phase));
+  return rows;
+}
+function buildCigar(c, scheme){
+  // Horizontal cylinder / cigar / classic mothership. A long lit hull with a
+  // row of windows, capped by rounded ends. Tapers slightly top & bottom.
+  const n = (c.width===3)?7:(c.width===5)?9:11;   // long body, odd
+  const rows=[];
+  const m = mastRow(c); if(m) rows.push(m);
+  // upper hull edge
+  rows.push([ hull('╭'), ...chips(n,'─',scheme,c.phase), hull('╮') ]);
+  // window band: alternating lit "portholes" inside the tube
+  const winGlyph = CORES[c.core][0] || 'o';
+  rows.push([ hull('('), blank(), ...chips(n-2, winGlyph, scheme, c.phase), blank(), hull(')') ]);
+  // lower hull edge
+  rows.push([ hull('╰'), ...chips(n, RIM_GLYPHS[c.rim], scheme, c.phase+1), hull('╯') ]);
+  if(BEAMS[c.beam]) rows.push(glow(BEAMS[c.beam], scheme, c.phase));
+  return rows;
+}
+function buildTictac(c, scheme){
+  // Nimitz "Tic-Tac": small, smooth, featureless oblong capsule. Deliberately
+  // plain — its whole character is the absence of detail.
+  const n = (c.width===7)?7:5;            // body length, odd
+  const rows=[];
+  const m = mastRow(c); if(m) rows.push(m);
+  // caps span the same width as the body row (n + 2 brackets) so every row
+  // shares one axis. rounded top/bottom via ▁ / ▔.
+  rows.push([ hull(' '), ...strToCells('▁'.repeat(n),'hull'), hull(' ') ]);
+  rows.push([ hull('('), ...chips(n, CORES[c.core][0]||' ', scheme, c.phase), hull(')') ]);
+  rows.push([ hull(' '), ...strToCells('▔'.repeat(n),'hull'), hull(' ') ]);
+  if(BEAMS[c.beam]) rows.push(glow(BEAMS[c.beam], scheme, c.phase));
+  return rows;
+}
+function buildSaturn(c, scheme){
+  // Saturn / hat: a domed disc bisected by a distinct equatorial brim that
+  // juts out past the body on both sides — the Adamski-adjacent classic.
+  const coreN = odd(c.width);
+  const rows=[];
+  const m = mastRow(c); if(m) rows.push(m);
+  rows.push(strToCells(DOMES[c.dome],'hull'));
+  // the brim: extends 2 cells beyond the body each side, lit
+  const brim = chips(coreN+4, RIM_GLYPHS[c.rim], scheme, c.phase);
+  rows.push([ hull('◄'), ...brim, hull('►') ]);
+  // body underside, narrower
+  rows.push([ hull('╰'), ...chips(coreN, CORES[c.core][0]||'═', scheme, c.phase+1), hull('╯') ]);
+  if(BEAMS[c.beam]) rows.push(glow(BEAMS[c.beam], scheme, c.phase));
+  return rows;
+}
+function buildEgg(c, scheme){
+  // Egg / oval / teardrop / lightbulb: a rounded body, wider at the base,
+  // tapering to a soft top.
+  const coreN = odd(c.width);
+  const g = CORES[c.core][0] || '•';
+  const rows=[];
+  const m = mastRow(c); if(m) rows.push(m);
+  const topN = Math.max(1, coreN-2);
+  rows.push([ hull('╭'), ...chips(topN, g, scheme, c.phase), hull('╮') ]);
+  rows.push([ hull('('), ...chips(coreN, g, scheme, c.phase), hull(')') ]);
+  rows.push([ hull('╰'), ...chips(coreN, RIM_GLYPHS[c.rim], scheme, c.phase+1), hull('╯') ]);
+  if(BEAMS[c.beam]) rows.push(glow(BEAMS[c.beam], scheme, c.phase));
+  return rows;
+}
+function buildDiamond(c, scheme){
+  // Diamond / rhombus: a four-sided lozenge that widens to the middle then
+  // narrows again — a rarer but chart-standard geometric form.
+  const w = odd(c.width);
+  const g = CORES[c.core][0] || '◇';
+  const mid = w;                 // widest row
+  const narrow = Math.max(1, w-2);
+  const rows=[];
+  const [crownCh,crownCol] = CROWNS[c.crown];
+  rows.push([ crownCh ? lit(crownCh, crownCol||C.gold) : lit('◆', scheme[c.phase&1]) ]);
+  rows.push([ hull('╱'), ...chips(narrow, g, scheme, c.phase), hull('╲') ]);
+  rows.push([ hull('╲'), ...chips(narrow, RIM_GLYPHS[c.rim], scheme, c.phase+1), hull('╱') ]);
+  rows.push([ lit('▾', scheme[c.phase&1]) ]);
+  return rows;
+}
+
+const BUILDERS = {saucer:buildSaucer,orb:buildOrb,ring:buildRing,
+                  mother:buildMother,needle:buildNeedle,bell:buildBell,manta:buildManta,
+                  triangle:buildTriangle,cigar:buildCigar,tictac:buildTictac,
+                  saturn:buildSaturn,egg:buildEgg,diamond:buildDiamond};
+
+// ── compose into the fixed canvas (centered H & V) ──────────────────────
+function buildRows(c){ return BUILDERS[FAMILIES[c.family]](c, LIGHT_SCHEMES[c.lights]); }
+
+function compose(rows){
+  const placed = rows.map(row=>{
+    const w = width(row);
+    const lead = Math.max(0, Math.round((CANVAS_W - w)/2));
+    const out = [];
+    for(let i=0;i<lead;i++) out.push(blank());
+    for(const cell of row) out.push(cell);
+    while(out.length < CANVAS_W) out.push(blank());
+    return out.slice(0, CANVAS_W);
+  });
+  const pad = CANVAS_H - placed.length;
+  const top = Math.max(0, pad>>1), bottom = Math.max(0, pad-top);
+  const blankRow = () => Array.from({length:CANVAS_W}, blank);
+  const grid = [];
+  for(let i=0;i<top;i++) grid.push(blankRow());
+  for(const r of placed.slice(0,CANVAS_H)) grid.push(r);
+  for(let i=0;i<bottom;i++) grid.push(blankRow());
+  return grid.slice(0,CANVAS_H);
+}
+// render → a CANVAS_H × CANVAS_W grid of cells
+function renderGrid(c){ return compose(buildRows(c)); }
+
+// ── morph ───────────────────────────────────────────────────────────────
+function smoothstep(t){ return t*t*(3-2*t); }
+function easeInt(a,b,t){ return Math.round(a + (b-a)*smoothstep(t)); }
+
+const SLOTS = ["core","cap","rim","beam","fin","strut","ant","dome","crown","lights"];
+function easeGenome(a,b,t,k){
+  const out = {...a};
+  let w = easeInt(a.width,b.width,t); if((w&1)===0) w++; out.width=w;
+  out.phase = (a.phase + k) & 1;
+  out.family = a.family;
+  const n = SLOTS.length;
+  for(let i=0;i<n;i++){
+    const thresh = (i+1)/(n+1);
+    out[SLOTS[i]] = (t>=thresh? b:a)[SLOTS[i]];
+  }
+  return out;
+}
+
+// per-cell dissolve rank → even reveal via precomputed percentile mapping
+function dissolveRank(r,col){
+  const h = ((r*7 + col*13) % 17) / 17;
+  const diag = (r+col)/(CANVAS_H+CANVAS_W);
+  return 0.55*diag + 0.45*h;
+}
+const RANK_GRID = Array.from({length:CANVAS_H},(_,r)=>
+  Array.from({length:CANVAS_W},(_,col)=>dissolveRank(r,col)));
+const RANKS_SORTED = RANK_GRID.flat().slice().sort((x,y)=>x-y);
+function thresholdFor(progress){
+  progress = Math.min(1,Math.max(0,progress));
+  const n = RANKS_SORTED.length, idx = progress*n, lo = Math.floor(idx);
+  if(lo>=n) return RANKS_SORTED[n-1]+1e-6;
+  if(lo===0) return RANKS_SORTED[0]-1e-6;
+  const frac = idx-lo;
+  return RANKS_SORTED[lo-1] + (RANKS_SORTED[lo]-RANKS_SORTED[lo-1])*frac;
+}
+const SPARK = "·˙·⋆˙";
+const BAND = (RANKS_SORTED[RANKS_SORTED.length-1]-RANKS_SORTED[0]) /
+             Math.max(14, RANKS_SORTED.length*0.18);
+
+function dissolveGrid(srcGrid, dstGrid, progress){
+  const thresh = thresholdFor(progress);
+  const out = [];
+  for(let r=0;r<CANVAS_H;r++){
+    const line=[];
+    for(let col=0;col<CANVAS_W;col++){
+      const rank = RANK_GRID[r][col];
+      const s = srcGrid[r][col], d = dstGrid[r][col];
+      if(Math.abs(rank-thresh) < BAND && (s.ch!==' '||d.ch!==' ')){
+        const g = SPARK[(r+col+Math.floor(progress*11))%SPARK.length];
+        line.push({ch:g, color:'spark'});
+      } else if(rank < thresh){
+        line.push(d);
+      } else {
+        line.push(s);
+      }
+    }
+    out.push(line);
+  }
+  return out;
+}
+
+// produce a sequence of grids morphing a→b
+function morphFrames(a,b,steps,transition=0.6){
+  if(steps<=1) return [renderGrid(b)];
+  if(a.family===b.family){
+    const out=[];
+    for(let k=0;k<steps;k++) out.push(renderGrid(easeGenome(a,b,k/(steps-1),k)));
+    return out;
+  }
+  const diss = Math.max(4, Math.round(steps*transition));
+  const pre = Math.max(1, (steps-diss)>>1);
+  const post = Math.max(1, steps-diss-pre);
+  const frames=[];
+  for(let k=0;k<pre;k++) frames.push(renderGrid({...a, phase:(a.phase+k)&1}));
+  const src = renderGrid({...a, phase:(a.phase+pre)&1});
+  const dst = renderGrid(b);
+  for(let j=0;j<diss;j++) frames.push(dissolveGrid(src,dst,(j+1)/diss));
+  for(let k=0;k<post;k++) frames.push(renderGrid({...b, phase:(b.phase+k)&1}));
+  return frames;
+}
+
+// ── DOM rendering: grid → spans ─────────────────────────────────────────
+function colorFor(cell){
+  if(cell.color==='hull') return null;        // use .hull class
+  if(cell.color==='spark') return 'spark';
+  return cell.color;                          // explicit hex
+}
+function gridToHTML(grid){
+  let html='';
+  for(let r=0;r<grid.length;r++){
+    for(const cell of grid[r]){
+      const ch = cell.ch===' ' ? ' ' : escapeHTML(cell.ch);
+      if(cell.ch===' ' || cell.color===''){ html += ch; continue; }
+      if(cell.color==='hull'){ html += `<span class="hull">${ch}</span>`; }
+      else if(cell.color==='spark'){ html += `<span class="spark">${ch}</span>`; }
+      else { html += `<span class="c" style="--c:${cell.color}">${ch}</span>`; }
+    }
+    if(r<grid.length-1) html += '\n';
+  }
+  return html;
+}
+function escapeHTML(s){ return s.replace(/[&<>]/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[m])); }
+
+// ── mulberry32 PRNG (deterministic, seedable) ───────────────────────────
+function mulberry32(seed){
+  let a = seed>>>0;
+  return function(){
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a>>>15), 1 | a);
+    t = (t + Math.imul(t ^ (t>>>7), 61 | t)) ^ t;
+    return ((t ^ (t>>>14)) >>> 0) / 4294967296;
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// the show: an endless tour of waypoints with smooth transitions
+// ═══════════════════════════════════════════════════════════════════════
+const stage = document.getElementById('stage');
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+const STEPS_EACH = 12;
+const FPS = reduceMotion ? 2.2 : 7;
+let rng = mulberry32((Math.random()*1e9)>>>0);
+let current = randomCraft(rng);
+let queue = [];          // pending grids to display
+
+// Build the next leg: morph the current craft into a fresh one (never the
+// same family back-to-back, so the tour stays varied).
+function nextLeg(){
+  let c = randomCraft(rng);
+  if(c.family === current.family){
+    c = {...c, family:(current.family + 1 + Math.floor(rng()*(FAMILIES.length-1))) % FAMILIES.length};
+  }
+  const grids = morphFrames(current, c, STEPS_EACH);
+  current = c;
+  return grids;
+}
+
+function pump(){
+  while(queue.length < STEPS_EACH) queue.push(...nextLeg());
+}
+
+let acc = 0, last = performance.now();
+
+// ── motion: DVD-screensaver drift + mouse avoidance ─────────────────────
+// The stage element is moved with a CSS transform every animation frame.
+// It drifts at constant speed and reflects off the viewport edges; when the
+// cursor comes near, a repulsion push steers the craft away so it can't be
+// clicked (the element is also pointer-events:none as a backstop).
+const motion = {
+  x: 0, y: 0,            // top-left position in px (set after first measure)
+  vx: 0, vy: 0,          // velocity px/sec
+  w: 0, h: 0,            // measured craft size
+  ready: false,
+  // ── cloak cycle: visible → fading out → (teleport) → fading in → visible ──
+  phase: 'visible',      // 'visible' | 'out' | 'in'
+  opacity: 1,
+  timer: 0,              // seconds until the next fade-out begins
+};
+const BASE_SPEED = reduceMotion ? 22 : 70;   // px/sec drift
+const FLEE_RADIUS = 170;                      // how close the mouse must get
+const FLEE_FORCE  = 1400;                     // strength of the dodge
+const MAX_SPEED   = 300;                      // cap so a fast mouse can't fling it
+const FADE_OUT_T  = 0.7;                       // seconds to fade away
+const FADE_IN_T   = 0.9;                       // seconds to materialize back
+const VISIBLE_MIN = reduceMotion ? 14 : 6;     // min seconds visible between cloaks
+const VISIBLE_MAX = reduceMotion ? 26 : 15;    // max seconds visible between cloaks
+const mouse = { x: -9999, y: -9999, active: false };
+
+function nextCloakDelay(){
+  return VISIBLE_MIN + Math.random()*(VISIBLE_MAX - VISIBLE_MIN);
+}
+
+addEventListener('pointermove', e => {
+  mouse.x = e.clientX; mouse.y = e.clientY; mouse.active = true;
+}, {passive:true});
+addEventListener('pointerleave', () => { mouse.active = false; });
+addEventListener('blur', () => { mouse.active = false; });
+
+function measure(){
+  const r = stage.getBoundingClientRect();
+  motion.w = r.width; motion.h = r.height;
+}
+
+function initMotion(){
+  measure();
+  // start somewhere random, fully on-screen
+  const maxX = Math.max(0, innerWidth  - motion.w);
+  const maxY = Math.max(0, innerHeight - motion.h);
+  motion.x = maxX * (0.2 + 0.6*Math.random());
+  motion.y = maxY * (0.2 + 0.6*Math.random());
+  // random diagonal heading at constant speed
+  const ang = Math.random()*Math.PI*2;
+  motion.vx = Math.cos(ang)*BASE_SPEED;
+  motion.vy = Math.sin(ang)*BASE_SPEED;
+  motion.ready = true;
+  motion.opacity = 1;
+  motion.phase = 'visible';
+  motion.timer = nextCloakDelay();
+  stage.style.opacity = '1';
+  stage.style.transform = `translate(${motion.x}px,${motion.y}px)`;
+}
+
+function teleport(){
+  // jump to a fresh random spot (away from the cursor) with a new heading
+  const maxX = Math.max(0, innerWidth  - motion.w);
+  const maxY = Math.max(0, innerHeight - motion.h);
+  let nx, ny, tries = 0;
+  do {
+    nx = maxX * Math.random();
+    ny = maxY * Math.random();
+    tries++;
+    // keep clear of the mouse so it doesn't reappear under the cursor
+    const cx = nx + motion.w/2, cy = ny + motion.h/2;
+    const clear = !mouse.active ||
+      Math.hypot(cx - mouse.x, cy - mouse.y) > FLEE_RADIUS + 60;
+    if(clear || tries > 12) break;
+  } while(true);
+  motion.x = nx; motion.y = ny;
+  const ang = Math.random()*Math.PI*2;
+  motion.vx = Math.cos(ang)*BASE_SPEED;
+  motion.vy = Math.sin(ang)*BASE_SPEED;
+}
+
+function stepMotion(dtSec){
+  if(!motion.ready) return;
+  const maxX = Math.max(0, innerWidth  - motion.w);
+  const maxY = Math.max(0, innerHeight - motion.h);
+
+  // ── cloak cycle ──
+  if(motion.phase === 'visible'){
+    motion.opacity = 1;
+    motion.timer -= dtSec;
+    if(motion.timer <= 0){ motion.phase = 'out'; }
+  } else if(motion.phase === 'out'){
+    motion.opacity -= dtSec / FADE_OUT_T;
+    if(motion.opacity <= 0){
+      motion.opacity = 0;
+      teleport();              // relocate while fully invisible
+      motion.phase = 'in';
+    }
+  } else if(motion.phase === 'in'){
+    motion.opacity += dtSec / FADE_IN_T;
+    if(motion.opacity >= 1){
+      motion.opacity = 1;
+      motion.phase = 'visible';
+      motion.timer = nextCloakDelay();
+    }
+  }
+
+  // mouse repulsion: push away from the cursor, ramping up as it nears
+  if(mouse.active){
+    const cx = motion.x + motion.w/2, cy = motion.y + motion.h/2;
+    let dx = cx - mouse.x, dy = cy - mouse.y;
+    let dist = Math.hypot(dx, dy) || 0.0001;
+    if(dist < FLEE_RADIUS){
+      const push = FLEE_FORCE * (1 - dist/FLEE_RADIUS) / dist;
+      motion.vx += dx * push * dtSec;
+      motion.vy += dy * push * dtSec;
+    }
+  }
+
+  // gently relax speed back toward the base drift so dodges don't accumulate
+  const sp = Math.hypot(motion.vx, motion.vy) || 0.0001;
+  const target = BASE_SPEED;
+  const relaxed = sp + (target - sp) * Math.min(1, dtSec*0.8);
+  motion.vx = motion.vx/sp * Math.min(relaxed, MAX_SPEED);
+  motion.vy = motion.vy/sp * Math.min(relaxed, MAX_SPEED);
+
+  // integrate
+  motion.x += motion.vx * dtSec;
+  motion.y += motion.vy * dtSec;
+
+  // bounce off the walls (reflect velocity, clamp inside)
+  if(motion.x <= 0){ motion.x = 0; motion.vx = Math.abs(motion.vx); }
+  else if(motion.x >= maxX){ motion.x = maxX; motion.vx = -Math.abs(motion.vx); }
+  if(motion.y <= 0){ motion.y = 0; motion.vy = Math.abs(motion.vy); }
+  else if(motion.y >= maxY){ motion.y = maxY; motion.vy = -Math.abs(motion.vy); }
+
+  stage.style.transform = `translate(${motion.x}px,${motion.y}px)`;
+  stage.style.opacity = motion.opacity.toFixed(3);
+}
+
+addEventListener('resize', () => { if(motion.ready) measure(); });
+
+function loop(now){
+  const dt = now - last; last = now;
+  // advance the craft's position every frame for smooth drift
+  stepMotion(Math.min(dt/1000, 0.05));
+  // advance the morph animation at the fixed frame rate
+  acc += dt;
+  const interval = 1000/FPS;
+  while(acc >= interval){
+    acc -= interval;
+    if(queue.length < 2) pump();
+    const grid = queue.shift();
+    if(grid) stage.innerHTML = gridToHTML(grid);
+  }
+  requestAnimationFrame(loop);
+}
+
+// seed the first frame immediately so there's no blank flash
+stage.innerHTML = gridToHTML(renderGrid(current));
+pump();
+// measure after layout settles, then start moving
+requestAnimationFrame(() => { initMotion(); requestAnimationFrame(loop); });
+</script>
+</body>
+</html>

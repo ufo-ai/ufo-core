@@ -40,8 +40,8 @@ resource "cloudflare_zone_setting" "always_use_https" {
 }
 
 # One live fleet (testing) behind two front doors: both apexes proxy /install from the testing
-# gateway, whose stamped script boards clients onto that fleet, and land browsers on the one site
-# at the prod apex.
+# gateway, whose stamped script boards clients onto that fleet, and land browsers on the embedded
+# landing page at the prod apex.
 module "prod" {
   source = "../../modules/edge"
 

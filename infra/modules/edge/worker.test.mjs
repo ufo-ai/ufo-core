@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import worker from "./worker.js";
+// The same substitution main.tf applies at deploy, so the tested worker is the shipped artifact.
+const moduleDir = new URL(".", import.meta.url);
+const LANDING_PAGE = await readFile(new URL("landing.html", moduleDir), "utf8");
+const source = (await readFile(new URL("worker.js", moduleDir), "utf8")).replace(
+  '"__LANDING_HTML__"',
+  JSON.stringify(LANDING_PAGE),
+);
+const worker = (
+  await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`)
+).default;
 
 function fakeD1() {
   const rows = new Map();
@@ -49,7 +59,8 @@ test("curl landing renders the card with the live count and https commands", asy
   const reply = await request("https://flyingobject.ai/");
   const body = await reply.text();
   assert.equal(reply.headers.get("content-type"), "text/plain; charset=utf-8");
-  assert.match(body, /0 identified flying objects\./);
+  assert.match(body, /◉ ◉ ◉/);
+  assert.match(body, /0 crafts on waitlist\./);
   assert.match(body, /curl https:\/\/flyingobject\.ai\/waitlist -d email=/);
   assert.match(body, /curl -fsSL https:\/\/flyingobject\.ai\/install \| sh/);
 });
@@ -58,7 +69,7 @@ test("curl landing over plain http gets the card directly", async () => {
   const reply = await request("http://flyingobject.ai/");
   assert.equal(reply.status, 200);
   assert.equal(reply.headers.get("content-type"), "text/plain; charset=utf-8");
-  assert.match(await reply.text(), /identified flying object/);
+  assert.match(await reply.text(), /crafts on waitlist/);
 });
 
 test("browser landing over plain http is bounced to https with its query intact", async () => {
@@ -67,9 +78,10 @@ test("browser landing over plain http is bounced to https with its query intact"
   assert.equal(reply.headers.get("location"), "https://flyingobject.ai/?ref=x");
 });
 
-test("browser landing on the site's own apex proxies root with its query intact", async () => {
+test("browser landing on the site's own apex serves the embedded page", async () => {
   const reply = await request("https://flyingobject.ai/?utm_source=card", { ua: "Mozilla/5.0" });
-  assert.equal(await reply.text(), "origin:https://flyingobject.ai/?utm_source=card");
+  assert.equal(reply.headers.get("content-type"), "text/html; charset=utf-8");
+  assert.equal(await reply.text(), LANDING_PAGE);
 });
 
 test("browser landing on another apex redirects to the site", async () => {
@@ -99,7 +111,7 @@ test("joining is positional, idempotent, and normalizes the email", async () => 
 
 test("a join busts the counter cache so the card reflects it", async () => {
   const body = await (await request("https://flyingobject.ai/")).text();
-  assert.match(body, /2 identified flying objects\./);
+  assert.match(body, /2 crafts on waitlist\./);
 });
 
 test("a malformed email is a 400 and takes no queue slot", async () => {
