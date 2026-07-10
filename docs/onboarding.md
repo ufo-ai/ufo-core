@@ -1,71 +1,75 @@
-# Web onboarding portal structure
+# Onboarding
 
-This documents the structure added by PR #3: a browser presentation for first-run onboarding and
-a tenant setup surface for connecting Slack. The important invariant is that the web portal is only
-a second renderer. It drives the same `Onboarding` claim machine as the terminal client.
+Onboarding is CLI-first: the apex's public face is a Cloudflare edge worker (landing card,
+waitlist, `/install`), and the terminal client is the one onboarding renderer. The gateway serves
+the client script and drives every screen server-side as directives over
+`POST /v1/onboard/{channel}`.
 
 ## Component map
 
 ```text
-                         control plane / apex
-               +------------------------------------+
-Browser        | ufo_control.gateway                | Kubernetes
-GET / -------->|  GET / -> PORTAL_PAGE              | Tenant CRs
-               |  POST /v1/onboard/web             |
-               |       |                            |
-               |       v                            |
-               |  Onboarding.advance(channel=web) --+--> JoinOrProvision
-               |       |                            |
-               |       +--> onboard_claim rows      |
-               |       +--> email code workflow     |
-               |       +--> setup bearer token      |
-               +------------------------------------+
-                                |
-                                | token + workspace directives
-                                v
+                     Cloudflare edge (infra/modules/edge)
+               +--------------------------------------------+
+curl / ------->|  GET /            CLI UA -> landing card   |
+               |                   other UA -> prod site    |
+               |  POST /waitlist   email -> D1; counter     |
+               |  GET /install     proxy of gateway /ufo    |
+               +----------------------+---------------------+
+                                      | origin
+                                      v
+                         control plane / apex gateway
+               +--------------------------------------------+
+ufo client --->|  GET /ufo -> version-stamped POSIX client  |
+               |  POST /v1/onboard/{channel}                |
+               |       |                                    |
+               |       v                                    |
+               |  Onboarding.advance ---------------------->+--> SharedWorkspaces
+               |       +--> onboard_claim rows              |    or JoinOrProvision
+               |       +--> email code workflow             |
+               |       +--> invite_code burn (create only)  |
+               |       +--> bearer token                    |
+               +--------------------------------------------+
+                                      |
+                                      | token + workspace directives -> ~/.ufo/
+                                      v
                          tenant workspace
-               +------------------------------------+
-Browser        | setup surface                      | core
-/surface/setup |  status                            | SurfaceContext
-?token=... --->|  slack/manifest                    |  credential()
-               |  slack/credentials                 |  put_credential()
-               |  slack/test                        |  public_base_url
-               +----------------+-------------------+
-                                |
-                                | fills workspace-global Slack slots
-                                v
-               +------------------------------------+
-Slack          | slack surface                      | core
-Events API --->|  verify signing secret             | blob marker:
-               |  url_verification -> challenge     | workspaces/<ws>/surfaces/slack/url_verified
-               |  message events -> admit turn      |
-               +------------------------------------+
+               +--------------------------------------------+
+Browser        | setup surface                              | core
+/surface/setup |  status · slack/manifest ·                 | SurfaceContext
+?token=... --->|  slack/credentials · slack/test            |  credential()/put_credential()
+               +----------------------+---------------------+
+                                      | fills workspace-global Slack slots
+                                      v
+               +--------------------------------------------+
+Slack          | slack surface                              | blob marker:
+Events API --->|  verify signing secret · admit turns       | workspaces/<ws>/surfaces/slack/
+               +--------------------------------------------+                     url_verified
 ```
 
-The split is deliberate:
+## The apex edge
 
-- `control/src/ufo_control/gateway.py` owns the pre-tenant sign-in and tenant resolution flow.
-- `control/src/ufo_control/gateway_web.py` owns the self-contained browser page and directive JSON
-  conversion.
-- `extensions/setup/ufo_ext_setup/surface.py` owns the tenant-side Slack setup page and APIs.
-- `extensions/slack/ufo_ext_slack/surface.py` owns Slack signature verification, URL verification,
-  event admission, and writeback.
-- `core/src/ufo/ext/surface.py` exposes the privileged surface seam needed by both setup and Slack.
+One worker fronts both apexes (`flyingobject.ai`, `testing.flyingobject.ai`), claiming only three
+paths — every other request passes through to what the host serves:
 
-## Apex onboarding flow
+- `GET /` — curl/wget/httpie get the text landing card (saucer, waitlist counter, install
+  one-liner); any other agent is proxied to the module's `site_base` — both apexes land browsers
+  on the one site at the prod apex.
+- `POST /waitlist -d email=…` — records the email in a per-apex D1 database, idempotent, with a
+  positional ack; the card's "N identified flying objects" counter reads it back (≤1h stale per
+  isolate, busted on join).
+- `GET /install` / `/install.sh` — proxies the gateway's stamped `/ufo` from the module's
+  `origin_base`; both apexes point at the one live fleet.
+
+## Terminal onboarding flow
 
 ```text
-Browser loads apex
+curl -fsSL https://flyingobject.ai/install | sh
   |
-  | GET /
-  v
-PORTAL_PAGE
-  |
-  | POST /v1/onboard/web
-  | header: x-ufo-session=<browser uuid>
+  | POST /v1/onboard/{channel}
+  | header: x-ufo-session=<host.pid.epoch>
   | body: "" or the user's answer
   v
-Onboarding.advance("web", session, body, install=b"")
+Onboarding.advance(channel, session, body, install)
   |
   +-- no claim yet ---------------------> ask for work email
   |
@@ -83,51 +87,29 @@ Onboarding.advance("web", session, body, install=b"")
                                             emit token + workspace directives
 ```
 
+The client is a pure renderer of tab-separated directive lines (`gateway_directives.py`): `say`,
+`ask`, `choose`, `status`, `ufo` (the animation), `poll`, `token`, `workspace`, `install`,
+`sendfile`, `logout`, `exit`. `install` self-installs the script into `~/.ufo/bin` on first run;
+`token` and `workspace` land in `~/.ufo/credentials` (chmod 600) and `~/.ufo/workspace` — the
+token is machine-consumed and never printed.
+
 Creating a workspace is invite-gated; joining an existing one never is. The operator mints codes
 with `ufo-control invite` — the plaintext prints once, only its hash lands in the
 `ufo_control.invite_code` ledger, and redeeming burns the code and stamps the claim's `invite_id`
 in one transaction, so one code opens exactly one workspace and a resolution retry never re-asks
-for it. The shared tier gates identically (`SharedWorkspaces.exists` decides create vs join).
-
-The endpoint returns JSON:
-
-```text
-tab-separated directive bytes
-  -> parse_directives()
-  -> {"directives": [{"verb": "...", "fields": ["..."]}]}
-```
-
-The page renders those directives:
-
-```text
-say       -> transcript line
-ask       -> next form prompt
-status    -> provisioning status line
-poll      -> delayed POST with the same session id
-token     -> saved in page memory only
-workspace -> paired with token to build /surface/setup?token=...
-exit != 0 -> visible error
-```
-
-The terminal and web flows share the same state machine, but not the same claim row unless both the
-channel and session match. The web channel is `"web"`; the terminal keeps its own channel.
+for it. The shared tier gates identically (`SharedWorkspaces.exists` decides create vs join). An
+invalid or used code re-asks and points at the waitlist.
 
 ## Setup handoff
 
-When onboarding completes, the page builds the tenant handoff link:
+The Slack setup page is reached with the credentials the client already holds:
 
 ```text
-workspace directive: https://<tenant>.<base-domain>
-token directive:     <gateway HMAC bearer>
-
-setup URL:
-https://<tenant>.<base-domain>/surface/setup?token=<gateway HMAC bearer>
+$(cat ~/.ufo/workspace)/surface/setup?token=$(cat ~/.ufo/credentials)
 ```
 
-The token is machine-consumed. It is not echoed in a human-visible `say` directive.
-
-On first contact, the setup surface validates the token against the tenant workspace id and binds it
-as a cookie:
+On first contact, the setup surface validates the token against the tenant workspace id and binds
+it as a cookie:
 
 ```text
 GET /surface/setup?token=...
@@ -189,24 +171,10 @@ all slots set, and marker fingerprint matches current signing secret
   -> connected
 ```
 
-The setup page generates a Slack app manifest from the tenant public base URL:
-
-```text
-[connect] public_base_url = https://<tenant>.<base-domain>
-
-events request URL:
-https://<tenant>.<base-domain>/surface/slack
-```
-
-The owner only needs to paste:
-
-```text
-Bot User OAuth Token
-Signing Secret
-```
-
-`slack_team_id` and `slack_bot_user_id` are derived server-side with Slack `auth.test` when they are
-not provided manually.
+The setup page generates a Slack app manifest from the tenant public base URL
+(`[connect] public_base_url`; events request URL `<public_base_url>/surface/slack`). The owner
+pastes only the Bot User OAuth Token and Signing Secret; `slack_team_id` and `slack_bot_user_id`
+are derived server-side with Slack `auth.test` when not provided manually.
 
 ## URL verification signal
 
@@ -252,10 +220,10 @@ next signed request.
 If the marker write fails, the request still succeeds; the marker is only setup status, not the
 Slack contract.
 
-## Why the core seam changed
+## The setup seam
 
-The setup surface configures a peer surface. That requires capabilities normal scoped extensions do
-not have:
+The setup surface configures a peer surface, which requires capabilities normal scoped extensions
+do not have:
 
 ```text
 SurfaceContext
@@ -266,9 +234,8 @@ SurfaceContext
   blob                   read/write the Slack verification marker
 ```
 
-Credential slots are keyed by workspace and slot name, not by extension. The setup surface can
-therefore fill the Slack surface slots without the Slack surface needing a separate setup API.
-
+Credential slots are keyed by workspace and slot name, not by extension, so the setup surface fills
+the Slack surface's slots without the Slack surface needing a separate setup API.
 `CredentialSlotUnset` is re-exported from `ufo.sdk.surfaces` so setup and Slack can distinguish
 "slot absent" from other credential failures without importing private core modules.
 
@@ -298,15 +265,21 @@ request/response surface for configuring Slack.
   or run the Slack test.
 - Blank credential fields keep existing stored values; nothing is written until all provided values
   validate.
-- A transient web POST failure re-shows the last prompt instead of stranding the browser session.
 
 ## File map
 
 ```text
+infra/modules/edge/
+  worker.js               apex landing card, waitlist, install proxy
+  worker.test.mjs         its behavior proof (node --test, ci checks job)
+
 control/src/ufo_control/
-  gateway.py              shared Onboarding machine and apex routes
-  gateway_web.py          browser page and directive JSON parser
+  gateway.py              Onboarding machine and apex routes
+  gateway_directives.py   the directive wire the client renders
+  gateway_claim.py        email -> 6-digit code -> constant-time verify
+  gateway_invite.py       one-time invite codes gating workspace creation
   gateway_token.py        token mint/verify contract used by setup
+  client/ufo              the POSIX terminal client
 
 extensions/setup/ufo_ext_setup/
   manifest.py             setup surface registration

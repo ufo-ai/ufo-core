@@ -1,5 +1,5 @@
-# The apex edge worker: `GET /` answers CLI user-agents with the text landing card (browsers pass
-# through to whatever the host serves), `POST /waitlist` records emails in D1 (the card's counter
+# The apex edge worker: `GET /` answers CLI user-agents with the text landing card (browsers are
+# proxied to the site at `site_base`), `POST /waitlist` records emails in D1 (the card's counter
 # reads them back), and `GET /install(.sh)` proxies the gateway's version-stamped client script.
 # Routes claim only these paths — every other request on the host never touches the worker.
 
@@ -34,6 +34,11 @@ resource "cloudflare_workers_script" "edge" {
       name = "ORIGIN_BASE"
       type = "plain_text"
       text = var.origin_base
+    },
+    {
+      name = "SITE_BASE"
+      type = "plain_text"
+      text = var.site_base
     },
   ]
 }

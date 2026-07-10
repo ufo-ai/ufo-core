@@ -1,11 +1,12 @@
 """The apex onboarding server — a control-plane role, not a tenant workspace.
 
 `GET /ufo` serves the version-stamped POSIX client; `POST /v1/onboard/{channel}` drives the sign-in
-screen as directives. `GET /` and `POST /v1/onboard/web` present the identical machine as a
-self-contained web portal (the same directives returned as JSON; see `gateway_web`). The state is
-the `onboard_claim` row keyed by the client's session, so each POST advances the same claim: no
-email → ask; code pending → verify; verified → resolve to a workspace and sign in. The claim ledger
-is written as the Postgres owner (`onboard_claim` is a platform record, no RLS).
+screen as directives. The apex's public face — the landing card, the waitlist, and `/install` —
+is the Cloudflare edge worker (`infra/modules/edge`) in front of this origin; the terminal client
+is the one onboarding renderer. The state is the `onboard_claim` row keyed by the client's session,
+so each POST advances the same claim: no email → ask; code pending → verify; verified → resolve to
+a workspace and sign in. The claim ledger is written as the Postgres owner (`onboard_claim` is a
+platform record, no RLS).
 
 Resolution has two tiers, picked by `UFO_ONBOARD_TIER`:
 
@@ -28,7 +29,7 @@ from typing import Any
 
 import asyncpg
 from fastapi import FastAPI, Request
-from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
+from starlette.responses import PlainTextResponse, Response
 from ufo.db import dispose_db, init_db
 
 from ufo_control.gateway_claim import ClaimError, ClaimWorkflow
@@ -43,7 +44,6 @@ from ufo_control.gateway_provision import (
 from ufo_control.gateway_shared import SharedWorkspaces, serve_dsn
 from ufo_control.gateway_store import OnboardClaim, OnboardStore
 from ufo_control.gateway_token import TOKEN_SECRET_ENV, mint_token
-from ufo_control.gateway_web import PORTAL_PAGE, WEB_CHANNEL, parse_directives
 from ufo_control.kube import KubeClient
 from ufo_control.members import owner_dsn
 
@@ -178,8 +178,7 @@ class Onboarding:
         """Creating a workspace burns a one-time invite code; joining an existing one never asks.
         None opens the gate — the claim already carries an invite (a resolution retry) or `answer`
         just redeemed one, burning the code and stamping the claim in one transaction — and
-        resolution proceeds in the same advance. The ask avoids the word "code", which the portal
-        renderer takes as its numeric-keyboard cue; invites are alphabetic."""
+        resolution proceeds in the same advance."""
         if claim.invite_id is not None:
             return None
         if not answer:
@@ -226,8 +225,7 @@ class Onboarding:
         self, email: str, workspace_id: str, workspace_url: str, install: bytes
     ) -> bytes:
         # The token travels only in the machine-consumed `token` directive (the client writes it to
-        # a chmod-600 credentials file, never printing it). The web portal builds the tokened
-        # /surface/setup handoff link from this token client-side; the terminal never echoes it.
+        # a chmod-600 credentials file, never printing it).
         token = mint_token(self.token_secret, workspace_id, email)
         return render(
             install,
@@ -322,29 +320,9 @@ def gateway_app() -> FastAPI:
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
-    @app.get("/")
-    async def portal() -> Response:
-        return HTMLResponse(PORTAL_PAGE)
-
     @app.get("/ufo")
     async def serve_script() -> Response:
         return PlainTextResponse(STAMPED_SCRIPT, media_type=SHELLSCRIPT_MEDIA_TYPE)
-
-    @app.post("/v1/onboard/web")
-    async def onboard_web(request: Request) -> Response:
-        """The portal page's wire: the same machine as the terminal channel, its directives
-        returned as JSON for the page's renderer instead of tab-separated lines for the shell."""
-        session = request.headers.get("x-ufo-session")
-        if not session:
-            return JSONResponse({"error": "x-ufo-session header is required"}, status_code=400)
-        body = (await request.body()).decode("utf-8", "replace").strip()
-        flow = _onboarding(state)  # env misconfig raises here → 500, distinct from a flow error
-        try:
-            payload = await flow.advance(WEB_CHANNEL, session, body, b"")
-        except Exception as error:
-            logger.exception("onboard.failed channel=%s", WEB_CHANNEL)
-            payload = render(directive("say", f"error: {error}"), directive("exit", "1"))
-        return JSONResponse({"directives": parse_directives(payload)})
 
     @app.post("/v1/onboard/{channel}")
     async def onboard(channel: str, request: Request) -> Response:

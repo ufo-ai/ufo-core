@@ -67,7 +67,11 @@ async function waitlistCount(db) {
 
 async function landing(request, env, url) {
   if (!CLI_UA.test(request.headers.get("user-agent") ?? "")) {
-    return fetch(request);
+    const site = `${env.SITE_BASE}/${url.search}`;
+    if (url.hostname !== new URL(env.SITE_BASE).hostname) {
+      return Response.redirect(site, 302);
+    }
+    return fetch(new Request(site, request));
   }
   return text(card(url.hostname, await waitlistCount(env.DB)));
 }

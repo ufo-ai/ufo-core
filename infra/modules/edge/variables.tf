@@ -22,3 +22,8 @@ variable "origin_base" {
   type        = string
   description = "Gateway base URL /install proxies the stamped client script from (its /ufo route)."
 }
+
+variable "site_base" {
+  type        = string
+  description = "Site base URL browsers hitting / are proxied to (the host's landing page)."
+}

@@ -35,7 +35,11 @@ globalThis.fetch = async (input) => {
   return new Response(`origin:${url}`);
 };
 
-const env = { DB: fakeD1(), ORIGIN_BASE: "https://testing.flyingobject.ai" };
+const env = {
+  DB: fakeD1(),
+  ORIGIN_BASE: "https://testing.flyingobject.ai",
+  SITE_BASE: "https://flyingobject.ai",
+};
 
 function request(url, { ua = "curl/8.6.0", method = "GET", body } = {}) {
   return worker.fetch(new Request(url, { method, body, headers: { "user-agent": ua } }), env);
@@ -50,9 +54,15 @@ test("curl landing renders the card with the live count and https commands", asy
   assert.match(body, /curl -fsSL https:\/\/flyingobject\.ai\/install \| sh/);
 });
 
-test("browser landing passes through to the host's own site", async () => {
-  const reply = await request("https://flyingobject.ai/", { ua: "Mozilla/5.0" });
-  assert.equal(await reply.text(), "origin:https://flyingobject.ai/");
+test("browser landing on the site's own apex proxies root with its query intact", async () => {
+  const reply = await request("https://flyingobject.ai/?utm_source=card", { ua: "Mozilla/5.0" });
+  assert.equal(await reply.text(), "origin:https://flyingobject.ai/?utm_source=card");
+});
+
+test("browser landing on another apex redirects to the site", async () => {
+  const reply = await request("https://testing.flyingobject.ai/?ref=x", { ua: "Mozilla/5.0" });
+  assert.equal(reply.status, 302);
+  assert.equal(reply.headers.get("location"), "https://flyingobject.ai/?ref=x");
 });
 
 test("joining is positional, idempotent, and normalizes the email", async () => {

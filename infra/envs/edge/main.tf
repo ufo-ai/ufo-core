@@ -3,7 +3,8 @@ data "cloudflare_zone" "flyingobject_ai" {
 }
 
 # One live fleet (testing) behind two front doors: both apexes proxy /install from the testing
-# gateway, whose stamped script boards clients onto that fleet.
+# gateway, whose stamped script boards clients onto that fleet, and land browsers on the one site
+# at the prod apex.
 module "prod" {
   source = "../../modules/edge"
 
@@ -12,6 +13,7 @@ module "prod" {
   zone_id     = data.cloudflare_zone.flyingobject_ai.id
   account_id  = data.cloudflare_zone.flyingobject_ai.account.id
   origin_base = "https://testing.flyingobject.ai"
+  site_base   = "https://flyingobject.ai"
 }
 
 module "testing" {
@@ -22,4 +24,5 @@ module "testing" {
   zone_id     = data.cloudflare_zone.flyingobject_ai.id
   account_id  = data.cloudflare_zone.flyingobject_ai.account.id
   origin_base = "https://testing.flyingobject.ai"
+  site_base   = "https://flyingobject.ai"
 }
