@@ -141,6 +141,28 @@ async def test_pipedream_broker_refuses_a_foreign_account(
         await PipedreamBroker().credential(uuid4(), "gmail", ACCOUNT)
 
 
+async def test_pipedream_broker_says_reconnect_for_an_account_it_does_not_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A feed-sync grant recorded through a previous broker answers 404 on the account read — the
+    run's failure names the repair (reconnect), never a bare not-found."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/oauth/token":
+            return httpx.Response(200, json={"access_token": "at", "expires_in": 3600})
+        return httpx.Response(404, json={"error": "Account not found"})
+
+    client = pipedream.PipedreamClient(
+        client_id=f"cid_{uuid4().hex}",
+        client_secret="s",
+        project_id="proj_test",
+        transport=httpx.MockTransport(handler),
+    )
+    monkeypatch.setattr(pipedream, "pipedream_client", lambda: client)
+    with pytest.raises(pipedream.PipedreamError, match="reconnect with connect_account"):
+        await PipedreamBroker().credential(uuid4(), "gmail", "ca_composio_era")
+
+
 async def test_pipedream_broker_refuses_an_account_on_the_wrong_app(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

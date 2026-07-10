@@ -6,7 +6,9 @@ actions into `BrokerTool`s — an action's input schema is derived from its `con
 with the app slot (the connected account) held back for the broker to bind itself; `execute` runs
 an action on Pipedream's server-side run API with the granted account bound through that slot's
 `authProvisionId` — an unknown key is augmented with the app's real keys so the model's next
-attempt is informed, and an action-level error raises loud; `search` is the same catalog search
+attempt is informed, an action-level error raises loud, and a failure naming an account this
+broker does not hold (a grant that predates it) tells the agent to have the member reconnect;
+`search` is the same catalog search
 (Pipedream has no router, so plan/guidance stay empty); `credential` confirms the account is owned
 by this workspace's external user and connected to this provider's app (metadata, never a token —
 the confused-deputy guard) and returns a `Credential` whose transport proxies provider HTTP through
@@ -20,7 +22,12 @@ from uuid import UUID
 import httpx
 
 from ufo.sdk.authproxy import Credential
-from ufo.sdk.connectors import BrokerSearch, BrokerTool, UnknownBrokerTool
+from ufo.sdk.connectors import (
+    BrokerSearch,
+    BrokerTool,
+    UnknownBrokerTool,
+    stale_grant_guidance,
+)
 from ufo_ext_pipedream import client as pipedream
 from ufo_ext_pipedream.client import APP_PROP_TYPE, ConnectorSpec, PipedreamError
 from ufo_ext_pipedream.proxy import PipedreamProxyTransport
@@ -77,12 +84,20 @@ class PipedreamBroker:
             raise await self._key_miss(client, provider, slug) from missing
         configured: dict[str, object] = dict(arguments)
         configured[_app_slot(definition, slug)] = {"authProvisionId": account_id}
-        response = await client.run_action(
-            slug, f"{pipedream.EXTERNAL_USER_PREFIX}{workspace_id}", configured
-        )
-        error = response.get("error")
-        if error:
-            raise PipedreamError(502, json.dumps(error))
+        try:
+            response = await client.run_action(
+                slug, f"{pipedream.EXTERNAL_USER_PREFIX}{workspace_id}", configured
+            )
+        except PipedreamError as error:
+            raise (
+                _reconnect_error(error, provider) if _stale_account(error, account_id) else error
+            ) from error
+        action_error = response.get("error")
+        if action_error:
+            failed = PipedreamError(502, json.dumps(action_error))
+            raise (
+                _reconnect_error(failed, provider) if _stale_account(failed, account_id) else failed
+            )
         return response
 
     async def search(self, workspace_id: UUID, provider: str, query: str) -> BrokerSearch:
@@ -92,7 +107,12 @@ class PipedreamBroker:
         spec = _spec(provider)
         external_user = f"{pipedream.EXTERNAL_USER_PREFIX}{workspace_id}"
         client = pipedream.pipedream_client()
-        connected = await client.connected_account(account, external_user)
+        try:
+            connected = await client.connected_account(account, external_user)
+        except PipedreamError as error:
+            if error.status != NOT_FOUND:
+                raise
+            raise _reconnect_error(error, provider) from error
         if connected.app != spec.app:
             raise PipedreamError(
                 409,
@@ -132,6 +152,20 @@ class PipedreamBroker:
         return PipedreamError(
             NOT_FOUND, f"no action {slug!r} on {app!r} — actions available: {names}"
         )
+
+
+def _stale_account(error: PipedreamError, account_id: str) -> bool:
+    """Whether a run failure names an unknown external user or account — Pipedream's shapes of the
+    stale-grant signature `stale_grant_guidance` answers. Matching is deliberately narrow: only
+    Connect's own vocabulary ("external user") or the granted account id itself, so a
+    provider-domain error that happens to say some upstream object's account was not found never
+    masquerades as a stale grant."""
+    body = error.body.lower()
+    return "external user not found" in body or (account_id.lower() in body and "not found" in body)
+
+
+def _reconnect_error(error: PipedreamError, provider: str) -> PipedreamError:
+    return PipedreamError(error.status, f"{error.body} — {stale_grant_guidance(provider)}")
 
 
 def _spec(provider: str) -> ConnectorSpec:

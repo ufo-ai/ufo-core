@@ -3,8 +3,10 @@
 Each method resolves the deploy's broker client per call (so a test's transport override is
 honoured) and speaks for one provider by its toolkit slug. `tools`/`schema` project the Composio
 catalog into `BrokerTool`s; `execute` runs a tool on Composio's server-side execute API under this
-workspace's broker user — a 404 is augmented with the toolkit's real slugs so the model's next
-attempt is informed, not another blind guess; `search` rides the Tool Router; `credential` confirms
+workspace's broker user — a slug 404 is augmented with the toolkit's real slugs so the model's next
+attempt is informed, and a failure naming an account this broker does not hold (a grant that
+predates it, or a broker org rotation) tells the agent to have the member reconnect instead of
+answering with tool slugs; `search` rides the Tool Router; `credential` confirms
 the account is owned by this workspace's broker user (metadata, never a token — the confused-deputy
 guard) and returns a `Credential` whose transport proxies provider HTTP through Composio's
 proxy-execute, so a feed-sync source holds no secret."""
@@ -17,7 +19,12 @@ from uuid import UUID
 import httpx
 
 from ufo.sdk.authproxy import Credential
-from ufo.sdk.connectors import BrokerSearch, BrokerTool, UnknownBrokerTool
+from ufo.sdk.connectors import (
+    BrokerSearch,
+    BrokerTool,
+    UnknownBrokerTool,
+    stale_grant_guidance,
+)
 from ufo_ext_composio import client as composio
 from ufo_ext_composio.proxy import ComposioProxyTransport
 
@@ -68,6 +75,8 @@ class ComposioBroker:
                 idempotency_key=idempotency_key,
             )
         except composio.ComposioError as error:
+            if _stale_account(error, account_id):
+                raise _reconnect_error(error, provider) from error
             if error.status != NOT_FOUND:
                 raise
             raise await self._slug_miss(client, provider, slug, error) from error
@@ -80,7 +89,12 @@ class ComposioBroker:
     async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
         broker_user = f"{composio.EXTERNAL_USER_PREFIX}{workspace_id}"
         client = composio.composio_client()
-        await client.connected_account(account, broker_user)
+        try:
+            await client.connected_account(account, broker_user)
+        except composio.ComposioError as error:
+            if error.status != NOT_FOUND:
+                raise
+            raise _reconnect_error(error, provider) from error
         return Credential(
             transport=ComposioProxyTransport(
                 api_base=composio.COMPOSIO_API_BASE,
@@ -113,6 +127,24 @@ class ComposioBroker:
         return composio.ComposioError(
             error.status, f"{error.body} — tools available on {toolkit}: {names}"
         )
+
+
+def _stale_account(error: composio.ComposioError, account_id: str) -> bool:
+    """Whether an execute failure names an unknown connected account — Composio's shapes of the
+    stale-grant signature `stale_grant_guidance` answers, on any status (a dead account surfaces
+    as 400 or 404). Matching is deliberately narrow: only Composio's own vocabulary ("connected
+    account") or the granted account id itself, so a provider-domain error that happens to say
+    some upstream object's account was not found never masquerades as a stale grant — and is
+    distinguished from a slug miss so a dead account is never answered with a list of tool
+    slugs."""
+    body = error.body.lower()
+    return ("connected account" in body and "not found" in body) or (
+        account_id.lower() in body and "not found" in body
+    )
+
+
+def _reconnect_error(error: composio.ComposioError, provider: str) -> composio.ComposioError:
+    return composio.ComposioError(error.status, f"{error.body} — {stale_grant_guidance(provider)}")
 
 
 def _toolkit(provider: str) -> str:

@@ -25,6 +25,9 @@ from ufo.connectors import (
 from ufo.connectors import (
     UnknownBrokerTool as UnknownBrokerTool,
 )
+from ufo.connectors import (
+    stale_grant_guidance as stale_grant_guidance,
+)
 from ufo.grants import (
     OAuthAccount as OAuthAccount,
 )

@@ -502,6 +502,91 @@ async def test_call_external_tool_augments_an_unknown_key_with_the_real_actions(
         )
 
 
+async def test_call_external_tool_with_a_stale_grant_says_reconnect(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failure observed live on testing: a gmail grant recorded through a previous broker
+    resolves normally, but Pipedream knows no such external user — the error must route the agent
+    into the connect flow, never read as an outage."""
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    turn_id = await _turn(workspace_id, agent_id, conversation_id)
+    store = GrantStore()
+    await store.record(
+        workspace_id=workspace_id,
+        agent_id=agent_id,
+        provider=PROVIDER,
+        account_id="ca_composio_era",
+        host=PROVIDER_HOST,
+        grantor_member_id=member_id,
+        conversation_id=conversation_id,
+    )
+    base = _pipedream_handler(f"ufo_{workspace_id}")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path.endswith("/actions/run"):
+            return httpx.Response(404, json={"error": "External user not found"})
+        return base(request)
+
+    _install_transport(monkeypatch, handler)
+    ctx = _ctx(workspace_id, agent_id, conversation_id, turn_id, store)
+    with pytest.raises(pipedream.PipedreamError, match="reconnect with connect_account"):
+        await call_external_tool(
+            ctx,
+            CallExternalToolInput(tool_name=GMAIL_ACTION, source_id=PROVIDER, arguments={}),
+        )
+
+
+async def test_an_in_band_action_error_says_reconnect_only_for_a_stale_account(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`actions/run` can fail in-band — a 200 whose body carries `error` — and that path must make
+    the same stale-account call: a body naming the unknown external user routes the agent to
+    reconnect, while a provider-domain error that merely says some upstream account was not found
+    raises plain, its shape untouched — never a false reconnect."""
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    turn_id = await _turn(workspace_id, agent_id, conversation_id)
+    store = GrantStore()
+    await store.record(
+        workspace_id=workspace_id,
+        agent_id=agent_id,
+        provider=PROVIDER,
+        account_id="ca_composio_era",
+        host=PROVIDER_HOST,
+        grantor_member_id=member_id,
+        conversation_id=conversation_id,
+    )
+    base = _pipedream_handler(f"ufo_{workspace_id}")
+    in_band_error: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path.endswith("/actions/run"):
+            return httpx.Response(200, json={"exports": {}, "os": [], "error": in_band_error})
+        return base(request)
+
+    _install_transport(monkeypatch, handler)
+    ctx = _ctx(workspace_id, agent_id, conversation_id, turn_id, store)
+
+    in_band_error.update({"name": "Error", "message": "External user not found"})
+    with pytest.raises(pipedream.PipedreamError, match="reconnect with connect_account"):
+        await call_external_tool(
+            ctx,
+            CallExternalToolInput(tool_name=GMAIL_ACTION, source_id=PROVIDER, arguments={}),
+        )
+
+    in_band_error.clear()
+    in_band_error.update({"name": "Error", "message": "CRM account not found for id 123"})
+    with pytest.raises(pipedream.PipedreamError) as raised:
+        await call_external_tool(
+            ctx,
+            CallExternalToolInput(tool_name=GMAIL_ACTION, source_id=PROVIDER, arguments={}),
+        )
+    assert "connect_account" not in str(raised.value)
+
+
 async def test_complete_rejects_a_consent_that_produced_no_owned_account(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

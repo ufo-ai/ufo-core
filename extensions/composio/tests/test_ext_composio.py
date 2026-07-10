@@ -425,6 +425,45 @@ async def test_call_external_tool_augments_a_404_with_the_real_slugs(
         )
 
 
+async def test_call_external_tool_with_a_stale_account_says_reconnect(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An execute failure naming the granted account (a grant this broker no longer holds — an org
+    or key rotation) routes the agent into the connect flow, never into the slug-miss augmentation
+    that would answer a dead account with a list of tools."""
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    turn_id = await _turn(workspace_id, agent_id, conversation_id)
+    store = GrantStore()
+    await store.record(
+        workspace_id=workspace_id,
+        agent_id=agent_id,
+        provider=PROVIDER,
+        account_id=COMPOSIO_ACCOUNT,
+        host=PROVIDER_HOST,
+        grantor_member_id=member_id,
+        conversation_id=conversation_id,
+    )
+    base = _composio_handler(COMPOSIO_USER)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and "/tools/execute/" in request.url.path:
+            return httpx.Response(
+                404, json={"error": f"connected account {COMPOSIO_ACCOUNT} not found"}
+            )
+        return base(request)
+
+    client = composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(composio, "composio_client", lambda: client)
+    ctx = _ctx(workspace_id, agent_id, conversation_id, turn_id, store)
+    with pytest.raises(composio.ComposioError, match="reconnect with connect_account"):
+        await call_external_tool(
+            ctx,
+            CallExternalToolInput(tool_name=GITHUB_SLUG, source_id=PROVIDER, arguments={}),
+        )
+
+
 async def test_complete_rejects_an_account_owned_by_a_foreign_composio_user(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

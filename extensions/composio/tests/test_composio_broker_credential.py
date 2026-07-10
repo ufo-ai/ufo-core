@@ -71,3 +71,18 @@ async def test_composio_broker_refuses_a_foreign_account(
     monkeypatch.setattr(composio, "composio_client", lambda: _client(foreign, {"data": []}))
     with pytest.raises(composio.ComposioError, match="owned by"):
         await ComposioBroker().credential(uuid4(), "asana", ACCOUNT)
+
+
+async def test_composio_broker_says_reconnect_for_an_account_it_does_not_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A feed-sync grant this broker no longer holds answers 404 on the account read — the run's
+    failure names the repair (reconnect), never a bare not-found."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"error": "not found"})
+
+    client = composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(composio, "composio_client", lambda: client)
+    with pytest.raises(composio.ComposioError, match="reconnect with connect_account"):
+        await ComposioBroker().credential(uuid4(), "asana", ACCOUNT)

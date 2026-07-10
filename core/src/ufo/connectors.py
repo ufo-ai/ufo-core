@@ -76,6 +76,16 @@ class UnknownBrokerTool(LookupError):
     into its `unresolved` answer instead of failing the call."""
 
 
+def stale_grant_guidance(provider: str) -> str:
+    """The suffix a broker appends when a failure names an account it does not hold — a grant made
+    through a previous broker, or a broker key/org rotation. The agent cannot repair that by
+    retrying, so the error says what can: ask the member to reconnect."""
+    return (
+        f"the {provider!r} grant references an account this broker does not recognize (it likely "
+        "predates the current broker); ask the member to reconnect with connect_account"
+    )
+
+
 @dataclass(frozen=True)
 class BrokerTool:
     """One provider tool as its broker catalogs it: the executable slug, a short description, and
