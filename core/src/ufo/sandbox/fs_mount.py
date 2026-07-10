@@ -14,7 +14,6 @@ from ufo.sandbox.fs_creds import SANDBOX_FS_CRED_TTL_SECONDS, SandboxFsCredentia
 AWS_CREDENTIALS_PATH = "/home/user/.aws/credentials"
 FUSE_DEVICE = "/dev/fuse"
 FUSE_CONF = "/etc/fuse.conf"
-AGENT_USER = "user"
 MOUNT_TIMEOUT_SECONDS = 30
 MOUNT_HEALTH_CHECK_TIMEOUT_SECONDS = 10
 MOUNT_CREDENTIAL_MAX_AGE_SECONDS = SANDBOX_FS_CRED_TTL_SECONDS // 2
@@ -64,22 +63,21 @@ def mount_scripts(mountpoint: str, s3fs: str) -> tuple[str, str]:
 
     prepare: open /dev/fuse to the agent user (root-only in the image); enable `user_allow_other` so
     a non-root mount may pass `allow_other` (needed so a root daemon can serve the agent's file
-    tools over the mount); lazily detach whatever is at the mountpoint — a reused sandbox may still
-    hold a prior mount, and mounting s3fs over an existing one is undefined, while `umount -l` is a
-    no-op on a fresh sandbox; then create the mountpoint and hand it to the agent user — the image
-    ships WITHOUT it, `/` is root-owned, and the image carries no sudo, so only this root step can
-    bring it into being.
+    tools over the mount); and lazily detach whatever is at the mountpoint — a reused sandbox may
+    still
+    hold a prior mount, and mounting s3fs over an existing one is undefined; `umount -l` is a no-op
+    on a fresh sandbox.
 
-    mount: lock down the credentials file, then mount with this bring-up's credential."""
+    mount: create the mountpoint — the image ships WITHOUT it and s3fs refuses to mount a path that
+    does not exist — lock down the credentials file, then mount with this bring-up's credential."""
     mp = shlex.quote(mountpoint)
     prepare = (
         f"chmod 666 {FUSE_DEVICE}; "
         f"grep -qxF user_allow_other {FUSE_CONF} 2>/dev/null "
         f"|| echo user_allow_other >> {FUSE_CONF}; "
-        f"umount -l {mp} 2>/dev/null || true; "
-        f"mkdir -p {mp} && chown {AGENT_USER} {mp}"
+        f"umount -l {mp} 2>/dev/null || true"
     )
-    mount = f"chmod 600 {AWS_CREDENTIALS_PATH} && {s3fs}"
+    mount = f"mkdir -p {mp} && chmod 600 {AWS_CREDENTIALS_PATH} && {s3fs}"
     return prepare, mount
 
 

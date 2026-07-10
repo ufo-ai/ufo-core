@@ -211,7 +211,9 @@ async def test_create_mounts_the_s3_workspace_prefix_over_s3fs() -> None:
     commands = [cmd for cmd, _, _ in sandbox.commands.runs]
     assert commands[0] == mount_health_check(WORKSPACE_DIR)
     assert "chmod 666 /dev/fuse" in commands[1]
-    assert commands[2].startswith(f"chmod 600 {AWS_CREDENTIALS_PATH} && ")
+    assert commands[2].startswith(
+        f"mkdir -p {WORKSPACE_DIR} && chmod 600 {AWS_CREDENTIALS_PATH} && "
+    )
     assert f"s3fs ufo-blobs:/conversations/{conversation}/workspace {WORKSPACE_DIR}" in commands[2]
     assert "-o url=https://minio:9000" in commands[2]
     assert "-o use_path_request_style" in commands[2]
