@@ -66,6 +66,7 @@ def main() -> None:
     prepare, mount = mount_scripts(WORKSPACE_DIR, s3fs)
     sandbox = Sandbox.create(template=args.template, timeout=SANDBOX_TIMEOUT_SECONDS)
     try:
+        sandbox.files.make_dir(WORKSPACE_DIR)
         sandbox.files.write(AWS_CREDENTIALS_PATH, aws_credentials_file(credentials))
         sandbox.commands.run(prepare, user="root", timeout=MOUNT_TIMEOUT_SECONDS)
         sandbox.commands.run(mount, timeout=MOUNT_TIMEOUT_SECONDS)
