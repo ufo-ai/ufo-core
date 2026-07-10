@@ -1,17 +1,15 @@
 """The CLI surface: bearer-token identity, turn admission, live stream, cancel, OAuth callback."""
 
 import hashlib
-from collections.abc import AsyncIterator, Callable, Coroutine
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from dbos import DBOSClient
 from fastapi import APIRouter, Header, HTTPException, Request
-from fastapi.responses import PlainTextResponse, Response, StreamingResponse
-from fastapi.routing import APIRoute
+from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from ufo.db import current_workspace, workspace_tx
 from ufo.governance import Governance
@@ -28,35 +26,12 @@ from ufo.schema.records import DEFAULT_AGENT_NAME, TerminalFrame
 from ufo.session_token import SessionTokenError, verify_session_token
 from ufo.surfaces.admission import Admission
 from ufo.surfaces.hub_tail import tail_frames, terminal_frame
-from ufo.surfaces.scope import ScopedResponse
 
 MAX_INBOUND_CHARS = 200_000
 CORE_PROPOSER = "core"
 CONNECT_CALLBACK_PATH = "/v1/connect/callback"
 
-
-class _SharedScopeRoute(APIRoute):
-    """The shared fleet binds each request's workspace as the ambient `current_workspace` inside the
-    handler (`_authenticate_shared`) and must release it once the response — a live turn tails the
-    hub, reading the durable turn under RLS after the handler returns — has fully streamed. This
-    wraps every route's response in a `ScopedResponse` on the shared fleet, releasing the binding in
-    the request's own task at the response's true end, never left for the next request reusing the
-    task's context to inherit. A per-tenant deploy pins its one workspace by role default and binds
-    nothing here, so its responses return unwrapped."""
-
-    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
-        inner = super().get_route_handler()
-
-        async def scoped(request: Request) -> Response:
-            response = await inner(request)
-            if request.app.state.shared_workspace:
-                return ScopedResponse(response)
-            return response
-
-        return scoped
-
-
-router = APIRouter(prefix="/v1", route_class=_SharedScopeRoute)
+router = APIRouter(prefix="/v1")
 
 
 @dataclass(frozen=True)
@@ -94,8 +69,9 @@ def _authenticate_shared(request: Request, token: str) -> CliIdentity:
     to it. There is no surface_identity lookup — that read would itself need the scope the token
     supplies, the chicken-and-egg the signed claim exists to break. The binding outlives this call
     (a live turn's StreamingResponse tails the hub, reading the durable turn under RLS after the
-    handler returns) and is released once the whole response is sent by `_SharedScopeRoute`, so no
-    request leaves it bound for the next request reusing the task's context."""
+    handler returns); the shared fleet's `WorkspaceScopeBoundary` releases it once the whole
+    response is sent — a raise after this bind included — so no request leaves it bound for the
+    next request reusing the task's context."""
     try:
         claims = verify_session_token(
             token, request.app.state.session_token_secret, datetime.now(UTC)

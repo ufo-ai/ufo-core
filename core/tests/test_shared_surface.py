@@ -4,13 +4,13 @@ its token claims. The token *is* the identity — there is no surface_identity l
 is the chicken-and-egg the signed claim breaks. RLS enforcement itself is a Postgres concern proven
 against the live database; here on sqlite we prove the token→workspace resolution and admission.
 
-We also prove the binding *lifecycle* the RLS scope rests on: the shared mount holds the request's
-workspace bound through the whole streamed response (the hub tail reads the durable turn after the
-handler returns) and releases it once the response is sent, so no request leaves a stale binding for
-the next occupant of its task to inherit, and a request whose task starts already carrying a stale
-binding still scopes to its own. httpx's ASGITransport runs each request in this test's own
-task/context, so — unlike a cross-request leak, which set-before-read masks — the post-response
-binding is directly observable here.
+We also prove the binding *lifecycle* the RLS scope rests on: `WorkspaceScopeBoundary` holds the
+request's workspace bound through the whole streamed response (the hub tail reads the durable turn
+after the handler returns) and releases it once the response is sent — a handler that raises after
+binding included — so no request leaves a stale binding for the next occupant of its task to
+inherit, and a request whose task starts already carrying one begins clean. httpx's ASGITransport
+runs each request in this test's own task/context, so — unlike a cross-request leak, which
+set-before-read masks — the post-response binding is directly observable here.
 """
 
 from collections.abc import AsyncIterator
@@ -20,7 +20,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from httpx import ASGITransport, AsyncClient
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
@@ -33,7 +33,7 @@ from ufo.ext.surface import SurfaceContext, SurfaceRoute, SurfaceSpec
 from ufo.hub import InProcessHub
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME, TerminalFrame
-from ufo.serve import _mount_shared_surfaces
+from ufo.serve import WorkspaceScopeBoundary, _mount_shared_surfaces
 from ufo.session_token import SESSION_TOKEN_TTL_SECONDS, mint_session_token
 from ufo.surfaces.cli import router
 
@@ -89,6 +89,7 @@ def _token(secret: str, member_id: UUID, workspace_id: UUID) -> str:
 
 def _app(dbos: StubDbos) -> FastAPI:
     app = FastAPI()
+    app.add_middleware(WorkspaceScopeBoundary)
     app.state.hub = InProcessHub()
     app.state.dbos = dbos
     app.state.durable_surfaces = frozenset()
@@ -182,10 +183,20 @@ async def _probe_handler(ctx: SurfaceContext, request: Request) -> Response:
     return StreamingResponse(frames(), media_type="text/plain")
 
 
+async def _probe_boom(ctx: SurfaceContext, request: Request) -> Response:
+    """A route that raises after the mount has bound the request's workspace: the error path where
+    no response object ever exists to carry a release, so only the boundary's `finally` covers
+    it."""
+    raise HTTPException(404, "no such probe")
+
+
 def _probe_app(tmp_path: Path) -> FastAPI:
     surface = SurfaceSpec(
         name=PROBE_SURFACE,
-        routes=(SurfaceRoute(method="POST", path="ping", handler=_probe_handler),),
+        routes=(
+            SurfaceRoute(method="POST", path="ping", handler=_probe_handler),
+            SurfaceRoute(method="POST", path="boom", handler=_probe_boom),
+        ),
         identify=_probe_workspace,
     )
     app = FastAPI()
@@ -226,9 +237,9 @@ async def test_shared_surface_holds_the_binding_through_the_stream_then_releases
 
 async def test_shared_surface_scopes_over_a_stale_inherited_binding(tmp_path: Path) -> None:
     """A request whose task begins already carrying another workspace's binding — the cpython
-    per-task context-copy leak the reset defends against — still scopes to its own: the endpoint
-    binds before anything reads, so the stale value never reaches the stream, and the request's own
-    binding does not survive it."""
+    per-task context-copy leak the boundary defends against — still scopes to its own: the boundary
+    clears the stale value on entry and the endpoint binds its own before anything reads, so the
+    stale value never reaches the stream, and no binding survives the request."""
     stale, own = uuid4(), uuid4()
     stale_token = current_workspace.set(stale)
     try:
@@ -238,9 +249,25 @@ async def test_shared_surface_scopes_over_a_stale_inherited_binding(tmp_path: Pa
         assert reply.status_code == 200, reply.text
         assert f"stream-ws={own}" in reply.text
         assert str(stale) not in reply.text
-        assert current_workspace.get() != own
+        assert current_workspace.get() is None
     finally:
         current_workspace.reset(stale_token)
+
+
+async def test_shared_surface_releases_the_binding_when_the_handler_raises(tmp_path: Path) -> None:
+    """A handler that raises after the mount bound the request's workspace still releases it: the
+    raise means no response object ever exists to carry a release (the 404 is rendered by the app's
+    exception handler), so only the boundary's `finally`, outside the route, reaches this path."""
+    baseline = current_workspace.set(None)
+    ws = uuid4()
+    try:
+        app = _probe_app(tmp_path)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://fleet") as client:
+            reply = await client.post("/surface/probe/boom", headers={"x-workspace": str(ws)})
+        assert reply.status_code == 404, reply.text
+        assert current_workspace.get() is None
+    finally:
+        current_workspace.reset(baseline)
 
 
 async def _seed_terminal_turn(workspace_id: UUID, member_id: UUID) -> UUID:
@@ -284,10 +311,10 @@ async def _seed_terminal_turn(workspace_id: UUID, member_id: UUID) -> UUID:
 
 async def test_shared_cli_chat_releases_the_binding_and_scopes_over_a_stale_one(db: None) -> None:
     """The shared CLI's `/v1/chat` binds the token's workspace in `_authenticate_shared` and admits
-    its turn there even when the request's task starts carrying a stale binding (set-before-read),
-    and `_SharedScopeRoute` releases the binding once the response is sent. Removing the wrap would
-    leave the request's workspace bound in this task's context after it returns (observable here,
-    since ASGITransport shares the context)."""
+    its turn there even when the request's task starts carrying a stale binding, and
+    `WorkspaceScopeBoundary` releases the binding once the response is sent. Removing the boundary
+    would leave the request's workspace bound in this task's context after it returns (observable
+    here, since ASGITransport shares the context)."""
     ws, member = await _seed_workspace("cli-a@x.test")
     stale = uuid4()
     stale_token = current_workspace.set(stale)
@@ -306,7 +333,7 @@ async def test_shared_cli_chat_releases_the_binding_and_scopes_over_a_stale_one(
         assert reply.status_code == 200, reply.text
         turn_id = UUID(reply.json()["turn_id"])
         assert await _turn_workspace(turn_id) == ws
-        assert current_workspace.get() != ws
+        assert current_workspace.get() is None
     finally:
         current_workspace.reset(stale_token)
 
@@ -329,6 +356,26 @@ async def test_shared_cli_stream_releases_the_binding_after_the_streamed_respons
             )
         assert reply.status_code == 200, reply.text
         assert reply.text.strip(), "the stream delivered no frame"
+        assert current_workspace.get() is None
+    finally:
+        current_workspace.reset(baseline)
+
+
+async def test_shared_cli_releases_the_binding_when_the_route_raises_after_binding() -> None:
+    """`/v1/chat` raises 400 (missing x-ufo-session) after `_authenticate_shared` has bound the
+    token's workspace: no response object ever exists to carry a release, so only the boundary's
+    `finally`, outside the route, keeps the binding from surviving into the task's next request."""
+    ws, member = uuid4(), uuid4()
+    baseline = current_workspace.set(None)
+    app = _app(StubDbos())
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://fleet") as client:
+            reply = await client.post(
+                "/v1/chat",
+                headers={"authorization": f"Bearer {_token(SECRET, member, ws)}"},
+                content=b"hi",
+            )
+        assert reply.status_code == 400, reply.text
         assert current_workspace.get() is None
     finally:
         current_workspace.reset(baseline)
