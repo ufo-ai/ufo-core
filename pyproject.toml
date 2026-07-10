@@ -156,7 +156,7 @@ target-version = "py312"
 extend-exclude = ["extensions/**/skills/**", ".worktrees"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B", "ASYNC", "PTH", "RUF", "TID"]
+select = ["E", "F", "W", "I", "UP", "B", "ASYNC", "PTH", "RUF", "TID", "ERA"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["ufo"]
