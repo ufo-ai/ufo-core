@@ -80,6 +80,7 @@ from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.surfaces.artifacts import router as artifacts_router
 from ufo.surfaces.cli import CONNECT_CALLBACK_PATH, router
 from ufo.surfaces.hub_tail import HubTailer
+from ufo.surfaces.scope import ScopedResponse
 from ufo.workspace import init_workspace_credentials, ws
 
 PROXY_STARTUP_TIMEOUT_SECONDS = 30
@@ -689,9 +690,12 @@ def _mount_shared_surfaces(
     """Mount each shared-fleet-capable surface's routes on the shared fleet, resolving the workspace
     per request instead of pinning one at boot: `SurfaceSpec.identify` verifies the request's signed
     bearer and returns the workspace it claims, which the endpoint binds for the whole request (an
-    unresolved token is a 401). It binds via `current_workspace.set`, not a `with ws(...)` block,
-    because a live surface returns a StreamingResponse whose hub tail runs — and reads the durable
-    turn under RLS — after the handler returns; the scope must outlive the call. The per-request
+    unresolved token is a 401). It binds via `current_workspace.set` and releases that binding once
+    the response has fully streamed (`ScopedResponse`) — not a `with ws(...)` block, which resets
+    when the handler returns and would cut the scope out from under the live surface's
+    StreamingResponse, whose hub tail reads the durable turn under RLS *after* the handler returns.
+    Every shared request thus leaves the workspace unbound — the request→workspace boundary is
+    enforced here, never left to per-task context isolation to clean up. The per-request
     SurfaceContext carries an `AdmissionInvoker` bound to that workspace so its admitted turn lands
     scoped to the token's workspace and no other.
 
@@ -732,7 +736,7 @@ def _mount_shared_surfaces(
                         _artifact_token_secret=artifact_secret,
                         _public_base_url=public_base_url,
                     )
-                    return await handler(context, request)
+                    return ScopedResponse(await handler(context, request))
 
                 app.add_route(
                     f"/surface/{spec.name}/{route.path}".rstrip("/"),
