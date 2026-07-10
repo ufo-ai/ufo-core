@@ -5,7 +5,8 @@ A surface is trusted infrastructure — it asserts a member's identity and admit
 trajectory corpus), a surface context carries privileged capabilities a scoped extension may not
 hold: admit a turn onto the durable queue (the same `invoke` scheduled tasks and the eval harness
 call), resolve an external id to a member and a conversation (linking a `surface_identity` on first
-contact), and read the workspace's credential slots in-process.
+contact — and joining a channel-verified email whose domain is the workspace's own as a new
+member), and read the workspace's credential slots in-process.
 
 One `SurfaceSpec`/`SurfaceContext` expresses both shapes of surface, differing only in how the reply
 gets back and thus in how much of the one context each uses:
@@ -136,6 +137,13 @@ class Writeback:
     question: AskUserInput | None
 
 
+def _email_domain(email: str) -> str:
+    """The address's domain, lowercased — empty for anything that is not `local@domain`, so a
+    malformed value can never satisfy a domain match."""
+    local, _, domain = email.strip().lower().rpartition("@")
+    return domain if local and domain else ""
+
+
 @dataclass(frozen=True)
 class SurfaceContext:
     """The privileged handle a surface's route handlers receive — one context spanning both delivery
@@ -226,6 +234,14 @@ class SurfaceContext:
         owner (RFC 0011 defers roles). A setup surface gates workspace-wide changes — connecting
         the one shared Slack app every member talks to — to the owner, so a joined teammate cannot
         overwrite the whole workspace's channel credentials."""
+        owner = await self._owner_email()
+        return owner is not None and owner.strip().lower() == email.strip().lower()
+
+    async def _owner_email(self) -> str | None:
+        """The earliest member's email. Their domain doubles as the workspace's own domain: the
+        owner onboarded through provisioning's vetted domain match, and the workspace stores no
+        domain of its own (the shared tier derives its id from the domain; the enterprise tier
+        labels the Tenant CR)."""
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
@@ -235,7 +251,7 @@ class SurfaceContext:
                     .limit(1)
                 )
             ).one_or_none()
-        return row is not None and row.email.strip().lower() == email.strip().lower()
+        return None if row is None else row.email
 
     async def adopt_identity(self, peer_surface: str, external_id: str) -> UUID | None:
         """Link this surface's external id to the member a peer surface already knows it by, so one
@@ -293,8 +309,38 @@ class SurfaceContext:
             log("surface.identity_link_race", surface=self.surface, external_id=external_id)
         return member.id
 
+    async def join_member(self, external_id: str, email: str) -> UUID | None:
+        """`link_member`, plus the domain-match join: an email with no member row whose domain is
+        the workspace's own — the owner's email domain — creates the member and links it in one
+        step, so a teammate becomes a member on first contact and only the owner ever onboards
+        through provisioning. The surface asserting the email is the trust anchor: it calls this
+        only with an email its channel verified. A foreign-domain email stays unlinked; a lost
+        creation race collapses on the member's (workspace_id, email) uniqueness and links the
+        surviving row."""
+        linked = await self.link_member(external_id, email)
+        if linked is not None:
+            return linked
+        owner = await self._owner_email()
+        domain = _email_domain(email)
+        if owner is None or not domain or domain != _email_domain(owner):
+            return None
+        try:
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.insert(tables.member).values(
+                        id=uuid4(),
+                        workspace_id=self.workspace_id,
+                        email=email.strip().lower(),
+                        created_at=sa.func.now(),
+                        updated_at=sa.func.now(),
+                    )
+                )
+        except sa.exc.IntegrityError:
+            log("surface.member_join_race", surface=self.surface, external_id=external_id)
+        return await self.link_member(external_id, email)
+
     def _conversation_lookup(self, queue_key: str) -> sa.Select:
-        return sa.select(tables.conversation.c.id).where(
+        return sa.select(tables.conversation.c.id, tables.conversation.c.member_id).where(
             tables.conversation.c.workspace_id == self.workspace_id,
             tables.conversation.c.surface == self.surface,
             tables.conversation.c.queue_key == queue_key,
@@ -310,10 +356,25 @@ class SurfaceContext:
 
     async def conversation_for(self, queue_key: str, member_id: UUID | None) -> UUID:
         """Get-or-create the conversation this surface keys by `queue_key`, outside any admission
-        transaction; a lost creation race re-reads the surviving row."""
-        found = await self.find_conversation(queue_key)
+        transaction; a lost creation race re-reads the surviving row. A memberless conversation
+        whose resolver now names a member is claimed for them — a DM that began before its speaker
+        could resolve (an unconfirmed email, a not-yet-joined teammate) becomes theirs, and their
+        memory subject, from the turn that resolves them; a conversation another member already
+        owns is never re-claimed."""
+        async with workspace_tx() as connection:
+            found = (await connection.execute(self._conversation_lookup(queue_key))).one_or_none()
         if found is not None:
-            return found
+            if member_id is not None and found.member_id is None:
+                async with workspace_tx() as connection:
+                    await connection.execute(
+                        sa.update(tables.conversation)
+                        .where(
+                            tables.conversation.c.id == found.id,
+                            tables.conversation.c.member_id.is_(None),
+                        )
+                        .values(member_id=member_id, updated_at=sa.func.now())
+                    )
+            return found.id
         conversation_id = uuid4()
         try:
             async with workspace_tx() as connection:

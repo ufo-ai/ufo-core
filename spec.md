@@ -192,7 +192,9 @@ durable turn queue (the one `invoke` boundary scheduled tasks and the eval harne
 spend cap is evaluated once) with its ambient `TurnContext` — the sender and IANA timezone the
 surface knows, which the engine renders as the `<context>` tag (the admission moment, local when a
 timezone is known; sender) before each member inbound — **identity** resolution (an external id → member + conversation,
-linking a `surface_identity` on first contact, and `adopt_identity` to span a member across
+linking a `surface_identity` on first contact — `join_member` also creates the member when a
+channel-verified email matches the workspace's own domain, the owner's email domain, so only the
+owner onboards through provisioning — and `adopt_identity` to span a member across
 surfaces), plus `tail`/`turn_owner`/`spend_rollup` for a live view. An extension registers a
 `surfaces` Manifest point; core mounts its `SurfaceRoute`s under `/surface/<name>`, each bound to the
 one context. The seam supports two delivery modes; a surface uses only the subset it needs:
@@ -217,7 +219,7 @@ one context. The seam supports two delivery modes; a surface uses only the subse
 |---|---|---|---|---|
 | CLI | core | live (hub tail) | member token | session (private) |
 | Web | `extensions/web` | live (hub tail) | web session → member (adopted from CLI) | session (private) |
-| Slackbot | `extensions/slack` | durable (writeback) | Slack user → linked member | channel:thread_ts (shared) |
+| Slackbot | `extensions/slack` | durable (writeback) | Slack user → member (linked; a Slack-confirmed same-domain email joins as new) | channel:thread_ts (shared) |
 
 Two-way attachments stream end to end, never buffering a whole file: an inbound Slack file streams
 from `url_private` into the conversation's workspace before the turn runs; a shared file

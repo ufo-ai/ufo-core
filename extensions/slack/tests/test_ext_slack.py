@@ -11,6 +11,7 @@ import hmac
 import json
 import re
 import time
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from urllib.parse import urlencode
@@ -103,15 +104,24 @@ class StubDbos:
         self.enqueued.append(workflow_id)
 
 
-def _mock_transport(recorder: list[httpx.Request], users: dict[str, str]) -> httpx.MockTransport:
+def _mock_transport(
+    recorder: list[httpx.Request],
+    users: dict[str, str],
+    unconfirmed: AbstractSet[str] = frozenset(),
+) -> httpx.MockTransport:
     def handler(request: httpx.Request) -> httpx.Response:
         recorder.append(request)
         url = str(request.url).split("?")[0]
         if url == slack.SLACK_USERS_INFO_URL:
-            email = users.get(str(request.url.params.get("user")))
+            user_id = str(request.url.params.get("user"))
+            email = users.get(user_id)
             user: dict[str, object] = {"profile": {"email": email} if email else {}}
             if email:
-                user |= {"real_name": "Bee Jones", "tz": "America/New_York"}
+                user |= {
+                    "real_name": "Bee Jones",
+                    "tz": "America/New_York",
+                    "is_email_confirmed": user_id not in unconfirmed,
+                }
             return httpx.Response(200, json={"ok": True, "user": user})
         if url in (slack.SLACK_CONVERSATIONS_REPLIES_URL, slack.SLACK_CONVERSATIONS_HISTORY_URL):
             return httpx.Response(200, json={"ok": True, "messages": []})
@@ -227,9 +237,14 @@ async def _mount(
     recorder: list[httpx.Request],
     users: dict[str, str] | None = None,
     hub: InProcessHub | None = None,
+    unconfirmed: AbstractSet[str] = frozenset(),
 ):
     return await _mount_transport(
-        monkeypatch, workspace_id, tmp_path, _mock_transport(recorder, users or {}), hub=hub
+        monkeypatch,
+        workspace_id,
+        tmp_path,
+        _mock_transport(recorder, users or {}, unconfirmed),
+        hub=hub,
     )
 
 
@@ -955,6 +970,151 @@ async def test_dm_links_member_by_email_and_status_anchors_to_the_message(
         "sender": "Bee Jones (bee@example.com)",
         "timezone": "America/New_York",
     }
+
+
+async def test_first_time_same_domain_dm_speaker_joins_as_a_member(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """Only the owner onboards through the CLI: a teammate whose Slack-confirmed email shares the
+    workspace's domain becomes a member on their first DM — the member row, the linked identity,
+    and the conversation they own (their memory subject), all from one inbound event."""
+    workspace_id, owner_id = await _seed(member_email="owner@example.com")
+    _, client, _ = await _mount(
+        monkeypatch, workspace_id, tmp_path, [], users={"UNEW": "New.Joiner@Example.com"}
+    )
+    dm = _event_body(
+        type="message", channel_type="im", user="UNEW", channel="D7", ts="8.0", text="hi"
+    )
+    async with client:
+        response = await client.post(
+            "/surface/slack", content=dm, headers=_sign(dm, int(time.time()))
+        )
+    assert response.status_code == 200
+    async with workspace_tx() as connection:
+        member_id = (
+            await connection.execute(
+                sa.select(tables.member.c.id).where(
+                    tables.member.c.workspace_id == workspace_id,
+                    tables.member.c.email == "new.joiner@example.com",
+                )
+            )
+        ).scalar_one()
+        linked = (
+            await connection.execute(
+                sa.select(tables.surface_identity.c.member_id).where(
+                    tables.surface_identity.c.surface == slack.SURFACE_SLACK,
+                    tables.surface_identity.c.external_id == "UNEW",
+                )
+            )
+        ).one()
+        conversation = (
+            await connection.execute(
+                sa.select(tables.conversation.c.member_id).where(
+                    tables.conversation.c.queue_key == "D7"
+                )
+            )
+        ).one()
+    assert member_id != owner_id
+    assert linked.member_id == member_id
+    assert conversation.member_id == member_id
+
+
+@pytest.mark.parametrize(
+    ("email", "unconfirmed"),
+    [("gigi@elsewhere.com", frozenset()), ("mallory@example.com", frozenset({"UOUT"}))],
+    ids=["foreign-domain", "unconfirmed-email"],
+)
+async def test_dm_without_a_confirmed_same_domain_email_stays_unlinked(
+    db: None, tmp_path, monkeypatch, email: str, unconfirmed: frozenset[str]
+) -> None:
+    """Neither a foreign-domain email nor one Slack has not confirmed grants membership: the DM is
+    admitted as a shared, memberless conversation and no member row appears."""
+    workspace_id, _ = await _seed(member_email="owner@example.com")
+    _, client, _ = await _mount(
+        monkeypatch, workspace_id, tmp_path, [], users={"UOUT": email}, unconfirmed=unconfirmed
+    )
+    dm = _event_body(
+        type="message", channel_type="im", user="UOUT", channel="D8", ts="9.0", text="hey"
+    )
+    async with client:
+        response = await client.post(
+            "/surface/slack", content=dm, headers=_sign(dm, int(time.time()))
+        )
+    assert response.status_code == 200
+    async with workspace_tx() as connection:
+        members = (
+            (
+                await connection.execute(
+                    sa.select(tables.member.c.email).where(
+                        tables.member.c.workspace_id == workspace_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        conversation = (
+            await connection.execute(
+                sa.select(tables.conversation.c.member_id).where(
+                    tables.conversation.c.queue_key == "D8"
+                )
+            )
+        ).one()
+        admitted = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+        ).scalar_one()
+    assert members == ["owner@example.com"]
+    assert conversation.member_id is None
+    assert admitted == 1
+
+
+async def test_confirmed_email_claims_the_dm_that_began_unconfirmed(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """An unconfirmed email is a retryable state, not a verdict: the first DM lands memberless,
+    and the DM after Slack confirms the address joins the speaker as a member and claims that same
+    conversation — and its memory subject — as theirs."""
+    workspace_id, _ = await _seed(member_email="owner@example.com")
+    unconfirmed = {"UNEW"}
+    _, client, _ = await _mount(
+        monkeypatch,
+        workspace_id,
+        tmp_path,
+        [],
+        users={"UNEW": "new.joiner@example.com"},
+        unconfirmed=unconfirmed,
+    )
+    first = _event_body(
+        type="message", channel_type="im", user="UNEW", channel="D7", ts="8.0", text="hi"
+    )
+    second = _event_body(
+        type="message", channel_type="im", user="UNEW", channel="D7", ts="9.0", text="me again"
+    )
+    async with client:
+        await client.post("/surface/slack", content=first, headers=_sign(first, int(time.time())))
+        unconfirmed.clear()
+        await client.post("/surface/slack", content=second, headers=_sign(second, int(time.time())))
+    async with workspace_tx() as connection:
+        member_id = (
+            await connection.execute(
+                sa.select(tables.member.c.id).where(
+                    tables.member.c.workspace_id == workspace_id,
+                    tables.member.c.email == "new.joiner@example.com",
+                )
+            )
+        ).scalar_one()
+        conversation = (
+            await connection.execute(
+                sa.select(tables.conversation.c.member_id).where(
+                    tables.conversation.c.queue_key == "D7"
+                )
+            )
+        ).one()
+        admitted = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+        ).scalar_one()
+    assert conversation.member_id == member_id
+    assert admitted == 2
 
 
 async def test_unlinked_dm_fails_loud_when_the_sender_read_is_unavailable(

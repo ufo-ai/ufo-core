@@ -6,7 +6,9 @@ conversation, every member reply in that thread, un-mentioned included, like any
 pulled into a thread. A conversation-starting channel turn carries a bounded digest of ambient
 context fetched from Slack at admit time — the thread's earlier un-addressed messages when
 mentioned mid-thread, the channel's recent messages when starting a fresh thread; after that
-every member reply is its own turn, so the transcript itself holds the thread.
+every member reply is its own turn, so the transcript itself holds the thread. A first-time DM
+speaker resolves by Slack-confirmed email: an existing member links, and a same-domain teammate
+joins as a new member — only the owner ever onboards through the CLI.
 
 While the turn runs, a per-turn status task tails its live frames off the hub and keeps the
 thread's native status (`assistant.threads.setStatus`) current — "Thinking…", then the model's own
@@ -439,7 +441,9 @@ async def _participating_conversation(ctx: SurfaceContext, queue_key: str) -> UU
 @dataclass(frozen=True)
 class SlackUser:
     """The sender facts one users.info read yields: the display fields for the turn's <context>
-    tag and the email the DM member link needs."""
+    tag and the email the DM member resolution needs. The email anchors member identity, so it is
+    carried only when Slack has confirmed it (`is_email_confirmed`) — an unconfirmed address is no
+    email at all."""
 
     name: str | None
     email: str | None
@@ -468,6 +472,8 @@ async def _slack_user(bot_token: str, slack_user_id: str) -> SlackUser | None:
         return None
     profile = user.get("profile")
     email = profile.get("email") if isinstance(profile, dict) else None
+    if user.get("is_email_confirmed") is not True:
+        email = None
     name = user.get("real_name") or user.get("name")
     timezone = user.get("tz")
     return SlackUser(
@@ -497,6 +503,10 @@ def _turn_context(sender: SlackUser | None) -> TurnContext:
 async def _resolve_member(
     ctx: SurfaceContext, inbound: Inbound, sender: SlackUser | None
 ) -> UUID | None:
+    """The DM speaker's member: the already-linked identity, else what their Slack-confirmed email
+    resolves — an existing member links, and a same-domain email joins them as a new member, so
+    only the owner ever onboards through the CLI and teammates become members on first contact.
+    No confirmed email leaves the DM a shared, memberless conversation."""
     linked = await ctx.linked_member(inbound.slack_user_id)
     if linked is not None:
         return linked
@@ -506,7 +516,7 @@ async def _resolve_member(
         )
     if sender.email is None:
         return None
-    return await ctx.link_member(inbound.slack_user_id, sender.email)
+    return await ctx.join_member(inbound.slack_user_id, sender.email)
 
 
 async def _ambient_context(ctx: SurfaceContext, bot_token: str, inbound: Inbound) -> str:

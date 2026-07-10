@@ -278,6 +278,41 @@ async def test_find_conversation_reads_without_creating(db: None, tmp_path) -> N
     assert await replace(context, surface="other").find_conversation("C1:1.0") is None
 
 
+async def test_conversation_for_claims_a_memberless_conversation(db: None, tmp_path) -> None:
+    """A conversation created before its speaker could resolve is claimed by the first resolving
+    turn, and never re-claimed from the member who owns it."""
+    workspace_id, _, member_id = await _seed(member_email="bee@example.com")
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    conversation_id = await context.conversation_for("D9", None)
+
+    async def _owner() -> UUID | None:
+        async with workspace_tx() as connection:
+            return (
+                await connection.execute(
+                    sa.select(tables.conversation.c.member_id).where(
+                        tables.conversation.c.id == conversation_id
+                    )
+                )
+            ).scalar_one()
+
+    assert await _owner() is None
+    assert await context.conversation_for("D9", member_id) == conversation_id
+    assert await _owner() == member_id
+    other_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=other_id,
+                workspace_id=workspace_id,
+                email="other@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    assert await context.conversation_for("D9", other_id) == conversation_id
+    assert await _owner() == member_id
+
+
 async def test_admitted_context_round_trips_to_the_loaded_turn(db: None, tmp_path) -> None:
     """Both ends of the turn.context column: the surface admits its ambient TurnContext, and the
     queue loader — the engine's one read path — validates the same record back off the row, with
@@ -346,6 +381,60 @@ async def test_is_workspace_owner_is_the_earliest_member(db: None, tmp_path) -> 
     assert await context.is_workspace_owner("OWNER@example.com") is True
     assert await context.is_workspace_owner("joiner@example.com") is False
     assert await context.is_workspace_owner("stranger@example.com") is False
+
+
+async def test_join_member_creates_a_same_domain_member_and_links(db: None, tmp_path) -> None:
+    workspace_id, _, _ = await _seed()
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    early = datetime(2026, 1, 1, tzinfo=UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                email="owner@example.com",
+                created_at=early,
+                updated_at=early,
+            )
+        )
+    joined = await context.join_member("UNEW", "New.Joiner@Example.com")
+    assert joined is not None
+    assert await context.linked_member("UNEW") == joined
+    async with workspace_tx() as connection:
+        email = (
+            await connection.execute(
+                sa.select(tables.member.c.email).where(tables.member.c.id == joined)
+            )
+        ).scalar_one()
+    assert email == "new.joiner@example.com"
+    # The owner is still the earliest member; the joiner arrived strictly later.
+    assert await context.is_workspace_owner("owner@example.com") is True
+    assert await context.is_workspace_owner("new.joiner@example.com") is False
+    # A second surface identity for the same email resolves to the one member, never a duplicate.
+    assert await context.join_member("UNEW2", "new.joiner@example.com") == joined
+
+
+async def test_join_member_refuses_without_a_domain_match(db: None, tmp_path) -> None:
+    workspace_id, _, _ = await _seed(member_email="owner@example.com")
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    for external_id, email in (
+        ("UGIGI", "gigi@elsewhere.com"),
+        ("UBARE", "example.com"),
+        ("UEMPTY", "@example.com"),
+    ):
+        assert await context.join_member(external_id, email) is None
+        assert await context.linked_member(external_id) is None
+    memberless = _context(uuid4(), StubDbos(), FilesystemBlobStore(root=tmp_path))
+    assert await memberless.join_member("UFIRST", "first@example.com") is None
+    async with workspace_tx() as connection:
+        members = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.member)
+                .where(tables.member.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    assert members == 1
 
 
 async def test_put_credential_round_trips_through_the_store(db: None, tmp_path) -> None:
