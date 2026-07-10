@@ -1,22 +1,30 @@
 """The browser delegation tools' proof: browser_task hands one objective to the `browser` profile
-through `ctx.spawn`, and wide_browse reads an entities file, fans a bounded pool of `browser`
-children over it, and writes the collected rows to a workspace JSON file. A RecordingSpawn stands
-in for the Subagents workflow (a dependency, never asserted); the tests assert the tools' own
-marshalling — the payloads spawned, the entity dedupe and cap, and the workspace write."""
+through a background `ctx.spawn` and awaits it under the call's timeout budget, and wide_browse
+reads an entities file, fans a bounded pool of `browser` children over it, and writes the collected
+rows to a workspace JSON file. A RecordingSpawn and a ScriptedSubagents stand in for the Subagents
+workflow (a dependency, never asserted); the tests assert the tools' own marshalling — the payloads
+spawned, the bounded wait and the cancel it fires, the entity dedupe and cap, and the workspace
+write."""
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
-from pydantic import BaseModel
-from ufo_ext_browser.delegation import DELEGATION_TOOLS, MAX_WIDE_BROWSE_ENTITIES
+import pytest
+from pydantic import BaseModel, ValidationError
+from ufo_ext_browser.delegation import (
+    BROWSER_TASK_TIMEOUT_FLOOR_MINUTES,
+    DELEGATION_TOOLS,
+    MAX_WIDE_BROWSE_ENTITIES,
+)
 
 from ufo.blob import FilesystemBlobStore
 from ufo.sandbox.session import ExecResult
 from ufo.schema.records import Agent, Turn
-from ufo.tools.context import SpawnResult, ToolContext
+from ufo.tools.context import SpawnResult, SubagentStatus, ToolContext
 
 
 class _Result(BaseModel):
@@ -25,7 +33,7 @@ class _Result(BaseModel):
 
 @dataclass
 class RecordingSpawn:
-    spawned: list[tuple[str, dict[str, object], str | None]] = field(default_factory=list)
+    spawned: list[tuple[str, dict[str, object], bool, str | None]] = field(default_factory=list)
 
     async def __call__(
         self,
@@ -34,9 +42,32 @@ class RecordingSpawn:
         background: bool = False,
         dedup_key: str | None = None,
     ) -> SpawnResult:
-        self.spawned.append((profile, payload, dedup_key))
+        self.spawned.append((profile, payload, background, dedup_key))
         name = payload.get("task_name")
-        return SpawnResult(turn_id=uuid4(), output=_Result(result=f"did {name}"))
+        output = None if background else _Result(result=f"did {name}")
+        return SpawnResult(turn_id=uuid4(), output=output)
+
+
+@dataclass
+class ScriptedSubagents:
+    """Answers `wait` with a scripted terminal after `finish_after_s` and records cancels."""
+
+    text: str = ""
+    finish_after_s: float = 0.0
+    cancelled: list[UUID] = field(default_factory=list)
+
+    async def wait(self, turn_ids: tuple[UUID, ...]) -> tuple[SubagentStatus, ...]:
+        await asyncio.sleep(self.finish_after_s)
+        return tuple(
+            SubagentStatus(turn_id=turn_id, status="done", text=self.text) for turn_id in turn_ids
+        )
+
+    async def cancel(self, turn_id: UUID) -> SubagentStatus:
+        self.cancelled.append(turn_id)
+        return SubagentStatus(turn_id=turn_id, status="cancelled", text="")
+
+    async def message(self, turn_id: UUID, text: str) -> SubagentStatus:
+        raise NotImplementedError
 
 
 @dataclass
@@ -61,6 +92,7 @@ def _context(
     spawn: RecordingSpawn,
     tmp_path: Path,
     idempotency_key: str | None = None,
+    subagents: ScriptedSubagents | None = None,
 ) -> ToolContext:
     return ToolContext(
         sandbox=sandbox,
@@ -79,6 +111,7 @@ def _context(
         spawn=spawn,
         member_id=None,
         artifact_token_secret="",
+        subagents=subagents,
         idempotency_key=idempotency_key,
     )
 
@@ -87,28 +120,68 @@ def _tool(name: str):
     return next(tool for tool in DELEGATION_TOOLS if tool.name == name)
 
 
-async def test_browser_task_spawns_the_browser_profile_with_the_objective(tmp_path: Path) -> None:
+async def test_browser_task_spawns_the_browser_profile_and_awaits_its_terminal(
+    tmp_path: Path,
+) -> None:
     spawn = RecordingSpawn()
+    control = ScriptedSubagents(text='{"result": "did jobs"}')
+    tool = _tool("browser_task")
+    args = tool.input_model.model_validate(
+        {
+            "url": "https://jobs.example.com",
+            "task": "list open roles",
+            "task_name": "jobs",
+            "user_description": "browse jobs",
+        }
+    )
+    assert args.timeout_minutes == BROWSER_TASK_TIMEOUT_FLOOR_MINUTES
+    result = await tool.handler(_context(FilesSandbox(), spawn, tmp_path, subagents=control), args)
+    assert spawn.spawned == [
+        (
+            "browser",
+            {"task": "list open roles", "url": "https://jobs.example.com", "task_name": "jobs"},
+            True,
+            None,
+        )
+    ]
+    assert control.cancelled == []
+    assert json.loads(result.content[0].text) == {"result": "did jobs"}
+
+
+async def test_browser_task_cancels_a_child_that_outlives_its_timeout(tmp_path: Path) -> None:
+    """The enforcing half of `timeout_minutes`: the wait on the child is bounded, and an expired
+    child is cancelled and reported as a recoverable tool error rather than awaited forever. Built
+    with `model_construct` to slip a zero-minute budget under the schema floor (which
+    `model_validate` forbids, proven below) so the deadline fires without a real 20-minute wait."""
+    spawn = RecordingSpawn()
+    control = ScriptedSubagents(text='{"result": "too late"}', finish_after_s=3600.0)
     tool = _tool("browser_task")
     result = await tool.handler(
-        _context(FilesSandbox(), spawn, tmp_path),
-        tool.input_model.model_validate(
+        _context(FilesSandbox(), spawn, tmp_path, subagents=control),
+        tool.input_model.model_construct(
+            url="https://slow.example.com",
+            task="wait forever",
+            task_name="slow",
+            user_description="slow browse",
+            timeout_minutes=0,
+        ),
+    )
+    assert result.is_error is True
+    assert "timeout" in result.content[0].text
+    assert len(control.cancelled) == 1
+
+
+async def test_browser_task_rejects_a_timeout_below_the_floor() -> None:
+    with pytest.raises(ValidationError):
+        _tool("browser_task").input_model.model_validate(
             {
                 "url": "https://jobs.example.com",
                 "task": "list open roles",
                 "task_name": "jobs",
                 "user_description": "browse jobs",
+                "timeout_minutes": BROWSER_TASK_TIMEOUT_FLOOR_MINUTES - 1,
             }
-        ),
-    )
-    assert spawn.spawned == [
-        (
-            "browser",
-            {"task": "list open roles", "url": "https://jobs.example.com", "task_name": "jobs"},
-            None,
         )
-    ]
-    assert json.loads(result.content[0].text) == {"result": "did jobs"}
 
 
 async def test_wide_browse_fans_over_deduped_entities_and_writes_the_json(tmp_path: Path) -> None:
@@ -131,9 +204,9 @@ async def test_wide_browse_fans_over_deduped_entities_and_writes_the_json(tmp_pa
             }
         ),
     )
-    entities = [payload["task_name"] for _, payload, _ in spawn.spawned]
+    entities = [payload["task_name"] for _, payload, _, _ in spawn.spawned]
     assert entities == ["acme.com", "beta.io"]
-    assert all('{"price": "number"}' in payload["task"] for _, payload, _ in spawn.spawned)
+    assert all('{"price": "number"}' in payload["task"] for _, payload, _, _ in spawn.spawned)
     assert "wide_browse.json" in sandbox.writes
     rows = json.loads(sandbox.writes["wide_browse.json"])
     assert [row["entity"] for row in rows] == ["acme.com", "beta.io"]
@@ -161,7 +234,7 @@ async def test_wide_browse_keys_each_child_on_the_call_and_entity(tmp_path: Path
             }
         ),
     )
-    assert [dedup for _, _, dedup in spawn.spawned] == [
+    assert [dedup for *_, dedup in spawn.spawned] == [
         "turn-1/wide_browse/call-3/acme.com",
         "turn-1/wide_browse/call-3/beta.io",
     ]
@@ -171,8 +244,6 @@ async def test_wide_browse_caps_the_entity_count(tmp_path: Path) -> None:
     too_many = "\n".join(f"site{i}.com" for i in range(MAX_WIDE_BROWSE_ENTITIES + 1))
     sandbox = FilesSandbox(files={"entities.txt": too_many, "schema.json": ""})
     tool = _tool("wide_browse")
-    import pytest
-
     with pytest.raises(ValueError, match="at most"):
         await tool.handler(
             _context(sandbox, RecordingSpawn(), tmp_path),

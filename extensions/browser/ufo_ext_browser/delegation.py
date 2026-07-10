@@ -1,10 +1,13 @@
 """Browser delegation tools: hand a web-automation objective to the browser subagent.
 
 `browser_task` spawns one `browser` child turn for a full multi-step session and returns its
-summary; `wide_browse` reads an entities file (one per line), fans a bounded pool of `browser`
-children out over them in parallel, and collects their summaries into a workspace JSON file. Both
-reach the child through `ctx.spawn` — the same Spawn seam `spawn_subagent` uses — so a delegated
-browser run is scoped to the browser profile's tools, never a raw browser handle.
+summary; the child runs in the background while the tool awaits it under the call's
+`timeout_minutes` budget, cancelling a session that outlives it, so a wedged website or a runaway
+automation loop never holds the parent turn open. `wide_browse` reads an entities file (one per
+line), fans a bounded pool of `browser` children out over them in parallel, and collects their
+summaries into a workspace JSON file. Both reach the child through `ctx.spawn` — the same Spawn
+seam `spawn_subagent` uses — so a delegated browser run is scoped to the browser profile's tools,
+never a raw browser handle.
 
 `browser_task` wants a fresh session each call, so it passes no `dedup_key`. `wide_browse` is
 `side_effecting` and spawns each child under `dedup_key = f"{idempotency_key}/{entity}"`,
@@ -17,8 +20,10 @@ import json
 from pydantic import BaseModel, Field
 
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
+from ufo_ext_browser.subagent import BrowserResult
 
 BROWSER_PROFILE_NAME = "browser"
+BROWSER_TASK_TIMEOUT_FLOOR_MINUTES = 20
 MAX_WIDE_BROWSE_ENTITIES = 128
 DEFAULT_SUBAGENT_FANOUT = 8
 WIDE_BROWSE_OUTPUT = "wide_browse.json"
@@ -47,8 +52,11 @@ class BrowserTaskInput(BaseModel):
         description="Short, user-friendly name for this task, e.g. 'Search flights' or 'Extract "
         "pricing'."
     )
-    timeout_minutes: int | None = Field(
-        default=None, description="Timeout in minutes. Minimum and default is 20."
+    timeout_minutes: int = Field(
+        default=BROWSER_TASK_TIMEOUT_FLOOR_MINUTES,
+        ge=BROWSER_TASK_TIMEOUT_FLOOR_MINUTES,
+        description="Wall-clock budget for the whole session; the task is cancelled when it "
+        "expires.",
     )
     user_description: str = Field(
         description="Brief plain-language description shown in the activity timeline."
@@ -76,10 +84,30 @@ class WideBrowseInput(BaseModel):
 
 
 async def _browser_task(ctx: ToolContext, args: BrowserTaskInput) -> ToolResult:
-    result = await ctx.spawn(
-        BROWSER_PROFILE_NAME, {"task": args.task, "url": args.url, "task_name": args.task_name}
+    if ctx.subagents is None:
+        raise RuntimeError("subagent control is not available in this context")
+    spawned = await ctx.spawn(
+        BROWSER_PROFILE_NAME,
+        {"task": args.task, "url": args.url, "task_name": args.task_name},
+        background=True,
     )
-    text = "" if result.output is None else result.output.model_dump_json()
+    try:
+        async with asyncio.timeout(args.timeout_minutes * 60):
+            (status,) = await ctx.subagents.wait((spawned.turn_id,))
+    except TimeoutError:
+        await ctx.subagents.cancel(spawned.turn_id)
+        return ToolResult(
+            content=(
+                TextContent(
+                    text=f"browser task {args.task_name!r} exceeded its "
+                    f"{args.timeout_minutes}-minute timeout and was cancelled"
+                ),
+            ),
+            is_error=True,
+        )
+    if status.status != "done":
+        raise RuntimeError(f"subagent {BROWSER_PROFILE_NAME!r} turn ended {status.status}")
+    text = BrowserResult.model_validate_json(status.text).model_dump_json()
     return ToolResult(content=(TextContent(text=text),))
 
 
