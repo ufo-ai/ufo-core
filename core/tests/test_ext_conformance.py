@@ -514,7 +514,9 @@ def test_pack_prompt_section_reaches_the_rendered_system_prompt() -> None:
     tuple the loop builds from `manifest.prompt_sections` and hands the engine each turn."""
     manifest = _sample_manifest()
     sections = tuple((section.name, section.body) for section in manifest.prompt_sections)
-    rendered = render_system_prompt("You are the workspace assistant.", sections)
+    rendered = render_system_prompt(
+        "You are the workspace assistant.", sections, model="claude-opus-4-8"
+    )
     assert sample.SECTION_BODY in rendered.content
     assert "You are the workspace assistant." in rendered.content
     assert rendered.digest.startswith("sha256:")
@@ -529,7 +531,9 @@ async def test_sample_skill_parses_indexes_and_mounts_with_its_script() -> None:
     registry = skill_registry((manifest,))
 
     assert sample.SKILL_NAME in dict(registry.index())
-    prompt = render_system_prompt("You are the assistant.", (), skills=registry.index())
+    prompt = render_system_prompt(
+        "You are the assistant.", (), skills=registry.index(), model="claude-opus-4-8"
+    )
     assert sample.SKILL_NAME in prompt.content
 
     written: dict[str, bytes] = {}

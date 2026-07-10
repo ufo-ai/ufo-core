@@ -248,7 +248,9 @@ async def test_web_tools_fail_loud_without_a_search_provider() -> None:
 def test_web_prompt_section_renders_into_the_shell() -> None:
     (section,) = research_manifest.manifest().prompt_sections
     assert section.name == "web"
-    rendered = render_system_prompt("You are the assistant.", ((section.name, section.body),))
+    rendered = render_system_prompt(
+        "You are the assistant.", ((section.name, section.body),), model="claude-opus-4-8"
+    )
     assert "search_web" in rendered.content
     assert 'never say "scrape" or "crawl"' in rendered.content
     assert "{{" not in rendered.content

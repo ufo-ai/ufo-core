@@ -23,6 +23,7 @@ def test_system_prompt_slots_the_agent_prompt_sections_and_citation() -> None:
     rendered = render_system_prompt(
         "You are the workspace assistant.",
         (("search", "<search>Search the web before answering factual questions.</search>"),),
+        model="claude-opus-4-8",
     )
     assert "You are the workspace assistant." in rendered.content
     assert "<search>Search the web before answering factual questions.</search>" in rendered.content
@@ -31,17 +32,33 @@ def test_system_prompt_slots_the_agent_prompt_sections_and_citation() -> None:
 
 
 def test_digest_is_stable_for_equal_content_and_shifts_with_it() -> None:
-    first = render_system_prompt("A", ())
-    again = render_system_prompt("A", ())
-    other = render_system_prompt("B", ())
+    first = render_system_prompt("A", (), model="claude-opus-4-8")
+    again = render_system_prompt("A", (), model="claude-opus-4-8")
+    other = render_system_prompt("B", (), model="claude-opus-4-8")
+    other_model = render_system_prompt("A", (), model="claude-haiku-4-5")
     assert first.digest == again.digest
     assert first.digest != other.digest
+    assert first.digest != other_model.digest
     assert first.digest.startswith("sha256:")
 
 
 def test_sections_render_in_name_order() -> None:
-    rendered = render_system_prompt("A", (("zeta", "BODY_ZETA"), ("alpha", "BODY_ALPHA")))
+    rendered = render_system_prompt(
+        "A", (("zeta", "BODY_ZETA"), ("alpha", "BODY_ALPHA")), model="claude-opus-4-8"
+    )
     assert rendered.content.index("BODY_ALPHA") < rendered.content.index("BODY_ZETA")
+
+
+def test_knowledge_cutoff_renders_the_models_boundary() -> None:
+    rendered = render_system_prompt("A", (), model="claude-opus-4-8")
+    assert "<knowledge_cutoff>" in rendered.content
+    assert "January 2026" in rendered.content
+    assert "{{" not in rendered.content
+
+
+def test_a_model_without_a_declared_cutoff_fails_loud() -> None:
+    with pytest.raises(ValueError, match="no knowledge cutoff declared for model 'gpt-5'"):
+        render_system_prompt("A", (), model="gpt-5")
 
 
 def test_a_var_substitutes_in_the_agent_prompt() -> None:
@@ -83,7 +100,7 @@ def test_skill_index_renders_a_block_and_is_empty_without_skills() -> None:
 
 def test_an_unresolved_slot_in_a_section_fails_loud() -> None:
     with pytest.raises(ValueError, match="unresolved slots: leftover"):
-        render_system_prompt("A", (("bad", "<bad>{{leftover}}</bad>"),))
+        render_system_prompt("A", (("bad", "<bad>{{leftover}}</bad>"),), model="claude-opus-4-8")
 
 
 def test_rendered_prompt_wraps_a_raw_string_with_a_digest() -> None:

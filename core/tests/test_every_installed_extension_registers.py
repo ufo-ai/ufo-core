@@ -310,7 +310,9 @@ def _check_prompt_sections(manifest: Manifest) -> None:
     if not manifest.prompt_sections:
         return
     sections = tuple((section.name, section.body) for section in manifest.prompt_sections)
-    rendered = render_system_prompt("You are the workspace assistant.", sections)
+    rendered = render_system_prompt(
+        "You are the workspace assistant.", sections, model="claude-opus-4-8"
+    )
     assert rendered.digest.startswith("sha256:")
     for section in manifest.prompt_sections:
         assert section.body in rendered.content

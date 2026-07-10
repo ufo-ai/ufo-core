@@ -2,8 +2,10 @@
 
 A profile template is core-shipped prose with slots the renderer fills: {{agent-prompt}} (the
 agent's own instructions — only the shell carries this slot), {{skill_index}} (the loadable-skill
-<available_skills> block), {{sections}} (the capability sections packs contribute — the seam), and
-{{citation}} (the one shared citation block, kept in citation.md and injected here).
+<available_skills> block), {{sections}} (the capability sections packs contribute — the seam),
+{{citation}} (the one shared citation block, kept in citation.md and injected here), and
+{{knowledge_cutoff}} (the resolved model's knowledge boundary from knowledge_cutoff.md — a model
+with no MODEL_KNOWLEDGE_CUTOFF entry fails loud rather than shipping a prompt without one).
 
 Vars ({{under_scored}}) inside the agent prompt are substituted from a caller-supplied mapping under
 strict both-ends validation — every declared var supplied, every supplied var declared — so a
@@ -24,11 +26,25 @@ AGENT_PROMPT_SLOT = "{{agent-prompt}}"
 SKILL_INDEX_SLOT = "{{skill_index}}"
 SECTIONS_SLOT = "{{sections}}"
 CITATION_SLOT = "{{citation}}"
+KNOWLEDGE_CUTOFF_SLOT = "{{knowledge_cutoff}}"
+CUTOFF_VAR = "{{cutoff}}"
 
 _PROMPTS_DIR = Path(__file__).parent
 SHELL = (_PROMPTS_DIR / "shell.md").read_text()
 CITATION_BLOCK = (_PROMPTS_DIR / "citation.md").read_text().strip()
+KNOWLEDGE_CUTOFF_BLOCK = (_PROMPTS_DIR / "knowledge_cutoff.md").read_text().strip()
 COMPACTION_SYSTEM_PROMPT = (_PROMPTS_DIR / "compaction.md").read_text().strip()
+
+MODEL_KNOWLEDGE_CUTOFF: dict[str, str] = {
+    "claude-fable-5": "January 2026",
+    "claude-opus-4-8": "January 2026",
+    "claude-opus-4-7": "January 2026",
+    "claude-opus-4-6": "August 2025",
+    "claude-sonnet-5": "January 2026",
+    "claude-sonnet-4-6": "August 2025",
+    "claude-haiku-4-5": "July 2025",
+    "z-ai/glm-5.2": "March 2026",
+}
 
 
 @dataclass(frozen=True)
@@ -48,10 +64,20 @@ def render_system_prompt(
     agent_prompt: str,
     sections: Sequence[tuple[str, str]],
     skills: Sequence[tuple[str, str]] = (),
+    *,
+    model: str,
 ) -> RenderedPrompt:
     """The main agent's system prompt: the core shell with the agent's own prompt, the pack-
-    contributed capability sections, and the loadable-skill index slotted in."""
-    return render_template(SHELL, agent_prompt, {}, skills, sections)
+    contributed capability sections, the loadable-skill index, and the resolved model's knowledge
+    cutoff slotted in. A model absent from MODEL_KNOWLEDGE_CUTOFF fails loud — the prompt never
+    ships without the model's boundary."""
+    cutoff = MODEL_KNOWLEDGE_CUTOFF.get(model)
+    if cutoff is None:
+        raise ValueError(f"no knowledge cutoff declared for model {model!r}")
+    block = KNOWLEDGE_CUTOFF_BLOCK.replace(CUTOFF_VAR, cutoff)
+    return render_template(
+        SHELL.replace(KNOWLEDGE_CUTOFF_SLOT, block), agent_prompt, {}, skills, sections
+    )
 
 
 def render_template(

@@ -143,13 +143,17 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             for section in manifest.prompt_sections
         )
         if turn.subagent_profile is None:
-            resolved, tools = agent, ToolRegistry(all_tools)
-            system_prompt = render_system_prompt(agent.prompt, sections, skills=skills.index())
+            resolved = agent.model_copy(update={"model": runtime.registry.resolve(agent.model)})
+            tools = ToolRegistry(all_tools)
+            system_prompt = render_system_prompt(
+                agent.prompt, sections, skills=skills.index(), model=resolved.model
+            )
             max_rounds = MAIN_ROUND_LIMIT
         else:
             profile = runtime.subagents.get(turn.subagent_profile)
             resolved = Agent(
-                prompt=subagent_system_prompt(profile), model=profile.model or agent.model
+                prompt=subagent_system_prompt(profile),
+                model=runtime.registry.resolve(profile.model or agent.model),
             )
             allowed = set(profile.tool_names) | runtime.subagent_grants.get(
                 profile.name, frozenset()
@@ -159,7 +163,6 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             )
             system_prompt = rendered_prompt(resolved.prompt)
             max_rounds = profile.max_rounds
-        resolved = resolved.model_copy(update={"model": runtime.registry.resolve(resolved.model)})
         model = await runtime.registry.client_for(resolved.model)
         handle = await _open_sandbox(
             runtime.carrier,

@@ -419,7 +419,9 @@ def test_manifest_contributes_the_browser_prompt_section_into_the_rendered_shell
     slot — so the browse-vs-search rules reach the agent's system prompt."""
     (section,) = browser_manifest.manifest().prompt_sections
     assert section.name == "browser"
-    rendered = render_system_prompt("You are the assistant.", ((section.name, section.body),))
+    rendered = render_system_prompt(
+        "You are the assistant.", ((section.name, section.body),), model="claude-opus-4-8"
+    )
     assert "job boards directly with the browser" in rendered.content
     assert "no saved sessions or cookies" in rendered.content
     assert "{{" not in rendered.content
