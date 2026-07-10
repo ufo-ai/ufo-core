@@ -1,0 +1,242 @@
+name: Dead code
+
+on:
+  schedule:
+    - cron: '43 5 * * *'
+  workflow_dispatch:
+    inputs:
+      focus:
+        description: >-
+          Doctrine surface to sweep (db-columns, config-fields, events-frames, enum-members,
+          sdk-exports, manifest-points); empty rotates by day.
+        required: false
+        default: ""
+
+concurrency:
+  group: dead-code
+
+jobs:
+  # Mechanical candidates (vulture) verified by an agent: most are false positives from dynamic
+  # dispatch, and a symbol is declared dead only when its removal builds and tests green.
+  symbols:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: write
+      id-token: write
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: ufo
+          POSTGRES_PASSWORD: ufo
+          POSTGRES_DB: ufo
+        ports:
+          - 5541:5432
+        options: >-
+          --health-cmd "pg_isready -U ufo"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Collect candidates
+        id: scan
+        run: |
+          echo "start=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          mkdir -p /tmp/dead-code
+          rc=0
+          uvx vulture@2.14 core/src extensions packs \
+            --exclude '*/tests/*,*/skills/*' > /tmp/dead-code/candidates.txt || rc=$?
+          test "$rc" -eq 0 -o "$rc" -eq 3 || exit "$rc"
+          count=$(wc -l < /tmp/dead-code/candidates.txt | tr -d ' ')
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "vulture candidates: $count"
+
+      - run: uv sync
+        if: steps.scan.outputs.count != '0'
+
+      - if: steps.scan.outputs.count != '0'
+        run: |
+          git config user.name dead-code
+          git config user.email dead-code@users.noreply.github.com
+
+      - name: Ensure label
+        if: steps.scan.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create dead-code -R "$GITHUB_REPOSITORY" --force --color 5319E7 \
+            --description 'filed by the dead-code sweep'
+
+      - name: Verify and tear out
+        if: steps.scan.outputs.count != '0'
+        uses: anthropics/claude-code-action@v1
+        env:
+          CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1'
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: github-actions
+          show_full_output: true
+          prompt: |
+            You are the dead-code sweep. /tmp/dead-code/candidates.txt holds vulture's candidates
+            for this tree. Vulture cannot see this repo's dynamic dispatch, so most candidates are
+            false positives; find the few that are truly dead and tear them out.
+
+            1. Trace references before believing a candidate: pyproject entry points and scripts,
+               extension Manifest registrations, typer CLI verbs, pydantic validators, SQLAlchemy
+               event hooks, DBOS workflows/steps, pytest fixtures and conftest wiring, Protocol
+               implementations, and alembic migrations all count as live. Grep the whole repo,
+               tests included.
+            2. Dedup before acting on `<module>.<symbol>`: skip it when
+               `gh issue list --state all --label dead-code --search "<module>.<symbol>"` matches,
+               or any PR (open or closed) has head branch `dead-code/sym/<symbol-kebab>` —
+               a closed unmerged tear-out is a human "not dead" verdict, never refile it.
+            3. Dead means removal proves it: on branch `dead-code/sym/<symbol-kebab>`, delete the
+               symbol and anything that only existed to serve it (land the tear-out whole — grep
+               for the shape by name per CLAUDE.md), then run `uv run ruff check`, `uv run mypy`
+               on the touched packages, and the focused tests for every module you touched or
+               that referenced the symbol. Anything red → not dead; revert and move on.
+            4. Open at most 2 tear-out PRs this run: commit terse, push the branch,
+               `gh pr create` with a body naming what was dead and why every apparent reference
+               is not live, ending `Fingerprint: <module>.<symbol>`. For a candidate you believe
+               dead but cannot prove by removal, file at most 2 issues instead
+               (`gh issue create --label dead-code`, same fingerprint line). If everything is
+               alive, say why and do nothing.
+            Never merge anything; a PR is a proposal for human review.
+          claude_args: |
+            --allowedTools "Task,TodoWrite,Read,Grep,Glob,Edit,Write,Bash(git:*),Bash(uv run:*),Bash(jq:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh pr create:*),Bash(gh pr list:*),Bash(gh pr view:*)"
+
+      - name: Request review
+        if: steps.scan.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr list -R "$GITHUB_REPOSITORY" --state open --json number,headRefName,createdAt \
+            -q '.[] | select(.headRefName | startswith("dead-code/sym/"))
+                    | select(.createdAt >= "${{ steps.scan.outputs.start }}") | .number' |
+          while read -r n; do
+            gh workflow run claude-code-review.yml -R "$GITHUB_REPOSITORY" -f pr="$n"
+          done
+
+  # The "both ends or neither" audit: one declared-surface class per day, rotating; a surface
+  # missing its producer or consumer is dead weight no mechanical scanner can see.
+  doctrine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: write
+      id-token: write
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: ufo
+          POSTGRES_PASSWORD: ufo
+          POSTGRES_DB: ufo
+        ports:
+          - 5541:5432
+        options: >-
+          --health-cmd "pg_isready -U ufo"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Pick focus
+        id: focus
+        run: |
+          echo "start=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          focus='${{ inputs.focus }}'
+          if [ -z "$focus" ]; then
+            order='db-columns config-fields events-frames enum-members sdk-exports manifest-points'
+            focus=$(echo "$order" | tr ' ' '\n' | sed -n "$(( 10#$(date -u +%j) % 6 + 1 ))p")
+          fi
+          echo "focus=$focus" >> "$GITHUB_OUTPUT"
+          echo "doctrine focus: $focus"
+
+      - run: uv sync
+
+      - run: |
+          git config user.name dead-code
+          git config user.email dead-code@users.noreply.github.com
+
+      - name: Ensure label
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create dead-code -R "$GITHUB_REPOSITORY" --force --color 5319E7 \
+            --description 'filed by the dead-code sweep'
+
+      - name: Audit surfaces
+        uses: anthropics/claude-code-action@v1
+        env:
+          CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1'
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: github-actions
+          show_full_output: true
+          prompt: |
+            You are the doctrine sweep for CLAUDE.md's "both ends or neither": every declared
+            surface ships with its producer AND its consumer. Today's focus:
+            ${{ steps.focus.outputs.focus }}.
+
+            Enumerate the declared surfaces of the focus class and verify each has a live other
+            end, grepping the whole repo including tests and migrations:
+            - db-columns: every column in core/src/ufo/schema — a writer and a reader
+            - config-fields: every field on the Config models — a consumer that reads it
+            - events-frames: every event and frame kind — an emitter and a handler
+            - enum-members: every member — constructed somewhere, matched somewhere
+            - sdk-exports: every public symbol under core/src/ufo/sdk — an extension or pack
+              that imports it
+            - manifest-points: every Manifest point — a consumer in serve/loader
+
+            A surface missing one end is a finding. Dedup on the surface's dotted name exactly as
+            follows: skip it when
+            `gh issue list --state all --label dead-code --search "<dotted-name>"` matches, or
+            any PR (open or closed) has head branch `dead-code/doc/<dotted-name-kebab>` — a
+            closed unmerged tear-out is a human "not dead" verdict, never refile it.
+
+            Dead means removal proves it: on branch `dead-code/doc/<dotted-name-kebab>`, tear the
+            surface out whole — both ends, anything that only existed to serve it, and the
+            alembic migration when the surface is a column — then run `uv run ruff check`,
+            `uv run mypy` on the touched packages, and the focused tests for every module you
+            touched. Anything red → not dead; revert and move on.
+
+            Open at most 2 tear-out PRs this run (terse commit, push,
+            `gh pr create` body naming the surface and its missing end, ending
+            `Fingerprint: <dotted-name>`). For a finding you cannot prove by removal, file at
+            most 2 issues instead (`gh issue create --label dead-code`, same fingerprint line).
+            If every surface has both ends, say so and do nothing.
+            Never merge anything; a PR is a proposal for human review.
+          claude_args: |
+            --allowedTools "Task,TodoWrite,Read,Grep,Glob,Edit,Write,Bash(git:*),Bash(uv run:*),Bash(jq:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh pr create:*),Bash(gh pr list:*),Bash(gh pr view:*)"
+
+      - name: Request review
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr list -R "$GITHUB_REPOSITORY" --state open --json number,headRefName,createdAt \
+            -q '.[] | select(.headRefName | startswith("dead-code/doc/"))
+                    | select(.createdAt >= "${{ steps.focus.outputs.start }}") | .number' |
+          while read -r n; do
+            gh workflow run claude-code-review.yml -R "$GITHUB_REPOSITORY" -f pr="$n"
+          done
