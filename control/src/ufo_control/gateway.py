@@ -34,6 +34,7 @@ from ufo.db import dispose_db, init_db
 from ufo_control.gateway_claim import ClaimError, ClaimWorkflow
 from ufo_control.gateway_directives import PROMPT, directive, first_run_install, render
 from ufo_control.gateway_email import WorkEmailError, WorkEmailPolicy, email_sender_from_env
+from ufo_control.gateway_invite import InviteCodes
 from ufo_control.gateway_provision import (
     DeployTarget,
     JoinOrProvision,
@@ -89,7 +90,9 @@ class Onboarding:
     claims: ClaimWorkflow
     store: OnboardStore
     resolver: SharedWorkspaces | JoinOrProvision
+    invites: InviteCodes
     token_secret: str
+    apex_host: str
 
     async def advance(self, channel: str, session: str, body: str, install: bytes) -> bytes:
         claim = await self.store.live_claim(channel, session)
@@ -97,7 +100,7 @@ class Onboarding:
             return await self._collect_email(channel, session, body, install)
         if claim.verified_at is None:
             return await self._verify_code(claim, body, install)
-        return await self._resolve(claim, install)
+        return await self._resolve(claim, body, install)
 
     async def _collect_email(self, channel: str, session: str, body: str, install: bytes) -> bytes:
         if not body:
@@ -126,21 +129,25 @@ class Onboarding:
             return render(
                 install, directive("say", str(error)), directive("ask", "enter the code:")
             )
-        return await self._resolve(claim, install)
+        return await self._resolve(claim, None, install)
 
-    async def _resolve(self, claim: OnboardClaim, install: bytes) -> bytes:
+    async def _resolve(self, claim: OnboardClaim, answer: str | None, install: bytes) -> bytes:
         match self.resolver:
             case SharedWorkspaces() as shared:
+                if not await shared.exists(claim.email_domain):
+                    gate = await self._invite_gate(claim, answer, install)
+                    if gate is not None:
+                        return gate
                 workspace_id = await shared.ensure(claim.email_domain, claim.email)
                 await self.store.complete(claim.claim_id, None, workspace_id)
                 return self._signed_in(claim.email, workspace_id, shared.workspace_url, install)
             case JoinOrProvision() as enterprise:
                 if claim.tenant_name is None:
-                    return await self._decide(enterprise, claim, install)
+                    return await self._decide(enterprise, claim, answer, install)
                 return await self._poll_provisioning(enterprise, claim, install)
 
     async def _decide(
-        self, enterprise: JoinOrProvision, claim: OnboardClaim, install: bytes
+        self, enterprise: JoinOrProvision, claim: OnboardClaim, answer: str | None, install: bytes
     ) -> bytes:
         tenants = await enterprise.tenants_for_domain(claim.email_domain)
         if len(tenants) > 1:
@@ -153,6 +160,9 @@ class Onboarding:
             await self.store.complete(claim.claim_id, name, workspace_id)
             url = enterprise.workspace_url(name)
             return self._signed_in(claim.email, workspace_id, url, install)
+        gate = await self._invite_gate(claim, answer, install)
+        if gate is not None:
+            return gate
         name = await enterprise.provision(claim.email_domain, claim.email)
         await self.store.start_provisioning(claim.claim_id, name)
         return render(
@@ -161,6 +171,35 @@ class Onboarding:
             directive("status", "creating tenant"),
             directive("poll", POLL_SECONDS),
         )
+
+    async def _invite_gate(
+        self, claim: OnboardClaim, answer: str | None, install: bytes
+    ) -> bytes | None:
+        """Creating a workspace burns a one-time invite code; joining an existing one never asks.
+        None opens the gate — the claim already carries an invite (a resolution retry) or `answer`
+        just redeemed one, burning the code and stamping the claim in one transaction — and
+        resolution proceeds in the same advance. The ask avoids the word "code", which the portal
+        renderer takes as its numeric-keyboard cue; invites are alphabetic."""
+        if claim.invite_id is not None:
+            return None
+        if not answer:
+            return render(
+                install,
+                directive("say", "a new workspace needs an invite code."),
+                directive("ask", "enter your invite:"),
+            )
+        if await self.invites.redeem(answer, claim.claim_id) is None:
+            return render(
+                install,
+                directive("say", "that code isn't valid or was already used."),
+                directive(
+                    "say",
+                    "no code? join the waitlist: "
+                    f"curl https://{self.apex_host}/waitlist -d email=you@yourco.com",
+                ),
+                directive("ask", "enter your invite:"),
+            )
+        return None
 
     async def _poll_provisioning(
         self, enterprise: JoinOrProvision, claim: OnboardClaim, install: bytes
@@ -235,6 +274,7 @@ def _resolver(tier: str, state: dict[str, Any]) -> SharedWorkspaces | JoinOrProv
 def _onboarding(state: dict[str, Any]) -> Onboarding:
     """One request's flow over the lifespan's store and the tier's resolver — assembled per request
     so a misconfigured env fails the request loudly, never the boot."""
+    base_url = os.environ.get(PUBLIC_BASE_URL_ENV, DEFAULT_PUBLIC_BASE_URL)
     return Onboarding(
         claims=ClaimWorkflow(
             store=state["store"],
@@ -243,7 +283,9 @@ def _onboarding(state: dict[str, Any]) -> Onboarding:
         ),
         store=state["store"],
         resolver=_resolver(state["tier"], state),
+        invites=state["invites"],
         token_secret=_require_env(TOKEN_SECRET_ENV),
+        apex_host=base_url.removeprefix("https://").removeprefix("http://"),
     )
 
 
@@ -256,7 +298,10 @@ def gateway_app() -> FastAPI:
         pool = await asyncpg.create_pool(dsn=owner_dsn())
         store = OnboardStore(pool=pool)
         await store.ensure_table()
+        invites = InviteCodes(pool=pool)
+        await invites.ensure_table()
         state["store"] = store
+        state["invites"] = invites
         state["tier"] = tier
         if tier == SHARED_TIER:
             init_db(serve_dsn())

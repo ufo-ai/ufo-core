@@ -73,14 +73,21 @@ Onboarding.advance("web", session, body, install=b"")
   |
   +-- code submitted -------------------> verify claim
   |
-  +-- existing tenant for domain --------> join workspace
+  +-- existing tenant for domain --------> join workspace (never asks for an invite)
   |
-  +-- no tenant for domain -------------> create Tenant CR
+  +-- no tenant for domain -------------> ask for a one-time invite code
+  |                                         redeem burns it, then create Tenant CR
   |                                         status + poll until Ready
   |
   +-- tenant Ready or joined -----------> mint bearer token
                                             emit token + workspace directives
 ```
+
+Creating a workspace is invite-gated; joining an existing one never is. The operator mints codes
+with `ufo-control invite` — the plaintext prints once, only its hash lands in the
+`ufo_control.invite_code` ledger, and redeeming burns the code and stamps the claim's `invite_id`
+in one transaction, so one code opens exactly one workspace and a resolution retry never re-asks
+for it. The shared tier gates identically (`SharedWorkspaces.exists` decides create vs join).
 
 The endpoint returns JSON:
 

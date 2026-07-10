@@ -19,6 +19,7 @@ from ufo_control.gateway import (
 )
 from ufo_control.gateway_claim import ClaimWorkflow
 from ufo_control.gateway_email import LoggingEmailSender, WorkEmailPolicy
+from ufo_control.gateway_invite import CODE_ALPHABET, InviteCodes, hash_invite, mint_code
 from ufo_control.gateway_provision import DeployTarget, JoinOrProvision
 from ufo_control.gateway_shared import SharedWorkspaces
 from ufo_control.gateway_store import OnboardStore
@@ -118,8 +119,18 @@ def _flow(store: OnboardStore, sender: LoggingEmailSender, kube: KubeClient) -> 
         claims=ClaimWorkflow(store=store, email_policy=WorkEmailPolicy(), email_sender=sender),
         store=store,
         resolver=JoinOrProvision(kube=kube, target=TARGET),
+        invites=InviteCodes(pool=store.pool),
         token_secret=SECRET,
+        apex_host="flyingobject.ai",
     )
+
+
+def test_minted_codes_are_grouped_and_hash_ignores_case_and_whitespace() -> None:
+    code = mint_code()
+    groups = code.split("-")
+    assert len(groups) == 3
+    assert all(len(group) == 4 and set(group) <= set(CODE_ALPHABET) for group in groups)
+    assert hash_invite(f"  {code.upper()} ") == hash_invite(code)
 
 
 async def test_provision_flow_signs_in_after_polling_to_ready(store: OnboardStore) -> None:
@@ -137,9 +148,15 @@ async def test_provision_flow_signs_in_after_polling_to_ready(store: OnboardStor
     assert "enter your work email" in (_verb(opening, "ask") or "")
     await flow.advance("ufo", "s", "me@acme.com", b"")
     code = sender.last_code("me@acme.com")
-    provisioning = await flow.advance("ufo", "s", code, b"")
+    gated = await flow.advance("ufo", "s", code, b"")
+    assert "invite" in (_verb(gated, "ask") or "")
+    assert cluster.applied == []  # nothing provisions until an invite opens the gate
+    invite = await InviteCodes(pool=store.pool).mint()
+    provisioning = await flow.advance("ufo", "s", invite, b"")
     assert _verb(provisioning, "poll") == "2"
     assert len(cluster.applied) == 1
+    claim = await store.live_claim("ufo", "s")
+    assert claim is not None and claim.invite_id is not None  # burned and stamped as one
     assert _verb(await flow.advance("ufo", "s", "", b""), "poll") == "2"
     signed_in = await flow.advance("ufo", "s", "", b"")
     await kube.http.aclose()
@@ -170,6 +187,49 @@ async def test_join_flow_adds_a_member_and_signs_in(store: OnboardStore) -> None
     assert verify_token(token, SECRET)["ws"] == WORKSPACE_ID
     assert _verb(signed_in, "workspace") == "https://acme-x.flyingobject.ai"
     assert await _member_emails(store) == ["me@acme.com"]
+
+
+async def test_invalid_invite_reasks_with_the_waitlist_hint(store: OnboardStore) -> None:
+    sender = LoggingEmailSender()
+    cluster = FakeCluster(list_items=[], status_sequence=[{"phase": "Provisioning"}])
+    kube = cluster.kube()
+    flow = _flow(store, sender, kube)
+    await flow.advance("ufo", "s", "", b"")
+    await flow.advance("ufo", "s", "me@acme.com", b"")
+    await flow.advance("ufo", "s", sender.last_code("me@acme.com"), b"")
+    rejected = await flow.advance("ufo", "s", "not-a-real-code", b"")
+    await kube.http.aclose()
+    assert cluster.applied == []
+    assert "isn't valid or was already used" in rejected.decode()
+    assert "curl https://flyingobject.ai/waitlist" in rejected.decode()
+    assert "invite" in (_verb(rejected, "ask") or "")
+
+
+async def test_a_burned_invite_cannot_open_a_second_workspace(store: OnboardStore) -> None:
+    sender = LoggingEmailSender()
+    invite = await InviteCodes(pool=store.pool).mint()
+    first_cluster = FakeCluster(
+        list_items=[], status_sequence=[{"phase": "Ready", "workspaceId": "ws-first"}]
+    )
+    first_kube = first_cluster.kube()
+    first = _flow(store, sender, first_kube)
+    await first.advance("ufo", "a", "", b"")
+    await first.advance("ufo", "a", "one@acme.com", b"")
+    await first.advance("ufo", "a", sender.last_code("one@acme.com"), b"")
+    await first.advance("ufo", "a", invite, b"")
+    signed_in = await first.advance("ufo", "a", "", b"")
+    await first_kube.http.aclose()
+    assert _verb(signed_in, "token") is not None
+    second_cluster = FakeCluster(list_items=[], status_sequence=[{"phase": "Provisioning"}])
+    second_kube = second_cluster.kube()
+    second = _flow(store, sender, second_kube)
+    await second.advance("ufo", "b", "", b"")
+    await second.advance("ufo", "b", "two@othercorp.com", b"")
+    await second.advance("ufo", "b", sender.last_code("two@othercorp.com"), b"")
+    rejected = await second.advance("ufo", "b", invite, b"")
+    await second_kube.http.aclose()
+    assert second_cluster.applied == []
+    assert "isn't valid or was already used" in rejected.decode()
 
 
 async def _member_emails(store: OnboardStore) -> list[str]:

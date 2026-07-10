@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator, Iterator
 import asyncpg
 import pytest
 
+from ufo_control.gateway_invite import InviteCodes
 from ufo_control.gateway_store import OnboardStore
 from ufo_control.members import OWNER_DSN_ENV
 
@@ -45,6 +46,7 @@ async def _prepare_schema() -> None:
                 uuid.UUID(WORKSPACE_ID),
             )
         await OnboardStore(pool=pool).ensure_table()
+        await InviteCodes(pool=pool).ensure_table()
     finally:
         await pool.close()
 
@@ -92,6 +94,7 @@ async def store(gateway_postgres: str) -> AsyncIterator[OnboardStore]:
     pool = await asyncpg.create_pool(gateway_postgres)
     async with pool.acquire() as connection:
         await connection.execute("truncate ufo_control.onboard_claim")
+        await connection.execute("truncate ufo_control.invite_code")
         await connection.execute("delete from member")
     try:
         yield OnboardStore(pool=pool)

@@ -32,7 +32,9 @@ DDL = (
     "  verified_at timestamptz,"
     "  tenant_name text,"
     "  resulting_workspace_id text,"
+    "  invite_id uuid,"
     "  created_at timestamptz not null default now())",
+    f"alter table {TABLE} add column if not exists invite_id uuid",
     f"create unique index if not exists {ACTIVE_INDEX} on {TABLE} (surface, surface_ref)"
     "  where resulting_workspace_id is null",
 )
@@ -51,6 +53,7 @@ class OnboardClaim:
     verified_at: datetime | None
     tenant_name: str | None
     resulting_workspace_id: str | None
+    invite_id: UUID | None
 
 
 def _aware(value: datetime | None) -> datetime | None:
@@ -106,6 +109,7 @@ class OnboardStore:
             verified_at=_aware(row["verified_at"]),
             tenant_name=row["tenant_name"],
             resulting_workspace_id=row["resulting_workspace_id"],
+            invite_id=row["invite_id"],
         )
 
     async def record_attempt(self, claim_id: UUID, attempts: int) -> None:

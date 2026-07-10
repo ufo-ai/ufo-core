@@ -12,6 +12,7 @@ from ufo_control.gateway import Onboarding
 from ufo_control.gateway_claim import ClaimWorkflow
 from ufo_control.gateway_directives import directive, render
 from ufo_control.gateway_email import LoggingEmailSender, WorkEmailPolicy
+from ufo_control.gateway_invite import InviteCodes
 from ufo_control.gateway_provision import DeployTarget, JoinOrProvision
 from ufo_control.gateway_store import OnboardStore
 from ufo_control.gateway_token import verify_token
@@ -86,7 +87,9 @@ def _flow(store: OnboardStore, sender: LoggingEmailSender, kube: KubeClient) -> 
         claims=ClaimWorkflow(store=store, email_policy=WorkEmailPolicy(), email_sender=sender),
         store=store,
         resolver=JoinOrProvision(kube=kube, target=TARGET),
+        invites=InviteCodes(pool=store.pool),
         token_secret=SECRET,
+        apex_host="flyingobject.ai",
     )
 
 
@@ -120,7 +123,10 @@ async def test_web_channel_walks_email_code_provision_to_the_setup_handoff(
     assert "email" in (_verb(opening, "ask") or "")
     await _advance_web(flow, "web-session", "me@acme.com")
     code = sender.last_code("me@acme.com")
-    provisioning = await _advance_web(flow, "web-session", code)
+    gated = await _advance_web(flow, "web-session", code)
+    assert "invite" in (_verb(gated, "ask") or "")
+    invite = await InviteCodes(pool=store.pool).mint()
+    provisioning = await _advance_web(flow, "web-session", invite)
     assert _verb(provisioning, "poll") == "2"
     assert _verb(provisioning, "status") is not None
     assert len(cluster.applied) == 1

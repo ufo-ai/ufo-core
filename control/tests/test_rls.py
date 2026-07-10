@@ -37,6 +37,7 @@ from ufo.workspace import ws
 from ufo_control.gateway import Onboarding
 from ufo_control.gateway_claim import ClaimWorkflow
 from ufo_control.gateway_email import LoggingEmailSender, WorkEmailPolicy
+from ufo_control.gateway_invite import InviteCodes
 from ufo_control.gateway_shared import SharedWorkspaces
 from ufo_control.gateway_store import OnboardStore
 from ufo_control.gateway_token import verify_token
@@ -384,7 +385,9 @@ async def test_shared_ensure_writes_workspace_and_owner_under_rls(
     member's owner row, written as the RLS-subject serve role under `ws(workspace_id)`. The uuid is
     derived from the domain, so the write is idempotent and a colleague joins the one workspace."""
     shared = SharedWorkspaces(workspace_url=SHARED_WORKSPACE_URL)
+    assert not await shared.exists("sharedco.io")
     workspace_id = await shared.ensure("sharedco.io", "Founder@Sharedco.io")
+    assert await shared.exists("sharedco.io")
     assert workspace_id == str(uuid5(NAMESPACE_DNS, "sharedco.io"))
     with ws(UUID(workspace_id)):
         async with workspace_tx() as connection:
@@ -425,26 +428,38 @@ async def test_shared_ensure_seeds_the_default_agent(shared_role_env: SharedRole
 async def test_shared_onboard_signs_in_without_a_tenant_cr(
     shared_role_env: SharedRoleEnv, rls_env: RlsEnv
 ) -> None:
-    """The full shared flow over the real claim ledger + RLS database: email → code → verify → a
-    signed-in bearer carrying the domain's workspace uuid, surfacing the apex (no subdomain). The
-    resolver holds no kube client, so no Tenant CR can be applied."""
+    """The full shared flow over the real claim ledger + RLS database: email → code → verify → the
+    invite gate (a fresh domain creates a workspace, so a one-time code is burned) → a signed-in
+    bearer carrying the domain's workspace uuid, surfacing the apex (no subdomain). A colleague of
+    the now-existing domain then joins codeless. The resolver holds no kube client, so no Tenant CR
+    can be applied."""
     pool = await asyncpg.create_pool(rls_env.owner_libpq_dsn)
     store = OnboardStore(pool=pool)
     await store.ensure_table()
+    invites = InviteCodes(pool=pool)
+    await invites.ensure_table()
     async with pool.acquire() as connection:
         await connection.execute("truncate ufo_control.onboard_claim")
+        await connection.execute("truncate ufo_control.invite_code")
     sender = LoggingEmailSender()
     flow = Onboarding(
         claims=ClaimWorkflow(store=store, email_policy=WorkEmailPolicy(), email_sender=sender),
         store=store,
         resolver=SharedWorkspaces(workspace_url=SHARED_WORKSPACE_URL),
+        invites=invites,
         token_secret=SHARED_TOKEN_SECRET,
+        apex_host="flyingobject.ai",
     )
     try:
         await flow.advance("ufo", "sess", "", b"")
         await flow.advance("ufo", "sess", "boss@sharedtwo.io", b"")
         code = sender.last_code("boss@sharedtwo.io")
-        signed_in = await flow.advance("ufo", "sess", code, b"")
+        gated = await flow.advance("ufo", "sess", code, b"")
+        assert "invite code" in gated.decode()
+        signed_in = await flow.advance("ufo", "sess", await invites.mint(), b"")
+        await flow.advance("ufo", "sess2", "", b"")
+        await flow.advance("ufo", "sess2", "mate@sharedtwo.io", b"")
+        joined = await flow.advance("ufo", "sess2", sender.last_code("mate@sharedtwo.io"), b"")
     finally:
         await pool.close()
     workspace_id = str(uuid5(NAMESPACE_DNS, "sharedtwo.io"))
@@ -453,8 +468,52 @@ async def test_shared_onboard_signs_in_without_a_tenant_cr(
     )
     assert verify_token(directives["token"], SHARED_TOKEN_SECRET)["ws"] == workspace_id
     assert directives["workspace"] == SHARED_WORKSPACE_URL
-    assert await _members_in(workspace_id) == ["boss@sharedtwo.io"]
+    joined_directives = dict(
+        line.split("\t", 1) for line in joined.decode().splitlines() if "\t" in line
+    )
+    assert "invite" not in joined.decode()  # an existing workspace joins codeless
+    assert verify_token(joined_directives["token"], SHARED_TOKEN_SECRET)["ws"] == workspace_id
+    assert await _members_in(workspace_id) == ["boss@sharedtwo.io", "mate@sharedtwo.io"]
     assert isinstance(flow.resolver, SharedWorkspaces)
+
+
+def test_invite_mints_a_one_time_code_over_the_cli(rls_env: RlsEnv) -> None:
+    """``ufo-control invite`` prints the plaintext once; the ledger holds only its hash, and the
+    printed code redeems — the whole chain a workspace creation consumes."""
+    previous = os.environ.get(POSTGRES_OWNER_DSN_ENV)
+    os.environ[POSTGRES_OWNER_DSN_ENV] = rls_env.owner_libpq_dsn
+    try:
+        result = CliRunner().invoke(main, ["invite"])
+    finally:
+        if previous is None:
+            os.environ.pop(POSTGRES_OWNER_DSN_ENV, None)
+        else:
+            os.environ[POSTGRES_OWNER_DSN_ENV] = previous
+    assert result.exit_code == 0, result.output
+    code = result.output.strip()
+    assert code
+    assert code not in result.output.replace(code, "", 1)  # printed exactly once
+    assert asyncio.run(_redeems(rls_env.owner_libpq_dsn, code))
+
+
+async def _redeems(dsn: str, code: str) -> bool:
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=1)
+    try:
+        claim_id = uuid4()
+        await pool.execute(
+            "insert into ufo_control.onboard_claim "
+            "(id, email, email_domain, code_hash, surface, surface_ref, expires_at) "
+            "values ($1, $2, $3, $4, $5, $6, now() + interval '15 minutes')",
+            claim_id,
+            "cli@mintco.io",
+            "mintco.io",
+            "x",
+            "ufo",
+            "cli-mint-proof",
+        )
+        return await InviteCodes(pool=pool).redeem(code, claim_id) is not None
+    finally:
+        await pool.close()
 
 
 async def test_owner_tx_enumerates_every_workspace_where_the_subject_fails_closed(

@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 
+import asyncpg
 import click
 import uvicorn
 from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
@@ -18,6 +19,7 @@ from opentelemetry.sdk._logs import LoggerProvider
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.resources import Resource
 
+from ufo_control.gateway_invite import InviteCodes
 from ufo_control.postgres import ensure_serve_role
 from ufo_control.rls import bootstrap_policies, owner_dsn
 
@@ -87,6 +89,23 @@ def gateway() -> None:
     uvicorn.run(
         "ufo_control.gateway:app", host=DEFAULT_HOST, port=port, log_level="info", log_config=None
     )
+
+
+@main.command()
+def invite() -> None:
+    """Mint a one-time invite code that lets onboarding create a new workspace. The plaintext
+    prints once and is never stored."""
+    click.echo(asyncio.run(_mint_invite()))
+
+
+async def _mint_invite() -> str:
+    pool = await asyncpg.create_pool(dsn=owner_dsn(), min_size=1, max_size=1)
+    try:
+        invites = InviteCodes(pool=pool)
+        await invites.ensure_table()
+        return await invites.mint()
+    finally:
+        await pool.close()
 
 
 @main.command(name="rls-bootstrap")

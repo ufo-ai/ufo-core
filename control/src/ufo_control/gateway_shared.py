@@ -50,6 +50,19 @@ class SharedWorkspaces:
 
     workspace_url: str
 
+    async def exists(self, domain: str) -> bool:
+        workspace_id = uuid5(NAMESPACE_DNS, domain.lower())
+        with ws(workspace_id):
+            async with workspace_tx() as connection:
+                row = (
+                    await connection.execute(
+                        sa.select(tables.workspace.c.id).where(
+                            tables.workspace.c.id == workspace_id
+                        )
+                    )
+                ).one_or_none()
+        return row is not None
+
     async def ensure(self, domain: str, email: str) -> str:
         workspace_id = uuid5(NAMESPACE_DNS, domain.lower())
         member = email.strip().lower()

@@ -58,6 +58,7 @@ class ClaimWorkflow:
             verified_at=None,
             tenant_name=None,
             resulting_workspace_id=None,
+            invite_id=None,
         )
         await self.store.insert_claim(claim)
         try:
