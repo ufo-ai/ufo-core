@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import socket
+import struct
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -294,6 +295,67 @@ async def test_egress_write_without_attribution_writes_nothing(db: None) -> None
             await connection.execute(sa.select(sa.func.count()).select_from(tables.ledger))
         ).scalar_one()
     assert count == 0
+
+
+async def test_client_reset_while_awaiting_the_request_line_does_not_crash_the_server() -> None:
+    """A peer that resets the connection while `_handle` awaits the request line (a health check
+    probe, a client that hangs up early) is routine TCP behavior, not a bug — it must not surface as
+    an unhandled exception in `client_connected_cb`, and the server must keep serving other
+    connections afterward."""
+    cert, key = await generate_ca()
+    proxy = _egress(_fixed(), ca_cert=cert, ca_key=key)
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    loop = asyncio.get_running_loop()
+    unhandled: list[dict] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect(("127.0.0.1", endpoint.port))
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        sock.close()
+        await asyncio.sleep(0.1)
+        assert unhandled == []
+        assert await _connect(endpoint.port, MODEL_HOST) == 403
+    finally:
+        loop.set_exception_handler(previous)
+        await proxy.stop()
+
+
+async def test_a_db_fault_in_the_authorize_gate_surfaces_loud() -> None:
+    """The reset guard is scoped to the client socket: an OSError out of the turn-liveness gate (the
+    fresh DB connection behind it refused) is an internal fault, and must reach the loop's exception
+    handler — never be swallowed as routine client noise."""
+
+    async def refused(run: RunToken) -> bool:
+        raise ConnectionRefusedError("db connection refused")
+
+    rules = (
+        ScopeRule(allowed_hosts=frozenset({MODEL_HOST})),
+        InjectionRule(host=MODEL_HOST, header="x-api-key", sentinel="s", real="REAL-KEY"),
+    )
+    cert, key = await generate_ca()
+    proxy = EgressProxy(resolve=_fixed(rules).resolve, authorize=refused, ca_cert=cert, ca_key=key)
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    loop = asyncio.get_running_loop()
+    unhandled: list[dict] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+    try:
+        token = RunToken(workspace_id=uuid4(), turn_id=uuid4()).encode()
+        reader, writer = await asyncio.open_connection("127.0.0.1", endpoint.port)
+        writer.write(
+            f"CONNECT {MODEL_HOST}:443 HTTP/1.1\r\n"
+            f"Proxy-Authorization: {_basic(token)}\r\n\r\n".encode()
+        )
+        await writer.drain()
+        assert await reader.read() == b""
+        writer.close()
+        await asyncio.sleep(0.1)
+        assert [type(context["exception"]) for context in unhandled] == [ConnectionRefusedError]
+    finally:
+        loop.set_exception_handler(previous)
+        await proxy.stop()
 
 
 async def test_keyed_host_connect_denied_without_a_live_turn(db: None) -> None:

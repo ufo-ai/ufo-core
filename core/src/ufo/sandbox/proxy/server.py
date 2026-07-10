@@ -201,18 +201,25 @@ class EgressProxy:
             self._workdir = None
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        """One client connection: read the CONNECT head, resolve rules, dispatch. The OSError guard
+        covers only the reads from the client socket — a peer that resets mid-request (a health
+        probe, an early hangup) is routine and ends the exchange silently, while a fault past the
+        head (the DB behind `authorize`, leaf minting) propagates loud."""
         try:
-            request_line = await reader.readline()
-            method, _, rest = request_line.decode(errors="replace").partition(" ")
-            if method != "CONNECT":
-                await _respond(writer, 405, "only CONNECT is proxied")
+            try:
+                request_line = await reader.readline()
+                method, _, rest = request_line.decode(errors="replace").partition(" ")
+                if method != "CONNECT":
+                    await _respond(writer, 405, "only CONNECT is proxied")
+                    return
+                host, _, port_text = rest.split(" ", 1)[0].partition(":")
+                proxy_auth = ""
+                while (line := await reader.readline()) not in (b"\r\n", b""):
+                    name, _, value = line.decode(errors="replace").partition(":")
+                    if name.strip().lower() == "proxy-authorization":
+                        proxy_auth = value.strip()
+            except OSError:
                 return
-            host, _, port_text = rest.split(" ", 1)[0].partition(":")
-            proxy_auth = ""
-            while (line := await reader.readline()) not in (b"\r\n", b""):
-                name, _, value = line.decode(errors="replace").partition(":")
-                if name.strip().lower() == "proxy-authorization":
-                    proxy_auth = value.strip()
             run = _run_token(proxy_auth)
             rules = await self._rules_for(run)
             if not any(isinstance(r, ScopeRule) and host in r.allowed_hosts for r in rules):
@@ -666,5 +673,10 @@ class SseTokenUsage:
 
 
 async def _respond(writer: asyncio.StreamWriter, status: int, message: str) -> None:
-    writer.write(f"HTTP/1.1 {status} {message}\r\n\r\n".encode())
-    await writer.drain()
+    """Write a terminal refusal to the client; a peer that vanished before reading it is routine —
+    the connection is closing either way."""
+    try:
+        writer.write(f"HTTP/1.1 {status} {message}\r\n\r\n".encode())
+        await writer.drain()
+    except OSError:
+        pass
