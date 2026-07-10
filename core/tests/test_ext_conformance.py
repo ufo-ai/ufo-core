@@ -10,7 +10,7 @@ breaks this probe, and a Manifest field the sample stops registering breaks the 
 import asyncio
 import json
 from dataclasses import dataclass, field, fields, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -898,12 +898,34 @@ async def test_job_context_confines_blob_to_a_workspace_scoped_trajectory_read(
     assert {name for name in dir(context.corpus) if not name.startswith("_")} == {
         "trajectories",
         "workspace_id",
+        "limit",
     }
 
     with ws(first):
         trajectories = await context.trajectories()
     assert len(trajectories) == 1
     assert trajectories[0].agent_id == first_agent
+
+
+async def test_the_corpus_reads_only_the_most_recent_conversations(
+    db: None, tmp_path: Path
+) -> None:
+    """The corpus is bounded to the `limit` most recently created conversations — a workspace with
+    a long history hands a job a bounded read, so older transcripts are never fetched."""
+    workspace_id = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    await _seed_trajectory(workspace_id, blob)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.conversation)
+            .values(created_at=datetime.now(UTC) - timedelta(days=30))
+            .where(tables.conversation.c.workspace_id == workspace_id)
+        )
+    recent_agent = await _seed_trajectory(workspace_id, blob)
+    corpus = TrajectoryCorpus(blob, limit=1)
+    with ws(workspace_id):
+        trajectories = await corpus.trajectories()
+    assert [trajectory.agent_id for trajectory in trajectories] == [recent_agent]
 
 
 async def test_a_corrupt_transcript_is_skipped_not_aborting_the_corpus(

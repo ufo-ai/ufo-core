@@ -693,7 +693,9 @@ def manifest() -> Manifest:
                 name=JOB_NAME,
                 schedule=None,
                 handler=_tick,
-                candidates=owner_candidates(sa.select(NOTE_TABLE.c.workspace_id).distinct()),
+                candidates=owner_candidates(
+                    lambda: sa.select(NOTE_TABLE.c.workspace_id).distinct()
+                ),
             ),
         ),
         routes=(RouteSpec(method="POST", path=ROUTE_PATH, handler=_hook),),

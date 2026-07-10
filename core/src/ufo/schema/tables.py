@@ -59,6 +59,13 @@ conversation = sa.Table(
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint("surface", "queue_key"),
+    sa.Index("conversation_workspace", "workspace_id"),
+    sa.Index(
+        "conversation_sandbox",
+        "workspace_id",
+        postgresql_where=sa.text("sandbox_handle is not null"),
+        sqlite_where=sa.text("sandbox_handle is not null"),
+    ),
 )
 
 turn = sa.Table(
@@ -91,6 +98,13 @@ turn = sa.Table(
         "(status in ('queued', 'running', 'parked')) = (terminal is null)", name="turn_terminal"
     ),
     sa.Index("turn_idempotency_key", "workspace_id", "idempotency_key", unique=True),
+    sa.Index("turn_conversation_activity", "conversation_id", "updated_at"),
+    sa.Index(
+        "turn_parked",
+        "workspace_id",
+        postgresql_where=sa.text("status = 'parked'"),
+        sqlite_where=sa.text("status = 'parked'"),
+    ),
 )
 
 ledger = sa.Table(
@@ -224,6 +238,7 @@ ext_store = sa.Table(
     sa.Column("value", sa.JSON, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Index("ext_store_key", "extension", "key"),
 )
 
 runtime_instance = sa.Table(

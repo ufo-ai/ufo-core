@@ -64,9 +64,9 @@ class JobSpec:
     ExtensionContext, never a raw handle. `candidates` names the workspaces this job has work in —
     the dispatcher binds each with `with ws(...)` and runs `handler` scoped to it, so a handler
     never runs unbound and never fans the fleet itself. It is required and has no fleet-wide value:
-    an extension declares it through `owner_candidates` (a select over its own tables projecting
-    distinct `workspace_id`, run for it under the one RLS-bypass read), so a job that would fire
-    across every workspace regardless of work cannot be expressed."""
+    an extension declares it through `owner_candidates` (a per-tick builder of a select over its
+    own tables projecting distinct `workspace_id`, run for it under the one RLS-bypass read), so a
+    job that would fire across every workspace regardless of work cannot be expressed."""
 
     name: str
     schedule: str | None

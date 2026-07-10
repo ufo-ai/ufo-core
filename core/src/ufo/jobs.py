@@ -50,6 +50,7 @@ CORE_EXTENSION = "core"
 SPEND_RESUME_JOB = "spend_resume"
 SPEND_RESUME_SCHEDULE = "0 * * * * *"
 RESUME_ENQUEUE_GRACE_SECONDS = 300
+SPEND_RESUME_BATCH_TURNS = 100
 SANDBOX_REAP_JOB = "sandbox_reap"
 SANDBOX_REAP_SCHEDULE = "0 */10 * * * *"
 SANDBOX_IDLE_TTL_SECONDS = 1800
@@ -93,9 +94,14 @@ class SpendResume:
     workspace's partition — exactly as a turn would. `candidate_workspaces` is the one `owner_tx`
     read (the RLS-bypass path) naming only the workspaces that hold a resumable parked turn, so a
     workspace with none is never bound. On a per-tenant deploy `owner_tx` resolves to the single
-    workspace, unchanged."""
+    workspace, unchanged.
+
+    A sweep re-admits at most `resume_batch` turns per workspace, oldest first — a workspace that
+    parked thousands makes bounded progress each tick instead of holding one tick for minutes; the
+    remainder stays PARKED and unstamped, so the next tick's candidate read picks it up."""
 
     client: DBOSClient
+    resume_batch: int = SPEND_RESUME_BATCH_TURNS
 
     async def run(self) -> None:
         for turn in await self._parked_turns():
@@ -148,6 +154,8 @@ class SpendResume:
                             tables.turn.c.resume_enqueued_at < cutoff,
                         ),
                     )
+                    .order_by(tables.turn.c.created_at)
+                    .limit(self.resume_batch)
                 )
             ).all()
         return tuple(
@@ -213,25 +221,20 @@ class SandboxReaper:
 
     async def candidate_workspaces(self) -> tuple[UUID, ...]:
         """The workspaces holding a conversation whose sandbox is idle past the TTL — one distinct
-        `workspace_id` per such workspace, read in one `owner_tx` (RLS bypass). A workspace with no
-        idle sandbox is never bound, so no transaction runs against it on the sweep."""
+        `workspace_id` per such workspace, read in one `owner_tx` (RLS bypass). Anti-joins driven
+        from the handle-carrying conversations (a partial index names them), each probing that
+        conversation's turns by index — the sweep's cost follows the live sandboxes, never the
+        settled turn history. A workspace with no idle sandbox is never bound, so no transaction
+        runs against it on the sweep."""
         cutoff = datetime.now(UTC) - timedelta(seconds=SANDBOX_IDLE_TTL_SECONDS)
-        in_flight = (
-            sa.select(tables.turn.c.conversation_id)
-            .where(tables.turn.c.status.in_(NON_TERMINAL_STATUSES))
-            .distinct()
-        )
         async with owner_tx() as connection:
             rows = (
                 await connection.execute(
                     sa.select(tables.conversation.c.workspace_id)
-                    .select_from(tables.turn.join(tables.conversation))
                     .where(
                         tables.conversation.c.sandbox_handle.is_not(None),
-                        tables.turn.c.conversation_id.notin_(in_flight),
+                        ~self._active_since(cutoff),
                     )
-                    .group_by(tables.conversation.c.workspace_id, tables.turn.c.conversation_id)
-                    .having(sa.func.max(tables.turn.c.updated_at) < cutoff)
                     .distinct()
                 )
             ).all()
@@ -266,36 +269,39 @@ class SandboxReaper:
         return found is not None
 
     async def _idle_sandboxes(self) -> tuple[tuple[UUID, str], ...]:
-        """The bound workspace's conversations carrying a persisted sandbox handle whose most recent
-        turn settled past the idle TTL and which have no turn in flight — the durable handle, not an
-        in-process map, is the set the reaper reclaims from, so a sandbox a prior process created is
-        in scope. Read through RLS, so the sweep sees only the workspace the dispatcher bound."""
+        """The bound workspace's conversations carrying a persisted sandbox handle with no turn in
+        flight and none touched within the TTL — the durable handle, not an in-process map, is the
+        set the reaper reclaims from, so a sandbox a prior process created is in scope, and a
+        handle whose turns are all gone is an orphan reclaimed the same way. Read through RLS, so
+        the sweep sees only the workspace the dispatcher bound."""
         cutoff = datetime.now(UTC) - timedelta(seconds=SANDBOX_IDLE_TTL_SECONDS)
-        in_flight = (
-            sa.select(tables.turn.c.conversation_id)
-            .where(tables.turn.c.status.in_(NON_TERMINAL_STATUSES))
-            .distinct()
-        )
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
                     sa.select(
-                        tables.turn.c.conversation_id,
+                        tables.conversation.c.id,
                         tables.conversation.c.sandbox_handle,
-                    )
-                    .select_from(tables.turn.join(tables.conversation))
-                    .where(
+                    ).where(
                         tables.conversation.c.sandbox_handle.is_not(None),
-                        tables.turn.c.conversation_id.notin_(in_flight),
+                        ~self._active_since(cutoff),
                     )
-                    .group_by(
-                        tables.turn.c.conversation_id,
-                        tables.conversation.c.sandbox_handle,
-                    )
-                    .having(sa.func.max(tables.turn.c.updated_at) < cutoff)
                 )
             ).all()
-        return tuple((row.conversation_id, row.sandbox_handle) for row in rows)
+        return tuple((row.id, row.sandbox_handle) for row in rows)
+
+    def _active_since(self, cutoff: datetime) -> sa.ColumnElement[bool]:
+        """The conversation has a turn in flight or one touched at or after `cutoff` — the busy
+        signal both the fleet-wide candidate read and the bound workspace's sweep negate, probing
+        each candidate conversation's turns through the `(conversation_id, updated_at)` index."""
+        return sa.exists(
+            sa.select(tables.turn.c.id).where(
+                tables.turn.c.conversation_id == tables.conversation.c.id,
+                sa.or_(
+                    tables.turn.c.status.in_(NON_TERMINAL_STATUSES),
+                    tables.turn.c.updated_at >= cutoff,
+                ),
+            )
+        )
 
 
 def _page_beyond_cursor(updated_at: datetime, page_id: UUID, cursor: object) -> bool:
@@ -397,24 +403,30 @@ class PageChangeRunner:
     async def workspaces_with_changes(self, consumer: PageChangeConsumer) -> tuple[UUID, ...]:
         """The workspaces this consumer has actual pending work in — those whose newest page lies
         beyond the consumer's own stored cursor. One `owner_tx` read (RLS bypass) takes each
-        workspace's high-water page (the maximum in the feed's `(updated_at, id)` order) and each
-        workspace's cursor for this consumer from `ext_store`; a workspace whose high-water page is
-        at or before its cursor has nothing changed since it last drained and is never opened, while
-        a workspace with no cursor yet (never driven) has every page pending. So a page-holding but
-        change-free workspace runs no per-tick transaction. On a per-tenant deploy `owner_tx`
-        resolves to the single workspace, unchanged."""
+        workspace's high-water page as a pair of correlated probes down the `page_feed` index (the
+        maximum in the feed's `(updated_at, id)` order — one probe per workspace, never a scan of
+        the page table) and each workspace's cursor for this consumer from `ext_store`; a workspace
+        whose high-water page is at or before its cursor has nothing changed since it last drained
+        and is never opened, while a workspace with no cursor yet (never driven) has every page
+        pending. So a page-holding but change-free workspace runs no per-tick transaction. On a
+        per-tenant deploy `owner_tx` resolves to the single workspace, unchanged."""
         cursor_key = f"{PAGE_CHANGE_CURSOR_KEY}:{consumer.discriminator}"
-        high_water = sa.select(
-            tables.page.c.workspace_id,
-            tables.page.c.updated_at,
-            tables.page.c.id,
-            sa.func.row_number()
-            .over(
-                partition_by=tables.page.c.workspace_id,
-                order_by=(tables.page.c.updated_at.desc(), tables.page.c.id.desc()),
-            )
-            .label("rank"),
-        ).subquery()
+        of_workspace = tables.page.c.workspace_id == tables.workspace.c.id
+        newest_first = (tables.page.c.updated_at.desc(), tables.page.c.id.desc())
+        newest_at = (
+            sa.select(tables.page.c.updated_at)
+            .where(of_workspace)
+            .order_by(*newest_first)
+            .limit(1)
+            .scalar_subquery()
+        )
+        newest_id = (
+            sa.select(tables.page.c.id)
+            .where(of_workspace)
+            .order_by(*newest_first)
+            .limit(1)
+            .scalar_subquery()
+        )
         async with owner_tx() as connection:
             cursor_rows = (
                 await connection.execute(
@@ -427,13 +439,17 @@ class PageChangeRunner:
             page_rows = (
                 await connection.execute(
                     sa.select(
-                        high_water.c.workspace_id, high_water.c.updated_at, high_water.c.id
-                    ).where(high_water.c.rank == 1)
+                        tables.workspace.c.id.label("workspace_id"),
+                        newest_at.label("updated_at"),
+                        newest_id.label("id"),
+                    )
                 )
             ).all()
         cursors = {row.workspace_id: row.value for row in cursor_rows}
         pending: list[UUID] = []
         for row in page_rows:
+            if row.updated_at is None:
+                continue
             if _page_beyond_cursor(row.updated_at, row.id, cursors.get(row.workspace_id)):
                 pending.append(row.workspace_id)
         return tuple(pending)

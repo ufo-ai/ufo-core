@@ -151,21 +151,34 @@ class Trajectory:
     messages: tuple[Message, ...]
 
 
+TRAJECTORY_CORPUS_CONVERSATIONS = 200
+
+
 @dataclass(frozen=True)
 class TrajectoryCorpus:
     """The one blob reach a handler gets: this workspace's conversation transcripts, read only. The
     store stays module-private (`_blob`), so the only operation exposed is enumerating this
     workspace's trajectories — never an arbitrary blob get or put over another conversation or an
-    artifact. A conversation whose transcript is missing or corrupt is skipped-with-log, never
+    artifact. The read is bounded to the `limit` most recently created conversations, so a
+    workspace with a long history hands a job a bounded corpus, never every transcript it ever
+    produced. A conversation whose transcript is missing or corrupt is skipped-with-log, never
     aborting the whole corpus."""
 
     _blob: BlobStore
+    limit: int = TRAJECTORY_CORPUS_CONVERSATIONS
 
     @property
     def workspace_id(self) -> UUID:
         return ws_current().workspace_id
 
     async def trajectories(self) -> tuple[Trajectory, ...]:
+        recent = (
+            sa.select(tables.conversation.c.id)
+            .where(tables.conversation.c.workspace_id == self.workspace_id)
+            .order_by(tables.conversation.c.created_at.desc(), tables.conversation.c.id.desc())
+            .limit(self.limit)
+            .scalar_subquery()
+        )
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
@@ -180,7 +193,7 @@ class TrajectoryCorpus:
                             tables.turn.c.conversation_id == tables.conversation.c.id,
                         ).join(tables.agent, tables.agent.c.id == tables.turn.c.agent_id)
                     )
-                    .where(tables.conversation.c.workspace_id == self.workspace_id)
+                    .where(tables.conversation.c.id.in_(recent))
                     .distinct()
                     .order_by(tables.conversation.c.id)
                 )
@@ -214,20 +227,26 @@ class TrajectoryCorpus:
 
 def trajectory_workspaces() -> WorkspaceCandidates:
     """The candidate seam a trajectory-reading job declares: the workspaces holding a conversation
-    with at least one turn — one distinct `workspace_id` per such workspace, read for the extension
-    through the one RLS-bypass path. Core owns the `conversation`/`turn` tables, so it owns this
-    query and the extension declares `candidates=trajectory_workspaces()` without reaching
-    `owner_tx`; the dispatcher binds each and the corpus read runs RLS-scoped, exactly as a turn
-    would scope it."""
-    with_a_turn = (
-        sa.select(tables.conversation.c.workspace_id)
-        .select_from(
-            tables.conversation.join(
-                tables.turn, tables.turn.c.conversation_id == tables.conversation.c.id
+    with at least one turn — a semi-join from `workspace` that stops each workspace at its first
+    turn-bearing conversation, read for the extension through the one RLS-bypass path. Core owns
+    the `conversation`/`turn` tables, so it owns this query and the extension declares
+    `candidates=trajectory_workspaces()` without reaching `owner_tx`; the dispatcher binds each and
+    the corpus read runs RLS-scoped, exactly as a turn would scope it."""
+
+    def with_a_turn() -> sa.Select[tuple[UUID]]:
+        return sa.select(tables.workspace.c.id).where(
+            sa.exists(
+                sa.select(tables.conversation.c.id).where(
+                    tables.conversation.c.workspace_id == tables.workspace.c.id,
+                    sa.exists(
+                        sa.select(tables.turn.c.id).where(
+                            tables.turn.c.conversation_id == tables.conversation.c.id
+                        )
+                    ),
+                )
             )
         )
-        .distinct()
-    )
+
     return owner_candidates(with_a_turn)
 
 

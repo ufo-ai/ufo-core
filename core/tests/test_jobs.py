@@ -36,7 +36,7 @@ def _runner(core_jobs: tuple[JobSpec, ...]) -> JobRunner:
 def _every_workspace() -> object:
     """A test candidate naming every workspace — the boot jobs here have no work table of their
     own, so they run on each seeded workspace. Real jobs name only the workspaces holding work."""
-    return owner_candidates(sa.select(tables.workspace.c.id).distinct())
+    return owner_candidates(lambda: sa.select(tables.workspace.c.id).distinct())
 
 
 async def _write_marker(context: ExtensionContext) -> None:

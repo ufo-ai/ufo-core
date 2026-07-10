@@ -247,6 +247,30 @@ async def test_reaper_skips_a_conversation_with_no_persisted_handle(db: None) ->
     assert carrier.reaped == []
 
 
+async def test_reaper_reclaims_a_handle_whose_conversation_has_no_turns(db: None) -> None:
+    """A persisted handle on a conversation with no turns at all has nothing that could be holding
+    it busy — an orphan the sweep reclaims like any idle sandbox, never a leaked container."""
+    workspace_id, _agent_id = await _workspace_agent()
+    conversation_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                surface="cli",
+                queue_key=uuid4().hex,
+                member_id=None,
+                sandbox_handle="local:sbx-orphan",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    carrier = RecordingCarrier()
+    await _reap(carrier)
+    assert carrier.destroyed == [conversation_id]
+    assert await _stored_handle(conversation_id) is None
+
+
 async def test_reaper_skips_a_handle_another_backend_wrote(db: None) -> None:
     """A deploy that switched carriers leaves rows another backend wrote; the running carrier
     neither reaps nor clears them — the id is not its to reclaim, so the prefix gates the reap."""

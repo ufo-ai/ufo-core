@@ -12,6 +12,7 @@ from ufo.ext.manifest import JobSpec
 from ufo.jobs import (
     CORE_EXTENSION,
     RESUME_ENQUEUE_GRACE_SECONDS,
+    SPEND_RESUME_BATCH_TURNS,
     SPEND_RESUME_JOB,
     JobRunner,
     SpendResume,
@@ -36,12 +37,12 @@ class StubDbos:
         self.scoped.append((workspace_id, turn_id))
 
 
-async def _resume(client: object) -> None:
+async def _resume(client: object, resume_batch: int = SPEND_RESUME_BATCH_TURNS) -> None:
     """Drive the resume sweep through the real dispatch: the spend-resume JobSpec's candidate names
     the workspaces holding a resumable parked turn, and `fire` binds each before running the sweep —
     so the cap decision and enqueue run scoped per workspace and never unbound, and a workspace with
     no resumable parked turn (absent from the candidates) is never opened."""
-    resume = SpendResume(client=client)
+    resume = SpendResume(client=client, resume_batch=resume_batch)
 
     async def _handler(context: ExtensionContext) -> None:
         await resume.run()
@@ -473,6 +474,23 @@ async def test_resume_reenqueues_a_parked_turn_past_the_grace_window(db: None) -
     again = StubDbos()
     await _resume(again)
     assert again.enqueued == []
+
+
+async def test_resume_sweep_bounds_its_batch_and_progresses_across_sweeps(db: None) -> None:
+    """A sweep re-admits at most `resume_batch` turns per workspace — a workspace that parked many
+    makes bounded progress each tick rather than holding one tick for all of them; the enqueued
+    turn's grace stamp keeps the next sweep off it, so the remainder drains sweep by sweep."""
+    async with workspace_tx() as connection:
+        workspace_id, _, agent_id, conversation_id = await _seed(connection)
+        first = await _insert_parked(connection, workspace_id, conversation_id, agent_id, seq=1)
+        second = await _insert_parked(connection, workspace_id, conversation_id, agent_id, seq=2)
+    dbos = StubDbos()
+    await _resume(dbos, resume_batch=1)
+    assert len(dbos.enqueued) == 1
+    again = StubDbos()
+    await _resume(again, resume_batch=1)
+    assert len(again.enqueued) == 1
+    assert set(dbos.enqueued) | set(again.enqueued) == {str(first), str(second)}
 
 
 async def test_resume_readmits_when_cap_raised(db: None) -> None:

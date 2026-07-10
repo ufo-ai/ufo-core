@@ -199,6 +199,23 @@ async def test_runner_fires_due_task_into_a_turn(db: None) -> None:
         assert await store.claim_due(datetime.now(UTC), 300) == ()
 
 
+async def test_claim_due_caps_a_sweep_at_its_batch_limit(db: None) -> None:
+    """One sweep leases at most `limit` tasks, oldest due first; the remainder stays due and the
+    next sweep claims it — a workspace with a task pileup makes bounded progress per tick instead
+    of claiming more than one lease can cover."""
+    workspace_id, agent_id, conversation_id = await _seed()
+    store = ScheduleStore()
+    older = datetime.now(UTC) - timedelta(minutes=10)
+    newer = datetime.now(UTC) - timedelta(minutes=5)
+    with ws(workspace_id):
+        await store.create(conversation_id, agent_id, "first", DAILY_9AM, "a", "a", older)
+        await store.create(conversation_id, agent_id, "second", DAILY_9AM, "b", "b", newer)
+        first_sweep = await store.claim_due(datetime.now(UTC), 300, limit=1)
+        assert [task.name for task in first_sweep] == ["first"]
+        second_sweep = await store.claim_due(datetime.now(UTC), 300, limit=1)
+        assert [task.name for task in second_sweep] == ["second"]
+
+
 async def test_fire_into_a_durable_surface_conversation_registers_delivery(db: None) -> None:
     """The gap this guards: a scheduled fire admits through the same boundary as a surface ingest,
     so a task scheduled in a Slack thread delivers its reply there — the writeback row rides the

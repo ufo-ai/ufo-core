@@ -19,7 +19,12 @@ import sqlalchemy as sa
 import ufo_ext_memory.manifest as memory_manifest
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
-from ufo_ext_memory.condenser import FactDeriver, MemoryConsolidator
+from ufo_ext_memory.condenser import (
+    MIN_CLUSTER_FACTS,
+    MIN_OLDEST_AGE,
+    FactDeriver,
+    MemoryConsolidator,
+)
 from ufo_ext_memory.store import (
     FACT,
     KIND_FACT,
@@ -483,6 +488,51 @@ async def test_consolidation_without_a_model_writes_nothing(clean: None) -> None
     rows = await _facts(workspace_id)
     assert [row for row in rows if row.item_class == SEMANTIC] == []
     assert all(row.superseded_by is None for row in rows if row.id in originals)
+
+
+async def _insert_fact(workspace_id: UUID, created_at: datetime) -> None:
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(memory_item).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                subject=SHARED_SUBJECT,
+                body="a fact",
+                item_class=FACT,
+                memory_kind=KIND_FACT,
+                confidence=5,
+                source_ref=None,
+                embedding_digest="sha256:seeded",
+                superseded_by=None,
+                created_at=created_at,
+                updated_at=created_at,
+            )
+        )
+
+
+async def test_consolidate_candidates_name_only_workspaces_with_a_clusterable_backlog(
+    db: None,
+) -> None:
+    """The hourly consolidate JobSpec binds only workspaces where a pass could form a cluster — at
+    least MIN_CLUSTER_FACTS live facts aged past MIN_OLDEST_AGE, the consolidator's own floor. A
+    workspace below the floor and one whose facts are all young are never candidates, so a fleet's
+    consolidation-free workspaces run no hourly transaction."""
+    clusterable, thin, young = await _workspace(), await _workspace(), await _workspace()
+    aged = datetime.now(UTC) - MIN_OLDEST_AGE - timedelta(hours=1)
+    fresh = datetime.now(UTC)
+    for workspace_id, stamps in (
+        (clusterable, (aged,) * MIN_CLUSTER_FACTS),
+        (thin, (aged,) * (MIN_CLUSTER_FACTS - 1)),
+        (young, (fresh,) * MIN_CLUSTER_FACTS),
+    ):
+        for stamp in stamps:
+            await _insert_fact(workspace_id, stamp)
+    consolidate = next(
+        job
+        for job in memory_manifest.manifest().jobs
+        if job.name == memory_manifest.CONSOLIDATE_JOB
+    )
+    assert await consolidate.candidates() == (clusterable,)
 
 
 # --- seam --------------------------------------------------------------------

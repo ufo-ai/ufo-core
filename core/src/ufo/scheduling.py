@@ -4,8 +4,9 @@ A scheduled task is a durable row — the conversation and agent a fire re-enter
 string, the `prompt` to deliver, and a `next_run_at` due marker. `ScheduleStore` is the one path a
 workspace reaches those rows: `create` upserts by name so re-scheduling an existing name updates it,
 `cancel` deletes, `list` reports, and `claim_due` + `reschedule` are the batch-at-interval runner's
-grip — `claim_due` leases every due task in one atomic statement so an overlapping poll never fires
-one twice, and `reschedule` advances a fired task to its next run. The store is cron-agnostic: it
+grip — `claim_due` leases a bounded batch of the oldest-due tasks in one atomic statement so an
+overlapping poll never fires one twice and one sweep never claims more than its lease can cover,
+and `reschedule` advances a fired task to its next run. The store is cron-agnostic: it
 stores the schedule string opaquely and orders on the `next_run_at` a caller computes, so the cron
 dialect lives with the extension that owns it, never in core."""
 
@@ -19,6 +20,8 @@ from ufo.candidates import WorkspaceCandidates
 from ufo.db import owner_tx, workspace_tx
 from ufo.schema import tables
 from ufo.workspace import ws_current
+
+CLAIM_BATCH_MAX_TASKS = 50
 
 
 @dataclass(frozen=True)
@@ -200,21 +203,38 @@ class ScheduleStore:
             )
         return tuple(_task(row) for row in rows)
 
-    async def claim_due(self, now: datetime, lease_seconds: int) -> tuple[ScheduledTask, ...]:
-        """Lease every task due at `now` in one atomic UPDATE: a due, unclaimed-or-expired row is
-        stamped with a fresh claim and returned. Because the claim and the read are the same
-        statement, two overlapping polls partition the due set rather than both firing it — the
-        loser's WHERE no longer matches the rows the winner claimed."""
+    async def claim_due(
+        self, now: datetime, lease_seconds: int, limit: int = CLAIM_BATCH_MAX_TASKS
+    ) -> tuple[ScheduledTask, ...]:
+        """Lease up to `limit` of the oldest-due tasks at `now` in one atomic UPDATE: a due,
+        unclaimed-or-expired row is stamped with a fresh claim and returned. Because the claim and
+        the read are the same statement, two overlapping polls partition the due set rather than
+        both firing it — the loser's WHERE no longer matches the rows the winner claimed. The cap
+        bounds one sweep's fires to what its lease can cover; the remainder stays due and the next
+        sweep claims it."""
         claim = uuid4().hex
         expires = now + timedelta(seconds=lease_seconds)
+        due = (
+            sa.select(tables.scheduled_task.c.id)
+            .where(
+                tables.scheduled_task.c.workspace_id == self.workspace_id,
+                tables.scheduled_task.c.next_run_at <= now,
+                sa.or_(
+                    tables.scheduled_task.c.claimed_by.is_(None),
+                    tables.scheduled_task.c.claim_expires_at < now,
+                ),
+            )
+            .order_by(tables.scheduled_task.c.next_run_at, tables.scheduled_task.c.id)
+            .limit(limit)
+            .scalar_subquery()
+        )
         async with workspace_tx() as connection:
             rows = (
                 (
                     await connection.execute(
                         sa.update(tables.scheduled_task)
                         .where(
-                            tables.scheduled_task.c.workspace_id == self.workspace_id,
-                            tables.scheduled_task.c.next_run_at <= now,
+                            tables.scheduled_task.c.id.in_(due),
                             sa.or_(
                                 tables.scheduled_task.c.claimed_by.is_(None),
                                 tables.scheduled_task.c.claim_expires_at < now,

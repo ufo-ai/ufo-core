@@ -37,7 +37,12 @@ from ufo.sdk.manifest import (
 )
 from ufo.sdk.sources import SHARED_SUBJECT, member_subject
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
-from ufo_ext_memory.condenser import FactDeriver, MemoryConsolidator
+from ufo_ext_memory.condenser import (
+    MIN_CLUSTER_FACTS,
+    MIN_OLDEST_AGE,
+    FactDeriver,
+    MemoryConsolidator,
+)
 from ufo_ext_memory.store import (
     DEFAULT_CONFIDENCE,
     FACT,
@@ -271,6 +276,32 @@ async def consolidate_memory(ctx: ExtensionContext) -> None:
     ).run()
 
 
+def _items_awaiting_index() -> sa.Select[tuple[UUID]]:
+    return (
+        sa.select(memory_item.c.workspace_id)
+        .where(memory_item.c.embedding_digest.is_(None))
+        .distinct()
+    )
+
+
+def _consolidatable_workspaces() -> sa.Select[tuple[UUID]]:
+    """Workspaces where a consolidation pass could actually form a cluster: at least
+    MIN_CLUSTER_FACTS live facts aged past MIN_OLDEST_AGE — the consolidator's own floor, folded
+    into the candidate read so a workspace whose facts are all young, superseded, or too few is
+    never bound on the hourly tick. Built per tick, so the age cutoff tracks `now`."""
+    cutoff = datetime.now(UTC) - MIN_OLDEST_AGE
+    return (
+        sa.select(memory_item.c.workspace_id)
+        .where(
+            memory_item.c.item_class == FACT,
+            memory_item.c.superseded_by.is_(None),
+            memory_item.c.created_at <= cutoff,
+        )
+        .group_by(memory_item.c.workspace_id)
+        .having(sa.func.count() >= MIN_CLUSTER_FACTS)
+    )
+
+
 def manifest() -> Manifest:
     return Manifest(
         name=NAME,
@@ -316,24 +347,13 @@ def manifest() -> Manifest:
                 name=MEMORY_INDEX_JOB,
                 schedule=MEMORY_INDEX_SCHEDULE,
                 handler=index_memory,
-                candidates=owner_candidates(
-                    sa.select(memory_item.c.workspace_id)
-                    .where(memory_item.c.embedding_digest.is_(None))
-                    .distinct()
-                ),
+                candidates=owner_candidates(_items_awaiting_index),
             ),
             JobSpec(
                 name=CONSOLIDATE_JOB,
                 schedule=CONSOLIDATE_SCHEDULE,
                 handler=consolidate_memory,
-                candidates=owner_candidates(
-                    sa.select(memory_item.c.workspace_id)
-                    .where(
-                        memory_item.c.item_class == FACT,
-                        memory_item.c.superseded_by.is_(None),
-                    )
-                    .distinct()
-                ),
+                candidates=owner_candidates(_consolidatable_workspaces),
             ),
         ),
         skills=(SkillSpec(path=SKILL_DIR),),
