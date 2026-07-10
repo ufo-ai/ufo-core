@@ -103,3 +103,25 @@ async def test_read_secret_raises_on_forbidden() -> None:
     with pytest.raises(httpx.HTTPStatusError):
         await client.read_secret("ufo-acme", "ufo-tenant")
     await client.close()
+
+
+async def test_delete_secret_issues_a_namespaced_delete() -> None:
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        return httpx.Response(200, json={})
+
+    client = _client(httpx.MockTransport(handler))
+    await client.delete_secret("ufo-acme", "sh.helm.release.v1.ufo-acme.v8878")
+    assert seen["method"] == "DELETE"
+    assert seen["path"] == "/api/v1/namespaces/ufo-acme/secrets/sh.helm.release.v1.ufo-acme.v8878"
+    await client.close()
+
+
+async def test_delete_secret_tolerates_an_already_absent_secret() -> None:
+    # Healing a stuck release is idempotent: a concurrent reconcile may have deleted it already.
+    client = _client(httpx.MockTransport(lambda request: httpx.Response(404)))
+    await client.delete_secret("ufo-acme", "sh.helm.release.v1.ufo-acme.v8878")
+    await client.close()

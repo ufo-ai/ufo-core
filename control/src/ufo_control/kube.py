@@ -203,6 +203,14 @@ class KubeClient:
         response.raise_for_status()
         return response.json()
 
+    async def delete_secret(self, namespace: str, name: str) -> None:
+        # 404-tolerant so healing a stuck release is idempotent: another reconcile (or a hand fix)
+        # may have already removed the dangling Helm release Secret.
+        response = await self.http.delete(f"/api/v1/namespaces/{namespace}/secrets/{name}")
+        if response.status_code == 404:
+            return
+        response.raise_for_status()
+
     async def get_lease(self, namespace: str, name: str) -> dict[str, Any] | None:
         return await self.get(self._lease_path(namespace, name))
 
