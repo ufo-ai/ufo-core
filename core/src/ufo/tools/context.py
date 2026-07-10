@@ -26,15 +26,19 @@ from dataclasses import dataclass, field
 from typing import Annotated, Any, Literal, Protocol
 from uuid import UUID
 
+import sqlalchemy as sa
 from pydantic import BaseModel, Field
 
 from ufo.blob import BlobStore
 from ufo.browser import CdpProvider, FindCompleter
 from ufo.connectors import ConnectorRegistry
+from ufo.credentials import CredentialRequests
+from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext
 from ufo.grants import ConnectUnavailable, GrantStore
 from ufo.o11y import log
 from ufo.sandbox.session import SandboxSession
+from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.search import SearchProvider
 from ufo.skills.runtime import CORE_SKILL_REGISTRY, SkillRegistry
@@ -157,7 +161,27 @@ class ToolContext:
     search_provider: SearchProvider | None = None
     connectors: ConnectorRegistry | None = None
     find: FindCompleter | None = None
+    requestable_credentials: CredentialRequests | None = None
+    public_base_url: str | None = None
     cleanup: TurnCleanup = field(default_factory=TurnCleanup)
+
+    async def speaker_is_owner(self) -> bool:
+        """Whether this turn's speaking member is the workspace owner — the earliest-created member
+        (there is no owner column; roles are deferred). Workspace-wide acts a tool drives (filling a
+        shared credential slot) gate on this, so a joined teammate cannot rewrite what every member
+        shares. No speaker is never the owner."""
+        if self.member_id is None:
+            return False
+        async with workspace_tx() as connection:
+            earliest = (
+                await connection.execute(
+                    sa.select(tables.member.c.id)
+                    .where(tables.member.c.workspace_id == self.turn.workspace_id)
+                    .order_by(tables.member.c.created_at.asc(), tables.member.c.id.asc())
+                    .limit(1)
+                )
+            ).one_or_none()
+        return earliest is not None and earliest.id == self.member_id
 
     async def connector_account(self, provider: str, account_id: str | None = None) -> str:
         """The broker's connected-account id a connector tool passes to the broker's server-side

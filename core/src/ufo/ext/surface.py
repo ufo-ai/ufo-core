@@ -26,6 +26,8 @@ scheduled fire, an extension invoke) — so it is a no-op for a live surface, th
 downgrade, not a second seam."""
 
 import asyncio
+import hashlib
+import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -44,7 +46,11 @@ from ufo.artifact_token import (
     mint_artifact_token,
 )
 from ufo.blob import BlobStore
-from ufo.credentials import CredentialStore
+from ufo.credentials import (
+    CredentialRequestInvalid,
+    CredentialStore,
+    open_credential_request,
+)
 from ufo.db import workspace_tx
 from ufo.hub import LiveFrame
 from ufo.o11y import log
@@ -56,6 +62,7 @@ from ufo.schema.records import (
     WRITEBACK_FAILED,
     WRITEBACK_PENDING,
     AskUserInput,
+    CredentialRequest,
     TerminalFrame,
     TerminalStatus,
     TurnContext,
@@ -135,6 +142,15 @@ class Writeback:
     text: str
     artifacts: tuple[SharedArtifact, ...]
     question: AskUserInput | None
+    credential_request: CredentialRequest | None
+
+
+def _fulfilled_marker_key(workspace_id: UUID, sealed: str, slot: str) -> str:
+    """The blob marker one fulfilled prompt leaves, keyed by the seal's digest and the slot — the
+    render gate reads it per prompt, so a stored slot stops prompting while its siblings keep
+    asking, and a fresh request (a rotation) seals differently and prompts anew."""
+    digest = hashlib.sha256(sealed.encode()).hexdigest()[:32]
+    return f"workspaces/{workspace_id}/credential_requests/{digest}/{slot}"
 
 
 def _email_domain(email: str) -> str:
@@ -170,17 +186,49 @@ class SurfaceContext:
             raise RuntimeError(f"surface {self.surface!r} reads a credential but holds no store")
         return await self._credentials.get(self.workspace_id, slot)
 
-    async def put_credential(self, slot: str, value: str) -> None:
-        """The write half of `credential`: a setup surface fills a peer surface's slots (slots are
-        workspace-global, keyed by `(workspace_id, slot)`, not namespaced per extension)."""
+    async def credential_prompt_pending(self, sealed: str, slot: str) -> bool:
+        """Whether one prompt of a sealed credential request still awaits its value — the per-slot
+        render gate, so a fulfilled, expired, or foreign prompt is never re-presented on reconnect
+        while an unanswered sibling keeps asking (and a rotation, sealing afresh, asks anew)."""
         if self._credentials is None:
-            raise RuntimeError(f"surface {self.surface!r} writes a credential but holds no store")
+            return False
+        try:
+            state = open_credential_request(self._credentials.fernet, sealed)
+        except CredentialRequestInvalid:
+            return False
+        if state.workspace_id != self.workspace_id or slot not in state.slots:
+            return False
+        return not await self.blob.exists(_fulfilled_marker_key(self.workspace_id, sealed, slot))
+
+    async def fulfill_credential_request(
+        self, sealed: str, slot: str, value: str, member_id: UUID | None
+    ) -> None:
+        """Verify the seal and store one requested slot: the fulfiller must be the member the
+        request was sealed for, the slot one it named, and the seal fresh — anything else raises
+        `CredentialRequestInvalid` before a byte is written. The value lands through the same
+        encrypted store `ufoctl credential set` writes, and the slot's own marker stops its prompt
+        from rendering again."""
+        if self._credentials is None:
+            raise RuntimeError(f"surface {self.surface!r} stores a credential but holds no store")
+        state = open_credential_request(self._credentials.fernet, sealed)
+        if state.workspace_id != self.workspace_id:
+            raise CredentialRequestInvalid("credential request was sealed for another workspace")
+        if member_id is None or member_id != state.member_id:
+            raise CredentialRequestInvalid(
+                "credential request can only be fulfilled by the member who asked"
+            )
+        if slot not in state.slots:
+            raise CredentialRequestInvalid(f"credential request does not name slot {slot!r}")
         await self._credentials.put(self.workspace_id, slot, value)
+        await self.blob.put(
+            _fulfilled_marker_key(self.workspace_id, sealed, slot),
+            json.dumps({"at": datetime.now(UTC).timestamp()}).encode(),
+        )
 
     @property
     def public_base_url(self) -> str | None:
-        """The deploy's public base (`[connect] public_base_url`), or None when unset — a setup
-        surface renders a channel's callback URL (Slack's Events request URL) from it."""
+        """The deploy's public base (`[connect] public_base_url`), or None when unset — a
+        channel's callback URL (Slack's Events request URL) renders from it."""
         return self._public_base_url
 
     def artifact_link(self, artifact: SharedArtifact) -> str | None:
@@ -227,15 +275,6 @@ class SurfaceContext:
 
     async def linked_member(self, external_id: str) -> UUID | None:
         return await self._identity_member(self.surface, external_id)
-
-    async def is_workspace_owner(self, email: str) -> bool:
-        """Whether `email` is the workspace owner — the earliest-created member, inserted at
-        provisioning before any later join. There is no owner column; the first member is the
-        owner (RFC 0011 defers roles). A setup surface gates workspace-wide changes — connecting
-        the one shared Slack app every member talks to — to the owner, so a joined teammate cannot
-        overwrite the whole workspace's channel credentials."""
-        owner = await self._owner_email()
-        return owner is not None and owner.strip().lower() == email.strip().lower()
 
     async def _owner_email(self) -> str | None:
         """The earliest member's email. Their domain doubles as the workspace's own domain: the
@@ -668,6 +707,7 @@ class WritebackPoller:
             status=terminal.status,
             text=terminal.text,
             question=terminal.question,
+            credential_request=terminal.credential_request,
             artifacts=tuple(
                 SharedArtifact(
                     blob_key=artifact.blob_key,

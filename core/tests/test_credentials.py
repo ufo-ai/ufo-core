@@ -1,10 +1,20 @@
+import time
 from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 
-from ufo.credentials import CredentialSlotUnset, CredentialStore
+from ufo.credentials import (
+    CREDENTIAL_REQUEST_TTL_SECONDS,
+    CredentialRequestInvalid,
+    CredentialRequests,
+    CredentialRequestState,
+    CredentialSlotUnset,
+    CredentialStore,
+    open_credential_request,
+    seal_credential_request,
+)
 from ufo.db import workspace_tx
 from ufo.ext.manifest import CredentialSlot, InjectionTarget, Manifest
 from ufo.sandbox.proxy.rules import (
@@ -114,3 +124,29 @@ async def test_code_only_slot_has_no_wire_rule(db: None) -> None:
         name="s", version="1", credentials=(CredentialSlot(name="code_only", description="x"),)
     )
     assert await derive_credential_rules((manifest,), workspace_id, store) == ()
+
+
+def test_credential_request_seal_round_trips_and_expires() -> None:
+    """The sealed grant a `request_credentials` call hands a surface: opens to exactly what was
+    sealed, and refuses garbage, a foreign key, or a seal older than the TTL."""
+    fernet = Fernet(Fernet.generate_key())
+    state = CredentialRequestState(workspace_id=uuid4(), member_id=uuid4(), slots=("a", "b"))
+    sealed = seal_credential_request(fernet, state)
+    assert open_credential_request(fernet, sealed) == state
+    with pytest.raises(CredentialRequestInvalid):
+        open_credential_request(fernet, "garbage")
+    stale = fernet.encrypt_at_time(
+        state.model_dump_json().encode(),
+        int(time.time()) - CREDENTIAL_REQUEST_TTL_SECONDS - 1,
+    ).decode()
+    with pytest.raises(CredentialRequestInvalid):
+        open_credential_request(fernet, stale)
+    with pytest.raises(CredentialRequestInvalid):
+        open_credential_request(Fernet(Fernet.generate_key()), sealed)
+
+
+def test_credential_requests_seal_only_declared_slots() -> None:
+    requests = CredentialRequests(fernet=Fernet(Fernet.generate_key()), declared=frozenset({"a"}))
+    assert requests.seal(uuid4(), uuid4(), ("a",))
+    with pytest.raises(ValueError, match="declares credential slot"):
+        requests.seal(uuid4(), uuid4(), ("a", "nope"))

@@ -44,10 +44,11 @@ from urllib.parse import parse_qs, urlparse
 from uuid import UUID
 
 import httpx
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from ufo.sdk.http import JSONResponse, Request, Response
 from ufo.sdk.hub import Parked, SkillLoad, Terminal, ToolCall
+from ufo.sdk.sandbox import BlobStore
 from ufo.sdk.surfaces import (
     AskUserInput,
     CredentialSlotUnset,
@@ -60,8 +61,50 @@ from ufo.sdk.surfaces import (
 SURFACE_SLACK = "slack"
 SLACK_BOT_TOKEN_SLOT = "slack_bot_token"
 SLACK_SIGNING_SECRET_SLOT = "slack_signing_secret"
-SLACK_BOT_USER_ID_SLOT = "slack_bot_user_id"
-SLACK_TEAM_ID_SLOT = "slack_team_id"
+
+
+class SlackIdentity(BaseModel):
+    """The app's derived identity — the team and bot-user ids `auth.test` proved for the stored
+    bot token, pinned to that token's fingerprint so a rotation reads as absent until
+    `slack_connect` re-derives. Not credentials: derived metadata, custodied as the surface's own
+    record beside its url-verified marker."""
+
+    bot_token_fingerprint: str
+    team_id: str
+    bot_user_id: str
+
+
+def identity_blob_key(workspace_id: UUID) -> str:
+    return f"workspaces/{workspace_id}/surfaces/slack/identity"
+
+
+def bot_token_fingerprint(bot_token: str) -> str:
+    return hashlib.sha256(bot_token.encode()).hexdigest()
+
+
+async def read_identity(
+    blob: BlobStore, workspace_id: UUID, bot_token: str
+) -> SlackIdentity | None:
+    """The stored identity record, or None when absent, unreadable, or derived from a since-rotated
+    token — never a stale team/bot id gating events for the wrong app."""
+    key = identity_blob_key(workspace_id)
+    if not await blob.exists(key):
+        return None
+    try:
+        identity = SlackIdentity.model_validate_json(await blob.get(key))
+    except ValueError:
+        return None
+    if identity.bot_token_fingerprint != bot_token_fingerprint(bot_token):
+        return None
+    return identity
+
+
+async def _identity(ctx: SurfaceContext) -> SlackIdentity | None:
+    try:
+        bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
+    except CredentialSlotUnset:
+        return None
+    return await read_identity(ctx.blob, ctx.workspace_id, bot_token)
 
 
 def url_verified_blob_key(workspace_id: UUID) -> str:
@@ -69,14 +112,14 @@ def url_verified_blob_key(workspace_id: UUID) -> str:
     with the signing secret currently stored, whether by the `url_verification` handshake or a real
     event. Keyed by workspace because hosted tenants share one blob bucket: a fixed key would let
     every tenant's marker overwrite every other's. The body records a fingerprint of the verifying
-    secret, so after a rotation the setup surface reads the workspace as pending until Slack's next
+    secret, so after a rotation `slack_connect` reads the workspace as pending until Slack's next
     signed request — never a stale "connected"."""
     return f"workspaces/{workspace_id}/surfaces/slack/url_verified"
 
 
 def signing_secret_fingerprint(signing_secret: str) -> str:
     """A non-reversible fingerprint of the signing secret — stamped into the url-verified marker so
-    the setup surface can tell a live verification from one left over from a rotated-out secret."""
+    `slack_connect` can tell a live verification from one left over from a rotated-out secret."""
     return hashlib.sha256(signing_secret.encode()).hexdigest()
 
 
@@ -314,7 +357,7 @@ _URL_VERIFIED_WRITTEN: dict[UUID, str] = {}
 
 async def _mark_url_verified(ctx: SurfaceContext, signing_secret: str) -> None:
     """Record that Slack reached this deploy with a request the stored secret verified — the signal
-    the setup surface's `connected` state reads. Callers gate what counts as proof: the
+    the `slack_connect` tool's `connected` state reads. Callers gate what counts as proof: the
     `url_verification` handshake (Slack's own URL check, which carries no team) or a request from
     the configured team — never a stray on-team-mismatch event, which would read as connected while
     the team gate drops everything. The cache holds the fingerprint this process last wrote, so the
@@ -359,7 +402,8 @@ async def ingest(ctx: SurfaceContext, request: Request) -> Response:
     payload = json.loads(raw)
     if not isinstance(payload, dict):
         raise ValueError("Slack body must be an object")
-    if payload.get("team_id") != await ctx.credential(SLACK_TEAM_ID_SLOT):
+    identity = await _identity(ctx)
+    if identity is None or payload.get("team_id") != identity.team_id:
         return JSONResponse({"ok": True, "ignored": True})
     await _mark_url_verified(ctx, signing_secret)
     inbound = await _to_inbound(ctx, payload)
@@ -396,7 +440,10 @@ async def _to_inbound(ctx: SurfaceContext, payload: Mapping[str, object]) -> Inb
         return None
     if event.get("bot_id") is not None or event.get("subtype") not in MEMBER_MESSAGE_SUBTYPES:
         return None
-    bot_user_id = await ctx.credential(SLACK_BOT_USER_ID_SLOT)
+    identity = await _identity(ctx)
+    if identity is None:
+        return None
+    bot_user_id = identity.bot_user_id
     user = event.get("user")
     if not isinstance(user, str) or not user or user == bot_user_id:
         return None
@@ -552,7 +599,8 @@ async def _ambient_context(ctx: SurfaceContext, bot_token: str, inbound: Inbound
             "ts": root_ts,
             "limit": AMBIENT_FETCH_LIMIT,
         }
-    bot_user_id = await ctx.credential(SLACK_BOT_USER_ID_SLOT)
+    identity = await _identity(ctx)
+    bot_user_id = "" if identity is None else identity.bot_user_id
     try:
         async with httpx.AsyncClient(timeout=AMBIENT_FETCH_TIMEOUT_SECONDS) as client:
             payload = await _slack_ok(
@@ -880,7 +928,8 @@ async def _to_click(ctx: SurfaceContext, raw: bytes) -> AnswerClick | None:
         return None
     team = payload.get("team")
     team_id = team.get("id") if isinstance(team, dict) else None
-    if team_id != await ctx.credential(SLACK_TEAM_ID_SLOT):
+    identity = await _identity(ctx)
+    if identity is None or team_id != identity.team_id:
         return None
     label = _clicked_answer(payload)
     if label is None:
@@ -953,9 +1002,16 @@ def _reply_text(writeback: Writeback) -> str:
 
 
 def _reply_with_oversize_links(ctx: SurfaceContext, writeback: Writeback) -> str:
-    """The reply text, plus a link block for any shared file too large to upload inline — a TTL
-    download link so an over-cap artifact is delivered rather than silently dropped."""
+    """The reply text, plus the terminal hint when the turn asked for credentials (Slack never
+    collects a secret — the member's own terminal does), plus a link block for any shared file too
+    large to upload inline — a TTL download link so an over-cap artifact is delivered rather than
+    silently dropped."""
     text = _reply_text(writeback)
+    if writeback.credential_request is not None:
+        text = (
+            f"{text}\n\n:lock: {writeback.credential_request.reason} — open your terminal, run "
+            "`ufo`, and ask me there to continue; secrets never pass through chat."
+        )
     oversized = tuple(a for a in writeback.artifacts if a.size_bytes > SLACK_UPLOAD_MAX_BYTES)
     if not oversized:
         return text

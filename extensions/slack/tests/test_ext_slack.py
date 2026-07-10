@@ -156,9 +156,16 @@ async def _store(workspace_id: UUID) -> CredentialStore:
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     await store.put(workspace_id, slack.SLACK_SIGNING_SECRET_SLOT, SIGNING_SECRET)
     await store.put(workspace_id, slack.SLACK_BOT_TOKEN_SLOT, BOT_TOKEN)
-    await store.put(workspace_id, slack.SLACK_BOT_USER_ID_SLOT, BOT_USER_ID)
-    await store.put(workspace_id, slack.SLACK_TEAM_ID_SLOT, TEAM_ID)
     return store
+
+
+async def _write_identity(blob: FilesystemBlobStore, workspace_id: UUID) -> None:
+    identity = slack.SlackIdentity(
+        bot_token_fingerprint=slack.bot_token_fingerprint(BOT_TOKEN),
+        team_id=TEAM_ID,
+        bot_user_id=BOT_USER_ID,
+    )
+    await blob.put(slack.identity_blob_key(workspace_id), identity.model_dump_json().encode())
 
 
 async def _seed(*, member_email: str | None = None) -> tuple[UUID, UUID | None]:
@@ -214,6 +221,7 @@ async def _mount_transport(
     _patch_httpx(monkeypatch, transport)
     store = await _store(workspace_id)
     blob = FilesystemBlobStore(root=tmp_path)
+    await _write_identity(blob, workspace_id)
     app = FastAPI()
     _mount_surfaces(
         app,
@@ -336,20 +344,20 @@ def test_turn_context_composes_the_sender_line_and_drops_an_unknown_timezone() -
     )
 
 
-def test_slack_app_setup_skill_parses_indexes_and_names_the_real_route_and_slots() -> None:
+def test_slack_app_setup_skill_parses_indexes_and_names_the_real_tools_and_slots() -> None:
     registry = skill_registry((slack_manifest(),))
     index = dict(registry.index())
     assert "slack-app-setup" in index
     body = registry.named("slack-app-setup").instructions
     assert "/surface/slack" in body
     assert "/surface/slack/interactive" in body
-    for slot in (
-        slack.SLACK_BOT_TOKEN_SLOT,
-        slack.SLACK_SIGNING_SECRET_SLOT,
-        slack.SLACK_BOT_USER_ID_SLOT,
-        slack.SLACK_TEAM_ID_SLOT,
-    ):
-        assert f"ufoctl credential set {slot}" in body
+    for tool in ("slack_connect", "slack_app_manifest", "request_credentials"):
+        assert f"`{tool}`" in body
+    assert "slack_status" not in body
+    for slot in (slack.SLACK_BOT_TOKEN_SLOT, slack.SLACK_SIGNING_SECRET_SLOT):
+        assert f"`{slot}`" in body
+    operator_alternative = "ufoctl credential set"
+    assert operator_alternative in body
 
 
 async def test_bad_signature_is_rejected(db: None, tmp_path, monkeypatch) -> None:
@@ -434,6 +442,7 @@ async def test_first_signed_event_marks_verified_and_a_rotated_secret_re_proves(
     _patch_httpx(monkeypatch, _mock_transport([], {}))
     store = await _store(workspace_id)
     blob = FilesystemBlobStore(root=tmp_path)
+    await _write_identity(blob, workspace_id)
     app = FastAPI()
     _mount_surfaces(
         app,

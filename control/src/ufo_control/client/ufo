@@ -458,6 +458,44 @@ choose_menu() { # walk the queued questions, collect answers into REPLY
   REPLY=$CM_ANSWERS
 }
 
+secret_send() { # prompt privately for each requested secret and post it out-of-band
+  SS_REST=$SECRETS
+  while [ -n "$SS_REST" ]; do
+    SS_LINE=${SS_REST%%"$NL"*}
+    SS_REST=${SS_REST#*"$NL"}
+    [ -n "$SS_LINE" ] || continue
+    SS_SEALED=${SS_LINE%%"$TAB"*}
+    SS_LINE=${SS_LINE#*"$TAB"}
+    SS_SLOT=${SS_LINE%%"$TAB"*}
+    SS_PROMPT=${SS_LINE#*"$TAB"}
+    if ! (: < /dev/tty) 2> /dev/null; then
+      say "run ufo in a terminal to enter: $SS_PROMPT"
+      continue
+    fi
+    printf '%s%s%s (hidden): ' "$MAGENTA" "$SS_PROMPT" "$RESET" > /dev/tty
+    STTY_SAVED=$(stty -g < /dev/tty)
+    stty -echo < /dev/tty
+    IFS= read -r SS_VALUE < /dev/tty || SS_VALUE=''
+    stty "$STTY_SAVED" < /dev/tty
+    STTY_SAVED=''
+    printf '\n' > /dev/tty
+    if [ -z "$SS_VALUE" ]; then
+      say "${DIM}skipped $SS_SLOT${RESET}"
+      continue
+    fi
+    SS_REPLY=$(printf '%s' "$SS_VALUE" | curl -sS --max-time 30 \
+      -H "authorization: Bearer $TOKEN" -H "x-ufo-session: $SID" \
+      -H 'content-type: text/plain' \
+      -H "x-ufo-secret: $SS_SEALED" -H "x-ufo-slot: $SS_SLOT" \
+      --data-binary @- "$WORKSPACE_URL/surface/ufo/$UFO_CHANNEL") || SS_REPLY=''
+    SS_VALUE=''
+    case "$SS_REPLY" in
+      say"$TAB"*) say "${DIM}${SS_REPLY#say"$TAB"}${RESET}" ;;
+      *) say "${DIM}no confirmation - ask the assistant to check${RESET}" ;;
+    esac
+  done
+}
+
 spin() {
   while :; do
     for c in '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏'; do
@@ -586,6 +624,7 @@ turn() {
   NEXT=end
   PROMPT=''
   CHOICES=''
+  SECRETS=''
   SLEEP=0
   CODE=0
   GOT=0
@@ -704,6 +743,9 @@ turn() {
         NEXT=choose
         CHOICES="${CHOICES}${rest}${NL}"
         ;;
+      secret)
+        SECRETS="${SECRETS}${rest}${NL}"
+        ;;
       poll)
         NEXT=poll
         SLEEP=$rest
@@ -803,6 +845,10 @@ main() {
   input="$*"
   while :; do
     turn "$input"
+    if [ -n "${SECRETS:-}" ]; then
+      secret_send
+      SECRETS=''
+    fi
     case "$NEXT" in
       ask)
         if ! ask "$PROMPT"; then

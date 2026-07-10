@@ -32,13 +32,15 @@ ufo client --->|  GET /ufo -> version-stamped POSIX client  |
                                       |
                                       | token + workspace directives -> ~/.ufo/
                                       v
-                         tenant workspace
+                         tenant workspace (in chat)
                +--------------------------------------------+
-Browser        | setup surface                              | core
-/surface/setup |  status · slack/manifest ·                 | SurfaceContext
-?token=... --->|  slack/credentials · slack/test            |  credential()/put_credential()
+ufo client --->| slack setup tools (slack extension)        |
+"connect       |  slack_connect · slack_app_manifest        |
+ slack"        |  request_credentials (core builtin)        |
+               |    -> secret directives -> hidden prompts  |
+               |    -> fulfillment fills the Slack slots    |
                +----------------------+---------------------+
-                                      | fills workspace-global Slack slots
+                                      | workspace-global Slack slots
                                       v
                +--------------------------------------------+
 Slack          | slack surface                              | blob marker:
@@ -52,8 +54,8 @@ One worker fronts both apexes (`flyingobject.ai`, `testing.flyingobject.ai`), cl
 paths — every other request passes through to what the host serves:
 
 - `GET /` — curl/wget/httpie get the text landing card (saucer, waitlist counter, install
-  one-liner); any other agent is proxied to the module's `site_base` — both apexes land browsers
-  on the one site at the prod apex.
+  one-liner); any other agent lands on the one site at the prod apex — proxied on the site's own
+  host, a redirect (query intact) from any other.
 - `POST /waitlist -d email=…` — records the email in a per-apex D1 database, idempotent, with a
   positional ack; the card's "N identified flying objects" counter reads it back (≤1h stale per
   isolate, busted on join).
@@ -100,29 +102,41 @@ in one transaction, so one code opens exactly one workspace and a resolution ret
 for it. The shared tier gates identically (`SharedWorkspaces.exists` decides create vs join). An
 invalid or used code re-asks and points at the waitlist.
 
-## Setup handoff
+## Connecting Slack in chat
 
-The Slack setup page is reached with the credentials the client already holds:
-
-```text
-$(cat ~/.ufo/workspace)/surface/setup?token=$(cat ~/.ufo/credentials)
-```
-
-On first contact, the setup surface validates the token against the tenant workspace id and binds
-it as a cookie:
+The member says "connect slack"; the agent loads the `slack-app-setup` skill and drives every step
+with tools — there is no setup page and no bespoke endpoint:
 
 ```text
-GET /surface/setup?token=...
+member: connect slack
   |
-  +-- token valid for this workspace -> Set-Cookie: ufo_setup=...
-  |                                    HttpOnly; Secure; SameSite=Strict
+  v
+slack_connect ---------------> not_configured / pending / connected, + events_url
   |
-  +-- token missing/invalid ---------> serve page without cookie;
-                                      API calls answer 401
+slack_app_manifest(name) ----> the exact app YAML; member creates the app at api.slack.com
+  |
+request_credentials ---------> seals {workspace, owner, slots}; turn ends
+  |                            terminal renders one `secret` line per still-
+  |                            unanswered slot; shell prompts with hidden input,
+  |                            POSTs each value with the seal — fulfillment
+  |                            verifies workspace, member, slot, freshness, then
+  |                            writes the encrypted slot and that slot's marker;
+  |                            NO turn admitted, transcript never sees a byte
+  |
+slack_connect ---------------> auth.test proves the token; the derived team and
+  |                            bot-user ids persist as the surface's own
+  |                            identity record, pinned to the token's
+  |                            fingerprint (owner-only step)
+  v
+first DM / @mention ---------> url-verified marker flips slack_connect to connected
 ```
 
-Every setup API re-verifies either `?token=` or the bound cookie. Owner-only APIs also check
-`SurfaceContext.is_workspace_owner(email)`, because Slack credentials are workspace-wide.
+Only the workspace owner can fill or finish (slots are workspace-global — the one bot every member
+shares); the seal binds fulfillment to the member who asked, and each fulfilled or expired prompt
+stops rendering individually (a per-slot blob marker gates it), so a disconnect mid-entry re-asks
+only what is missing and a token rotation stales the identity record automatically. On Slack
+itself the same frame renders as a hint to open the terminal — no surface ever collects a secret
+in chat.
 
 ## Slack setup state machine
 
@@ -131,9 +145,10 @@ Every setup API re-verifies either `?token=` or the bound cookie. Owner-only API
        | not_configured  |
        +-----------------+
               |
-              | save bot token + signing secret
-              | auth.test derives team and bot ids
-              | put_credential() writes all slots
+              | request_credentials fulfillment stores
+              | the bot token + signing secret;
+              | slack_connect derives the identity
+              | record (auth.test, fingerprint-pinned)
               v
        +-----------------+
        |     pending     |<------------------------+
@@ -149,32 +164,27 @@ Every setup API re-verifies either `?token=` or the bound cookie. Owner-only API
                              makes marker stale
 ```
 
-Setup reads four workspace-global Slack slots:
+`slack_connect` reads two workspace-global secret slots — `slack_bot_token` and
+`slack_signing_secret` — plus the surface's identity record:
 
 ```text
-slack_bot_token
-slack_signing_secret
-slack_team_id
-slack_bot_user_id
-```
-
-State calculation:
-
-```text
-missing any slot
+missing a secret slot
   -> not_configured
 
-all slots set, but no matching url_verified marker
+secrets set, identity absent or from a rotated token
+  -> auth.test derives + persists {token fingerprint, team_id, bot_user_id}
+
+identity valid, but no matching url_verified marker
   -> pending
 
-all slots set, and marker fingerprint matches current signing secret
+marker fingerprint matches current signing secret
   -> connected
 ```
 
-The setup page generates a Slack app manifest from the tenant public base URL
+`slack_app_manifest` renders the app manifest from the tenant public base URL
 (`[connect] public_base_url`; events request URL `<public_base_url>/surface/slack`). The owner
-pastes only the Bot User OAuth Token and Signing Secret; `slack_team_id` and `slack_bot_user_id`
-are derived server-side with Slack `auth.test` when not provided manually.
+enters only the Bot User OAuth Token and Signing Secret; the team and bot-user ids are derived
+metadata, never entered and never slots.
 
 ## URL verification signal
 
@@ -213,58 +223,50 @@ handshake carries no team and always counts), the member's first DM or @mention 
 to connected — no manual re-save of the request URL, and no false green from an event the team gate
 drops.
 
-The setup surface trusts the marker only while its fingerprint matches the currently stored
-signing secret. Rotating the signing secret therefore moves the UI back to pending until Slack's
-next signed request.
+`slack_connect` trusts the marker only while its fingerprint matches the currently stored
+signing secret. Rotating the signing secret therefore reads as pending until Slack's next signed
+request.
 
 If the marker write fails, the request still succeeds; the marker is only setup status, not the
 Slack contract.
 
-## The setup seam
-
-The setup surface configures a peer surface, which requires capabilities normal scoped extensions
-do not have:
+## The seams underneath
 
 ```text
-SurfaceContext
-  credential(slot)       read workspace credential slots
-  put_credential(slot)   write workspace credential slots
-  public_base_url        build externally reachable callback URLs
-  is_workspace_owner()   gate workspace-wide setup writes
-  blob                   read/write the Slack verification marker
+request_credentials (core builtin)
+  gates: speaking member · workspace owner · declared slots · credential key
+  seals: {workspace, member, slots} under the credential Fernet, TTL-bound
+  ends the turn; the request rides the terminal frame / writeback
+
+ufo surface fulfillment (POST /surface/ufo/{channel} + x-ufo-secret headers)
+  SurfaceContext.credential_prompt_pending(sealed, slot)   the per-slot render gate
+  SurfaceContext.fulfill_credential_request(...)            verify seal -> encrypted store
+                                                            + that slot's own marker
+
+slack tools (ToolContext)
+  ext.credentials.get       own declared slots only (the two secrets)
+  ctx.speaker_is_owner()    the owner gate on the identity-deriving step
+  ctx.public_base_url       renders the Events request URL
+  ctx.blob                  the identity record + url-verified marker
 ```
 
-Credential slots are keyed by workspace and slot name, not by extension, so the setup surface fills
-the Slack surface's slots without the Slack surface needing a separate setup API.
-`CredentialSlotUnset` is re-exported from `ufo.sdk.surfaces` so setup and Slack can distinguish
-"slot absent" from other credential failures without importing private core modules.
+Credential slots are keyed by workspace and slot name, not by extension, so fulfillment fills the
+Slack surface's slots without the Slack surface needing a separate setup API.
 
 ## Hosted pack entry
 
-The `assistant_hosted` pack includes both surfaces:
-
-```text
-assistant_hosted
-  |
-  +-- slack  durable member surface
-  |     /surface/slack
-  |
-  +-- setup  live setup surface
-        /surface/setup
-```
-
-The setup surface has no credential slots of its own and no writeback delivery. It is a tenant-local
-request/response surface for configuring Slack.
+The `assistant_hosted` pack includes the slack extension — its durable member surface
+(`/surface/slack`), its four credential slots, and its setup tools; connecting it is a
+conversation, not a surface.
 
 ## Operational edges
 
 - Gateway environment misconfiguration fails loudly as a 500 before a flow error is rendered.
-- Setup requires `UFO_TOKEN_SECRET`; missing secret is an operator error, not a 401.
-- The setup cookie is `Secure`, `HttpOnly`, and `SameSite=Strict`.
-- Only the owner, currently the earliest workspace member, can save credentials, fetch the manifest,
-  or run the Slack test.
-- Blank credential fields keep existing stored values; nothing is written until all provided values
-  validate.
+- The ufo surface requires `UFO_TOKEN_SECRET`; missing secret is an operator error, not a 401.
+- Only the owner, currently the earliest workspace member, can request credential entry or run
+  `slack_connect`; a joined teammate's attempt raises before anything seals or writes.
+- A secret value is bounded (4 KiB) and travels bearer-authenticated on the existing chat
+  transport; the fulfillment response is a `say` line, never a turn.
 
 ## File map
 
@@ -278,18 +280,20 @@ control/src/ufo_control/
   gateway_directives.py   the directive wire the client renders
   gateway_claim.py        email -> 6-digit code -> constant-time verify
   gateway_invite.py       one-time invite codes gating workspace creation
-  gateway_token.py        token mint/verify contract used by setup
-  client/ufo              the POSIX terminal client
-
-extensions/setup/ufo_ext_setup/
-  manifest.py             setup surface registration
-  surface.py              setup page, auth, status, manifest, save, test
+  gateway_token.py        the bearer mint/verify contract
+  client/ufo              the POSIX terminal client (renders `secret` prompts)
 
 extensions/slack/ufo_ext_slack/
-  surface.py              Slack ingest, URL verification marker, event admission
+  surface.py              Slack ingest, identity record, URL verification marker
+  tools.py                slack_connect, slack_app_manifest
+
+extensions/ufo/ufo_ext_ufo/
+  surface.py              the terminal wire: secret rendering + fulfillment
 
 core/src/ufo/
-  ext/surface.py          privileged SurfaceContext seam
+  tools/builtins.py       request_credentials
+  credentials.py          the sealed-request contract
+  ext/surface.py          privileged SurfaceContext seam (pending/fulfill)
   sdk/surfaces.py         public re-exports for surface extensions
 
 packs/assistant_hosted/

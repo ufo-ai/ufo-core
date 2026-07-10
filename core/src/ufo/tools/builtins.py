@@ -1,6 +1,6 @@
 """The builtin tool set: bash, read, write, edit, glob, grep, share_file, spawn_subagent,
-load_sessions, ask_user, load_skill, connect_account, pause_and_wait, list_skills,
-wait_for_subagents, cancel_subagent, message_subagent.
+load_sessions, ask_user, request_credentials, load_skill, connect_account, pause_and_wait,
+list_skills, wait_for_subagents, cancel_subagent, message_subagent.
 
 Each file/shell handler reaches the workspace only through `ctx.sandbox`, so the carrier's scoping
 and egress rules apply whether a byte arrives via a shell command or a file op. `read`, `edit`, and
@@ -17,7 +17,10 @@ path that hands a file back outside the sandbox, with no read cap and no whole-f
 reads specific past conversation transcripts back from the blob store, scoped to the speaking
 member's own conversations. `ask_user` is chat-native: it
 structures a question or confirmation the agent poses in its reply, whose answer rides the member's
-next message — no out-of-band prompt. `load_skill` mounts a skill's `SKILL.md` and assets into the
+next message — no out-of-band prompt. `request_credentials` is its secret-collecting sibling: it
+seals which slots the speaking owner will fill and ends the turn; a capable surface prompts for the
+values privately and fulfillment lands them in the encrypted store, never the transcript.
+`load_skill` mounts a skill's `SKILL.md` and assets into the
 workspace and returns its workflow instructions. `list_skills` reports the loadable skills so the
 agent can discover a workflow before starting. `pause_and_wait` is chat-native like `ask_user`: it
 structures a wait the agent poses in its reply and ends the turn, resuming on the next inbound.
@@ -49,7 +52,7 @@ from ufo.grants import installed_connect_flow
 from ufo.models.interface import TextBlock
 from ufo.sandbox.session import WORKSPACE_DIR, workspace_path
 from ufo.schema import tables
-from ufo.schema.records import AskUserInput
+from ufo.schema.records import AskUserInput, CredentialPrompt, CredentialRequest
 from ufo.skills.runtime import mount_skill
 from ufo.tools.context import ImageContent, TextContent, ToolContext, ToolResult
 from ufo.tools.registry import ToolDef
@@ -81,6 +84,7 @@ print(json.dumps(stat))
 
 
 MAX_BASH_TIMEOUT_MS = 600_000
+MAX_REQUESTED_SLOTS = 4
 
 
 class BashInput(BaseModel):
@@ -213,6 +217,17 @@ class LoadSkillInput(BaseModel):
 class ConnectAccountInput(BaseModel):
     provider: str = Field(
         description="The provider to connect an account for, e.g. 'github', 'google'."
+    )
+
+
+class RequestCredentialsInput(BaseModel):
+    reason: str = Field(
+        description="Why these values are needed, shown to the member above the prompts."
+    )
+    prompts: tuple[CredentialPrompt, ...] = Field(
+        min_length=1,
+        max_length=MAX_REQUESTED_SLOTS,
+        description="The slots to fill and what to ask for each.",
     )
 
 
@@ -608,6 +623,36 @@ async def connect_account_handler(ctx: ToolContext, args: ConnectAccountInput) -
     return ToolResult(content=(TextContent(text=url),))
 
 
+REQUEST_CREDENTIALS_DIRECTIVE = (
+    "Tell the member what you need in your reply, then end your turn — their terminal prompts for "
+    "each value privately, and the entered secrets never appear in this conversation."
+)
+
+
+async def request_credentials_handler(
+    ctx: ToolContext, args: RequestCredentialsInput
+) -> ToolResult:
+    """Collect BYOK secrets from the speaking owner without them touching the transcript: seal
+    which slots this member will fill (the same Fernet that guards the slots signs the grant), and
+    return the structured request so a capable surface prompts for the values privately and
+    fulfills against the seal. Ends the turn like ask_user — the member returns once entered. Slots
+    are workspace-global, so only the owner may fill them; a non-owner speaker, an undeclared slot,
+    or a deploy without a credential key raises, surfacing as a recoverable tool error."""
+    if ctx.member_id is None:
+        raise ValueError("collecting credentials requires a speaking member")
+    if ctx.requestable_credentials is None:
+        raise ValueError("no credential key is configured — this deploy cannot store secrets")
+    if not await ctx.speaker_is_owner():
+        raise ValueError("only the workspace owner can fill credential slots")
+    sealed = ctx.requestable_credentials.seal(
+        ctx.turn.workspace_id, ctx.member_id, tuple(prompt.slot for prompt in args.prompts)
+    )
+    request = CredentialRequest(reason=args.reason, prompts=args.prompts, sealed=sealed)
+    return ToolResult(
+        content=(TextContent(text=f"{REQUEST_CREDENTIALS_DIRECTIVE}\n{request.model_dump_json()}"),)
+    )
+
+
 PAUSE_DIRECTIVE = (
     "Pause here and end your turn — you resume when the awaited event arrives or the wait elapses."
 )
@@ -817,6 +862,19 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=ConnectAccountInput,
         handler=connect_account_handler,
+    ),
+    ToolDef(
+        name="request_credentials",
+        description=(
+            "Ask the speaking member to fill credential slots (API keys, bot tokens, signing "
+            "secrets) without the values passing through this conversation — their terminal "
+            "prompts for each one privately. Use it when a capability needs a secret a member "
+            "must supply; never ask for a secret in chat prose. Only the workspace owner can "
+            "fill slots. After calling it, explain what you need in your reply and end your "
+            "turn; verify the slots once the member says they have entered them."
+        ),
+        input_model=RequestCredentialsInput,
+        handler=request_credentials_handler,
     ),
     ToolDef(
         name="pause_and_wait",

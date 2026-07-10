@@ -92,6 +92,22 @@ class AskUserInput(BaseModel):
     )
 
 
+class CredentialPrompt(BaseModel):
+    slot: str = Field(description="The credential slot to fill.")
+    prompt: str = Field(description="What to show the member when asking for this value.")
+
+
+class CredentialRequest(BaseModel):
+    """The `request_credentials` tool's structured output and, verbatim, what a terminal frame
+    carries when collecting secrets was the turn's final act. A capable surface prompts the member
+    for each value privately and fulfills against the sealed grant — the entered secrets never
+    touch the transcript or the sandbox."""
+
+    reason: str
+    prompts: tuple[CredentialPrompt, ...]
+    sealed: str
+
+
 class TerminalFrame(BaseModel):
     status: TerminalStatus
     text: str = ""
@@ -100,6 +116,7 @@ class TerminalFrame(BaseModel):
     cost_micro_usd: int = 0
     model: str = ""
     question: AskUserInput | None = None
+    credential_request: CredentialRequest | None = None
 
 
 class Agent(BaseModel):

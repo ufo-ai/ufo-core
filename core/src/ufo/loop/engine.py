@@ -33,6 +33,7 @@ from ufo.accounting import (
 from ufo.blob import BlobStore
 from ufo.browser import CdpProvider
 from ufo.connectors import ConnectorRegistry
+from ufo.credentials import CredentialRequests
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext
 from ufo.ext.loader import HookChain
@@ -76,6 +77,7 @@ from ufo.schema.records import (
     RUNNING,
     Agent,
     AskUserInput,
+    CredentialRequest,
     TerminalFrame,
     TerminalStatus,
     Turn,
@@ -105,6 +107,7 @@ COMMIT_RETRY_INITIAL_SECONDS = 1.0
 COMMIT_RETRY_MAX_SECONDS = 30.0
 SKILL_LOAD_TOOL = "load_skill"
 ASK_USER_TOOL = "ask_user"
+REQUEST_CREDENTIALS_TOOL = "request_credentials"
 TOOL_CALL_PREVIEW_CHARS = 200
 MAX_TOOL_RESULT_CHARS = 1_048_576
 TOOL_RESULT_PREVIEW_CHARS = 2_000
@@ -207,20 +210,23 @@ def _bounded(content: str) -> str:
     )
 
 
-def _asked_question(
-    tool_calls: tuple[ToolUseBlock, ...], results: tuple[ToolResultBlock, ...]
-) -> AskUserInput | None:
-    """The structured question a round leaves pending: parsed from the ask_user handler's own
-    result payload (the directive line, then the question as one JSON line) when the round ends on
-    a successful ask_user, so a pre_tool_use hook that folded the args is honored — the question a
-    surface renders is the one the handler structured, never the raw call. A result a post hook
-    rewrote past recognition carries no question; the reply's prose still asks."""
+def _final_act[PayloadT: BaseModel](
+    tool_calls: tuple[ToolUseBlock, ...],
+    results: tuple[ToolResultBlock, ...],
+    tool_name: str,
+    model: type[PayloadT],
+) -> PayloadT | None:
+    """The structured payload a round leaves pending when `tool_name` was its successful final
+    act: parsed from the handler's own result (the directive line, then the payload as one JSON
+    line), so a pre_tool_use hook that folded the args is honored — what a surface renders is what
+    the handler structured, never the raw call. A result a post hook rewrote past recognition
+    carries no payload; the reply's prose still asks."""
     last, result = tool_calls[-1], results[-1]
-    if last.name != ASK_USER_TOOL or result.is_error or not isinstance(result.content, str):
+    if last.name != tool_name or result.is_error or not isinstance(result.content, str):
         return None
     _directive, _, rest = result.content.partition("\n")
     try:
-        return AskUserInput.model_validate(json.loads(rest.split("\n", 1)[0]))
+        return model.model_validate(json.loads(rest.split("\n", 1)[0]))
     except (json.JSONDecodeError, ValidationError):
         return None
 
@@ -255,6 +261,8 @@ class TurnEngine:
     member_id: UUID | None
     artifact_token_secret: str
     grants: GrantStore | None
+    requestable_credentials: CredentialRequests | None = None
+    public_base_url: str | None = None
     pricing: Pricing = CORE_PRICING
     reasoning: ReasoningEffort = DEFAULT_REASONING_EFFORT
     subagents: SubagentControl | None = None
@@ -307,6 +315,8 @@ class TurnEngine:
                 search_provider=self.search_provider,
                 connectors=self.connectors,
                 find=rank_find,
+                requestable_credentials=self.requestable_credentials,
+                public_base_url=self.public_base_url,
             )
             try:
                 if not await self._mark_running():
@@ -325,13 +335,19 @@ class TurnEngine:
                     return frame
                 if inbound.injected:
                     system = f"{system}\n\n{inbound.injected}"
-                final_messages, answer, question = await self._model_round(
+                final_messages, answer, question, credential_request = await self._model_round(
                     context, await self._load_messages(), usage_events, system
                 )
                 await self.hooks.fire(
                     "stop", Stop(answer=answer), self.turn, self.agent, self.member_id
                 )
-                frame = await self._commit("done", usage_events, answer=answer, question=question)
+                frame = await self._commit(
+                    "done",
+                    usage_events,
+                    answer=answer,
+                    question=question,
+                    credential_request=credential_request,
+                )
                 if frame.status == "done":
                     await self._persist_transcript(final_messages, answer)
                 else:
@@ -410,13 +426,15 @@ class TurnEngine:
         messages: tuple[Message, ...],
         usage_events: list[Usage],
         system: str,
-    ) -> tuple[tuple[Message, ...], str, AskUserInput | None]:
+    ) -> tuple[tuple[Message, ...], str, AskUserInput | None, CredentialRequest | None]:
         """Call the model until it answers with text and no tool calls; each tool-calling round
         dispatches the calls in the sandbox and feeds the results back as the next user turn. Also
-        returns the structured question left pending when asking the user was the turn's final tool
-        act — each round overwrites it, so a turn that asked and then worked on carries none."""
+        returns the structured question or credential request left pending when asking was the
+        turn's final tool act — each round overwrites both, so a turn that asked and then worked
+        on carries neither."""
         nudged = False
         question: AskUserInput | None = None
+        credential_request: CredentialRequest | None = None
         for _round in range(self.max_rounds):
             await self._enforce_spend(usage_events)
             messages, compaction_usage = await self.compaction.maybe_compact(messages)
@@ -427,7 +445,7 @@ class TurnEngine:
             await self._publish_cost(usage_events)
             if not tool_calls:
                 if text.strip():
-                    return messages, text, question
+                    return messages, text, question, credential_request
                 if nudged:
                     raise RuntimeError("model returned an empty response twice")
                 nudged = True
@@ -435,14 +453,17 @@ class TurnEngine:
                 continue
             assistant_blocks = (*((TextBlock(text=text),) if text else ()), *tool_calls)
             results = tuple([await self._dispatch(context, call) for call in tool_calls])
-            question = _asked_question(tool_calls, results)
+            question = _final_act(tool_calls, results, ASK_USER_TOOL, AskUserInput)
+            credential_request = _final_act(
+                tool_calls, results, REQUEST_CREDENTIALS_TOOL, CredentialRequest
+            )
             messages = (
                 *messages,
                 Message(role="assistant", content=assistant_blocks),
                 Message(role="user", content=results),
             )
         messages, text = await self._force_final(messages, usage_events, system)
-        return messages, text, None
+        return messages, text, None, None
 
     async def _force_final(
         self,
@@ -787,13 +808,16 @@ class TurnEngine:
         answer: str = "",
         error_class: str | None = None,
         question: AskUserInput | None = None,
+        credential_request: CredentialRequest | None = None,
     ) -> TerminalFrame:
         """Retries until the terminal state is durable: a client's wait always ends,
         so a database outage delays the commit rather than losing it."""
         delay = COMMIT_RETRY_INITIAL_SECONDS
         while True:
             try:
-                frame = await self._commit_once(status, usage_events, answer, error_class, question)
+                frame = await self._commit_once(
+                    status, usage_events, answer, error_class, question, credential_request
+                )
                 break
             except Exception as error:
                 log(
@@ -815,6 +839,7 @@ class TurnEngine:
         answer: str,
         error_class: str | None,
         question: AskUserInput | None,
+        credential_request: CredentialRequest | None,
     ) -> TerminalFrame:
         usage = _total_usage(usage_events)
         async with workspace_tx() as connection:
@@ -837,6 +862,7 @@ class TurnEngine:
                 cost_micro_usd=micro_usd,
                 model=model,
                 question=question,
+                credential_request=credential_request,
             )
             updated = await connection.execute(
                 sa.update(tables.turn)

@@ -6,6 +6,9 @@ durable surface, its two-phase writeback) and types its handlers against the pri
 code in any `__init__.py`), so the public surface lives in named modules like this one."""
 
 from ufo.credentials import (
+    CredentialRequestInvalid as CredentialRequestInvalid,
+)
+from ufo.credentials import (
     CredentialSlotUnset as CredentialSlotUnset,
 )
 from ufo.ext.surface import (
@@ -28,6 +31,12 @@ from ufo.schema.records import (
 )
 from ufo.schema.records import (
     AskUserInput as AskUserInput,
+)
+from ufo.schema.records import (
+    CredentialPrompt as CredentialPrompt,
+)
+from ufo.schema.records import (
+    CredentialRequest as CredentialRequest,
 )
 from ufo.schema.records import (
     QuestionOption as QuestionOption,

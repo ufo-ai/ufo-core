@@ -1,8 +1,9 @@
-"""The Slack extension's manifest: one surface on the core seam plus the credential slots its
-handlers read in-process — the bot token and signing secret (secrets), and the bot user id and team
-id (the app's identity used to gate and verify events). None carry a wire-injection target: a
-surface authenticates to Slack itself, never through the sandbox egress proxy. The `slack-app-setup`
-skill walks a member through creating the Slack app and filling these four slots."""
+"""The Slack extension's manifest: one surface on the core seam, its two secret slots — the bot
+token and signing secret, read in-process — and the setup tools the agent drives in chat. The
+app's identity (team and bot-user ids) is derived metadata, not a credential: `slack_connect`
+proves it with auth.test and custodies it as the surface's own record. Neither slot carries a
+wire-injection target: a surface authenticates to Slack itself, never through the sandbox egress
+proxy. The `slack-app-setup` skill walks a member through the whole connection."""
 
 from pathlib import Path
 
@@ -10,15 +11,14 @@ from ufo.sdk.manifest import CredentialSlot, Manifest, SkillSpec
 from ufo.sdk.surfaces import SurfaceRoute, SurfaceSpec
 from ufo_ext_slack.surface import (
     SLACK_BOT_TOKEN_SLOT,
-    SLACK_BOT_USER_ID_SLOT,
     SLACK_SIGNING_SECRET_SLOT,
-    SLACK_TEAM_ID_SLOT,
     SURFACE_SLACK,
     attach,
     ingest,
     interactive,
     post,
 )
+from ufo_ext_slack.tools import TOOLS
 
 NAME = "slack"
 VERSION = "0.1.0"
@@ -34,8 +34,6 @@ def manifest() -> Manifest:
                 name=SLACK_BOT_TOKEN_SLOT, description="Slack bot OAuth token (xoxb-...)."
             ),
             CredentialSlot(name=SLACK_SIGNING_SECRET_SLOT, description="Slack app signing secret."),
-            CredentialSlot(name=SLACK_BOT_USER_ID_SLOT, description="The bot's own Slack user id."),
-            CredentialSlot(name=SLACK_TEAM_ID_SLOT, description="The Slack workspace (team) id."),
         ),
         surfaces=(
             SurfaceSpec(
@@ -48,5 +46,6 @@ def manifest() -> Manifest:
                 attach=attach,
             ),
         ),
+        tools=TOOLS,
         skills=(SkillSpec(path=SKILL_DIR),),
     )

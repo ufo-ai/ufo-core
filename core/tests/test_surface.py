@@ -13,7 +13,12 @@ import sqlalchemy as sa
 from cryptography.fernet import Fernet
 
 from ufo.blob import FilesystemBlobStore
-from ufo.credentials import CredentialStore
+from ufo.credentials import (
+    CredentialRequestInvalid,
+    CredentialRequestState,
+    CredentialStore,
+    seal_credential_request,
+)
 from ufo.db import workspace_tx
 from ufo.ext.surface import (
     WRITEBACK_CLAIMED,
@@ -363,26 +368,6 @@ async def test_write_workspace_file_streams_into_the_workspace_subtree(db: None,
     assert stored == b"hello world"
 
 
-async def test_is_workspace_owner_is_the_earliest_member(db: None, tmp_path) -> None:
-    workspace_id, _, _ = await _seed()
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-    early = datetime(2026, 1, 1, tzinfo=UTC)
-    async with workspace_tx() as connection:
-        for offset, email in ((0, "owner@example.com"), (5, "joiner@example.com")):
-            await connection.execute(
-                sa.insert(tables.member).values(
-                    id=uuid4(),
-                    workspace_id=workspace_id,
-                    email=email,
-                    created_at=early + timedelta(minutes=offset),
-                    updated_at=early + timedelta(minutes=offset),
-                )
-            )
-    assert await context.is_workspace_owner("OWNER@example.com") is True
-    assert await context.is_workspace_owner("joiner@example.com") is False
-    assert await context.is_workspace_owner("stranger@example.com") is False
-
-
 async def test_join_member_creates_a_same_domain_member_and_links(db: None, tmp_path) -> None:
     workspace_id, _, _ = await _seed()
     context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
@@ -407,9 +392,6 @@ async def test_join_member_creates_a_same_domain_member_and_links(db: None, tmp_
             )
         ).scalar_one()
     assert email == "new.joiner@example.com"
-    # The owner is still the earliest member; the joiner arrived strictly later.
-    assert await context.is_workspace_owner("owner@example.com") is True
-    assert await context.is_workspace_owner("new.joiner@example.com") is False
     # A second surface identity for the same email resolves to the one member, never a duplicate.
     assert await context.join_member("UNEW2", "new.joiner@example.com") == joined
 
@@ -435,21 +417,6 @@ async def test_join_member_refuses_without_a_domain_match(db: None, tmp_path) ->
             )
         ).scalar_one()
     assert members == 1
-
-
-async def test_put_credential_round_trips_through_the_store(db: None, tmp_path) -> None:
-    workspace_id, _, _ = await _seed()
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-    await context.put_credential("slack_bot_token", "xoxb-secret")
-    assert await context.credential("slack_bot_token") == "xoxb-secret"
-
-
-async def test_put_credential_fails_loud_without_a_store(tmp_path) -> None:
-    context = replace(
-        _context(uuid4(), StubDbos(), FilesystemBlobStore(root=tmp_path)), _credentials=None
-    )
-    with pytest.raises(RuntimeError, match="writes a credential but holds no store"):
-        await context.put_credential("slot", "value")
 
 
 def test_public_base_url_is_the_wired_connect_base(tmp_path) -> None:
@@ -524,3 +491,44 @@ async def test_poller_backs_off_a_young_failure_then_terminally_fails_when_aged_
     )
     await poller.drain()
     assert (await _writeback(turn_id)).status == WRITEBACK_FAILED
+
+
+async def test_credential_prompts_gate_per_slot_on_seal_workspace_and_marker(
+    db: None, tmp_path
+) -> None:
+    """The per-slot render gate over the real methods: every named prompt of a live seal is
+    pending, garbage and a foreign workspace never are, and fulfilling one slot silences exactly
+    that prompt — its sibling keeps asking, so a disconnect mid-entry or a rotation over
+    already-stored slots never strands a prompt. Expiry is proven where the seal contract lives
+    (test_credentials)."""
+    workspace_id, _, _ = await _seed()
+    blob = FilesystemBlobStore(root=tmp_path)
+    context = _context(workspace_id, StubDbos(), blob)
+    member_id = uuid4()
+    sealed = seal_credential_request(
+        context._credentials.fernet,
+        CredentialRequestState(workspace_id=workspace_id, member_id=member_id, slots=("a", "b")),
+    )
+    assert await context.credential_prompt_pending(sealed, "a") is True
+    assert await context.credential_prompt_pending(sealed, "b") is True
+    assert await context.credential_prompt_pending(sealed, "unnamed") is False
+    assert await context.credential_prompt_pending("garbage", "a") is False
+    foreign = seal_credential_request(
+        context._credentials.fernet,
+        CredentialRequestState(workspace_id=uuid4(), member_id=member_id, slots=("a",)),
+    )
+    assert await context.credential_prompt_pending(foreign, "a") is False
+    await context.fulfill_credential_request(sealed, "a", "one", member_id)
+    assert await context.credential_prompt_pending(sealed, "a") is False
+    assert await context.credential_prompt_pending(sealed, "b") is True
+    await context.fulfill_credential_request(sealed, "b", "two", member_id)
+    assert await context.credential_prompt_pending(sealed, "b") is False
+    rotation = seal_credential_request(
+        context._credentials.fernet,
+        CredentialRequestState(workspace_id=workspace_id, member_id=member_id, slots=("a", "b")),
+    )
+    assert await context.credential_prompt_pending(rotation, "a") is True
+    with pytest.raises(CredentialRequestInvalid, match="member"):
+        await context.fulfill_credential_request(sealed, "a", "hijack", uuid4())
+    with pytest.raises(CredentialRequestInvalid, match="slot"):
+        await context.fulfill_credential_request(sealed, "c", "off-seal", member_id)

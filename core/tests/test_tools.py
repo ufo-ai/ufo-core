@@ -142,6 +142,7 @@ def test_registry_schemas_cover_every_tool() -> None:
         "spawn_subagent",
         "load_sessions",
         "ask_user",
+        "request_credentials",
         "load_skill",
         "connect_account",
         "pause_and_wait",

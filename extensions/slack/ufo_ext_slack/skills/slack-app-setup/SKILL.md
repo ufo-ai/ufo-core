@@ -1,55 +1,54 @@
 ---
 name: slack-app-setup
-description: Load when the user wants to create a Slack app, make a Slack bot, or connect Slack to this assistant. Walks them through creating the app from a ready-made manifest, installing it, and filling the four credential slots the slack surface reads.
+description: Load when the user wants to create a Slack app, make a Slack bot, or connect Slack to this assistant. Drives the whole connection in chat with the slack setup tools — manifest, private credential entry, live verification.
 ---
 # Slack app setup — connect Slack to this assistant
 
 Stand up a Slack bot and wire it into the slack surface this deploy already runs. There is no new
-server to build: the surface is mounted and listening. The whole job is (1) create a Slack app from
-the manifest below, (2) install it to the workspace, (3) read four values back from Slack, and (4)
-fill the surface's four credential slots with them.
+server to build: the surface is mounted and listening, and you drive every step with three tools —
+`slack_connect`, `slack_app_manifest`, `request_credentials`. The member only clicks through
+Slack's own pages and enters two values privately in their terminal.
 
 ## Ground rules — read before you reply
 
-**This deploy is the Slack receiver.** Slack's Events API request URL is this deploy's own route:
+**This deploy is the Slack receiver.** Slack's Events API request URL is this deploy's own route —
+`slack_connect` reports it as `events_url`; never invent or hand-assemble one.
 
-```
-<public_base_url>/surface/slack
-```
-
-`<public_base_url>` is the deploy's externally reachable base (`[connect] public_base_url`, e.g.
-`https://ufo.example.com`) — the same scheme+host a browser reaches this deploy at. If you
-don't know it, ask; never invent one and never emit a placeholder (`example.com`, `your-server…`).
-
-- **HTTP Events API only.** Never offer Socket Mode; the surface receives events over HTTP at the
-  route above. The manifest below sets `socket_mode_enabled: false`.
+- **HTTP Events API only.** Never offer Socket Mode; the manifest below sets
+  `socket_mode_enabled: false`.
 - **Signature-verified.** The surface verifies every event's Slack signature against the signing
   secret before acting on it. The one exception is Slack's `url_verification` handshake while the
   `slack_signing_secret` slot is still empty — the challenge echoes back (it stores and grants
-  nothing), so the request URL verifies the moment the app is created, before Step 4. If
+  nothing), so the request URL verifies the moment the app is created, before the secrets land. If
   verification fails anyway, the deploy isn't reachable at the URL — the URL is wrong.
-- **Don't probe the URL.** The sandbox egress proxy denies arbitrary hosts, so `curl`/`dig` against
-  the deploy or Slack proves nothing. The URL is correct by construction; use it.
-- **Conversational bot.** It answers `@mentions` in channels and direct messages, replying in-thread;
-  once mentioned in a thread it follows that thread, answering every reply without needing another
-  mention. When first mentioned mid-thread it reads the earlier thread messages for context, and when
-  starting a fresh thread it reads the channel's recent messages — it never answers top-level channel
-  messages unaddressed.
-  Replies render the agent's markdown, and files the agent shares upload into the thread; a message's
-  attachments download into the agent's workspace. While it works it shows Slack's native thread
-  status ("Thinking…", then what it's doing), and when it asks a question with fixed choices it
-  presents them as buttons — clicking one answers as the member who clicked. There are no slash
-  commands or modals — don't offer them, don't tailor the scope set to a request. The Step 2 scopes
-  are the whole surface.
+- **Don't probe the URL.** The sandbox egress proxy denies arbitrary hosts, so `curl`/`dig`
+  against the deploy or Slack proves nothing. The URL is correct by construction; use it.
+- **Secrets never enter this chat.** The bot token and signing secret travel through
+  `request_credentials` — the member's terminal prompts for each value privately. Never ask for a
+  secret in chat prose, and never accept one pasted here; if a member pastes one, tell them to
+  rotate it.
+- **Conversational bot.** It answers `@mentions` in channels and direct messages, replying
+  in-thread; when mentioned in a thread it reads the earlier thread messages for context, and when
+  first addressed it reads the channel's recent messages — though it only ever answers when
+  addressed. Replies render the agent's markdown, and files the agent shares upload into the
+  thread; a message's attachments download into the agent's workspace. While it works it shows
+  Slack's native thread status ("Thinking…", then what it's doing), and when it asks a question
+  with fixed choices it presents them as buttons — clicking one answers as the member who clicked.
+  There are no slash commands or modals — don't offer them, don't tailor the scope set to a
+  request. The manifest's scopes are the whole surface.
 
-**Produce the manifest in the same reply.** Once you have the app's display name, render the filled-in
-manifest immediately — don't promise it and stall.
+## Step 1 — where things stand
 
-## Step 1 — create the app from a manifest
+Call `slack_connect`. It walks the whole state machine idempotently: `connected` means there is
+nothing to do; `pending` means the credentials are stored and identity proven — only Slack's first
+event is missing (skip to Step 5); `not_configured` starts at Step 2.
 
-Send the user to <https://api.slack.com/apps> → **Create New App → From a manifest**, pick the
-workspace, and paste the YAML below. Substitute the display name and the request URL; leave
-everything else exactly as written — Slack rejects a manifest with extra fields.
+## Step 2 — create the app from the manifest
+
+Ask for the bot's display name if you don't have one, call `slack_app_manifest` with it, and show
+the returned YAML verbatim in a code block. Send the member to <https://api.slack.com/apps> →
+**Create New App → From a manifest**, pick the workspace, and paste it exactly — Slack rejects a
+manifest with extra fields. The tool renders this shape, filled in for this deploy:
 
 ```yaml
 display_information:
@@ -94,82 +93,63 @@ settings:
   token_rotation_enabled: false
 ```
 
-Why each piece: `app_mentions:read` + the `message.*` events and matching `*:history` scopes let the
-surface see the messages it's added to and the mentions it must answer; `chat:write` posts the reply
-in-thread; the `agent_view` block enables Slack's Agents & AI Apps experience and `assistant:write`
-lets the surface set the thread's native status ("Thinking…", then what the agent is doing) while a
-turn runs — Slack's validator pairs `agent_view` with the `app_home_opened` event, which the
-surface receives and ignores; `files:read` downloads a message's
-attachments into the workspace and `files:write` uploads files the agent shares back; `users:read` +
-`users:read.email` let the surface match a Slack user's verified email to a workspace member, so a
-member speaking in a DM acts with their own rights. The `interactivity` block delivers button clicks
-(the agent's multiple-choice questions) to the surface's interactive route, signature-verified like
-every event. The `app_home` block enables the Messages tab so direct messages reach the bot.
+Why each piece: `app_mentions:read` + the `message.*` events and matching `*:history` scopes let
+the surface see the messages it's added to and the mentions it must answer; `chat:write` posts the
+reply in-thread; the `agent_view` block enables Slack's Agents & AI Apps experience and
+`assistant:write` lets the surface set the thread's native status while a turn runs — Slack's
+validator pairs `agent_view` with the `app_home_opened` event, which the surface receives and
+ignores; `files:read` downloads a message's attachments into the workspace and `files:write`
+uploads files the agent shares back; `users:read` + `users:read.email` let the surface match a
+Slack user's verified email to a workspace member, so a member speaking in a DM acts with their own
+rights. The `interactivity` block delivers button clicks (the agent's multiple-choice questions) to
+the surface's interactive route, signature-verified like every event. The `app_home` block enables
+the Messages tab so direct messages reach the bot.
 
-Slack verifies the request URL as the app is created and it succeeds right away — events only
-start being accepted once Step 4 fills the slots.
+Then the member opens **Install App** (left sidebar, under *Settings*) → **Install to Workspace**
+→ **Allow**. Nothing to pick: the manifest already declared the bot scopes. Ignore any App-Level
+Token / Socket Mode prompt — that mints an `xapp-` token this surface never uses.
 
-## Step 2 — install to the workspace
+## Step 3 — collect the two secrets privately
 
-In the app, open **Install App** (left sidebar, under *Settings*) → **Install to Workspace** →
-**Allow**. Nothing to pick: the manifest already declared the bot scopes.
+Call `request_credentials` with reason "connecting Slack" and these two prompts, then tell the
+member where each value lives and end your turn — their terminal prompts for the values with
+hidden input, and they never appear in this conversation:
 
-## Step 3 — read the four values back from Slack
+- `slack_bot_token` — **Bot User OAuth Token** (`xoxb-…`), under *OAuth & Permissions*, shown
+  after install.
+- `slack_signing_secret` — **Signing Secret**, under *Basic Information → App Credentials* (click
+  **Show**).
 
-- **Bot User OAuth Token** (`xoxb-…`) — *OAuth & Permissions*, shown after install. → `slack_bot_token`
-- **Signing Secret** — *Basic Information → App Credentials* (click **Show**). → `slack_signing_secret`
-- **Bot User ID** (`U…`) — *OAuth & Permissions*; the bot's name links to its member profile, whose id
-  is the `U…` value. → `slack_bot_user_id`
-- **Team (workspace) ID** (`T…`) — Slack → workspace settings, or the `T…` segment of any message's
-  "Copy link". → `slack_team_id`
+Only the workspace owner can fill these — the bot is shared by every member.
 
-Ignore any **App-Level Token** / *"Scopes to be accessed by this token"* prompt — that mints an
-`xapp-` Socket-Mode token this surface never uses.
+## Step 4 — finish and verify
 
-## Step 4 — fill the four credential slots
+When the member says they've entered the values, call `slack_connect` again. It verifies the token
+live against Slack and derives the app's identity itself (nothing more to paste), reporting what
+remains. A rejected token means a bad copy — re-run Step 3.
 
-ufo stores each value as an encrypted, workspace-scoped credential slot; the surface reads them
-in-process to verify events and call Slack, and they never enter the sandbox. The user runs these in
-the deploy's terminal — each prompts for its value with hidden input, so a secret never enters this
-chat or its transcript; never ask for one here:
+## Step 5 — first contact
 
-```
-ufoctl credential set slack_bot_token
-ufoctl credential set slack_signing_secret
-ufoctl credential set slack_bot_user_id
-ufoctl credential set slack_team_id
-```
+`pending` flips to `connected` on Slack's first signed request from the workspace: the member
+invites the bot to a channel and @mentions it, or DMs it. Confirm with `slack_connect`.
 
-| Slack value | credential slot |
-| --- | --- |
-| Bot User OAuth Token (`xoxb-…`) | `slack_bot_token` |
-| Signing Secret | `slack_signing_secret` |
-| Bot User ID (`U…`) | `slack_bot_user_id` |
-| Team ID (`T…`) | `slack_team_id` |
+## Operator alternative
 
-`ufoctl credential list` then shows all four slots `set` (encrypted at rest under the key named by
-`[credentials] key_env`, default `UFO_CREDENTIAL_KEY`).
-
-On a cold start the deploy can instead carry the four values in its environment (`SLACK_BOT_TOKEN`,
-`SLACK_SIGNING_SECRET`, `SLACK_BOT_USER_ID`, `SLACK_TEAM_ID`) before `ufoctl init` — init seeds
-every declared slot from its upper-cased env var.
-
-Once all four slots are filled and `ufoctl serve` is running behind `<public_base_url>`, invite
-the bot to a channel and `@mention` it (or DM it). It replies in-thread and follows the thread
-from there.
+On a self-managed deploy the operator can fill the two secret slots out-of-band instead:
+`ufoctl credential set <slot>` prompts with hidden input, and a cold start can carry
+`SLACK_BOT_TOKEN` and `SLACK_SIGNING_SECRET` in the environment before `ufoctl init` — init seeds
+every declared slot from its upper-cased env var. `slack_connect` still derives the identity.
 
 ## Updating an existing app
 
-Every settings change ships through the same manifest — never walk the user through individual
-settings pages. Open the app at <https://api.slack.com/apps> → **App Manifest** (left sidebar,
-under *Features*), replace the YAML with Step 1's (same display name and request URLs), and **Save
-Changes**. Slack applies it in place: event subscriptions, the interactivity request URL, and
-scopes all update at once. Only a scope change needs more — Slack then shows a reinstall banner;
-reinstalling rotates nothing, the credential slots stay valid.
+Every settings change ships through the same manifest — never walk the member through individual
+settings pages. They open the app at <https://api.slack.com/apps> → **App Manifest** (left
+sidebar, under *Features*), replace the YAML with a fresh `slack_app_manifest` render (same
+display name), and **Save Changes**. Slack applies it in place. Only a scope change needs more —
+Slack then shows a reinstall banner; reinstalling rotates nothing, the credential slots stay valid.
 
 ## A second bot in the same workspace
 
-Works the same way: create a distinct app with its own display name, install it, and fill the same
-four slots with *that* app's token, signing secret, bot user id, and (the same) team id. The deploy
-serves one app at a time — refilling the slots switches the surface to the new bot; the old app
-stops verifying.
+Works the same way: a distinct app with its own display name, installed, its token and signing
+secret collected through Step 3, then `slack_connect`. The deploy serves one app at a time —
+refilling the slots switches the surface to the new bot; the old app stops verifying.

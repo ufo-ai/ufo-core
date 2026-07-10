@@ -87,7 +87,8 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   the base-pinned `embed_openai` extension; turbopuffer is a drop-in index alternative. Source
   pages reach recall through the memory extension's own page-index job over the core `PageFeed`.
 - **Minimal built-in tools** — `bash`, `read`, `write`, `edit`,
-  `ask_user`, `spawn_subagent`, `load_skill`, `share_file`. Everything else arrives via extensions.
+  `ask_user`, `request_credentials`, `spawn_subagent`, `load_skill`, `share_file`. Everything else
+  arrives via extensions.
   Two tools where one would do is a defect. `share_file` ports the shipped design: byte custody in
   the blob store, a TTL-bound token URL served by core's artifact route — no token, no bytes.
 
@@ -135,7 +136,7 @@ Manifest registers (each optional):
 | `jobs` | Recurring/one-time background work. |
 | `routes` | HTTP endpoints under `/ext/<name>/` (webhooks, OAuth callbacks, plugin UIs). |
 | `surfaces` | A chat surface on the one privileged surface seam: its `SurfaceRoute`s mounted under `/surface/<name>`. A **durable** surface (Slack) declares two-phase delivery (`post` then `attach`) the poller drives — declaring `post` is what marks it durable, and admission registers every turn entering its conversations for delivery, whoever admits it; a **live** surface (web) tails the hub over SSE in its own route. Core's CLI is the built-in live twin. |
-| `credentials` | Named BYOK slots the workspace must fill (drives onboarding); `ufoctl init` seeds a slot from its upper-cased env var (`SLACK_BOT_TOKEN` → `slack_bot_token`), and the operator fills or rotates one anytime with `ufoctl credential set <slot>`. |
+| `credentials` | Named BYOK slots the workspace must fill (drives onboarding); `ufoctl init` seeds a slot from its upper-cased env var (`SLACK_BOT_TOKEN` → `slack_bot_token`), and the operator fills or rotates one anytime with `ufoctl credential set <slot>`. A member fills one in chat through `request_credentials`: the owner's ask seals which slots they will fill, a capable surface prompts for each value privately, and fulfillment verifies the seal before the encrypted store takes it — the plaintext never enters the transcript or the sandbox. |
 | `onboarding` | Steps contributed to the workspace/pack onboarding flow. |
 | `models` | Model providers behind `ModelClient` (OpenRouter, local runtimes). |
 | `carriers` | Sandbox carriers — Docker, E2B, remote runners; core's default is a local temp-dir carrier. |

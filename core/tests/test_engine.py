@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from ufo.blob import FilesystemBlobStore
 from ufo.connectors import ConnectorRegistry
+from ufo.credentials import CredentialRequests, open_credential_request
 from ufo.db import workspace_tx
 from ufo.ext.loader import HookChain
 from ufo.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
@@ -23,9 +24,11 @@ from ufo.loop.compaction import (
     CompactionSummary,
 )
 from ufo.loop.engine import (
+    ASK_USER_TOOL,
     FORCE_FINAL_PROMPT,
     MAX_TOOL_RESULT_CHARS,
     OFFLOAD_NOTICE,
+    REQUEST_CREDENTIALS_TOOL,
     TOOL_IMAGE_BLOB_DIR,
     TOOL_OUTPUT_DIR,
     TOOL_RESULT_PREVIEW_CHARS,
@@ -35,8 +38,8 @@ from ufo.loop.engine import (
     UNTRUSTED_RESULT_OPEN,
     TurnEngine,
     TurnParked,
-    _asked_question,
     _bounded,
+    _final_act,
 )
 from ufo.loop.prompts.render import COMPACTION_SYSTEM_PROMPT, rendered_prompt
 from ufo.loop.transcript import Transcript
@@ -55,8 +58,20 @@ from ufo.models.interface import (
 )
 from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.schema import tables
-from ufo.schema.records import Agent, TerminalFrame, Turn, TurnContext, Usage
-from ufo.tools.builtins import BUILTIN_TOOLS
+from ufo.schema.records import (
+    Agent,
+    AskUserInput,
+    CredentialRequest,
+    TerminalFrame,
+    Turn,
+    TurnContext,
+    Usage,
+)
+from ufo.tools.builtins import (
+    BUILTIN_TOOLS,
+    RequestCredentialsInput,
+    request_credentials_handler,
+)
 from ufo.tools.context import (
     ImageContent,
     SpawnResult,
@@ -372,6 +387,8 @@ def _engine(
     tmp_path: Path,
     carrier: RecordingCarrier | None = None,
     compaction: Compaction | None = None,
+    member_id: UUID | None = None,
+    requestable_credentials: CredentialRequests | None = None,
 ) -> TurnEngine:
     carrier = carrier or RecordingCarrier()
     blob = FilesystemBlobStore(root=tmp_path)
@@ -396,9 +413,10 @@ def _engine(
         hooks=HookChain(),
         blob=blob,
         spawn=_unavailable_spawn,
-        member_id=None,
+        member_id=member_id,
         artifact_token_secret="",
         grants=None,
+        requestable_credentials=requestable_credentials,
     )
 
 
@@ -612,15 +630,16 @@ def test_asked_question_reads_the_handlers_result_not_the_raw_call() -> None:
     content = "Ask these in your reply.\n" + json.dumps({"awaiting": "question", **folded})
     calls = (ToolUseBlock(id="q1", name="ask_user", input=ASK_INPUT),)
     results = (ToolResultBlock(tool_use_id="q1", content=content),)
-    question = _asked_question(calls, results)
+    question = _final_act(calls, results, ASK_USER_TOOL, AskUserInput)
     assert question is not None
     assert question.title == "Folded"
     assert question.questions[0].question == "Really?"
     rewritten = (ToolResultBlock(tool_use_id="q1", content="a hook replaced this output"),)
-    assert _asked_question(calls, rewritten) is None
+    assert _final_act(calls, rewritten, ASK_USER_TOOL, AskUserInput) is None
     errored = (ToolResultBlock(tool_use_id="q1", content=content, is_error=True),)
-    assert _asked_question(calls, errored) is None
-    assert _asked_question((ToolUseBlock(id="c1", name="bash", input={}),), results) is None
+    assert _final_act(calls, errored, ASK_USER_TOOL, AskUserInput) is None
+    others = (ToolUseBlock(id="c1", name="bash", input={}),)
+    assert _final_act(others, results, ASK_USER_TOOL, AskUserInput) is None
 
 
 async def test_question_is_cleared_when_the_turn_works_on_after_asking(
@@ -632,6 +651,138 @@ async def test_question_is_cleared_when_the_turn_works_on_after_asking(
     assert frame.status == "done"
     assert frame.text == "done without asking"
     assert frame.question is None
+
+
+REQUEST_INPUT = {
+    "reason": "Connecting Slack needs the bot token.",
+    "prompts": [{"slot": "sample_api", "prompt": "Bot User OAuth Token"}],
+}
+
+
+@dataclass(frozen=True)
+class CollectThenEndModel:
+    """Calls request_credentials, then (seeing the directive result) explains and ends its turn —
+    the chat-native secret collection, so the terminal frame must carry the sealed request."""
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        answered = any(
+            isinstance(message.content, tuple)
+            and any(isinstance(block, ToolResultBlock) for block in message.content)
+            for message in request.messages
+        )
+        if answered:
+            yield TextDelta(text="Your terminal will prompt for the token.")
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        yield ToolCallStart(id="s1", name="request_credentials")
+        yield ToolCallDelta(id="s1", partial_json=json.dumps(REQUEST_INPUT))
+        yield Usage(input_tokens=2, output_tokens=2)
+
+
+async def _seeded_member(workspace_id: UUID) -> UUID:
+    async with workspace_tx() as connection:
+        return (
+            await connection.execute(
+                sa.select(tables.member.c.id).where(tables.member.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+
+
+async def test_request_credentials_as_the_final_act_rides_the_terminal_frame(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    owner = await _seeded_member(turn.workspace_id)
+    fernet = Fernet(Fernet.generate_key())
+    requests = CredentialRequests(fernet=fernet, declared=frozenset({"sample_api"}))
+    engine = _engine(
+        turn, CollectThenEndModel(), tmp_path, member_id=owner, requestable_credentials=requests
+    )
+    frame = await engine.run()
+    assert frame.status == "done"
+    assert frame.credential_request is not None
+    assert frame.credential_request.reason == REQUEST_INPUT["reason"]
+    assert [p.slot for p in frame.credential_request.prompts] == ["sample_api"]
+    state = open_credential_request(fernet, frame.credential_request.sealed)
+    assert state.workspace_id == turn.workspace_id
+    assert state.member_id == owner
+    assert state.slots == ("sample_api",)
+    async with workspace_tx() as connection:
+        stored = (
+            await connection.execute(
+                sa.select(tables.turn.c.terminal).where(tables.turn.c.id == turn.id)
+            )
+        ).scalar_one()
+    assert TerminalFrame.model_validate(stored).credential_request == frame.credential_request
+
+
+async def test_request_credentials_gates_on_owner_key_and_declared_slots(
+    db: None, tmp_path: Path
+) -> None:
+    """The granting act's guards, each failing loud before anything seals: no speaker, no
+    credential key, a non-owner speaker (a later-joined member), and an undeclared slot."""
+    turn = await _seed_turn("queued", None)
+    owner = await _seeded_member(turn.workspace_id)
+    joiner = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=joiner,
+                workspace_id=turn.workspace_id,
+                email="late@b.c",
+                created_at=datetime(2100, 1, 1, tzinfo=UTC),
+                updated_at=datetime(2100, 1, 1, tzinfo=UTC),
+            )
+        )
+    requests = CredentialRequests(
+        fernet=Fernet(Fernet.generate_key()), declared=frozenset({"sample_api"})
+    )
+    args = RequestCredentialsInput.model_validate(REQUEST_INPUT)
+    blob = FilesystemBlobStore(root=tmp_path)
+    handle = SandboxHandle(conversation_id=turn.conversation_id, container_id="test")
+
+    def context(member: UUID | None, requestable: CredentialRequests | None) -> ToolContext:
+        return ToolContext(
+            sandbox=SandboxSession(carrier=RecordingCarrier(), handle=handle),
+            blob=blob,
+            turn=turn,
+            agent=Agent(prompt="p", model="claude-opus-4-8"),
+            spawn=_unavailable_spawn,
+            member_id=member,
+            artifact_token_secret="",
+            requestable_credentials=requestable,
+        )
+
+    with pytest.raises(ValueError, match="speaking member"):
+        await request_credentials_handler(context(None, requests), args)
+    with pytest.raises(ValueError, match="no credential key"):
+        await request_credentials_handler(context(owner, None), args)
+    with pytest.raises(ValueError, match="workspace owner"):
+        await request_credentials_handler(context(joiner, requests), args)
+    undeclared = RequestCredentialsInput.model_validate(
+        {"reason": "r", "prompts": [{"slot": "nonesuch", "prompt": "p"}]}
+    )
+    with pytest.raises(ValueError, match="declares credential slot"):
+        await request_credentials_handler(context(owner, requests), undeclared)
+
+
+def test_requested_credentials_reads_the_handlers_result_not_the_raw_call() -> None:
+    payload = {
+        "reason": "folded",
+        "prompts": [{"slot": "sample_api", "prompt": "key"}],
+        "sealed": "opaque",
+    }
+    content = "Tell the member what you need.\n" + json.dumps(payload)
+    calls = (ToolUseBlock(id="s1", name="request_credentials", input=REQUEST_INPUT),)
+    results = (ToolResultBlock(tool_use_id="s1", content=content),)
+    request = _final_act(calls, results, REQUEST_CREDENTIALS_TOOL, CredentialRequest)
+    assert request is not None
+    assert request.reason == "folded"
+    assert request.sealed == "opaque"
+    rewritten = (ToolResultBlock(tool_use_id="s1", content="a hook replaced this output"),)
+    assert _final_act(calls, rewritten, REQUEST_CREDENTIALS_TOOL, CredentialRequest) is None
+    others = (ToolUseBlock(id="c1", name="bash", input={}),)
+    assert _final_act(others, results, REQUEST_CREDENTIALS_TOOL, CredentialRequest) is None
 
 
 async def test_round_budget_exhaustion_forces_a_final_answer_instead_of_failing(

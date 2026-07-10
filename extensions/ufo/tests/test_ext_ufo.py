@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
+from cryptography.fernet import Fernet
 from dbos import DBOSClient
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
@@ -31,6 +32,11 @@ from ufo.accounting import CORE_PRICING
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
 from ufo.connectors import ConnectorRegistry
+from ufo.credentials import (
+    CredentialRequestState,
+    CredentialStore,
+    seal_credential_request,
+)
 from ufo.db import workspace_tx
 from ufo.ext.loader import skill_registry
 from ufo.ext.manifest import ModelProviderSpec
@@ -41,7 +47,7 @@ from ufo.models.interface import ModelEvent, ModelRequest, TextDelta
 from ufo.models.registry import ModelRegistry
 from ufo.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
 from ufo.schema import tables
-from ufo.schema.records import TerminalFrame, Usage
+from ufo.schema.records import CredentialPrompt, CredentialRequest, TerminalFrame, Usage
 from ufo.serve import _mount_shared_surfaces, _mount_surfaces
 
 SECRET = "ufo-token-secret"
@@ -103,6 +109,56 @@ def test_terminal_frame_maps_by_status_and_streamed() -> None:
     cancelled = Terminal(frame=TerminalFrame(status="cancelled"))
     assert directives_for(cancelled, streamed=True) == (b"say\tcancelled\n", b"exit\t0\n")
     assert directives_for(Parked(message="over cap"), False) == (b"say\tover cap\n", b"ask\t>\n")
+
+
+def _request() -> CredentialRequest:
+    return CredentialRequest(
+        reason="Connecting Slack needs two values.",
+        prompts=(
+            CredentialPrompt(slot="slack_bot_token", prompt="Bot User OAuth Token"),
+            CredentialPrompt(slot="slack_signing_secret", prompt="Signing Secret"),
+        ),
+        sealed="sealed-opaque",
+    )
+
+
+def test_pending_credential_prompts_render_individually() -> None:
+    """A done turn prompts exactly the still-unanswered slots — all, one, or none — so a stored
+    sibling never re-prompts while a missing one keeps asking."""
+    request = _request()
+    done = Terminal(frame=TerminalFrame(status="done", text="t", credential_request=request))
+    assert directives_for(done, streamed=True, collect=request.prompts) == (
+        b"secret\tsealed-opaque\tslack_bot_token\tBot User OAuth Token\n",
+        b"secret\tsealed-opaque\tslack_signing_secret\tSigning Secret\n",
+        b"ask\t>\n",
+    )
+    assert directives_for(done, streamed=True, collect=request.prompts[1:]) == (
+        b"secret\tsealed-opaque\tslack_signing_secret\tSigning Secret\n",
+        b"ask\t>\n",
+    )
+    assert directives_for(done, streamed=True) == (b"ask\t>\n",)
+
+
+async def test_stream_gates_each_secret_prompt_on_the_pending_check() -> None:
+    def frames() -> AsyncIterator[tuple[str, Terminal]]:
+        async def gen() -> AsyncIterator[tuple[str, Terminal]]:
+            frame = TerminalFrame(status="done", text="t", credential_request=_request())
+            yield ("c1", Terminal(frame=frame))
+
+        return gen()
+
+    async def fulfilled(sealed: str, slot: str) -> bool:
+        assert sealed == "sealed-opaque"
+        return False
+
+    async def token_only(sealed: str, slot: str) -> bool:
+        return slot == "slack_bot_token"
+
+    gated = [line async for line in stream_directives(frames(), 5.0, fulfilled)]
+    assert not any(line.startswith(b"secret\t") for line in gated)
+    partial = [line async for line in stream_directives(frames(), 5.0, token_only)]
+    secrets = [line for line in partial if line.startswith(b"secret\t")]
+    assert secrets == [b"secret\tsealed-opaque\tslack_bot_token\tBot User OAuth Token\n"]
 
 
 def test_valid_token_verifies_to_its_lowered_email() -> None:
@@ -497,3 +553,67 @@ async def test_email_matching_no_member_gets_an_unlinked_conversation(
         ).one_or_none()
     assert conversation.member_id is None
     assert identity is None
+
+
+async def test_secret_fulfillment_lands_in_the_store_never_the_transcript(
+    db: None,
+    runtime: tuple[Config, InProcessHub, FilesystemBlobStore],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other end of the `secret` directive: the shell POSTs each privately-entered value with
+    the sealed request, the surface verifies the seal and writes the encrypted slot, and no turn is
+    admitted — the secret never becomes a message. Only the member the request was sealed for may
+    fulfill it, only for slots it named, under the size bound."""
+    config, hub, blob = runtime
+    monkeypatch.setenv("UFO_TOKEN_SECRET", SECRET)
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    dbos_client = DBOSClient(system_database_url=config.database.system_url)
+    workspace_id = await _seed_workspace()
+    owner = await _seed_member(workspace_id, "owner@example.com")
+    await _seed_member(workspace_id, "late@example.com")
+    sealed = seal_credential_request(
+        store.fernet,
+        CredentialRequestState(
+            workspace_id=workspace_id,
+            member_id=owner,
+            slots=("slack_bot_token", "slack_signing_secret"),
+        ),
+    )
+    app = FastAPI()
+    _mount_surfaces(app, (ufo_manifest(),), workspace_id, store, blob, hub, dbos_client, "", None)
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    foreign = _mint(SECRET, workspace_id, "late@example.com", _future())
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://ufo") as client:
+
+            async def send(bearer: str, slot: str, value: bytes):
+                return await client.post(
+                    "/surface/ufo/main",
+                    content=value,
+                    headers={
+                        "authorization": f"Bearer {bearer}",
+                        "x-ufo-secret": sealed,
+                        "x-ufo-slot": slot,
+                    },
+                )
+
+            last_first = await send(token, "slack_signing_secret", b"shhh")
+            assert last_first.status_code == 200
+            assert last_first.content == b"say\tstored slack_signing_secret\n"
+            first = await send(token, "slack_bot_token", b"xoxb-real")
+            assert first.status_code == 200
+            assert first.content == b"say\tstored slack_bot_token\n"
+            assert await store.get(workspace_id, "slack_bot_token") == "xoxb-real"
+            assert await store.get(workspace_id, "slack_signing_secret") == "shhh"
+            assert await _turn_count(workspace_id) == 0
+            denied = await send(foreign, "slack_bot_token", b"xoxb-evil")
+            assert denied.status_code == 403
+            assert await store.get(workspace_id, "slack_bot_token") == "xoxb-real"
+            offslot = await send(token, "unrelated_slot", b"v")
+            assert offslot.status_code == 403
+            oversized = await send(token, "slack_bot_token", b"x" * 5000)
+            assert oversized.status_code == 413
+            garbage = await send(token, "slack_bot_token", b"")
+            assert garbage.status_code == 400
+    finally:
+        dbos_client.destroy()

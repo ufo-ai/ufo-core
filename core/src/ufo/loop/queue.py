@@ -12,7 +12,7 @@ from ufo.blob import BlobStore, FilesystemBlobStore, S3BlobStore
 from ufo.browser import CdpProvider
 from ufo.config import Config
 from ufo.connectors import ConnectorRegistry
-from ufo.credentials import CredentialStore
+from ufo.credentials import CredentialRequests, CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.loader import turn_hooks, turn_runtime_skills, turn_tools
 from ufo.ext.manifest import Manifest
@@ -192,6 +192,17 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             connectors=runtime.connectors,
             tools=tools,
             tool_ext=tool_ext,
+            requestable_credentials=(
+                None
+                if runtime.credentials is None
+                else CredentialRequests(
+                    fernet=runtime.credentials.fernet,
+                    declared=frozenset(
+                        slot.name for manifest in runtime.manifests for slot in manifest.credentials
+                    ),
+                )
+            ),
+            public_base_url=runtime.config.connect.public_base_url,
             hooks=hooks,
             blob=runtime.blob,
             spawn=subagents.spawn,
