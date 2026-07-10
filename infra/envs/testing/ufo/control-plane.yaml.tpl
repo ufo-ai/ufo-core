@@ -41,6 +41,9 @@ spec:
             - name: UFO_CONTROL_POSTGRES_OWNER_DSN
               valueFrom:
                 secretKeyRef: {name: ufo-control-secrets, key: postgres-admin-dsn}
+            - name: UFO_CONTROL_PG_ROLE_SEED
+              valueFrom:
+                secretKeyRef: {name: ufo-control-secrets, key: pg-role-seed}
 ---
 apiVersion: v1
 kind: ServiceAccount
