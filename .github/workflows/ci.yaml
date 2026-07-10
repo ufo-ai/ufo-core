@@ -62,3 +62,36 @@ jobs:
       # store. The container/image-build/live turns (`serial`/`integration`/`docker`) run in the
       # nightly `integration` workflow, off this per-push hot path.
       - run: uv run pytest -n auto -m "not serial and not integration and not docker" -q
+
+  # The RLS tier's isolation proof, against its own SUPERUSER Postgres on :5544 (never the parallel
+  # suite's :5541). The tier's setup is the cluster admin — it CREATEs roles + databases, applies RLS
+  # policies, and mints the RLS-subject serve role — so it needs a superuser and is the sole owner of
+  # its cluster (global DROP ROLE/DATABASE), which is why it runs on its own runner, serial, off the
+  # `test` job's xdist. This is the gate the U1 / ufo_dbos / serve-role bugs slipped past; UFO_RLS_
+  # REQUIRED makes an unreachable DB a hard collection error, so the suite can never silently skip.
+  rls:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres-admin:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: admin
+          POSTGRES_PASSWORD: admin
+        ports:
+          - 5544:5432
+        options: >-
+          --health-cmd "pg_isready -U admin"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync
+      - run: uv run pytest control/tests/test_rls.py -q
+        env:
+          UFO_RLS_REQUIRED: "1"

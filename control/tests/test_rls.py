@@ -69,6 +69,10 @@ SEED = "rls-test-seed"
 PACK = "assistant_hosted"
 TENANT_ROLES = ("ufo_t_acme", "ufo_t_globex")
 TENANT_DBOS = ("ufo_dbos_acme", "ufo_dbos_globex")
+# CI sets this so an unreachable superuser Postgres is a loud collection error, never a silent skip:
+# the RLS tier's isolation, serve-role fail-closed, and shared bootstrap must be exercised on every
+# run — this suite going quiet is exactly how the serve-role gaps once reached the live cluster.
+RLS_REQUIRED_ENV = "UFO_RLS_REQUIRED"
 
 
 def _reachable() -> bool:
@@ -76,6 +80,11 @@ def _reachable() -> bool:
         with socket.create_connection((PG_HOST, PG_PORT), timeout=0.5):
             return True
     except OSError:
+        if os.environ.get(RLS_REQUIRED_ENV):
+            raise RuntimeError(
+                f"{RLS_REQUIRED_ENV} is set but the superuser Postgres on {PG_HOST}:{PG_PORT} is "
+                "unreachable — the RLS tier must run here, not skip"
+            ) from None
         return False
 
 
@@ -109,7 +118,11 @@ async def _reset(database: str) -> None:
         for name in (database, f"{database}_dbos", *TENANT_DBOS):
             await connection.execute(f'drop database if exists "{name}" with (force)')
         for role in (*TENANT_ROLES, "ufo_serve", "ufo_serve_shared", "ufo_app", OWNER_ROLE):
-            await connection.execute(f'drop role if exists "{role}"')
+            if await connection.fetchval("select 1 from pg_roles where rolname = $1", role):
+                # drop_owned first: a role holding SET on the app.workspace_id parameter (or the
+                # owner's default privileges) can't be dropped while those grants stand.
+                await connection.execute(f'drop owned by "{role}"')
+                await connection.execute(f'drop role "{role}"')
         await connection.execute(f"create role \"{OWNER_ROLE}\" login password '{OWNER_PASSWORD}'")
         await connection.execute(f'create database "{database}" owner "{OWNER_ROLE}"')
     finally:
@@ -193,7 +206,7 @@ async def test_each_tenant_role_sees_only_its_own_workspace(rls_env: RlsEnv) -> 
             workspaces = await connection.fetch("select id from workspace")
             assert [str(row["id"]) for row in workspaces] == [tenant.workspace_id]
             members = await connection.fetch("select workspace_id from member")
-            assert [str(row["workspace_id"]) for row in members] == [tenant.workspace_id]
+            assert {str(row["workspace_id"]) for row in members} == {tenant.workspace_id}
         finally:
             await connection.close()
 
@@ -336,7 +349,7 @@ async def test_shared_role_scopes_each_transaction_via_contextvar(
                 rows = (await connection.execute(sa.select(tables.workspace.c.id))).all()
                 assert [str(row.id) for row in rows] == [workspace_id]
                 members = (await connection.execute(sa.select(tables.member.c.workspace_id))).all()
-                assert [str(row.workspace_id) for row in members] == [workspace_id]
+                assert {str(row.workspace_id) for row in members} == {workspace_id}
         finally:
             current_workspace.reset(reset)
 
