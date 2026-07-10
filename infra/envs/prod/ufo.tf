@@ -56,12 +56,19 @@ locals {
     otlp_endpoint = "http://otel-collector.${local.system_namespace}.svc.cluster.local:4318"
   TOML
 
-  ufo_manifests = merge(
+  # The migrate Job is split out of the shared for_each so its own resource can wait on
+  # completion; everything else applies fire-and-forget.
+  ufo_manifests = { for path, manifest in merge(
     data.kubectl_file_documents.tenant_crd.manifests,
     data.kubectl_file_documents.control_plane.manifests,
     data.kubectl_file_documents.cluster_services.manifests,
     data.kubectl_file_documents.observability.manifests,
-  )
+  ) : path => manifest if !strcontains(path, "/jobs/ufo-migrate-") }
+
+  ufo_migrate_manifest = one([
+    for path, manifest in data.kubectl_file_documents.control_plane.manifests :
+    manifest if strcontains(path, "/jobs/ufo-migrate-")
+  ])
 
   # The one shared serve fleet's host: all hosted workspaces are served by this single fleet (no
   # per-workspace subdomain — RFC 0011), so one hostname fronts it, alongside the onboarding gateway
@@ -239,6 +246,31 @@ data "kubectl_file_documents" "observability" {
 resource "kubectl_manifest" "ufo" {
   for_each  = local.ufo_manifests
   yaml_body = each.value
+
+  depends_on = [
+    module.platform,
+    kubernetes_namespace_v1.ufo_system,
+    kubernetes_config_map_v1.ufo_control_platform,
+    kubernetes_secret_v1.ufo_serve,
+  ]
+}
+
+# The deploy is only done when the schema migration + RLS bootstrap have actually run: waiting on
+# the Job's success makes a failed bootstrap fail the apply, instead of shipping green while the
+# Job crash-loops unseen.
+resource "kubectl_manifest" "ufo_migrate" {
+  yaml_body = local.ufo_migrate_manifest
+
+  wait_for {
+    field {
+      key   = "status.succeeded"
+      value = "1"
+    }
+  }
+
+  timeouts {
+    create = "10m"
+  }
 
   depends_on = [
     module.platform,

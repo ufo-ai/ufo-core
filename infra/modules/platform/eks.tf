@@ -35,7 +35,21 @@ module "eks" {
   subnet_ids = module.vpc.private_subnets
 
   cluster_addons = {
-    coredns                = {}
+    # CoreDNS replicas must land on distinct nodes: the addon default is only a soft
+    # anti-affinity, and co-located replicas turn one node's loss into a cluster-wide
+    # external-DNS outage while internal DNS keeps answering.
+    coredns = {
+      configuration_values = jsonencode({
+        affinity = {
+          podAntiAffinity = {
+            requiredDuringSchedulingIgnoredDuringExecution = [{
+              labelSelector = { matchLabels = { "k8s-app" = "kube-dns" } }
+              topologyKey   = "kubernetes.io/hostname"
+            }]
+          }
+        }
+      })
+    }
     kube-proxy             = {}
     eks-pod-identity-agent = {}
     vpc-cni                = { before_compute = true }

@@ -45,6 +45,9 @@ env:
   ECR_REGISTRY: 899147036157.dkr.ecr.us-east-1.amazonaws.com
   DEPLOY_ROLE_ARN: arn:aws:iam::899147036157:role/github-deploy
   TF_DIR: infra/envs/testing
+  # The datadog terraform provider (monitors.tf) reads these at plan and apply.
+  DD_API_KEY: ${{ secrets.DD_API_KEY }}
+  DD_APP_KEY: ${{ secrets.DD_APP_KEY }}
 
 jobs:
   deploy:
