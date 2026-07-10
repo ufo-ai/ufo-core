@@ -25,7 +25,6 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
-      actions: write
       id-token: write
     services:
       postgres:
@@ -52,7 +51,6 @@ jobs:
       - name: Collect candidates
         id: scan
         run: |
-          echo "start=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
           mkdir -p /tmp/dead-code
           rc=0
           uvx vulture@2.14 core/src extensions packs \
@@ -116,18 +114,6 @@ jobs:
           claude_args: |
             --allowedTools "Task,TodoWrite,Read,Grep,Glob,Edit,Write,Bash(git:*),Bash(uv run:*),Bash(jq:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh pr create:*),Bash(gh pr list:*),Bash(gh pr view:*)"
 
-      - name: Request review
-        if: steps.scan.outputs.count != '0'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh pr list -R "$GITHUB_REPOSITORY" --state open --json number,headRefName,createdAt \
-            -q '.[] | select(.headRefName | startswith("dead-code/sym/"))
-                    | select(.createdAt >= "${{ steps.scan.outputs.start }}") | .number' |
-          while read -r n; do
-            gh workflow run claude-code-review.yml -R "$GITHUB_REPOSITORY" -f pr="$n"
-          done
-
   # The "both ends or neither" audit: one declared-surface class per day, rotating; a surface
   # missing its producer or consumer is dead weight no mechanical scanner can see.
   doctrine:
@@ -137,7 +123,6 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
-      actions: write
       id-token: write
     services:
       postgres:
@@ -164,7 +149,6 @@ jobs:
       - name: Pick focus
         id: focus
         run: |
-          echo "start=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
           focus='${{ inputs.focus }}'
           if [ -z "$focus" ]; then
             order='db-columns config-fields events-frames enum-members sdk-exports manifest-points'
@@ -230,13 +214,3 @@ jobs:
           claude_args: |
             --allowedTools "Task,TodoWrite,Read,Grep,Glob,Edit,Write,Bash(git:*),Bash(uv run:*),Bash(jq:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh pr create:*),Bash(gh pr list:*),Bash(gh pr view:*)"
 
-      - name: Request review
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh pr list -R "$GITHUB_REPOSITORY" --state open --json number,headRefName,createdAt \
-            -q '.[] | select(.headRefName | startswith("dead-code/doc/"))
-                    | select(.createdAt >= "${{ steps.focus.outputs.start }}") | .number' |
-          while read -r n; do
-            gh workflow run claude-code-review.yml -R "$GITHUB_REPOSITORY" -f pr="$n"
-          done

@@ -18,7 +18,6 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
-      actions: write
       id-token: write
     services:
       postgres:
@@ -54,7 +53,7 @@ jobs:
           CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1'
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          allowed_bots: github-actions
+          allowed_bots: github-actions,claude
           show_full_output: true
           prompt: |
             Investigate issue #${{ inputs.issue }} in this repo (`gh issue view ${{ inputs.issue }}`):
@@ -76,13 +75,3 @@ jobs:
           claude_args: |
             --allowedTools "Task,TodoWrite,Read,Grep,Glob,Edit,Write,Bash(git:*),Bash(uv run:*),Bash(jq:*),Bash(gh issue view:*),Bash(gh issue comment:*),Bash(gh issue edit:*),Bash(gh issue list:*),Bash(gh pr create:*),Bash(gh pr list:*),Bash(gh pr view:*)"
 
-      - name: Request review
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          pr=$(gh pr list -R "$GITHUB_REPOSITORY" --head "sentinel/issue-${{ inputs.issue }}" --state open --json number -q '.[0].number')
-          if [ -n "$pr" ]; then
-            gh workflow run claude-code-review.yml -R "$GITHUB_REPOSITORY" -f pr="$pr"
-          else
-            echo 'no PR opened'
-          fi
