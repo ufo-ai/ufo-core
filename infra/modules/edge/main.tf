@@ -12,6 +12,10 @@ terraform {
 resource "cloudflare_d1_database" "waitlist" {
   account_id = var.account_id
   name       = "${var.name}-waitlist"
+
+  # Unset, provider 5.x PUTs `read_replication: null` on every update and the API refuses it
+  # ("Expected object, received null"). Disabled is D1's actual default.
+  read_replication = { mode = "disabled" }
 }
 
 resource "cloudflare_workers_script" "edge" {
