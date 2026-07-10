@@ -255,13 +255,13 @@ def test_block_kit_reply_body_renders_markdown_and_degrades() -> None:
     assert degraded["text"] == big
 
 
-def test_thread_keying_and_gating() -> None:
+def test_thread_keying_and_addressing() -> None:
     assert slack.slack_thread_key("C1", "100.5", is_dm=False) == "C1:100.5"
     assert slack.slack_thread_key("D1", "100.5", is_dm=True) == "D1"
-    assert slack.slack_message_gated({"type": "app_mention"}, BOT_USER_ID, is_dm=False)
-    assert slack.slack_message_gated({"type": "message"}, BOT_USER_ID, is_dm=True)
-    assert not slack.slack_message_gated({"type": "message", "text": "hi"}, BOT_USER_ID, False)
-    assert slack.slack_message_gated(
+    assert slack.slack_message_addressed({"type": "app_mention"}, BOT_USER_ID, is_dm=False)
+    assert slack.slack_message_addressed({"type": "message"}, BOT_USER_ID, is_dm=True)
+    assert not slack.slack_message_addressed({"type": "message", "text": "hi"}, BOT_USER_ID, False)
+    assert slack.slack_message_addressed(
         {"type": "message", "text": f"<@{BOT_USER_ID}> hi"}, BOT_USER_ID, False
     )
 
@@ -551,12 +551,10 @@ def _ambient_transport(
             return _messages(history)
         if url == slack.SLACK_USERS_INFO_URL:
             return httpx.Response(200, json={"ok": True, "user": {"profile": {}}})
-        if url in (
-            slack.SLACK_CHAT_POST_MESSAGE_URL,
-            slack.SLACK_CHAT_UPDATE_URL,
-            slack.SLACK_CHAT_DELETE_URL,
-        ):
+        if url == slack.SLACK_CHAT_POST_MESSAGE_URL:
             return httpx.Response(200, json={"ok": True, "channel": "C5", "ts": "999.100"})
+        if url == slack.SLACK_ASSISTANT_STATUS_URL:
+            return httpx.Response(200, json={"ok": True})
         return httpx.Response(404, json={"ok": False, "error": "not_mocked"})
 
     return httpx.MockTransport(handler)
@@ -584,6 +582,7 @@ async def test_mid_thread_mention_prepends_unseen_thread_history(
         {"user": "U1", "ts": "1700000000.000100", "text": "we saw errors spike at noon"},
         {"user": BOT_USER_ID, "ts": "1700000060.000200", "text": "earlier bot reply"},
         {"user": "U2", "ts": "1700000120.000300", "text": "restarting did not help"},
+        {"user": "U4", "ts": "1700000181.000500", "text": "reply racing the mention's ingest"},
     ]
     _, client, _ = await _mount_transport(
         monkeypatch, workspace_id, tmp_path, _ambient_transport(recorder, replies)
@@ -606,14 +605,14 @@ async def test_mid_thread_mention_prepends_unseen_thread_history(
     params = fetches[0].url.params
     assert params["channel"] == "C7"
     assert params["ts"] == "1700000000.000100"
-    assert params["latest"] == "1700000180.000400"
-    assert params["inclusive"] == "false"
+    assert "latest" not in params
     assert params["limit"] == str(slack.AMBIENT_FETCH_LIMIT)
     assert not _fetches(recorder, slack.SLACK_CONVERSATIONS_HISTORY_URL)
     assert await _turn_inbound(workspace_id) == (
         f"{slack.AMBIENT_THREAD_HEADER}\n"
         "[2023-11-14 22:13] <@U1>: we saw errors spike at noon\n"
-        "[2023-11-14 22:15] <@U2>: restarting did not help\n\n"
+        "[2023-11-14 22:15] <@U2>: restarting did not help\n"
+        "[2023-11-14 22:16] <@U4>: reply racing the mention's ingest\n\n"
         "<@UBOT00000> summarize this thread"
     )
 
@@ -719,6 +718,188 @@ async def test_replies_fetch_failure_still_admits(db: None, tmp_path, monkeypatc
     assert response.status_code == 200
     assert len(_fetches(recorder, slack.SLACK_CONVERSATIONS_REPLIES_URL)) == 1
     assert await _turn_inbound(workspace_id) == "<@UBOT00000> ping"
+
+
+async def test_participating_thread_admits_unmentioned_replies_on_the_transcript(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """The participation gate end to end: the first mention makes the thread a conversation and
+    carries the ambient digest; from then on every member reply — un-mentioned, broadcast, or a
+    second mention — is its own turn with its plain body and no refetched digest, while replies in
+    a foreign thread and top-level chatter stay ignored."""
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    replies = [{"user": "U1", "ts": "1700000000.000100", "text": "pre-mention chatter"}]
+    _, client, _ = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, _ambient_transport(recorder, replies=replies)
+    )
+    root = "1700000000.000100"
+    admitted = [
+        _event_body(
+            type="app_mention",
+            user="U1",
+            channel="C1",
+            ts="1700000180.000400",
+            thread_ts=root,
+            text="<@UBOT00000> take a look",
+        ),
+        _event_body(
+            type="message",
+            user="U2",
+            channel="C1",
+            ts="1700000240.000500",
+            thread_ts=root,
+            text="and it happens on retries too",
+        ),
+        _event_body(
+            type="message",
+            subtype="thread_broadcast",
+            user="U3",
+            channel="C1",
+            ts="1700000300.000600",
+            thread_ts=root,
+            text="broadcasting the reply",
+        ),
+        _event_body(
+            type="app_mention",
+            user="U1",
+            channel="C1",
+            ts="1700000360.000700",
+            thread_ts=root,
+            text="<@UBOT00000> anything yet?",
+        ),
+    ]
+    ignored = [
+        _event_body(
+            type="message",
+            user="U2",
+            channel="C1",
+            ts="1700000420.000800",
+            thread_ts="1699990000.000900",
+            text="reply in a thread the agent never joined",
+        ),
+        _event_body(
+            type="message",
+            user="U2",
+            channel="C1",
+            ts="1700000480.000900",
+            text="top-level passing message",
+        ),
+    ]
+    async with client:
+        for body in admitted:
+            response = await client.post(
+                "/surface/slack", content=body, headers=_sign(body, int(time.time()))
+            )
+            assert response.json() == {"ok": True}
+        for body in ignored:
+            response = await client.post(
+                "/surface/slack", content=body, headers=_sign(body, int(time.time()))
+            )
+            assert response.json() == {"ok": True, "ignored": True}
+    async with workspace_tx() as connection:
+        queue_keys = (
+            (
+                await connection.execute(
+                    sa.select(tables.conversation.c.queue_key).where(
+                        tables.conversation.c.workspace_id == workspace_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        turns = (
+            await connection.execute(
+                sa.select(tables.turn.c.inbound, tables.turn.c.idempotency_key)
+                .where(tables.turn.c.workspace_id == workspace_id)
+                .order_by(tables.turn.c.seq)
+            )
+        ).all()
+    assert queue_keys == [f"C1:{root}"]
+    assert [turn.idempotency_key for turn in turns] == [
+        "C1:1700000180.000400",
+        "C1:1700000240.000500",
+        "C1:1700000300.000600",
+        "C1:1700000360.000700",
+    ]
+    assert turns[0].inbound == (
+        f"{slack.AMBIENT_THREAD_HEADER}\n"
+        "[2023-11-14 22:13] <@U1>: pre-mention chatter\n\n"
+        "<@UBOT00000> take a look"
+    )
+    assert turns[1].inbound == "and it happens on retries too"
+    assert turns[2].inbound == "broadcasting the reply"
+    assert turns[3].inbound == "<@UBOT00000> anything yet?"
+    assert len(_fetches(recorder, slack.SLACK_CONVERSATIONS_REPLIES_URL)) == 1
+    assert not _fetches(recorder, slack.SLACK_CONVERSATIONS_HISTORY_URL)
+
+
+async def test_a_bare_conversation_row_is_not_participation(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """The half-state a conversation-starting ingest passes through — row created, first turn not
+    yet admitted: an un-mentioned reply is still ignored, never admitted ahead of the starting
+    turn, and a mention landing on the bare row still fetches its ambient backfill."""
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    root = "1700000000.000100"
+    replies = [{"user": "U1", "ts": root, "text": "the thread root"}]
+    _, client, _ = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, _ambient_transport(recorder, replies=replies)
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                surface=slack.SURFACE_SLACK,
+                queue_key=f"C1:{root}",
+                member_id=None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    reply = _event_body(
+        type="message",
+        user="U2",
+        channel="C1",
+        ts="1700000240.000500",
+        thread_ts=root,
+        text="reply racing the starting mention",
+    )
+    mention = _event_body(
+        type="app_mention",
+        user="U1",
+        channel="C1",
+        ts="1700000300.000600",
+        thread_ts=root,
+        text="<@UBOT00000> hello",
+    )
+    async with client:
+        ignored = await client.post(
+            "/surface/slack", content=reply, headers=_sign(reply, int(time.time()))
+        )
+        assert ignored.json() == {"ok": True, "ignored": True}
+        admitted = await client.post(
+            "/surface/slack", content=mention, headers=_sign(mention, int(time.time()))
+        )
+        assert admitted.json() == {"ok": True}
+    async with workspace_tx() as connection:
+        turns = (
+            (
+                await connection.execute(
+                    sa.select(tables.turn.c.inbound).where(
+                        tables.turn.c.workspace_id == workspace_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(turns) == 1
+    assert turns[0].startswith(slack.AMBIENT_THREAD_HEADER)
+    assert len(_fetches(recorder, slack.SLACK_CONVERSATIONS_REPLIES_URL)) == 1
 
 
 async def test_dm_links_member_by_email_and_status_anchors_to_the_message(

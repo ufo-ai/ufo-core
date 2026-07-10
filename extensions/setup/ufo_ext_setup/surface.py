@@ -58,7 +58,7 @@ display_information:
   name: {name}
 features:
   agent_view:
-    agent_description: Answers @mentions in channels and direct messages, replying in-thread.
+    agent_description: Answers @mentions and direct messages, and follows the threads it joins.
   app_home:
     messages_tab_enabled: true
     messages_tab_read_only_enabled: false

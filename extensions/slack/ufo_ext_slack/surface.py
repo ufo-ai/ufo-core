@@ -1,10 +1,12 @@
 """The Slack surface on the core surface seam: verify an inbound event, key it to a thread
 conversation, stream any attached files into the workspace, and admit a turn; then deliver the
-terminal reply and stream the turn's shared files into the conversation's thread. A channel
-mention carries a bounded digest of ambient context fetched from Slack at admit time — the
-thread's earlier un-addressed messages when mentioned mid-thread, the channel's recent messages
-when starting a fresh thread — so the agent reads the room while only ever answering when
-addressed.
+terminal reply and stream the turn's shared files into the conversation's thread. The agent
+answers when addressed — a DM or an @-mention — and, once a mention has made a thread its
+conversation, every member reply in that thread, un-mentioned included, like any participant
+pulled into a thread. A conversation-starting channel turn carries a bounded digest of ambient
+context fetched from Slack at admit time — the thread's earlier un-addressed messages when
+mentioned mid-thread, the channel's recent messages when starting a fresh thread; after that
+every member reply is its own turn, so the transcript itself holds the thread.
 
 While the turn runs, a per-turn status task tails its live frames off the hub and keeps the
 thread's native status (`assistant.threads.setStatus`) current — "Thinking…", then the model's own
@@ -100,7 +102,7 @@ SLACK_BUTTON_VALUE_LIMIT = 2_000
 SLACK_REPLAY_SECONDS = 300
 MAX_SLACK_EVENT_BYTES = 1_000_000
 MESSAGE_EVENT_TYPES = ("app_mention", "message")
-MEMBER_MESSAGE_SUBTYPES = (None, "file_share")
+MEMBER_MESSAGE_SUBTYPES = (None, "file_share", "thread_broadcast")
 
 AMBIENT_FETCH_LIMIT = 100
 AMBIENT_CHANNEL_FETCH_LIMIT = 15
@@ -161,7 +163,10 @@ class InboundFile:
 @dataclass(frozen=True)
 class Inbound:
     """A verified, gated Slack message reduced to what admission, identity, and the thread status
-    need."""
+    need. `conversation_id` is the channel message's already-conversing conversation — one holding
+    an admitted turn — None for a DM or a conversation-starting message; it is the participation
+    that admits an un-addressed reply, and the signal that the transcript already holds the thread
+    so no ambient digest is fetched."""
 
     slack_user_id: str
     queue_key: str
@@ -170,6 +175,7 @@ class Inbound:
     is_dm: bool
     body: str
     files: tuple[InboundFile, ...]
+    conversation_id: UUID | None
 
 
 def verify_slack_signature(
@@ -210,9 +216,11 @@ def slack_thread_key(channel: str, root_ts: str, is_dm: bool) -> str:
     return f"{channel}:{root_ts}"
 
 
-def slack_message_gated(event: Mapping[str, object], bot_user_id: str, is_dm: bool) -> bool:
-    """Whether the agent should answer: always in a DM or an explicit mention, and in a channel only
-    when the bot is @-mentioned — never on every passing message."""
+def slack_message_addressed(event: Mapping[str, object], bot_user_id: str, is_dm: bool) -> bool:
+    """Whether the message addresses the agent directly — always in a DM, in a channel only by
+    @-mention. Direct address always admits; an un-addressed channel message is admitted only as a
+    reply in a thread the agent already converses in (`_participating_conversation`), never as
+    passing top-level traffic."""
     if event.get("type") == "app_mention" or is_dm:
         return True
     return f"<@{bot_user_id}>" in str(event.get("text") or "")
@@ -361,7 +369,9 @@ async def ingest(ctx: SurfaceContext, request: Request) -> Response:
         _ambient_context(ctx, bot_token, inbound),
     )
     member_id = await _resolve_member(ctx, inbound, sender) if inbound.is_dm else None
-    conversation_id = await ctx.conversation_for(inbound.queue_key, member_id)
+    conversation_id = inbound.conversation_id
+    if conversation_id is None:
+        conversation_id = await ctx.conversation_for(inbound.queue_key, member_id)
     body = f"{context}{inbound.body}"
     if inbound.files:
         downloaded = await _download_files(ctx, conversation_id, bot_token, inbound.files)
@@ -389,21 +399,41 @@ async def _to_inbound(ctx: SurfaceContext, payload: Mapping[str, object]) -> Inb
     if not isinstance(user, str) or not user or user == bot_user_id:
         return None
     is_dm = event.get("channel_type") == "im"
-    if not slack_message_gated(event, bot_user_id, is_dm):
+    addressed = slack_message_addressed(event, bot_user_id, is_dm)
+    root = event.get("thread_ts")
+    root_ts = root if isinstance(root, str) and root else None
+    if not addressed and root_ts is None:
         return None
     channel = _string_field(event, "channel")
     ts = _string_field(event, "ts")
-    root = event.get("thread_ts")
-    root_ts = root if isinstance(root, str) and root else ts
+    queue_key = slack_thread_key(channel, root_ts or ts, is_dm)
+    conversation_id = None if is_dm else await _participating_conversation(ctx, queue_key)
+    if not addressed and conversation_id is None:
+        return None
     return Inbound(
         slack_user_id=user,
-        queue_key=slack_thread_key(channel, root_ts, is_dm),
+        queue_key=queue_key,
         message_id=f"{channel}:{ts}",
         ts=ts,
         is_dm=is_dm,
         body=str(event.get("text") or ""),
         files=_inbound_files(event),
+        conversation_id=conversation_id,
     )
+
+
+async def _participating_conversation(ctx: SurfaceContext, queue_key: str) -> UUID | None:
+    """The thread's conversation once it holds an admitted turn, else None. Participation is the
+    transcript, never a bare conversation row: the row is created mid-ingest before the
+    conversation-starting turn is admitted, and gating on it alone would let a racing reply be
+    admitted ahead of that turn — or let a redelivery of the starting mention skip its ambient
+    backfill."""
+    conversation_id = await ctx.find_conversation(queue_key)
+    if conversation_id is None:
+        return None
+    if await ctx.latest_turn(conversation_id) is None:
+        return None
+    return conversation_id
 
 
 @dataclass(frozen=True)
@@ -480,16 +510,18 @@ async def _resolve_member(
 
 
 async def _ambient_context(ctx: SurfaceContext, bot_token: str, inbound: Inbound) -> str:
-    """A digest of the ambient messages around the trigger — the un-addressed traffic the gate
-    never admits. A mid-thread mention reads the thread's earlier messages (the whole history when
-    the bot is first mentioned); a top-level mention reads the channel's recent messages as context
-    for its fresh thread. One bounded page per admitted channel turn, no stored watermark:
-    already-digested lines may repeat across turns, but no message is ever lost to state that races
-    a running turn; a thread past the page limit keeps its earliest page — the root anchor — and
-    drops the overflow. Best-effort by design with its own short timeout, so ingest answers inside
-    Slack's three-second event ack — a failed or slow fetch logs and the mention is admitted with
-    its plain body."""
-    if inbound.is_dm:
+    """A digest of the ambient messages a conversation-starting turn cannot have in its transcript —
+    the traffic from before the agent was addressed. A first mid-thread mention reads the whole
+    thread (unbounded above, so a reply racing this very ingest rides the digest instead of
+    vanishing — the trigger itself carries the mention and is dropped); a top-level mention reads
+    the channel's recent messages as context for its fresh thread. Only the conversation-starting
+    turn fetches: once the conversation holds a turn, every member reply is admitted as its own
+    turn, so the transcript holds the thread and a refetch would only duplicate it. One bounded
+    page — a thread past the page limit keeps its earliest page, the root anchor, and drops the
+    overflow. Best-effort by design with its own short timeout, so ingest answers inside Slack's
+    three-second event ack — a failed or slow fetch logs and the mention is admitted with its
+    plain body."""
+    if inbound.is_dm or inbound.conversation_id is not None:
         return ""
     channel, _, root_ts = inbound.queue_key.partition(":")
     trigger_ts = inbound.message_id.partition(":")[2]
@@ -508,8 +540,6 @@ async def _ambient_context(ctx: SurfaceContext, bot_token: str, inbound: Inbound
         params = {
             "channel": channel,
             "ts": root_ts,
-            "latest": trigger_ts,
-            "inclusive": "false",
             "limit": AMBIENT_FETCH_LIMIT,
         }
     bot_user_id = await ctx.credential(SLACK_BOT_USER_ID_SLOT)

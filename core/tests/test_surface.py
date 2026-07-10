@@ -264,6 +264,20 @@ async def test_admit_queues_a_turn_and_registers_a_writeback(db: None, tmp_path)
     assert again == turn_id
 
 
+async def test_find_conversation_reads_without_creating(db: None, tmp_path) -> None:
+    workspace_id, _, _ = await _seed()
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    assert await context.find_conversation("C1:1.0") is None
+    async with workspace_tx() as connection:
+        created = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.conversation))
+        ).scalar_one()
+    assert created == 0
+    conversation_id = await context.conversation_for("C1:1.0", None)
+    assert await context.find_conversation("C1:1.0") == conversation_id
+    assert await replace(context, surface="other").find_conversation("C1:1.0") is None
+
+
 async def test_admitted_context_round_trips_to_the_loaded_turn(db: None, tmp_path) -> None:
     """Both ends of the turn.context column: the surface admits its ambient TurnContext, and the
     queue loader — the engine's one read path — validates the same record back off the row, with

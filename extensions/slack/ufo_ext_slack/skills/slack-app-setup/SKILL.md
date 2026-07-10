@@ -31,8 +31,10 @@ don't know it, ask; never invent one and never emit a placeholder (`example.com`
 - **Don't probe the URL.** The sandbox egress proxy denies arbitrary hosts, so `curl`/`dig` against
   the deploy or Slack proves nothing. The URL is correct by construction; use it.
 - **Conversational bot.** It answers `@mentions` in channels and direct messages, replying in-thread;
-  when mentioned in a thread it reads the earlier thread messages for context, and when first
-  addressed it reads the channel's recent messages — though it only ever answers when addressed.
+  once mentioned in a thread it follows that thread, answering every reply without needing another
+  mention. When first mentioned mid-thread it reads the earlier thread messages for context, and when
+  starting a fresh thread it reads the channel's recent messages — it never answers top-level channel
+  messages unaddressed.
   Replies render the agent's markdown, and files the agent shares upload into the thread; a message's
   attachments download into the agent's workspace. While it works it shows Slack's native thread
   status ("Thinking…", then what it's doing), and when it asks a question with fixed choices it
@@ -54,7 +56,7 @@ display_information:
   name: <bot display name>
 features:
   agent_view:
-    agent_description: Answers @mentions in channels and direct messages, replying in-thread.
+    agent_description: Answers @mentions and direct messages, and follows the threads it joins.
   app_home:
     messages_tab_enabled: true
     messages_tab_read_only_enabled: false
@@ -153,7 +155,8 @@ On a cold start the deploy can instead carry the four values in its environment 
 every declared slot from its upper-cased env var.
 
 Once all four slots are filled and `ufoctl serve` is running behind `<public_base_url>`, invite
-the bot to a channel and `@mention` it (or DM it). It replies in-thread.
+the bot to a channel and `@mention` it (or DM it). It replies in-thread and follows the thread
+from there.
 
 ## Updating an existing app
 

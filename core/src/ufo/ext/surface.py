@@ -293,18 +293,27 @@ class SurfaceContext:
             log("surface.identity_link_race", surface=self.surface, external_id=external_id)
         return member.id
 
-    async def conversation_for(self, queue_key: str, member_id: UUID | None) -> UUID:
-        """Get-or-create the conversation this surface keys by `queue_key`, outside any admission
-        transaction; a lost creation race re-reads the surviving row."""
-        lookup = sa.select(tables.conversation.c.id).where(
+    def _conversation_lookup(self, queue_key: str) -> sa.Select:
+        return sa.select(tables.conversation.c.id).where(
             tables.conversation.c.workspace_id == self.workspace_id,
             tables.conversation.c.surface == self.surface,
             tables.conversation.c.queue_key == queue_key,
         )
+
+    async def find_conversation(self, queue_key: str) -> UUID | None:
+        """The conversation this surface keys by `queue_key`, or None before its first turn — how a
+        surface reads participation without creating a conversation as a side effect (Slack admits
+        an un-mentioned reply only in a thread whose key already names a conversation)."""
         async with workspace_tx() as connection:
-            found = (await connection.execute(lookup)).one_or_none()
+            found = (await connection.execute(self._conversation_lookup(queue_key))).one_or_none()
+        return None if found is None else found.id
+
+    async def conversation_for(self, queue_key: str, member_id: UUID | None) -> UUID:
+        """Get-or-create the conversation this surface keys by `queue_key`, outside any admission
+        transaction; a lost creation race re-reads the surviving row."""
+        found = await self.find_conversation(queue_key)
         if found is not None:
-            return found.id
+            return found
         conversation_id = uuid4()
         try:
             async with workspace_tx() as connection:
@@ -322,7 +331,7 @@ class SurfaceContext:
         except sa.exc.IntegrityError:
             log("surface.conversation_create_lost_race", surface=self.surface, queue_key=queue_key)
             async with workspace_tx() as connection:
-                return (await connection.execute(lookup)).one().id
+                return (await connection.execute(self._conversation_lookup(queue_key))).one().id
         return conversation_id
 
     async def admit(
