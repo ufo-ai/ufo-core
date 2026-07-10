@@ -582,15 +582,22 @@ BLOCK_ROLES = {"paragraph", "blockquote", "article", "Section", "main", "region"
 
 def render_markdown(root: FrameSnapshot) -> str:
     """Reading view: the accessibility tree rendered as markdown — headings keep their level, links
-    carry their href, list items bullet — so the model reads structure, not a flat innerText smear.
+    carry their href, list items bullet, and inline text merges into paragraphs bounded by
+    BLOCK_ROLES nodes — so the model reads structure, not a flat innerText smear.
     Same frame splice as render_page."""
     blocks: list[str] = []
     visited: set[tuple[int, str]] = set()
+    inline: list[str] = []
 
     def emit(text: str) -> None:
         text = text.strip()
         if text and (not blocks or blocks[-1] != text):
             blocks.append(text)
+
+    def flush() -> None:
+        if inline:
+            emit(" ".join(inline))
+            inline.clear()
 
     def walk(frame: FrameSnapshot, ax_id: str, parent_name: str) -> None:
         if (id(frame), ax_id) in visited:
@@ -605,31 +612,42 @@ def render_markdown(root: FrameSnapshot) -> str:
         backend_id = backend if isinstance(backend, int) else None
 
         if not (role == "StaticText" and name == parent_name):
-            if role in HEADING_ROLES and name:
+            if role in BLOCK_ROLES:
+                flush()
+                if name:
+                    emit(name)
+            elif role in HEADING_ROLES and name:
                 level = _ax_property(node, "level")
                 depth = int(level) if isinstance(level, int) and 1 <= level <= 6 else 1
+                flush()
                 emit(f"{'#' * depth} {name}")
             elif role == "link" and name:
                 url = _ax_property(node, "url")
-                emit(f"[{name}]({url})" if isinstance(url, str) and url else name)
+                inline.append(f"[{name}]({url})" if isinstance(url, str) and url else name)
             elif role in LIST_ITEM_ROLES and name:
+                flush()
                 emit(f"- {name}")
             elif role == "image" and (name or (backend_id and frame.geom.get(backend_id))):
                 geom = frame.geom.get(backend_id) if backend_id is not None else None
                 alt = name or _image_name(geom.img_src if geom else None)
                 if alt:
+                    flush()
                     emit(f"![{alt}]")
             elif name and role not in IGNORED_ROLES:
-                emit(name)
+                inline.append(name)
 
         for child in as_list(node.get("childIds") or [], "childIds"):
             walk(frame, as_str(child, "childIds[]"), name)
+        if role in BLOCK_ROLES:
+            flush()
         child_frame = frame.children.get(backend_id) if backend_id is not None else None
         if child_frame is not None and child_frame.root_ax_id is not None:
+            flush()
             walk(child_frame, child_frame.root_ax_id, "")
 
     if root.root_ax_id is not None:
         walk(root, root.root_ax_id, "")
+        flush()
     return "\n\n".join(blocks)
 
 
