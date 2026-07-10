@@ -5,7 +5,7 @@ variable "name" {
 
 variable "hostname" {
   type        = string
-  description = "Apex hostname the worker fronts (routes are claimed per-path on this host)."
+  description = "Apex hostname the worker fronts (the route claims the whole host)."
 }
 
 variable "zone_id" {
