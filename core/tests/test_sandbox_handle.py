@@ -7,6 +7,7 @@ resume-read (the id core seeds and the write it skips when nothing changed) is a
 conversation row, with a stand-in carrier recording the spec core built for it."""
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -66,6 +67,7 @@ def _turn(workspace_id: UUID, conversation_id: UUID) -> Turn:
         seq=1,
         status="running",
         inbound="hi",
+        created_at=datetime(2026, 7, 9, tzinfo=UTC),
     )
 
 

@@ -330,6 +330,15 @@ async def _read_transcript(
             await asyncio.sleep(0.05)
 
 
+def _bodies(stored: Conversation) -> list[object]:
+    """Message contents with each member inbound's <context> tag stripped — these tests assert the
+    bodies; the tag itself is proven in test_engine."""
+    return [
+        m.content.split("</context>\n", 1)[-1] if isinstance(m.content, str) else m.content
+        for m in stored.messages
+    ]
+
+
 async def _turn_row(turn_id: str) -> tuple[str, UUID]:
     async with workspace_tx() as connection:
         row = (
@@ -381,7 +390,7 @@ async def test_turn_round_trip_bills_and_persists(surface: AsyncClient) -> None:
     _, _, blob = _runtime_parts(surface)
     stored = await _read_transcript(blob, conversation_id, 1)
     assert stored.seq == 1
-    assert [m.content for m in stored.messages] == ["ping", "echo:1"]
+    assert _bodies(stored) == ["ping", "echo:1"]
 
 
 async def test_auto_model_resolves_to_the_configured_default(surface: AsyncClient) -> None:
@@ -468,7 +477,7 @@ async def test_failure_commits_terminal_bills_nothing_preserves_inbound(
     assert billed == 0
     _, _, blob = _runtime_parts(surface)
     stored = await _read_transcript(blob, conversation_id, 1)
-    assert [m.content for m in stored.messages] == ["explode"]
+    assert _bodies(stored) == ["explode"]
 
 
 async def test_next_turn_sees_a_failed_turns_inbound(surface: AsyncClient) -> None:
@@ -482,7 +491,7 @@ async def test_next_turn_sees_a_failed_turns_inbound(surface: AsyncClient) -> No
     _, conversation_id = await _turn_row(second)
     _, _, blob = _runtime_parts(surface)
     stored = await _read_transcript(blob, conversation_id, 2)
-    assert [m.content for m in stored.messages][:2] == ["explode", "ok"]
+    assert _bodies(stored)[:2] == ["explode", "ok"]
 
 
 async def test_cancel_commits_terminal_while_model_runs(surface: AsyncClient) -> None:
@@ -625,7 +634,7 @@ async def test_empty_response_nudge_recovers_and_bills_both_calls(
     _, conversation_id = await _turn_row(turn_id)
     _, _, blob = _runtime_parts(surface)
     stored = await _read_transcript(blob, conversation_id, 1)
-    assert [m.content for m in stored.messages] == ["shy", EMPTY_RESPONSE_NUDGE, "echo:2"]
+    assert _bodies(stored) == ["shy", EMPTY_RESPONSE_NUDGE, "echo:2"]
 
 
 async def test_empty_response_twice_fails_loud(surface: AsyncClient) -> None:

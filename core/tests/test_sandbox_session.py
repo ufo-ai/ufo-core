@@ -1,4 +1,5 @@
 import base64
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -92,6 +93,7 @@ def _bash_ctx(carrier: _RecordingCarrier, tmp_path: Path) -> ToolContext:
             seq=1,
             status="running",
             inbound="hi",
+            created_at=datetime(2026, 7, 9, tzinfo=UTC),
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_no_spawn,

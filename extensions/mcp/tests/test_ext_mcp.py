@@ -13,6 +13,7 @@ raise."""
 import contextlib
 import json
 from collections.abc import AsyncIterator, Callable
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import httpx
@@ -281,6 +282,7 @@ async def _tool_context() -> ToolContext:
             seq=1,
             status="running",
             inbound="use an mcp tool",
+            created_at=datetime(2026, 7, 9, tzinfo=UTC),
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=None,

@@ -10,6 +10,7 @@ subprocesses, no container), so the sandbox read is real, not a fake. The seam t
 and consumer proven together."""
 
 import json
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
@@ -268,6 +269,7 @@ async def test_save_custom_skill_tool_round_trips_through_the_sandbox(db: None, 
         seq=1,
         status="running",
         inbound="save it",
+        created_at=datetime(2026, 7, 9, tzinfo=UTC),
     )
     ctx = ToolContext(
         sandbox=session,
@@ -316,6 +318,7 @@ async def test_save_custom_skill_tool_skips_a_non_regular_file(db: None, tmp_pat
         seq=1,
         status="running",
         inbound="save it",
+        created_at=datetime(2026, 7, 9, tzinfo=UTC),
     )
     ctx = ToolContext(
         sandbox=session,

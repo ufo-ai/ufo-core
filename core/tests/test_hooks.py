@@ -14,6 +14,7 @@ seam and its runner are proven in test_page_change."""
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -93,6 +94,7 @@ async def _fire(chain: HookChain, event: str, payload: object) -> loader.HookRes
         seq=1,
         status="running",
         inbound="hi",
+        created_at=datetime(2026, 7, 9, tzinfo=UTC),
     )
     return await chain.fire(event, payload, turn, Agent(prompt="p", model="claude-opus-4-8"), None)
 
@@ -422,6 +424,7 @@ async def _seed_turn(workspace_id: UUID) -> Turn:
         seq=1,
         status="queued",
         inbound="hi",
+        created_at=datetime(2026, 7, 9, tzinfo=UTC),
     )
 
 

@@ -2,6 +2,7 @@ import asyncio
 import base64
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID, uuid4
 
@@ -379,6 +380,7 @@ def _turn_context(
         seq=1,
         status="running",
         inbound="connect my gmail",
+        created_at=datetime(2026, 7, 9, tzinfo=UTC),
     )
     return ToolContext(
         sandbox=None,

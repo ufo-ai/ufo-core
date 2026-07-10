@@ -10,6 +10,7 @@ API, so a dynamic tool never touches the sandbox egress proxy (the sample proves
 
 import json
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID, uuid4
 
@@ -474,6 +475,7 @@ def _turn_context(
             seq=1,
             status="running",
             inbound="connect my github",
+            created_at=datetime(2026, 7, 9, tzinfo=UTC),
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=None,
@@ -501,6 +503,7 @@ def _ctx(
             seq=1,
             status="running",
             inbound="use a connector",
+            created_at=datetime(2026, 7, 9, tzinfo=UTC),
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=None,

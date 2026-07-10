@@ -31,6 +31,7 @@ from ufo.schema.records import (
     WRITEBACK_PENDING,
     TerminalFrame,
     TerminalStatus,
+    TurnContext,
     TurnStatus,
     turn_id_for,
 )
@@ -51,6 +52,7 @@ class Admission:
         agent_id: UUID,
         body: str,
         idempotency_key: str | None = None,
+        context: TurnContext | None = None,
     ) -> UUID:
         async with workspace_tx() as connection:
             conversation = (
@@ -107,6 +109,7 @@ class Admission:
                         seq=seq,
                         status=status,
                         inbound=body,
+                        context=None if context is None else context.model_dump(mode="json"),
                         terminal=None if terminal is None else terminal.model_dump(mode="json"),
                         idempotency_key=idempotency_key,
                         created_at=sa.func.now(),
@@ -172,7 +175,13 @@ class AdmissionInvoker:
         agent_id: UUID,
         message: str,
         idempotency_key: str | None = None,
+        context: TurnContext | None = None,
     ) -> UUID:
         return await self.admission.admit(
-            self.workspace_id, conversation_id, agent_id, message, idempotency_key=idempotency_key
+            self.workspace_id,
+            conversation_id,
+            agent_id,
+            message,
+            idempotency_key=idempotency_key,
+            context=context,
         )

@@ -57,6 +57,7 @@ from ufo.schema.records import (
     AskUserInput,
     TerminalFrame,
     TerminalStatus,
+    TurnContext,
 )
 
 WORKSPACE_SEGMENT = "workspace"
@@ -73,6 +74,7 @@ class TurnInvoker(Protocol):
         agent_id: UUID,
         message: str,
         idempotency_key: str | None = None,
+        context: TurnContext | None = None,
     ) -> UUID: ...
 
 
@@ -329,14 +331,16 @@ class SurfaceContext:
         agent_id: UUID,
         body: str,
         idempotency_key: str | None = None,
+        context: TurnContext | None = None,
     ) -> UUID:
         """Admit an inbound message onto the durable turn queue and return its turn id. Delivery is
         admission's concern, derived from the conversation's surface: a durable-surface turn
         registers for the poller atomically with its row, a live surface's turn registers nothing
-        and its member tails the hub — the surface supplies only the message and its idempotency
-        key. A redelivery deduped to the turn already admitted joins it."""
+        and its member tails the hub — the surface supplies only the message, its idempotency
+        key, and the ambient `TurnContext` (sender, timezone) the engine renders before the
+        inbound. A redelivery deduped to the turn already admitted joins it."""
         return await self._invoker.invoke(
-            conversation_id, agent_id, body, idempotency_key=idempotency_key
+            conversation_id, agent_id, body, idempotency_key=idempotency_key, context=context
         )
 
     async def turn_inbound(self, turn_id: UUID) -> str | None:

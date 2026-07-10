@@ -109,8 +109,10 @@ def _mock_transport(recorder: list[httpx.Request], users: dict[str, str]) -> htt
         url = str(request.url).split("?")[0]
         if url == slack.SLACK_USERS_INFO_URL:
             email = users.get(str(request.url.params.get("user")))
-            profile = {"email": email} if email else {}
-            return httpx.Response(200, json={"ok": True, "user": {"profile": profile}})
+            user: dict[str, object] = {"profile": {"email": email} if email else {}}
+            if email:
+                user |= {"real_name": "Bee Jones", "tz": "America/New_York"}
+            return httpx.Response(200, json={"ok": True, "user": user})
         if url in (slack.SLACK_CONVERSATIONS_REPLIES_URL, slack.SLACK_CONVERSATIONS_HISTORY_URL):
             return httpx.Response(200, json={"ok": True, "messages": []})
         if url == slack.SLACK_CHAT_POST_MESSAGE_URL:
@@ -303,6 +305,20 @@ def test_ambient_digest_filters_and_bounds() -> None:
     assert "message 000" in capped
     assert "message 029" in capped
     assert "message 001" not in capped
+
+
+def test_turn_context_composes_the_sender_line_and_drops_an_unknown_timezone() -> None:
+    full = slack._turn_context(
+        slack.SlackUser(name="Bee Jones", email="bee@example.com", timezone="America/New_York")
+    )
+    assert (full.sender, full.timezone) == ("Bee Jones (bee@example.com)", "America/New_York")
+    degraded = slack._turn_context(
+        slack.SlackUser(name="Bee Jones", email=None, timezone="Mars/Olympus_Mons")
+    )
+    assert (degraded.sender, degraded.timezone) == ("Bee Jones", None)
+    assert slack._turn_context(None) == slack._turn_context(
+        slack.SlackUser(name=None, email=None, timezone=None)
+    )
 
 
 def test_slack_app_setup_skill_parses_indexes_and_names_the_real_route_and_slots() -> None:
@@ -747,8 +763,43 @@ async def test_dm_links_member_by_email_and_status_anchors_to_the_message(
                 )
             )
         ).one()
+        turn_context = (
+            await connection.execute(
+                sa.select(tables.turn.c.context).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
     assert linked.member_id == member_id
     assert conversation.member_id == member_id
+    assert turn_context == {
+        "sender": "Bee Jones (bee@example.com)",
+        "timezone": "America/New_York",
+    }
+
+
+async def test_unlinked_dm_fails_loud_when_the_sender_read_is_unavailable(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """Sender context is best-effort, but an unlinked DM cannot resolve its member without the
+    users.info read — ingest raises instead of silently admitting the member's DM as nobody."""
+
+    def slack_down(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": False, "error": "internal_error"})
+
+    workspace_id, _ = await _seed(member_email="bee@example.com")
+    _, client, _ = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, httpx.MockTransport(slack_down)
+    )
+    dm = _event_body(
+        type="message", channel_type="im", user="UBEE", channel="D9", ts="7.0", text="hey"
+    )
+    async with client:
+        with pytest.raises(slack.SlackApiError, match="cannot resolve the DM member UBEE"):
+            await client.post("/surface/slack", content=dm, headers=_sign(dm, int(time.time())))
+    async with workspace_tx() as connection:
+        admitted = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+        ).scalar_one()
+    assert admitted == 0
 
 
 async def test_inbound_file_streams_into_the_workspace(db: None, tmp_path, monkeypatch) -> None:

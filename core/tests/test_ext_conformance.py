@@ -10,6 +10,7 @@ breaks this probe, and a Manifest field the sample stops registering breaks the 
 import asyncio
 import json
 from dataclasses import dataclass, field, fields, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -198,6 +199,7 @@ def _tool_context(workspace_id: UUID, ext: ExtensionContext, tmp_path: Path) -> 
             seq=1,
             status="running",
             inbound="hi",
+            created_at=datetime(2026, 7, 9, tzinfo=UTC),
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
@@ -554,6 +556,7 @@ async def test_tool_dispatches_with_its_scoped_context(db: None, tmp_path: Path)
             seq=1,
             status="running",
             inbound="hi",
+            created_at=datetime(2026, 7, 9, tzinfo=UTC),
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
@@ -643,6 +646,7 @@ async def test_connector_execute_tool_resolves_the_bound_account_without_the_san
             seq=1,
             status="running",
             inbound="hi",
+            created_at=datetime(2026, 7, 9, tzinfo=UTC),
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,

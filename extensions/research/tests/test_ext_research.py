@@ -7,6 +7,7 @@ assert the tools' own marshalling (queries fanned and merged, the vertical folde
 gate, the fail-loud on a missing provider), never the fake. The exa backend keeps its own proof."""
 
 import json
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
@@ -102,6 +103,7 @@ def _context(provider: SearchProvider | None) -> ToolContext:
             seq=1,
             status="running",
             inbound="research this",
+            created_at=datetime(2026, 7, 9, tzinfo=UTC),
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_no_spawn,

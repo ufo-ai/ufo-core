@@ -206,6 +206,7 @@ def file_ctx(sandbox_image: str, tmp_path: Path) -> Iterator[tuple[ToolContext, 
         seq=0,
         status="running",
         inbound="hi",
+        created_at=datetime(2026, 7, 9, tzinfo=UTC),
     )
     ctx = ToolContext(
         sandbox=SandboxSession(carrier=DockerCarrier(), handle=handle),

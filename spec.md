@@ -189,7 +189,9 @@ Core owns **one surface seam**, not every surface. A surface is trusted infrastr
 a member's identity and admits turns as that member — so its `SurfaceContext` is deliberately
 privileged (distinct from the scoped extension context): **admit** an inbound message onto the
 durable turn queue (the one `invoke` boundary scheduled tasks and the eval harness also call, so the
-spend cap is evaluated once), **identity** resolution (an external id → member + conversation,
+spend cap is evaluated once) with its ambient `TurnContext` — the sender and IANA timezone the
+surface knows, which the engine renders as the `<context>` tag (the admission moment, local when a
+timezone is known; sender) before each member inbound — **identity** resolution (an external id → member + conversation,
 linking a `surface_identity` on first contact, and `adopt_identity` to span a member across
 surfaces), plus `tail`/`turn_owner`/`spend_rollup` for a live view. An extension registers a
 `surfaces` Manifest point; core mounts its `SurfaceRoute`s under `/surface/<name>`, each bound to the

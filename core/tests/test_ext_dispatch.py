@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -209,6 +210,7 @@ async def _seed_turn() -> Turn:
         seq=1,
         status="queued",
         inbound="hi",
+        created_at=datetime(2026, 7, 9, tzinfo=UTC),
         terminal=None,
     )
 

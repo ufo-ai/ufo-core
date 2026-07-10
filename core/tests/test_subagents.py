@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
@@ -260,6 +261,7 @@ async def test_message_admits_the_running_childs_next_turn_and_enqueues_it(
         seq=1,
         status="running",
         inbound="parent",
+        created_at=datetime(2026, 7, 9, tzinfo=UTC),
     )
     child_id, child_conversation = await _running_child(workspace_id, agent_id, parent.id)
     client = _RecordingClient()
@@ -301,6 +303,7 @@ async def test_message_refuses_a_turn_this_parent_did_not_spawn(
         seq=1,
         status="running",
         inbound="parent",
+        created_at=datetime(2026, 7, 9, tzinfo=UTC),
     )
     stranger, _ = await _running_child(workspace_id, agent_id, uuid4())
     subagents = Subagents(client=_RecordingClient(), registry=SubagentRegistry(()), parent=parent)
@@ -365,6 +368,7 @@ async def _parent(workspace_id: UUID, agent_id: UUID) -> Turn:
         seq=1,
         status="running",
         inbound="parent",
+        created_at=datetime(2026, 7, 9, tzinfo=UTC),
     )
 
 
@@ -528,6 +532,7 @@ async def test_wait_reports_every_already_finished_childs_status(
         seq=1,
         status="running",
         inbound="parent",
+        created_at=datetime(2026, 7, 9, tzinfo=UTC),
     )
     client = DBOSClient(system_database_url=dbos_launched.database.system_url)
     subagents = Subagents(client=client, registry=SubagentRegistry(()), parent=parent)

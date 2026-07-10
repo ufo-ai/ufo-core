@@ -46,6 +46,7 @@ from ufo.schema.records import (
     Agent,
     TerminalFrame,
     Turn,
+    TurnContext,
 )
 from ufo.search import SearchProvider
 from ufo.skills.runtime import SkillRegistry
@@ -262,6 +263,8 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, UUID | None]:
                     tables.turn.c.seq,
                     tables.turn.c.status,
                     tables.turn.c.inbound,
+                    tables.turn.c.created_at,
+                    tables.turn.c.context,
                     tables.turn.c.terminal,
                     tables.turn.c.parent_turn_id,
                     tables.turn.c.subagent_profile,
@@ -282,6 +285,8 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, UUID | None]:
         seq=row.seq,
         status=row.status,
         inbound=row.inbound,
+        created_at=row.created_at,
+        context=None if row.context is None else TurnContext.model_validate(row.context),
         terminal=None if row.terminal is None else TerminalFrame.model_validate(row.terminal),
         parent_turn_id=row.parent_turn_id,
         subagent_profile=row.subagent_profile,

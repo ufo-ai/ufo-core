@@ -6,6 +6,7 @@ write."""
 
 import json
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -72,6 +73,7 @@ def _context(
             seq=1,
             status="running",
             inbound="hi",
+            created_at=datetime(2026, 7, 9, tzinfo=UTC),
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=spawn,

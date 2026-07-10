@@ -1,10 +1,12 @@
 """Boundary records and the queue contract shared by surfaces and workers."""
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Literal
 from uuid import NAMESPACE_URL, UUID, uuid5
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 TurnStatus = Literal["queued", "running", "parked", "done", "failed", "cancelled"]
 TerminalStatus = Literal["done", "failed", "cancelled"]
@@ -105,6 +107,36 @@ class Agent(BaseModel):
     model: str
 
 
+class TurnContext(BaseModel):
+    """Ambient facts the admitting surface knows about an inbound — who spoke and their IANA
+    timezone — carried on the turn row and rendered by the engine as the <context> tag before the
+    message. Both fields are made safe at construction: the sender (surface-reported free text) is
+    flattened to one line without angle brackets so it cannot forge tag structure, and a bad zone
+    fails at the surface, never mid-turn."""
+
+    sender: str | None = None
+    timezone: str | None = None
+
+    @field_validator("sender")
+    @classmethod
+    def _tag_safe_line(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        flattened = " ".join(value.replace("<", "").replace(">", "").split())
+        return flattened or None
+
+    @field_validator("timezone")
+    @classmethod
+    def _known_zone(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as error:
+            raise ValueError(f"unknown timezone: {value}") from error
+        return value
+
+
 class Turn(BaseModel):
     id: UUID
     workspace_id: UUID
@@ -113,10 +145,19 @@ class Turn(BaseModel):
     seq: int
     status: TurnStatus
     inbound: str
+    created_at: datetime
+    context: TurnContext | None = None
     terminal: TerminalFrame | None = None
     parent_turn_id: UUID | None = None
     subagent_profile: str | None = None
     traceparent: str | None = None
+
+    @field_validator("created_at")
+    @classmethod
+    def _aware_utc(cls, value: datetime) -> datetime:
+        """The row's timestamp is UTC by construction; a driver that drops the marker (sqlite)
+        hands it back naive, which `astimezone` would misread as local time."""
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
     @model_validator(mode="after")
     def _terminal_matches_status(self) -> "Turn":

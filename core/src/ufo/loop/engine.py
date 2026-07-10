@@ -12,7 +12,9 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import sqlalchemy as sa
 from dbos import DBOS
@@ -76,6 +78,7 @@ from ufo.schema.records import (
     TerminalFrame,
     TerminalStatus,
     Turn,
+    TurnContext,
     Usage,
 )
 from ufo.search import SearchProvider
@@ -90,6 +93,7 @@ MAIN_ROUND_LIMIT = 200
 DELTA_FLUSH_BYTES = 2048
 DELTA_FLUSH_SECONDS = 0.2
 EMPTY_RESPONSE_NUDGE = "Previous model response was empty. Answer now."
+CONTEXT_TIME_FORMAT = "%A %Y-%m-%d %H:%M %Z"
 FORCE_FINAL_PROMPT = (
     "You have reached the maximum number of tool-use rounds. Do not call any more tools. "
     "Give your best final answer now using everything gathered so far."
@@ -179,6 +183,18 @@ class TurnParked(Exception):
 def _parse_args(partials: list[str]) -> dict[str, object]:
     joined = "".join(partials)
     return json.loads(joined) if joined.strip() else {}
+
+
+def _context_tag(context: TurnContext | None, admitted_at: datetime) -> str:
+    """The <context> tag rendered before a member inbound: the admission moment (in the sender's
+    zone when the surface supplied one, else UTC) and the sender the surface named. The persisted
+    moment — never the wall clock — keeps a queued, parked, or replayed turn's tag at the time the
+    member actually spoke."""
+    zone = ZoneInfo(context.timezone) if context is not None and context.timezone else UTC
+    lines = [f"time: {admitted_at.astimezone(zone).strftime(CONTEXT_TIME_FORMAT)}"]
+    if context is not None and context.sender:
+        lines.append(f"sender: {context.sender}")
+    return "<context>\n" + "\n".join(lines) + "\n</context>\n"
 
 
 def _bounded(content: str) -> str:
@@ -368,7 +384,14 @@ class TurnEngine:
         return updated.rowcount == 1
 
     async def _load_messages(self) -> tuple[Message, ...]:
-        return (*await self._prior_messages(), Message(role="user", content=self.turn.inbound))
+        """Prior transcript plus this turn's inbound, prefixed with the <context> tag on a member
+        turn — the model has no clock, so the tag carries the admission moment and the sender, and
+        it persists into the transcript so each past exchange keeps its moment. A subagent's
+        inbound stays the bare schema payload its profile contract promises."""
+        inbound = self.turn.inbound
+        if self.turn.subagent_profile is None:
+            inbound = _context_tag(self.turn.context, self.turn.created_at) + inbound
+        return (*await self._prior_messages(), Message(role="user", content=inbound))
 
     async def _prior_messages(self) -> tuple[Message, ...]:
         """The conversation before this turn; self-exclusion keeps a replay from reading its own
@@ -922,9 +945,7 @@ class TurnEngine:
         """Preserve the user's message on a non-done terminal so the next turn still sees it; the
         assistant's error or partial text is never persisted, and the monotonic guard lets a
         done turn's fuller transcript win over this at the same seq."""
-        await self._write_conversation(
-            (*await self._prior_messages(), Message(role="user", content=self.turn.inbound))
-        )
+        await self._write_conversation(await self._load_messages())
 
     async def _write_conversation(self, messages: tuple[Message, ...]) -> None:
         conversation = Conversation(seq=self.turn.seq, messages=messages)

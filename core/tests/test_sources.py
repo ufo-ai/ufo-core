@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import ClassVar
 from uuid import UUID, uuid4
@@ -240,6 +241,7 @@ def _context(memory: MemoryStore, member_id: UUID | None, blob_root: Path) -> To
             seq=1,
             status="running",
             inbound="hi",
+            created_at=datetime(2026, 7, 9, tzinfo=UTC),
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,

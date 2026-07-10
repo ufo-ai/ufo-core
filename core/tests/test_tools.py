@@ -1,5 +1,6 @@
 import json
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -90,6 +91,7 @@ def make_context(
         seq=0,
         status="running",
         inbound="hello",
+        created_at=datetime(2026, 7, 9, tzinfo=UTC),
     )
     return ToolContext(
         sandbox=sandbox,

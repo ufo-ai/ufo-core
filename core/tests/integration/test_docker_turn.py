@@ -11,6 +11,7 @@ import shutil
 import subprocess
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -227,6 +228,7 @@ async def _seed_turn(conversation_id: UUID) -> Turn:
         seq=1,
         status="queued",
         inbound="run the marker",
+        created_at=datetime(2026, 7, 9, tzinfo=UTC),
     )
 
 

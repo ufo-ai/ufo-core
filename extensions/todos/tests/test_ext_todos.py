@@ -1,5 +1,6 @@
 import json
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -56,6 +57,7 @@ def _context(workspace_id: UUID, conversation_id: UUID, tmp_path: Path) -> ToolC
         seq=0,
         status="running",
         inbound="hello",
+        created_at=datetime(2026, 7, 9, tzinfo=UTC),
     )
     return ToolContext(
         sandbox=_NoSandbox(),
@@ -159,6 +161,7 @@ async def test_requires_the_extension_context(tmp_path: Path) -> None:
         seq=0,
         status="running",
         inbound="hi",
+        created_at=datetime(2026, 7, 9, tzinfo=UTC),
     )
     ctx = ToolContext(
         sandbox=_NoSandbox(),

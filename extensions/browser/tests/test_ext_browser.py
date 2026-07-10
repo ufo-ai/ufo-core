@@ -12,6 +12,7 @@ asserted. The BUA engine keeps its own live-CDP end-to-end proof in test_browser
 import base64
 import json
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 from uuid import UUID, uuid4
@@ -188,6 +189,7 @@ def _context(
             seq=1,
             status="running",
             inbound="hi",
+            created_at=datetime(2026, 7, 9, tzinfo=UTC),
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_no_spawn,

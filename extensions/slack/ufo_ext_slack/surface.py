@@ -40,6 +40,7 @@ from urllib.parse import parse_qs, urlparse
 from uuid import UUID
 
 import httpx
+from pydantic import ValidationError
 
 from ufo.sdk.http import JSONResponse, Request, Response
 from ufo.sdk.hub import Parked, SkillLoad, Terminal, ToolCall
@@ -48,6 +49,7 @@ from ufo.sdk.surfaces import (
     CredentialSlotUnset,
     SharedArtifact,
     SurfaceContext,
+    TurnContext,
     Writeback,
 )
 
@@ -354,15 +356,24 @@ async def ingest(ctx: SurfaceContext, request: Request) -> Response:
     if inbound is None:
         return JSONResponse({"ok": True, "ignored": True})
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
-    member_id = await _resolve_member(ctx, bot_token, inbound) if inbound.is_dm else None
+    sender, context = await asyncio.gather(
+        _slack_user(bot_token, inbound.slack_user_id),
+        _ambient_context(ctx, bot_token, inbound),
+    )
+    member_id = await _resolve_member(ctx, inbound, sender) if inbound.is_dm else None
     conversation_id = await ctx.conversation_for(inbound.queue_key, member_id)
-    context = await _ambient_context(ctx, bot_token, inbound)
     body = f"{context}{inbound.body}"
     if inbound.files:
         downloaded = await _download_files(ctx, conversation_id, bot_token, inbound.files)
         body = f"{body}{_files_note(downloaded)}"
     agent_id = await ctx.default_agent()
-    turn_id = await ctx.admit(conversation_id, agent_id, body, idempotency_key=inbound.message_id)
+    turn_id = await ctx.admit(
+        conversation_id,
+        agent_id,
+        body,
+        idempotency_key=inbound.message_id,
+        context=_turn_context(sender),
+    )
     _track_status(ctx, turn_id, inbound.queue_key, inbound.ts)
     return JSONResponse({"ok": True})
 
@@ -395,33 +406,77 @@ async def _to_inbound(ctx: SurfaceContext, payload: Mapping[str, object]) -> Inb
     )
 
 
-async def _resolve_member(ctx: SurfaceContext, bot_token: str, inbound: Inbound) -> UUID | None:
+@dataclass(frozen=True)
+class SlackUser:
+    """The sender facts one users.info read yields: the display fields for the turn's <context>
+    tag and the email the DM member link needs."""
+
+    name: str | None
+    email: str | None
+    timezone: str | None
+
+
+async def _slack_user(bot_token: str, slack_user_id: str) -> SlackUser | None:
+    """One best-effort users.info read per inbound, feeding both the turn's <context> tag and the
+    DM member link. It shares the ambient fetch's short timeout so ingest answers inside Slack's
+    event ack; a failed read logs and returns None — the turn is admitted without sender context,
+    and only an unlinked DM (which cannot resolve its member) fails loud instead."""
+    try:
+        async with httpx.AsyncClient(timeout=AMBIENT_FETCH_TIMEOUT_SECONDS) as client:
+            payload = await _slack_ok(
+                client.get(
+                    SLACK_USERS_INFO_URL,
+                    params={"user": slack_user_id},
+                    headers={"Authorization": f"Bearer {bot_token}"},
+                )
+            )
+    except Exception as error:
+        _LOG.warning("slack users.info failed for %s: %s", slack_user_id, error)
+        return None
+    user = payload.get("user")
+    if not isinstance(user, dict):
+        return None
+    profile = user.get("profile")
+    email = profile.get("email") if isinstance(profile, dict) else None
+    name = user.get("real_name") or user.get("name")
+    timezone = user.get("tz")
+    return SlackUser(
+        name=name if isinstance(name, str) and name else None,
+        email=email.strip() if isinstance(email, str) and email.strip() else None,
+        timezone=timezone if isinstance(timezone, str) and timezone else None,
+    )
+
+
+def _turn_context(sender: SlackUser | None) -> TurnContext:
+    """The admitted turn's ambient context from the sender read; a timezone Slack reports that is
+    not a known zone is dropped with a log rather than failing the member's message."""
+    if sender is None:
+        return TurnContext()
+    line = (
+        f"{sender.name} ({sender.email})"
+        if sender.name and sender.email
+        else sender.name or sender.email
+    )
+    try:
+        return TurnContext(sender=line, timezone=sender.timezone)
+    except ValidationError:
+        _LOG.warning("slack timezone %r is not a known zone; dropped", sender.timezone)
+        return TurnContext(sender=line)
+
+
+async def _resolve_member(
+    ctx: SurfaceContext, inbound: Inbound, sender: SlackUser | None
+) -> UUID | None:
     linked = await ctx.linked_member(inbound.slack_user_id)
     if linked is not None:
         return linked
-    email = await _slack_user_email(bot_token, inbound.slack_user_id)
-    if email is None:
-        return None
-    return await ctx.link_member(inbound.slack_user_id, email)
-
-
-async def _slack_user_email(bot_token: str, slack_user_id: str) -> str | None:
-    async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
-        response = await client.get(
-            SLACK_USERS_INFO_URL,
-            params={"user": slack_user_id},
-            headers={"Authorization": f"Bearer {bot_token}"},
+    if sender is None:
+        raise SlackApiError(
+            f"users.info unavailable; cannot resolve the DM member {inbound.slack_user_id}"
         )
-    response.raise_for_status()
-    payload = response.json()
-    if payload.get("ok") is not True:
-        raise SlackApiError(str(payload.get("error")))
-    user = payload.get("user")
-    profile = user.get("profile") if isinstance(user, dict) else None
-    email = profile.get("email") if isinstance(profile, dict) else None
-    if isinstance(email, str) and email.strip():
-        return email.strip()
-    return None
+    if sender.email is None:
+        return None
+    return await ctx.link_member(inbound.slack_user_id, sender.email)
 
 
 async def _ambient_context(ctx: SurfaceContext, bot_token: str, inbound: Inbound) -> str:

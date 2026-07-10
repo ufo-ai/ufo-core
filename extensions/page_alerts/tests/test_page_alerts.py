@@ -135,6 +135,7 @@ def _tool_ctx(workspace_id: UUID, conversation_id: UUID, agent_id: UUID) -> Tool
             seq=1,
             status="running",
             inbound="watch my pages",
+            created_at=datetime(2026, 7, 9, tzinfo=UTC),
         ),
         agent=Agent(prompt="p", model=BILLED_MODEL),
         spawn=_unavailable_spawn,

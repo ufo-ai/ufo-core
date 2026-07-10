@@ -1,6 +1,7 @@
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -53,7 +54,7 @@ from ufo.models.interface import (
 )
 from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.schema import tables
-from ufo.schema.records import Agent, TerminalFrame, Turn, Usage
+from ufo.schema.records import Agent, TerminalFrame, Turn, TurnContext, Usage
 from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.context import (
     ImageContent,
@@ -289,6 +290,9 @@ class RecordingCarrier:
     async def destroy(self, handle: SandboxHandle) -> None: ...
 
 
+ADMITTED_AT = datetime(2026, 7, 9, 18, 32, tzinfo=UTC)
+
+
 async def _seed_turn(status: str, terminal: TerminalFrame | None, seq: int = 1) -> Turn:
     workspace_id, member_id, agent_id, conversation_id, turn_id = (uuid4() for _ in range(5))
     async with workspace_tx() as connection:
@@ -338,7 +342,7 @@ async def _seed_turn(status: str, terminal: TerminalFrame | None, seq: int = 1) 
                 status=status,
                 inbound="hi",
                 terminal=None if terminal is None else terminal.model_dump(mode="json"),
-                created_at=sa.func.now(),
+                created_at=ADMITTED_AT,
                 updated_at=sa.func.now(),
             )
         )
@@ -350,6 +354,7 @@ async def _seed_turn(status: str, terminal: TerminalFrame | None, seq: int = 1) 
         seq=seq,
         status=status,
         inbound="hi",
+        created_at=ADMITTED_AT,
         terminal=terminal,
     )
 
@@ -783,7 +788,9 @@ async def test_cancel_winning_mid_round_keeps_cancelled_terminal_bills_and_prese
     assert int(row.amount) == 10
     stored = await engine.transcript.read()
     assert stored is not None
-    assert stored.messages == (Message(role="user", content="hi"),)
+    (inbound,) = stored.messages
+    assert inbound.role == "user"
+    assert isinstance(inbound.content, str) and inbound.content.endswith("\nhi")
 
 
 async def test_per_step_cap_parks_a_running_turn(db: None, tmp_path: Path) -> None:
@@ -879,7 +886,49 @@ async def test_per_step_park_then_resume_persists_full_transcript(db: None, tmp_
     assert frame is not None and frame.status == "done"
     stored = await transcript.read()
     assert stored is not None and stored.seq == turn.seq
-    assert [m.content for m in stored.messages] == ["hi", "answer"]
+    user, answer = stored.messages
+    assert isinstance(user.content, str) and user.content.endswith("\nhi")
+    assert answer.content == "answer"
+
+
+async def test_member_inbound_carries_the_context_tag_and_a_subagent_inbound_does_not(
+    db: None, tmp_path: Path
+) -> None:
+    """The model has no clock: a member turn's inbound reaches it behind a <context> tag carrying
+    the admission moment — rendered from the turn's persisted stamp, never the wall clock, so a
+    queued, parked, or replayed turn keeps the time the member actually spoke — in the sender's
+    zone with the sender named when the surface supplied them, UTC alone otherwise; the tagged
+    form is what persists into the transcript. A subagent turn's inbound stays the bare schema
+    payload its profile contract promises."""
+    plain = await _seed_turn("queued", None)
+    model = CapturingModel()
+    engine = _engine(plain, model, tmp_path)
+    frame = await engine.run()
+    assert frame is not None and frame.status == "done"
+    sent = model.seen[0][-1].content
+    assert sent == "<context>\ntime: Thursday 2026-07-09 18:32 UTC\n</context>\nhi"
+    stored = await engine.transcript.read()
+    assert stored is not None and stored.messages[0].content == sent
+    placed = (await _seed_turn("queued", None)).model_copy(
+        update={
+            "context": TurnContext(
+                sender="Marshall Rich (marshall@metalcraft.ai)", timezone="Asia/Tokyo"
+            )
+        }
+    )
+    placed_model = CapturingModel()
+    await _engine(placed, placed_model, tmp_path).run()
+    assert placed_model.seen[0][-1].content == (
+        "<context>\n"
+        "time: Friday 2026-07-10 03:32 JST\n"
+        "sender: Marshall Rich (marshall@metalcraft.ai)\n"
+        "</context>\n"
+        "hi"
+    )
+    child = (await _seed_turn("queued", None)).model_copy(update={"subagent_profile": "probe"})
+    child_model = CapturingModel()
+    await _engine(child, child_model, tmp_path).run()
+    assert child_model.seen[0][-1].content == "hi"
 
 
 class _NoArgs(BaseModel):

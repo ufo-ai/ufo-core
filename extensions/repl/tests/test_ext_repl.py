@@ -1,6 +1,7 @@
 import json
 import shlex
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -71,6 +72,7 @@ def _context(sandbox: FakeSandbox, tmp_path: Path) -> ToolContext:
         seq=0,
         status="running",
         inbound="hi",
+        created_at=datetime(2026, 7, 9, tzinfo=UTC),
     )
     return ToolContext(
         sandbox=sandbox,

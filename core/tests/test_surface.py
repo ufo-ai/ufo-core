@@ -29,8 +29,9 @@ from ufo.ext.surface import (
     workspace_key,
 )
 from ufo.hub import InProcessHub
+from ufo.loop.queue import _load_turn
 from ufo.schema import tables
-from ufo.schema.records import WRITEBACK_PENDING, TerminalFrame
+from ufo.schema.records import WRITEBACK_PENDING, TerminalFrame, TurnContext
 from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.surfaces.hub_tail import HubTailer
 
@@ -261,6 +262,22 @@ async def test_admit_queues_a_turn_and_registers_a_writeback(db: None, tmp_path)
     # A redelivery of the same message joins the one turn and one writeback.
     again = await context.admit(conversation_id, agent_id, "hello", idempotency_key="C1:1.0")
     assert again == turn_id
+
+
+async def test_admitted_context_round_trips_to_the_loaded_turn(db: None, tmp_path) -> None:
+    """Both ends of the turn.context column: the surface admits its ambient TurnContext, and the
+    queue loader — the engine's one read path — validates the same record back off the row, with
+    the admission stamp the engine renders from."""
+    workspace_id, agent_id, _ = await _seed()
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    conversation_id = await context.conversation_for("C1:1.0", None)
+    ambient = TurnContext(sender="Bee Jones (bee@example.com)", timezone="America/New_York")
+    turn_id = await context.admit(
+        conversation_id, agent_id, "hello", idempotency_key="C1:2.0", context=ambient
+    )
+    turn, _, _ = await _load_turn(turn_id)
+    assert turn.context == ambient
+    assert turn.created_at.tzinfo is not None
 
 
 async def test_link_member_provisions_a_surface_identity(db: None, tmp_path) -> None:

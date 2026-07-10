@@ -12,6 +12,7 @@ injects nothing on the wire."""
 import asyncio
 import base64
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID, uuid4
 
@@ -231,6 +232,7 @@ def _turn_context(
         seq=1,
         status="running",
         inbound="connect my sample account",
+        created_at=datetime(2026, 7, 9, tzinfo=UTC),
     )
     return ToolContext(
         sandbox=None,
