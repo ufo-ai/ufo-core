@@ -1,7 +1,8 @@
 """The hosted assistant pack: the same assistant config backed by managed infrastructure.
 
 Activating it (config `[pack] name = "assistant_hosted"`) brings up the assistant capabilities —
-memory and recall, Exa research, Composio connectors and MCP, the browser/computer-use tools,
+memory and recall, Exa research, brokered connectors (Composio, plus Pipedream for Gmail) and MCP,
+the browser/computer-use tools,
 website building and the code REPL, document generation, todos, scheduled tasks, the web chat
 surface and the ufo terminal surface, the OpenRouter model provider, and the coding subagent — but
 over managed backends instead
@@ -35,6 +36,8 @@ EXTENSIONS = (
     "e2b",
     "documents",
     "connectors",
+    "composio",
+    "pipedream",
     "coding",
     "browser",
     "sandbox_chrome",

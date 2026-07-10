@@ -104,7 +104,9 @@ services: SQLite + filesystem blobs + in-process hub.
 
 ## U8 — connectors + grants
 
-- Port the connector framework + Composio client as `extensions/connectors`; `grants.py`
+- Port the connector framework as `extensions/connectors` (broker-generic tools) with the
+  Composio and Pipedream brokers beside it (`extensions/composio`, `extensions/pipedream`);
+  `grants.py`
   (`/connect` → OAuth link → complete → Grant row with account id); proxy ScopeRules from grants;
   connector-API source backend.
 - **Proof**: OAuth a real provider in chat; the agent calls it; a call to an ungranted account is

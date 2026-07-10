@@ -85,7 +85,7 @@ def _config(
     hub_url: str | None = None,
     cdp_provider: str = DEFAULT_CDP_PROVIDER,
     sandbox_backend: str = "local",
-    auth_backend: str = "composio",
+    auth_backend: str | None = None,
     search_provider: str | None = None,
 ) -> Config:
     return Config(

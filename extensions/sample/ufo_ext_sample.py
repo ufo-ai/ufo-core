@@ -10,7 +10,7 @@ log), so the tests read those rows back through the same public surfaces core wr
 undeclared slot is refused."""
 
 import hashlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import ClassVar
@@ -21,7 +21,7 @@ from pydantic import BaseModel
 
 from ufo.sdk.authproxy import AuthProxySpec, Credential
 from ufo.sdk.browser import CdpEndpoint, CdpLease
-from ufo.sdk.connectors import OAuthAccount
+from ufo.sdk.connectors import BrokerSearch, BrokerTool, OAuthAccount, UnknownBrokerTool
 from ufo.sdk.context import AgentChange, ExtensionContext
 from ufo.sdk.http import (
     JSONResponse,
@@ -97,10 +97,15 @@ INJECTION_HEADER = "authorization"
 INJECTION_SENTINEL = "Bearer sentinel-sample-key"
 INJECTION_DIMENSION = "requests"
 CONNECTOR_PROVIDER = "sample_connector"
+CONNECTOR_LABEL = "Sample Connector"
 CONNECTOR_HOST = "api.connector.sample.test"
 CONNECTOR_ACCOUNT = "sample-account-1"
 CONNECTOR_AUTHORIZE_URL = "https://connect.sample.test/oauth"
 CONNECTOR_EXECUTE_TOOL_NAME = "sample_connector_execute"
+BROKER_TOOL_SLUG = "SAMPLE_LIST_WIDGETS"
+BROKER_TOOL_DESCRIPTION = "List the sample provider's widgets."
+BROKER_SEARCH_PLAN = "call SAMPLE_LIST_WIDGETS first"
+BROKER_BEARER_PREFIX = "sample-broker-token:"
 HUB_BACKEND = "sample_hub"
 TOOL_KEY = "tool:echo"
 JOB_KEY = "job:ran"
@@ -460,6 +465,53 @@ class _SampleConnectorOAuth:
         return OAuthAccount(account_id=CONNECTOR_ACCOUNT)
 
 
+@dataclass(frozen=True)
+class _SampleBroker:
+    """The stub broker: a one-tool canned catalog, an execute that echoes its whole call back as
+    the provider response, and a bearer credential naming the account — so a test asserting the
+    dynamic connector tools or feed-sync routing reads exactly what core dispatched through the
+    seam, off public surfaces, with no live broker."""
+
+    async def tools(self, workspace_id: UUID, provider: str, query: str) -> tuple[BrokerTool, ...]:
+        return (BrokerTool(slug=BROKER_TOOL_SLUG, description=BROKER_TOOL_DESCRIPTION),)
+
+    async def schema(self, workspace_id: UUID, provider: str, slug: str) -> BrokerTool:
+        if slug != BROKER_TOOL_SLUG:
+            raise UnknownBrokerTool(slug)
+        return BrokerTool(
+            slug=slug,
+            description=BROKER_TOOL_DESCRIPTION,
+            input_schema={"type": "object", "properties": {"limit": {"type": "integer"}}},
+        )
+
+    async def execute(
+        self,
+        workspace_id: UUID,
+        provider: str,
+        slug: str,
+        arguments: Mapping[str, object],
+        account_id: str,
+        idempotency_key: str | None,
+    ) -> dict[str, object]:
+        if slug != BROKER_TOOL_SLUG:
+            raise UnknownBrokerTool(slug)
+        return {
+            "provider": provider,
+            "slug": slug,
+            "arguments": dict(arguments),
+            "account": account_id,
+            "idempotency_key": idempotency_key,
+        }
+
+    async def search(self, workspace_id: UUID, provider: str, query: str) -> BrokerSearch:
+        return BrokerSearch(
+            tools=await self.tools(workspace_id, provider, query), plan=(BROKER_SEARCH_PLAN,)
+        )
+
+    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
+        return Credential(bearer=f"{BROKER_BEARER_PREFIX}{account}")
+
+
 class ConnectorExecuteInput(BaseModel):
     tool_name: str = "sample_list"
 
@@ -728,6 +780,8 @@ def manifest() -> Manifest:
         connectors=(
             ConnectorProvider(
                 oauth=_SampleConnectorOAuth(),
+                label=CONNECTOR_LABEL,
+                broker=_SampleBroker(),
                 tools=(
                     ToolDef(
                         name=CONNECTOR_EXECUTE_TOOL_NAME,

@@ -20,6 +20,7 @@ from ufo_testsupport.stream_gate import GatingHub, StreamGate, release_when_runn
 from ufo.accounting import CORE_PRICING, record_egress_request, record_turn_usage
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
+from ufo.connectors import ConnectorRegistry
 from ufo.db import workspace_tx
 from ufo.ext.loader import skill_registry
 from ufo.ext.manifest import ModelProviderSpec
@@ -162,6 +163,7 @@ def dbos_runtime(
             carrier=StandInCarrier(),
             cdp_provider=None,
             search_provider=None,
+            connectors=ConnectorRegistry(entries={}),
             proxy=proxy,
             dbos=dbos_client,
             subagents=SubagentRegistry(()),

@@ -13,13 +13,14 @@ environment (one Composio account per deploy, the analog of the model key)."""
 import asyncio
 import json
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from uuid import UUID
 
 import httpx
 
-from ufo.sdk.connectors import OAuthAccount
-from ufo.sdk.context import JsonValue
+from ufo.sdk.connectors import BrokerSearch, BrokerTool, OAuthAccount
+from ufo_ext_composio import mcp_session
 
 COMPOSIO_API_BASE = "https://backend.composio.dev/api/v3.1"
 COMPOSIO_API_KEY_ENV = "COMPOSIO_API_KEY"
@@ -57,7 +58,6 @@ class ToolRouterSession:
 
 CONNECTORS: dict[str, ConnectorSpec] = {
     "github": ConnectorSpec("GitHub", "github", "api.github.com"),
-    "gmail": ConnectorSpec("Gmail", "gmail", "gmail.googleapis.com"),
     "google_calendar": ConnectorSpec("Google Calendar", "googlecalendar", "www.googleapis.com"),
     "google_sheets": ConnectorSpec("Google Sheets", "googlesheets", "sheets.googleapis.com"),
     "google_drive": ConnectorSpec("Google Drive", "googledrive", "www.googleapis.com"),
@@ -159,7 +159,7 @@ class ComposioClient:
     async def execute_tool(
         self,
         slug: str,
-        arguments: dict[str, JsonValue],
+        arguments: Mapping[str, object],
         user_id: str,
         connected_account_id: str | None = None,
         idempotency_key: str | None = None,
@@ -260,14 +260,14 @@ def _str_tuple(value: object) -> tuple[str, ...]:
     return tuple(item for item in value if isinstance(item, str) and item)
 
 
-def _connector_search_payload(result: dict[str, object], connector: str) -> dict[str, object]:
-    """Project a Tool Router `COMPOSIO_SEARCH_TOOLS` result into the connector-scoped shape the
-    agent reads: the matched tool slugs + input schemas plus the recommended plan steps, execution
+def _search_result(result: dict[str, object]) -> BrokerSearch:
+    """Project a Tool Router `COMPOSIO_SEARCH_TOOLS` result into the `BrokerSearch` the dynamic
+    tools render: the matched tool slugs + input schemas plus the recommended plan steps, execution
     guidance, and known pitfalls the router surfaces so the model's next call is informed, not a
     blind guess."""
     inner = _dict(result.get("data")) or result
     schemas = _dict(inner.get("tool_schemas"))
-    tools: list[dict[str, object]] = []
+    tools: list[BrokerTool] = []
     plan: list[str] = []
     guidance: list[str] = []
     pitfalls: list[str] = []
@@ -283,33 +283,27 @@ def _connector_search_payload(result: dict[str, object], connector: str) -> dict
             seen.add(slug)
             schema = _dict(schemas.get(slug))
             tools.append(
-                {
-                    "slug": slug,
-                    "description": schema.get("description") or "",
-                    "inputSchema": schema.get("input_schema") or {},
-                }
+                BrokerTool(
+                    slug=slug,
+                    description=str(schema.get("description") or ""),
+                    input_schema=_dict(schema.get("input_schema")),
+                )
             )
         plan.extend(_str_tuple(item.get("recommended_plan_steps")))
         guidance.extend(_str_tuple([item.get("execution_guidance")]))
         pitfalls.extend(_str_tuple(item.get("known_pitfalls")))
-    return {
-        "connector": connector,
-        "tools": tools,
-        "plan": plan,
-        "guidance": guidance,
-        "pitfalls": pitfalls,
-    }
+    return BrokerSearch(
+        tools=tuple(tools), plan=tuple(plan), guidance=tuple(guidance), pitfalls=tuple(pitfalls)
+    )
 
 
 async def search_connector_tools(
     client: ComposioClient, workspace_id: UUID, connector: str, query: str
-) -> dict[str, object]:
+) -> BrokerSearch:
     """Semantic tool discovery via Composio's Tool Router: matched tool slugs + input schemas plus
     the recommended execution plan, guidance, and pitfalls. Search only — execution never goes via
     Tool Router, so metering and the grant stay on the execute API. The (broker user, toolkit)
     session is opened once and cached, so concurrent searches on one connector share it."""
-    from ufo_ext_connectors import mcp_session
-
     spec = CONNECTORS.get(connector)
     toolkit = spec.toolkit if spec is not None else connector
     user_id = f"{EXTERNAL_USER_PREFIX}{workspace_id}"
@@ -328,4 +322,4 @@ async def search_connector_tools(
         {"x-api-key": client.api_key},
         TOOL_ROUTER_TIMEOUT_SECONDS,
     )
-    return _connector_search_payload(result, connector)
+    return _search_result(result)

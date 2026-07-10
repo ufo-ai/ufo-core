@@ -129,7 +129,7 @@ Manifest registers (each optional):
 | `subagents` | Typed subagent profiles. |
 | `prompt_sections` | Capability sections a pack contributes to the agent's system prompt, rendered into the shell's `{{sections}}` slot ordered by name — a pack's rules (web search, browsing, office docs) reach the agent without core naming the capability. |
 | `skills` | Skill folders (SKILL.md + bundled scripts/assets) contributed to the loadable set; the loader parses each into the registry `load_skill` and the `{{skill_index}}` consult, mounted into the sandbox under `.skills/<name>/` beside core's own three. A skill script imports nothing from ufo (it runs in the sandbox) — a CI gate holds that boundary. |
-| `connectors` | Provider actions behind the connector framework; OAuth via the grant flow. **Composio brokers auth by PROXY: every call goes through Composio (`/tools/execute` for tools; a proxying transport → `/tools/execute/proxy` for feed-sync source HTTP, carried by the `composio` auth-proxy backend) carrying `(user_id, connected_account_id)` — Composio holds the provider token and injects it server-side; the token is NEVER exposed to us. A connector grant stores only `connected_account_id`; the confused-deputy check reads the account's `user_id` metadata, never a token. Composio grants derive NO egress InjectionRule — the sentinel→key swap (§Sandboxing) is ONLY for user-supplied BYOK `credentials` keys.** |
+| `connectors` | One brokered provider per declaration: its OAuth descriptor (grant flow), member-facing label, and `ConnectorBroker` — catalog, server-side execute, feed-sync credential. `serve` merges every declaration into the one `ConnectorRegistry`; the `connectors` extension's broker-generic dynamic tools (list/describe/search/call) dispatch through it, and the sync runner resolves a brokered provider's feed-sync `Credential` through its own broker. Two broker extensions ship — `composio` (most providers) and `pipedream` (Gmail: Google blocks restricted Gmail scopes on Composio's shared client; the deploy's own Google OAuth client rides Pipedream Connect). **A broker brokers auth by PROXY: every call goes through the broker (its execute API for tools; a proxying transport for feed-sync source HTTP) carrying `(external user, connected account id)` — the broker holds the provider token and injects it server-side; the token is NEVER exposed to us. A connector grant stores only the connected-account id; the confused-deputy check reads the account's owner metadata, never a token. Broker grants derive NO egress InjectionRule — the sentinel→key swap (§Sandboxing) is ONLY for user-supplied BYOK `credentials` keys.** |
 | `sources` | Data-feed backends: `sync(cursor) -> pages` run as jobs; pages land in memory/knowledge via the derivation pipeline. Each backend is pluggable — S3, connector/provider APIs, webhooks; core ships only `folder` (local files). Connector source providers live in `extensions/sources`, built on the read-only REST connector framework core exposes through `ufo.sdk.sources` (so any extension can provide a source); each resolves a provider `Credential` through the pluggable **auth-proxy** seam, never importing a broker. |
 | `hooks` | Reactive lifecycle handlers on Claude Code's taxonomy, scoped like a job. Seven fire on the turn loop — `pre_tool_use`/`post_tool_use`/`post_tool_use_failure`, `user_prompt_submit`, `stop`, `pre_compact`/`post_compact` — as a runtime policy filter over the tools grants already admit (observe, deny, modify, or inject), never a second grant path. The eighth, `page_change`, is the data-plane seam (data → memory): a core batched cursor-runner replays each changed source page to a consumer's hook off that extension's own cursor — the path the memory indexer and knowledge-graph extractor ride. (Claude Code's session/permission/subagent-stop/notification events have no producer here and are not members until one lands with a consumer.) |
 | `jobs` | Recurring/one-time background work. |
@@ -143,7 +143,7 @@ Manifest registers (each optional):
 | `embeds` | Embedding backends behind `EmbedClient`, selected by `memory.embed_backend`; OpenAI text-embedding-3-large ships as the base-pinned `embed_openai` extension registering name `"default"`. |
 | `hubs` | Stream hubs for multi-instance deploys (Redis). |
 | `cdp_providers` | CDP transport backends the one BUA browser engine (an extension, not core) connects, selected by `[browser] cdp_provider` (default `sandbox_cdp`): core's `sandbox_cdp` wraps the `BROWSER_CDP_URL` endpoint in a static lease; browserbase mints a fresh hosted session per turn. A provider mints a per-turn `CdpLease` the loop releases at turn end. The BUA engine is the browser extension, so only the transport is a core seam, never the engine. |
-| `auth_proxies` | Credential backends a feed-sync connector source resolves a provider `Credential` through, selected by `[connectors] auth_backend` (default `composio`): the Composio broker (a proxying transport, token stays server-side) or `direct` BYOK (a member-added key read host-side from the credential store, never reaching the sandbox). No backend installed → connector sources are inert; folder sources need none. |
+| `auth_proxies` | The fallback credential backend for a feed-sync provider no installed broker claims, selected by `[connectors] auth_backend` (unset by default): `direct` BYOK (a member-added key read host-side from the credential store, never reaching the sandbox), or any registered backend. A brokered provider resolves through its own broker's `credential`, never this seam; unset + unbrokered → that source fails loud; folder sources need none. |
 | `search_providers` | Web-search backends the research extension's tools call, selected by `[research] search_provider`. A backend runs host-side — it reads its BYOK key in-process and reaches its API over async HTTP, so the key never enters the sandbox — and answers a search query; `supports_fetch` marks whether it also fetches a URL's content (Exa's search + contents does; an answer-with-citations backend need not, and the `fetch_url` tool gates on it). Core ships no default: every backend is an extension, and the research extension `requires` this seam. |
 | `requires` | Sub-seams this extension consumes from another (the browser pack `requires` `cdp_providers`); `serve` resolves each at boot and fails loud — naming the extension and the seam — if the backend is absent, unknown, or unkeyed, so a missing dependency stops startup rather than the first tool call. |
 
@@ -180,8 +180,8 @@ extension's do. The lockfile is the installed+verified universe; a pack selects 
 so pack integrity derives from the pinned extensions it names. Absent config, the deploy runs the
 unnarrowed set (the lockfile's pins, or every discovered extension in dev). The flagship is
 **assistant** — memory (with its index and embed backends), the browser pack (its BUA engine over
-the default `sandbox_cdp` transport), Composio connectors, and web research (the research tools over
-the Exa search backend).
+the default `sandbox_cdp` transport), brokered connectors (Composio; Pipedream for Gmail), and web
+research (the research tools over the Exa search backend).
 
 ## Surfaces
 
@@ -317,7 +317,7 @@ bundle installs OSS, on-prem, or hosted.
 | Slack surface (ingest + writeback + attachments) | surfaces, credentials, skills |
 | Page alerts (chat-bound watches over synced pages, off-turn classify + alert turn) | tools, hooks (page_change) |
 | Brief pipeline (typed outline → draft → critic stages the agent chains) | subagents, skills |
-| Composio connectors | connectors, credentials, routes (OAuth), auth_proxies |
+| Composio / Pipedream connector brokers | connectors, routes (OAuth) |
 | Docker, E2B | carriers |
 | Redis stream hub | hubs |
 | turbopuffer index | indexes |
@@ -332,7 +332,7 @@ bundle installs OSS, on-prem, or hosted.
 | Websites | tools (sandbox serving), routes |
 
 Packs (activation bundles, not code — see Packs): **assistant** bundles memory, the browser pack
-(its BUA engine over the default `sandbox_cdp` transport), Composio connectors, and web research
+(its BUA engine over the default `sandbox_cdp` transport), brokered connectors, and web research
 (the research tools over the Exa search backend) (the flagship); **startup** and
 **support bot** name the extensions plus pack-level onboarding a product needs (YC/fundraising docs
 and search; knowledgebase + keys onboarding with the websites plugin). Each activates one coherent

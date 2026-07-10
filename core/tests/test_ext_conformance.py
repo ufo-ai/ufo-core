@@ -37,6 +37,7 @@ from ufo.config import (
     ResearchConfig,
     SandboxConfig,
 )
+from ufo.connectors import UnknownBrokerTool
 from ufo.credentials import CredentialSlotUnset, CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import (
@@ -76,6 +77,7 @@ from ufo.schema import tables
 from ufo.schema.records import WRITEBACK_PENDING, Agent, Turn, Usage
 from ufo.search import FetchRequest, SearchQuery
 from ufo.serve import (
+    _connector_registry,
     _mount_ext_routes,
     _mount_surfaces,
     _select_auth_proxy,
@@ -314,31 +316,95 @@ def test_boot_validation_of_requires_fails_when_no_cdp_provider_is_registered() 
         _validate_requires(_cdp_config(sample.CDP_PROVIDER), (unknown,), None)
 
 
+def _connectors_config(backend: str | None) -> Config:
+    return Config(
+        database=DatabaseConfig(url="sqlite+aiosqlite:///dev.db"),
+        blob=BlobConfig(backend="filesystem", root=Path()),
+        connectors=ConnectorsConfig(auth_backend=backend),
+    )
+
+
 def test_core_selects_a_manifest_contributed_auth_proxy() -> None:
     """The `auth_proxies` seam end to end: core's boot-time selection has no built-in auth proxy, so
     resolving the sample's backend name proves the Manifest `auth_proxies` point flowed into
-    selection and was built with a credential reader. No extension registering any auth proxy yields
-    None (folder sources need none); selecting a name no extension registers, two extensions
-    claiming one name, and a selected backend with no credential key each fail loud."""
+    selection and was built with a credential reader. An unset knob yields None (a brokered
+    provider resolves through its own broker, folder sources need none); selecting a name no
+    extension registers, two extensions claiming one name, and a selected backend with no
+    credential key each fail loud."""
     manifest = _sample_manifest()
     store = _credential_store()
 
-    def _config(backend: str) -> Config:
-        return Config(
-            database=DatabaseConfig(url="sqlite+aiosqlite:///dev.db"),
-            blob=BlobConfig(backend="filesystem", root=Path()),
-            connectors=ConnectorsConfig(auth_backend=backend),
-        )
-
-    selected = _select_auth_proxy(_config(sample.AUTH_PROXY_BACKEND), (manifest,), store)
+    selected = _select_auth_proxy(_connectors_config(sample.AUTH_PROXY_BACKEND), (manifest,), store)
     assert isinstance(selected, sample.SampleAuthProxy)
-    assert _select_auth_proxy(_config("composio"), (), store) is None
+    assert _select_auth_proxy(_connectors_config(None), (manifest,), store) is None
     with pytest.raises(RuntimeError, match="no extension registers it"):
-        _select_auth_proxy(_config("nope"), (manifest,), store)
+        _select_auth_proxy(_connectors_config("nope"), (manifest,), store)
     with pytest.raises(RuntimeError, match="two extensions register auth proxy"):
-        _select_auth_proxy(_config(sample.AUTH_PROXY_BACKEND), (manifest, manifest), store)
+        _select_auth_proxy(
+            _connectors_config(sample.AUTH_PROXY_BACKEND), (manifest, manifest), store
+        )
     with pytest.raises(RuntimeError, match="needs a credential key"):
-        _select_auth_proxy(_config(sample.AUTH_PROXY_BACKEND), (manifest,), None)
+        _select_auth_proxy(_connectors_config(sample.AUTH_PROXY_BACKEND), (manifest,), None)
+
+
+async def test_connector_registry_routes_a_brokered_provider_to_its_own_broker() -> None:
+    """The `ConnectorRegistry` half of the connectors seam: `serve`'s registry build folds the
+    sample's ConnectorProvider — label and broker included — and `credential` routes the sample
+    provider to the sample broker while an unregistered provider falls back to the deploy-selected
+    auth backend. With no fallback selected, an unregistered provider fails loud."""
+    manifest = _sample_manifest()
+    store = _credential_store()
+    workspace_id = uuid4()
+
+    registry = _connector_registry(
+        _connectors_config(sample.AUTH_PROXY_BACKEND), (manifest,), store
+    )
+    entry = registry.entry(sample.CONNECTOR_PROVIDER)
+    assert entry.label == sample.CONNECTOR_LABEL
+    brokered = await registry.credential(workspace_id, sample.CONNECTOR_PROVIDER, "acct-9")
+    assert brokered.bearer == f"{sample.BROKER_BEARER_PREFIX}acct-9"
+    fallback = await registry.credential(workspace_id, "unbrokered", "acct-9")
+    assert fallback.bearer == sample.AUTH_PROXY_BEARER
+
+    bare = _connector_registry(_connectors_config(None), (manifest,), store)
+    with pytest.raises(RuntimeError, match="no connector broker"):
+        await bare.credential(workspace_id, "unbrokered", "acct-9")
+    with pytest.raises(KeyError, match="no installed connector"):
+        bare.entry("unbrokered")
+
+
+async def test_sample_broker_answers_the_dynamic_tool_surface() -> None:
+    """The broker half through the probe: catalog, schema (an unknown slug raises
+    `UnknownBrokerTool`), search, and an execute whose response echoes exactly what core dispatched
+    — provider, slug, arguments, account, and the per-call idempotency key — so a consumer asserts
+    the dispatch off the broker's own public answer, never a mock log."""
+    broker = sample._SampleBroker()
+    workspace_id = uuid4()
+    listed = await broker.tools(workspace_id, sample.CONNECTOR_PROVIDER, "widgets")
+    assert [tool.slug for tool in listed] == [sample.BROKER_TOOL_SLUG]
+    described = await broker.schema(
+        workspace_id, sample.CONNECTOR_PROVIDER, sample.BROKER_TOOL_SLUG
+    )
+    assert described.input_schema["properties"] == {"limit": {"type": "integer"}}
+    with pytest.raises(UnknownBrokerTool):
+        await broker.schema(workspace_id, sample.CONNECTOR_PROVIDER, "NOT_A_TOOL")
+    found = await broker.search(workspace_id, sample.CONNECTOR_PROVIDER, "list widgets")
+    assert found.plan == (sample.BROKER_SEARCH_PLAN,)
+    executed = await broker.execute(
+        workspace_id,
+        sample.CONNECTOR_PROVIDER,
+        sample.BROKER_TOOL_SLUG,
+        {"limit": 3},
+        sample.CONNECTOR_ACCOUNT,
+        "t1/x/c1",
+    )
+    assert executed == {
+        "provider": sample.CONNECTOR_PROVIDER,
+        "slug": sample.BROKER_TOOL_SLUG,
+        "arguments": {"limit": 3},
+        "account": sample.CONNECTOR_ACCOUNT,
+        "idempotency_key": "t1/x/c1",
+    }
 
 
 async def test_sample_auth_proxy_resolves_a_credential() -> None:

@@ -54,7 +54,7 @@ class ConnectorBackend:
         if auth.auth_proxy is None:
             raise RuntimeError(
                 f"connector source {self.connector.name!r} needs an auth proxy but none is wired "
-                "(set [connectors] auth_backend and install a backend that registers it)"
+                "(install the provider's broker extension, or set [connectors] auth_backend)"
             )
         credential = await auth.auth_proxy.credential(
             auth.workspace_id, self.connector.name, config.account

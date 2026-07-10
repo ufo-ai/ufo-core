@@ -11,6 +11,7 @@ from dbos import DBOS, DBOSClient, Queue
 from ufo.blob import BlobStore, FilesystemBlobStore, S3BlobStore
 from ufo.browser import CdpProvider
 from ufo.config import Config
+from ufo.connectors import ConnectorRegistry
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.loader import turn_hooks, turn_runtime_skills, turn_tools
@@ -74,6 +75,7 @@ class Runtime:
     carrier: Carrier
     cdp_provider: CdpProvider | None
     search_provider: SearchProvider | None
+    connectors: ConnectorRegistry
     proxy: ProxyEndpoint
     dbos: DBOSClient
     subagents: SubagentRegistry
@@ -187,6 +189,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             sandbox=SandboxSession(carrier=runtime.carrier, handle=handle),
             cdp_provider=runtime.cdp_provider,
             search_provider=runtime.search_provider,
+            connectors=runtime.connectors,
             tools=tools,
             tool_ext=tool_ext,
             hooks=hooks,

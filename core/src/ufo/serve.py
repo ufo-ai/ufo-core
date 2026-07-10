@@ -27,7 +27,7 @@ from ufo.config import (
     Config,
     load_config,
 )
-from ufo.connectors import AuthProxy
+from ufo.connectors import AuthProxy, ConnectorEntry, ConnectorRegistry
 from ufo.credentials import CredentialStore
 from ufo.db import current_workspace, init_db, init_owner_db, workspace_tx
 from ufo.ext.context import CredentialAccess, context_for
@@ -125,6 +125,7 @@ def run() -> None:
     # ambient workspace's vector namespace per query — so one boot-built set serves every workspace.
     embed = embed_backend(manifests, config.memory.embed_backend, credentials)
     index = index_backend(manifests, config.memory.index_backend, embed, credentials)
+    connectors = _connector_registry(config, manifests, credentials)
     init_runtime(
         Runtime(
             config=config,
@@ -134,6 +135,7 @@ def run() -> None:
             carrier=carrier,
             cdp_provider=_select_cdp_provider(config, manifests, credentials),
             search_provider=_select_search_provider(config, manifests, credentials),
+            connectors=connectors,
             proxy=_proxy_endpoint(config, manifests, credentials, registry.pricing),
             dbos=dbos_client,
             subagents=SubagentRegistry((*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests))),
@@ -179,7 +181,7 @@ def run() -> None:
         backends=_source_backends(manifests),
         blob=blob,
         postgres=config.database.url.startswith("postgresql"),
-        auth_proxy=_select_auth_proxy(config, manifests, credentials),
+        auth_proxy=connectors,
     )
     page_feed = CorePageFeed(blob=blob)
     if workspace_id is not None:
@@ -546,20 +548,20 @@ def _select_auth_proxy(
     manifests: tuple[Manifest, ...],
     credentials: CredentialStore | None,
 ) -> AuthProxy | None:
-    """The one auth-proxy backend feed-sync resolves connector credentials through, chosen by
-    `[connectors] auth_backend`: a backend an extension registers through its Manifest
-    `auth_proxies` point, built once at boot with a credential reader scoped to its slots (a direct
-    BYOK backend reads its key in-process, host-side, never in the sandbox). No auth-proxy extension
-    installed means no connector source can run — folder sources need none — so selection yields
-    None rather than fail. Two extensions claiming one name fail loud, as does selecting a name no
-    extension registers or building a selected backend with no credential key set."""
+    """The fallback auth-proxy backend the `ConnectorRegistry` resolves an unbrokered provider's
+    feed-sync credential through, chosen by `[connectors] auth_backend`: a backend an extension
+    registers through its Manifest `auth_proxies` point, built once at boot with a credential
+    reader scoped to its slots (a direct BYOK backend reads its key in-process, host-side, never in
+    the sandbox). Unset selects no fallback — a brokered provider resolves through its own broker
+    regardless. Two extensions claiming one name fail loud, as does selecting a name no extension
+    registers or building a selected backend with no credential key set."""
     specs: dict[str, tuple[AuthProxySpec, Manifest]] = {}
     for manifest in manifests:
         for spec in manifest.auth_proxies:
             if spec.backend in specs:
                 raise RuntimeError(f"two extensions register auth proxy backend {spec.backend!r}")
             specs[spec.backend] = (spec, manifest)
-    if not specs:
+    if config.connectors.auth_backend is None:
         return None
     found = specs.get(config.connectors.auth_backend)
     if found is None:
@@ -881,6 +883,30 @@ async def _local_rule_base(
 
 
 BIND_ADDRESSES = frozenset({"0.0.0.0", "127.0.0.1", "localhost", "::", "::1"})
+
+
+def _connector_registry(
+    config: Config,
+    manifests: tuple[Manifest, ...],
+    credentials: CredentialStore | None,
+) -> ConnectorRegistry:
+    """The one connector routing object, built from every manifest's `connectors` point: the
+    dynamic connector tools read it off the turn's ToolContext, and the sync runner resolves
+    feed-sync credentials through it — a brokered provider via its own broker, any other via the
+    deploy-selected fallback backend. Two extensions claiming one provider fail loud, as the
+    connect flow's OAuth registry would collide on the same name."""
+    entries: dict[str, ConnectorEntry] = {}
+    for manifest in manifests:
+        for connector in manifest.connectors:
+            provider = connector.oauth.provider
+            if provider in entries:
+                raise RuntimeError(f"two extensions register connector provider {provider!r}")
+            entries[provider] = ConnectorEntry(
+                provider=provider, label=connector.label, broker=connector.broker
+            )
+    return ConnectorRegistry(
+        entries=entries, fallback=_select_auth_proxy(config, manifests, credentials)
+    )
 
 
 def _connect_flow(

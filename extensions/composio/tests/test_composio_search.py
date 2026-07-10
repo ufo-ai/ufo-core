@@ -1,7 +1,7 @@
-"""Composio's Tool Router semantic search: projecting a router result into the connector-scoped
-shape the agent reads, sharing one router session across concurrent searches, and parsing the MCP
-tool result. The Tool Router HTTP is stubbed — no live API — so the projection and session-sharing
-logic run against canned responses."""
+"""Composio's Tool Router semantic search: projecting a router result into the `BrokerSearch` the
+dynamic connector tools render, sharing one router session across concurrent searches, and parsing
+the MCP tool result. The Tool Router HTTP is stubbed — no live API — so the projection and
+session-sharing logic run against canned responses."""
 
 import asyncio
 from types import SimpleNamespace
@@ -9,8 +9,8 @@ from typing import Any, cast
 from uuid import uuid4
 
 import pytest
-import ufo_ext_connectors.composio as composio
-import ufo_ext_connectors.mcp_session as mcp_session
+import ufo_ext_composio.client as composio
+import ufo_ext_composio.mcp_session as mcp_session
 
 _ROUTER_RESULT = {
     "data": {
@@ -33,15 +33,16 @@ _ROUTER_RESULT = {
 }
 
 
-def test_connector_search_payload_projects_the_router_result() -> None:
-    payload = composio._connector_search_payload(_ROUTER_RESULT, "github")
-    assert payload["connector"] == "github"
-    slugs = [tool["slug"] for tool in payload["tools"]]
-    assert slugs == ["GITHUB_CREATE_ISSUE_COMMENT", "GITHUB_GET_ISSUE"]
-    assert payload["tools"][0]["description"] == "Comment on an issue"
-    assert payload["plan"] == ["find the issue", "post the comment"]
-    assert payload["guidance"] == ["resolve the repo first"]
-    assert payload["pitfalls"] == ["issue number is not the id"]
+def test_search_result_projects_the_router_result() -> None:
+    found = composio._search_result(_ROUTER_RESULT)
+    assert [tool.slug for tool in found.tools] == [
+        "GITHUB_CREATE_ISSUE_COMMENT",
+        "GITHUB_GET_ISSUE",
+    ]
+    assert found.tools[0].description == "Comment on an issue"
+    assert found.plan == ("find the issue", "post the comment")
+    assert found.guidance == ("resolve the repo first",)
+    assert found.pitfalls == ("issue number is not the id",)
 
 
 async def test_search_connector_tools_shares_one_session_under_concurrency(
@@ -76,7 +77,7 @@ async def test_search_connector_tools_shares_one_session_under_concurrency(
     )
 
     assert sessions["count"] == 1
-    assert all(p["plan"] == ["find the issue", "post the comment"] for p in payloads)
+    assert all(p.plan == ("find the issue", "post the comment") for p in payloads)
 
 
 class _StubToolResult:

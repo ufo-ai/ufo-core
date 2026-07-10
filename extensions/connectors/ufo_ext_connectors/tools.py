@@ -1,26 +1,23 @@
-"""The dynamic Composio tool surface: discover connectors, describe a connector's real tools, and
-execute one server-side.
+"""The dynamic connector tool surface: discover connectors, describe a connector's real tools, and
+execute one server-side — generic over every installed broker.
 
-Composio brokers hundreds of services and thousands of tools, so the agent never holds a fixed
-per-provider tool — it searches. `list_external_tools` filters the connector catalog locally;
-`describe_external_tools` fetches a connector's real tool slugs and input schemas from Composio;
-`call_external_tool` executes a tool on Composio's server-side execute API, authenticated by the
-deploy's Composio key and the turn-agent's connected account (bound through `/connect`). Composio
-holds the account's OAuth token and injects it itself, so a dynamic tool never touches the sandbox
-egress proxy — it reaches only Composio's own API."""
+A broker fronts hundreds of services and thousands of tools, so the agent never holds a fixed
+per-provider tool — it searches. Every call reads the turn's `ConnectorRegistry` and dispatches to
+the broker that registered the provider: `list_external_tools` filters the registry locally;
+`describe_external_tools` and `search_connector_tools` read the broker's catalog;
+`call_external_tool` executes on the broker's server-side API, authenticated by the turn-agent's
+connected account (bound through `/connect`). The broker holds the account's token and injects it
+itself, so a dynamic tool never touches the sandbox egress proxy — it reaches only the broker's own
+API."""
 
 import json
 import re
 
 from pydantic import BaseModel, Field
 
+from ufo.sdk.connectors import BrokerTool, ConnectorRegistry, UnknownBrokerTool
 from ufo.sdk.context import JsonValue
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
-from ufo_ext_connectors import composio
-from ufo_ext_connectors.composio import CONNECTORS, EXTERNAL_USER_PREFIX, ComposioError
-
-DISCOVERY_DESCRIPTION_CAP = 240
-NOT_FOUND = 404
 
 
 class ListExternalToolsInput(BaseModel):
@@ -35,7 +32,7 @@ class ListExternalToolsInput(BaseModel):
 
 
 class DescribeExternalToolsInput(BaseModel):
-    source_id: str = Field(description="The connector source ID, e.g. 'github', 'slack', 'gcal'.")
+    source_id: str = Field(description="The connector source ID, e.g. 'github', 'slack', 'gmail'.")
     tool_names: tuple[str, ...] = Field(
         default=(),
         description="Exact tool names to get schemas for, from list_external_tools results. Omit "
@@ -47,8 +44,8 @@ class DescribeExternalToolsInput(BaseModel):
 
 
 class CallExternalToolInput(BaseModel):
-    tool_name: str = Field(description="Exact tool name from list_external_tools results.")
-    source_id: str = Field(description="The connector source ID, e.g. 'github', 'gcal'.")
+    tool_name: str = Field(description="Exact tool name from describe_external_tools results.")
+    source_id: str = Field(description="The connector source ID, e.g. 'github', 'gmail'.")
     arguments: dict[str, JsonValue] = Field(
         description="Arguments for the connector tool as a dict. Pass {} for tools that take no "
         "parameters."
@@ -65,92 +62,83 @@ class SearchConnectorToolsInput(BaseModel):
 
 
 async def list_external_tools(ctx: ToolContext, args: ListExternalToolsInput) -> ToolResult:
+    registry = _registry(ctx)
     matches: list[dict[str, str]] = []
     seen: set[str] = set()
     for query in args.queries:
         target = query.removeprefix("select:").strip().lower()
-        for connector, spec in sorted(CONNECTORS.items()):
-            if connector in seen:
+        for provider, entry in sorted(registry.entries.items()):
+            if provider in seen:
                 continue
-            haystack = f"{connector} {spec.toolkit} {spec.label}".lower()
+            haystack = f"{provider} {entry.label}".lower()
             if target and target not in haystack:
                 continue
-            seen.add(connector)
-            matches.append({"source_id": connector, "toolkit": spec.toolkit, "label": spec.label})
+            seen.add(provider)
+            matches.append({"source_id": provider, "label": entry.label})
     return _json_result({"connectors": matches})
 
 
 async def describe_external_tools(ctx: ToolContext, args: DescribeExternalToolsInput) -> ToolResult:
-    client = composio.composio_client()
+    entry = _registry(ctx).entry(args.source_id)
+    workspace_id = ctx.turn.workspace_id
     schemas: dict[str, object] = {}
     unresolved: list[str] = []
     for name in args.tool_names:
         try:
-            schemas[name] = await client.tool_schema(name)
-        except ComposioError as error:
-            if error.status != NOT_FOUND:
-                raise
+            described = await entry.broker.schema(workspace_id, entry.provider, name)
+        except UnknownBrokerTool:
             unresolved.append(name)
+            continue
+        schemas[name] = _tool_json(described)
     result: dict[str, object] = {"source_id": args.source_id, "schemas": schemas}
     if args.query or unresolved or not args.tool_names:
-        toolkit = _toolkit(args.source_id)
-        listed = await client.list_tools(toolkit, _discovery_query(args.query, unresolved))
-        result["availableTools"] = _discovered_tools(listed)
+        listed = await entry.broker.tools(
+            workspace_id, entry.provider, _discovery_query(args.query, unresolved)
+        )
+        result["availableTools"] = [
+            {"slug": tool.slug, "description": tool.description} for tool in listed
+        ]
     if unresolved:
         result["unresolved"] = unresolved
     return _json_result(result)
 
 
 async def call_external_tool(ctx: ToolContext, args: CallExternalToolInput) -> ToolResult:
-    client = composio.composio_client()
-    connected_account_id = await ctx.connector_account(args.source_id)
-    user_id = f"{EXTERNAL_USER_PREFIX}{ctx.turn.workspace_id}"
-    try:
-        response = await client.execute_tool(
-            args.tool_name,
-            args.arguments,
-            user_id,
-            connected_account_id,
-            idempotency_key=ctx.idempotency_key,
-        )
-    except ComposioError as error:
-        if error.status != NOT_FOUND:
-            raise
-        raise await _tool_not_found(client, args, error) from error
+    entry = _registry(ctx).entry(args.source_id)
+    account_id = await ctx.connector_account(args.source_id)
+    response = await entry.broker.execute(
+        ctx.turn.workspace_id,
+        entry.provider,
+        args.tool_name,
+        args.arguments,
+        account_id,
+        ctx.idempotency_key,
+    )
     return _json_result(response)
 
 
 async def search_connector_tools(ctx: ToolContext, args: SearchConnectorToolsInput) -> ToolResult:
-    client = composio.composio_client()
-    payload = await composio.search_connector_tools(
-        client, ctx.turn.workspace_id, args.source_id, args.query
+    entry = _registry(ctx).entry(args.source_id)
+    found = await entry.broker.search(ctx.turn.workspace_id, entry.provider, args.query)
+    return _json_result(
+        {
+            "connector": args.source_id,
+            "tools": [_tool_json(tool) for tool in found.tools],
+            "plan": list(found.plan),
+            "guidance": list(found.guidance),
+            "pitfalls": list(found.pitfalls),
+        }
     )
-    return _json_result(payload)
 
 
-async def _tool_not_found(
-    client: composio.ComposioClient, args: CallExternalToolInput, error: ComposioError
-) -> ComposioError:
-    """A 404 from execute, augmented with the source's real tool slugs so the model's next attempt
-    is informed instead of another blind guess at the naming convention. Augmentation is
-    best-effort: if the discovery lookup fails, the original 404 stands."""
-    try:
-        toolkit = _toolkit(args.source_id)
-        query = _discovery_query("", [args.tool_name])
-        tools = _discovered_tools(await client.list_tools(toolkit, query))
-        if not tools and query:
-            tools = _discovered_tools(await client.list_tools(toolkit, ""))
-    except (ComposioError, ValueError, KeyError):
-        return error
-    if not tools:
-        return error
-    names = ", ".join(tool["slug"] for tool in tools)
-    return ComposioError(error.status, f"{error.body} — tools available on {toolkit}: {names}")
+def _registry(ctx: ToolContext) -> ConnectorRegistry:
+    if ctx.connectors is None:
+        raise RuntimeError("connector tools dispatched without the turn's connector registry")
+    return ctx.connectors
 
 
-def _toolkit(source_id: str) -> str:
-    spec = CONNECTORS.get(source_id)
-    return spec.toolkit if spec is not None else source_id
+def _tool_json(tool: BrokerTool) -> dict[str, object]:
+    return {"slug": tool.slug, "description": tool.description, "input_schema": tool.input_schema}
 
 
 def _discovery_query(explicit: str, unresolved: list[str]) -> str:
@@ -163,31 +151,6 @@ def _discovery_query(explicit: str, unresolved: list[str]) -> str:
     return " ".join(dict.fromkeys(words))
 
 
-def _discovered_tools(listed: dict[str, object]) -> list[dict[str, str]]:
-    """Project a Composio `list_tools` response to the connector's real slugs and short
-    descriptions."""
-    items = listed.get("items")
-    tools: list[dict[str, str]] = []
-    if not isinstance(items, list):
-        return tools
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        slug = item.get("slug") or item.get("name")
-        if not isinstance(slug, str) or not slug:
-            continue
-        description = item.get("description")
-        tools.append(
-            {
-                "slug": slug,
-                "description": description[:DISCOVERY_DESCRIPTION_CAP]
-                if isinstance(description, str)
-                else "",
-            }
-        )
-    return tools
-
-
 def _json_result(payload: dict[str, object]) -> ToolResult:
     return ToolResult(content=(TextContent(text=json.dumps(payload)),))
 
@@ -197,10 +160,10 @@ CONNECTOR_TOOLS: tuple[ToolDef, ...] = (
         name="list_external_tools",
         description=(
             "List available external connectors (github, slack, ...), not their tools. Filter by "
-            "queries to search connector name/toolkit/label. Returns connector catalog rows: "
-            "source_id, toolkit, label. Call this before claiming you can't access something — "
-            "there may be a connector available. Use 'select:<source_id>' syntax to fetch a "
-            "specific connector by exact source ID. To find a connector's real tools, call "
+            "queries to search connector name/label. Returns connector catalog rows: source_id, "
+            "label. Call this before claiming you can't access something — there may be a "
+            "connector available. Use 'select:<source_id>' syntax to fetch a specific connector by "
+            "exact source ID. To find a connector's real tools, call "
             "describe_external_tools(source_id, query=...)."
         ),
         input_model=ListExternalToolsInput,
@@ -222,10 +185,10 @@ CONNECTOR_TOOLS: tuple[ToolDef, ...] = (
     ToolDef(
         name="search_connector_tools",
         description=(
-            "Semantic tool discovery for one connector via Composio's Tool Router. Pass source_id "
-            "plus a natural-language use case (e.g. 'comment on a pull request') to get matching "
-            "real tool slugs and input schemas in 'tools', plus the router's 'plan' (recommended "
-            "steps), 'guidance', and 'pitfalls' for executing them. Richer than "
+            "Semantic tool discovery for one connector. Pass source_id plus a natural-language "
+            "use case (e.g. 'comment on a pull request') to get matching real tool slugs and "
+            "input schemas in 'tools', plus any 'plan' (recommended steps), 'guidance', and "
+            "'pitfalls' the connector's broker surfaces for executing them. Richer than "
             "describe_external_tools when you know the goal but not the tool; still call "
             "call_external_tool to run a returned slug."
         ),

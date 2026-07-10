@@ -71,6 +71,10 @@ spec:
     - {secretKey: OPENAI_API_KEY, remoteRef: {key: ${secret_api_keys}, property: openai-api-key}}
     - {secretKey: OPENROUTER_API_KEY, remoteRef: {key: ${secret_api_keys}, property: openrouter-api-key}}
     - {secretKey: COMPOSIO_API_KEY, remoteRef: {key: ${secret_api_keys}, property: composio-api-key}}
+    - {secretKey: PIPEDREAM_CLIENT_ID, remoteRef: {key: ${secret_api_keys}, property: pipedream-client-id}}
+    - {secretKey: PIPEDREAM_CLIENT_SECRET, remoteRef: {key: ${secret_api_keys}, property: pipedream-client-secret}}
+    - {secretKey: PIPEDREAM_PROJECT_ID, remoteRef: {key: ${secret_api_keys}, property: pipedream-project-id}}
+    - {secretKey: PIPEDREAM_GMAIL_OAUTH_APP_ID, remoteRef: {key: ${secret_api_keys}, property: pipedream-gmail-oauth-app-id}}
     - {secretKey: E2B_API_KEY, remoteRef: {key: ${secret_api_keys}, property: e2b-api-key}}
     - {secretKey: UFO_E2B_API_KEY, remoteRef: {key: ${secret_api_keys}, property: e2b-api-key}}
     - {secretKey: TURBOPUFFER_API_KEY, remoteRef: {key: ${secret_api_keys}, property: turbopuffer-api-key}}

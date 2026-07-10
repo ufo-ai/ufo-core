@@ -20,6 +20,7 @@ from ufo_ext_index_default import DefaultIndex
 from ufo.accounting import CORE_PRICING
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
+from ufo.connectors import ConnectorRegistry
 from ufo.db import workspace_tx
 from ufo.ext.loader import skill_registry
 from ufo.ext.manifest import ModelProviderSpec
@@ -158,6 +159,7 @@ def _install_runtime(config: Config, registry: ModelRegistry, carrier: _Counting
             carrier=carrier,
             cdp_provider=None,
             search_provider=None,
+            connectors=ConnectorRegistry(entries={}),
             proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
             dbos=DBOSClient(system_database_url=config.database.system_url),
             subagents=SubagentRegistry(()),

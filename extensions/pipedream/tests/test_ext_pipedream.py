@@ -1,0 +1,676 @@
+"""The pipedream extension: Pipedream-backed OAuth providers and the Pipedream `ConnectorBroker`.
+
+The extension imports only `ufo.sdk`. These tests source its manifest the way `serve` does
+(`_connect_flow` and `_connector_registry` over the manifests) and drive the two seams it owns: the
+OAuth consent handoff (Connect Link bridge + server-side account resolution, so the untrusted
+return leg can never name a foreign account) and the broker behind the dynamic connector tools —
+driven through the `connectors` extension's real tools over the built registry, so the whole chain
+(generic tool → registry → Pipedream broker → actions/run) runs as one. Pipedream's HTTP is mocked
+with an `httpx.MockTransport` — no live Pipedream API or credentials — so the real client,
+provider, route, broker, and tool code run against canned Connect responses. Execution is
+server-side on Pipedream's run API, so a dynamic tool never touches the sandbox egress proxy (the
+sample proves that path)."""
+
+import json
+from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
+from urllib.parse import parse_qs, urlparse
+from uuid import UUID, uuid4
+
+import httpx
+import pytest
+import sqlalchemy as sa
+import ufo_ext_connectors.manifest as connectors_manifest
+import ufo_ext_pipedream.client as pipedream
+import ufo_ext_pipedream.manifest as pipedream_manifest
+import ufo_ext_pipedream.provider as provider
+from cryptography.fernet import Fernet
+from starlette.requests import Request
+from ufo_ext_connectors.tools import (
+    CallExternalToolInput,
+    DescribeExternalToolsInput,
+    call_external_tool,
+    describe_external_tools,
+)
+from ufo_ext_pipedream.broker import PipedreamBroker
+
+from ufo.config import Config
+from ufo.connectors import ConnectorRegistry
+from ufo.credentials import CredentialStore
+from ufo.db import workspace_tx
+from ufo.ext.context import context_for
+from ufo.ext.loader import turn_tools
+from ufo.grants import GrantStore, install_connect_flow
+from ufo.schema import tables
+from ufo.schema.records import Agent, Turn
+from ufo.serve import _connect_flow, _connector_registry
+from ufo.tools.builtins import ConnectAccountInput, connect_account_handler
+from ufo.tools.context import ToolContext
+from ufo.workspace import ws
+
+PUBLIC_BASE_URL = "https://ufo.example.com"
+EXPECTED_REDIRECT_URI = "https://ufo.example.com/v1/connect/callback"
+PROVIDER = "gmail"
+PROVIDER_HOST = "gmail.googleapis.com"
+CONNECT_LINK = "https://pipedream.com/_static/connect.html?token=ctok_abc&connectLink=true"
+PIPEDREAM_ACCOUNT = "apn_test123"
+GMAIL_ACTION = "gmail-send-email"
+UNKNOWN_ACTION = "gmail-definitely-not-an-action"
+ACTION_DESCRIPTION = "Send an email from your Gmail account."
+OAUTH_APP_ID = "oa_gmail_custom"
+
+
+@pytest.fixture(autouse=True)
+def _pipedream_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setenv(pipedream.PIPEDREAM_CLIENT_ID_ENV, f"cid_{uuid4().hex}")
+    monkeypatch.setenv(pipedream.PIPEDREAM_CLIENT_SECRET_ENV, "csecret")
+    monkeypatch.setenv(pipedream.PIPEDREAM_PROJECT_ID_ENV, "proj_test")
+    monkeypatch.setenv("PIPEDREAM_GMAIL_OAUTH_APP_ID", OAUTH_APP_ID)
+    yield
+    install_connect_flow(None)
+
+
+def _pipedream_handler(
+    owner: str,
+    executed: list[dict[str, object]] | None = None,
+    minted: list[dict[str, object]] | None = None,
+    token_mints: list[int] | None = None,
+) -> Callable[[httpx.Request], httpx.Response]:
+    """A Pipedream Connect mock: the OAuth token grant (counting mints into `token_mints`), connect
+    tokens (recording the request body into `minted`), the accounts reads (reporting `owner` as
+    each account's `external_id`, so the ownership assertion passes for a match and refuses a
+    foreign one), the action catalog, and server-side run (recording the request body into
+    `executed`). An unknown component key 404s on retrieve."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        method = request.method
+        if method == "POST" and path == "/v1/oauth/token":
+            assert pipedream.ENVIRONMENT_HEADER not in request.headers
+            if token_mints is not None:
+                token_mints.append(1)
+            return httpx.Response(200, json={"access_token": "at_test", "expires_in": 3600})
+        assert request.headers[pipedream.ENVIRONMENT_HEADER] == pipedream.DEFAULT_ENVIRONMENT
+        if method == "POST" and path.endswith("/tokens"):
+            if minted is not None:
+                minted.append(json.loads(request.content))
+            return httpx.Response(
+                200,
+                json={
+                    "token": "ctok_abc",
+                    "expires_at": "2026-07-10T00:00:00Z",
+                    "connect_link_url": CONNECT_LINK,
+                },
+            )
+        if method == "GET" and path.endswith(f"/accounts/{PIPEDREAM_ACCOUNT}"):
+            return httpx.Response(200, json={"data": _account(owner, PIPEDREAM_ACCOUNT)})
+        if method == "GET" and path.endswith("/accounts"):
+            assert request.url.params["app"] == "gmail"
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        _account(owner, "apn_older", created_at="2026-07-01T00:00:00Z"),
+                        _account(owner, PIPEDREAM_ACCOUNT, created_at="2026-07-09T12:00:00Z"),
+                    ]
+                },
+            )
+        if method == "GET" and path.endswith("/actions"):
+            return httpx.Response(
+                200,
+                json={"data": [{"key": GMAIL_ACTION, "description": ACTION_DESCRIPTION}]},
+            )
+        if method == "GET" and path.endswith(f"/components/{GMAIL_ACTION}"):
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "key": GMAIL_ACTION,
+                        "description": ACTION_DESCRIPTION,
+                        "configurable_props": [
+                            {"name": "gmail", "type": "app", "app": "gmail"},
+                            {"name": "to", "type": "string", "label": "Recipient"},
+                            {"name": "draft", "type": "boolean", "optional": True},
+                            {"name": "syncDir", "type": "dir", "optional": True},
+                        ],
+                    }
+                },
+            )
+        if method == "GET" and "/components/" in path:
+            return httpx.Response(404, json={"error": "unknown component"})
+        if method == "POST" and path.endswith("/actions/run"):
+            if executed is not None:
+                executed.append(json.loads(request.content))
+            return httpx.Response(
+                200, json={"exports": {"$summary": "sent"}, "os": [], "ret": {"id": "msg_1"}}
+            )
+        return httpx.Response(404, json={})
+
+    return handle
+
+
+def _account(owner: str, account_id: str, created_at: str = "2026-07-09T12:00:00Z") -> dict:
+    return {
+        "id": account_id,
+        "external_id": owner,
+        "healthy": True,
+        "created_at": created_at,
+        "app": {"name_slug": "gmail", "name": "Gmail"},
+    }
+
+
+def _install_transport(
+    monkeypatch: pytest.MonkeyPatch, handler: Callable[[httpx.Request], httpx.Response]
+) -> None:
+    """Every `pipedream_client()` read answers a client pinned to the mock transport, exactly as a
+    deploy's env-built client would be shaped."""
+    built = pipedream.pipedream_client()
+    client = pipedream.PipedreamClient(
+        client_id=built.client_id,
+        client_secret=built.client_secret,
+        project_id=built.project_id,
+        environment=built.environment,
+        transport=httpx.MockTransport(handler),
+    )
+    monkeypatch.setattr(pipedream, "pipedream_client", lambda: client)
+
+
+def _config() -> Config:
+    return Config.model_validate(
+        {
+            "database": {"url": "sqlite+aiosqlite:///unused.db"},
+            "blob": {"backend": "filesystem", "root": "/tmp/unused"},
+            "connect": {"public_base_url": PUBLIC_BASE_URL},
+        }
+    )
+
+
+def _credentials() -> CredentialStore:
+    return CredentialStore(fernet=Fernet(Fernet.generate_key()))
+
+
+def _registry() -> ConnectorRegistry:
+    return _connector_registry(_config(), (pipedream_manifest.manifest(),), _credentials())
+
+
+async def test_access_token_is_minted_once_and_cached() -> None:
+    token_mints: list[int] = []
+    client = pipedream.PipedreamClient(
+        client_id=f"cid_{uuid4().hex}",
+        client_secret="s",
+        project_id="proj_test",
+        transport=httpx.MockTransport(_pipedream_handler("ufo_ws", token_mints=token_mints)),
+    )
+    await client.list_actions("gmail")
+    await client.list_actions("gmail")
+    assert token_mints == [1]
+
+
+async def test_connect_token_pins_both_return_legs(monkeypatch: pytest.MonkeyPatch) -> None:
+    minted: list[dict[str, object]] = []
+    _install_transport(monkeypatch, _pipedream_handler("ufo_ws", minted=minted))
+    token = await pipedream.pipedream_client().connect_token(
+        "ufo_ws", "https://x.test/ok", "https://x.test/err"
+    )
+    assert token.connect_link_url == CONNECT_LINK
+    assert minted == [
+        {
+            "external_user_id": "ufo_ws",
+            "success_redirect_uri": "https://x.test/ok",
+            "error_redirect_uri": "https://x.test/err",
+        }
+    ]
+
+
+async def test_connected_account_refuses_a_foreign_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_transport(monkeypatch, _pipedream_handler("ufo_someone_else"))
+    with pytest.raises(pipedream.PipedreamError, match="owned by"):
+        await pipedream.pipedream_client().connected_account(PIPEDREAM_ACCOUNT, "ufo_ws")
+
+
+async def test_connected_account_refuses_an_unhealthy_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/oauth/token":
+            return httpx.Response(200, json={"access_token": "at", "expires_in": 3600})
+        record = _account("ufo_ws", PIPEDREAM_ACCOUNT)
+        record["healthy"] = False
+        return httpx.Response(200, json={"data": record})
+
+    _install_transport(monkeypatch, handler)
+    with pytest.raises(pipedream.PipedreamError, match="unhealthy"):
+        await pipedream.pipedream_client().connected_account(PIPEDREAM_ACCOUNT, "ufo_ws")
+
+
+async def test_newest_account_picks_the_latest_of_the_workspaces_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_transport(monkeypatch, _pipedream_handler("ufo_ws"))
+    account = await pipedream.pipedream_client().newest_account("ufo_ws", "gmail")
+    assert account.account_id == PIPEDREAM_ACCOUNT
+    assert account.app == "gmail"
+
+
+async def test_run_action_refuses_an_oversized_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_transport(monkeypatch, _pipedream_handler("ufo_ws"))
+    with pytest.raises(ValueError, match="payload bound"):
+        await pipedream.pipedream_client().run_action(
+            GMAIL_ACTION,
+            "ufo_ws",
+            {"blob": "x" * (pipedream.MAX_RUN_ARGUMENTS_BYTES + 1)},
+        )
+
+
+def test_authorize_url_points_the_browser_at_the_oauth_bridge() -> None:
+    oauth = provider.PipedreamOAuthProvider(provider=PROVIDER, host=PROVIDER_HOST, app="gmail")
+    url = oauth.authorize_url("SEALED", EXPECTED_REDIRECT_URI)
+    parsed = urlparse(url)
+    assert (parsed.scheme, parsed.netloc, parsed.path) == (
+        "https",
+        "ufo.example.com",
+        provider.OAUTH_ROUTE_MOUNT,
+    )
+    query = parse_qs(parsed.query)
+    assert query["provider"] == [PROVIDER]
+    assert query["state"] == ["SEALED"]
+    assert query["callback"] == [EXPECTED_REDIRECT_URI]
+
+
+async def test_oauth_route_start_leg_redirects_to_connect_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The start leg mints a Connect token whose success and error redirects both return to this
+    bridge, then sends the member to the hosted Connect Link pinned to the provider's app — and to
+    the deploy's own Google OAuth client when its env is set."""
+    minted: list[dict[str, object]] = []
+    _install_transport(monkeypatch, _pipedream_handler("ufo_ws", minted=minted))
+    ctx = context_for(pipedream_manifest.NAME, frozenset())
+    query = f"provider={PROVIDER}&state=SEALED&callback={EXPECTED_REDIRECT_URI}"
+    with ws(uuid4()):
+        response = await provider.oauth_route(ctx, _request(query))
+    assert response.status_code == provider.REDIRECT_STATUS
+    location = urlparse(response.headers["location"])
+    link_query = parse_qs(location.query)
+    assert response.headers["location"].startswith(CONNECT_LINK)
+    assert link_query["app"] == ["gmail"]
+    assert link_query["oauthAppId"] == [OAUTH_APP_ID]
+    success = urlparse(str(minted[0]["success_redirect_uri"]))
+    assert success.path == provider.OAUTH_ROUTE_MOUNT
+    success_query = parse_qs(success.query)
+    assert success_query["state"] == ["SEALED"]
+    assert success_query[provider.OUTCOME_PARAM] == [provider.OUTCOME_CONNECTED]
+    error = parse_qs(urlparse(str(minted[0]["error_redirect_uri"])).query)
+    assert error[provider.OUTCOME_PARAM] == [provider.OUTCOME_FAILED]
+
+
+async def test_oauth_route_start_leg_rides_the_shared_client_when_no_custom_one_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pipedream's shared Google client passes consent for restricted Gmail scopes (verified
+    live), so an unset custom-client env means the Connect Link simply carries no `oauthAppId` —
+    never a refusal."""
+    monkeypatch.delenv("PIPEDREAM_GMAIL_OAUTH_APP_ID")
+    _install_transport(monkeypatch, _pipedream_handler("ufo_ws"))
+    ctx = context_for(pipedream_manifest.NAME, frozenset())
+    query = f"provider={PROVIDER}&state=SEALED&callback={EXPECTED_REDIRECT_URI}"
+    with ws(uuid4()):
+        response = await provider.oauth_route(ctx, _request(query))
+    assert response.status_code == provider.REDIRECT_STATUS
+    link_query = parse_qs(urlparse(response.headers["location"]).query)
+    assert link_query["app"] == ["gmail"]
+    assert "oauthAppId" not in link_query
+
+
+async def test_oauth_route_return_leg_hands_core_the_outcome_as_code() -> None:
+    """The return leg carries no account id — Pipedream documents no redirect param naming one —
+    so the bridge hands core a fixed outcome code and `exchange` resolves the account server-side,
+    scoped to the workspace's own external user."""
+    ctx = context_for(pipedream_manifest.NAME, frozenset())
+    query = (
+        f"state=SEALED&callback={EXPECTED_REDIRECT_URI}"
+        f"&{provider.OUTCOME_PARAM}={provider.OUTCOME_CONNECTED}"
+    )
+    with ws(uuid4()):
+        response = await provider.oauth_route(ctx, _request(query))
+    assert response.status_code == provider.REDIRECT_STATUS
+    landing = urlparse(response.headers["location"])
+    assert f"{landing.scheme}://{landing.netloc}{landing.path}" == EXPECTED_REDIRECT_URI
+    landing_query = parse_qs(landing.query)
+    assert landing_query["state"] == ["SEALED"]
+    assert landing_query["code"] == [provider.OUTCOME_CONNECTED]
+
+
+async def test_oauth_route_failed_consent_answers_loud_instead_of_reminting_consent() -> None:
+    ctx = context_for(pipedream_manifest.NAME, frozenset())
+    query = (
+        f"provider={PROVIDER}&state=SEALED&callback={EXPECTED_REDIRECT_URI}"
+        f"&{provider.OUTCOME_PARAM}={provider.OUTCOME_FAILED}"
+    )
+    with ws(uuid4()):
+        response = await provider.oauth_route(ctx, _request(query))
+    assert response.status_code == provider.FAILED_CONSENT_STATUS
+    assert "location" not in response.headers
+
+
+def test_serve_registers_gmail_with_label_and_broker() -> None:
+    flow = _connect_flow(_credentials(), _config(), (pipedream_manifest.manifest(),))
+    assert flow is not None
+    assert set(flow.providers) == set(pipedream.CONNECTORS)
+    assert flow.providers[PROVIDER].host == PROVIDER_HOST
+    registry = _registry()
+    entry = registry.entry(PROVIDER)
+    assert entry.label == "Gmail"
+    assert isinstance(entry.broker, PipedreamBroker)
+
+
+def test_composio_and_pipedream_register_disjoint_providers() -> None:
+    """Both brokers install side by side: gmail resolves to Pipedream, everything else to
+    Composio, in the one registry `serve` builds — the routing the user-visible split rides on."""
+    import ufo_ext_composio.manifest as composio_manifest
+    from ufo_ext_composio.broker import ComposioBroker
+
+    registry = _connector_registry(
+        _config(),
+        (composio_manifest.manifest(), pipedream_manifest.manifest()),
+        _credentials(),
+    )
+    assert isinstance(registry.entry("gmail").broker, PipedreamBroker)
+    assert isinstance(registry.entry("github").broker, ComposioBroker)
+
+
+async def test_describe_external_tools_builds_the_schema_from_configurable_props(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The action's agent-facing schema offers exactly the settable props: the app slot is the
+    broker's to bind (never the agent's), an optional prop is not required."""
+    _install_transport(monkeypatch, _pipedream_handler("ufo_ws"))
+    result = await describe_external_tools(
+        _ctx(uuid4(), uuid4(), uuid4(), None),
+        DescribeExternalToolsInput(source_id=PROVIDER, tool_names=(GMAIL_ACTION,)),
+    )
+    payload = json.loads(result.content[0].text)
+    schema = payload["schemas"][GMAIL_ACTION]["input_schema"]
+    assert set(schema["properties"]) == {"to", "draft"}
+    assert schema["required"] == ["to"]
+    assert schema["properties"]["to"] == {"type": "string", "description": "Recipient"}
+
+
+async def test_describe_external_tools_marks_an_unknown_name_unresolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_transport(monkeypatch, _pipedream_handler("ufo_ws"))
+    result = await describe_external_tools(
+        _ctx(uuid4(), uuid4(), uuid4(), None),
+        DescribeExternalToolsInput(source_id=PROVIDER, tool_names=(UNKNOWN_ACTION,)),
+    )
+    payload = json.loads(result.content[0].text)
+    assert payload["unresolved"] == [UNKNOWN_ACTION]
+    assert [tool["slug"] for tool in payload["availableTools"]] == [GMAIL_ACTION]
+
+
+async def test_connect_binds_a_grant_and_call_external_tool_executes_via_pipedream(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end across both extensions: connect the Gmail account in chat — `exchange` resolves
+    the newest account of this workspace's external user, never trusting the return leg — binding a
+    grant that carries the Pipedream account id, then the `connectors` extension's
+    `call_external_tool` resolves that grant, routes through the registry to the Pipedream broker,
+    and runs the action server-side with the account bound through the app slot's
+    `authProvisionId` — no sandbox, no proxy."""
+    workspace_id = await _workspace()
+    owner = f"{pipedream.EXTERNAL_USER_PREFIX}{workspace_id}"
+    executed: list[dict[str, object]] = []
+    _install_transport(monkeypatch, _pipedream_handler(owner, executed=executed))
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    turn_id = await _turn(workspace_id, agent_id, conversation_id)
+    credentials = _credentials()
+    flow = _connect_flow(
+        credentials, _config(), (connectors_manifest.manifest(), pipedream_manifest.manifest())
+    )
+    assert flow is not None
+    install_connect_flow(flow)
+
+    begin = await connect_account_handler(
+        _turn_context(workspace_id, agent_id, conversation_id, member_id, turn_id),
+        ConnectAccountInput(provider=PROVIDER),
+    )
+    state = parse_qs(urlparse(begin.content[0].text).query)["state"][0]
+    recorded = await flow.complete(state=state, code=provider.OUTCOME_CONNECTED)
+    assert (recorded.provider, recorded.account_id) == (PROVIDER, PIPEDREAM_ACCOUNT)
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.grant.c.host, tables.grant.c.account_id).where(
+                    tables.grant.c.workspace_id == workspace_id
+                )
+            )
+        ).one()
+    assert (row.host, row.account_id) == (PROVIDER_HOST, PIPEDREAM_ACCOUNT)
+
+    tools, ext_by_tool = turn_tools(
+        (connectors_manifest.manifest(), pipedream_manifest.manifest()), credentials
+    )
+    tool = next(t for t in tools if t.name == "call_external_tool")
+    ctx = _ctx(workspace_id, agent_id, conversation_id, turn_id, flow.store, ext_by_tool[tool.name])
+    result = await tool.handler(
+        ctx,
+        tool.input_model.model_validate(
+            {"tool_name": GMAIL_ACTION, "source_id": PROVIDER, "arguments": {"to": "a@b.test"}}
+        ),
+    )
+    assert result.is_error is False
+    assert json.loads(result.content[0].text)["exports"]["$summary"] == "sent"
+    assert executed == [
+        {
+            "id": GMAIL_ACTION,
+            "external_user_id": owner,
+            "configured_props": {
+                "to": "a@b.test",
+                "gmail": {"authProvisionId": PIPEDREAM_ACCOUNT},
+            },
+        }
+    ]
+
+
+async def test_call_external_tool_augments_an_unknown_key_with_the_real_actions(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    turn_id = await _turn(workspace_id, agent_id, conversation_id)
+    store = GrantStore()
+    await store.record(
+        workspace_id=workspace_id,
+        agent_id=agent_id,
+        provider=PROVIDER,
+        account_id=PIPEDREAM_ACCOUNT,
+        host=PROVIDER_HOST,
+        grantor_member_id=member_id,
+        conversation_id=conversation_id,
+    )
+    _install_transport(monkeypatch, _pipedream_handler(f"ufo_{workspace_id}"))
+    ctx = _ctx(workspace_id, agent_id, conversation_id, turn_id, store)
+    with pytest.raises(pipedream.PipedreamError, match=f"actions available: {GMAIL_ACTION}"):
+        await call_external_tool(
+            ctx,
+            CallExternalToolInput(tool_name=UNKNOWN_ACTION, source_id=PROVIDER, arguments={}),
+        )
+
+
+async def test_complete_rejects_a_consent_that_produced_no_owned_account(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Confused-deputy close: `exchange` lists only this workspace's external user's accounts, so a
+    consent completed under another workspace binds nothing here — no account, no grant."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/oauth/token":
+            return httpx.Response(200, json={"access_token": "at", "expires_in": 3600})
+        if request.url.path.endswith("/accounts"):
+            return httpx.Response(200, json={"data": []})
+        return httpx.Response(404, json={})
+
+    _install_transport(monkeypatch, handler)
+    workspace_id = uuid4()
+    flow = _connect_flow(_credentials(), _config(), (pipedream_manifest.manifest(),))
+    assert flow is not None
+    url = flow.authorize(
+        workspace_id=workspace_id,
+        agent_id=uuid4(),
+        provider=PROVIDER,
+        grantor_member_id=uuid4(),
+        conversation_id=uuid4(),
+    )
+    state = parse_qs(urlparse(url).query)["state"][0]
+    with pytest.raises(pipedream.PipedreamError, match="no 'gmail' account is connected"):
+        await flow.complete(state=state, code=provider.OUTCOME_CONNECTED)
+    async with workspace_tx() as connection:
+        count = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.grant)
+                .where(tables.grant.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    assert count == 0
+
+
+def _request(query: str) -> Request:
+    return Request({"type": "http", "method": "GET", "headers": [], "query_string": query.encode()})
+
+
+def _turn_context(
+    workspace_id: UUID,
+    agent_id: UUID,
+    conversation_id: UUID,
+    member_id: UUID,
+    turn_id: UUID,
+) -> ToolContext:
+    return ToolContext(
+        sandbox=None,
+        blob=None,
+        turn=Turn(
+            id=turn_id,
+            workspace_id=workspace_id,
+            conversation_id=conversation_id,
+            agent_id=agent_id,
+            seq=1,
+            status="running",
+            inbound="connect my gmail",
+            created_at=datetime(2026, 7, 9, tzinfo=UTC),
+        ),
+        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        spawn=None,
+        member_id=member_id,
+        artifact_token_secret="",
+    )
+
+
+def _ctx(
+    workspace_id: UUID,
+    agent_id: UUID,
+    conversation_id: UUID,
+    turn_id: UUID | None,
+    grants: GrantStore | None = None,
+    ext: object = None,
+) -> ToolContext:
+    return ToolContext(
+        sandbox=None,
+        blob=None,
+        turn=Turn(
+            id=turn_id or uuid4(),
+            workspace_id=workspace_id,
+            conversation_id=conversation_id,
+            agent_id=agent_id,
+            seq=1,
+            status="running",
+            inbound="use a connector",
+            created_at=datetime(2026, 7, 9, tzinfo=UTC),
+        ),
+        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        spawn=None,
+        member_id=None,
+        artifact_token_secret="",
+        grants=grants,
+        ext=ext,
+        connectors=_registry(),
+    )
+
+
+async def _workspace() -> UUID:
+    workspace_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+    return workspace_id
+
+
+async def _member_agent(workspace_id: UUID) -> tuple[UUID, UUID]:
+    member_id, agent_id = uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email=f"{member_id.hex[:8]}@x.test",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="assistant",
+                prompt="p",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return member_id, agent_id
+
+
+async def _conversation(workspace_id: UUID, member_id: UUID) -> UUID:
+    conversation_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                surface="cli",
+                queue_key=uuid4().hex,
+                member_id=member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return conversation_id
+
+
+async def _turn(workspace_id: UUID, agent_id: UUID, conversation_id: UUID) -> UUID:
+    turn_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="running",
+                inbound="hi",
+                terminal=None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return turn_id

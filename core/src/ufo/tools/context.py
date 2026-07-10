@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 
 from ufo.blob import BlobStore
 from ufo.browser import CdpProvider, FindCompleter
+from ufo.connectors import ConnectorRegistry
 from ufo.ext.context import ExtensionContext
 from ufo.grants import ConnectUnavailable, GrantStore
 from ufo.o11y import log
@@ -154,6 +155,7 @@ class ToolContext:
     ext: ExtensionContext | None = None
     cdp_provider: CdpProvider | None = None
     search_provider: SearchProvider | None = None
+    connectors: ConnectorRegistry | None = None
     find: FindCompleter | None = None
     cleanup: TurnCleanup = field(default_factory=TurnCleanup)
 

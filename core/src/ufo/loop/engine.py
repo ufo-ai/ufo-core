@@ -32,6 +32,7 @@ from ufo.accounting import (
 )
 from ufo.blob import BlobStore
 from ufo.browser import CdpProvider
+from ufo.connectors import ConnectorRegistry
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext
 from ufo.ext.loader import HookChain
@@ -245,6 +246,7 @@ class TurnEngine:
     sandbox: SandboxSession
     cdp_provider: CdpProvider | None
     search_provider: SearchProvider | None
+    connectors: ConnectorRegistry
     tools: ToolRegistry
     tool_ext: dict[str, ExtensionContext]
     hooks: HookChain
@@ -303,6 +305,7 @@ class TurnEngine:
                 skills=self.skills,
                 cdp_provider=self.cdp_provider,
                 search_provider=self.search_provider,
+                connectors=self.connectors,
                 find=rank_find,
             )
             try:

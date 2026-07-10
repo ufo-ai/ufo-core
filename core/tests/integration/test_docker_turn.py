@@ -20,6 +20,7 @@ import sqlalchemy as sa
 from ufo_ext_docker import DockerCarrier
 
 from ufo.blob import FilesystemBlobStore
+from ufo.connectors import ConnectorRegistry
 from ufo.db import workspace_tx
 from ufo.ext.loader import HookChain
 from ufo.hub import InProcessHub
@@ -254,6 +255,7 @@ async def test_turn_execs_bash_in_a_live_container(
         sandbox=SandboxSession(carrier=DockerCarrier(), handle=live_container),
         cdp_provider=None,
         search_provider=None,
+        connectors=ConnectorRegistry(entries={}),
         tools=ToolRegistry(BUILTIN_TOOLS),
         tool_ext={},
         hooks=HookChain(),

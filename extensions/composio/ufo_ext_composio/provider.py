@@ -15,11 +15,11 @@ from uuid import UUID
 from ufo.sdk.connectors import OAuthAccount
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.http import Request, Response
-from ufo_ext_connectors import composio
-from ufo_ext_connectors.composio import CONNECTORS
+from ufo_ext_composio import client as composio
+from ufo_ext_composio.client import CONNECTORS
 
 OAUTH_ROUTE_PATH = "oauth"
-OAUTH_ROUTE_MOUNT = "/ext/connectors/oauth"
+OAUTH_ROUTE_MOUNT = "/ext/composio/oauth"
 COMPOSIO_ACCOUNT_PARAM = "connected_account_id"
 COMPOSIO_STATUS_PARAM = "status"
 REDIRECT_STATUS = 302

@@ -30,6 +30,7 @@ from ufo_ext_ufo.surface import (
 from ufo.accounting import CORE_PRICING
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
+from ufo.connectors import ConnectorRegistry
 from ufo.db import workspace_tx
 from ufo.ext.loader import skill_registry
 from ufo.ext.manifest import ModelProviderSpec
@@ -289,6 +290,7 @@ def runtime(dbos_launched: Config) -> Iterator[tuple[Config, InProcessHub, Files
             carrier=StandInCarrier(),
             cdp_provider=None,
             search_provider=None,
+            connectors=ConnectorRegistry(entries={}),
             proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
             dbos=dbos_client,
             subagents=SubagentRegistry(()),

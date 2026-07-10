@@ -1,19 +1,19 @@
-"""The Composio auth-proxy backend end to end: `credential` confirms the account's owner from
-metadata (never a token) and returns a `Credential` whose transport proxies provider HTTP through
-Composio's proxy-execute. Composio's connected-account read and proxy-execute are mocked with
-`httpx.MockTransport` — no live API, no key, no direct provider call — so the real backend and proxy
-transport run against canned Composio responses. This proves the backend the connectors extension
-contributes to core's auth-proxy seam; the source framework that consumes a `Credential` keeps its
-own proof in `extensions/sources/tests`."""
+"""The Composio broker's feed-sync credential end to end: `credential` confirms the account's owner
+from metadata (never a token) and returns a `Credential` whose transport proxies provider HTTP
+through Composio's proxy-execute. Composio's connected-account read and proxy-execute are mocked
+with `httpx.MockTransport` — no live API, no key, no direct provider call — so the real broker and
+proxy transport run against canned Composio responses. This proves the credential the
+`ConnectorRegistry` routes a brokered provider's feed-sync to; the source framework that consumes a
+`Credential` keeps its own proof in `extensions/sources/tests`."""
 
 from collections.abc import Callable
 from uuid import uuid4
 
 import httpx
 import pytest
-import ufo_ext_connectors.composio as composio
-import ufo_ext_connectors.composio_proxy as composio_proxy
-from ufo_ext_connectors.authproxy import ComposioAuthProxy
+import ufo_ext_composio.client as composio
+import ufo_ext_composio.proxy as composio_proxy
+from ufo_ext_composio.broker import ComposioBroker
 
 ACCOUNT = "ca_asana_1"
 ASANA_BASE = "https://app.asana.com/api/1.0"
@@ -44,7 +44,7 @@ def _client(owner: str, page: dict[str, object]) -> composio.ComposioClient:
     )
 
 
-async def test_composio_auth_proxy_yields_a_transport_that_proxies_provider_http(
+async def test_composio_broker_yields_a_transport_that_proxies_provider_http(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace_id = uuid4()
@@ -52,7 +52,7 @@ async def test_composio_auth_proxy_yields_a_transport_that_proxies_provider_http
     body = {"data": [{"gid": "111", "name": "Acme HQ"}]}
     monkeypatch.setattr(composio, "composio_client", lambda: _client(owner, body))
 
-    credential = await ComposioAuthProxy().credential(workspace_id, "asana", ACCOUNT)
+    credential = await ComposioBroker().credential(workspace_id, "asana", ACCOUNT)
     assert credential.transport is not None
     assert credential.bearer is None
 
@@ -62,7 +62,7 @@ async def test_composio_auth_proxy_yields_a_transport_that_proxies_provider_http
     assert response.json() == body
 
 
-async def test_composio_auth_proxy_refuses_a_foreign_account(
+async def test_composio_broker_refuses_a_foreign_account(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The confused-deputy guard reads the account's owning user (never a token); an account owned
@@ -70,4 +70,4 @@ async def test_composio_auth_proxy_refuses_a_foreign_account(
     foreign = f"{composio.EXTERNAL_USER_PREFIX}{uuid4()}"
     monkeypatch.setattr(composio, "composio_client", lambda: _client(foreign, {"data": []}))
     with pytest.raises(composio.ComposioError, match="owned by"):
-        await ComposioAuthProxy().credential(uuid4(), "asana", ACCOUNT)
+        await ComposioBroker().credential(uuid4(), "asana", ACCOUNT)

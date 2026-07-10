@@ -222,15 +222,15 @@ class BrowserConfig(BaseModel):
 
 
 class ConnectorsConfig(BaseModel):
-    """Feed-sync connector settings. `auth_backend` names the auth-proxy backend the sync runner
-    resolves a connector's provider credential through — the Composio broker default (the token
-    stays server-side), a `direct` BYOK backend (a member-added key read host-side), or any backend
-    an extension registers through its Manifest `auth_proxies` point. Selecting a name no extension
-    registers fails loud at boot; a deploy with no auth-proxy extension installed runs no connector
-    source."""
+    """Feed-sync connector settings. A brokered provider resolves its credential through its own
+    broker (the extension that registers the connector), never a config knob; `auth_backend` names
+    the auth-proxy backend for every other provider — the `direct` BYOK backend (a member-added key
+    read host-side) or any backend an extension registers through its Manifest `auth_proxies`
+    point. Unset selects no fallback; selecting a name no extension registers fails loud at
+    boot."""
 
     model_config = ConfigDict(extra="forbid")
-    auth_backend: str = "composio"
+    auth_backend: str | None = None
 
 
 class ResearchConfig(BaseModel):

@@ -22,6 +22,7 @@ from ufo_ext_docker import DockerCarrier
 
 from ufo.artifact_token import verify_artifact_token
 from ufo.blob import FilesystemBlobStore
+from ufo.connectors import ConnectorRegistry
 from ufo.db import workspace_tx
 from ufo.ext.loader import HookChain
 from ufo.hub import InProcessHub
@@ -550,6 +551,7 @@ async def test_engine_offloads_an_oversize_result_to_a_readable_workspace_file(
         sandbox=ctx.sandbox,
         cdp_provider=None,
         search_provider=None,
+        connectors=ConnectorRegistry(entries={}),
         tools=ToolRegistry((_oversize_tool("big", full),)),
         tool_ext={},
         hooks=HookChain(),

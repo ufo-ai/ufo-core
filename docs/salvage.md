@@ -54,7 +54,7 @@ Working against the old repo:
 
 | Old | Becomes | Notes |
 |---|---|---|
-| `metalcraft_connectors/{base,composio,composio_proxy,errors,integration_descriptors,mcp,registry}.py` + 48 provider dirs | `ufo.sources` (core read-only REST connector framework, re-exported via `ufo.sdk.sources` so any extension can build a source) + `extensions/sources` (providers) + `extensions/connectors` (Composio broker: dynamic tools, OAuth, the `composio` auth-proxy backend) | U8; the framework consumes the pluggable auth-proxy seam (`composio` / `direct` BYOK), never importing the broker; providers land per tranche |
+| `metalcraft_connectors/{base,composio,composio_proxy,errors,integration_descriptors,mcp,registry}.py` + 48 provider dirs | `ufo.sources` (core read-only REST connector framework, re-exported via `ufo.sdk.sources` so any extension can build a source) + `extensions/sources` (providers) + `extensions/connectors` (the broker-generic dynamic tools) + `extensions/composio` / `extensions/pipedream` (the brokers: OAuth, catalog, execute, feed-sync credential) | U8; the framework consumes the pluggable auth-proxy seam (a provider's own broker, else `direct` BYOK), never importing a broker; providers land per tranche |
 | `metalcraft_agent/bua/` (18 files), `browser.py`, `browser_cdp.py`, `tools/browser.py`, `sandbox/browser_runtime.py` | `extensions/browser` (bundled by the assistant pack) | U10 |
 | `metalcraft_agent/tools/web.py` | `extensions/research` (the `search_web`/`fetch_url`/`search_vertical`/`wide_research` tools + research subagent profiles, over core's `search_providers` seam) + `extensions/exa` (the host-side Exa search backend on that seam); both bundled by the assistant pack | U10; `search_web`, `fetch_url`, `search_vertical` each a distinct tool |
 | `metalcraft_agent/tools/todos.py` | `extensions/todos` | `update_todo_list`/`update_todo_status` over the pack's scoped store, keyed by conversation; `<todo_list>` prompt section |
@@ -76,7 +76,7 @@ Working against the old repo:
 | sandbox_proxy kubectl mint (apiserver rewrite, token mint), `metalcraft-agent-writer` RBAC | returns as the enterprise rewriter module |
 | `metalcraft_store/{payload,payloads}.py` (`trajectory_event` + `payload/`) | second trajectory representation; transcript store is the one representation |
 | `metalcraft_agent/{agent_projection,platform_tools,in_memory,env,tool_runtime}.py` | CRD projection/catalog plumbing; frozen-per-turn-config concept survives in `AgentRuntime` |
-| `metalcraft_agent/tools/{diagnostics,platform,broker,egress,mcp,composio,connector_tools}.py` | diagnostics: cut (o11y subsumes); the connector invocation set re-enters via `extensions/connectors` |
+| `metalcraft_agent/tools/{diagnostics,platform,broker,egress,mcp,composio,connector_tools}.py` | diagnostics: cut (o11y subsumes); the connector invocation set re-enters via `extensions/connectors` over the broker seam |
 | `metalcraft_cloud/`, `deploy/`, `charts/`, Terraform | signup is hosted-side; `ufoctl bundle` replaces install packaging |
 | `metalcraft_store/{catalog_registry,catalog_registry_writes,server,migrate}.py`, `jobrunner/improve_*` | registry/catalog + improve runtime ride k8s-era machinery; superseded by packs + extension store |
 | Refinement CRD machinery (`contracts/kinds/refinement.py`, `k8s/kinds/refinement.py`, gateway promotions) | self-improvement returns as an extension, not a kind |

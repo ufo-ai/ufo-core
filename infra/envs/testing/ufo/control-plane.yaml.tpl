@@ -404,7 +404,7 @@ spec:
           ports:
             - {name: http, containerPort: 8710}
           # Model/provider keys the fleet shares across workspaces (ANTHROPIC/OPENAI/OPENROUTER, EXA,
-          # TURBOPUFFER, E2B + UFO_E2B_TEMPLATE, COMPOSIO, UFO_TOKEN_SECRET) plus the shared egress
+          # TURBOPUFFER, E2B + UFO_E2B_TEMPLATE, COMPOSIO, PIPEDREAM, UFO_TOKEN_SECRET) plus the shared egress
           # proxy's CA (UFO_EGRESS_CA_CERT) the sandbox trusts.
           envFrom:
             - secretRef: {name: ufo-platform-secrets}

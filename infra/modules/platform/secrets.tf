@@ -115,14 +115,18 @@ resource "aws_secretsmanager_secret" "api_keys" {
 resource "aws_secretsmanager_secret_version" "api_keys" {
   secret_id = aws_secretsmanager_secret.api_keys.id
   secret_string = jsonencode({
-    "anthropic-api-key"   = ""
-    "openai-api-key"      = ""
-    "openrouter-api-key"  = ""
-    "composio-api-key"    = ""
-    "e2b-api-key"         = ""
-    "exa-api-key"         = ""
-    "turbopuffer-api-key" = ""
-    "datadog-api-key"     = ""
+    "anthropic-api-key"            = ""
+    "openai-api-key"               = ""
+    "openrouter-api-key"           = ""
+    "composio-api-key"             = ""
+    "pipedream-client-id"          = ""
+    "pipedream-client-secret"      = ""
+    "pipedream-project-id"         = ""
+    "pipedream-gmail-oauth-app-id" = ""
+    "e2b-api-key"                  = ""
+    "exa-api-key"                  = ""
+    "turbopuffer-api-key"          = ""
+    "datadog-api-key"              = ""
   })
 
   lifecycle {

@@ -21,7 +21,7 @@ from starlette.responses import Response
 from ufo.accounting import ModelPrice
 from ufo.browser import CdpProvider
 from ufo.candidates import WorkspaceCandidates
-from ufo.connectors import AuthProxy
+from ufo.connectors import AuthProxy, ConnectorBroker
 from ufo.ext.context import CredentialAccess, ExtensionContext
 from ufo.ext.surface import SurfaceSpec
 from ufo.grants import OAuthProvider
@@ -88,12 +88,16 @@ class RouteSpec:
 @dataclass(frozen=True)
 class ConnectorProvider:
     """One connector an extension registers: the OAuth descriptor behind `/connect` for this
-    provider and the agent tools that call its granted account. The descriptor's `provider` keys the
-    connect-flow registry `serve` builds; its `host` is the one the derived grant admits, injects,
-    and meters at the egress proxy. The tools join the turn's tool set scoped to the extension, so a
-    connector call reaches the provider host only for an agent the grant covers."""
+    provider, the member-facing `label` the discovery tool lists it by, the `broker` serving its
+    catalog, server-side execution, and feed-sync credential, and any fixed agent tools of its own.
+    The descriptor's `provider` keys both the connect-flow registry and the `ConnectorRegistry`
+    `serve` builds; its `host` is the one the derived grant admits, injects, and meters at the
+    egress proxy. The tools join the turn's tool set scoped to the extension, so a connector call
+    reaches the provider host only for an agent the grant covers."""
 
     oauth: OAuthProvider
+    label: str
+    broker: ConnectorBroker
     tools: tuple[ToolDef, ...] = ()
 
 
@@ -204,12 +208,12 @@ class HubSpec:
 @dataclass(frozen=True)
 class AuthProxySpec:
     """One auth-proxy backend an extension registers, mirroring `CdpProviderSpec`: the `backend`
-    name a deploy selects it by (`config.connectors.auth_backend`, default `"composio"`) and the
-    `build` core calls once at boot, only when selected, given a credential reader scoped to this
-    manifest's slots. A broker backend (Composio) needs no slot and returns a proxying transport; a
-    direct/BYOK backend reads a member-added provider key through that reader host-side and returns
-    a bearer. The selected proxy is threaded onto the sync runner's `SourceAuth`, so a connector
-    source resolves its provider credential through it without core minting or holding a token."""
+    name a deploy selects it by (`config.connectors.auth_backend`, unset by default) and the `build`
+    core calls once at boot, only when selected, given a credential reader scoped to this manifest's
+    slots. The selected backend is the `ConnectorRegistry`'s fallback for providers no installed
+    broker claims — the direct/BYOK backend reads a member-added provider key through that reader
+    host-side and returns a bearer; a brokered provider resolves through its own broker's
+    `credential` instead, never this seam."""
 
     backend: str
     build: Callable[[CredentialAccess], AuthProxy]

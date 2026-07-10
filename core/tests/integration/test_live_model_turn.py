@@ -24,6 +24,7 @@ from httpx import ASGITransport, AsyncClient
 
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
+from ufo.connectors import ConnectorRegistry
 from ufo.db import workspace_tx
 from ufo.hub import InProcessHub
 from ufo.loop import queue as loop_queue
@@ -84,6 +85,7 @@ async def live_surface(
             carrier=_StandInCarrier(),
             cdp_provider=None,
             search_provider=None,
+            connectors=ConnectorRegistry(entries={}),
             proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
             dbos=runtime_dbos,
             subagents=SubagentRegistry(()),

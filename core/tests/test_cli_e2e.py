@@ -34,6 +34,7 @@ from ufo import cli
 from ufo.accounting import CORE_PRICING
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config, load_config
+from ufo.connectors import ConnectorRegistry
 from ufo.credentials import CredentialSlotUnset, CredentialStore
 from ufo.db import dispose_db, init_db, workspace_tx
 from ufo.ext.loader import skill_registry
@@ -421,6 +422,7 @@ def chat_server(
             carrier=StandInCarrier(),
             cdp_provider=None,
             search_provider=None,
+            connectors=ConnectorRegistry(entries={}),
             proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
             dbos=dbos_client,
             subagents=SubagentRegistry(()),

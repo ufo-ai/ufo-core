@@ -12,6 +12,7 @@ from opentelemetry import trace
 from pydantic import BaseModel
 
 from ufo.blob import FilesystemBlobStore
+from ufo.connectors import ConnectorRegistry
 from ufo.db import workspace_tx
 from ufo.ext.loader import HookChain
 from ufo.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
@@ -389,6 +390,7 @@ def _engine(
         sandbox=SandboxSession(carrier=carrier, handle=handle),
         cdp_provider=None,
         search_provider=None,
+        connectors=ConnectorRegistry(entries={}),
         tools=ToolRegistry(BUILTIN_TOOLS),
         tool_ext={},
         hooks=HookChain(),

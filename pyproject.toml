@@ -39,6 +39,7 @@ brief_pipeline = "ufo_ext_brief_pipeline.manifest:manifest"
 browser = "ufo_ext_browser.manifest:manifest"
 browserbase = "ufo_ext_browserbase:manifest"
 coding = "ufo_ext_coding.manifest:manifest"
+composio = "ufo_ext_composio.manifest:manifest"
 connectors = "ufo_ext_connectors.manifest:manifest"
 docker = "ufo_ext_docker:manifest"
 documents = "ufo_ext_documents.manifest:manifest"
@@ -52,6 +53,7 @@ mcp = "ufo_ext_mcp:manifest"
 memory = "ufo_ext_memory.manifest:manifest"
 page_alerts = "ufo_ext_page_alerts.manifest:manifest"
 openrouter = "ufo_ext_openrouter:manifest"
+pipedream = "ufo_ext_pipedream.manifest:manifest"
 redis_hub = "ufo_ext_redis_hub.manifest:manifest"
 repl = "ufo_ext_repl.manifest:manifest"
 research = "ufo_ext_research.manifest:manifest"
@@ -103,12 +105,14 @@ packages = [
     "extensions/brief_pipeline/ufo_ext_brief_pipeline",
     "extensions/browser/ufo_ext_browser",
     "extensions/coding/ufo_ext_coding",
+    "extensions/composio/ufo_ext_composio",
     "extensions/connectors/ufo_ext_connectors",
     "extensions/documents/ufo_ext_documents",
     "extensions/eval_harness/ufo_ext_eval_harness",
     "extensions/page_alerts/ufo_ext_page_alerts",
     "extensions/knowledge_graph/ufo_ext_knowledge_graph",
     "extensions/memory/ufo_ext_memory",
+    "extensions/pipedream/ufo_ext_pipedream",
     "extensions/redis_hub/ufo_ext_redis_hub",
     "extensions/repl/ufo_ext_repl",
     "extensions/research/ufo_ext_research",
