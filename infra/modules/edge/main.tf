@@ -1,7 +1,8 @@
 # The apex edge worker: `GET /` answers CLI user-agents with the text landing card — over plain
 # http too, so `curl <hostname>` works verbatim — and serves browsers the embedded landing page
-# (`landing.html`, substituted into the script below) on the `site_base` host; browsers on any
-# other host are redirected there, and on plain http bounced to https first. `POST /waitlist`
+# (`landing.html`, substituted into the script below) on the `site_base` host, stamped with the
+# craft count from the gateway's `/fleet`; browsers on any other host are redirected there, and on
+# plain http bounced to https first. `POST /waitlist`
 # records emails in D1 (the card's counter reads them back), and `GET /install(.sh)` proxies the
 # gateway's version-stamped client script. The route claims the whole host — Cloudflare matches patterns against the URL
 # including its query, so exact-path routes never fire for query'd URLs (`/?utm=…`). Paths the

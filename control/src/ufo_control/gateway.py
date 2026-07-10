@@ -1,12 +1,13 @@
 """The apex onboarding server — a control-plane role, not a tenant workspace.
 
 `GET /ufo` serves the version-stamped POSIX client; `POST /v1/onboard/{channel}` drives the sign-in
-screen as directives. The apex's public face — the landing card, the waitlist, and `/install` —
-is the Cloudflare edge worker (`infra/modules/edge`) in front of this origin; the terminal client
-is the one onboarding renderer. The state is the `onboard_claim` row keyed by the client's session,
-so each POST advances the same claim: no email → ask; code pending → verify; verified → resolve to
-a workspace and sign in. The claim ledger is written as the Postgres owner (`onboard_claim` is a
-platform record, no RLS).
+screen as directives; `GET /fleet` answers the craft count the edge worker's landing page renders —
+one craft aloft per workspace. The apex's public face — the landing card, the waitlist, and
+`/install` — is the Cloudflare edge worker (`infra/modules/edge`) in front of this origin; the
+terminal client is the one onboarding renderer. The state is the `onboard_claim` row keyed by the
+client's session, so each POST advances the same claim: no email → ask; code pending → verify;
+verified → resolve to a workspace and sign in. The claim ledger is written as the Postgres owner
+(`onboard_claim` is a platform record, no RLS).
 
 Resolution has two tiers, picked by `UFO_ONBOARD_TIER`:
 
@@ -29,7 +30,7 @@ from typing import Any
 
 import asyncpg
 from fastapi import FastAPI, Request
-from starlette.responses import PlainTextResponse, Response
+from starlette.responses import JSONResponse, PlainTextResponse, Response
 from ufo.db import dispose_db, init_db
 
 from ufo_control.gateway_claim import ClaimError, ClaimWorkflow
@@ -236,6 +237,11 @@ class Onboarding:
         )
 
 
+async def craft_count(pool: asyncpg.Pool) -> int:
+    """The fleet size the landing page renders — every workspace is one craft aloft."""
+    return await pool.fetchval("select count(*) from workspace")
+
+
 def _require_env(name: str) -> str:
     value = os.environ.get(name)
     if not value:
@@ -298,6 +304,7 @@ def gateway_app() -> FastAPI:
         await store.ensure_table()
         invites = InviteCodes(pool=pool)
         await invites.ensure_table()
+        state["pool"] = pool
         state["store"] = store
         state["invites"] = invites
         state["tier"] = tier
@@ -323,6 +330,10 @@ def gateway_app() -> FastAPI:
     @app.get("/ufo")
     async def serve_script() -> Response:
         return PlainTextResponse(STAMPED_SCRIPT, media_type=SHELLSCRIPT_MEDIA_TYPE)
+
+    @app.get("/fleet")
+    async def fleet() -> Response:
+        return JSONResponse({"craft": await craft_count(state["pool"])})
 
     @app.post("/v1/onboard/{channel}")
     async def onboard(channel: str, request: Request) -> Response:

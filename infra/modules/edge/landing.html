@@ -20,7 +20,7 @@
     min-height:100vh;
     overflow:hidden;          /* no scrollbars as the craft roams */
   }
-  #stage{
+  .craft{
     position:fixed;
     left:0; top:0;
     will-change:transform, opacity;  /* moved + faded in JS */
@@ -34,22 +34,23 @@
     user-select:none;
     pointer-events:none;       /* never intercepts the cursor */
   }
-  #stage .hull {color:var(--hull); text-shadow:0 0 6px #8b8fb855}
-  #stage .lit  {color:var(--gold); text-shadow:0 0 10px var(--gold)}
-  #stage .spark{color:var(--spark);text-shadow:0 0 12px var(--spark)}
-  #stage .c    {color:var(--c); text-shadow:0 0 10px var(--c)}
+  .craft .hull {color:var(--hull); text-shadow:0 0 6px #8b8fb855}
+  .craft .lit  {color:var(--gold); text-shadow:0 0 10px var(--gold)}
+  .craft .spark{color:var(--spark);text-shadow:0 0 12px var(--spark)}
+  .craft .c    {color:var(--c); text-shadow:0 0 10px var(--c)}
   @media (prefers-reduced-motion: reduce){
-    #stage{text-shadow:0 0 6px currentColor}
+    .craft{text-shadow:0 0 6px currentColor}
   }
 </style>
 </head>
 <body>
-  <div id="stage" role="img" aria-label="An animated ASCII flying saucer that continuously re-forms into different craft"></div>
+  <div id="sky" role="img" aria-label="Animated ASCII flying saucers that continuously re-form into different craft"></div>
 
 <script>
 "use strict";
 /* ═══════════════════════════════════════════════════════════════════════
-   ufo morph — JavaScript port of the Python renderer.
+   ufo morph — JavaScript port of the Python renderer, flown as a fleet:
+   one craft aloft per workspace (the worker substitutes the count below).
 
    A craft is built from a grammar of parts (domes, struts, cores, rims,
    fins, antennae, beams). Thirteen SILHOUETTE FAMILIES cover the recognized
@@ -519,197 +520,230 @@ function mulberry32(seed){
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// the show: an endless tour of waypoints with smooth transitions
+// the fleet: one craft aloft per workspace, each on its own endless tour
 // ═══════════════════════════════════════════════════════════════════════
-const stage = document.getElementById('stage');
+const FLEET_N = __FLEET_N__;
+const MAX_FLEET = 100;
+
+const sky = document.getElementById('sky');
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 const STEPS_EACH = 12;
 const FPS = reduceMotion ? 2.2 : 7;
-let rng = mulberry32((Math.random()*1e9)>>>0);
-let current = randomCraft(rng);
-let queue = [];          // pending grids to display
-
-// Build the next leg: morph the current craft into a fresh one (never the
-// same family back-to-back, so the tour stays varied).
-function nextLeg(){
-  let c = randomCraft(rng);
-  if(c.family === current.family){
-    c = {...c, family:(current.family + 1 + Math.floor(rng()*(FAMILIES.length-1))) % FAMILIES.length};
-  }
-  const grids = morphFrames(current, c, STEPS_EACH);
-  current = c;
-  return grids;
-}
-
-function pump(){
-  while(queue.length < STEPS_EACH) queue.push(...nextLeg());
-}
-
-let acc = 0, last = performance.now();
-
-// ── motion: DVD-screensaver drift + mouse avoidance ─────────────────────
-// The stage element is moved with a CSS transform every animation frame.
-// It drifts at constant speed and reflects off the viewport edges; when the
-// cursor comes near, a repulsion push steers the craft away so it can't be
-// clicked (the element is also pointer-events:none as a backstop).
-const motion = {
-  x: 0, y: 0,            // top-left position in px (set after first measure)
-  vx: 0, vy: 0,          // velocity px/sec
-  w: 0, h: 0,            // measured craft size
-  ready: false,
-  // ── cloak cycle: visible → fading out → (teleport) → fading in → visible ──
-  phase: 'visible',      // 'visible' | 'out' | 'in'
-  opacity: 1,
-  timer: 0,              // seconds until the next fade-out begins
-};
 const BASE_SPEED = reduceMotion ? 22 : 70;   // px/sec drift
 const FLEE_RADIUS = 170;                      // how close the mouse must get
 const FLEE_FORCE  = 1400;                     // strength of the dodge
 const MAX_SPEED   = 300;                      // cap so a fast mouse can't fling it
+const SEP_FORCE   = 900;                      // craft keep polite formation distance
 const FADE_OUT_T  = 0.7;                       // seconds to fade away
 const FADE_IN_T   = 0.9;                       // seconds to materialize back
 const VISIBLE_MIN = reduceMotion ? 14 : 6;     // min seconds visible between cloaks
 const VISIBLE_MAX = reduceMotion ? 26 : 15;    // max seconds visible between cloaks
+const SEED_STRIDE = 2654435761;                // craft #i flies the same hull every visit
+
+const requested = Number(new URLSearchParams(location.search).get('n'));
+const COUNT = Math.min(MAX_FLEET, Math.max(1, requested || FLEET_N || 1));
+sky.setAttribute('aria-label',
+  `${COUNT} animated ASCII flying saucer${COUNT === 1 ? '' : 's'} drifting across the night sky`);
+
 const mouse = { x: -9999, y: -9999, active: false };
-
-function nextCloakDelay(){
-  return VISIBLE_MIN + Math.random()*(VISIBLE_MAX - VISIBLE_MIN);
-}
-
 addEventListener('pointermove', e => {
   mouse.x = e.clientX; mouse.y = e.clientY; mouse.active = true;
 }, {passive:true});
 addEventListener('pointerleave', () => { mouse.active = false; });
 addEventListener('blur', () => { mouse.active = false; });
 
-function measure(){
-  const r = stage.getBoundingClientRect();
-  motion.w = r.width; motion.h = r.height;
+// craft shrink as the fleet grows so the sky never crowds out
+function fontPx(){
+  const base = Math.min(22, Math.max(13, innerWidth*0.0375));
+  return Math.max(7, base * Math.max(0.32, Math.pow(COUNT, -0.22)));
+}
+function nextCloakDelay(){ return VISIBLE_MIN + Math.random()*(VISIBLE_MAX - VISIBLE_MIN); }
+
+function makeCraft(index){
+  const el = document.createElement('div');
+  el.className = 'craft';
+  el.style.fontSize = fontPx().toFixed(2) + 'px';
+  el.style.opacity = '0';            // invisible until initMotion places it
+  sky.appendChild(el);
+  const rng = mulberry32(((index+1) * SEED_STRIDE) >>> 0);
+  const craft = {
+    el, rng,
+    current: randomCraft(rng),
+    queue: [],
+    x:0, y:0, vx:0, vy:0, w:0, h:0, ready:false,
+    phase:'visible', opacity:1, timer:nextCloakDelay(),
+  };
+  el.innerHTML = gridToHTML(renderGrid(craft.current));
+  return craft;
 }
 
-function initMotion(){
-  measure();
-  // start somewhere random, fully on-screen
-  const maxX = Math.max(0, innerWidth  - motion.w);
-  const maxY = Math.max(0, innerHeight - motion.h);
-  motion.x = maxX * (0.2 + 0.6*Math.random());
-  motion.y = maxY * (0.2 + 0.6*Math.random());
-  // random diagonal heading at constant speed
+// Build the next leg: morph the craft into a fresh one (never the same
+// family back-to-back, so each tour stays varied).
+function nextLeg(craft){
+  let c = randomCraft(craft.rng);
+  if(c.family === craft.current.family){
+    c = {...c, family:(craft.current.family + 1 +
+          Math.floor(craft.rng()*(FAMILIES.length-1))) % FAMILIES.length};
+  }
+  const grids = morphFrames(craft.current, c, STEPS_EACH);
+  craft.current = c;
+  return grids;
+}
+function pump(craft){
+  while(craft.queue.length < STEPS_EACH) craft.queue.push(...nextLeg(craft));
+}
+
+function initMotion(craft){
+  const r = craft.el.getBoundingClientRect();
+  craft.w = r.width; craft.h = r.height;
+  const maxX = Math.max(0, innerWidth  - craft.w);
+  const maxY = Math.max(0, innerHeight - craft.h);
+  craft.x = maxX * Math.random();
+  craft.y = maxY * Math.random();
   const ang = Math.random()*Math.PI*2;
-  motion.vx = Math.cos(ang)*BASE_SPEED;
-  motion.vy = Math.sin(ang)*BASE_SPEED;
-  motion.ready = true;
-  motion.opacity = 1;
-  motion.phase = 'visible';
-  motion.timer = nextCloakDelay();
-  stage.style.opacity = '1';
-  stage.style.transform = `translate(${motion.x}px,${motion.y}px)`;
+  craft.vx = Math.cos(ang)*BASE_SPEED;
+  craft.vy = Math.sin(ang)*BASE_SPEED;
+  craft.ready = true;
+  craft.el.style.transform = `translate(${craft.x}px,${craft.y}px)`;
+  craft.el.style.opacity = '1';
 }
 
-function teleport(){
+function teleport(craft){
   // jump to a fresh random spot (away from the cursor) with a new heading
-  const maxX = Math.max(0, innerWidth  - motion.w);
-  const maxY = Math.max(0, innerHeight - motion.h);
+  const maxX = Math.max(0, innerWidth  - craft.w);
+  const maxY = Math.max(0, innerHeight - craft.h);
   let nx, ny, tries = 0;
   do {
     nx = maxX * Math.random();
     ny = maxY * Math.random();
     tries++;
-    // keep clear of the mouse so it doesn't reappear under the cursor
-    const cx = nx + motion.w/2, cy = ny + motion.h/2;
+    const cx = nx + craft.w/2, cy = ny + craft.h/2;
     const clear = !mouse.active ||
       Math.hypot(cx - mouse.x, cy - mouse.y) > FLEE_RADIUS + 60;
     if(clear || tries > 12) break;
   } while(true);
-  motion.x = nx; motion.y = ny;
+  craft.x = nx; craft.y = ny;
   const ang = Math.random()*Math.PI*2;
-  motion.vx = Math.cos(ang)*BASE_SPEED;
-  motion.vy = Math.sin(ang)*BASE_SPEED;
+  craft.vx = Math.cos(ang)*BASE_SPEED;
+  craft.vy = Math.sin(ang)*BASE_SPEED;
 }
 
-function stepMotion(dtSec){
-  if(!motion.ready) return;
-  const maxX = Math.max(0, innerWidth  - motion.w);
-  const maxY = Math.max(0, innerHeight - motion.h);
-
-  // ── cloak cycle ──
-  if(motion.phase === 'visible'){
-    motion.opacity = 1;
-    motion.timer -= dtSec;
-    if(motion.timer <= 0){ motion.phase = 'out'; }
-  } else if(motion.phase === 'out'){
-    motion.opacity -= dtSec / FADE_OUT_T;
-    if(motion.opacity <= 0){
-      motion.opacity = 0;
-      teleport();              // relocate while fully invisible
-      motion.phase = 'in';
+// pairwise repulsion spreads the formation; cloaked craft don't push
+function applySeparation(dtSec){
+  for(let i=0;i<fleet.length;i++){
+    const a = fleet[i];
+    if(!a.ready || a.opacity < 0.3) continue;
+    for(let j=i+1;j<fleet.length;j++){
+      const b = fleet[j];
+      if(!b.ready || b.opacity < 0.3) continue;
+      const ax = a.x + a.w/2, ay = a.y + a.h/2;
+      const bx = b.x + b.w/2, by = b.y + b.h/2;
+      const rad = 0.6*(a.w + b.w)/2 + 8;
+      const dx = ax-bx, dy = ay-by;
+      const dist = Math.hypot(dx,dy) || 0.0001;
+      if(dist >= rad) continue;
+      const push = SEP_FORCE * (1 - dist/rad) / dist * dtSec;
+      a.vx += dx*push; a.vy += dy*push;
+      b.vx -= dx*push; b.vy -= dy*push;
     }
-  } else if(motion.phase === 'in'){
-    motion.opacity += dtSec / FADE_IN_T;
-    if(motion.opacity >= 1){
-      motion.opacity = 1;
-      motion.phase = 'visible';
-      motion.timer = nextCloakDelay();
+  }
+}
+
+function stepMotion(craft, dtSec){
+  if(!craft.ready) return;
+  const maxX = Math.max(0, innerWidth  - craft.w);
+  const maxY = Math.max(0, innerHeight - craft.h);
+
+  // ── cloak cycle: visible → fading out → (teleport) → fading in ──
+  if(craft.phase === 'visible'){
+    craft.opacity = 1;
+    craft.timer -= dtSec;
+    if(craft.timer <= 0){ craft.phase = 'out'; }
+  } else if(craft.phase === 'out'){
+    craft.opacity -= dtSec / FADE_OUT_T;
+    if(craft.opacity <= 0){
+      craft.opacity = 0;
+      teleport(craft);            // relocate while fully invisible
+      craft.phase = 'in';
+    }
+  } else if(craft.phase === 'in'){
+    craft.opacity += dtSec / FADE_IN_T;
+    if(craft.opacity >= 1){
+      craft.opacity = 1;
+      craft.phase = 'visible';
+      craft.timer = nextCloakDelay();
     }
   }
 
   // mouse repulsion: push away from the cursor, ramping up as it nears
   if(mouse.active){
-    const cx = motion.x + motion.w/2, cy = motion.y + motion.h/2;
-    let dx = cx - mouse.x, dy = cy - mouse.y;
-    let dist = Math.hypot(dx, dy) || 0.0001;
+    const cx = craft.x + craft.w/2, cy = craft.y + craft.h/2;
+    const dx = cx - mouse.x, dy = cy - mouse.y;
+    const dist = Math.hypot(dx, dy) || 0.0001;
     if(dist < FLEE_RADIUS){
       const push = FLEE_FORCE * (1 - dist/FLEE_RADIUS) / dist;
-      motion.vx += dx * push * dtSec;
-      motion.vy += dy * push * dtSec;
+      craft.vx += dx * push * dtSec;
+      craft.vy += dy * push * dtSec;
     }
   }
 
   // gently relax speed back toward the base drift so dodges don't accumulate
-  const sp = Math.hypot(motion.vx, motion.vy) || 0.0001;
-  const target = BASE_SPEED;
-  const relaxed = sp + (target - sp) * Math.min(1, dtSec*0.8);
-  motion.vx = motion.vx/sp * Math.min(relaxed, MAX_SPEED);
-  motion.vy = motion.vy/sp * Math.min(relaxed, MAX_SPEED);
+  const sp = Math.hypot(craft.vx, craft.vy) || 0.0001;
+  const relaxed = sp + (BASE_SPEED - sp) * Math.min(1, dtSec*0.8);
+  craft.vx = craft.vx/sp * Math.min(relaxed, MAX_SPEED);
+  craft.vy = craft.vy/sp * Math.min(relaxed, MAX_SPEED);
 
-  // integrate
-  motion.x += motion.vx * dtSec;
-  motion.y += motion.vy * dtSec;
+  // integrate, then bounce off the walls
+  craft.x += craft.vx * dtSec;
+  craft.y += craft.vy * dtSec;
+  if(craft.x <= 0){ craft.x = 0; craft.vx = Math.abs(craft.vx); }
+  else if(craft.x >= maxX){ craft.x = maxX; craft.vx = -Math.abs(craft.vx); }
+  if(craft.y <= 0){ craft.y = 0; craft.vy = Math.abs(craft.vy); }
+  else if(craft.y >= maxY){ craft.y = maxY; craft.vy = -Math.abs(craft.vy); }
 
-  // bounce off the walls (reflect velocity, clamp inside)
-  if(motion.x <= 0){ motion.x = 0; motion.vx = Math.abs(motion.vx); }
-  else if(motion.x >= maxX){ motion.x = maxX; motion.vx = -Math.abs(motion.vx); }
-  if(motion.y <= 0){ motion.y = 0; motion.vy = Math.abs(motion.vy); }
-  else if(motion.y >= maxY){ motion.y = maxY; motion.vy = -Math.abs(motion.vy); }
-
-  stage.style.transform = `translate(${motion.x}px,${motion.y}px)`;
-  stage.style.opacity = motion.opacity.toFixed(3);
+  craft.el.style.transform = `translate(${craft.x}px,${craft.y}px)`;
+  craft.el.style.opacity = craft.opacity.toFixed(3);
 }
 
-addEventListener('resize', () => { if(motion.ready) measure(); });
+const fleet = Array.from({length:COUNT}, (_,i) => makeCraft(i));
+
+addEventListener('resize', () => {
+  const px = fontPx().toFixed(2)+'px';
+  for(const craft of fleet){
+    craft.el.style.fontSize = px;
+    const r = craft.el.getBoundingClientRect();
+    craft.w = r.width; craft.h = r.height;
+  }
+});
+
+let acc = 0, last = performance.now();
 
 function loop(now){
-  const dt = now - last; last = now;
-  // advance the craft's position every frame for smooth drift
-  stepMotion(Math.min(dt/1000, 0.05));
-  // advance the morph animation at the fixed frame rate
-  acc += dt;
+  const rawDt = now - last; last = now;
+  // advance every craft's position each frame for smooth drift
+  const dtSec = Math.min(rawDt/1000, 0.05);
+  applySeparation(dtSec);
+  for(const craft of fleet) stepMotion(craft, dtSec);
+  // advance the morph animations at the fixed frame rate
+  acc += rawDt;
   const interval = 1000/FPS;
   while(acc >= interval){
     acc -= interval;
-    if(queue.length < 2) pump();
-    const grid = queue.shift();
-    if(grid) stage.innerHTML = gridToHTML(grid);
+    for(const craft of fleet){
+      if(craft.queue.length < 2) pump(craft);
+      const grid = craft.queue.shift();
+      if(grid) craft.el.innerHTML = gridToHTML(grid);
+    }
   }
   requestAnimationFrame(loop);
 }
 
-// seed the first frame immediately so there's no blank flash
-stage.innerHTML = gridToHTML(renderGrid(current));
-pump();
-// measure after layout settles, then start moving
-requestAnimationFrame(() => { initMotion(); requestAnimationFrame(loop); });
+// measure after layout settles, then place the fleet and start moving
+requestAnimationFrame(() => {
+  for(const craft of fleet){ pump(craft); initMotion(craft); }
+  requestAnimationFrame(loop);
+});
 </script>
 </body>
 </html>

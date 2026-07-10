@@ -9,9 +9,12 @@ const source = (await readFile(new URL("worker.js", moduleDir), "utf8")).replace
   '"__LANDING_HTML__"',
   JSON.stringify(LANDING_PAGE),
 );
-const worker = (
-  await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`)
-).default;
+async function importWorker(tag) {
+  const tagged = `${source}\n// ${tag}`;
+  return (await import(`data:text/javascript;base64,${Buffer.from(tagged).toString("base64")}`))
+    .default;
+}
+const worker = await importWorker("shared");
 
 function fakeD1() {
   const rows = new Map();
@@ -39,8 +42,10 @@ function fakeD1() {
 }
 
 const passedThrough = [];
+let fleetReply = () => Response.json({ craft: 0 });
 globalThis.fetch = async (input) => {
   const url = input instanceof Request ? input.url : input;
+  if (url.endsWith("/fleet")) return fleetReply();
   passedThrough.push(url);
   return new Response(`origin:${url}`);
 };
@@ -81,7 +86,41 @@ test("browser landing over plain http is bounced to https with its query intact"
 test("browser landing on the site's own apex serves the embedded page", async () => {
   const reply = await request("https://flyingobject.ai/?utm_source=card", { ua: "Mozilla/5.0" });
   assert.equal(reply.headers.get("content-type"), "text/html; charset=utf-8");
-  assert.equal(await reply.text(), LANDING_PAGE);
+  assert.equal(await reply.text(), LANDING_PAGE.replace("__FLEET_N__", "0"));
+});
+
+test("the landing page carries the live craft count from the gateway", async () => {
+  const fresh = await importWorker("fleet-live");
+  fleetReply = () => Response.json({ craft: 4 });
+  const reply = await fresh.fetch(
+    new Request("https://flyingobject.ai/", { headers: { "user-agent": "Mozilla/5.0" } }),
+    env,
+  );
+  assert.match(await reply.text(), /const FLEET_N = 4;/);
+});
+
+test("the craft count is capped at the fleet limit", async () => {
+  const fresh = await importWorker("fleet-cap");
+  fleetReply = () => Response.json({ craft: 5000 });
+  const reply = await fresh.fetch(
+    new Request("https://flyingobject.ai/", { headers: { "user-agent": "Mozilla/5.0" } }),
+    env,
+  );
+  assert.match(await reply.text(), /const FLEET_N = 100;/);
+});
+
+test("a gateway outage lands an empty sky, not an error", async () => {
+  const fresh = await importWorker("fleet-outage");
+  fleetReply = () => {
+    throw new Error("origin down");
+  };
+  const reply = await fresh.fetch(
+    new Request("https://flyingobject.ai/", { headers: { "user-agent": "Mozilla/5.0" } }),
+    env,
+  );
+  assert.equal(reply.status, 200);
+  assert.match(await reply.text(), /const FLEET_N = 0;/);
+  fleetReply = () => Response.json({ craft: 0 });
 });
 
 test("browser landing on another apex redirects to the site", async () => {
