@@ -7,7 +7,6 @@ tool. The invariant the session exists to hold: a tool reaches only the conversa
 
 import base64
 import json
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Protocol
@@ -279,6 +278,3 @@ class SandboxSession:
         """The carrier's per-sandbox traffic token when it gates the public per-port host behind
         one (e2b), else None — carried as a connection header by a caller dialing `host`."""
         return self.handle.traffic_token
-
-
-SandboxFactory = Callable[[UUID], Awaitable[SandboxSession]]
