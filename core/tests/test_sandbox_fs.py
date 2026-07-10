@@ -124,13 +124,15 @@ def test_aws_credentials_file_is_the_default_profile() -> None:
 
 
 def test_mount_scripts_prepare_and_mount() -> None:
+    """The mountpoint is born in the root `prepare` (the image ships without /workspace, `/` is
+    root-owned, and there is no sudo) and handed to the agent user, whose non-root `mount` then
+    only locks the credential file and runs s3fs."""
     prepare, mount = mount_scripts("/workspace", "s3fs bucket:/p /workspace -o x")
     assert "chmod 666 /dev/fuse" in prepare
     assert "user_allow_other" in prepare
     assert "umount -l /workspace" in prepare
-    assert mount == (
-        f"mkdir -p /workspace && chmod 600 {AWS_CREDENTIALS_PATH} && s3fs bucket:/p /workspace -o x"
-    )
+    assert prepare.endswith("mkdir -p /workspace && chown user /workspace")
+    assert mount == (f"chmod 600 {AWS_CREDENTIALS_PATH} && s3fs bucket:/p /workspace -o x")
 
 
 def test_mount_health_check_probes_readdir_and_bounds_credential_age() -> None:
