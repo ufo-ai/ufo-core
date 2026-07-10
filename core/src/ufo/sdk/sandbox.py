@@ -12,6 +12,7 @@ from ufo.sandbox.fs_mount import (
 )
 from ufo.sandbox.fs_mount import MOUNT_TIMEOUT_SECONDS as MOUNT_TIMEOUT_SECONDS
 from ufo.sandbox.fs_mount import aws_credentials_file as aws_credentials_file
+from ufo.sandbox.fs_mount import mount_health_check as mount_health_check
 from ufo.sandbox.fs_mount import mount_scripts as mount_scripts
 from ufo.sandbox.fs_mount import s3fs_command as s3fs_command
 from ufo.sandbox.session import SENTINEL_MODEL_KEY as SENTINEL_MODEL_KEY

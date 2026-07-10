@@ -1,20 +1,22 @@
 """The s3fs mount recipe a carrier runs to bring a conversation's workspace S3 prefix up at
-`/workspace`: the AWS credentials file the minted scoped cred becomes, the s3fs command, and the
-root `prepare` + user `mount` shell steps. Pure string builders — each carrier (Docker, E2B) writes
-the cred, runs the two steps through its own exec-with-user, and health-checks with `mountpoint` —
-so this backend-neutral recipe is re-exported through `ufo.sdk.sandbox` for the carriers."""
+`/workspace`: the AWS credentials file the minted scoped cred becomes, the s3fs command, the
+root `prepare` + user `mount` shell steps, and the `mount_health_check` probe that decides
+skip-vs-remount. Pure string builders — each carrier (Docker, E2B) writes the cred and runs the
+steps through its own exec-with-user — so this backend-neutral recipe is re-exported through
+`ufo.sdk.sandbox` for the carriers."""
 
 from __future__ import annotations
 
 import shlex
 
-from ufo.sandbox.fs_creds import SandboxFsCredentials
+from ufo.sandbox.fs_creds import SANDBOX_FS_CRED_TTL_SECONDS, SandboxFsCredentials
 
 AWS_CREDENTIALS_PATH = "/home/user/.aws/credentials"
 FUSE_DEVICE = "/dev/fuse"
 FUSE_CONF = "/etc/fuse.conf"
 MOUNT_TIMEOUT_SECONDS = 30
 MOUNT_HEALTH_CHECK_TIMEOUT_SECONDS = 10
+MOUNT_CREDENTIAL_MAX_AGE_SECONDS = SANDBOX_FS_CRED_TTL_SECONDS // 2
 
 
 def aws_credentials_file(credentials: SandboxFsCredentials) -> str:
@@ -77,3 +79,20 @@ def mount_scripts(mountpoint: str, s3fs: str) -> tuple[str, str]:
     )
     mount = f"mkdir -p {mp} && chmod 600 {AWS_CREDENTIALS_PATH} && {s3fs}"
     return prepare, mount
+
+
+def mount_health_check(mountpoint: str) -> str:
+    """The probe that decides skip-vs-remount, true only for a genuinely serviceable mount: the
+    path is a mountpoint, a readdir answers through s3fs (a real ListObjects — an expired
+    credential or wedged daemon fails it with EIO, while `mountpoint` alone stays green because
+    s3fs synthesizes the root inode locally), and the mounted credential is under half its TTL.
+    Every attach re-mints, so refreshing at half-life means no attach proceeds onto a credential
+    that expires mid-session — and a pause/resume carrier (e2b) can park a sandbox for days, so
+    wall-clock credential age, not daemon liveness, is what invalidates a mount. A missing
+    credentials file reads as age-since-epoch, so a never-mounted sandbox probes unhealthy."""
+    mp = shlex.quote(mountpoint)
+    minted = f"$(stat -c %Y {shlex.quote(AWS_CREDENTIALS_PATH)} 2>/dev/null || echo 0)"
+    return (
+        f"mountpoint -q {mp} && ls {mp} >/dev/null 2>&1 && "
+        f"[ $(( $(date +%s) - {minted} )) -lt {MOUNT_CREDENTIAL_MAX_AGE_SECONDS} ]"
+    )

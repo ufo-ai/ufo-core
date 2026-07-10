@@ -41,7 +41,7 @@ from ufo.sandbox.session import (
     SandboxHandle,
     SandboxSpec,
 )
-from ufo.sdk.sandbox import AWS_CREDENTIALS_PATH, aws_credentials_file
+from ufo.sdk.sandbox import AWS_CREDENTIALS_PATH, aws_credentials_file, mount_health_check
 from ufo.serve import _select_carrier
 
 
@@ -60,6 +60,7 @@ class _Commands:
     result: _Result = field(default_factory=lambda: _Result("out", "", 0))
     raises: Exception | None = None
     fail_on: tuple[str, ...] = ()
+    timeout_on: tuple[str, ...] = ()
 
     def run(
         self,
@@ -75,6 +76,8 @@ class _Commands:
         self.envs.append(envs)
         if any(token in cmd for token in self.fail_on):
             raise CommandExitException(stderr="", stdout="", exit_code=1, error="not mounted")
+        if any(token in cmd for token in self.timeout_on):
+            raise TimeoutException("probe hung")
         if self.raises is not None:
             raise self.raises
         return self.result
@@ -122,6 +125,7 @@ class _Sdk:
     sandboxes: dict[str, _Sandbox] = field(default_factory=dict)
     counter: int = 0
     command_fail_on: tuple[str, ...] = ()
+    command_timeout_on: tuple[str, ...] = ()
 
     def create(
         self,
@@ -134,7 +138,10 @@ class _Sdk:
     ) -> _Sandbox:
         self.counter += 1
         sandbox_id = f"sbx-{self.counter}"
-        sandbox = _Sandbox(sandbox_id=sandbox_id, commands=_Commands(fail_on=self.command_fail_on))
+        sandbox = _Sandbox(
+            sandbox_id=sandbox_id,
+            commands=_Commands(fail_on=self.command_fail_on, timeout_on=self.command_timeout_on),
+        )
         self.sandboxes[sandbox_id] = sandbox
         self.created.append(
             {
@@ -202,7 +209,7 @@ async def test_create_mounts_the_s3_workspace_prefix_over_s3fs() -> None:
         (AWS_CREDENTIALS_PATH, aws_credentials_file(_S3_CREDS)),
     ]
     commands = [cmd for cmd, _, _ in sandbox.commands.runs]
-    assert commands[0] == f"mountpoint -q {WORKSPACE_DIR}"
+    assert commands[0] == mount_health_check(WORKSPACE_DIR)
     assert "chmod 666 /dev/fuse" in commands[1]
     assert commands[2].startswith(
         f"mkdir -p {WORKSPACE_DIR} && chmod 600 {AWS_CREDENTIALS_PATH} && "
@@ -219,14 +226,32 @@ async def test_create_mounts_the_s3_workspace_prefix_over_s3fs() -> None:
 async def test_create_skips_the_s3_mount_when_already_healthy() -> None:
     """Idempotent-if-healthy: a subagent's create over a live mount health-checks and returns
     without remounting, so it never yanks the mount out from under an in-flight dispatch."""
-    sdk = _Sdk()  # mountpoint succeeds → already mounted
+    sdk = _Sdk()  # the probe succeeds → mounted, serving S3, credential inside its window
     carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
 
     await carrier.create(_s3_spec(uuid4()))
 
     sandbox = sdk.sandboxes["sbx-1"]
     assert sandbox.files.written == [(CA_SANDBOX_PATH, "ca-pem")]
-    assert [cmd for cmd, _, _ in sandbox.commands.runs] == [f"mountpoint -q {WORKSPACE_DIR}"]
+    assert [cmd for cmd, _, _ in sandbox.commands.runs] == [mount_health_check(WORKSPACE_DIR)]
+
+
+async def test_create_remounts_when_the_health_probe_times_out() -> None:
+    """A wedged FUSE mount hangs the probe rather than failing it; the carrier reads the timeout
+    as unhealthy and remounts with the bring-up's fresh credential instead of surfacing the hang —
+    the resumed-after-pause sandbox whose s3fs daemon outlived its STS token."""
+    sdk = _Sdk(command_timeout_on=("mountpoint",))
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    conversation = uuid4()
+
+    await carrier.create(_s3_spec(conversation))
+
+    sandbox = sdk.sandboxes["sbx-1"]
+    assert (AWS_CREDENTIALS_PATH, aws_credentials_file(_S3_CREDS)) in sandbox.files.written
+    commands = [cmd for cmd, _, _ in sandbox.commands.runs]
+    assert commands[0] == mount_health_check(WORKSPACE_DIR)
+    assert "umount -l" in commands[1]
+    assert f"s3fs ufo-blobs:/conversations/{conversation}/workspace {WORKSPACE_DIR}" in commands[2]
 
 
 async def test_create_opens_a_sandbox_on_the_template_and_returns_its_handle() -> None:

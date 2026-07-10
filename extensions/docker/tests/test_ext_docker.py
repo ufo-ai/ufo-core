@@ -17,7 +17,7 @@ from ufo_ext_docker import DockerCarrier
 from ufo.blob import FilesystemBlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
 from ufo.sandbox.fs_creds import SandboxFsCredentials
-from ufo.sdk.sandbox import WORKSPACE_DIR, MountSpec, SandboxHandle
+from ufo.sdk.sandbox import WORKSPACE_DIR, MountSpec, SandboxHandle, mount_health_check
 from ufo.serve import _select_carrier
 
 _S3_CREDS = SandboxFsCredentials("AKIASBX", "sbx-secret", "sbx-token")
@@ -102,6 +102,36 @@ def test_config_backend_docker_resolves_the_extension_contributed_carrier() -> N
     )
     carrier = _select_carrier(config, (docker_ext.manifest(),))
     assert isinstance(carrier, DockerCarrier)
+
+
+async def test_attach_skips_the_remount_only_when_the_shared_probe_passes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The skip decision rides on the shared mount_health_check recipe — a real readdir through
+    s3fs plus the credential-age bound, not a bare `mountpoint` that stays green on an
+    expired-credential mount — and a pass makes _mount_s3 a no-op."""
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60):
+        calls.append(argv)
+        return 0, b"", b""
+
+    monkeypatch.setattr(docker_ext, "_docker", fake_docker)
+    conversation = uuid4()
+    mount = MountSpec(
+        kind="s3",
+        bucket="ufo-blobs",
+        key_prefix=f"conversations/{conversation}/workspace",
+        credentials=_S3_CREDS,
+        s3_url="https://minio:9000",
+        region="us-east-1",
+        path_style=True,
+    )
+    handle = SandboxHandle(conversation_id=conversation, container_id="c1", mount=mount)
+
+    await DockerCarrier()._mount_s3(handle, mount)
+
+    assert calls == [("exec", "-i", "c1", "sh", "-c", mount_health_check(WORKSPACE_DIR))]
 
 
 async def test_s3fs_mount_exec_clears_the_proxy_env_but_the_health_check_does_not(

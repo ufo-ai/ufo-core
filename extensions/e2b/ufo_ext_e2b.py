@@ -50,6 +50,7 @@ from ufo.sdk.sandbox import (
     SandboxHandle,
     SandboxSpec,
     aws_credentials_file,
+    mount_health_check,
     mount_scripts,
     s3fs_command,
 )
@@ -192,8 +193,10 @@ class E2BCarrier:
 
     async def _mount_s3(self, sandbox: E2BSandbox, mount: MountSpec) -> None:
         """Bring the conversation's workspace S3 prefix up at /workspace over s3fs. Runs on every
-        create/resume and is idempotent: skips a healthy mount so a subagent sharing the sandbox
-        never remounts under an in-flight dispatch. Writes the prefix-scoped credential, then runs
+        create/resume and is idempotent: skips a mount the health probe passes — mounted, answering
+        S3, credential inside its refresh window — so a subagent sharing the sandbox never remounts
+        under an in-flight dispatch, while a stale mount (a resumed sandbox whose credential aged
+        out while paused) is remounted with this bring-up's fresh credential. Writes it, then runs
         the root `prepare` and the agent `mount` through the sync SDK off the loop — the privileged
         prepare runs as root, the s3fs mount as the agent. These steps pass no egress env, so s3fs
         reaches S3 directly with its own scoped credential — never through the agent's egress proxy,
@@ -235,11 +238,11 @@ class E2BCarrier:
         try:
             await asyncio.to_thread(
                 sandbox.commands.run,
-                f"mountpoint -q {shlex.quote(WORKSPACE_DIR)}",
+                mount_health_check(WORKSPACE_DIR),
                 timeout=MOUNT_HEALTH_CHECK_TIMEOUT_SECONDS,
             )
             return True
-        except CommandExitException:
+        except (CommandExitException, TimeoutException):
             return False
 
     async def exec(

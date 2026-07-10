@@ -16,6 +16,7 @@ import pytest
 from ufo.blob import S3BlobStore
 from ufo.loop.queue import _workspace_mount
 from ufo.sandbox.fs_creds import (
+    SANDBOX_FS_CRED_TTL_SECONDS,
     SandboxFsCredentialMinter,
     SandboxFsCredentials,
     workspace_key_prefix,
@@ -23,7 +24,9 @@ from ufo.sandbox.fs_creds import (
 )
 from ufo.sandbox.fs_mount import (
     AWS_CREDENTIALS_PATH,
+    MOUNT_CREDENTIAL_MAX_AGE_SECONDS,
     aws_credentials_file,
+    mount_health_check,
     mount_scripts,
     s3fs_command,
 )
@@ -128,6 +131,23 @@ def test_mount_scripts_prepare_and_mount() -> None:
     assert mount == (
         f"mkdir -p /workspace && chmod 600 {AWS_CREDENTIALS_PATH} && s3fs bucket:/p /workspace -o x"
     )
+
+
+def test_mount_health_check_probes_readdir_and_bounds_credential_age() -> None:
+    """The skip-vs-remount probe is a real proof of service, not a bare `mountpoint`: readdir
+    forces a ListObjects through s3fs (an expired credential or wedged daemon fails it with EIO
+    while the mountpoint alone stays green), and the credential-age bound remounts before the
+    minted session can expire under a turn — the wedge a pause/resume carrier otherwise pins
+    forever, since the daemon survives the pause but its credential does not."""
+    probe = mount_health_check("/workspace")
+    assert probe == (
+        "mountpoint -q /workspace && ls /workspace >/dev/null 2>&1 && "
+        f"[ $(( $(date +%s) - $(stat -c %Y {AWS_CREDENTIALS_PATH} 2>/dev/null || echo 0) )) "
+        f"-lt {MOUNT_CREDENTIAL_MAX_AGE_SECONDS} ]"
+    )
+    # Refresh strictly inside the TTL: a mount that passes the probe holds a credential with at
+    # least half its lifetime left for the session it serves.
+    assert MOUNT_CREDENTIAL_MAX_AGE_SECONDS <= SANDBOX_FS_CRED_TTL_SECONDS // 2
 
 
 async def test_workspace_mount_mints_a_scoped_s3_mount() -> None:

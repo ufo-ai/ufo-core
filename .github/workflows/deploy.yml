@@ -112,6 +112,9 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.14.9"
+          # The mount gate reads role/bucket via $(terraform output -raw …); the wrapper corrupts
+          # captured stdout, and nothing here consumes its step outputs.
+          terraform_wrapper: false
 
       - name: Terraform init
         working-directory: ${{ env.TF_DIR }}
@@ -133,6 +136,19 @@ jobs:
         env:
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: terraform apply -auto-approve -input=false -var "image_tag=$IMAGE_TAG"
+
+      # Mount gate: the published template + this environment's IAM and bucket must serve a live
+      # workspace mount — mint, s3fs mount, write/list/read/chmod/delete — or the deploy goes red
+      # instead of surfacing later as a wedged agent.
+      - name: Gate sandbox workspace mount
+        if: github.event_name != 'pull_request'
+        env:
+          E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+        run: |
+          uv run python sandbox/mount_gate.py \
+            --role-arn "$(terraform -chdir="$TF_DIR" output -raw sandbox_fs_role_arn)" \
+            --bucket "$(terraform -chdir="$TF_DIR" output -raw blob_bucket)" \
+            --region "$AWS_REGION"
 
   edge:
     runs-on: ubuntu-latest

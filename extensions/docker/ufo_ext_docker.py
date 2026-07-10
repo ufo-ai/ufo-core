@@ -28,6 +28,7 @@ from ufo.sdk.sandbox import (
     SandboxHandle,
     SandboxSpec,
     aws_credentials_file,
+    mount_health_check,
     mount_scripts,
     s3fs_command,
 )
@@ -169,9 +170,11 @@ class DockerCarrier:
 
     async def _mount_s3(self, handle: SandboxHandle, mount: MountSpec) -> None:
         """Bring the conversation's workspace S3 prefix up at /workspace over s3fs. Idempotent:
-        skips a healthy mount, so a later turn attaching to a still-running container skips a
-        redundant remount (same-conversation turns serialize under the queue partition, so no
-        dispatch races another's in-flight reads). Writes the prefix-scoped credential, then runs
+        skips a mount the health probe passes — mounted, answering S3, credential inside its
+        refresh window — so a later turn attaching to a still-running container skips a redundant
+        remount (same-conversation turns serialize under the queue partition, so no dispatch races
+        another's in-flight reads), while a stale or aged-out mount is torn down and remounted with
+        this bring-up's fresh credential. Writes the prefix-scoped credential, then runs
         the root `prepare` (open /dev/fuse, enable user_allow_other, detach any stale mount) and the
         agent `mount` (s3fs, with the proxy env cleared) through the two docker-exec users — the
         privileged prepare never runs as the agent."""
@@ -237,7 +240,7 @@ class DockerCarrier:
             handle.container_id,
             "sh",
             "-c",
-            f"mountpoint -q {shlex.quote(WORKSPACE_DIR)}",
+            mount_health_check(WORKSPACE_DIR),
             timeout_s=MOUNT_HEALTH_CHECK_TIMEOUT_SECONDS,
         )
         return code == 0

@@ -79,12 +79,18 @@ data "aws_iam_policy_document" "app_s3" {
 # the sandbox for s3fs. The role grants s3 on the whole bucket; the per-conversation session policy
 # minted at AssumeRole narrows it. Trust names the app-s3 role by its COMPUTED arn — referencing
 # module.irsa_app_s3.iam_role_arn would cycle (irsa_app_s3 → app_s3 policy → this role → irsa_app_s3).
+# github-deploy is trusted so the deploy pipeline's mount gate (sandbox/mount_gate.py) mints the
+# same scoped credential and proves a live mount before the deploy goes green — it already
+# administers this role through terraform, so the trust adds no reach.
 data "aws_iam_policy_document" "sandbox_fs_trust" {
   statement {
     actions = ["sts:AssumeRole"]
     principals {
-      type        = "AWS"
-      identifiers = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.name}-app-s3"]
+      type = "AWS"
+      identifiers = [
+        "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.name}-app-s3",
+        "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/github-deploy",
+      ]
     }
   }
 }
