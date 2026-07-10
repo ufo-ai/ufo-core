@@ -218,6 +218,12 @@ data "kubectl_file_documents" "control_plane" {
     bundle_image   = local.bundle_image
     serve_role_arn = module.platform.app_s3_role_arn
     otlp_endpoint  = "http://otel-collector.${local.system_namespace}.svc.cluster.local:4318"
+
+    # Onboarding email: the gateway sends verification codes as ses_sender via the gateway-ses IRSA
+    # role. Empty ses_sender degrades the gateway to the logging backend (codes land in pod logs).
+    ses_sender           = var.ses_sender
+    ses_region           = var.region
+    gateway_ses_role_arn = module.platform.gateway_ses_role_arn
   })
 }
 

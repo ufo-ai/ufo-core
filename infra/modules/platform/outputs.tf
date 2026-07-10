@@ -43,6 +43,11 @@ output "app_s3_role_arn" {
   value       = module.irsa_app_s3.iam_role_arn
 }
 
+output "gateway_ses_role_arn" {
+  description = "IRSA role annotated on the ufo-operator ServiceAccount — the apex gateway exchanges its web identity for ses:SendEmail credentials. Empty when ses_sender is unset."
+  value       = local.ses_enabled ? module.irsa_gateway_ses[0].iam_role_arn : ""
+}
+
 output "rds_endpoint" {
   value = module.rds.db_instance_endpoint
 }

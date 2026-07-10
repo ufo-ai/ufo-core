@@ -50,6 +50,12 @@ kind: ServiceAccount
 metadata:
   name: ufo-operator
   namespace: ${namespace}
+%{ if gateway_ses_role_arn != "" }
+  annotations:
+    # IRSA: the gateway exchanges this pod's projected web identity for ses:SendEmail credentials
+    # (the pod identity webhook injects AWS_ROLE_ARN / AWS_WEB_IDENTITY_TOKEN_FILE from this).
+    eks.amazonaws.com/role-arn: ${gateway_ses_role_arn}
+%{ endif }
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -232,7 +238,13 @@ spec:
             - {name: UFO_WORKSPACE_BASE_URL, value: "https://${shared_host}"}
             - {name: UFO_BASE_DOMAIN, value: "${base_domain}"}
             - {name: UFO_BUNDLE_IMAGE, value: "${bundle_image}"}
+%{ if ses_sender != "" }
+            - {name: UFO_GATEWAY_EMAIL_BACKEND, value: "ses"}
+            - {name: UFO_SES_SENDER, value: "${ses_sender}"}
+            - {name: UFO_SES_REGION, value: "${ses_region}"}
+%{ else }
             - {name: UFO_GATEWAY_EMAIL_BACKEND, value: "logging"}
+%{ endif }
             - name: UFO_CONTROL_POSTGRES_OWNER_DSN
               valueFrom:
                 secretKeyRef: {name: ufo-control-secrets, key: postgres-admin-dsn}

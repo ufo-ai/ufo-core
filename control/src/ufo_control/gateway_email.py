@@ -4,9 +4,11 @@
 organization — the denylist fails CLOSED and a malformed address is rejected up front. The sender
 delivers the 6-digit code: `logging` for dev/tests, `ses` for the hosted apex. The SES backend
 speaks SESv2 `SendEmail` over `httpx` with a local SigV4 signer — signing is pure CPU (hmac/sha256)
-so it runs inline, and the send itself is async: no boto3 network client, no sync HTTP on the loop.
-The backend is selected by `UFO_GATEWAY_EMAIL_BACKEND`, failing loud on a missing SES field.
-Copy-adapted from metalcraft's `onboard/email_domain.py` and `onboard/email_sender.py`."""
+so it runs inline, and every network call is async: no boto3 network client, no sync HTTP on the
+loop. Credentials are the pod's IRSA web identity (`AWS_ROLE_ARN` + `AWS_WEB_IDENTITY_TOKEN_FILE`,
+injected by the EKS pod identity webhook from the gateway ServiceAccount's annotation), exchanged
+at STS per send. The backend is selected by `UFO_GATEWAY_EMAIL_BACKEND`, failing loud on a missing
+SES field."""
 
 import hashlib
 import hmac
@@ -16,7 +18,9 @@ import os
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Protocol
+from xml.etree import ElementTree
 
 import httpx
 
@@ -76,10 +80,15 @@ SES_TIMEOUT_SECONDS = 10.0
 EMAIL_BACKEND_ENV = "UFO_GATEWAY_EMAIL_BACKEND"
 SES_SENDER_ENV = "UFO_SES_SENDER"
 SES_REGION_ENV = "UFO_SES_REGION"
-AWS_ACCESS_KEY_ENV = "AWS_ACCESS_KEY_ID"
-AWS_SECRET_KEY_ENV = "AWS_SECRET_ACCESS_KEY"
-AWS_SESSION_TOKEN_ENV = "AWS_SESSION_TOKEN"
+AWS_ROLE_ARN_ENV = "AWS_ROLE_ARN"
+AWS_WEB_IDENTITY_TOKEN_FILE_ENV = "AWS_WEB_IDENTITY_TOKEN_FILE"
 DEFAULT_SES_REGION = "us-east-1"
+
+STS_VERSION = "2011-06-15"
+STS_NS = "{https://sts.amazonaws.com/doc/2011-06-15/}"
+STS_SESSION_NAME = "ufo-gateway-email"
+STS_SESSION_SECONDS = 900
+STS_TIMEOUT_SECONDS = 10.0
 
 
 class WorkEmailError(ValueError):
@@ -138,19 +147,24 @@ class LoggingEmailSender:
 class SesCredentials:
     access_key: str
     secret_key: str
-    session_token: str | None
+    session_token: str
 
 
 @dataclass(frozen=True)
 class SesEmailSender:
     """SESv2 `SendEmail` via `httpx` with a local SigV4 signer. `source` is the verified From
-    address; `region` selects the SES endpoint."""
+    address; `region` selects the STS and SES endpoints. Credentials are the pod's IRSA web
+    identity: the projected token at `token_file` is exchanged for `role_arn` at STS on every send
+    (`AssumeRoleWithWebIdentity` is unsigned, so no bootstrap credential exists) — onboarding email
+    is rare enough that a credential cache would be dead weight."""
 
     source: str
     region: str
-    credentials: SesCredentials
+    role_arn: str
+    token_file: Path
 
     async def send(self, email: str, code: str) -> None:
+        credentials = await self._assume_role()
         body = json.dumps(
             {
                 "FromEmailAddress": self.source,
@@ -164,10 +178,43 @@ class SesEmailSender:
             }
         ).encode()
         host = f"email.{self.region}.amazonaws.com"
-        headers = _sigv4_headers(host, body, self.region, self.credentials, datetime.now(UTC))
+        headers = _sigv4_headers(host, body, self.region, credentials, datetime.now(UTC))
         async with httpx.AsyncClient(timeout=SES_TIMEOUT_SECONDS) as client:
             response = await client.post(f"https://{host}{SES_PATH}", content=body, headers=headers)
             response.raise_for_status()
+
+    async def _assume_role(self) -> SesCredentials:
+        token = self.token_file.read_text().strip()
+        async with httpx.AsyncClient(timeout=STS_TIMEOUT_SECONDS) as client:
+            response = await client.post(
+                f"https://sts.{self.region}.amazonaws.com/",
+                data={
+                    "Action": "AssumeRoleWithWebIdentity",
+                    "Version": STS_VERSION,
+                    "RoleArn": self.role_arn,
+                    "RoleSessionName": STS_SESSION_NAME,
+                    "WebIdentityToken": token,
+                    "DurationSeconds": str(STS_SESSION_SECONDS),
+                },
+            )
+            response.raise_for_status()
+        return _parse_assume_role_credentials(response.text)
+
+
+def _parse_assume_role_credentials(payload: str) -> SesCredentials:
+    root = ElementTree.fromstring(payload)
+
+    def credential(name: str) -> str:
+        value = root.findtext(f".//{STS_NS}Credentials/{STS_NS}{name}")
+        if not value:
+            raise RuntimeError(f"STS AssumeRoleWithWebIdentity response is missing {name}")
+        return value
+
+    return SesCredentials(
+        access_key=credential("AccessKeyId"),
+        secret_key=credential("SecretAccessKey"),
+        session_token=credential("SessionToken"),
+    )
 
 
 def _sigv4_headers(
@@ -181,9 +228,8 @@ def _sigv4_headers(
         "host": host,
         "x-amz-content-sha256": payload_hash,
         "x-amz-date": amz_date,
+        "x-amz-security-token": credentials.session_token,
     }
-    if credentials.session_token:
-        headers["x-amz-security-token"] = credentials.session_token
     signed_headers = ";".join(sorted(headers))
     canonical_headers = "".join(f"{key}:{headers[key]}\n" for key in sorted(headers))
     canonical_request = "\n".join(
@@ -222,11 +268,8 @@ def email_sender_from_env() -> EmailSender:
         return SesEmailSender(
             source=_require_env(SES_SENDER_ENV),
             region=os.environ.get(SES_REGION_ENV, DEFAULT_SES_REGION),
-            credentials=SesCredentials(
-                access_key=_require_env(AWS_ACCESS_KEY_ENV),
-                secret_key=_require_env(AWS_SECRET_KEY_ENV),
-                session_token=os.environ.get(AWS_SESSION_TOKEN_ENV),
-            ),
+            role_arn=_require_env(AWS_ROLE_ARN_ENV),
+            token_file=Path(_require_env(AWS_WEB_IDENTITY_TOKEN_FILE_ENV)),
         )
     raise RuntimeError(f"{EMAIL_BACKEND_ENV}={backend!r} is not a known backend (ses|logging)")
 

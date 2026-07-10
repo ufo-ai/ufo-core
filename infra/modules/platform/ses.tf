@@ -1,7 +1,8 @@
 # Transactional email for onboarding verification codes (the gateway extension's claim machine,
 # RFC 0011 §4). This verifies the sending domain (Easy DKIM) and grants ses:SendEmail for that
-# identity, scoped to the From address. ses_sender = "" leaves SES uncreated. The grant lands on the
-# app IRSA role (system-namespace service accounts); the FromAddress condition pins it to ses_sender.
+# identity, scoped to the From address. ses_sender = "" leaves SES uncreated. The grant lands on a
+# dedicated IRSA role annotated on the gateway's ServiceAccount (ufo-system:ufo-operator) — the pod
+# exchanges its projected web identity at STS; the FromAddress condition pins it to ses_sender.
 #
 # After apply: add the ses_dkim_records CNAMEs to the authoritative DNS (Cloudflare) to verify the
 # domain, and request SES production access to send beyond the verified set (a new account is
@@ -35,7 +36,7 @@ resource "aws_sesv2_email_identity" "onboard" {
   tags = local.tags
 }
 
-data "aws_iam_policy_document" "app_ses" {
+data "aws_iam_policy_document" "gateway_ses" {
   count = local.ses_enabled ? 1 : 0
   statement {
     sid       = "SendOnboardingEmail"
@@ -49,11 +50,28 @@ data "aws_iam_policy_document" "app_ses" {
   }
 }
 
-resource "aws_iam_policy" "app_ses" {
+resource "aws_iam_policy" "gateway_ses" {
   count  = local.ses_enabled ? 1 : 0
-  name   = "${local.name}-app-ses"
-  policy = data.aws_iam_policy_document.app_ses[0].json
+  name   = "${local.name}-gateway-ses"
+  policy = data.aws_iam_policy_document.gateway_ses[0].json
   tags   = local.tags
+}
+
+module "irsa_gateway_ses" {
+  count   = local.ses_enabled ? 1 : 0
+  source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
+  version = "~> 5.48"
+
+  role_name        = "${local.name}-gateway-ses"
+  role_policy_arns = { ses = aws_iam_policy.gateway_ses[0].arn }
+
+  oidc_providers = {
+    main = {
+      provider_arn               = module.eks.oidc_provider_arn
+      namespace_service_accounts = ["${local.system_namespace}:ufo-operator"]
+    }
+  }
+  tags = local.tags
 }
 
 output "ses_dkim_records" {

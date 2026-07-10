@@ -84,7 +84,6 @@ spec:
     - {secretKey: UFO_EGRESS_CA_CERT, remoteRef: {key: ${secret_api_keys}, property: egress-ca-cert}}
     - {secretKey: UFO_TOKEN_SECRET, remoteRef: {key: ${secret_platform}, property: ufo-token-secret}}
     - {secretKey: UFO_E2B_TEMPLATE, remoteRef: {key: ${secret_platform}, property: e2b-sandbox-template}}
-    - {secretKey: SES_SENDER, remoteRef: {key: ${secret_platform}, property: ses-sender}}
 ---
 # The shared egress proxy's stable CA (cert + key), read ONLY by the ufo-sandbox-proxy Deployment in
 # ufo-system — never replicated into tenant namespaces, so the CA private key stays off every

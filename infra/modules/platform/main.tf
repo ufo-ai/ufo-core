@@ -15,9 +15,6 @@ locals {
   # Tenants run in their own ufo-<name> namespaces (the operator creates them at provisioning).
   system_namespace = "ufo-system"
 
-  # Service accounts (in system_namespace) that read/write the S3 store bucket via IRSA.
-  s3_service_accounts = ["ufo-operator", "ufo-serve"]
-
   # Secrets Manager path prefix for this environment.
   secret_prefix = "ufo/${var.name}"
 }

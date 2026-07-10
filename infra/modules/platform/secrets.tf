@@ -90,8 +90,8 @@ resource "aws_secretsmanager_secret_version" "postgres" {
 }
 
 # 2) Platform-generated material tenant pods read from env → replicated into each tenant namespace.
-#    e2b-sandbox-template and ses-sender are non-secret config co-located here so one ExternalSecret
-#    carries everything a tenant's serve needs.
+#    e2b-sandbox-template is non-secret config co-located here so one ExternalSecret carries
+#    everything a tenant's serve needs.
 resource "aws_secretsmanager_secret" "platform" {
   name = "${local.secret_prefix}/platform"
   tags = local.tags
@@ -102,7 +102,6 @@ resource "aws_secretsmanager_secret_version" "platform" {
   secret_string = jsonencode({
     "ufo-token-secret"     = random_password.ufo_token.result
     "e2b-sandbox-template" = var.e2b_sandbox_template
-    "ses-sender"           = var.ses_sender
   })
 }
 
