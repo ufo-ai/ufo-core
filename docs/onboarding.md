@@ -12,7 +12,8 @@ the client script and drives every screen server-side as directives over
                +--------------------------------------------+
 curl / ------->|  GET /            CLI UA -> landing card   |
                |                   other UA -> prod site    |
-               |  POST /waitlist   email -> D1; counter     |
+               |  POST /waitlist   email -> D1 + mail queue |
+               |  queue consumer   confirmation email       |
                |  GET /install     proxy of gateway /ufo    |
                +----------------------+---------------------+
                                       | origin
@@ -57,8 +58,9 @@ paths — every other request passes through to what the host serves:
   one-liner); any other agent lands on the one site at the prod apex — proxied on the site's own
   host, a redirect (query intact) from any other.
 - `POST /waitlist -d email=…` — records the email in a per-apex D1 database, idempotent, with a
-  positional ack; the card's "N identified flying objects" counter reads it back (≤1h stale per
-  isolate, busted on join).
+  positional ack; a first insert queues a matching confirmation email, retried five times before
+  its terminal failure is logged by the dead-letter consumer. The card's "N identified flying
+  objects" counter reads D1 (≤1h stale per isolate, busted on join).
 - `GET /install` / `/install.sh` — proxies the gateway's stamped `/ufo` from the module's
   `origin_base`; both apexes point at the one live fleet.
 
@@ -268,6 +270,8 @@ conversation, not a surface.
 ## Operational edges
 
 - Gateway environment misconfiguration fails loudly as a 500 before a flow error is rendered.
+- The `flyingobject.ai` domain is onboarded in Cloudflare Email Sending; the edge binding permits
+  only `no-reply@flyingobject.ai` as its sender.
 - The ufo surface requires `UFO_TOKEN_SECRET`; missing secret is an operator error, not a 401.
 - Only the owner, currently the earliest workspace member, can request credential entry or run
   `slack_connect`; a joined teammate's attempt raises before anything seals or writes.
@@ -278,7 +282,7 @@ conversation, not a surface.
 
 ```text
 infra/modules/edge/
-  worker.js               apex landing card, waitlist, install proxy
+  worker.js               apex landing card, waitlist mail, install proxy
   worker.test.mjs         its behavior proof (node --test, ci checks job)
 
 control/src/ufo_control/

@@ -11,8 +11,12 @@
 
 terraform {
   required_providers {
-    cloudflare = { source = "cloudflare/cloudflare", version = "~> 5.7" }
+    cloudflare = { source = "cloudflare/cloudflare", version = "~> 5.12" }
   }
+}
+
+locals {
+  waitlist_sender = "no-reply@flyingobject.ai"
 }
 
 resource "cloudflare_d1_database" "waitlist" {
@@ -24,13 +28,27 @@ resource "cloudflare_d1_database" "waitlist" {
   read_replication = { mode = "disabled" }
 }
 
+resource "cloudflare_queue" "waitlist_email" {
+  account_id = var.account_id
+  queue_name = "${var.name}-waitlist-email"
+}
+
+resource "cloudflare_queue" "waitlist_email_dead_letters" {
+  account_id = var.account_id
+  queue_name = "${var.name}-waitlist-email-dead-letters"
+}
+
 resource "cloudflare_workers_script" "edge" {
   account_id  = var.account_id
   script_name = var.name
   content = replace(
-    file("${path.module}/worker.js"),
-    "\"__LANDING_HTML__\"",
-    jsonencode(file("${path.module}/landing.html")),
+    replace(
+      file("${path.module}/worker.js"),
+      "\"__LANDING_HTML__\"",
+      jsonencode(file("${path.module}/landing.html")),
+    ),
+    "\"__WAITLIST_SENDER__\"",
+    jsonencode(local.waitlist_sender),
   )
   main_module = "worker.js"
 
@@ -45,7 +63,47 @@ resource "cloudflare_workers_script" "edge" {
       type = "plain_text"
       text = var.origin_base
     },
+    {
+      name       = "WAITLIST_EMAILS"
+      type       = "queue"
+      queue_name = cloudflare_queue.waitlist_email.queue_name
+    },
+    {
+      name                     = "EMAIL"
+      type                     = "send_email"
+      allowed_sender_addresses = [local.waitlist_sender]
+    },
+    {
+      name = "WAITLIST_DEAD_LETTER_QUEUE"
+      type = "plain_text"
+      text = cloudflare_queue.waitlist_email_dead_letters.queue_name
+    },
   ]
+}
+
+resource "cloudflare_queue_consumer" "waitlist_email" {
+  account_id        = var.account_id
+  queue_id          = cloudflare_queue.waitlist_email.queue_id
+  script_name       = cloudflare_workers_script.edge.script_name
+  type              = "worker"
+  dead_letter_queue = cloudflare_queue.waitlist_email_dead_letters.queue_name
+  settings = {
+    batch_size      = 1
+    max_concurrency = 1
+    max_retries     = 5
+    retry_delay     = 60
+  }
+}
+
+resource "cloudflare_queue_consumer" "waitlist_email_dead_letters" {
+  account_id  = var.account_id
+  queue_id    = cloudflare_queue.waitlist_email_dead_letters.queue_id
+  script_name = cloudflare_workers_script.edge.script_name
+  type        = "worker"
+  settings = {
+    batch_size      = 1
+    max_concurrency = 1
+  }
 }
 
 resource "cloudflare_workers_route" "edge" {

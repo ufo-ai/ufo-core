@@ -5,10 +5,9 @@ import test from "node:test";
 // The same substitution main.tf applies at deploy, so the tested worker is the shipped artifact.
 const moduleDir = new URL(".", import.meta.url);
 const LANDING_PAGE = await readFile(new URL("landing.html", moduleDir), "utf8");
-const source = (await readFile(new URL("worker.js", moduleDir), "utf8")).replace(
-  '"__LANDING_HTML__"',
-  JSON.stringify(LANDING_PAGE),
-);
+const source = (await readFile(new URL("worker.js", moduleDir), "utf8"))
+  .replace('"__LANDING_HTML__"', JSON.stringify(LANDING_PAGE))
+  .replace('"__WAITLIST_SENDER__"', JSON.stringify("no-reply@flyingobject.ai"));
 async function importWorker(tag) {
   const tagged = `${source}\n// ${tag}`;
   return (await import(`data:text/javascript;base64,${Buffer.from(tagged).toString("base64")}`))
@@ -27,10 +26,12 @@ function fakeD1() {
           return this;
         },
         async run() {
+          let changes = 0;
           if (stmt.sql.startsWith("insert") && !rows.has(stmt.args[0])) {
             rows.set(stmt.args[0], rows.size + 1);
+            changes = 1;
           }
-          return {};
+          return { meta: { changes } };
         },
         async first() {
           if (stmt.sql.includes("where created_at <=")) return { n: rows.get(stmt.args[0]) };
@@ -53,6 +54,8 @@ globalThis.fetch = async (input) => {
 const env = {
   DB: fakeD1(),
   ORIGIN_BASE: "https://testing.flyingobject.ai",
+  WAITLIST_EMAILS: { async send() {} },
+  WAITLIST_DEAD_LETTER_QUEUE: "ufo-edge-waitlist-email-dead-letters",
 };
 
 function request(url, { ua = "curl/8.6.0", method = "GET", body } = {}) {
@@ -161,6 +164,116 @@ test("joining is positional, idempotent, and normalizes the email", async () => 
     body: "email=you@yourco.com",
   });
   assert.match(await duplicate.text(), /#1\./);
+});
+
+test("a first join queues and delivers one confirmation email", async () => {
+  const queued = [];
+  const sent = [];
+  const isolated = {
+    DB: fakeD1(),
+    ORIGIN_BASE: "https://testing.flyingobject.ai",
+    WAITLIST_DEAD_LETTER_QUEUE: "ufo-edge-waitlist-email-dead-letters",
+    WAITLIST_EMAILS: {
+      async send(message) {
+        queued.push(message);
+      },
+    },
+    EMAIL: {
+      async send(message) {
+        sent.push(message);
+      },
+    },
+  };
+  const fresh = await importWorker("waitlist-email");
+  const signup = () =>
+    new Request("https://flyingobject.ai/waitlist", {
+      method: "POST",
+      body: "email=Pilot@Example.com",
+      headers: { "user-agent": "curl/8.6.0" },
+    });
+  await fresh.fetch(signup(), isolated);
+  await fresh.fetch(signup(), isolated);
+  assert.deepEqual(queued, [{ email: "pilot@example.com", position: 1 }]);
+
+  let acknowledged = false;
+  await fresh.queue(
+    {
+      queue: "ufo-edge-waitlist-email",
+      messages: [
+        {
+          body: queued[0],
+          ack() {
+            acknowledged = true;
+          },
+        },
+      ],
+    },
+    isolated,
+  );
+  assert.deepEqual(sent, [
+    {
+      to: "pilot@example.com",
+      from: "no-reply@flyingobject.ai",
+      subject: "You're on the flyingobject.ai waitlist",
+      text:
+        "Transmission received: pilot@example.com\n\n" +
+        "You are flying object #1.\n" +
+        "We'll signal you when it's time to board.\n",
+    },
+  ]);
+  assert.equal(acknowledged, true);
+});
+
+test("a failed confirmation remains unacknowledged for queue retry", async () => {
+  let acknowledged = false;
+  await assert.rejects(
+    worker.queue(
+      {
+        queue: "ufo-edge-waitlist-email",
+        messages: [
+          {
+            body: { email: "pilot@example.com", position: 1 },
+            ack() {
+              acknowledged = true;
+            },
+          },
+        ],
+      },
+      {
+        EMAIL: {
+          async send() {
+            throw new Error("email unavailable");
+          },
+        },
+        WAITLIST_DEAD_LETTER_QUEUE: "ufo-edge-waitlist-email-dead-letters",
+      },
+    ),
+    /email unavailable/,
+  );
+  assert.equal(acknowledged, false);
+});
+
+test("an exhausted confirmation is surfaced and consumed", async (context) => {
+  const logged = context.mock.method(console, "error", () => {});
+  let acknowledged = false;
+  await worker.queue(
+    {
+      queue: "ufo-edge-waitlist-email-dead-letters",
+      messages: [
+        {
+          body: { email: "pilot@example.com", position: 1 },
+          ack() {
+            acknowledged = true;
+          },
+        },
+      ],
+    },
+    { WAITLIST_DEAD_LETTER_QUEUE: "ufo-edge-waitlist-email-dead-letters" },
+  );
+  assert.equal(acknowledged, true);
+  assert.deepEqual(logged.mock.calls[0].arguments, [
+    "waitlist confirmation failed for pilot@example.com",
+  ]);
 });
 
 test("a join busts the counter cache so the card reflects it", async () => {

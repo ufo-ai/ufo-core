@@ -5,6 +5,8 @@ const COUNT_TTL_MS = 3_600_000;
 const FLEET_TTL_MS = 300_000;
 const FLEET_FETCH_TIMEOUT_MS = 3_000;
 const MAX_FLEET = 100;
+const WAITLIST_SENDER = "__WAITLIST_SENDER__";
+const WAITLIST_SUBJECT = "You're on the flyingobject.ai waitlist";
 
 const LANDING_HTML = "__LANDING_HTML__";
 
@@ -108,7 +110,9 @@ async function join(request, env, url) {
     return text(usage(url.hostname), 400);
   }
   await env.DB.prepare(SCHEMA).run();
-  await env.DB.prepare("insert into waitlist (email) values (?1) on conflict (email) do nothing")
+  const inserted = await env.DB.prepare(
+    "insert into waitlist (email) values (?1) on conflict (email) do nothing",
+  )
     .bind(email)
     .run();
   const row = await env.DB.prepare(
@@ -117,6 +121,9 @@ async function join(request, env, url) {
   )
     .bind(email)
     .first();
+  if (inserted.meta.changes === 1) {
+    await env.WAITLIST_EMAILS.send({ email, position: row.n });
+  }
   counted = { count: null, at: 0 };
   return text(ack(email, row.n));
 }
@@ -135,5 +142,29 @@ export default {
       default:
         return fetch(request);
     }
+  },
+  async queue(batch, env) {
+    if (batch.queue === env.WAITLIST_DEAD_LETTER_QUEUE) {
+      batch.messages.forEach((message) => {
+        console.error(`waitlist confirmation failed for ${message.body.email}`);
+        message.ack();
+      });
+      return;
+    }
+    await Promise.all(
+      batch.messages.map(async (message) => {
+        const { email, position } = message.body;
+        await env.EMAIL.send({
+          to: email,
+          from: WAITLIST_SENDER,
+          subject: WAITLIST_SUBJECT,
+          text:
+            `Transmission received: ${email}\n\n` +
+            `You are flying object #${position}.\n` +
+            "We'll signal you when it's time to board.\n",
+        });
+        message.ack();
+      }),
+    );
   },
 };
