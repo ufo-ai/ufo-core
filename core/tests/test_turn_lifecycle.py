@@ -3,7 +3,7 @@ import hashlib
 import json
 import secrets
 from collections.abc import AsyncIterator, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -27,7 +27,7 @@ from ufo.hub import Hub, InProcessHub
 from ufo.jobs import SpendResume
 from ufo.loop import queue as loop_queue
 from ufo.loop.engine import EMPTY_RESPONSE_NUDGE, FORCE_FINAL_PROMPT
-from ufo.loop.subagents import SubagentProfile, SubagentRegistry
+from ufo.loop.subagents import SubagentProfile, SubagentRegistry, Subagents
 from ufo.loop.transcript import Transcript
 from ufo.models.interface import (
     ModelEvent,
@@ -40,7 +40,7 @@ from ufo.models.interface import (
 from ufo.models.registry import ModelRegistry
 from ufo.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
 from ufo.schema import tables
-from ufo.schema.records import TerminalFrame, Usage
+from ufo.schema.records import TerminalFrame, Turn, Usage
 from ufo.surfaces import hub_tail
 from ufo.surfaces.cli import router
 from ufo.transcript import Conversation
@@ -48,6 +48,7 @@ from ufo.workspace import ws
 
 STREAM_TIMEOUT_SECONDS = 30
 STREAM_GATE = StreamGate()
+SEEN_SYSTEM_PROMPTS: list[str] = []
 
 
 @dataclass(frozen=True)
@@ -109,12 +110,65 @@ PINNED_PROFILE = SubagentProfile(
     model=PINNED_MODEL,
 )
 
+FORCED_ECHO = -1
+FOLLOWUP_INBOUND = "continue"
+FOLLOWUP_ECHO = 99
+
+
+class ExtendInput(BaseModel):
+    value: int
+    extended_context: bool | None = None
+
+
+EXTEND_PROFILE = SubagentProfile(
+    name="extend",
+    prompt="EXTEND: burn a round, then echo the value back unless forced to a close.",
+    tool_names=("bash",),
+    input_model=ExtendInput,
+    output_model=RoundTripOutput,
+    max_rounds=1,
+)
+
+
+class PreloadInput(BaseModel):
+    value: int
+    preload_skills: tuple[str, ...] | None = None
+
+
+PRELOAD_PROFILE = SubagentProfile(
+    name="preload",
+    prompt="ROUNDTRIP: echo the value back after preloading a skill.",
+    tool_names=(),
+    input_model=PreloadInput,
+    output_model=RoundTripOutput,
+)
+
 
 @dataclass(frozen=True)
 class StandInModel:
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        SEEN_SYSTEM_PROMPTS.append(request.system)
         if "ROUNDTRIP" in request.system:
+            if request.messages[-1].content == FOLLOWUP_INBOUND:
+                yield TextDelta(text=json.dumps({"echoed": FOLLOWUP_ECHO}))
+                yield Usage(input_tokens=5, output_tokens=5)
+                return
             payload = json.loads(request.messages[-1].content)
+            yield TextDelta(text=json.dumps({"echoed": payload["value"]}))
+            yield Usage(input_tokens=5, output_tokens=5)
+            return
+        if "EXTEND" in request.system:
+            last = request.messages[-1].content
+            if last == FORCE_FINAL_PROMPT:
+                yield TextDelta(text=json.dumps({"echoed": FORCED_ECHO}))
+                yield Usage(input_tokens=5, output_tokens=5)
+                return
+            if isinstance(last, str):
+                yield ToolCallStart(id="x1", name="bash")
+                yield ToolCallDelta(id="x1", partial_json='{"command": "true"}')
+                yield Usage(input_tokens=2, output_tokens=2)
+                return
+            payload = json.loads(request.messages[0].content)
             yield TextDelta(text=json.dumps({"echoed": payload["value"]}))
             yield Usage(input_tokens=5, output_tokens=5)
             return
@@ -152,6 +206,31 @@ class StandInModel:
             )
             yield Usage(input_tokens=4, output_tokens=4)
             return
+        if isinstance(inbound, str) and "spawn-extended" in inbound:
+            yield ToolCallStart(id="s4", name="spawn_subagent")
+            yield ToolCallDelta(
+                id="s4",
+                partial_json='{"profile": "extend", "payload": '
+                '{"value": 42, "extended_context": true}}',
+            )
+            yield Usage(input_tokens=4, output_tokens=4)
+            return
+        if isinstance(inbound, str) and "spawn-capped" in inbound:
+            yield ToolCallStart(id="s5", name="spawn_subagent")
+            yield ToolCallDelta(
+                id="s5", partial_json='{"profile": "extend", "payload": {"value": 42}}'
+            )
+            yield Usage(input_tokens=4, output_tokens=4)
+            return
+        if isinstance(inbound, str) and "spawn-preload" in inbound:
+            yield ToolCallStart(id="s6", name="spawn_subagent")
+            yield ToolCallDelta(
+                id="s6",
+                partial_json='{"profile": "preload", "payload": '
+                '{"value": 5, "preload_skills": ["sandbox"]}}',
+            )
+            yield Usage(input_tokens=4, output_tokens=4)
+            return
         if "explode-after-usage" in inbound:
             yield TextDelta(text="partial")
             yield Usage(input_tokens=7, output_tokens=3)
@@ -186,12 +265,16 @@ class StandInCarrier:
     """Stands in for the Docker carrier through the full queue path: create-or-attach returns a
     handle, and exec is never reached because StandInModel makes no tool calls."""
 
+    writes: list[tuple[str, bytes]] = field(default_factory=list)
+
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         return SandboxHandle(conversation_id=spec.conversation_id, container_id="test")
 
     async def exec(
         self, handle: SandboxHandle, argv: tuple[str, ...], stdin: bytes, timeout_s: int
     ) -> ExecResult:
+        if argv[:2] == ("sh", "-c") and argv[2].startswith("mkdir -p"):
+            self.writes.append((argv[-1], stdin))
         return ExecResult(stdout="", stderr="", exit_code=0)
 
     async def destroy(self, handle: SandboxHandle) -> None: ...
@@ -221,7 +304,15 @@ def dbos_runtime(
             connectors=ConnectorRegistry(entries={}),
             proxy=proxy,
             dbos=dbos_client,
-            subagents=SubagentRegistry((ROUNDTRIP_PROFILE, EXHAUST_PROFILE, PINNED_PROFILE)),
+            subagents=SubagentRegistry(
+                (
+                    ROUNDTRIP_PROFILE,
+                    EXHAUST_PROFILE,
+                    PINNED_PROFILE,
+                    EXTEND_PROFILE,
+                    PRELOAD_PROFILE,
+                )
+            ),
             subagent_grants={},
             manifests=(STUB_BACKENDS,),
             registry=STANDIN_REGISTRY,
@@ -770,3 +861,102 @@ async def test_subagent_bills_under_its_profile_model_not_the_parents(
         ).scalar_one()
     assert child_model == PINNED_MODEL
     assert parent_model == "claude-opus-4-8"
+
+
+async def _child_echo(parent: str) -> int:
+    async with workspace_tx() as connection:
+        child = (
+            await connection.execute(
+                sa.select(tables.turn.c.terminal).where(
+                    tables.turn.c.parent_turn_id == UUID(parent)
+                )
+            )
+        ).one()
+    return RoundTripOutput.model_validate_json(
+        TerminalFrame.model_validate(child.terminal).text
+    ).echoed
+
+
+async def test_subagent_extended_context_lifts_the_round_ceiling(surface: AsyncClient) -> None:
+    """A subagent whose payload carries `extended_context: true` runs under MAIN_ROUND_LIMIT, not
+    its own smaller `max_rounds`. The `extend` profile burns a tool round and echoes on the next —
+    a reach its 1-round budget cannot make: capped it force-finals to the sentinel, extended it
+    reaches the real echo."""
+    headers = await _bootstrap()
+    extended = (await surface.post("/v1/chat", content=b"spawn-extended", headers=headers)).json()[
+        "turn_id"
+    ]
+    _, extended_terminal = await _consume(surface, headers, extended)
+    assert extended_terminal["status"] == "done"
+    capped = (await surface.post("/v1/chat", content=b"spawn-capped", headers=headers)).json()[
+        "turn_id"
+    ]
+    _, capped_terminal = await _consume(surface, headers, capped)
+    assert capped_terminal["status"] == "done"
+    assert await _child_echo(extended) == 42
+    assert await _child_echo(capped) == FORCED_ECHO
+
+
+async def test_subagent_preload_skills_mounts_and_injects_the_skill(surface: AsyncClient) -> None:
+    """A subagent whose payload carries `preload_skills` starts with the skill mounted into its
+    sandbox and its instructions already in the system prompt — no `load_skill` round needed."""
+    runtime = loop_queue._runtime
+    assert runtime is not None
+    assert isinstance(runtime.carrier, StandInCarrier)
+    skill = runtime.skills.named("sandbox")
+    runtime.carrier.writes.clear()
+    SEEN_SYSTEM_PROMPTS.clear()
+    headers = await _bootstrap()
+    parent = (await surface.post("/v1/chat", content=b"spawn-preload", headers=headers)).json()[
+        "turn_id"
+    ]
+    _, terminal = await _consume(surface, headers, parent)
+    assert terminal["status"] == "done"
+    assert await _child_echo(parent) == 5
+    mounted = dict(runtime.carrier.writes)
+    skill_md = next(path for path in mounted if path.endswith(f"/.skills/{skill.name}/SKILL.md"))
+    assert mounted[skill_md] == skill.raw_skill_md.encode()
+    assert any(skill.prompt_body() in system for system in SEEN_SYSTEM_PROMPTS)
+
+
+async def test_subagent_plain_text_followup_runs_without_a_spawn_payload(
+    surface: AsyncClient,
+) -> None:
+    """`message_subagent` stores free text as the follow-up turn's inbound — only the child's
+    spawn turn (seq 1) carries the JSON payload, so the follow-up must run to its own terminal
+    without parsing one."""
+    runtime = loop_queue._runtime
+    assert runtime is not None
+    headers = await _bootstrap()
+    parent_id = (await surface.post("/v1/chat", content=b"spawn-subagent", headers=headers)).json()[
+        "turn_id"
+    ]
+    _, terminal = await _consume(surface, headers, parent_id)
+    assert terminal["status"] == "done"
+    async with workspace_tx() as connection:
+        parent_row = (
+            await connection.execute(
+                sa.select(tables.turn).where(tables.turn.c.id == UUID(parent_id))
+            )
+        ).one()
+        child_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(tables.turn.c.parent_turn_id == UUID(parent_id))
+            )
+        ).scalar_one()
+    parent = Turn(
+        id=parent_row.id,
+        workspace_id=parent_row.workspace_id,
+        conversation_id=parent_row.conversation_id,
+        agent_id=parent_row.agent_id,
+        seq=parent_row.seq,
+        status=parent_row.status,
+        inbound=parent_row.inbound,
+        created_at=parent_row.created_at,
+        terminal=TerminalFrame.model_validate(parent_row.terminal),
+    )
+    subagents = Subagents(client=runtime.dbos, registry=runtime.subagents, parent=parent)
+    queued = await subagents.message(child_id, FOLLOWUP_INBOUND)
+    (followup,) = await subagents.wait((queued.turn_id,))
+    assert followup.status == "done"
+    assert RoundTripOutput.model_validate_json(followup.text).echoed == FOLLOWUP_ECHO

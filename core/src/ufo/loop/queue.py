@@ -1,6 +1,7 @@
 """Durable turn execution: partitioned queue, the turn workflow, per-process runtime."""
 
 import asyncio
+import json
 import os
 from dataclasses import dataclass
 from uuid import UUID
@@ -50,7 +51,7 @@ from ufo.schema.records import (
     TurnContext,
 )
 from ufo.search import SearchProvider
-from ufo.skills.runtime import SkillRegistry
+from ufo.skills.runtime import RuntimeSkill, SkillRegistry, mount_skill
 from ufo.tools.registry import ToolRegistry
 from ufo.workspace import ws
 
@@ -142,6 +143,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             for manifest in runtime.manifests
             for section in manifest.prompt_sections
         )
+        preload: tuple[RuntimeSkill, ...] = ()
         if turn.subagent_profile is None:
             resolved = agent.model_copy(update={"model": runtime.registry.resolve(agent.model)})
             tools = ToolRegistry(all_tools)
@@ -151,8 +153,14 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             max_rounds = MAIN_ROUND_LIMIT
         else:
             profile = runtime.subagents.get(turn.subagent_profile)
+            payload = json.loads(turn.inbound) if turn.seq == 1 else {}
+            resolved_skills: dict[str, RuntimeSkill] = {}
+            for name in payload.get("preload_skills") or ():
+                for skill in skills.tree(name):
+                    resolved_skills.setdefault(skill.name, skill)
+            preload = tuple(resolved_skills.values())
             resolved = Agent(
-                prompt=subagent_system_prompt(profile),
+                prompt=subagent_system_prompt(profile, preload),
                 model=runtime.registry.resolve(profile.model or agent.model),
             )
             allowed = set(profile.tool_names) | runtime.subagent_grants.get(
@@ -162,7 +170,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 tuple(tool for tool in all_tools if tool.name in allowed or tool.subagent_default)
             )
             system_prompt = rendered_prompt(resolved.prompt)
-            max_rounds = profile.max_rounds
+            max_rounds = MAIN_ROUND_LIMIT if payload.get("extended_context") else profile.max_rounds
         model = await runtime.registry.client_for(resolved.model)
         handle = await _open_sandbox(
             runtime.carrier,
@@ -172,6 +180,9 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             runtime.proxy,
             turn,
         )
+        sandbox = SandboxSession(carrier=runtime.carrier, handle=handle)
+        for skill in preload:
+            await mount_skill(sandbox, skill)
         engine = TurnEngine(
             turn=turn,
             agent=resolved,
@@ -189,7 +200,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 member_id=member_id,
             ),
             hub=runtime.hub,
-            sandbox=SandboxSession(carrier=runtime.carrier, handle=handle),
+            sandbox=sandbox,
             cdp_provider=runtime.cdp_provider,
             search_provider=runtime.search_provider,
             connectors=runtime.connectors,

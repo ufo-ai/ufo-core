@@ -13,10 +13,16 @@ from ufo.db import workspace_tx
 from ufo.ext.manifest import SUBAGENT_ROUND_LIMIT, SubagentProfile
 from ufo.loop.profiles import CORE_SUBAGENT_PROFILES, GENERAL_PURPOSE
 from ufo.loop.queue import _load_turn
-from ufo.loop.subagents import SubagentRegistry, Subagents, subagent_system_prompt
+from ufo.loop.subagents import (
+    PRELOAD_PROMPT_CHAR_BOUND,
+    SubagentRegistry,
+    Subagents,
+    subagent_system_prompt,
+)
 from ufo.o11y import current_traceparent
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame, Turn, turn_id_for
+from ufo.skills.runtime import RuntimeSkill
 from ufo.tools.builtins import BUILTIN_TOOLS
 
 
@@ -141,6 +147,36 @@ def test_subagent_prompt_fills_the_skill_index_slot() -> None:
     prompt = subagent_system_prompt(profile)
     assert "{{skill_index}}" not in prompt
     assert "<available_skills>" in prompt
+
+
+def test_subagent_prompt_keeps_the_json_contract_after_preloaded_skills() -> None:
+    """A preloaded skill's own answer-formatting instructions must never be the prompt's last word
+    — the JSON output contract stays after every preloaded body, or a website build would return
+    prose the parent's schema validation rejects."""
+    skill = RuntimeSkill(
+        name="verbose", description="d", instructions="End with a friendly prose summary."
+    )
+    prompt = subagent_system_prompt(_profile("research"), preload=(skill,))
+    assert "Preloaded skill(s):" in prompt
+    contract_at = prompt.index("Respond with a single JSON object")
+    assert prompt.index("End with a friendly prose summary.") < contract_at
+    assert prompt.index("<citation_instructions>") > prompt.index("Preloaded skill(s):")
+
+
+def test_subagent_prompt_bounds_the_preloaded_bodies() -> None:
+    oversized = RuntimeSkill(
+        name="huge", description="d", instructions="x" * (PRELOAD_PROMPT_CHAR_BOUND + 1)
+    )
+    with pytest.raises(ValueError, match="over the"):
+        subagent_system_prompt(_profile("research"), preload=(oversized,))
+
+
+def test_subagent_prompt_reads_a_preloaded_skills_braces_as_content() -> None:
+    templated = RuntimeSkill(
+        name="vue", description="d", instructions="Interpolate with {{ message }} in the template."
+    )
+    prompt = subagent_system_prompt(_profile("research"), preload=(templated,))
+    assert "{{ message }}" in prompt
 
 
 def test_subagent_prompt_fails_loud_on_an_unfilled_slot() -> None:

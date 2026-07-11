@@ -67,8 +67,10 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   Every-turn content belongs in the system prompt, situational/long content in skills; skills carry
   workflows, never restated tool docs (the tool's description is authoritative).
 - **Typed subagents** — a registry of profiles (name, prompt, tool subset, input/output schema);
-  spawn = child turn with parent linkage; foreground awaits, background returns an id. Extensions
-  register profiles.
+  spawn = child turn with parent linkage; foreground awaits, background returns an id. Two payload
+  knobs any profile may declare: `preload_skills` mounts the named skills and injects their
+  instructions before the child's first round; `extended_context` lifts its round budget to the
+  main ceiling. Extensions register profiles.
 - **Compaction** — full-conversation `messages.json.lz4` transcript with monotonic seq +
   `compactions/<cid>/{before,after,summary}` records in the blob store; a deterministic pipeline
   groups the over-window head into API rounds, compresses it into a validated structured

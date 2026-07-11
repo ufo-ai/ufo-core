@@ -1,5 +1,5 @@
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -8,7 +8,8 @@ import pytest
 from pydantic import ValidationError
 from ufo_ext_sites import manifest as sites_manifest
 from ufo_ext_sites import tools as sites_tools
-from ufo_ext_sites.subagent import WEBSITE_BUILDING_PROFILE
+from ufo_ext_sites.delegation import BuildWebsiteInput, _build_website
+from ufo_ext_sites.subagent import WEBSITE_BUILDING_PROFILE, WebsiteBuildingResult
 from ufo_ext_sites.tools import (
     DeployWebsiteInput,
     PublishWebsiteInput,
@@ -80,20 +81,63 @@ def _context(sandbox: FakeSandbox, tmp_path: Path) -> ToolContext:
     )
 
 
-def test_manifest_declares_the_four_tools_the_profile_and_the_section() -> None:
+def test_manifest_declares_the_tools_the_profile_and_the_section() -> None:
     manifest = sites_manifest.manifest()
     assert {tool.name for tool in manifest.tools} == {
         "website",
         "start_server",
         "deploy_website",
         "publish_website",
+        "build_website",
     }
     deploy = next(tool for tool in manifest.tools if tool.name == "deploy_website")
     assert deploy.description.startswith("Serve a website folder from the workspace")
+    build = next(tool for tool in manifest.tools if tool.name == "build_website")
+    assert {"objective", "preload_skills", "extended_context"} <= set(
+        build.input_model.model_json_schema()["properties"]
+    )
     (profile,) = manifest.subagents
     assert profile.name == "website_building"
     (section,) = manifest.prompt_sections
     assert section.name == "sites" and "<sites>" in section.body
+
+
+async def test_build_website_forwards_the_optional_knobs_into_the_spawn(tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    async def _capture(profile: str, payload: dict, background: bool = False) -> SpawnResult:
+        captured["profile"] = profile
+        captured["payload"] = payload
+        return SpawnResult(turn_id=uuid4(), output=WebsiteBuildingResult(result="built"))
+
+    ctx = replace(_context(FakeSandbox(), tmp_path), spawn=_capture)
+    result = await _build_website(
+        ctx,
+        BuildWebsiteInput(
+            objective="build a landing page",
+            preload_skills=("website-building",),
+            extended_context=True,
+        ),
+    )
+    assert captured["profile"] == "website_building"
+    assert captured["payload"] == {
+        "objective": "build a landing page",
+        "preload_skills": ("website-building",),
+        "extended_context": True,
+    }
+    assert json.loads(result.content[0].text)["result"] == "built"
+
+
+async def test_build_website_omits_the_unset_knobs(tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    async def _capture(profile: str, payload: dict, background: bool = False) -> SpawnResult:
+        captured["payload"] = payload
+        return SpawnResult(turn_id=uuid4(), output=WebsiteBuildingResult(result="built"))
+
+    ctx = replace(_context(FakeSandbox(), tmp_path), spawn=_capture)
+    await _build_website(ctx, BuildWebsiteInput(objective="minimal"))
+    assert captured["payload"] == {"objective": "minimal"}
 
 
 def test_website_building_indexes_the_parent_and_hides_the_nested_child() -> None:

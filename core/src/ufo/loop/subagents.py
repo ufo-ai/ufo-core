@@ -37,11 +37,12 @@ from ufo.schema.records import (
     Turn,
     turn_id_for,
 )
-from ufo.skills.runtime import CORE_SKILLS
+from ufo.skills.runtime import CORE_SKILLS, RuntimeSkill
 from ufo.tools.context import SpawnResult, SubagentStatus
 
 SUBAGENT_SURFACE = "subagent"
 SUBAGENT_POLL_SECONDS = 0.1
+PRELOAD_PROMPT_CHAR_BOUND = 200_000
 
 SUBAGENT_OUTPUT_DISCIPLINE = (
     (Path(__file__).parent / "prompts" / "subagent_shell.md")
@@ -75,20 +76,31 @@ class SubagentRegistry:
         raise KeyError(f"unknown subagent profile: {name}")
 
 
-def subagent_system_prompt(profile: SubagentProfile) -> str:
+def subagent_system_prompt(profile: SubagentProfile, preload: tuple[RuntimeSkill, ...] = ()) -> str:
     """The child's system prompt: the profile's own instructions with its `{{skill_index}}` slot
-    filled from the loadable-skill index, then the shared output discipline (citation and formatting
-    rules, wrapped around every profile so a subagent inherits the same citation contract the main
-    agent renders), then the output contract — so the child's final answer is a single JSON object
-    the parent can validate against the schema. A slot the profile leaves unfilled fails loud rather
-    than reaching the model as a literal brace."""
+    filled from the loadable-skill index, then any preloaded skills' instructions, then the shared
+    output discipline (citation and formatting rules, wrapped around every profile so a subagent
+    inherits the same citation contract the main agent renders), then the output contract — so the
+    child's final answer is a single JSON object the parent can validate against the schema, and a
+    preloaded skill's own answer-formatting instructions can never displace that contract from the
+    prompt's last word. A slot the profile leaves unfilled fails loud rather than reaching the
+    model as a literal brace; preloaded bodies over the char bound fail loud rather than blowing
+    the model call. Skill bodies are injected after slot validation — a literal brace inside a
+    skill is content, never an unfilled slot."""
     body = profile.prompt.replace(SKILL_INDEX_SLOT, SUBAGENT_SKILL_INDEX)
-    wrapped = f"{body}\n\n{SUBAGENT_OUTPUT_DISCIPLINE}"
-    if unresolved := frozenset(PROMPT_VAR_RE.findall(wrapped)):
+    if unresolved := frozenset(PROMPT_VAR_RE.findall(f"{body}\n\n{SUBAGENT_OUTPUT_DISCIPLINE}")):
         raise ValueError(f"subagent prompt has unresolved slots: {', '.join(sorted(unresolved))}")
+    if preload:
+        bodies = "\n\n".join(skill.prompt_body() for skill in preload)
+        if len(bodies) > PRELOAD_PROMPT_CHAR_BOUND:
+            raise ValueError(
+                f"preloaded skill bodies are {len(bodies)} chars, "
+                f"over the {PRELOAD_PROMPT_CHAR_BOUND} bound"
+            )
+        body = f"{body}\n\n---\n\nPreloaded skill(s):\n\n{bodies}"
     schema = json.dumps(profile.output_model.model_json_schema(), sort_keys=True)
     contract = f"Respond with a single JSON object matching this schema and nothing else:\n{schema}"
-    return f"{wrapped}\n\n{contract}"
+    return f"{body}\n\n{SUBAGENT_OUTPUT_DISCIPLINE}\n\n{contract}"
 
 
 @dataclass(frozen=True)
