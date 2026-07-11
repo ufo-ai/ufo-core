@@ -33,7 +33,7 @@ from ufo.ext.surface import SurfaceContext, SurfaceRoute, SurfaceSpec
 from ufo.hub import InProcessHub
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME, TerminalFrame
-from ufo.serve import WorkspaceScopeBoundary, _mount_shared_surfaces
+from ufo.serve import WorkspaceScopeBoundary, _mount_shared_surfaces, _shared_fleet_manifests
 from ufo.session_token import SESSION_TOKEN_TTL_SECONDS, mint_session_token
 from ufo.surfaces.cli import router
 
@@ -379,3 +379,45 @@ async def test_shared_cli_releases_the_binding_when_the_route_raises_after_bindi
         assert current_workspace.get() is None
     finally:
         current_workspace.reset(baseline)
+
+
+def test_shared_fleet_serves_only_extensions_whose_surfaces_all_mount() -> None:
+    """An extension declaring a surface the fleet cannot mount — no `identify`, or durable
+    delivery — contributes nothing there: its setup tools would otherwise walk a member through
+    connecting a surface whose request URL the fleet answers with 404. Surfaceless extensions and
+    live `identify`-declaring ones load unchanged."""
+
+    async def _handler(context: SurfaceContext, request: Request) -> Response:
+        return Response()
+
+    async def _post(context: SurfaceContext, turn_id: UUID, text: str) -> str:
+        return ""
+
+    route = SurfaceRoute(method="POST", path="", handler=_handler)
+    capable = Manifest(
+        name="capable",
+        version="0",
+        surfaces=(SurfaceSpec(name="live", routes=(route,), identify=lambda request: None),),
+    )
+    toolbox = Manifest(name="toolbox", version="0")
+    unidentified = Manifest(
+        name="unidentified",
+        version="0",
+        surfaces=(SurfaceSpec(name="tenant-only", routes=(route,)),),
+    )
+    durable = Manifest(
+        name="durable",
+        version="0",
+        surfaces=(
+            SurfaceSpec(
+                name="writeback",
+                routes=(route,),
+                identify=lambda request: None,
+                post=_post,
+            ),
+        ),
+    )
+
+    kept = _shared_fleet_manifests((capable, toolbox, unidentified, durable))
+
+    assert tuple(manifest.name for manifest in kept) == ("capable", "toolbox")

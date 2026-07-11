@@ -93,6 +93,8 @@ def run() -> None:
     init_db(config.database.url)
     manifests = load_manifests(config.pack.name)
     shared = config.serve.shared_workspace
+    if shared:
+        manifests = _shared_fleet_manifests(manifests)
     # The shared fleet has no single workspace to bootstrap-check, admit a seat for, or pin: it
     # connects as an RLS-subject role and resolves the workspace per request/turn. workspace_id
     # stays None, so every provider below builds ambient (context_for(None)) and scopes at use. It
@@ -193,7 +195,9 @@ def run() -> None:
     page_feed = CorePageFeed(blob=blob)
     if workspace_id is not None:
         asyncio.run(register_sources(config.sources))
-    _launch_jobs(config, sync_driver, index, embed, page_feed, dbos_client, blob, carrier)
+    _launch_jobs(
+        config, manifests, sync_driver, index, embed, page_feed, dbos_client, blob, carrier
+    )
     if workspace_id is not None:
         _mount_ext_routes(app, manifests, workspace_id, credentials, index, embed)
         _mount_surfaces(
@@ -270,6 +274,7 @@ def _shared_owner_dsn(config: Config) -> str:
 
 def _launch_jobs(
     config: Config,
+    manifests: tuple[Manifest, ...],
     sync_driver: SyncDriver,
     index: IndexBackend,
     embed: EmbedClient,
@@ -282,10 +287,11 @@ def _launch_jobs(
     that re-admits parked turns, and the sandbox reaper that reclaims idle containers) plus every
     installed extension's (the memory extension's memory-index and page-index jobs among them) — as
     DBOS schedules and one-shot enqueues, after
-    launch so the system store is live. Registration is the synchronous DBOS API (off the loop, at
-    startup); a handler may read a declared credential or the deploy index/embed backends or the
-    page feed, so once any job is registered the credential key must be set."""
-    manifests = load_manifests(config.pack.name)
+    launch so the system store is live. `manifests` is the boot's one extension set — on the shared
+    fleet the narrowed one, so an excluded extension's jobs and hooks never register — never
+    reloaded here. Registration is the synchronous DBOS API (off the loop, at startup); a handler
+    may read a declared credential or the deploy index/embed backends or the page feed, so once any
+    job is registered the credential key must be set."""
     key = os.environ.get(config.credentials.key_env)
     if not key:
         raise RuntimeError(
@@ -718,6 +724,33 @@ class WorkspaceScopeBoundary:
             current_workspace.set(None)
 
 
+def _shared_fleet_capable(spec: SurfaceSpec) -> bool:
+    """Whether the shared fleet can mount this surface: it must resolve each request's workspace
+    (`identify`) and deliver live — durable writeback needs the per-workspace poller the fleet
+    does not run."""
+    return spec.identify is not None and spec.post is None
+
+
+def _shared_fleet_manifests(manifests: tuple[Manifest, ...]) -> tuple[Manifest, ...]:
+    """The extension set the shared fleet serves: an extension declaring any surface the fleet
+    cannot mount is excluded whole. Its tools, skills, and prompt sections exist to set up and
+    drive that surface, so offering them here walks a member through connecting a surface whose
+    routes never mount (a Slack request URL handed out on the fleet answers 404). The per-tenant
+    deploy loads every manifest."""
+    kept: list[Manifest] = []
+    for manifest in manifests:
+        unmountable = [spec.name for spec in manifest.surfaces if not _shared_fleet_capable(spec)]
+        if unmountable:
+            log(
+                "serve.shared_fleet.extension_excluded",
+                extension=manifest.name,
+                surfaces=",".join(unmountable),
+            )
+            continue
+        kept.append(manifest)
+    return tuple(kept)
+
+
 def _mount_shared_surfaces(
     app: FastAPI,
     manifests: tuple[Manifest, ...],
@@ -747,7 +780,7 @@ def _mount_shared_surfaces(
     for manifest in manifests:
         for spec in manifest.surfaces:
             resolver = spec.identify
-            if resolver is None or spec.post is not None:
+            if resolver is None or not _shared_fleet_capable(spec):
                 log("serve.shared_surface.deferred", surface=spec.name)
                 continue
             if manifest.credentials and credentials is None:
