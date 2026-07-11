@@ -1,8 +1,10 @@
 <!doctype html>
+<!-- terminal interface: curl https://flyingobject.ai -->
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="flyingobject.ai is a terminal-native site. Open it with curl https://flyingobject.ai" />
 <title>ufo</title>
 <style>
   /* The craft's shimmer palette — the only colors used. */
@@ -38,6 +40,15 @@
   .craft .lit  {color:var(--gold); text-shadow:0 0 10px var(--gold)}
   .craft .spark{color:var(--spark);text-shadow:0 0 12px var(--spark)}
   .craft .c    {color:var(--c); text-shadow:0 0 10px var(--c)}
+  .terminal-hint{
+    position:fixed;
+    right:1rem; bottom:1rem;
+    z-index:1;
+    color:var(--hull);
+    font:12px var(--mono);
+    opacity:.72;
+    pointer-events:none;
+  }
   @media (prefers-reduced-motion: reduce){
     .craft{text-shadow:0 0 6px currentColor}
   }
@@ -45,9 +56,11 @@
 </head>
 <body>
   <div id="sky" role="img" aria-label="Animated ASCII flying saucers that continuously re-form into different craft"></div>
+  <aside class="terminal-hint" aria-label="Terminal interface">terminal interface: <code>curl https://flyingobject.ai</code></aside>
 
 <script>
 "use strict";
+console.info("terminal interface: curl https://flyingobject.ai");
 /* ═══════════════════════════════════════════════════════════════════════
    ufo morph — JavaScript port of the Python renderer, flown as a fleet:
    one craft aloft per workspace (the worker substitutes the count below).

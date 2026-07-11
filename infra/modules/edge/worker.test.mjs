@@ -82,6 +82,25 @@ test("browser landing over plain http is bounced to https with its query intact"
   assert.equal(reply.headers.get("location"), "https://flyingobject.ai/?ref=x");
 });
 
+test("browser landing guides source readers, consoles, and fetchers to curl", () => {
+  assert.match(
+    LANDING_PAGE,
+    /^<!doctype html>\n<!-- terminal interface: curl https:\/\/flyingobject\.ai -->/,
+  );
+  assert.match(
+    LANDING_PAGE,
+    /<meta name="description" content="[^"]*curl https:\/\/flyingobject\.ai" \/>/,
+  );
+  assert.match(
+    LANDING_PAGE,
+    /<aside class="terminal-hint"[^>]*>terminal interface: <code>curl https:\/\/flyingobject\.ai<\/code><\/aside>/,
+  );
+  assert.match(
+    LANDING_PAGE,
+    /console\.info\("terminal interface: curl https:\/\/flyingobject\.ai"\);/,
+  );
+});
+
 test("every front door serves its own embedded page to browsers", async () => {
   for (const host of ["flyingobject.ai", "testing.flyingobject.ai"]) {
     const reply = await request(`https://${host}/?utm_source=card`, { ua: "Mozilla/5.0" });
