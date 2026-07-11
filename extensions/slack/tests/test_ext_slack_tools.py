@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 import sqlalchemy as sa
+import ufo_ext_slack.surface as slack
 import yaml
 from cryptography.fernet import Fernet
 from ufo_ext_slack import tools
@@ -147,7 +148,7 @@ def _auth_test_transport(
 ) -> httpx.MockTransport:
     def handler(request: httpx.Request) -> httpx.Response:
         recorder.append(request)
-        if str(request.url) == tools.SLACK_AUTH_TEST_URL:
+        if str(request.url) == slack.SLACK_AUTH_TEST_URL:
             if ok:
                 body = {
                     "ok": True,
@@ -171,7 +172,7 @@ def _patch_httpx(monkeypatch: pytest.MonkeyPatch, transport: httpx.MockTransport
         kwargs.pop("transport", None)
         return real(transport=transport, **kwargs)
 
-    monkeypatch.setattr(tools.httpx, "AsyncClient", factory)
+    monkeypatch.setattr(slack.httpx, "AsyncClient", factory)
 
 
 async def test_slack_connect_walks_the_state_machine(

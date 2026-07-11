@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import re
 import time
 from collections.abc import Set as AbstractSet
@@ -77,6 +78,7 @@ async def _settle_status_tasks(db: None):
     patch.setattr(hub_tail, "TERMINAL_POLL_SECONDS", 0.05)
     try:
         yield
+        await asyncio.gather(*slack._IDENTITY_TASKS.values(), return_exceptions=True)
         await asyncio.gather(*slack._REWRITE_TASKS, return_exceptions=True)
         tasks = dict(slack._STATUS_TASKS)
         if tasks:
@@ -92,6 +94,7 @@ async def _settle_status_tasks(db: None):
             )
         slack._STATUS_TASKS.clear()
         slack._THREAD_WRITERS.clear()
+        slack._IDENTITY_TASKS.clear()
     finally:
         patch.undo()
 
@@ -123,6 +126,10 @@ def _mock_transport(
                     "is_email_confirmed": user_id not in unconfirmed,
                 }
             return httpx.Response(200, json={"ok": True, "user": user})
+        if url == slack.SLACK_AUTH_TEST_URL:
+            return httpx.Response(
+                200, json={"ok": True, "team_id": TEAM_ID, "user_id": BOT_USER_ID}
+            )
         if url in (slack.SLACK_CONVERSATIONS_REPLIES_URL, slack.SLACK_CONVERSATIONS_HISTORY_URL):
             return httpx.Response(200, json={"ok": True, "messages": []})
         if url == slack.SLACK_CHAT_POST_MESSAGE_URL:
@@ -217,11 +224,13 @@ async def _mount_transport(
     tmp_path,
     transport: httpx.MockTransport,
     hub: InProcessHub | None = None,
+    identity: bool = True,
 ):
     _patch_httpx(monkeypatch, transport)
     store = await _store(workspace_id)
     blob = FilesystemBlobStore(root=tmp_path)
-    await _write_identity(blob, workspace_id)
+    if identity:
+        await _write_identity(blob, workspace_id)
     app = FastAPI()
     _mount_surfaces(
         app,
@@ -236,6 +245,96 @@ async def _mount_transport(
     )
     client = AsyncClient(transport=ASGITransport(app=app), base_url="http://slack")
     return app, client, blob
+
+
+async def test_first_signed_event_proves_identity_and_retry_admits(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    _, client, blob = await _mount_transport(
+        monkeypatch,
+        workspace_id,
+        tmp_path,
+        _mock_transport(recorder, {}),
+        identity=False,
+    )
+    body = _event_body(
+        type="app_mention",
+        user="U1",
+        channel="C1",
+        ts="100.5",
+        text=f"<@{BOT_USER_ID}> hi",
+    )
+    async with client:
+        first = await client.post(
+            "/surface/slack", content=body, headers=_sign(body, int(time.time()))
+        )
+        assert first.status_code == 503
+        await asyncio.gather(*slack._IDENTITY_TASKS.values())
+        response = await client.post(
+            "/surface/slack", content=body, headers=_sign(body, int(time.time()))
+        )
+    assert response.status_code == 200
+    assert await slack.read_identity(blob, workspace_id, BOT_TOKEN) == slack.SlackIdentity(
+        bot_token_fingerprint=slack.bot_token_fingerprint(BOT_TOKEN),
+        team_id=TEAM_ID,
+        bot_user_id=BOT_USER_ID,
+    )
+    assert len(_fetches(recorder, slack.SLACK_AUTH_TEST_URL)) == 1
+    async with workspace_tx() as connection:
+        assert (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.turn)
+                .where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one() == 1
+
+
+async def test_identity_proof_failure_returns_before_slack_ack_deadline(
+    db: None, tmp_path, monkeypatch, caplog
+) -> None:
+    workspace_id, _ = await _seed()
+
+    def rejected(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == slack.SLACK_AUTH_TEST_URL:
+            return httpx.Response(200, json={"ok": False, "error": "invalid_auth"})
+        return httpx.Response(404, json={"ok": False, "error": "not_mocked"})
+
+    _, client, blob = await _mount_transport(
+        monkeypatch,
+        workspace_id,
+        tmp_path,
+        httpx.MockTransport(rejected),
+        identity=False,
+    )
+    body = _event_body(
+        type="app_mention",
+        user="U1",
+        channel="C1",
+        ts="100.5",
+        text=f"<@{BOT_USER_ID}> hi",
+    )
+    with caplog.at_level(logging.ERROR, logger="ufo_ext_slack"):
+        async with client:
+            response = await client.post(
+                "/surface/slack", content=body, headers=_sign(body, int(time.time()))
+            )
+        assert response.status_code == 503
+        await asyncio.gather(*slack._IDENTITY_TASKS.values())
+    assert [
+        record.getMessage() for record in caplog.records if record.levelno == logging.ERROR
+    ] == ["slack identity proof failed: invalid_auth"]
+    assert await slack.read_identity(blob, workspace_id, BOT_TOKEN) is None
+    async with workspace_tx() as connection:
+        assert (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.turn)
+                .where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one() == 0
 
 
 async def _mount(
@@ -1760,6 +1859,45 @@ def _signed_form(body: bytes) -> dict[str, str]:
         **_sign(body, int(time.time())),
         "content-type": "application/x-www-form-urlencoded",
     }
+
+
+async def test_first_signed_click_proves_identity_and_retry_admits(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    _, client, blob = await _mount_transport(
+        monkeypatch,
+        workspace_id,
+        tmp_path,
+        _mock_transport(recorder, {}),
+        identity=False,
+    )
+    click = _click_body()
+    async with client:
+        first = await client.post(
+            "/surface/slack/interactive", content=click, headers=_signed_form(click)
+        )
+        assert first.status_code == 503
+        await asyncio.gather(*slack._IDENTITY_TASKS.values())
+        response = await client.post(
+            "/surface/slack/interactive", content=click, headers=_signed_form(click)
+        )
+    assert response.status_code == 200
+    assert await slack.read_identity(blob, workspace_id, BOT_TOKEN) == slack.SlackIdentity(
+        bot_token_fingerprint=slack.bot_token_fingerprint(BOT_TOKEN),
+        team_id=TEAM_ID,
+        bot_user_id=BOT_USER_ID,
+    )
+    assert len(_fetches(recorder, slack.SLACK_AUTH_TEST_URL)) == 1
+    async with workspace_tx() as connection:
+        assert (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.turn)
+                .where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one() == 1
 
 
 async def test_first_click_wins_and_alone_rewrites_the_message(

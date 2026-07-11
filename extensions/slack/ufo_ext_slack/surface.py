@@ -36,6 +36,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Mapping
 from dataclasses import dataclass
@@ -61,6 +62,17 @@ from ufo.sdk.surfaces import (
 SURFACE_SLACK = "slack"
 SLACK_BOT_TOKEN_SLOT = "slack_bot_token"
 SLACK_SIGNING_SECRET_SLOT = "slack_signing_secret"
+SLACK_AUTH_TEST_URL = "https://slack.com/api/auth.test"
+SLACK_IDENTITY_TIMEOUT_SECONDS = 20
+TEAM_ID_PATTERN = r"^T[A-Z0-9]+$"
+BOT_USER_ID_PATTERN = r"^[UW][A-Z0-9]+$"
+MALFORMED_IDENTITY_ERROR = "malformed identity"
+
+
+class SlackIdentityError(RuntimeError):
+    def __init__(self, error: str):
+        self.error = error
+        super().__init__(error)
 
 
 class SlackIdentity(BaseModel):
@@ -99,12 +111,83 @@ async def read_identity(
     return identity
 
 
+@dataclass(frozen=True)
+class SlackIdentityResolver:
+    blob: BlobStore
+    workspace_id: UUID
+    bot_token: str
+
+    async def resolve(self) -> SlackIdentity:
+        """Return the app identity bound to the bot token, proving and persisting it when absent."""
+        identity = await read_identity(self.blob, self.workspace_id, self.bot_token)
+        if identity is not None:
+            return identity
+        identity = await self._prove()
+        await self.blob.put(
+            identity_blob_key(self.workspace_id), identity.model_dump_json().encode()
+        )
+        return identity
+
+    async def _prove(self) -> SlackIdentity:
+        try:
+            async with httpx.AsyncClient(timeout=SLACK_IDENTITY_TIMEOUT_SECONDS) as client:
+                response = await client.post(
+                    SLACK_AUTH_TEST_URL,
+                    headers={"authorization": f"Bearer {self.bot_token}"},
+                )
+            response.raise_for_status()
+            payload = response.json()
+        except (httpx.HTTPError, json.JSONDecodeError) as error:
+            raise SlackIdentityError(f"unreachable: {error}") from error
+        if not isinstance(payload, dict):
+            raise SlackIdentityError("malformed response")
+        if payload.get("ok") is not True:
+            raise SlackIdentityError(str(payload.get("error") or "no error given"))
+        team_id = payload.get("team_id")
+        bot_user_id = payload.get("user_id")
+        if not isinstance(team_id, str) or not re.match(TEAM_ID_PATTERN, team_id):
+            raise SlackIdentityError(MALFORMED_IDENTITY_ERROR)
+        if not isinstance(bot_user_id, str) or not re.match(BOT_USER_ID_PATTERN, bot_user_id):
+            raise SlackIdentityError(MALFORMED_IDENTITY_ERROR)
+        return SlackIdentity(
+            bot_token_fingerprint=bot_token_fingerprint(self.bot_token),
+            team_id=team_id,
+            bot_user_id=bot_user_id,
+        )
+
+
 async def _identity(ctx: SurfaceContext) -> SlackIdentity | None:
     try:
         bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
     except CredentialSlotUnset:
         return None
     return await read_identity(ctx.blob, ctx.workspace_id, bot_token)
+
+
+_IDENTITY_TASKS: dict[UUID, asyncio.Task[None]] = {}
+
+
+def _prove_identity_in_background(ctx: SurfaceContext) -> None:
+    if ctx.workspace_id in _IDENTITY_TASKS:
+        return
+    task = asyncio.create_task(_run_identity_proof(ctx))
+    _IDENTITY_TASKS[ctx.workspace_id] = task
+
+    def _untrack(done: asyncio.Task[None]) -> None:
+        if _IDENTITY_TASKS.get(ctx.workspace_id) is done:
+            del _IDENTITY_TASKS[ctx.workspace_id]
+
+    task.add_done_callback(_untrack)
+
+
+async def _run_identity_proof(ctx: SurfaceContext) -> None:
+    try:
+        bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
+        await SlackIdentityResolver(ctx.blob, ctx.workspace_id, bot_token).resolve()
+    except SlackIdentityError as error:
+        _LOG.error("slack identity proof failed: %s", error)
+    except Exception:
+        _LOG.error("slack identity proof failed", exc_info=True)
 
 
 def url_verified_blob_key(workspace_id: UUID) -> str:
@@ -403,16 +486,19 @@ async def ingest(ctx: SurfaceContext, request: Request) -> Response:
     if not isinstance(payload, dict):
         raise ValueError("Slack body must be an object")
     identity = await _identity(ctx)
-    if identity is None or payload.get("team_id") != identity.team_id:
+    if identity is None:
+        _prove_identity_in_background(ctx)
+        return Response("Slack identity is being verified", status_code=503)
+    if payload.get("team_id") != identity.team_id:
         return JSONResponse({"ok": True, "ignored": True})
     await _mark_url_verified(ctx, signing_secret)
-    inbound = await _to_inbound(ctx, payload)
+    inbound = await _to_inbound(ctx, payload, identity)
     if inbound is None:
         return JSONResponse({"ok": True, "ignored": True})
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
     sender, context = await asyncio.gather(
         _slack_user(bot_token, inbound.slack_user_id),
-        _ambient_context(ctx, bot_token, inbound),
+        _ambient_context(ctx, bot_token, inbound, identity),
     )
     member_id = await _resolve_member(ctx, inbound, sender) if inbound.is_dm else None
     conversation_id = inbound.conversation_id
@@ -434,14 +520,13 @@ async def ingest(ctx: SurfaceContext, request: Request) -> Response:
     return JSONResponse({"ok": True})
 
 
-async def _to_inbound(ctx: SurfaceContext, payload: Mapping[str, object]) -> Inbound | None:
+async def _to_inbound(
+    ctx: SurfaceContext, payload: Mapping[str, object], identity: SlackIdentity
+) -> Inbound | None:
     event = payload.get("event")
     if not isinstance(event, dict) or event.get("type") not in MESSAGE_EVENT_TYPES:
         return None
     if event.get("bot_id") is not None or event.get("subtype") not in MEMBER_MESSAGE_SUBTYPES:
-        return None
-    identity = await _identity(ctx)
-    if identity is None:
         return None
     bot_user_id = identity.bot_user_id
     user = event.get("user")
@@ -566,7 +651,9 @@ async def _resolve_member(
     return await ctx.join_member(inbound.slack_user_id, sender.email)
 
 
-async def _ambient_context(ctx: SurfaceContext, bot_token: str, inbound: Inbound) -> str:
+async def _ambient_context(
+    ctx: SurfaceContext, bot_token: str, inbound: Inbound, identity: SlackIdentity
+) -> str:
     """A digest of the ambient messages a conversation-starting turn cannot have in its transcript —
     the traffic from before the agent was addressed. A first mid-thread mention reads the whole
     thread (unbounded above, so a reply racing this very ingest rides the digest instead of
@@ -599,8 +686,7 @@ async def _ambient_context(ctx: SurfaceContext, bot_token: str, inbound: Inbound
             "ts": root_ts,
             "limit": AMBIENT_FETCH_LIMIT,
         }
-    identity = await _identity(ctx)
-    bot_user_id = "" if identity is None else identity.bot_user_id
+    bot_user_id = identity.bot_user_id
     try:
         async with httpx.AsyncClient(timeout=AMBIENT_FETCH_TIMEOUT_SECONDS) as client:
             payload = await _slack_ok(
@@ -882,7 +968,11 @@ async def interactive(ctx: SurfaceContext, request: Request) -> Response:
         verify_slack_signature(request.headers, raw, signing_secret)
     except SlackSignatureError as error:
         return Response(str(error), status_code=401)
-    click = await _to_click(ctx, raw)
+    identity = await _identity(ctx)
+    if identity is None:
+        _prove_identity_in_background(ctx)
+        return Response("Slack identity is being verified", status_code=503)
+    click = await _to_click(ctx, raw, identity)
     if click is None:
         return JSONResponse({"ok": True, "ignored": True})
     await _mark_url_verified(ctx, signing_secret)
@@ -918,7 +1008,7 @@ async def _run_rewrite(click: AnswerClick) -> None:
         _LOG.warning("slack answer rewrite failed for %s: %s", click.message_ts, error)
 
 
-async def _to_click(ctx: SurfaceContext, raw: bytes) -> AnswerClick | None:
+async def _to_click(ctx: SurfaceContext, raw: bytes, identity: SlackIdentity) -> AnswerClick | None:
     form = parse_qs(raw.decode())
     encoded = form.get("payload")
     if not encoded:
@@ -928,8 +1018,7 @@ async def _to_click(ctx: SurfaceContext, raw: bytes) -> AnswerClick | None:
         return None
     team = payload.get("team")
     team_id = team.get("id") if isinstance(team, dict) else None
-    identity = await _identity(ctx)
-    if identity is None or team_id != identity.team_id:
+    if team_id != identity.team_id:
         return None
     label = _clicked_answer(payload)
     if label is None:

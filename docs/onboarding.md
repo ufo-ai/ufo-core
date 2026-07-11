@@ -123,10 +123,10 @@ request_credentials ---------> seals {workspace, owner, slots}; turn ends
   |                            writes the encrypted slot and that slot's marker;
   |                            NO turn admitted, transcript never sees a byte
   |
-slack_connect ---------------> auth.test proves the token; the derived team and
-  |                            bot-user ids persist as the surface's own
-  |                            identity record, pinned to the token's
-  |                            fingerprint (owner-only step)
+slack_connect ---------------> auth.test proves the token; a signed request can
+  |                            run the same proof. The derived team and bot-user
+  |                            ids persist as the surface's own identity record,
+  |                            pinned to the token's fingerprint (owner-only tool)
   v
 first DM / @mention ---------> url-verified marker flips slack_connect to connected
 ```
@@ -147,8 +147,9 @@ in chat.
               |
               | request_credentials fulfillment stores
               | the bot token + signing secret;
-              | slack_connect derives the identity
-              | record (auth.test, fingerprint-pinned)
+              | slack_connect or a signed request derives
+              | the identity record (auth.test,
+              | fingerprint-pinned)
               v
        +-----------------+
        |     pending     |<------------------------+
@@ -172,7 +173,7 @@ missing a secret slot
   -> not_configured
 
 secrets set, identity absent or from a rotated token
-  -> auth.test derives + persists {token fingerprint, team_id, bot_user_id}
+  -> identity resolution derives + persists {token fingerprint, team_id, bot_user_id}
 
 identity valid, but no matching url_verified marker
   -> pending
@@ -181,10 +182,12 @@ marker fingerprint matches current signing secret
   -> connected
 ```
 
-`slack_app_manifest` renders the app manifest from the tenant public base URL
-(`[connect] public_base_url`; events request URL `<public_base_url>/surface/slack`). The owner
-enters only the Bot User OAuth Token and Signing Secret; the team and bot-user ids are derived
-metadata, never entered and never slots.
+`slack_connect` and signed Slack requests use the same `auth.test` identity resolution. A request
+with no identity starts that proof after its response and asks Slack to retry; the retry continues
+through normal admission. `slack_app_manifest` renders the app manifest from the tenant public
+base URL (`[connect] public_base_url`; events request URL
+`<public_base_url>/surface/slack`). The owner enters only the Bot User OAuth Token and Signing
+Secret; the team and bot-user ids are derived metadata, never entered and never slots.
 
 ## URL verification signal
 

@@ -12,31 +12,24 @@ test, so the scopes and events can never drift apart."""
 
 import json
 import re
-from dataclasses import dataclass
 
-import httpx
 from pydantic import BaseModel, Field
 
 from ufo.sdk.surfaces import CredentialSlotUnset
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_slack.surface import (
+    MALFORMED_IDENTITY_ERROR,
     SLACK_BOT_TOKEN_SLOT,
     SLACK_SIGNING_SECRET_SLOT,
-    SlackIdentity,
-    bot_token_fingerprint,
-    identity_blob_key,
+    SlackIdentityError,
+    SlackIdentityResolver,
     read_identity,
     signing_secret_fingerprint,
     url_verified_blob_key,
 )
 
-SLACK_AUTH_TEST_URL = "https://slack.com/api/auth.test"
-AUTH_TEST_TIMEOUT_SECONDS = 20
-
 SLACK_SECRET_SLOTS = (SLACK_BOT_TOKEN_SLOT, SLACK_SIGNING_SECRET_SLOT)
 
-TEAM_ID_PATTERN = r"^T[A-Z0-9]+$"
-BOT_USER_ID_PATTERN = r"^[UW][A-Z0-9]+$"
 BOT_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9 _.-]{0,34}$"
 
 TOKEN_REJECTED_ERRORS = ("invalid_auth", "token_revoked", "account_inactive", "not_authed")
@@ -107,8 +100,9 @@ def _state(state: str, hint: str, events_url: str | None, **extra: object) -> To
 async def slack_connect_handler(ctx: ToolContext, args: SlackConnectInput) -> ToolResult:
     """One idempotent walk of the connection state machine, reporting where it stopped:
     `not_configured` (a secret is missing or the token is rejected), `pending` (identity proven,
-    awaiting Slack's first signed event), or `connected`. The identity-deriving step — the only
-    write — is owner-gated: the bot is shared by every member."""
+    awaiting Slack's first signed event), or `connected`. Deriving identity here is owner-gated —
+    the bot is shared by every member; a signed Slack request proves the same record itself, the
+    signature gating what the owner gates here."""
     assert ctx.ext is not None
     events_url = None if ctx.public_base_url is None else _events_url(ctx.public_base_url)
     missing = []
@@ -130,26 +124,23 @@ async def slack_connect_handler(ctx: ToolContext, args: SlackConnectInput) -> To
     if identity is None:
         if not await ctx.speaker_is_owner():
             raise ValueError("only the workspace owner can connect Slack")
-        result = await _auth_test(bot_token)
-        if not result.ok:
-            return _state("not_configured", _token_diagnosis(result.error), events_url)
-        if not re.match(TEAM_ID_PATTERN, result.team_id) or not re.match(
-            BOT_USER_ID_PATTERN, result.user_id
-        ):
+        try:
+            identity = await SlackIdentityResolver(
+                ctx.blob, ctx.turn.workspace_id, bot_token
+            ).resolve()
+        except SlackIdentityError as error:
+            if error.error == MALFORMED_IDENTITY_ERROR:
+                return _state(
+                    "not_configured",
+                    "Slack auth.test did not return a usable team/bot id — re-copy the Bot User "
+                    "OAuth Token from OAuth & Permissions and collect it again.",
+                    events_url,
+                )
             return _state(
                 "not_configured",
-                "Slack auth.test did not return a usable team/bot id — re-copy the Bot User "
-                "OAuth Token from OAuth & Permissions and collect it again.",
+                _token_diagnosis(error.error),
                 events_url,
             )
-        identity = SlackIdentity(
-            bot_token_fingerprint=bot_token_fingerprint(bot_token),
-            team_id=result.team_id,
-            bot_user_id=result.user_id,
-        )
-        await ctx.blob.put(
-            identity_blob_key(ctx.turn.workspace_id), identity.model_dump_json().encode()
-        )
     if await _verified(ctx):
         return _state(
             "connected",
@@ -203,41 +194,6 @@ async def slack_manifest_handler(ctx: ToolContext, args: SlackManifestInput) -> 
         name=args.name, request_url=events_url, interactivity_url=f"{events_url}/interactive"
     )
     return ToolResult(content=(TextContent(text=manifest),))
-
-
-@dataclass(frozen=True)
-class AuthTest:
-    ok: bool
-    error: str
-    team_id: str
-    user_id: str
-    team: str
-    user: str
-
-
-async def _auth_test(bot_token: str) -> AuthTest:
-    try:
-        async with httpx.AsyncClient(timeout=AUTH_TEST_TIMEOUT_SECONDS) as client:
-            response = await client.post(
-                SLACK_AUTH_TEST_URL, headers={"authorization": f"Bearer {bot_token}"}
-            )
-        payload = response.json()
-    except (httpx.HTTPError, json.JSONDecodeError) as error:
-        return AuthTest(
-            ok=False, error=f"unreachable: {error}", team_id="", user_id="", team="", user=""
-        )
-    if not isinstance(payload, dict):
-        return AuthTest(
-            ok=False, error="malformed response", team_id="", user_id="", team="", user=""
-        )
-    return AuthTest(
-        ok=bool(payload.get("ok")),
-        error=str(payload.get("error") or ""),
-        team_id=str(payload.get("team_id") or ""),
-        user_id=str(payload.get("user_id") or ""),
-        team=str(payload.get("team") or ""),
-        user=str(payload.get("user") or ""),
-    )
 
 
 def _token_diagnosis(error: str) -> str:
