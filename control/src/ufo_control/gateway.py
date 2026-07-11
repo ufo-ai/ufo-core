@@ -2,7 +2,8 @@
 
 `GET /ufo` serves the version-stamped POSIX client; `POST /v1/onboard/{channel}` drives the sign-in
 screen as directives; `GET /fleet` answers the craft count the edge worker's landing page renders —
-one craft aloft per workspace. The apex's public face — the landing card, the waitlist, and
+one craft aloft per live workspace of the tier (shared: workspace rows; enterprise: `Tenant` CRs,
+so a deleted tenant leaves the sky). The apex's public face — the landing card, the waitlist, and
 `/install` — is the Cloudflare edge worker (`infra/modules/edge`) in front of this origin; the
 terminal client is the one onboarding renderer. The state is the `onboard_claim` row keyed by the
 client's session, so each POST advances the same claim: no email → ask; code pending → verify;
@@ -237,11 +238,6 @@ class Onboarding:
         )
 
 
-async def craft_count(pool: asyncpg.Pool) -> int:
-    """The fleet size the landing page renders — every workspace is one craft aloft."""
-    return await pool.fetchval("select count(*) from workspace")
-
-
 def _require_env(name: str) -> str:
     value = os.environ.get(name)
     if not value:
@@ -333,7 +329,11 @@ def gateway_app() -> FastAPI:
 
     @app.get("/fleet")
     async def fleet() -> Response:
-        return JSONResponse({"craft": await craft_count(state["pool"])})
+        if state["tier"] == SHARED_TIER:
+            craft = await state["pool"].fetchval("select count(*) from workspace")
+        else:
+            craft = len(await state["kube"].list_tenants())
+        return JSONResponse({"craft": craft})
 
     @app.post("/v1/onboard/{channel}")
     async def onboard(channel: str, request: Request) -> Response:

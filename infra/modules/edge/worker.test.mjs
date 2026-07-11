@@ -53,7 +53,6 @@ globalThis.fetch = async (input) => {
 const env = {
   DB: fakeD1(),
   ORIGIN_BASE: "https://testing.flyingobject.ai",
-  SITE_BASE: "https://flyingobject.ai",
 };
 
 function request(url, { ua = "curl/8.6.0", method = "GET", body } = {}) {
@@ -83,10 +82,12 @@ test("browser landing over plain http is bounced to https with its query intact"
   assert.equal(reply.headers.get("location"), "https://flyingobject.ai/?ref=x");
 });
 
-test("browser landing on the site's own apex serves the embedded page", async () => {
-  const reply = await request("https://flyingobject.ai/?utm_source=card", { ua: "Mozilla/5.0" });
-  assert.equal(reply.headers.get("content-type"), "text/html; charset=utf-8");
-  assert.equal(await reply.text(), LANDING_PAGE.replace("__FLEET_N__", "0"));
+test("every front door serves its own embedded page to browsers", async () => {
+  for (const host of ["flyingobject.ai", "testing.flyingobject.ai"]) {
+    const reply = await request(`https://${host}/?utm_source=card`, { ua: "Mozilla/5.0" });
+    assert.equal(reply.headers.get("content-type"), "text/html; charset=utf-8");
+    assert.equal(await reply.text(), LANDING_PAGE.replace("__FLEET_N__", "0"));
+  }
 });
 
 test("the landing page carries the live craft count from the gateway", async () => {
@@ -121,12 +122,6 @@ test("a gateway outage lands an empty sky, not an error", async () => {
   assert.equal(reply.status, 200);
   assert.match(await reply.text(), /const FLEET_N = 0;/);
   fleetReply = () => Response.json({ craft: 0 });
-});
-
-test("browser landing on another apex redirects to the site", async () => {
-  const reply = await request("https://testing.flyingobject.ai/?ref=x", { ua: "Mozilla/5.0" });
-  assert.equal(reply.status, 302);
-  assert.equal(reply.headers.get("location"), "https://flyingobject.ai/?ref=x");
 });
 
 test("joining is positional, idempotent, and normalizes the email", async () => {

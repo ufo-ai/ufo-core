@@ -3,6 +3,7 @@ const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MAX_EMAIL = 254;
 const COUNT_TTL_MS = 3_600_000;
 const FLEET_TTL_MS = 300_000;
+const FLEET_FETCH_TIMEOUT_MS = 3_000;
 const MAX_FLEET = 100;
 
 const LANDING_HTML = "__LANDING_HTML__";
@@ -75,7 +76,10 @@ async function fleetCount(originBase) {
     return fleet.count;
   }
   try {
-    const { craft } = await (await fetch(`${originBase}/fleet`)).json();
+    const reply = await fetch(`${originBase}/fleet`, {
+      signal: AbortSignal.timeout(FLEET_FETCH_TIMEOUT_MS),
+    });
+    const { craft } = await reply.json();
     fleet = { count: Math.min(MAX_FLEET, Math.max(0, Number(craft) || 0)), at: Date.now() };
   } catch {
     return fleet.count ?? 0;
@@ -88,9 +92,6 @@ async function landing(request, env, url) {
     if (url.protocol === "http:") {
       url.protocol = "https:";
       return Response.redirect(url.href, 301);
-    }
-    if (url.hostname !== new URL(env.SITE_BASE).hostname) {
-      return Response.redirect(`${env.SITE_BASE}/${url.search}`, 302);
     }
     const count = await fleetCount(env.ORIGIN_BASE);
     return new Response(LANDING_HTML.replace("__FLEET_N__", String(count)), {

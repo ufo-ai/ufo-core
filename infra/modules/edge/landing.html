@@ -540,6 +540,12 @@ const FADE_IN_T   = 0.9;                       // seconds to materialize back
 const VISIBLE_MIN = reduceMotion ? 14 : 6;     // min seconds visible between cloaks
 const VISIBLE_MAX = reduceMotion ? 26 : 15;    // max seconds visible between cloaks
 const SEED_STRIDE = 2654435761;                // craft #i flies the same hull every visit
+const SHRINK_EXPONENT = -0.22;
+const SHRINK_FLOOR = 0.32;
+const MIN_FONT_PX = 7;
+const FORMATION_RADIUS_SHARE = 0.6;
+const FORMATION_PAD_PX = 8;
+const CLOAKED_BELOW = 0.3;
 
 const requested = Number(new URLSearchParams(location.search).get('n'));
 const COUNT = Math.min(MAX_FLEET, Math.max(1, requested || FLEET_N || 1));
@@ -553,10 +559,9 @@ addEventListener('pointermove', e => {
 addEventListener('pointerleave', () => { mouse.active = false; });
 addEventListener('blur', () => { mouse.active = false; });
 
-// craft shrink as the fleet grows so the sky never crowds out
 function fontPx(){
   const base = Math.min(22, Math.max(13, innerWidth*0.0375));
-  return Math.max(7, base * Math.max(0.32, Math.pow(COUNT, -0.22)));
+  return Math.max(MIN_FONT_PX, base * Math.max(SHRINK_FLOOR, Math.pow(COUNT, SHRINK_EXPONENT)));
 }
 function nextCloakDelay(){ return VISIBLE_MIN + Math.random()*(VISIBLE_MAX - VISIBLE_MIN); }
 
@@ -629,17 +634,16 @@ function teleport(craft){
   craft.vy = Math.sin(ang)*BASE_SPEED;
 }
 
-// pairwise repulsion spreads the formation; cloaked craft don't push
 function applySeparation(dtSec){
   for(let i=0;i<fleet.length;i++){
     const a = fleet[i];
-    if(!a.ready || a.opacity < 0.3) continue;
+    if(!a.ready || a.opacity < CLOAKED_BELOW) continue;
     for(let j=i+1;j<fleet.length;j++){
       const b = fleet[j];
-      if(!b.ready || b.opacity < 0.3) continue;
+      if(!b.ready || b.opacity < CLOAKED_BELOW) continue;
       const ax = a.x + a.w/2, ay = a.y + a.h/2;
       const bx = b.x + b.w/2, by = b.y + b.h/2;
-      const rad = 0.6*(a.w + b.w)/2 + 8;
+      const rad = FORMATION_RADIUS_SHARE*(a.w + b.w)/2 + FORMATION_PAD_PX;
       const dx = ax-bx, dy = ay-by;
       const dist = Math.hypot(dx,dy) || 0.0001;
       if(dist >= rad) continue;

@@ -20,10 +20,6 @@ variable "account_id" {
 
 variable "origin_base" {
   type        = string
-  description = "Gateway base URL /install proxies the stamped client script from (its /ufo route)."
+  description = "This door's gateway base URL: /install proxies its stamped client script (/ufo), the landing page counts its fleet (/fleet)."
 }
 
-variable "site_base" {
-  type        = string
-  description = "Site base URL browsers hitting / land on: its own host serves the embedded landing page, every other host redirects to it."
-}

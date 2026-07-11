@@ -40,8 +40,9 @@ resource "cloudflare_zone_setting" "always_use_https" {
 }
 
 # One live fleet (testing) behind two front doors: both apexes proxy /install from the testing
-# gateway, whose stamped script boards clients onto that fleet, and land browsers on the embedded
-# landing page at the prod apex.
+# gateway, whose stamped script boards clients onto that fleet. Each front door serves the embedded
+# landing page stamped with its own gateway's craft count — the doors' skies diverge when prod gets
+# its own fleet (repoint origin_base).
 module "prod" {
   source = "../../modules/edge"
 
@@ -50,7 +51,6 @@ module "prod" {
   zone_id     = data.cloudflare_zone.flyingobject_ai.id
   account_id  = data.cloudflare_zone.flyingobject_ai.account.id
   origin_base = "https://testing.flyingobject.ai"
-  site_base   = "https://flyingobject.ai"
 }
 
 module "testing" {
@@ -61,5 +61,4 @@ module "testing" {
   zone_id     = data.cloudflare_zone.flyingobject_ai.id
   account_id  = data.cloudflare_zone.flyingobject_ai.account.id
   origin_base = "https://testing.flyingobject.ai"
-  site_base   = "https://flyingobject.ai"
 }
