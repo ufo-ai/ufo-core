@@ -520,7 +520,9 @@ function mulberry32(seed){
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// the fleet: one craft aloft per workspace, each on its own endless tour
+// the fleet: one craft aloft per workspace, each on its own staggered
+// tour — a craft holds its form between morphs, and a collision re-forms
+// both craft on the spot
 // ═══════════════════════════════════════════════════════════════════════
 const FLEET_N = __FLEET_N__;
 const MAX_FLEET = 100;
@@ -546,6 +548,10 @@ const MIN_FONT_PX = 7;
 const FORMATION_RADIUS_SHARE = 0.6;
 const FORMATION_PAD_PX = 8;
 const CLOAKED_BELOW = 0.3;
+const HOLD_MIN_S = reduceMotion ? 8 : 2.5;
+const HOLD_MAX_S = reduceMotion ? 24 : 11;
+const COLLIDE_SHARE = 0.8;
+const COLLIDE_COOLDOWN_S = 3;
 
 const requested = Number(new URLSearchParams(location.search).get('n'));
 const COUNT = Math.min(MAX_FLEET, Math.max(1, requested || FLEET_N || 1));
@@ -576,6 +582,9 @@ function makeCraft(index){
     el, rng,
     current: randomCraft(rng),
     queue: [],
+    holdTimer: Math.random()*HOLD_MAX_S,
+    shimmer: 0,
+    cooldown: 0,
     x:0, y:0, vx:0, vy:0, w:0, h:0, ready:false,
     phase:'visible', opacity:1, timer:nextCloakDelay(),
   };
@@ -595,8 +604,15 @@ function nextLeg(craft){
   craft.current = c;
   return grids;
 }
-function pump(craft){
-  while(craft.queue.length < STEPS_EACH) craft.queue.push(...nextLeg(craft));
+function startLeg(craft){
+  craft.queue.push(...nextLeg(craft));
+  craft.holdTimer = HOLD_MIN_S + Math.random()*(HOLD_MAX_S - HOLD_MIN_S);
+}
+
+function bump(craft){
+  if(craft.cooldown > 0 || craft.queue.length) return;
+  craft.cooldown = COLLIDE_COOLDOWN_S;
+  startLeg(craft);
 }
 
 function initMotion(craft){
@@ -634,7 +650,7 @@ function teleport(craft){
   craft.vy = Math.sin(ang)*BASE_SPEED;
 }
 
-function applySeparation(dtSec){
+function interact(dtSec){
   for(let i=0;i<fleet.length;i++){
     const a = fleet[i];
     if(!a.ready || a.opacity < CLOAKED_BELOW) continue;
@@ -650,6 +666,7 @@ function applySeparation(dtSec){
       const push = SEP_FORCE * (1 - dist/rad) / dist * dtSec;
       a.vx += dx*push; a.vy += dy*push;
       b.vx -= dx*push; b.vy -= dy*push;
+      if(dist < rad*COLLIDE_SHARE){ bump(a); bump(b); }
     }
   }
 }
@@ -658,6 +675,12 @@ function stepMotion(craft, dtSec){
   if(!craft.ready) return;
   const maxX = Math.max(0, innerWidth  - craft.w);
   const maxY = Math.max(0, innerHeight - craft.h);
+
+  craft.cooldown = Math.max(0, craft.cooldown - dtSec);
+  if(!craft.queue.length){
+    craft.holdTimer -= dtSec;
+    if(craft.holdTimer <= 0) startLeg(craft);
+  }
 
   // ── cloak cycle: visible → fading out → (teleport) → fading in ──
   if(craft.phase === 'visible'){
@@ -727,7 +750,7 @@ function loop(now){
   const rawDt = now - last; last = now;
   // advance every craft's position each frame for smooth drift
   const dtSec = Math.min(rawDt/1000, 0.05);
-  applySeparation(dtSec);
+  interact(dtSec);
   for(const craft of fleet) stepMotion(craft, dtSec);
   // advance the morph animations at the fixed frame rate
   acc += rawDt;
@@ -735,9 +758,11 @@ function loop(now){
   while(acc >= interval){
     acc -= interval;
     for(const craft of fleet){
-      if(craft.queue.length < 2) pump(craft);
       const grid = craft.queue.shift();
-      if(grid) craft.el.innerHTML = gridToHTML(grid);
+      if(grid){ craft.el.innerHTML = gridToHTML(grid); continue; }
+      craft.shimmer++;
+      craft.el.innerHTML = gridToHTML(renderGrid(
+        {...craft.current, phase:(craft.current.phase + craft.shimmer) & 1}));
     }
   }
   requestAnimationFrame(loop);
@@ -745,7 +770,7 @@ function loop(now){
 
 // measure after layout settles, then place the fleet and start moving
 requestAnimationFrame(() => {
-  for(const craft of fleet){ pump(craft); initMotion(craft); }
+  for(const craft of fleet) initMotion(craft);
   requestAnimationFrame(loop);
 });
 </script>
