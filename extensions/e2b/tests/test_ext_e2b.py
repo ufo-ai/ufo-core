@@ -16,7 +16,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import ufo_ext_e2b as e2b_ext
-from e2b.exceptions import TimeoutException
+from e2b.exceptions import SandboxNotFoundException, TimeoutException
 from e2b.sandbox.commands.command_handle import CommandExitException
 from ufo_ext_e2b import (
     CA_SANDBOX_PATH,
@@ -126,6 +126,7 @@ class _Sdk:
     counter: int = 0
     command_fail_on: tuple[str, ...] = ()
     command_timeout_on: tuple[str, ...] = ()
+    not_found: frozenset[str] = frozenset()
 
     def create(
         self,
@@ -156,6 +157,8 @@ class _Sdk:
 
     def connect(self, sandbox_id: str, *, timeout: int, api_key: str) -> _Sandbox:
         self.connected.append(sandbox_id)
+        if sandbox_id in self.not_found:
+            raise SandboxNotFoundException(f"Paused sandbox {sandbox_id} not found")
         return self.sandboxes[sandbox_id]
 
 
@@ -490,6 +493,19 @@ async def test_destroy_on_a_conversation_never_created_is_a_no_op() -> None:
 
     assert sdk.connected == []
     assert sdk.sandboxes == {}
+
+
+async def test_destroy_on_an_already_gone_sandbox_is_a_no_op() -> None:
+    """The reaper retries a stored handle whose sandbox is already gone (paused past e2b's own
+    retention, or reaped by a concurrent process) every sweep unless destroy absorbs the
+    reconnect's SandboxNotFoundException as the no-op its own contract promises — otherwise the
+    raise stops the reaper from ever clearing the durable handle."""
+    sdk = _Sdk(not_found=frozenset({"gone-1"}))
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+
+    await carrier.destroy(SandboxHandle(conversation_id=uuid4(), container_id="gone-1"))
+
+    assert sdk.connected == ["gone-1"]
 
 
 def _clear_e2b_env(monkeypatch: pytest.MonkeyPatch) -> None:

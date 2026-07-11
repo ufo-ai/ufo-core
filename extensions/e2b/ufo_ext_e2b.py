@@ -31,7 +31,7 @@ from typing import Protocol, cast
 from uuid import UUID
 
 from e2b import Sandbox as E2BSdkSandbox
-from e2b.exceptions import TimeoutException
+from e2b.exceptions import SandboxNotFoundException, TimeoutException
 from e2b.sandbox.commands.command_handle import CommandExitException
 from e2b.sandbox.sandbox_api import SandboxLifecycle
 
@@ -302,16 +302,21 @@ class E2BCarrier:
         this process still holds is paused directly, and one it never held (a prior process created
         it) is reconnected from `handle.container_id` and paused too — the durable handle lets idle
         reclaim reach a sandbox this process could not otherwise address. An empty id (the seam's
-        no-container reap) connects to nothing and is a no-op that never raises."""
+        no-container reap) connects to nothing and is a no-op that never raises. A sandbox already
+        gone (paused past e2b's own retention, or reaped by a concurrent process) raises
+        SandboxNotFoundException on reconnect — also a no-op, since nothing is left to pause."""
         self._egress.pop(handle.conversation_id, None)
         live = self._live.pop(handle.conversation_id, None)
         if live is None and handle.container_id:
-            live = await asyncio.to_thread(
-                self.sdk.connect,
-                handle.container_id,
-                timeout=self.timeout_seconds,
-                api_key=self.api_key,
-            )
+            try:
+                live = await asyncio.to_thread(
+                    self.sdk.connect,
+                    handle.container_id,
+                    timeout=self.timeout_seconds,
+                    api_key=self.api_key,
+                )
+            except SandboxNotFoundException:
+                return
         if live is not None:
             await asyncio.to_thread(live.pause, api_key=self.api_key)
 
