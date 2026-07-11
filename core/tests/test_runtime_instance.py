@@ -12,8 +12,10 @@ from ufo.db import workspace_tx
 from ufo.runtime_instance import (
     STALE_AFTER_SECONDS,
     BootGuard,
+    ExecutorRecovery,
     Heartbeat,
     fingerprint_of,
+    record_fleet_seat,
 )
 from ufo.schema import tables
 
@@ -192,7 +194,7 @@ async def test_a_transient_error_does_not_kill_the_heartbeat_loop(
     instance_id = await _insert_instance(
         workspace_id, heartbeat_age_seconds=STALE_AFTER_SECONDS + 20
     )
-    real_tx = runtime_instance.workspace_tx
+    real_tx = runtime_instance.owner_tx
     ticks = {"n": 0}
 
     def flaky_tx() -> object:
@@ -201,9 +203,9 @@ async def test_a_transient_error_does_not_kill_the_heartbeat_loop(
             raise sa.exc.SQLAlchemyError("transient connection reset")
         return real_tx()
 
-    monkeypatch.setattr(runtime_instance, "workspace_tx", flaky_tx)
+    monkeypatch.setattr(runtime_instance, "owner_tx", flaky_tx)
     monkeypatch.setattr(runtime_instance, "HEARTBEAT_INTERVAL_SECONDS", 0.02)
-    heartbeat = Heartbeat(instance_id=instance_id, workspace_id=workspace_id)
+    heartbeat = Heartbeat(instance_id=instance_id)
     task = asyncio.create_task(heartbeat.run())
     try:
         async with asyncio.timeout(5):
@@ -226,7 +228,7 @@ async def test_heartbeat_refreshes_a_stale_row_and_retire_removes_it(
     )
     assert not await _row_live(instance_id)
     monkeypatch.setattr(runtime_instance, "HEARTBEAT_INTERVAL_SECONDS", 0.02)
-    heartbeat = Heartbeat(instance_id=instance_id, workspace_id=workspace_id)
+    heartbeat = Heartbeat(instance_id=instance_id)
     task = asyncio.create_task(heartbeat.run())
     try:
         async with asyncio.timeout(5):
@@ -239,3 +241,27 @@ async def test_heartbeat_refreshes_a_stale_row_and_retire_removes_it(
     assert await _row_live(instance_id)
     await heartbeat.retire()
     assert not await _row_present(instance_id)
+
+
+async def test_fleet_seat_has_no_workspace_and_counts_as_a_live_executor(db: None) -> None:
+    """The shared fleet's seat: recorded with no workspace (it serves them all), refreshed by the
+    same heartbeat, and read as live by the executor-recovery sweep — so a booting fleet process is
+    never swept as stranded and its retirement frees the seat like any instance's."""
+    instance_id = uuid4()
+    await record_fleet_seat(_production_config(), instance_id)
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.runtime_instance.c.workspace_id).where(
+                    tables.runtime_instance.c.id == instance_id
+                )
+            )
+        ).one()
+    assert row.workspace_id is None
+    assert str(instance_id) in await ExecutorRecovery()._live_executors()
+    heartbeat = Heartbeat(instance_id=instance_id)
+    await heartbeat.beat()
+    assert await _row_live(instance_id)
+    await heartbeat.retire()
+    assert not await _row_present(instance_id)
+    assert str(instance_id) not in await ExecutorRecovery()._live_executors()

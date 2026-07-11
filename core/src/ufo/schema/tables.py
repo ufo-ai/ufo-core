@@ -245,7 +245,7 @@ runtime_instance = sa.Table(
     "runtime_instance",
     metadata,
     sa.Column("id", sa.Uuid, primary_key=True),
-    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
+    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=True),
     sa.Column("started_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("heartbeat_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("fingerprint", sa.Text, nullable=False),

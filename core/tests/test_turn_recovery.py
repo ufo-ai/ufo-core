@@ -8,13 +8,21 @@ for the in-flight step and never finalizes the workflow, leaving it PENDING for
 `recover_pending_workflows` to re-dispatch — exactly a killed worker recovering on a peer."""
 
 import asyncio
+import json
+import os
+import subprocess
+import sys
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from pathlib import Path
 from uuid import UUID, uuid4
 
+import psycopg
 import pytest
 import sqlalchemy as sa
 from dbos import DBOS, DBOSClient, SetWorkflowID
+from sqlalchemy.engine import make_url
 from ufo_ext_index_default import DefaultIndex
 
 from ufo.accounting import CORE_PRICING
@@ -244,3 +252,153 @@ async def test_crash_mid_turn_recovers_without_re_executing_completed_work(
         loop_queue.reset_runtime()
         if saved is not None:
             loop_queue.init_runtime(saved)
+
+
+WORKER = Path(__file__).parent / "recovery_worker.py"
+CRASH_EXIT_CODE = 42
+WORKER_TIMEOUT_SECONDS = 120
+
+
+def _worker_env(app_url: str, system_url: str, blob_root: Path) -> dict[str, str]:
+    ids = {name: str(uuid4()) for name in ("workspace", "member", "agent", "conversation", "turn")}
+    return {
+        **os.environ,
+        "RECOVERY_TEST_APP_URL": app_url,
+        "RECOVERY_TEST_SYSTEM_URL": system_url,
+        "RECOVERY_TEST_BLOB_ROOT": str(blob_root),
+        "RECOVERY_TEST_IDS": json.dumps(ids),
+    }
+
+
+def _run_worker(phase: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(WORKER), phase],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=WORKER_TIMEOUT_SECONDS,
+    )
+
+
+@pytest.mark.serial
+def test_queued_turn_killed_mid_run_recovers_on_fresh_boot(
+    database_url: str, tmp_path: Path
+) -> None:
+    """The deploy-rollout scenario, with real process death: process one runs the turn through the
+    partitioned turns queue and dies via os._exit mid-round-two, leaving the workflow PENDING with
+    two recorded steps; process two boots the way `ufoctl serve` boots (sync-context DBOS.launch,
+    recovery firing during it, asyncio.run boot work continuing on the main thread) and must drive
+    the turn to a done terminal. A hang here is the prod wedge: an eternally-running turn silently
+    blocking its conversation partition."""
+    if not database_url.startswith("postgresql"):
+        pytest.skip("prod-topology recovery proof runs on postgres")
+    system_url = _reset_private_system_db(database_url)
+    env = _worker_env(database_url, system_url, tmp_path / "blobs")
+
+    crashed = _run_worker("crash", env)
+    assert crashed.returncode == CRASH_EXIT_CODE, (
+        f"crash phase died wrong: rc={crashed.returncode}\n{crashed.stdout}\n{crashed.stderr}"
+    )
+
+    recovered = _run_worker("recover", env)
+    assert recovered.returncode == 0, (
+        f"recovered process never finished the turn: rc={recovered.returncode}\n"
+        f"{recovered.stdout}\n{recovered.stderr}"
+    )
+    assert '"status": "done"' in recovered.stdout
+    assert '"text": "recovered"' in recovered.stdout
+
+
+def _reset_private_system_db(database_url: str) -> str:
+    """A per-test DBOS system database, so these subprocess fleets never share queues with the
+    session's own DBOS launch. Returns the psycopg-driver url the workers take."""
+    base = make_url(database_url)
+    name = f"{base.database}_recovery_sys"
+    from ufo_testsupport.plugin import reset_postgres_database
+
+    asyncio.run(reset_postgres_database(name))
+    return (base.set(database=name, drivername="postgresql+psycopg")).render_as_string(
+        hide_password=False
+    )
+
+
+def _workflow_attempts_and_steps(system_url: str, turn_id: str) -> tuple[int | None, list[int]]:
+    dsn = system_url.replace("postgresql+psycopg", "postgresql")
+    try:
+        with psycopg.connect(dsn) as db, db.cursor() as cur:
+            cur.execute(
+                "select recovery_attempts from dbos.workflow_status where workflow_uuid = %s",
+                (turn_id,),
+            )
+            row = cur.fetchone()
+            cur.execute(
+                "select function_id from dbos.operation_outputs"
+                " where workflow_uuid = %s order by function_id",
+                (turn_id,),
+            )
+            steps = [step for (step,) in cur.fetchall()]
+    except psycopg.errors.UndefinedTable:
+        return None, []
+    return (None if row is None else row[0]), steps
+
+
+LIVE_PEER_WINDOW_SECONDS = 15
+
+
+@pytest.mark.serial
+def test_booting_peer_leaves_live_turn_alone_then_recovers_it_after_death(
+    database_url: str, tmp_path: Path
+) -> None:
+    """The rolling-deploy scenario: a peer process boots while the incumbent is mid-turn and ALIVE.
+    The booting peer must not treat the live turn as crashed work — stealing it starts a second
+    concurrent execution whose loser parks forever in DBOS's duplicate-execution wait, wedging the
+    turn and its whole conversation partition. Once the incumbent actually dies, the peer's
+    executor-recovery sweep must reclaim the turn and finish it."""
+    if not database_url.startswith("postgresql"):
+        pytest.skip("prod-topology recovery proof runs on postgres")
+    system_url = _reset_private_system_db(database_url)
+    env = _worker_env(database_url, system_url, tmp_path / "blobs")
+    turn_id = json.loads(env["RECOVERY_TEST_IDS"])["turn"]
+
+    incumbent = subprocess.Popen(
+        [sys.executable, str(WORKER), "incumbent"],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    thief = None
+    try:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            attempts, steps = _workflow_attempts_and_steps(system_url, turn_id)
+            if 2 in steps:
+                break
+            assert incumbent.poll() is None, "incumbent died before reaching round two"
+            time.sleep(0.5)
+        else:
+            pytest.fail("incumbent never recorded its round-one steps")
+
+        thief = subprocess.Popen(
+            [sys.executable, str(WORKER), "thief"],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        window_ends = time.monotonic() + LIVE_PEER_WINDOW_SECONDS
+        while time.monotonic() < window_ends:
+            attempts, _ = _workflow_attempts_and_steps(system_url, turn_id)
+            assert attempts == 1, (
+                f"the booting peer stole the live turn (recovery_attempts={attempts})"
+            )
+            time.sleep(1)
+
+        incumbent.kill()
+        out, _ = thief.communicate(timeout=90)
+        assert thief.returncode == 0, f"peer never finished the dead incumbent's turn:\n{out}"
+        assert '"text": "recovered"' in out
+    finally:
+        for proc in (incumbent, thief):
+            if proc is not None and proc.poll() is None:
+                proc.kill()

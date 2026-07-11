@@ -276,12 +276,13 @@ carrier extension and needs no host Docker at all.
 ## Scale-out
 
 Scale-out is a deployment mode, not a feature: the same bundle with more instances. Nothing in core
-is instance-aware except the boot guard; the only extension involved is the Redis hub.
+is instance-aware except the boot guard, its heartbeat, and the executor-recovery sweep; the only
+extension involved is the Redis hub.
 
 | Concern | Multi-instance behavior |
 |---|---|
 | Database | Postgres required; SQLite is single-instance-only. |
-| Turns, queues, jobs | DBOS coordinates through Postgres: any instance pulls; a crashed instance's workflows recover on peers. |
+| Turns, queues, jobs | DBOS coordinates through Postgres: any instance pulls. Each process's DBOS executor id is its instance id, so in-flight work is attributable to a heartbeat: the executor-recovery sweep re-dispatches workflows whose executor has no fresh `runtime_instance` row, and never touches a live peer's — recovering a live workflow would double-execute it. |
 | Live deltas | Shared hub required (Redis hub extension); terminal frames stay durable in Postgres. |
 | Blobs | S3 backend required; the filesystem backend is single-instance-only. |
 | Sandboxes | Per-instance disposable cache over durable workspace state; any instance recreates the container on demand. |

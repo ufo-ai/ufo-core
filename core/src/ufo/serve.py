@@ -61,7 +61,7 @@ from ufo.loop.subagents import SubagentRegistry
 from ufo.models.registry import model_registry
 from ufo.o11y import init_o11y, log
 from ufo.proxy_serve import OWNER_DSN_ENV, model_rule_base
-from ufo.runtime_instance import BootGuard, Heartbeat
+from ufo.runtime_instance import BootGuard, ExecutorRecovery, Heartbeat, record_fleet_seat
 from ufo.sandbox.fs_creds import DEFAULT_S3_REGION, AwsStsClient, SandboxFsCredentialMinter
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.proxy.rules import Rule, derive_credential_rules
@@ -108,6 +108,12 @@ def run() -> None:
     if workspace_id is not None:
         guard = BootGuard(config=config, workspace_id=workspace_id, instance_id=instance_id)
         asyncio.run(guard.admit())
+    else:
+        asyncio.run(record_fleet_seat(config, instance_id))
+    heartbeat = Heartbeat(instance_id=instance_id)
+    threading.Thread(
+        target=lambda: asyncio.run(heartbeat.run()), name="instance-heartbeat", daemon=True
+    ).start()
     session_secret = _session_secret(config) if shared else ""
     key = os.environ.get(config.credentials.key_env)
     credentials = CredentialStore(fernet=Fernet(key.encode())) if key else None
@@ -155,6 +161,7 @@ def run() -> None:
             "name": DBOS_APP_NAME,
             "application_version": DBOS_APP_VERSION,
             "system_database_url": config.database.system_url,
+            "executor_id": str(instance_id),
             "run_admin_server": False,
         }
     )
@@ -216,6 +223,7 @@ def run() -> None:
         uvicorn.run(app, host=config.serve.host, port=config.serve.port, log_level="warning")
     finally:
         DBOS.destroy()
+        asyncio.run(heartbeat.retire())
 
 
 async def _require_bootstrap() -> None:
@@ -778,17 +786,16 @@ def _mount_shared_surfaces(
 
 @asynccontextmanager
 async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Run this instance's background loops for the life of the process: the heartbeat that keeps
-    its runtime_instance row live — and retires it on graceful shutdown so peers see the seat free
-    at once — and, when a durable surface is installed, the writeback poller, the durable half of
-    surface delivery off the hub and off the turn loop. The shared fleet holds no single workspace
-    to heartbeat a seat for or poll writebacks under, so it runs neither."""
-    workspace_id: UUID | None = app.state.workspace_id
-    if workspace_id is None:
-        yield
-        return
-    heartbeat = Heartbeat(instance_id=app.state.instance_id, workspace_id=workspace_id)
-    tasks = [asyncio.create_task(heartbeat.run())]
+    """Run this instance's app-loop background work: the executor-recovery sweep that re-dispatches
+    workflows stranded by dead peers, and, when a durable surface is installed, the writeback
+    poller, the durable half of surface delivery off the hub and off the turn loop. The shared
+    fleet polls no writebacks (it holds no single workspace's surfaces), but it sweeps like any
+    instance — its turns strand and recover the same way. The heartbeat is NOT here: liveness must
+    span the whole boot (jobs enqueue under this executor id before uvicorn starts) and survive an
+    app-loop stall, so `run` drives it on a dedicated thread from the moment the seat exists, and
+    retires the seat only after `DBOS.destroy` has stopped all execution — a seat freed while
+    queued workflows still run would hand a peer a second live execution."""
+    tasks = [asyncio.create_task(ExecutorRecovery().run())]
     poller = app.state.writeback_poller
     if poller is not None:
         tasks.append(asyncio.create_task(poller.run()))
@@ -797,7 +804,6 @@ async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         for task in tasks:
             task.cancel()
-        await heartbeat.retire()
 
 
 def _proxy_endpoint(
