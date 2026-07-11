@@ -1,16 +1,21 @@
-"""Shared-tier onboarding: a verified org domain resolves to a workspace ROW in the shared database.
+"""Shared-tier onboarding: a verified org domain resolves to its one workspace — the dedicated
+tenant when the org runs one, else a workspace ROW in the shared database.
 
-The default tier (RFC 0011): one shared serve fleet presents each workspace by RLS, so onboarding a
-member is a workspace row, that member's owner row, and the default `assistant` agent every turn
-resolves — no `Tenant` CR, no dedicated deploy, no subdomain. The shared fleet never runs the
-per-tenant `ufoctl init` bootstrap, so the agent that init would seed is seeded here instead, from
-the same core defaults, or the first turn's `default_agent()` finds no row. The writes run under the
-ambient `ws(workspace_id)` scope as the RLS-subject serve role, so each row lands scoped to exactly
-that workspace or the policy rejects it. The workspace uuid is
-derived from the domain (`uuid5`), the shared-tier analogue of the enterprise `mint_tenant_name`, so
-a concurrent second onboard for a fresh domain computes the same id and the insert is idempotent —
-never a duplicate workspace — and a later member of the same organization joins the one workspace it
-already has.
+The tenant check comes first because both kinds live in one Postgres: a domain that already has a
+dedicated deploy taking the shared row path would fork the org across two workspaces — its history,
+credentials, and surfaces on the tenant, its new sign-ins on a parallel empty row the tenant's
+surfaces never see. So `joins` — the `TenantJoin` both tiers resolve through — joins the domain's
+tenant when one exists, and only a tenantless domain falls through to the ROW path (RFC 0011): one
+shared serve fleet presents each workspace by RLS, so onboarding a member is a workspace row, that
+member's owner row, and the default `assistant` agent every turn resolves — no `Tenant` CR, no
+dedicated deploy, no subdomain. The shared fleet never runs the per-tenant `ufoctl init` bootstrap,
+so the agent that init would seed is seeded here instead, from the same core defaults, or the first
+turn's `default_agent()` finds no row. The writes run under the ambient `ws(workspace_id)` scope as
+the RLS-subject serve role, so each row lands scoped to exactly that workspace or the policy rejects
+it. The workspace uuid is derived from the domain (`uuid5`), the shared-tier analogue of the
+enterprise `mint_tenant_name`, so a concurrent second onboard for a fresh domain computes the same
+id and the insert is idempotent — never a duplicate workspace — and a later member of the same
+organization joins the one workspace it already has.
 """
 
 import os
@@ -24,6 +29,8 @@ from ufo.onboarding import DEFAULT_AGENT_MODEL, DEFAULT_AGENT_PROMPT
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME
 from ufo.workspace import ws
+
+from ufo_control.gateway_provision import TenantJoin
 
 SERVE_DSN_ENV = "UFO_CONTROL_SERVE_DSN"
 
@@ -42,13 +49,15 @@ def serve_dsn() -> str:
 
 @dataclass(frozen=True)
 class SharedWorkspaces:
-    """Resolve a verified org domain to its workspace row in the shared database, adding the member
-    as owner and seeding the default agent. Holds no Kubernetes client — the shared tier applies no
-    `Tenant`. `workspace_url` is the shared serve host the member's `ufo` surface talks to
-    (`app.<apex>`, one fleet for every workspace — no per-workspace subdomain), distinct from the
-    onboarding apex."""
+    """Resolve a verified org domain to its one workspace: the domain's dedicated tenant when the
+    cluster runs one (`joins.join_existing` — the same join the enterprise tier resolves through,
+    never a provision), else its workspace row in the shared database, adding the member as owner
+    and seeding the default agent. `workspace_url` is the shared serve host the member's `ufo`
+    surface talks to for row-backed workspaces (`app.<apex>`, one fleet for every workspace — no
+    per-workspace subdomain); a joined tenant member talks to the tenant's own URL instead."""
 
     workspace_url: str
+    joins: TenantJoin
 
     async def exists(self, domain: str) -> bool:
         workspace_id = uuid5(NAMESPACE_DNS, domain.lower())

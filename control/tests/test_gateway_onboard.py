@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from ufo_control.gateway import (
+    BASE_DOMAIN_ENV,
     SHARED_TIER,
     STAMPED_SCRIPT,
     WORKSPACE_BASE_URL_ENV,
@@ -20,11 +21,18 @@ from ufo_control.gateway import (
 from ufo_control.gateway_claim import ClaimWorkflow
 from ufo_control.gateway_email import LoggingEmailSender, WorkEmailPolicy
 from ufo_control.gateway_invite import CODE_ALPHABET, InviteCodes, hash_invite, mint_code
-from ufo_control.gateway_provision import DeployTarget, JoinOrProvision
+from ufo_control.gateway_provision import (
+    DeployTarget,
+    JoinOrProvision,
+    TenantJoin,
+    TenantNotReady,
+    TooManyTenantsForDomain,
+)
 from ufo_control.gateway_shared import SharedWorkspaces
 from ufo_control.gateway_store import OnboardStore
 from ufo_control.gateway_token import verify_token
 from ufo_control.kube import KubeClient
+from ufo_control.platform import ORG_DOMAIN_LABEL
 
 BUNDLE = "ghcr.io/metalcraftai/ufo@sha256:" + "a" * 64
 TARGET = DeployTarget(base_domain="flyingobject.ai", bundle_image=BUNDLE)
@@ -47,9 +55,11 @@ def test_shared_resolver_uses_the_workspace_serve_host(monkeypatch: pytest.Monke
     (`app.<apex>`), not the onboarding apex — separate hosts, so the `workspace` directive must
     carry the serve host or the member's turns 404 on the gateway."""
     monkeypatch.setenv(WORKSPACE_BASE_URL_ENV, "https://app.testing.flyingobject.ai")
-    resolver = _resolver(SHARED_TIER, {})
+    monkeypatch.setenv(BASE_DOMAIN_ENV, "testing.flyingobject.ai")
+    resolver = _resolver(SHARED_TIER, {"kube": FakeCluster([], []).kube()})
     assert isinstance(resolver, SharedWorkspaces)
     assert resolver.workspace_url == "https://app.testing.flyingobject.ai"
+    assert resolver.joins.base_domain == "testing.flyingobject.ai"
 
 
 def test_shared_resolver_fails_loud_without_the_workspace_serve_host(
@@ -58,6 +68,15 @@ def test_shared_resolver_fails_loud_without_the_workspace_serve_host(
     monkeypatch.delenv(WORKSPACE_BASE_URL_ENV, raising=False)
     with pytest.raises(RuntimeError, match=WORKSPACE_BASE_URL_ENV):
         _resolver(SHARED_TIER, {})
+
+
+def test_shared_resolver_fails_loud_without_the_base_domain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(WORKSPACE_BASE_URL_ENV, "https://app.testing.flyingobject.ai")
+    monkeypatch.delenv(BASE_DOMAIN_ENV, raising=False)
+    with pytest.raises(RuntimeError, match=BASE_DOMAIN_ENV):
+        _resolver(SHARED_TIER, {"kube": FakeCluster([], []).kube()})
 
 
 def test_shipped_script_is_stamped_and_carries_the_adapted_chat_target() -> None:
@@ -92,11 +111,27 @@ class FakeCluster:
             self.applied.append(body)
             return httpx.Response(200, json=body)
         if path.endswith("/tenants"):
-            return httpx.Response(200, json={"items": self.list_items})
+            selector = request.url.params.get("labelSelector")
+            items = self.list_items
+            if selector:
+                key, _, value = selector.partition("=")
+                items = [
+                    item
+                    for item in items
+                    if item.get("metadata", {}).get("labels", {}).get(key) == value
+                ]
+            return httpx.Response(200, json={"items": items})
         name = path.rsplit("/", 1)[1]
         status = self.status_sequence[min(self.status_index, len(self.status_sequence) - 1)]
         self.status_index += 1
         return httpx.Response(200, json={"metadata": {"name": name}, "status": status})
+
+
+def _tenant_item(name: str, status: dict[str, Any], domain: str) -> dict[str, Any]:
+    return {
+        "metadata": {"name": name, "labels": {ORG_DOMAIN_LABEL: domain}},
+        "status": status,
+    }
 
 
 def _lines(body: bytes) -> list[tuple[str, str]]:
@@ -171,7 +206,7 @@ async def test_join_flow_adds_a_member_and_signs_in(store: OnboardStore) -> None
     sender = LoggingEmailSender()
     ready = {"phase": "Ready", "workspaceId": WORKSPACE_ID}
     cluster = FakeCluster(
-        list_items=[{"metadata": {"name": "acme-x"}, "status": ready}],
+        list_items=[_tenant_item("acme-x", ready, "acme.com")],
         status_sequence=[ready],
     )
     kube = cluster.kube()
@@ -187,6 +222,88 @@ async def test_join_flow_adds_a_member_and_signs_in(store: OnboardStore) -> None
     assert verify_token(token, SECRET)["ws"] == WORKSPACE_ID
     assert _verb(signed_in, "workspace") == "https://acme-x.flyingobject.ai"
     assert await _member_emails(store) == ["me@acme.com"]
+
+
+async def test_shared_flow_joins_the_domains_existing_tenant(store: OnboardStore) -> None:
+    """A member of an org that already runs a dedicated tenant never lands on a parallel shared
+    row: the shared tier joins the tenant — codeless, like any join of an existing workspace — and
+    the sign-in carries the tenant's workspace uuid and the tenant's own reconciled URL, not
+    `app.<apex>` and not a hostname recomputed from the base domain. Another org's tenant in the
+    same cluster is invisible to the lookup — the org-domain label scopes it."""
+    sender = LoggingEmailSender()
+    ready = {"phase": "Ready", "workspaceId": WORKSPACE_ID, "url": "https://acme-x.custom.example"}
+    other = {"phase": "Ready", "workspaceId": "22222222-2222-2222-2222-222222222222"}
+    cluster = FakeCluster(
+        list_items=[
+            _tenant_item("acme-x", ready, "acme.com"),
+            _tenant_item("other-z", other, "other.org"),
+        ],
+        status_sequence=[ready],
+    )
+    kube = cluster.kube()
+    flow = Onboarding(
+        claims=ClaimWorkflow(store=store, email_policy=WorkEmailPolicy(), email_sender=sender),
+        store=store,
+        resolver=SharedWorkspaces(
+            workspace_url="https://app.flyingobject.ai",
+            joins=TenantJoin(kube=kube, base_domain="flyingobject.ai"),
+        ),
+        invites=InviteCodes(pool=store.pool),
+        token_secret=SECRET,
+        apex_host="flyingobject.ai",
+    )
+    await flow.advance("ufo", "s", "", b"")
+    await flow.advance("ufo", "s", "me@acme.com", b"")
+    signed_in = await flow.advance("ufo", "s", sender.last_code("me@acme.com"), b"")
+    await kube.http.aclose()
+    assert cluster.applied == []
+    token = _verb(signed_in, "token")
+    assert token is not None
+    assert verify_token(token, SECRET)["ws"] == WORKSPACE_ID
+    assert _verb(signed_in, "workspace") == "https://acme-x.custom.example"
+    assert await _member_emails(store) == ["me@acme.com"]
+
+
+async def test_join_refuses_an_ambiguous_domain() -> None:
+    ready = {"phase": "Ready", "workspaceId": WORKSPACE_ID}
+    cluster = FakeCluster(
+        list_items=[
+            _tenant_item("acme-x", ready, "acme.com"),
+            _tenant_item("acme-y", ready, "acme.com"),
+        ],
+        status_sequence=[ready],
+    )
+    kube = cluster.kube()
+    joins = TenantJoin(kube=kube, base_domain="flyingobject.ai")
+    with pytest.raises(TooManyTenantsForDomain):
+        await joins.join_existing("acme.com", "me@acme.com")
+    await kube.http.aclose()
+
+
+async def test_join_refuses_a_tenant_that_is_not_serving() -> None:
+    """A Provisioning or Failed tenant may already carry a persisted workspaceId; joining it would
+    sign the member into a deploy that cannot answer them, so the join refuses instead."""
+    provisioning = {"phase": "Provisioning", "workspaceId": WORKSPACE_ID}
+    cluster = FakeCluster(
+        list_items=[_tenant_item("acme-x", provisioning, "acme.com")],
+        status_sequence=[provisioning],
+    )
+    kube = cluster.kube()
+    joins = TenantJoin(kube=kube, base_domain="flyingobject.ai")
+    with pytest.raises(TenantNotReady):
+        await joins.join_existing("acme.com", "me@acme.com")
+    await kube.http.aclose()
+
+
+async def test_tenant_listing_failure_refuses_rather_than_forking() -> None:
+    """A 403 from the apiserver means 'could not look', never 'no tenant': answering an empty list
+    would send the flow down the row path and fork an org whose tenant merely couldn't be seen."""
+    transport = httpx.MockTransport(lambda request: httpx.Response(403, json={}))
+    kube = KubeClient(http=httpx.AsyncClient(transport=transport, base_url="https://kube.test"))
+    joins = TenantJoin(kube=kube, base_domain="flyingobject.ai")
+    with pytest.raises(httpx.HTTPStatusError):
+        await joins.join_existing("acme.com", "me@acme.com")
+    await kube.http.aclose()
 
 
 async def test_invalid_invite_reasks_with_the_waitlist_hint(store: OnboardStore) -> None:

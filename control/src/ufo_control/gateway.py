@@ -12,7 +12,10 @@ verified → resolve to a workspace and sign in. The claim ledger is written as 
 
 Resolution has two tiers, picked by `UFO_ONBOARD_TIER`:
 
-    shared (default)  → `SharedWorkspaces` ensures the org's workspace ROW in the shared database
+    shared (default)  → `SharedWorkspaces` first joins the domain's dedicated tenant when one
+                        exists (the enterprise join, reading Tenant CRs — never a provision), so an
+                        org with its own deploy is never forked onto a parallel shared row; only a
+                        tenantless domain ensures the org's workspace ROW in the shared database
                         and adds the member as owner, under `ws(workspace_id)` as the RLS-subject
                         serve role — no Tenant CR, no poll, no subdomain; signs in immediately.
     enterprise        → `JoinOrProvision` applies a `Tenant` CR through the same `KubeClient` the
@@ -40,8 +43,9 @@ from ufo_control.gateway_email import WorkEmailError, WorkEmailPolicy, email_sen
 from ufo_control.gateway_invite import InviteCodes
 from ufo_control.gateway_provision import (
     DeployTarget,
+    JoinedTenant,
     JoinOrProvision,
-    TooManyTenantsForDomain,
+    TenantJoin,
 )
 from ufo_control.gateway_shared import SharedWorkspaces, serve_dsn
 from ufo_control.gateway_store import OnboardClaim, OnboardStore
@@ -136,6 +140,9 @@ class Onboarding:
     async def _resolve(self, claim: OnboardClaim, answer: str | None, install: bytes) -> bytes:
         match self.resolver:
             case SharedWorkspaces() as shared:
+                joined = await shared.joins.join_existing(claim.email_domain, claim.email)
+                if joined is not None:
+                    return await self._join_signed_in(claim, joined, install)
                 if not await shared.exists(claim.email_domain):
                     gate = await self._invite_gate(claim, answer, install)
                     if gate is not None:
@@ -148,20 +155,18 @@ class Onboarding:
                     return await self._decide(enterprise, claim, answer, install)
                 return await self._poll_provisioning(enterprise, claim, install)
 
+    async def _join_signed_in(
+        self, claim: OnboardClaim, joined: JoinedTenant, install: bytes
+    ) -> bytes:
+        await self.store.complete(claim.claim_id, joined.name, joined.workspace_id)
+        return self._signed_in(claim.email, joined.workspace_id, joined.url, install)
+
     async def _decide(
         self, enterprise: JoinOrProvision, claim: OnboardClaim, answer: str | None, install: bytes
     ) -> bytes:
-        tenants = await enterprise.tenants_for_domain(claim.email_domain)
-        if len(tenants) > 1:
-            raise TooManyTenantsForDomain(
-                f"domain {claim.email_domain} maps to {len(tenants)} workspaces — contact support"
-            )
-        if len(tenants) == 1:
-            name = tenants[0].tenant
-            workspace_id = await enterprise.join(name, claim.email)
-            await self.store.complete(claim.claim_id, name, workspace_id)
-            url = enterprise.workspace_url(name)
-            return self._signed_in(claim.email, workspace_id, url, install)
+        joined = await enterprise.joins.join_existing(claim.email_domain, claim.email)
+        if joined is not None:
+            return await self._join_signed_in(claim, joined, install)
         gate = await self._invite_gate(claim, answer, install)
         if gate is not None:
             return gate
@@ -261,7 +266,10 @@ def _resolver(tier: str, state: dict[str, Any]) -> SharedWorkspaces | JoinOrProv
         # from UFO_PUBLIC_BASE_URL, the onboarding apex the client fetches `/ufo` and boards at,
         # which has no `/surface` route. Conflating them handed the member the apex and their turns
         # 404'd; the shared serve fleet is a separate host.
-        return SharedWorkspaces(workspace_url=_require_env(WORKSPACE_BASE_URL_ENV))
+        return SharedWorkspaces(
+            workspace_url=_require_env(WORKSPACE_BASE_URL_ENV),
+            joins=TenantJoin(kube=state["kube"], base_domain=_require_env(BASE_DOMAIN_ENV)),
+        )
     return JoinOrProvision(
         kube=state["kube"],
         target=DeployTarget(
@@ -304,17 +312,15 @@ def gateway_app() -> FastAPI:
         state["store"] = store
         state["invites"] = invites
         state["tier"] = tier
+        state["kube"] = KubeClient.from_env()
         if tier == SHARED_TIER:
             init_db(serve_dsn())
-        else:
-            state["kube"] = KubeClient.from_env()
         try:
             yield
         finally:
             if tier == SHARED_TIER:
                 await dispose_db()
-            else:
-                await state["kube"].close()
+            await state["kube"].close()
             await pool.close()
 
     app = FastAPI(lifespan=lifespan)

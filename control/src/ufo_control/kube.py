@@ -133,14 +133,18 @@ class KubeClient:
         return response.json()
 
     async def list_tenants(self, org_domain: str | None = None) -> list[dict[str, Any]]:
+        """Every Tenant CR (optionally narrowed by org-domain label). Empty only when the apiserver
+        proves it — 404, the CRD absent. A 403 raises: callers gate workspace creation on this
+        listing, and an RBAC failure read as 'no tenants' would fork an org onto a duplicate
+        workspace instead of surfacing the misconfiguration."""
         path = f"/apis/{API_GROUP_VERSION}/namespaces/{PLATFORM_NAMESPACE}/{TENANT_PLURAL}"
         if org_domain is not None:
             path += f"?labelSelector={ORG_DOMAIN_LABEL}={org_domain}"
-        listing = await self.get(path)
-        if listing is None:
+        response = await self.http.get(path)
+        if response.status_code == 404:
             return []
-        items = listing.get("items", [])
-        return list(items)
+        response.raise_for_status()
+        return list(response.json().get("items", []))
 
     async def get_tenant(self, name: str) -> dict[str, Any] | None:
         return await self.get(self._tenant_path(name))

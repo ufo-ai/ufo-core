@@ -57,13 +57,9 @@ def test_hosted_config_selects_the_sandbox_chrome_cdp_provider() -> None:
     assert SandboxConfig.model_validate(parsed["sandbox"]).backend == "e2b"
 
 
-async def test_tenants_for_domain_counts() -> None:
-    items = [{"metadata": {"name": "acme-x"}, "status": {"phase": "Ready", "workspaceId": "ws-1"}}]
-    kube = _kube(httpx.MockTransport(lambda request: httpx.Response(200, json={"items": items})))
-    tenants = await kube_join(kube).tenants_for_domain("acme.com")
-    assert len(tenants) == 1
-    assert tenants[0].tenant == "acme-x"
-    assert tenants[0].workspace_id == "ws-1"
+async def test_join_existing_is_none_only_for_a_tenantless_domain() -> None:
+    kube = _kube(httpx.MockTransport(lambda request: httpx.Response(200, json={"items": []})))
+    assert await kube_join(kube).joins.join_existing("acme.com", "me@acme.com") is None
     await kube.http.aclose()
 
 

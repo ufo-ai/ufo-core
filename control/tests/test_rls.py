@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5
 
 import asyncpg
+import httpx
 import pytest
 import sqlalchemy as sa
 from click.testing import CliRunner
@@ -38,9 +39,11 @@ from ufo_control.gateway import Onboarding
 from ufo_control.gateway_claim import ClaimWorkflow
 from ufo_control.gateway_email import LoggingEmailSender, WorkEmailPolicy
 from ufo_control.gateway_invite import InviteCodes
+from ufo_control.gateway_provision import TenantJoin
 from ufo_control.gateway_shared import SharedWorkspaces
 from ufo_control.gateway_store import OnboardStore
 from ufo_control.gateway_token import verify_token
+from ufo_control.kube import KubeClient
 from ufo_control.main import main
 from ufo_control.postgres import (
     PG_ROLE_SEED_ENV,
@@ -378,13 +381,24 @@ async def _members_in(workspace_id: str) -> list[str]:
     return [row.email for row in rows]
 
 
+def _tenantless_shared() -> SharedWorkspaces:
+    """A `SharedWorkspaces` over an empty cluster: the domain has no dedicated tenant, so
+    resolution falls through to the shared row path these tests prove."""
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"items": []}))
+    kube = KubeClient(http=httpx.AsyncClient(transport=transport, base_url="https://kube.test"))
+    return SharedWorkspaces(
+        workspace_url=SHARED_WORKSPACE_URL,
+        joins=TenantJoin(kube=kube, base_domain="flyingobject.ai"),
+    )
+
+
 async def test_shared_ensure_writes_workspace_and_owner_under_rls(
     shared_role_env: SharedRoleEnv,
 ) -> None:
     """The shared tier's core act: a verified org domain resolves to its workspace row and the
     member's owner row, written as the RLS-subject serve role under `ws(workspace_id)`. The uuid is
     derived from the domain, so the write is idempotent and a colleague joins the one workspace."""
-    shared = SharedWorkspaces(workspace_url=SHARED_WORKSPACE_URL)
+    shared = _tenantless_shared()
     assert not await shared.exists("sharedco.io")
     workspace_id = await shared.ensure("sharedco.io", "Founder@Sharedco.io")
     assert await shared.exists("sharedco.io")
@@ -417,7 +431,7 @@ async def test_shared_ensure_seeds_the_default_agent(shared_role_env: SharedRole
     """The shared tier seeds the same default `assistant` agent `ufoctl init` seeds per tenant, so
     the first turn's `default_agent()` resolves a row. Seeded from core's own defaults — identical
     to a per-tenant agent — and idempotent: a re-onboard neither duplicates the row nor errors."""
-    shared = SharedWorkspaces(workspace_url=SHARED_WORKSPACE_URL)
+    shared = _tenantless_shared()
     workspace_id = await shared.ensure("agentco.io", "founder@agentco.io")
     seeded = [(DEFAULT_AGENT_NAME, DEFAULT_AGENT_PROMPT, DEFAULT_AGENT_MODEL)]
     assert await _default_agents_in(workspace_id) == seeded
@@ -431,8 +445,8 @@ async def test_shared_onboard_signs_in_without_a_tenant_cr(
     """The full shared flow over the real claim ledger + RLS database: email → code → verify → the
     invite gate (a fresh domain creates a workspace, so a one-time code is burned) → a signed-in
     bearer carrying the domain's workspace uuid, surfacing the apex (no subdomain). A colleague of
-    the now-existing domain then joins codeless. The resolver holds no kube client, so no Tenant CR
-    can be applied."""
+    the now-existing domain then joins codeless. The cluster holds no tenant for the domain, so
+    resolution falls through the tenant check to the shared row path."""
     pool = await asyncpg.create_pool(rls_env.owner_libpq_dsn)
     store = OnboardStore(pool=pool)
     await store.ensure_table()
@@ -445,7 +459,7 @@ async def test_shared_onboard_signs_in_without_a_tenant_cr(
     flow = Onboarding(
         claims=ClaimWorkflow(store=store, email_policy=WorkEmailPolicy(), email_sender=sender),
         store=store,
-        resolver=SharedWorkspaces(workspace_url=SHARED_WORKSPACE_URL),
+        resolver=_tenantless_shared(),
         invites=invites,
         token_secret=SHARED_TOKEN_SECRET,
         apex_host="flyingobject.ai",

@@ -99,8 +99,11 @@ Creating a workspace is invite-gated; joining an existing one never is. The oper
 with `ufo-control invite` — the plaintext prints once, only its hash lands in the
 `ufo_control.invite_code` ledger, and redeeming burns the code and stamps the claim's `invite_id`
 in one transaction, so one code opens exactly one workspace and a resolution retry never re-asks
-for it. The shared tier gates identically (`SharedWorkspaces.exists` decides create vs join). An
-invalid or used code re-asks and points at the waitlist.
+for it. Both tiers resolve tenant-first through the same `TenantJoin`: a domain with a dedicated
+Ready tenant joins it codeless, so an org with its own deploy is never forked onto a parallel
+shared row; on the shared tier only a tenantless domain falls through to the workspace-row path,
+where `SharedWorkspaces.exists` decides create vs join. An invalid or used code re-asks and points
+at the waitlist.
 
 ## Connecting Slack in chat
 

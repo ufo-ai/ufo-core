@@ -31,6 +31,57 @@ class TooManyTenantsForDomain(RuntimeError):
     """A domain resolved to more than one tenant — a human must reconcile before join is safe."""
 
 
+class TenantNotReady(RuntimeError):
+    """The domain's tenant exists but is not serving — joining would sign the member into a deploy
+    that cannot answer them."""
+
+
+@dataclass(frozen=True)
+class JoinedTenant:
+    """Where an existing dedicated deploy took the member: the tenant slug, the workspace uuid its
+    operator minted, and the URL the member's `ufo` surface talks to."""
+
+    name: str
+    workspace_id: str
+    url: str
+
+
+@dataclass(frozen=True)
+class TenantJoin:
+    """Resolve a verified domain to its one existing tenant and join the member — the piece of
+    resolution both tiers share, so an org with a dedicated deploy is never forked onto a second
+    workspace. Reads Tenant CRs, never applies one: provisioning stays the enterprise tier's."""
+
+    kube: KubeClient
+    base_domain: str
+
+    async def join_existing(self, domain: str, email: str) -> JoinedTenant | None:
+        """The domain's tenant joined, or None when the cluster proves the domain has none — a
+        listing failure raises rather than answering None, because 'could not look' read as 'no
+        tenant' silently forks the org. An ambiguous domain or a tenant not yet (or no longer)
+        serving refuses loudly instead of signing the member into a deploy that cannot answer."""
+        statuses = [
+            status_from_tenant(obj) for obj in await self.kube.list_tenants(org_domain=domain)
+        ]
+        if len(statuses) > 1:
+            raise TooManyTenantsForDomain(
+                f"domain {domain} maps to {len(statuses)} workspaces — contact support"
+            )
+        if not statuses:
+            return None
+        status = statuses[0]
+        if status.phase != "Ready":
+            raise TenantNotReady(
+                f"{domain}'s workspace is {status.phase.lower()} — try again shortly"
+            )
+        result = await add_member(self.kube, status.tenant, MemberRequest(email=email))
+        return JoinedTenant(
+            name=status.tenant,
+            workspace_id=result.workspace_id,
+            url=status.url or f"https://{status.tenant}.{self.base_domain}",
+        )
+
+
 @dataclass(frozen=True)
 class DeployTarget:
     base_domain: str
@@ -70,13 +121,13 @@ class JoinOrProvision:
     kube: KubeClient
     target: DeployTarget
 
+    @property
+    def joins(self) -> TenantJoin:
+        return TenantJoin(kube=self.kube, base_domain=self.target.base_domain)
+
     def workspace_url(self, name: str) -> str:
         """The tenant's public URL surfaced on sign-in — its own subdomain under the deploy base."""
         return f"https://{name}.{self.target.base_domain}"
-
-    async def tenants_for_domain(self, domain: str) -> tuple[DeployStatus, ...]:
-        objs = await self.kube.list_tenants(org_domain=domain)
-        return tuple(status_from_tenant(obj) for obj in objs)
 
     async def provision(self, domain: str, owner_email: str) -> str:
         name = mint_tenant_name(domain)
@@ -88,7 +139,3 @@ class JoinOrProvision:
         if obj is None:
             return DeployStatus(tenant=name, phase="Pending", message="not yet reconciled")
         return status_from_tenant(obj)
-
-    async def join(self, name: str, email: str) -> str:
-        result = await add_member(self.kube, name, MemberRequest(email=email))
-        return result.workspace_id

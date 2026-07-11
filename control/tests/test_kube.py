@@ -84,10 +84,18 @@ async def test_list_tenants_unwraps_items() -> None:
     await client.close()
 
 
-@pytest.mark.parametrize("status", [403, 404])
-async def test_list_tenants_empty_when_crd_absent(status: int) -> None:
-    client = _client(httpx.MockTransport(lambda request: httpx.Response(status)))
+async def test_list_tenants_empty_when_crd_absent() -> None:
+    client = _client(httpx.MockTransport(lambda request: httpx.Response(404)))
     assert await client.list_tenants() == []
+    await client.close()
+
+
+async def test_list_tenants_raises_on_forbidden() -> None:
+    """Callers gate workspace creation on this listing — a 403 read as 'no tenants' would fork an
+    org onto a duplicate workspace, so an RBAC failure surfaces instead of answering empty."""
+    client = _client(httpx.MockTransport(lambda request: httpx.Response(403)))
+    with pytest.raises(httpx.HTTPStatusError):
+        await client.list_tenants()
     await client.close()
 
 
