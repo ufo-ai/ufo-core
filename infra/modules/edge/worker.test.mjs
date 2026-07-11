@@ -82,7 +82,7 @@ test("browser landing over plain http is bounced to https with its query intact"
   assert.equal(reply.headers.get("location"), "https://flyingobject.ai/?ref=x");
 });
 
-test("browser landing guides source readers, consoles, and fetchers to curl", () => {
+test("browser landing hides the terminal hint from sight", () => {
   assert.match(
     LANDING_PAGE,
     /^<!doctype html>\n<!-- terminal interface: curl https:\/\/flyingobject\.ai -->/,
@@ -93,8 +93,9 @@ test("browser landing guides source readers, consoles, and fetchers to curl", ()
   );
   assert.match(
     LANDING_PAGE,
-    /<aside class="terminal-hint"[^>]*>terminal interface: <code>curl https:\/\/flyingobject\.ai<\/code><\/aside>/,
+    /<span hidden aria-hidden="true">terminal interface: curl https:\/\/flyingobject\.ai<\/span>/,
   );
+  assert.doesNotMatch(LANDING_PAGE, /terminal-hint/);
   assert.match(
     LANDING_PAGE,
     /console\.info\("terminal interface: curl https:\/\/flyingobject\.ai"\);/,
