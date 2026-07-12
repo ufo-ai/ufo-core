@@ -11,6 +11,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 TurnStatus = Literal["queued", "running", "parked", "done", "failed", "cancelled"]
 TerminalStatus = Literal["done", "failed", "cancelled"]
 TurnAdmissionSource = Literal["member", "internal"]
+ReasoningEffort = Literal["off", "low", "medium", "high"]
+DEFAULT_REASONING_EFFORT: ReasoningEffort = "high"
 NON_TERMINAL_STATUSES: tuple[TurnStatus, ...] = ("queued", "running", "parked")
 WritebackStatus = Literal["pending", "claimed", "delivered", "failed"]
 WRITEBACK_PENDING: WritebackStatus = "pending"
@@ -117,7 +119,9 @@ class TerminalFrame(BaseModel):
     error_class: str | None = None
     tokens: int = 0
     cost_micro_usd: int = 0
+    cache_percent: int = Field(default=0, ge=0, le=100)
     model: str = ""
+    reasoning: ReasoningEffort | None = None
     question: AskUserInput | None = None
     credential_request: CredentialRequest | None = None
 

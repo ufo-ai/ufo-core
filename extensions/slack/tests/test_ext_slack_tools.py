@@ -355,6 +355,11 @@ def test_slack_writeback_hints_at_the_terminal_for_a_credential_request() -> Non
         queue_key="C1:1.0",
         status="done",
         text="I need two values from Slack.",
+        tokens=0,
+        cost_micro_usd=0,
+        cache_percent=0,
+        model="",
+        reasoning=None,
         artifacts=(),
         question=None,
         credential_request=CredentialRequest(

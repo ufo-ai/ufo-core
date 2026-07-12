@@ -11,7 +11,7 @@ import pytest
 import ufo_ext_openrouter as openrouter
 from openai.types.chat import ChatCompletionChunk
 from openai.types.chat.chat_completion_chunk import Choice, ChoiceDelta
-from openai.types.completion_usage import CompletionUsage
+from openai.types.completion_usage import CompletionUsage, PromptTokensDetails
 
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.models.interface import Message, ModelRequest, ModelResponseTruncated, TextDelta
@@ -52,9 +52,12 @@ def _chunk(
     return ChatCompletionChunk(**fields)
 
 
-def _usage(prompt: int, completion: int) -> CompletionUsage:
+def _usage(prompt: int, completion: int, cached: int = 0) -> CompletionUsage:
     return CompletionUsage(
-        prompt_tokens=prompt, completion_tokens=completion, total_tokens=prompt + completion
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+        total_tokens=prompt + completion,
+        prompt_tokens_details=PromptTokensDetails(cached_tokens=cached),
     )
 
 
@@ -98,6 +101,14 @@ async def test_complete_streams_text_then_usage_with_the_reasoning_budget() -> N
     assert kwargs["model"] == "google/gemini-2.5-pro"
     assert kwargs["extra_body"] == {"reasoning": {"effort": "high"}}
     assert kwargs["stream_options"] == {"include_usage": True}
+
+
+async def test_cached_prompt_tokens_are_a_disjoint_usage_class() -> None:
+    create = ScriptedCreate(
+        [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(10, 2, cached=4))]
+    )
+    events = [event async for event in _client(create).complete(REQUEST)]
+    assert events[-1] == Usage(input_tokens=6, output_tokens=2, cache_read_tokens=4)
 
 
 async def test_reasoning_effort_rides_from_the_request() -> None:

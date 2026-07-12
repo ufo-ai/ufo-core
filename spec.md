@@ -212,7 +212,9 @@ allocation, delivery registration, and enqueue recovery remain one implementatio
 - **Durable** (Slack) — the member is elsewhere; declaring `post` is what marks the surface
   durable, and admission registers a writeback for every turn entering its conversations — a
   surface ingest, a scheduled fire, an extension invoke alike. A `WritebackPoller` delivers the
-  terminal reply at-least-once (the hub is lossy), two-phase: `post` returns the reply's durable
+  terminal reply with its cost, tokens, cache-read percentage, model, and reasoning effort
+  at-least-once (the hub is
+  lossy), two-phase: `post` returns the reply's durable
   reference (recorded before any upload), then `attach` streams the turn's shared files into the
   conversation, with rich rendering. Recovery resumes `attach` without re-posting; attachment
   delivery is at-least-once and may repeat after a crash between upload and the delivered commit.
@@ -238,6 +240,7 @@ from `url_private` into the conversation's workspace before the turn runs; a sha
 (`share_file` → a `shared_artifact` record) streams from the blob store to Slack's chunked
 external-upload API, into the conversation's thread (Slack forbids threading on a reply's ts). `surface_identity` and `conversation.surface`
 are open namespaces validated by surface registration, not a fixed enum.
+Slack renders each terminal's accounting and model metadata as the reply's final context block.
 
 Shared surface requests authenticate their workspace before core binds it. Slack uses canonical
 event and interactive URLs: the untrusted team id selects one unique `surface_installation`, its

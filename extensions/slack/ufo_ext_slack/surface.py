@@ -249,6 +249,7 @@ AMBIENT_CHANNEL_HEADER = (
 )
 AMBIENT_OMITTED_MARKER = "[… earlier messages omitted …]"
 SLACK_MARKDOWN_TEXT_LIMIT = 12_000
+SLACK_CONTEXT_TEXT_LIMIT = 3_000
 MAX_SLACK_MESSAGE_BYTES = 40_000
 SLACK_UPLOAD_MAX_BYTES = 25 * 1024 * 1024
 SLACK_INVALID_BLOCKS_ERROR = "invalid_blocks"
@@ -446,17 +447,21 @@ def slack_reply_body(
     channel: str,
     thread_ts: str | None,
     text: str,
+    metadata: str,
     blocks: bool = True,
     actions: dict[str, object] | None = None,
 ) -> bytes:
     """The chat.postMessage body: one Block Kit `markdown` block so Slack renders the agent's own
-    markdown natively, plus the answer-button `actions` block when the turn ended on a question —
+    markdown natively, plus the answer-button `actions` block when the turn ended on a question and
+    a final `context` block for the turn's accounting and model metadata —
     degrading to a text-only body (buttons and all) when the reply exceeds Slack's block-character
     or payload-byte caps, or when `blocks=False` forces plain text after Slack rejects the blocks as
     `invalid_blocks`. `text` always carries the whole reply as the notification fallback, and the
     question rides it in prose, so a degraded reply is still answerable by a typed reply."""
-    if not text:
-        raise ValueError("Slack reply text is required")
+    if not text or not metadata:
+        raise ValueError("Slack reply text and metadata are required")
+    if len(metadata) > SLACK_CONTEXT_TEXT_LIMIT:
+        raise ValueError("Slack reply metadata is too large")
     base: dict[str, object] = {"channel": channel, "text": text}
     if thread_ts is not None:
         base["thread_ts"] = thread_ts
@@ -464,10 +469,14 @@ def slack_reply_body(
         block_list: list[dict[str, object]] = [{"type": "markdown", "text": text}]
         if actions is not None:
             block_list.append(actions)
+        block_list.append(
+            {"type": "context", "elements": [{"type": "plain_text", "text": metadata}]}
+        )
         with_blocks = {**base, "blocks": block_list}
         encoded = json.dumps(with_blocks, separators=(",", ":")).encode()
         if len(encoded) <= MAX_SLACK_MESSAGE_BYTES:
             return encoded
+    base["text"] = f"{text}\n\n{metadata}"
     encoded = json.dumps(base, separators=(",", ":")).encode()
     if len(encoded) > MAX_SLACK_MESSAGE_BYTES:
         raise ValueError("Slack reply text is too large")
@@ -1217,13 +1226,20 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
     text = _reply_with_oversize_links(ctx, writeback)
     actions = slack_answer_actions(writeback.question)
+    model = writeback.model or "no-model"
+    params = f"-[{writeback.reasoning}]" if writeback.reasoning is not None else ""
+    metadata = (
+        f"${writeback.cost_micro_usd / 1_000_000:.6f} "
+        f"({writeback.tokens:,} tokens, {writeback.cache_percent}% cached) · "
+        f"{model}{params}"
+    )[:SLACK_CONTEXT_TEXT_LIMIT]
     async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
         payload = await _chat_post(
-            client, bot_token, slack_reply_body(channel, thread, text, actions=actions)
+            client, bot_token, slack_reply_body(channel, thread, text, metadata, actions=actions)
         )
         if payload.get("error") == SLACK_INVALID_BLOCKS_ERROR:
             payload = await _chat_post(
-                client, bot_token, slack_reply_body(channel, thread, text, blocks=False)
+                client, bot_token, slack_reply_body(channel, thread, text, metadata, blocks=False)
             )
     if payload.get("ok") is not True:
         raise SlackApiError(str(payload.get("error")))

@@ -172,12 +172,13 @@ class OpenAIClient:
                 async for chunk in stream:
                     if chunk.usage is not None:
                         details = chunk.usage.prompt_tokens_details
+                        cached_tokens = (details.cached_tokens or 0) if details is not None else 0
+                        if cached_tokens > chunk.usage.prompt_tokens:
+                            raise RuntimeError("cached prompt tokens exceed total prompt tokens")
                         usage = Usage(
-                            input_tokens=chunk.usage.prompt_tokens,
+                            input_tokens=chunk.usage.prompt_tokens - cached_tokens,
                             output_tokens=chunk.usage.completion_tokens,
-                            cache_read_tokens=(
-                                (details.cached_tokens or 0) if details is not None else 0
-                            ),
+                            cache_read_tokens=cached_tokens,
                         )
                     if not chunk.choices:
                         continue

@@ -468,7 +468,9 @@ async def test_turn_round_trip_bills_and_persists(surface: AsyncClient) -> None:
     assert terminal["status"] == "done"
     assert terminal["tokens"] == 10
     assert terminal["cost_micro_usd"] == 110
+    assert terminal["cache_percent"] == 0
     assert terminal["model"] == "claude-opus-4-8"
+    assert terminal["reasoning"] == "high"
     status, conversation_id = await _turn_row(turn_id)
     assert status == "done"
     async with workspace_tx() as connection:

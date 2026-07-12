@@ -126,6 +126,13 @@ class EchoModel:
 
 
 @dataclass(frozen=True)
+class CachedModel:
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        yield TextDelta(text="answer")
+        yield Usage(input_tokens=3, output_tokens=3, cache_read_tokens=4)
+
+
+@dataclass(frozen=True)
 class CancelRacingModel:
     """Stands in for the model while the cancel endpoint wins the race mid-round."""
 
@@ -435,6 +442,20 @@ async def test_turn_with_a_traceparent_runs_inside_the_admitting_trace(
     frame = await _engine(traced, model, tmp_path).run()
     assert frame.status == "done"
     assert [context.trace_id for context in model.contexts] == [0x0AF7651916CD43DD8448EB211C80319C]
+
+
+async def test_terminal_records_cached_share_of_prompt_tokens(db: None, tmp_path: Path) -> None:
+    turn = await _seed_turn("queued", None)
+    frame = await _engine(turn, CachedModel(), tmp_path).run()
+    assert frame.tokens == 10
+    assert frame.cache_percent == 57
+    async with workspace_tx() as connection:
+        stored = (
+            await connection.execute(
+                sa.select(tables.turn.c.terminal).where(tables.turn.c.id == turn.id)
+            )
+        ).scalar_one()
+    assert TerminalFrame.model_validate(stored).cache_percent == 57
 
 
 async def test_already_terminal_turn_republishes_without_clobbering_transcript(

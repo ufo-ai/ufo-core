@@ -443,14 +443,20 @@ async def test_raw_request_body_stops_on_the_first_chunk_past_one_mib() -> None:
 
 
 def test_block_kit_reply_body_renders_markdown_and_degrades() -> None:
-    body = json.loads(slack.slack_reply_body("C5", "200.0", "hi **there**"))
+    metadata = "$0.001234 (1,234 tokens, 42% cached) · claude-opus-4-8-[high]"
+    body = json.loads(slack.slack_reply_body("C5", "200.0", "hi **there**", metadata))
     assert body["channel"] == "C5"
     assert body["thread_ts"] == "200.0"
-    assert body["blocks"] == [{"type": "markdown", "text": "hi **there**"}]
+    assert body["blocks"] == [
+        {"type": "markdown", "text": "hi **there**"},
+        {"type": "context", "elements": [{"type": "plain_text", "text": metadata}]},
+    ]
     big = "x" * (slack.SLACK_MARKDOWN_TEXT_LIMIT + 1)
-    degraded = json.loads(slack.slack_reply_body("C5", None, big))
+    degraded = json.loads(slack.slack_reply_body("C5", None, big, metadata))
     assert "blocks" not in degraded
-    assert degraded["text"] == big
+    assert degraded["text"] == f"{big}\n\n{metadata}"
+    with pytest.raises(ValueError, match="metadata is too large"):
+        slack.slack_reply_body("C5", None, "hi", "x" * (slack.SLACK_CONTEXT_TEXT_LIMIT + 1))
 
 
 def test_thread_keying_and_addressing() -> None:
@@ -1518,9 +1524,16 @@ async def _seed_done_turn(
                 seq=1,
                 status="done",
                 inbound="ask",
-                terminal=TerminalFrame(status="done", text=text, question=question).model_dump(
-                    mode="json"
-                ),
+                terminal=TerminalFrame(
+                    status="done",
+                    text=text,
+                    tokens=1_234,
+                    cost_micro_usd=1_234,
+                    cache_percent=42,
+                    model="claude-opus-4-8",
+                    reasoning="high",
+                    question=question,
+                ).model_dump(mode="json"),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -1857,7 +1870,18 @@ async def test_writeback_posts_block_kit_reply_and_streams_the_attachment(
     reply = json.loads(posts[0].content)
     assert reply["channel"] == "C5"
     assert reply["thread_ts"] == "200.0"
-    assert reply["blocks"] == [{"type": "markdown", "text": "hi **there**"}]
+    assert reply["blocks"] == [
+        {"type": "markdown", "text": "hi **there**"},
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "plain_text",
+                    "text": "$0.001234 (1,234 tokens, 42% cached) · claude-opus-4-8-[high]",
+                }
+            ],
+        },
+    ]
 
     reserve = [r for r in recorder if str(r.url) == slack.SLACK_FILES_GET_UPLOAD_URL]
     uploads = [r for r in recorder if str(r.url) == UPLOAD_URL]
@@ -1977,9 +2001,11 @@ async def test_invalid_blocks_reposts_once_as_plain_text(db: None, tmp_path, mon
     assert len(posts) == 2
     first = json.loads(posts[0].content)
     second = json.loads(posts[1].content)
-    assert first["blocks"] == [{"type": "markdown", "text": "hi **there**"}]
+    assert first["blocks"][-1]["type"] == "context"
     assert "blocks" not in second
-    assert second["text"] == "hi **there**"
+    assert second["text"] == (
+        "hi **there**\n\n$0.001234 (1,234 tokens, 42% cached) · claude-opus-4-8-[high]"
+    )
 
     async with workspace_tx() as connection:
         row = (
@@ -2265,6 +2291,7 @@ async def test_question_writeback_posts_answer_buttons(db: None, tmp_path, monke
     assert [b["text"]["text"] for b in actions["elements"]] == ["Ship", "Hold"]
     assert [b["action_id"] for b in actions["elements"]] == ["ask:0", "ask:1"]
     assert [b["value"] for b in actions["elements"]] == ["Ship", "Hold"]
+    assert reply["blocks"][-1]["type"] == "context"
 
 
 def _click_body(action_id: str = "ask:0", value: str = "Ship", user: str = "U9") -> bytes:

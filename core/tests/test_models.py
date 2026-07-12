@@ -345,7 +345,7 @@ async def test_openai_maps_deltas_then_single_usage() -> None:
     assert events == [
         TextDelta(text="a"),
         TextDelta(text="b"),
-        Usage(input_tokens=10, output_tokens=5, cache_read_tokens=4, cache_write_tokens=0),
+        Usage(input_tokens=6, output_tokens=5, cache_read_tokens=4, cache_write_tokens=0),
     ]
 
 

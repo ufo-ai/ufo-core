@@ -55,13 +55,11 @@ from ufo.loop.compaction import (
 from ufo.loop.prompts.render import RenderedPrompt
 from ufo.loop.transcript import Transcript
 from ufo.models.interface import (
-    DEFAULT_REASONING_EFFORT,
     ImageBlock,
     ImageSource,
     Message,
     ModelClient,
     ModelRequest,
-    ReasoningEffort,
     TextBlock,
     TextDelta,
     ToolCallDelta,
@@ -73,12 +71,14 @@ from ufo.o11y import emit_metric, log, turn_span
 from ufo.sandbox.session import WORKSPACE_DIR, SandboxSession, workspace_path
 from ufo.schema import tables
 from ufo.schema.records import (
+    DEFAULT_REASONING_EFFORT,
     NON_TERMINAL_STATUSES,
     PARKED,
     RUNNING,
     Agent,
     AskUserInput,
     CredentialRequest,
+    ReasoningEffort,
     TerminalFrame,
     TerminalStatus,
     Turn,
@@ -943,13 +943,18 @@ class TurnEngine:
             )
             cost = await read_turn_cost(connection, self.turn.id)
             tokens, micro_usd, model = cost if cost is not None else (0, 0, "")
+            prompt_tokens = usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens
             frame = TerminalFrame(
                 status=status,
                 text=answer,
                 error_class=error_class,
                 tokens=tokens,
                 cost_micro_usd=micro_usd,
+                cache_percent=(
+                    round(100 * usage.cache_read_tokens / prompt_tokens) if prompt_tokens else 0
+                ),
                 model=model,
+                reasoning=self.reasoning if model else None,
                 question=question,
                 credential_request=credential_request,
             )

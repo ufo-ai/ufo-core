@@ -7,7 +7,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from ufo.models.interface import AUTO_MODEL, DEFAULT_REASONING_EFFORT, ReasoningEffort
+from ufo.models.interface import AUTO_MODEL
+from ufo.schema.records import DEFAULT_REASONING_EFFORT, ReasoningEffort
 
 CONFIG_PATH_ENV = "UFO_CONFIG"
 DEFAULT_CONFIG_PATH = Path("ufo.toml")

@@ -67,6 +67,7 @@ from ufo.schema.records import (
     WRITEBACK_PENDING,
     AskUserInput,
     CredentialRequest,
+    ReasoningEffort,
     TerminalFrame,
     TerminalStatus,
     TurnContext,
@@ -138,15 +139,20 @@ class SharedArtifact:
 @dataclass(frozen=True)
 class Writeback:
     """One terminal turn ready for delivery: the conversation's `queue_key` (the surface decodes its
-    own channel/thread from it), the terminal outcome (`status` + the agent's `text`), the files
+    own channel/thread from it), the terminal outcome and its accounting/model metadata, the files
     the turn shared, and the structured `question` when asking the user was the turn's final act. A
-    surface renders the reply from `status`/`text`, uploads `artifacts`, and may render `question`
-    as its own answer affordance (buttons) — the answer arrives as the conversation's next turn."""
+    surface renders the reply and metadata, uploads `artifacts`, and may render `question` as its
+    own answer affordance (buttons) — the answer arrives as the conversation's next turn."""
 
     turn_id: UUID
     queue_key: str
     status: TerminalStatus
     text: str
+    tokens: int
+    cost_micro_usd: int
+    cache_percent: int
+    model: str
+    reasoning: ReasoningEffort | None
     artifacts: tuple[SharedArtifact, ...]
     question: AskUserInput | None
     credential_request: CredentialRequest | None
@@ -1012,6 +1018,11 @@ class WritebackPoller:
             queue_key=row.queue_key,
             status=terminal.status,
             text=terminal.text,
+            tokens=terminal.tokens,
+            cost_micro_usd=terminal.cost_micro_usd,
+            cache_percent=terminal.cache_percent,
+            model=terminal.model,
+            reasoning=terminal.reasoning,
             question=terminal.question,
             credential_request=terminal.credential_request,
             artifacts=tuple(

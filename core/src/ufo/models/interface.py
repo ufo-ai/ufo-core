@@ -5,7 +5,7 @@ from typing import Annotated, Any, Literal, Protocol
 
 from pydantic import BaseModel, Field
 
-from ufo.schema.records import Usage
+from ufo.schema.records import DEFAULT_REASONING_EFFORT, ReasoningEffort, Usage
 
 
 class TextBlock(BaseModel):
@@ -64,10 +64,6 @@ class ToolSchema(BaseModel):
     name: str
     description: str
     input_schema: dict[str, Any]
-
-
-ReasoningEffort = Literal["off", "low", "medium", "high"]
-DEFAULT_REASONING_EFFORT: ReasoningEffort = "high"
 
 
 class ModelRequest(BaseModel):

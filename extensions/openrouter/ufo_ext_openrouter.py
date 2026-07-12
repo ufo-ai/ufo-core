@@ -78,10 +78,13 @@ def _chunk_provider(chunk: ChatCompletionChunk) -> str | None:
 
 def _usage_of(usage: CompletionUsage) -> Usage:
     details = usage.prompt_tokens_details
+    cached_tokens = (details.cached_tokens or 0) if details is not None else 0
+    if cached_tokens > usage.prompt_tokens:
+        raise ValueError("cached prompt tokens exceed total prompt tokens")
     return Usage(
-        input_tokens=usage.prompt_tokens,
+        input_tokens=usage.prompt_tokens - cached_tokens,
         output_tokens=usage.completion_tokens,
-        cache_read_tokens=(details.cached_tokens or 0) if details is not None else 0,
+        cache_read_tokens=cached_tokens,
     )
 
 
