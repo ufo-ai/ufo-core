@@ -120,7 +120,9 @@ turn = sa.Table(
         "status in ('queued', 'running', 'parked', 'done', 'failed', 'cancelled')",
         name="turn_status",
     ),
-    sa.CheckConstraint("admission_source in ('member', 'internal')", name="turn_admission_source"),
+    sa.CheckConstraint(
+        "admission_source in ('member', 'internal', 'scheduled')", name="turn_admission_source"
+    ),
     sa.CheckConstraint(
         "(status in ('queued', 'running', 'parked')) = (terminal is null)", name="turn_terminal"
     ),

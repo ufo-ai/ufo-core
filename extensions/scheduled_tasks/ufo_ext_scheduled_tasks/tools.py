@@ -172,8 +172,8 @@ SCHEDULED_TASK_TOOLS: tuple[ToolDef, ...] = (
         name="schedule_task",
         description=(
             "Schedule a recurring task for yourself: give a 5-field cron schedule and the task "
-            "prompt. The platform materializes a locked-down recurring job that invokes you on "
-            "that schedule, in this conversation."
+            "prompt. The platform materializes a locked-down recurring job that searches memory, "
+            "then invokes you on that schedule in this conversation."
         ),
         input_model=ScheduleTaskInput,
         handler=schedule_task,

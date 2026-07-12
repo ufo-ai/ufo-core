@@ -80,7 +80,10 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   from the model's real window less the summary reserve, so a long turn never exceeds it.
 - **Memory** — an extension, not core: it owns the `memory_item` table, the `memory_search`/
   `memory_update` tools, and recall (lexical + vector RRF fusion, subject ∈ {member, shared}),
-  auto-injected each turn through a `user_prompt_submit` hook — no core memory seam. Recall carries the
+  auto-injected each turn through a `user_prompt_submit` hook. It also provides the typed
+  `memory_search` seam: core resolves the conversation's member under workspace scope and routes
+  a consumer to the extension's one search workflow. Scheduled tasks require this seam and search
+  after admission and before the run's first model round. Recall carries the
   gbrain richness: per-kind recency decay (fact/preference/decision/event/task half-lives, fact
   items only), a type-diversity cap so no class dominates, supersession suppression, and an
   episodic→topic pointer excluded from auto-injection. It rides two core selection seams: the
@@ -151,10 +154,12 @@ Manifest registers (each optional):
 | `cdp_providers` | CDP transport backends the one BUA browser engine (an extension, not core) connects, selected by `[browser] cdp_provider` (default `sandbox_cdp`): core's `sandbox_cdp` wraps the `BROWSER_CDP_URL` endpoint in a static lease; browserbase mints a fresh hosted session per turn. A provider mints a per-turn `CdpLease` the loop releases at turn end. The BUA engine is the browser extension, so only the transport is a core seam, never the engine. |
 | `auth_proxies` | The fallback credential backend for a feed-sync provider no installed broker claims: the sole installed backend is automatic; `[connectors] auth_backend` selects one when several are installed and must name a registered choice. `direct` BYOK reads a member-added key host-side from the credential store, never reaching the sandbox. A brokered provider resolves through its own broker's `credential`, never this seam; folder sources need none. |
 | `search_providers` | Web-search backends the research extension's tools call, selected by `[research] search_provider`. A backend runs host-side — it reads its BYOK key in-process and reaches its API over async HTTP, so the key never enters the sandbox — and answers a search query; `supports_fetch` marks whether it also fetches a URL's content (Exa's search + contents does; an answer-with-citations backend need not, and the `fetch_url` tool gates on it). Core ships no default: every backend is an extension, and the research extension `requires` this seam. |
+| `memory_search` | A named workspace-scoped memory search provider (`default` is selected). Core resolves a conversation to its member before calling it; consumers declare `requires=("memory_search",)`, and boot fails unless exactly one default provider is active. |
 | `requires` | Sub-seams this extension consumes from another (the browser pack `requires` `cdp_providers`); `serve` resolves each at boot and fails loud — naming the extension and the seam — if the backend is absent, unknown, or unkeyed, so a missing dependency stops startup rather than the first tool call. |
 
 `ExtensionContext` (capability-scoped, handed to every handler): workspace-scoped store access,
-`credentials.get(slot)`, the selected `index`/`embed` backends, `pages` (the `PageFeed` replaying
+`credentials.get(slot)`, the selected `index`/`embed` backends,
+`pages` (the `PageFeed` replaying
 source-page changes under a resumable cursor), `transaction()` over the extension's own tables,
 `invoke(agent, input, conversation=...)`, metered `model.complete(...)`/`model.turn(...)`,
 `schedule(job)`, `trajectories.read(...)` (transcript/turn evidence), and
@@ -350,11 +355,11 @@ bundle installs OSS, on-prem, or hosted.
 | turbopuffer index | indexes |
 | GitHub / Asana feed-sync sources | sources, credentials, auth_proxies (`direct`) |
 | Agent-guided education / onboarding | onboarding, tools |
-| Scheduled tasks (cron / one-time) | jobs, invoke, tools |
+| Scheduled tasks (cron / one-time) | jobs, invoke, tools, requires (`memory_search`) |
 | GH code review on PR + auto-merge | routes (webhook), credentials, invoke, tools |
 | Service self-improvement / bug-fixing from o11y | sources (o11y), jobs, trajectories.read, invoke (evals), agents.propose_change |
 | Security review | tools, subagents |
-| gbrain-style memory (source → condense to markdown + graph) | memory, sources, hooks (page_change) |
+| gbrain-style memory (source → condense to markdown + graph) | memory_search, sources, hooks (page_change) |
 | CRM / ATS | connectors, sources, hooks (page_change), tools |
 | Websites | tools (sandbox serving), routes |
 

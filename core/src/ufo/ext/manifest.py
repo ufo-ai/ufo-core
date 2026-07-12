@@ -27,6 +27,7 @@ from ufo.ext.surface import SurfaceSpec
 from ufo.grants import OAuthProvider
 from ufo.hub import Hub
 from ufo.indexing import EmbedClient, IndexBackend
+from ufo.memory import MemorySearchProvider
 from ufo.models.interface import ModelClient
 from ufo.sandbox.session import Carrier
 from ufo.schema.records import Agent, Turn
@@ -498,6 +499,14 @@ own — never a boot-time registration, since the skills are per-workspace state
 
 
 @dataclass(frozen=True)
+class MemorySearchProviderSpec:
+    """One named memory-search provider built with its extension's scoped context."""
+
+    name: str
+    build: Callable[[ExtensionContext], MemorySearchProvider]
+
+
+@dataclass(frozen=True)
 class Manifest:
     """What one extension declares, returned by its `ufo.extension` entry point. `requires`
     names the sub-seams this extension consumes from another (a browser extension `requires` the
@@ -530,6 +539,7 @@ class Manifest:
     carriers: tuple[CarrierSpec, ...] = ()
     auth_proxies: tuple[AuthProxySpec, ...] = ()
     search_providers: tuple[SearchProviderSpec, ...] = ()
+    memory_search: tuple[MemorySearchProviderSpec, ...] = ()
     requires: tuple[str, ...] = field(default_factory=tuple)
 
 

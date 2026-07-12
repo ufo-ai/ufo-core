@@ -155,6 +155,14 @@ async def test_memory_update_then_search_recalls_in_a_new_conversation(
         assert "hunter2" in found.content[0].text
 
 
+async def test_memory_search_provider_rejects_an_empty_query_set() -> None:
+    (spec,) = memory.manifest().memory_search
+    embed = StubEmbed(vec((0, 1.0)))
+    provider = spec.build(_ext(DefaultIndex(embed=embed, transaction=workspace_tx), embed))
+    with pytest.raises(ValueError, match="requires 1-3 queries"):
+        await provider.search((), None)
+
+
 async def test_user_prompt_submit_hook_injects_a_recalled_fact(clean: None) -> None:
     """The headline: a fact committed in one context is auto-injected into a fresh turn by the
     user_prompt_submit recall hook — no tool call, the recall path is the hook itself."""

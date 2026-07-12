@@ -14,6 +14,7 @@ returning None rather than ever denying the turn.
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from itertools import zip_longest
 from pathlib import Path
@@ -31,10 +32,12 @@ from ufo.sdk.manifest import (
     HookSpec,
     InjectContext,
     Manifest,
+    MemorySearchProviderSpec,
     PageChangeBatch,
     SkillSpec,
     UserPromptSubmit,
 )
+from ufo.sdk.memory import DEFAULT_MEMORY_SEARCH_PROVIDER, MemoryMatch
 from ufo.sdk.sources import SHARED_SUBJECT, member_subject
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_memory.condenser import (
@@ -146,6 +149,54 @@ def _date_bound(value: str | None, *, end: bool) -> datetime | None:
     return parsed
 
 
+@dataclass(frozen=True)
+class MemorySearchService:
+    """The one multi-query search workflow used by tools and dependent extensions."""
+
+    ctx: ExtensionContext
+
+    async def search(
+        self,
+        queries: tuple[str, ...],
+        member_id: UUID | None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> tuple[MemoryMatch, ...]:
+        if not 1 <= len(queries) <= MAX_MEMORY_QUERIES:
+            raise ValueError(f"memory search requires 1-{MAX_MEMORY_QUERIES} queries")
+        store = store_for(self.ctx)
+        subjects = recall_subjects(member_id)
+        recall_batch = asyncio.gather(
+            *(store.recall(query, subjects, MEMORY_SEARCH_LIMIT, start, end) for query in queries)
+        )
+        source_batch = asyncio.gather(
+            *(
+                store.search_sources(query, subjects, MEMORY_SEARCH_LIMIT, start, end)
+                for query in queries
+            )
+        )
+        recalled_legs: list[tuple[Recalled, ...]] = await recall_batch
+        source_legs: list[tuple[SourceMatch, ...]] = await source_batch
+        recalled: dict[UUID, Recalled] = {}
+        for recall_tier in zip_longest(*recalled_legs):
+            for item in recall_tier:
+                if item is not None and item.memory_id not in recalled:
+                    recalled[item.memory_id] = item
+        sources: dict[UUID, SourceMatch] = {}
+        for source_tier in zip_longest(*source_legs):
+            for match in source_tier:
+                if match is not None and match.page_id not in sources:
+                    sources[match.page_id] = match
+        matches = tuple(
+            MemoryMatch(kind=item.item_class, text=item.body)
+            for item in list(recalled.values())[:MEMORY_SEARCH_LIMIT]
+        )
+        return matches + tuple(
+            MemoryMatch(kind="source", text=match.text)
+            for match in list(sources.values())[:MEMORY_SEARCH_LIMIT]
+        )
+
+
 async def memory_search_handler(ctx: ToolContext, args: MemorySearchInput) -> ToolResult:
     """Fan the queries out concurrently over recall and source search, then merge each kind by
     interleaving the per-query results round-robin — each query's top hit, then each query's
@@ -154,41 +205,16 @@ async def memory_search_handler(ctx: ToolContext, args: MemorySearchInput) -> To
     when given, restrict recalled facts to a `created_at` window."""
     if ctx.ext is None:
         raise RuntimeError("memory_search dispatched without its ExtensionContext")
-    store = store_for(ctx.ext)
-    subjects = recall_subjects(ctx.member_id)
     start = _date_bound(args.start_date, end=False)
     end = _date_bound(args.end_date, end=True)
-    recall_batch = asyncio.gather(
-        *(store.recall(query, subjects, MEMORY_SEARCH_LIMIT, start, end) for query in args.queries)
-    )
-    source_batch = asyncio.gather(
-        *(
-            store.search_sources(query, subjects, MEMORY_SEARCH_LIMIT, start, end)
-            for query in args.queries
+    matches = await MemorySearchService(ctx.ext).search(args.queries, ctx.member_id, start, end)
+    if not matches:
+        return ToolResult(content=(TextContent(text="No matching memory."),))
+    return ToolResult(
+        content=(
+            TextContent(text="\n".join(f"- [{match.kind}] {match.text}" for match in matches)),
         )
     )
-    recalled_legs: list[tuple[Recalled, ...]] = await recall_batch
-    source_legs: list[tuple[SourceMatch, ...]] = await source_batch
-    recalled: dict[UUID, Recalled] = {}
-    for recall_tier in zip_longest(*recalled_legs):
-        for item in recall_tier:
-            if item is not None and item.memory_id not in recalled:
-                recalled[item.memory_id] = item
-    sources: dict[UUID, SourceMatch] = {}
-    for source_tier in zip_longest(*source_legs):
-        for match in source_tier:
-            if match is not None and match.page_id not in sources:
-                sources[match.page_id] = match
-    if not recalled and not sources:
-        return ToolResult(content=(TextContent(text="No matching memory."),))
-    lines = [
-        f"- [{item.item_class}] {item.body}"
-        for item in list(recalled.values())[:MEMORY_SEARCH_LIMIT]
-    ]
-    lines.extend(
-        f"- [source] {match.text}" for match in list(sources.values())[:MEMORY_SEARCH_LIMIT]
-    )
-    return ToolResult(content=(TextContent(text="\n".join(lines)),))
 
 
 async def memory_update_handler(ctx: ToolContext, args: MemoryUpdateInput) -> ToolResult:
@@ -357,4 +383,9 @@ def manifest() -> Manifest:
             ),
         ),
         skills=(SkillSpec(path=SKILL_DIR),),
+        memory_search=(
+            MemorySearchProviderSpec(
+                name=DEFAULT_MEMORY_SEARCH_PROVIDER, build=MemorySearchService
+            ),
+        ),
     )

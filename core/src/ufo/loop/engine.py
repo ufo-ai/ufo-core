@@ -14,6 +14,7 @@ import json
 import time
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from html import escape
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -54,6 +55,7 @@ from ufo.loop.compaction import (
 )
 from ufo.loop.prompts.render import RenderedPrompt
 from ufo.loop.transcript import Transcript
+from ufo.memory import MemorySearch
 from ufo.models.interface import (
     ImageBlock,
     ImageSource,
@@ -75,6 +77,7 @@ from ufo.schema.records import (
     NON_TERMINAL_STATUSES,
     PARKED,
     RUNNING,
+    SCHEDULED_ADMISSION,
     Agent,
     AskUserInput,
     CredentialRequest,
@@ -109,6 +112,8 @@ COMMIT_RETRY_MAX_SECONDS = 30.0
 SKILL_LOAD_TOOL = "load_skill"
 ASK_USER_TOOL = "ask_user"
 REQUEST_CREDENTIALS_TOOL = "request_credentials"
+SCHEDULED_MEMORY_CONTEXT = "<recalled_memory>\n{recalled}\n</recalled_memory>"
+SCHEDULED_MEMORY_SEARCH_TIMEOUT_SECONDS = 4.0
 
 
 async def _claim_turn(turn_id: UUID, attempt: str) -> bool:
@@ -371,6 +376,7 @@ class TurnEngine:
     artifact_token_secret: str
     grants: GrantStore | None
     requestable_credentials: CredentialRequests | None = None
+    memory: MemorySearch | None = None
     public_base_url: str | None = None
     pricing: Pricing = CORE_PRICING
     reasoning: ReasoningEffort = DEFAULT_REASONING_EFFORT
@@ -431,6 +437,8 @@ class TurnEngine:
                 if not await self._mark_running():
                     return await self._resolve_unclaimed()
                 system = self.system_prompt.content
+                if self.turn.admission_source == SCHEDULED_ADMISSION:
+                    system = await self._scheduled_system(system)
                 inbound = await self.hooks.fire(
                     "user_prompt_submit",
                     UserPromptSubmit(text=self.turn.inbound),
@@ -480,6 +488,24 @@ class TurnEngine:
                 raise
             finally:
                 await context.cleanup.drain()
+
+    async def _scheduled_system(self, system: str) -> str:
+        if self.memory is None:
+            raise RuntimeError("scheduled turn requires memory search; none is wired")
+        try:
+            async with asyncio.timeout(SCHEDULED_MEMORY_SEARCH_TIMEOUT_SECONDS):
+                matches = await self.memory.search(self.turn.conversation_id, (self.turn.inbound,))
+        except Exception as error:
+            log(
+                "memory.scheduled_search_degraded",
+                turn_id=str(self.turn.id),
+                error_class=type(error).__name__,
+            )
+            return system
+        if not matches:
+            return system
+        recalled = "\n".join(f"- [{escape(match.kind)}] {escape(match.text)}" for match in matches)
+        return f"{system}\n\n{SCHEDULED_MEMORY_CONTEXT.format(recalled=recalled)}"
 
     async def _mark_running(self) -> bool:
         """Claim the turn as this execution's single owner, keyed by this run's workflow id. A

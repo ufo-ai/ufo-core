@@ -12,6 +12,7 @@ undeclared slot is refused."""
 import hashlib
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
 from typing import ClassVar
 from uuid import UUID
@@ -46,6 +47,7 @@ from ufo.sdk.manifest import (
     IndexBackendSpec,
     InjectionTarget,
     Manifest,
+    MemorySearchProviderSpec,
     ModelProviderSpec,
     OnboardingStep,
     PageChangeBatch,
@@ -62,6 +64,7 @@ from ufo.sdk.manifest import (
     SubagentProfile,
     SubagentToolGrant,
 )
+from ufo.sdk.memory import MemoryMatch
 from ufo.sdk.models import ModelEvent, ModelPrice, ModelRequest, TextDelta, Usage
 from ufo.sdk.sandbox import (
     BlobStore,
@@ -162,6 +165,9 @@ SAMPLE_SEARCH_URL = "https://sample.test/result"
 SAMPLE_SEARCH_TITLE = "Sample result"
 SAMPLE_SEARCH_TEXT = "the sample search backend answers a canned hit"
 SAMPLE_SEARCH_ANSWER = "the sample search backend answers directly"
+SAMPLE_MEMORY_TEXT = "the sample memory provider returns a scoped result"
+MEMORY_SEARCH_KEY = "memory_search"
+MEMORY_SEARCH_PROVIDER = "sample"
 SAMPLE_FETCH_TEXT = "the sample search backend fetched a canned page"
 
 
@@ -698,6 +704,31 @@ class SampleSearchProvider:
         return FetchedPage(url=request.url, text=SAMPLE_FETCH_TEXT)
 
 
+@dataclass(frozen=True)
+class SampleMemorySearch:
+    """Record a scoped search and return one result through the public provider seam."""
+
+    ctx: ExtensionContext
+
+    async def search(
+        self,
+        queries: tuple[str, ...],
+        member_id: UUID | None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> tuple[MemoryMatch, ...]:
+        await self.ctx.store.put(
+            MEMORY_SEARCH_KEY,
+            {
+                "queries": list(queries),
+                "member_id": None if member_id is None else str(member_id),
+                "start": None if start is None else start.isoformat(),
+                "end": None if end is None else end.isoformat(),
+            },
+        )
+        return (MemoryMatch(kind="fact", text=SAMPLE_MEMORY_TEXT),)
+
+
 class SampleCarrier:
     """A trivial in-process carrier the probe registers so `serve`'s backend selection has a
     manifest-contributed carrier to choose. It implements the whole Carrier protocol without a real
@@ -854,5 +885,8 @@ def manifest() -> Manifest:
             SearchProviderSpec(
                 backend=SEARCH_PROVIDER, build=lambda credentials: SampleSearchProvider()
             ),
+        ),
+        memory_search=(
+            MemorySearchProviderSpec(name=MEMORY_SEARCH_PROVIDER, build=SampleMemorySearch),
         ),
     )

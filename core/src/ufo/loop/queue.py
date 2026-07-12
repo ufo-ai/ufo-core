@@ -30,6 +30,7 @@ from ufo.loop.engine import (
 from ufo.loop.prompts.render import render_system_prompt, rendered_prompt
 from ufo.loop.subagents import SubagentRegistry, Subagents, subagent_system_prompt
 from ufo.loop.transcript import Transcript
+from ufo.memory import MemorySearch
 from ufo.models.registry import ModelRegistry
 from ufo.o11y import log
 from ufo.sandbox.fs_creds import SandboxFsCredentialMinter, workspace_key_prefix
@@ -94,6 +95,7 @@ class Runtime:
     index: IndexBackend
     embed: EmbedClient
     artifact_token_secret: str
+    memory: MemorySearch | None = None
 
 
 _runtime: Runtime | None = None
@@ -258,6 +260,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             sandbox=sandbox,
             cdp_provider=runtime.cdp_provider,
             search_provider=runtime.search_provider,
+            memory=runtime.memory,
             connectors=runtime.connectors,
             tools=tools,
             tool_ext=tool_ext,
@@ -346,6 +349,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, UUID | None]:
                     tables.turn.c.seq,
                     tables.turn.c.status,
                     tables.turn.c.inbound,
+                    tables.turn.c.admission_source,
                     tables.turn.c.created_at,
                     tables.turn.c.context,
                     tables.turn.c.terminal,
@@ -368,6 +372,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, UUID | None]:
         seq=row.seq,
         status=row.status,
         inbound=row.inbound,
+        admission_source=row.admission_source,
         created_at=row.created_at,
         context=None if row.context is None else TurnContext.model_validate(row.context),
         terminal=None if row.terminal is None else TerminalFrame.model_validate(row.terminal),

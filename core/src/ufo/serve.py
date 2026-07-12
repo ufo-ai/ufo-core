@@ -37,6 +37,7 @@ from ufo.ext.loader import (
     embed_backend,
     index_backend,
     load_manifests,
+    memory_search,
     skill_registry,
     turn_subagent_grants,
     turn_subagents,
@@ -64,6 +65,7 @@ from ufo.jobs import (
 from ufo.loop.profiles import CORE_SUBAGENT_PROFILES
 from ufo.loop.queue import Runtime, init_runtime
 from ufo.loop.subagents import SubagentRegistry
+from ufo.memory import DEFAULT_MEMORY_SEARCH_PROVIDER
 from ufo.models.registry import model_registry
 from ufo.o11y import init_o11y, log
 from ufo.proxy_serve import OWNER_DSN_ENV, model_rule_base
@@ -133,6 +135,7 @@ def run() -> None:
     registry = model_registry(config, manifests)
     embed = embed_backend(manifests, config.memory.embed_backend, credentials)
     index = index_backend(manifests, config.memory.index_backend, embed, credentials)
+    memory = memory_search(manifests, credentials, index, embed)
     connectors = _connector_registry(config, manifests, credentials)
     runtime = Runtime(
         config=config,
@@ -153,6 +156,7 @@ def run() -> None:
         credentials=credentials,
         index=index,
         embed=embed,
+        memory=memory,
         artifact_token_secret=artifact_secret,
     )
     init_runtime(runtime)
@@ -527,9 +531,42 @@ def _require_search_provider(
     _select_search_provider(config, manifests, credentials)
 
 
+def _require_memory_search(
+    _config: Config,
+    manifests: tuple[Manifest, ...],
+    credentials: CredentialStore | None,
+) -> None:
+    """Require exactly one usable default memory-search provider."""
+    providers = tuple(
+        (manifest, spec)
+        for manifest in manifests
+        for spec in manifest.memory_search
+        if spec.name == DEFAULT_MEMORY_SEARCH_PROVIDER
+    )
+    if not providers:
+        raise RuntimeError("no active extension registers memory search")
+    if len(providers) > 1:
+        raise RuntimeError(
+            f"two extensions register memory search provider "
+            f"{DEFAULT_MEMORY_SEARCH_PROVIDER!r}: "
+            + ", ".join(sorted(manifest.name for manifest, _spec in providers))
+        )
+    manifest, _spec = providers[0]
+    declared = frozenset(slot.name for slot in manifest.credentials)
+    if declared and credentials is None:
+        raise RuntimeError(
+            f"memory search provider {manifest.name!r} declares credential slots "
+            "but no credential key is set"
+        )
+
+
 _REQUIRED_SEAM_CHECKS: dict[
     str, Callable[[Config, tuple[Manifest, ...], CredentialStore | None], None]
-] = {"cdp_providers": _require_cdp_provider, "search_providers": _require_search_provider}
+] = {
+    "cdp_providers": _require_cdp_provider,
+    "memory_search": _require_memory_search,
+    "search_providers": _require_search_provider,
+}
 
 
 def _select_auth_proxy(

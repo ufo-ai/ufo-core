@@ -184,8 +184,9 @@ class Manifest:
     routes: tuple[RouteSpec, ...] = ();         credentials: tuple[CredentialSlot, ...] = ()
     onboarding: tuple[OnboardingStep, ...] = ();packs: tuple[PackRef, ...] = ()
     models: tuple[ModelProviderSpec, ...] = (); carriers: tuple[CarrierSpec, ...] = ()
-    memory: tuple[Condenser, ...] = ();         indexes: tuple[IndexBackendSpec, ...] = ()
-    hubs: tuple[HubSpec, ...] = ()
+    memory_search: tuple[MemorySearchProviderSpec, ...] = ()
+    indexes: tuple[IndexBackendSpec, ...] = (); hubs: tuple[HubSpec, ...] = ()
+    requires: tuple[str, ...] = ()
 
 class ExtensionContext(Protocol):
     store: ScopedStore                                        # workspace-scoped queries, no raw engine

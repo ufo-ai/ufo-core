@@ -17,7 +17,7 @@ supported and single future runs are not.
 
 Use `schedule_task` for recurring tasks that should survive beyond the active workflow. Pass a 5-field
 cron `schedule`, a `prompt`, and optionally `name`/`description`. Save the returned `name`; cancellation
-requires it.
+requires it. Every run searches memory for relevant context before the task starts.
 
 COMMUNICATION RULE: When talking to users, NEVER say "cron" or "cron job". Use friendly terms like "recurring task", "scheduled task", or "automatic check".
 

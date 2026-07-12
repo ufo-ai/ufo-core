@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 TurnStatus = Literal["queued", "running", "parked", "done", "failed", "cancelled"]
 TerminalStatus = Literal["done", "failed", "cancelled"]
-TurnAdmissionSource = Literal["member", "internal"]
+TurnAdmissionSource = Literal["member", "internal", "scheduled"]
 ReasoningEffort = Literal["off", "low", "medium", "high"]
 DEFAULT_REASONING_EFFORT: ReasoningEffort = "high"
 NON_TERMINAL_STATUSES: tuple[TurnStatus, ...] = ("queued", "running", "parked")
@@ -23,6 +23,7 @@ RUNNING: TurnStatus = "running"
 PARKED: TurnStatus = "parked"
 MEMBER_ADMISSION: TurnAdmissionSource = "member"
 INTERNAL_ADMISSION: TurnAdmissionSource = "internal"
+SCHEDULED_ADMISSION: TurnAdmissionSource = "scheduled"
 
 ProposalStatus = Literal["pending", "approved", "rejected"]
 PENDING: ProposalStatus = "pending"
@@ -170,6 +171,7 @@ class Turn(BaseModel):
     status: TurnStatus
     inbound: str
     created_at: datetime
+    admission_source: TurnAdmissionSource = INTERNAL_ADMISSION
     context: TurnContext | None = None
     terminal: TerminalFrame | None = None
     parent_turn_id: UUID | None = None

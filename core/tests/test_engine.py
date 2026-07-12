@@ -43,6 +43,7 @@ from ufo.loop.engine import (
 )
 from ufo.loop.prompts.render import COMPACTION_SYSTEM_PROMPT, rendered_prompt
 from ufo.loop.transcript import Transcript
+from ufo.memory import MemoryMatch, MemorySearch
 from ufo.models.interface import (
     ImageBlock,
     ImageSource,
@@ -59,11 +60,14 @@ from ufo.models.interface import (
 from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.schema import tables
 from ufo.schema.records import (
+    INTERNAL_ADMISSION,
+    SCHEDULED_ADMISSION,
     Agent,
     AskUserInput,
     CredentialRequest,
     TerminalFrame,
     Turn,
+    TurnAdmissionSource,
     TurnContext,
     Usage,
 )
@@ -81,6 +85,7 @@ from ufo.tools.context import (
 )
 from ufo.tools.registry import ToolDef, ToolRegistry
 from ufo.transcript import Conversation
+from ufo.workspace import ws
 
 
 @dataclass
@@ -96,6 +101,29 @@ class CapturingModel:
         self.seen_system.append(request.system)
         yield TextDelta(text="ok")
         yield Usage(input_tokens=1, output_tokens=1)
+
+
+@dataclass
+class MemoryAwareModel:
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        recalled = (
+            "<recalled_memory>\n- [fact] Investor Alice prefers &lt;email&gt;\n</recalled_memory>"
+        )
+        text = "remembered" if recalled in request.system else "missing"
+        yield TextDelta(text=text)
+        yield Usage(input_tokens=1, output_tokens=1)
+
+
+@dataclass
+class StaticMemorySearch:
+    async def search(
+        self,
+        queries: tuple[str, ...],
+        member_id: UUID | None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> tuple[MemoryMatch, ...]:
+        return (MemoryMatch(kind="fact", text="Investor Alice prefers <email>"),)
 
 
 @dataclass
@@ -318,7 +346,12 @@ class RecordingCarrier:
 ADMITTED_AT = datetime(2026, 7, 9, 18, 32, tzinfo=UTC)
 
 
-async def _seed_turn(status: str, terminal: TerminalFrame | None, seq: int = 1) -> Turn:
+async def _seed_turn(
+    status: str,
+    terminal: TerminalFrame | None,
+    seq: int = 1,
+    admission_source: TurnAdmissionSource = INTERNAL_ADMISSION,
+) -> Turn:
     workspace_id, member_id, agent_id, conversation_id, turn_id = (uuid4() for _ in range(5))
     async with workspace_tx() as connection:
         await connection.execute(
@@ -366,6 +399,7 @@ async def _seed_turn(status: str, terminal: TerminalFrame | None, seq: int = 1) 
                 seq=seq,
                 status=status,
                 inbound="hi",
+                admission_source=admission_source,
                 terminal=None if terminal is None else terminal.model_dump(mode="json"),
                 created_at=ADMITTED_AT,
                 updated_at=sa.func.now(),
@@ -379,6 +413,7 @@ async def _seed_turn(status: str, terminal: TerminalFrame | None, seq: int = 1) 
         seq=seq,
         status=status,
         inbound="hi",
+        admission_source=admission_source,
         created_at=ADMITTED_AT,
         terminal=terminal,
     )
@@ -398,6 +433,7 @@ def _engine(
     compaction: Compaction | None = None,
     member_id: UUID | None = None,
     requestable_credentials: CredentialRequests | None = None,
+    memory: MemorySearch | None = None,
 ) -> TurnEngine:
     carrier = carrier or RecordingCarrier()
     blob = FilesystemBlobStore(root=tmp_path)
@@ -426,7 +462,22 @@ def _engine(
         artifact_token_secret="",
         grants=None,
         requestable_credentials=requestable_credentials,
+        memory=memory,
     )
+
+
+async def test_scheduled_turn_searches_memory_after_claim(db: None, tmp_path: Path) -> None:
+    turn = await _seed_turn("queued", None, admission_source=SCHEDULED_ADMISSION)
+    with ws(turn.workspace_id):
+        frame = await _engine(
+            turn,
+            MemoryAwareModel(),
+            tmp_path,
+            memory=MemorySearch(StaticMemorySearch()),
+        ).run()
+    assert frame is not None
+    assert frame.status == "done"
+    assert frame.text == "remembered"
 
 
 async def test_turn_with_a_traceparent_runs_inside_the_admitting_trace(

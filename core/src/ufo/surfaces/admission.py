@@ -37,6 +37,7 @@ from ufo.schema.records import (
     INTERNAL_ADMISSION,
     MEMBER_ADMISSION,
     PARKED,
+    SCHEDULED_ADMISSION,
     TURN_QUEUE_NAME,
     TURN_WORKFLOW_NAME,
     WRITEBACK_PENDING,
@@ -331,7 +332,11 @@ class Admission:
                         status=status,
                         inbound=body,
                         admission_source=(
-                            MEMBER_ADMISSION if pending_pause is not None else INTERNAL_ADMISSION
+                            MEMBER_ADMISSION
+                            if pending_pause is not None
+                            else SCHEDULED_ADMISSION
+                            if scheduled_task is not None
+                            else INTERNAL_ADMISSION
                         ),
                         context=None if context is None else context.model_dump(mode="json"),
                         terminal=None if terminal is None else terminal.model_dump(mode="json"),

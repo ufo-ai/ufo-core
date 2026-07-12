@@ -36,6 +36,7 @@ from ufo.ext.manifest import (
     HookSpec,
     InjectContext,
     Manifest,
+    MemorySearchProviderSpec,
     ModifyInput,
     ModifyOutput,
     Pack,
@@ -45,6 +46,7 @@ from ufo.ext.manifest import (
     SubagentProfile,
 )
 from ufo.indexing import EmbedClient, IndexBackend
+from ufo.memory import DEFAULT_MEMORY_SEARCH_PROVIDER, MemorySearch
 from ufo.o11y import log
 from ufo.schema.records import Agent, Turn
 from ufo.skills.runtime import (
@@ -436,6 +438,34 @@ def embed_backend(
             context = context_for(manifest.name, declared)
             return spec.factory(context)
     raise NotRegisteredError(f"config selects embed backend {name!r} but no extension registers it")
+
+
+def memory_search(
+    manifests: tuple[Manifest, ...],
+    credential_store: CredentialStore | None,
+    index: IndexBackend | None = None,
+    embed: EmbedClient | None = None,
+    name: str = DEFAULT_MEMORY_SEARCH_PROVIDER,
+) -> MemorySearch | None:
+    """Build one named provider with its declaring extension's scoped context."""
+    providers: list[tuple[Manifest, MemorySearchProviderSpec]] = []
+    for manifest in manifests:
+        providers.extend((manifest, spec) for spec in manifest.memory_search if spec.name == name)
+    if not providers:
+        return None
+    if len(providers) > 1:
+        raise RuntimeError(
+            f"two extensions register memory search provider {name!r}: "
+            + ", ".join(sorted(manifest.name for manifest, _spec in providers))
+        )
+    manifest, spec = providers[0]
+    declared = frozenset(slot.name for slot in manifest.credentials)
+    if declared and credential_store is None:
+        raise RuntimeError(
+            f"memory search provider {manifest.name!r} declares credential slots "
+            "but no credential key is set"
+        )
+    return MemorySearch(spec.build(context_for(manifest.name, declared, index, embed)))
 
 
 def validate_ext_tools(

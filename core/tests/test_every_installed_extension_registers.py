@@ -43,6 +43,7 @@ from ufo.ext.loader import (
     embed_backend,
     index_backend,
     load_manifests,
+    memory_search,
     skill_registry,
     turn_hooks,
     turn_subagents,
@@ -227,6 +228,11 @@ def _check_search_providers(manifest: Manifest, store: CredentialStore) -> None:
         )
 
 
+def _check_memory_search(manifest: Manifest, store: CredentialStore) -> None:
+    for spec in manifest.memory_search:
+        assert memory_search((manifest,), store, name=spec.name) is not None
+
+
 def _check_surfaces(manifest: Manifest, store: CredentialStore, tmp_path: Path) -> None:
     if not manifest.surfaces:
         return
@@ -340,6 +346,7 @@ def test_installed_extension_registers_every_declared_point(name: str, tmp_path:
     _check_sources(manifest)
     _check_auth_proxies(manifest, store)
     _check_search_providers(manifest, store)
+    _check_memory_search(manifest, store)
     _check_surfaces(manifest, store, tmp_path)
     _check_routes(manifest, store)
     _check_hooks(manifest, store)

@@ -156,8 +156,13 @@ def _tool_ctx(workspace_id: UUID, conversation_id: UUID, agent_id: UUID) -> Tool
     )
 
 
-def _runner_ctx(invoker: AdmissionInvoker) -> ExtensionContext:
-    return context_for(NAME, frozenset(), invoker=invoker, schedule_invoker=invoker)
+def _runner_ctx(invoker: AdmissionInvoker | None) -> ExtensionContext:
+    return context_for(
+        NAME,
+        frozenset(),
+        invoker=invoker,
+        schedule_invoker=invoker,
+    )
 
 
 async def _turns(conversation_id: UUID) -> list[sa.RowMapping]:
@@ -1114,6 +1119,7 @@ async def test_runner_fires_due_task_into_a_turn(db: None) -> None:
         turns = await _turns(conversation_id)
         assert len(turns) == 1
         assert turns[0]["inbound"] == "check inbox"
+        assert turns[0]["admission_source"] == "scheduled"
         assert turns[0]["status"] == "queued"
         assert dbos.enqueued == [str(turns[0]["id"])]
         advanced = (await store.list())[0]
@@ -1257,6 +1263,7 @@ async def test_schedule_task_rejects_non_five_field_cron(db: None) -> None:
 def test_task_scheduling_skill_parses_and_indexes() -> None:
     index = dict(skill_registry((manifest(),)).index())
     assert "task-scheduling" in index
+    assert manifest().requires == ("memory_search",)
 
 
 def test_manifest_exposes_pause_as_a_side_effecting_tool() -> None:
@@ -1286,14 +1293,16 @@ async def test_manifest_job_fires_through_job_runner(db: None) -> None:
     )
     with ws(workspace_id):
         await runner.fire(f"{NAME}:{RUNNER_JOB}")
-    assert len(await _turns(conversation_id)) == 1
+    turns = await _turns(conversation_id)
+    assert len(turns) == 1
+    assert turns[0]["inbound"] == "check inbox"
 
 
 async def test_invoke_without_invoker_fails_loud(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     store = ScheduleStore()
     due_at = datetime.now(UTC) - timedelta(minutes=1)
-    ctx = context_for(NAME, frozenset())
+    ctx = _runner_ctx(None)
     with ws(workspace_id):
         await store.create(
             conversation_id, agent_id, "scheduled-x", DAILY_9AM, "do it", "do it", due_at

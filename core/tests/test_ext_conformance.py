@@ -52,6 +52,7 @@ from ufo.ext.loader import (
     embed_backend,
     index_backend,
     load_manifests,
+    memory_search,
     skill_registry,
     turn_subagent_grants,
     turn_subagents,
@@ -478,6 +479,60 @@ async def test_sample_search_provider_answers_a_query_and_fetches() -> None:
     page = await provider.fetch(FetchRequest(url="https://sample.test/page"))
     assert page.url == "https://sample.test/page"
     assert page.text == sample.SAMPLE_FETCH_TEXT
+
+
+async def test_sample_memory_search_provider_is_scoped_to_the_conversation_member(
+    db: None,
+) -> None:
+    workspace_id = await _workspace()
+    member_id, conversation_id = uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email="memory@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                surface="cli",
+                queue_key="memory",
+                member_id=member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    access = memory_search(
+        (_sample_manifest(),), _credential_store(), name=sample.MEMORY_SEARCH_PROVIDER
+    )
+    assert access is not None
+    with ws(workspace_id):
+        matches = await access.search(conversation_id, ("customer history",))
+        recorded = await ScopedStore(extension=sample.NAME).get(sample.MEMORY_SEARCH_KEY)
+    assert matches[0].text == sample.SAMPLE_MEMORY_TEXT
+    assert recorded == {
+        "queries": ["customer history"],
+        "member_id": str(member_id),
+        "start": None,
+        "end": None,
+    }
+
+
+def test_memory_search_registration_is_unique_and_required() -> None:
+    provider = next(manifest for manifest in load_manifests() if manifest.name == "memory")
+    consumer = Manifest(name="memory-consumer", version="0", requires=("memory_search",))
+    assert memory_search((), _credential_store()) is None
+    assert memory_search(load_manifests(), _credential_store()) is not None
+    with pytest.raises(RuntimeError, match=r"requires the 'memory_search' seam"):
+        _validate_requires(_cdp_config(sample.CDP_PROVIDER), (consumer,), _credential_store())
+    _validate_requires(_cdp_config(sample.CDP_PROVIDER), (consumer, provider), _credential_store())
+    with pytest.raises(RuntimeError, match="two extensions register memory search"):
+        memory_search((provider, provider), _credential_store())
 
 
 def test_boot_validation_of_requires_fails_when_no_search_backend_is_configured() -> None:
