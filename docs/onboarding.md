@@ -121,10 +121,10 @@ request_credentials ---------> seals {workspace, owner, slots}; turn ends
   |                            writes the encrypted slot and that slot's marker;
   |                            NO turn admitted, transcript never sees a byte
   |
-slack_connect ---------------> auth.test proves the token; a signed request can
-  |                            run the same proof. The derived team and bot-user
-  |                            ids persist as the surface's own identity record,
-  |                            pinned to the token's fingerprint (owner-only tool)
+slack_connect ---------------> auth.test proves the token; the derived team and
+  |                            bot-user ids persist as the surface's own identity
+  |                            record, pinned to the token's fingerprint, and the
+  |                            team uniquely registers to this UFO workspace
   v
 first DM / @mention ---------> url-verified marker flips slack_connect to connected
 ```
@@ -153,7 +153,7 @@ in chat.
        |     pending     |<------------------------+
        +-----------------+                         |
               |                                    |
-              | Slack URL verification with        |
+              | first signed event or click with   |
               | current signing secret writes      |
               | marker blob                        |
               v                                    |
@@ -180,34 +180,34 @@ marker fingerprint matches current signing secret
   -> connected
 ```
 
-`slack_connect` and signed Slack requests use the same `auth.test` identity resolution. A request
-with no identity starts that proof after its response and asks Slack to retry; the retry continues
-through normal admission. `slack_app_manifest` renders the app manifest from the workspace public
-base URL (`[connect] public_base_url`; events request URL
-`<public_base_url>/surface/slack/<workspace_id>`). The owner enters only the Bot User OAuth Token
-and Signing Secret; the team and bot-user ids are derived metadata, never entered and never slots.
+`slack_connect` runs `auth.test` when its identity is absent or stale, persists that identity, and
+uniquely registers the derived team to the workspace. A registered request with no cached identity
+starts the same proof after its response and asks Slack to retry; the retry continues through
+normal admission.
+`slack_app_manifest` renders the app manifest from `[connect] public_base_url`; its events request
+URL is `<public_base_url>/surface/slack`. The owner enters only the Bot User OAuth Token and Signing
+Secret; the team and bot-user ids are derived metadata, never entered and never slots.
 
 ## URL verification signal
 
 Slack proves it reached the deploy with the stored signing secret on every signature-verified
-request — the `url_verification` handshake or a real event:
+event or interactive request:
 
 ```text
-Slack Events API
+Slack callback
   |
-  | POST /surface/slack/<workspace_id>
+  | POST /surface/slack or /surface/slack/interactive
   | x-slack-signature + x-slack-request-timestamp
   v
 slack surface
   |
-  +-- read slack_signing_secret
-  |     unset + url_verification -> echo the challenge (nothing stored, no marker)
-  |     unset + event            -> 401
-  +-- verify HMAC and replay window
-  +-- url_verification -> write marker, return {"challenge": "..."}
-  +-- event / click -> bind HMAC-secret + team fingerprint to this workspace
-  +-- foreign team_id  -> ignored, no marker
-  +-- event / click    -> write marker, admit turn
+  +-- url_verification -> echo the challenge unbound (nothing stored, no marker)
+  +-- parse team id as an untrusted routing hint
+  +-- lookup unique team registration -> candidate workspace
+  +-- read that workspace's slack_signing_secret
+  +-- verify HMAC and replay window over the original bytes
+  +-- bind the workspace only after verification
+  +-- event / click -> write marker, admit turn
 ```
 
 The marker (best-effort, written once per stored secret per process):
@@ -220,14 +220,13 @@ workspaces/<workspace_id>/surfaces/slack/url_verified
 The unsigned echo exists because Slack probes the request URL the instant the app is created from
 the manifest — before the owner can hold the secret Slack mints with the app. Echoing the caller's
 own challenge stores and grants nothing, and it spares the owner a failed-verification banner with
-no reliable retry. Because any signed request from the configured team writes the marker (the
-handshake carries no team and always counts), the member's first DM or @mention is what flips setup
-to connected — no manual re-save of the request URL, and no false green from an event the team gate
-drops.
+no reliable retry. The handshake carries no team, so it cannot select a workspace or mark one
+connected. The member's first signed DM, @mention, or click writes the marker and flips setup to
+connected.
 
-A signed event or click binds its app-secret and Slack-team fingerprint to one UFO workspace. The
-same Slack app may serve different Slack teams, while replaying one installation into another UFO
-workspace is rejected. URL verification carries no team and creates no installation binding.
+`slack_connect` binds `team:<team_id>` to one UFO workspace under a database uniqueness constraint.
+The request's team id selects only a candidate secret; the HMAC authorizes the request. An unknown
+team and a mismatched signature return the same rejection, and URL verification creates no binding.
 
 `slack_connect` trusts the marker only while its fingerprint matches the currently stored
 signing secret. Rotating the signing secret therefore reads as pending until Slack's next signed
@@ -251,6 +250,7 @@ ufo surface fulfillment (POST /surface/ufo/{channel} + x-ufo-secret headers)
 
 slack tools (ToolContext)
   ext.credentials.get       own declared slots only (the two secrets)
+  ext.installations.bind    own declared surface only (the unique Slack team)
   ctx.speaker_is_owner()    the owner gate on the identity-deriving step
   ctx.public_base_url       renders the Events request URL
   ctx.blob                  the identity record + url-verified marker
@@ -262,8 +262,8 @@ Slack surface's slots without the Slack surface needing a separate setup API.
 ## Pack placement
 
 The `assistant_hosted` pack includes the slack extension — its durable member surface
-(`/surface/slack/<workspace_id>`), its two credential slots, and its setup tools; connecting it is
-a conversation, not a surface.
+(`/surface/slack`), its two credential slots, and its setup tools; connecting it is a conversation,
+not a separate setup surface.
 
 ## Operational edges
 
@@ -271,8 +271,9 @@ a conversation, not a surface.
 - The `flyingobject.ai` domain is onboarded in Cloudflare Email Sending; the edge binding permits
   only `no-reply@flyingobject.ai` as its sender.
 - The ufo surface requires `UFO_TOKEN_SECRET`; a missing secret is a configuration error, not a 401.
-- Only the owner (the earliest workspace member) can request Slack credential entry or run
-  `slack_connect`; a joined teammate's attempt raises before anything seals or writes.
+- Only the owner (the earliest workspace member) can request Slack credential entry or derive a
+  missing Slack identity. Once derived, a teammate may call `slack_connect`; it idempotently
+  refreshes the team registration and returns status without another `auth.test` call.
 - A secret value is bounded (4 KiB) and travels bearer-authenticated on the existing chat
   transport; the fulfillment response is a `say` line, never a turn.
 
