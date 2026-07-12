@@ -118,10 +118,11 @@ module "irsa_app_s3" {
   role_name        = "${local.name}-app-s3"
   role_policy_arns = { s3 = aws_iam_policy.app_s3.arn }
 
+  assume_role_condition_test = "StringLike"
   oidc_providers = {
     main = {
       provider_arn               = module.eks.oidc_provider_arn
-      namespace_service_accounts = ["${local.system_namespace}:ufo-serve"]
+      namespace_service_accounts = ["ufo-*:ufo-serve"]
     }
   }
   tags = local.tags
