@@ -7,10 +7,8 @@ from ufo_control.gateway_email import (
     AWS_ROLE_ARN_ENV,
     AWS_WEB_IDENTITY_TOKEN_FILE_ENV,
     DEFAULT_SES_REGION,
-    EMAIL_BACKEND_ENV,
     SES_REGION_ENV,
     SES_SENDER_ENV,
-    LoggingEmailSender,
     SesCredentials,
     SesEmailSender,
     _parse_assume_role_credentials,
@@ -21,7 +19,7 @@ from ufo_control.gateway_email import (
 STS_RESPONSE = """\
 <AssumeRoleWithWebIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
   <AssumeRoleWithWebIdentityResult>
-    <SubjectFromWebIdentityToken>system:serviceaccount:ufo-system:ufo-operator</SubjectFromWebIdentityToken>
+    <SubjectFromWebIdentityToken>system:serviceaccount:ufo-system:ufo-gateway</SubjectFromWebIdentityToken>
     <AssumedRoleUser>
       <Arn>arn:aws:sts::111122223333:assumed-role/ufo-testing-gateway-ses/ufo-gateway-email</Arn>
       <AssumedRoleId>AROAEXAMPLE:ufo-gateway-email</AssumedRoleId>
@@ -74,17 +72,11 @@ def test_sigv4_headers_sign_the_session_token() -> None:
     assert "x-amz-security-token" in headers["authorization"].split("SignedHeaders=")[1]
 
 
-def test_email_sender_from_env_defaults_to_logging(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(EMAIL_BACKEND_ENV, raising=False)
-    assert isinstance(email_sender_from_env(), LoggingEmailSender)
-
-
 def test_email_sender_from_env_builds_ses_from_irsa(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     token_file = tmp_path / "token"
     token_file.write_text("projected-token\n")
-    monkeypatch.setenv(EMAIL_BACKEND_ENV, "ses")
     monkeypatch.setenv(SES_SENDER_ENV, "no-reply@flyingobject.ai")
     monkeypatch.delenv(SES_REGION_ENV, raising=False)
     monkeypatch.setenv(AWS_ROLE_ARN_ENV, "arn:aws:iam::111122223333:role/ufo-testing-gateway-ses")
@@ -101,16 +93,7 @@ def test_email_sender_from_env_builds_ses_from_irsa(
 def test_email_sender_from_env_fails_loud_without_irsa(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv(EMAIL_BACKEND_ENV, "ses")
     monkeypatch.setenv(SES_SENDER_ENV, "no-reply@flyingobject.ai")
     monkeypatch.delenv(AWS_ROLE_ARN_ENV, raising=False)
     with pytest.raises(RuntimeError, match=AWS_ROLE_ARN_ENV):
-        email_sender_from_env()
-
-
-def test_email_sender_from_env_rejects_unknown_backend(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv(EMAIL_BACKEND_ENV, "smtp")
-    with pytest.raises(RuntimeError, match="not a known backend"):
         email_sender_from_env()

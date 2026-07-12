@@ -86,7 +86,7 @@ from ufo.sources.sync import (
 )
 from ufo.surfaces.admission import Admission, AdmissionInvoker, MemberAdmission
 from ufo.surfaces.artifacts import router as artifacts_router
-from ufo.surfaces.cli import CONNECT_CALLBACK_PATH, router
+from ufo.surfaces.cli import CONNECT_CALLBACK_PATH, callback_router, router
 from ufo.surfaces.hub_tail import HubTailer
 from ufo.workspace import init_workspace_credentials, ws
 
@@ -94,20 +94,20 @@ PROXY_STARTUP_TIMEOUT_SECONDS = 30
 
 
 def run() -> None:
+    """Start the configured dedicated server or shared service."""
     config = load_config()
     init_o11y(config.o11y.otlp_endpoint)
     init_db(config.database.url)
     manifests = load_manifests(config.pack.name)
+    key = os.environ.get(config.credentials.key_env)
+    if not key:
+        raise RuntimeError(
+            f"credential key env {config.credentials.key_env!r} is unset but jobs are registered"
+        )
+    credentials = CredentialStore(fernet=Fernet(key.encode()))
     shared = config.serve.shared_workspace
     if shared:
         manifests = _shared_fleet_manifests(manifests)
-    # The shared fleet has no single workspace to bootstrap-check, admit a seat for, or pin: it
-    # connects as an RLS-subject role and resolves the workspace per request/turn. workspace_id
-    # stays None, so every provider below builds ambient (context_for(None)) and scopes at use. It
-    # also opens the RLS-bypassing owner engine owner_tx enumerates through — the per-tenant deploy
-    # pins one workspace by its role default, so its owner_tx falls through the subject engine and
-    # needs none.
-    if shared:
         init_owner_db(_shared_owner_dsn(config))
     else:
         asyncio.run(_require_bootstrap())
@@ -122,9 +122,6 @@ def run() -> None:
     threading.Thread(
         target=lambda: asyncio.run(heartbeat.run()), name="instance-heartbeat", daemon=True
     ).start()
-    session_secret = _session_secret(config) if shared else ""
-    key = os.environ.get(config.credentials.key_env)
-    credentials = CredentialStore(fernet=Fernet(key.encode())) if key else None
     validate_ext_tools(manifests, credentials)
     _validate_requires(config, manifests, credentials)
     init_workspace_credentials(credentials)
@@ -134,35 +131,31 @@ def run() -> None:
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
     carrier = _select_carrier(config, manifests)
     registry = model_registry(config, manifests)
-    # Deploy-global providers built once, with no workspace: each holds a credential reader that
-    # resolves the ambient workspace's key (else the platform key) at use, and the index reads the
-    # ambient workspace's vector namespace per query — so one boot-built set serves every workspace.
     embed = embed_backend(manifests, config.memory.embed_backend, credentials)
     index = index_backend(manifests, config.memory.index_backend, embed, credentials)
     connectors = _connector_registry(config, manifests, credentials)
-    init_runtime(
-        Runtime(
-            config=config,
-            blob=blob,
-            workspace_fs=_sandbox_fs_minter(config.blob),
-            hub=hub,
-            carrier=carrier,
-            cdp_provider=_select_cdp_provider(config, manifests, credentials),
-            search_provider=_select_search_provider(config, manifests, credentials),
-            connectors=connectors,
-            proxy=_proxy_endpoint(config, manifests, credentials, registry.pricing),
-            dbos=dbos_client,
-            subagents=SubagentRegistry((*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests))),
-            subagent_grants=turn_subagent_grants(manifests),
-            manifests=manifests,
-            registry=registry,
-            skills=skill_registry(manifests),
-            credentials=credentials,
-            index=index,
-            embed=embed,
-            artifact_token_secret=artifact_secret,
-        )
+    runtime = Runtime(
+        config=config,
+        blob=blob,
+        workspace_fs=_sandbox_fs_minter(config.blob),
+        hub=hub,
+        carrier=carrier,
+        cdp_provider=_select_cdp_provider(config, manifests, credentials),
+        search_provider=_select_search_provider(config, manifests, credentials),
+        connectors=connectors,
+        proxy=_proxy_endpoint(config, manifests, credentials, registry.pricing),
+        dbos=dbos_client,
+        subagents=SubagentRegistry((*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests))),
+        subagent_grants=turn_subagent_grants(manifests),
+        manifests=manifests,
+        registry=registry,
+        skills=skill_registry(manifests),
+        credentials=credentials,
+        index=index,
+        embed=embed,
+        artifact_token_secret=artifact_secret,
     )
+    init_runtime(runtime)
     install_connect_flow(_connect_flow(credentials, config, manifests))
     DBOS(
         config={
@@ -179,13 +172,14 @@ def run() -> None:
     app.state.dbos = dbos_client
     app.state.instance_id = instance_id
     app.state.workspace_id = workspace_id
-    app.state.shared_workspace = shared
-    app.state.session_token_secret = session_secret
     app.state.durable_surfaces = durable_surfaces(manifests)
     app.state.writeback_poller = None
     app.state.blob = blob
     app.state.artifact_token_secret = artifact_secret
-    app.include_router(router)
+    if workspace_id is not None:
+        app.include_router(router)
+    else:
+        app.include_router(callback_router)
     app.include_router(artifacts_router)
     sync_driver = SyncDriver(
         backends=_source_backends(manifests),
@@ -196,11 +190,9 @@ def run() -> None:
     page_feed = CorePageFeed(blob=blob)
     if workspace_id is not None:
         asyncio.run(register_sources(config.sources))
-    _launch_jobs(
-        config, manifests, sync_driver, index, embed, page_feed, dbos_client, blob, carrier
-    )
-    _mount_ext_routes(app, manifests, workspace_id, credentials, index, embed)
+    _launch_jobs(runtime, sync_driver, page_feed)
     if workspace_id is not None:
+        _mount_ext_routes(app, manifests, workspace_id, credentials, index, embed)
         _mount_surfaces(
             app,
             manifests,
@@ -213,6 +205,7 @@ def run() -> None:
             config.connect.public_base_url,
         )
     else:
+        _mount_ext_routes(app, manifests, None, credentials, index, embed)
         _mount_shared_surfaces(
             app,
             manifests,
@@ -241,32 +234,17 @@ async def _require_bootstrap() -> None:
         raise RuntimeError("workspace missing — run `ufoctl init` first")
 
 
-def _session_secret(config: Config) -> str:
-    """The shared fleet's session-signing secret, read once at boot. The surface verifies every
-    member token against it before any RLS-scoped read, so an unset secret leaves the fleet unable
-    to authenticate anyone — fail loud here, not on the first request."""
-    secret = os.environ.get(config.serve.session_secret_env)
-    if not secret:
-        raise RuntimeError(
-            f"shared serve needs {config.serve.session_secret_env} set to sign and verify member "
-            "session tokens"
-        )
-    return secret
-
-
 def _shared_owner_dsn(config: Config) -> str:
-    """The RLS-bypassing owner DSN the shared fleet opens as `owner_tx`'s engine — the one
-    cross-workspace read the fleet-wide job sweeps enumerate through before re-binding each row
-    under `ws(...)`. One process serves every workspace, so it carries no tenant-pinned role
-    default; `owner_tx` must bypass RLS through the table-owner role, else it falls back to the
-    RLS-subject engine and the enumeration reads an unset `app.workspace_id` GUC and crashes. Read
-    from `UFO_OWNER_DSN` (a k8s secretKeyRef injects it — a password-bearing DSN cannot ride a
-    configmap), falling back to `[database] owner_url`; neither set fails loud. The secret's
-    contract is a plain libpq URL; pin the asyncpg driver the fleet's subject engine also dials."""
+    """The RLS-bypassing owner DSN the shared service opens as `owner_tx`'s engine — the one
+    cross-workspace read job sweeps enumerate through before re-binding each row under `ws(...)`.
+    `owner_tx` must bypass RLS through the table-owner role, else it falls back to the RLS-subject
+    engine and the enumeration reads an unset `app.workspace_id` GUC. Read from `UFO_OWNER_DSN`,
+    falling back to `[database] owner_url`; neither set fails loud. A plain libpq URL is normalized
+    to the asyncpg driver used by the subject engine."""
     dsn = os.environ.get(OWNER_DSN_ENV) or config.database.owner_url
     if not dsn:
         raise RuntimeError(
-            f"{OWNER_DSN_ENV} or [database] owner_url must be set for the shared serve fleet — "
+            f"{OWNER_DSN_ENV} or [database] owner_url must be set for shared serve — "
             "owner_tx bypasses RLS with the owner role to enumerate every workspace the job sweeps "
             "fan across; without it the enumeration reads an unset app.workspace_id GUC and crashes"
         )
@@ -274,62 +252,48 @@ def _shared_owner_dsn(config: Config) -> str:
 
 
 def _launch_jobs(
-    config: Config,
-    manifests: tuple[Manifest, ...],
+    runtime: Runtime,
     sync_driver: SyncDriver,
-    index: IndexBackend,
-    embed: EmbedClient,
     page_feed: CorePageFeed,
-    dbos_client: DBOSClient,
-    blob: BlobStore,
-    carrier: Carrier,
 ) -> None:
     """Register this workspace's jobs — core's own (the source sync driver, the turn dispatcher
     that recovers queued turns and re-admits parked turns, and the sandbox reaper) plus every
     installed extension's (the memory extension's memory-index and page-index jobs among them) — as
     DBOS schedules and one-shot enqueues, after
-    launch so the system store is live. `manifests` is the boot's one extension set — on the shared
-    fleet the narrowed one, so an excluded extension's jobs and hooks never register — never
-    reloaded here. Registration is the synchronous DBOS API (off the loop, at startup); a handler
-    may read a declared credential or the deploy index/embed backends or the page feed, so once any
-    job is registered the credential key must be set."""
-    key = os.environ.get(config.credentials.key_env)
-    if not key:
-        raise RuntimeError(
-            f"credential key env {config.credentials.key_env!r} is unset but jobs are registered"
-        )
-    admission = Admission(dbos=dbos_client, durable_surfaces=durable_surfaces(manifests))
+    launch so the system store is live. Registration is the synchronous DBOS API (off the loop, at
+    startup); a handler may read a declared credential or the deploy index/embed backends or the
+    page feed, so once any job is registered the credential key must be set."""
+    admission = Admission(dbos=runtime.dbos, durable_surfaces=durable_surfaces(runtime.manifests))
 
     def invoker_for(workspace_id: UUID) -> AdmissionInvoker:
         return AdmissionInvoker(admission=admission, workspace_id=workspace_id)
 
-    registry = model_registry(config, manifests)
     page_change_runner = PageChangeRunner(
-        manifests=manifests,
+        manifests=runtime.manifests,
         pages=page_feed,
         invoker_factory=invoker_for,
-        index=index,
-        embed=embed,
-        blob=blob,
-        registry=registry,
+        index=runtime.index,
+        embed=runtime.embed,
+        blob=runtime.blob,
+        registry=runtime.registry,
     )
     bindings = bindings_from(
-        manifests,
+        runtime.manifests,
         core_jobs(
             sync_driver,
-            TurnDispatcher(client=dbos_client),
-            SandboxReaper(carrier=carrier, backend=config.sandbox.backend),
+            TurnDispatcher(client=runtime.dbos),
+            SandboxReaper(carrier=runtime.carrier, backend=runtime.config.sandbox.backend),
             page_change_runner,
         ),
     )
     JobRunner(
         bindings=bindings,
         invoker_factory=invoker_for,
-        index=index,
-        embed=embed,
+        index=runtime.index,
+        embed=runtime.embed,
         pages=page_feed,
-        blob=blob,
-        registry=registry,
+        blob=runtime.blob,
+        registry=runtime.registry,
     ).launch()
 
 
@@ -362,9 +326,9 @@ def _select_carrier(config: Config, manifests: tuple[Manifest, ...]) -> Carrier:
     `local` carrier plus every carrier an extension contributes via its `carriers` Manifest point
     (`docker`, `e2b`, a remote runner). An extension name that collides with the built-in or another
     extension fails loud, and a backend name no carrier registers fails loud — so the selected name
-    resolves to exactly one factory, built once here and held as `Runtime.carrier`. An off-cluster
-    backend (its sandbox runs outside the serve pod's network) with no `[sandbox] proxy_public_url`
-    fails loud too: its sandbox could reach neither the in-pod proxy nor a metered egress route, so
+    resolves to exactly one factory, built once here and held as `Runtime.carrier`. A remote
+    backend with no `[sandbox] proxy_public_url` fails loud too: its sandbox could reach neither the
+    process-local proxy nor a metered egress route, so
     it would run open — never a silent default."""
     factories: dict[str, Callable[[], Carrier]] = {"local": LocalCarrier}
     off_cluster: set[str] = set()
@@ -381,12 +345,22 @@ def _select_carrier(config: Config, manifests: tuple[Manifest, ...]) -> Carrier:
             f"sandbox backend {config.sandbox.backend!r} is not a registered carrier "
             f"(have {sorted(factories)})"
         )
-    if config.sandbox.backend in off_cluster and not config.sandbox.proxy_public_url:
-        raise RuntimeError(
-            f"sandbox backend {config.sandbox.backend!r} runs off-cluster and cannot reach the "
-            "in-pod egress proxy; set [sandbox] proxy_public_url to the externally-reachable proxy "
-            "URL so in-sandbox egress is credential-injected, default-denied, and metered"
-        )
+    if config.sandbox.backend in off_cluster:
+        public_url = config.sandbox.proxy_public_url
+        if not public_url:
+            raise RuntimeError(
+                f"sandbox backend {config.sandbox.backend!r} is remote and cannot reach the "
+                "process-local egress proxy; set [sandbox] proxy_public_url to the externally "
+                "reachable HTTPS proxy URL so in-sandbox egress is credential-injected, "
+                "default-denied, and metered"
+            )
+        parsed = urlparse(public_url)
+        if parsed.scheme != "https" or parsed.hostname is None:
+            raise RuntimeError(
+                f"sandbox backend {config.sandbox.backend!r} is remote; "
+                "[sandbox] proxy_public_url must be an HTTPS URL so its run token is encrypted "
+                "in transit"
+            )
     return factory()
 
 
@@ -606,7 +580,12 @@ def _mount_ext_routes(
     index: IndexBackend,
     embed: EmbedClient,
 ) -> None:
-    """Mount extension routes with a verified workspace-scoped context."""
+    """Mount extension routes with a verified workspace-scoped context.
+
+    A dedicated server mounts every route against its pinned workspace; a route declaring
+    `identify` must independently verify that same workspace. Shared serve mounts only identified
+    routes and runs each under the workspace its verifier returns. An unverified request is refused
+    before the handler can touch the database or credentials."""
     for manifest in manifests:
         routes = tuple(
             spec
@@ -725,18 +704,17 @@ def _mount_surfaces(
 class WorkspaceScopeBoundary:
     """The shared fleet's request→workspace boundary: one process serves every workspace, each
     request binds its own as the ambient `current_workspace` before it reads anything
-    (`_authenticate_shared`, the surface endpoints below), and this middleware guarantees every
-    request begins and ends with none bound. On entry it clears any stale value the task's context
-    inherited (cpython#140947: a request task can start on a prior task's contextvars); its
-    `finally` releases the binding once the downstream app has fully sent the response — raises
-    included, which never yield a response a wrapper could ride. The release must outlive the
-    handler: a live surface's StreamingResponse tails the hub, reading the durable turn under RLS
-    after the handler returns, so a `with ws(...)` block inside the route would cut that read off.
-    `await self.app(...)` runs in the request's own task and returns only once the whole response —
-    the body Starlette streams in a child task (a *copy* of this context) included — is sent or
-    torn down, so the release lands in exactly the context the binding was set in. Raw ASGI
-    deliberately: BaseHTTPMiddleware runs downstream in a separate task whose contextvar writes
-    never line up with this one's."""
+    (the shared surface endpoints below), and this middleware guarantees every request begins and
+    ends with none bound. On entry it clears any stale value the task's context inherited
+    (cpython#140947: a request task can start on a prior task's contextvars); its `finally` releases
+    the binding once the downstream app has fully sent the response — raises included, which never
+    yield a response a wrapper could ride. The release must outlive the handler: a live surface's
+    StreamingResponse tails the hub, reading the durable turn under RLS after the handler returns,
+    so a `with ws(...)` block inside the route would cut that read off. `await self.app(...)` runs
+    in the request's own task and returns only once the whole response — the body Starlette streams
+    in a child task (a *copy* of this context) included — is sent or torn down, so the release lands
+    in exactly the context the binding was set in. Raw ASGI deliberately: BaseHTTPMiddleware runs
+    downstream in a separate task whose contextvar writes never line up with this one's."""
 
     app: ASGIApp
 
@@ -758,19 +736,14 @@ def _shared_fleet_capable(spec: SurfaceSpec) -> bool:
 
 
 def _shared_fleet_manifests(manifests: tuple[Manifest, ...]) -> tuple[Manifest, ...]:
-    """The extension set the shared fleet serves: an extension declaring any surface the fleet
-    cannot mount is excluded whole. Its tools, skills, and prompt sections exist to set up and
-    drive that surface, so offering them here walks a member through connecting a surface whose
-    routes never mount (a Slack request URL handed out on the fleet answers 404). The per-tenant
-    deploy loads every manifest."""
     kept: list[Manifest] = []
     for manifest in manifests:
-        unmountable = [spec.name for spec in manifest.surfaces if not _shared_fleet_capable(spec)]
-        if unmountable:
+        blocked = [spec.name for spec in manifest.surfaces if not _shared_fleet_capable(spec)]
+        if blocked:
             log(
                 "serve.shared_fleet.extension_excluded",
                 extension=manifest.name,
-                surfaces=",".join(unmountable),
+                surfaces=",".join(blocked),
             )
             continue
         kept.append(manifest)
@@ -871,15 +844,16 @@ async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]:
     app-loop stall, so `run` drives it on a dedicated thread from the moment the seat exists, and
     retires the seat only after `DBOS.destroy` has stopped all execution — a seat freed while
     queued workflows still run would hand a peer a second live execution."""
-    tasks = [asyncio.create_task(ExecutorRecovery().run())]
-    poller = app.state.writeback_poller
-    if poller is not None:
-        tasks.append(asyncio.create_task(poller.run()))
-    try:
-        yield
-    finally:
-        for task in tasks:
-            task.cancel()
+    async with asyncio.TaskGroup() as group:
+        tasks = [group.create_task(ExecutorRecovery().run())]
+        poller = app.state.writeback_poller
+        if poller is not None:
+            tasks.append(group.create_task(poller.run()))
+        try:
+            yield
+        finally:
+            for task in tasks:
+                task.cancel()
 
 
 def _proxy_endpoint(
@@ -890,9 +864,9 @@ def _proxy_endpoint(
 ) -> ProxyEndpoint:
     """The egress proxy endpoint the carrier threads into every sandbox, in the shape this deploy
     takes. With `[sandbox] proxy_public_url` set (hosted, multi-node) the proxy runs as a standalone
-    `ufoctl proxy` off this pod, so serve only carries the address and trust material: the stable
-    platform CA from env (the sandbox's trust anchor for the proxy's minted leaves), the deploy's
-    stable `proxy_port`, and that off-cluster dial-back base. An unset CA fails loud rather than
+    `ufoctl proxy` outside this process, so serve only carries the address and trust material: the
+    stable shared CA from env (the sandbox's trust anchor for the proxy's minted leaves), the
+    stable `proxy_port`, and the public base. An unset CA fails loud rather than
     shipping a sandbox that reaches no host. Unset (local, single-node) serve runs the proxy
     in-process, minting its own ephemeral CA — no shared trust material to source, no separate
     service to run alongside."""
@@ -902,7 +876,7 @@ def _proxy_endpoint(
     if not ca_cert:
         raise RuntimeError(
             f"{EGRESS_CA_CERT_ENV} must hold the shared egress proxy's CA certificate (PEM) so the "
-            "sandbox trusts the proxy's TLS; the proxy runs as `ufoctl proxy`, not in this pod"
+            "sandbox trusts the proxy's TLS; the proxy runs as a separate `ufoctl proxy` process"
         )
     return ProxyEndpoint(
         port=config.sandbox.proxy_port,
@@ -922,10 +896,10 @@ def _local_egress_proxy(
     process's life. One workspace's serve owns it, so (unlike the shared `ufoctl proxy`) it mints an
     ephemeral CA with no shared trust material to carry and injects this workspace's own credential
     secrets with no injecting-slot ban. The resolver reads the turn's agent and grants per turn
-    through `workspace_tx` — already scoped to this deploy's tenant DB by `init_db` — and authorizes
-    each keyed-host CONNECT against the turn's live status, so a real key is injected only while the
-    turn runs. It binds `proxy_port` and carries no `public_url`: the in-pod sandbox forms a
-    host-local address from the port alone."""
+    through `workspace_tx` — already scoped to the configured application database by `init_db` —
+    and authorizes each keyed-host CONNECT against the turn's live status, so a real key is injected
+    only while the turn runs. It binds `proxy_port` and carries no `public_url`: a local carrier
+    forms a process-local address from the port alone."""
     resolver = PerAgentRules(
         base=asyncio.run(_local_rule_base(config, manifests, credentials)),
         grants=GrantStore() if credentials is not None else None,

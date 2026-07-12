@@ -5,7 +5,7 @@ data "cloudflare_zone" "flyingobject_ai" {
 # `curl flyingobject.ai` must answer with the card, not a 301: the zone-wide Always Use HTTPS
 # redirect fires before worker routes, so it moves here as a redirect rule that exempts the two
 # apexes' `/` (the worker serves CLI clients over plain http and bounces browsers to https
-# itself). Every other host and path in the zone — gateway, tenant, and app ingress — keeps the
+# itself). Every other host and path in the zone — gateway and app ingress — keeps the
 # https redirect. The rule is in place before the zone setting turns off, so no request ever
 # sees a gap.
 resource "cloudflare_ruleset" "https_redirect" {
@@ -39,10 +39,6 @@ resource "cloudflare_zone_setting" "always_use_https" {
   depends_on = [cloudflare_ruleset.https_redirect]
 }
 
-# One live fleet (testing) behind two front doors: both apexes proxy /install from the testing
-# gateway, whose stamped script boards clients onto that fleet. Each front door serves the embedded
-# landing page stamped with its own gateway's craft count — the doors' skies diverge when prod gets
-# its own fleet (repoint origin_base).
 module "prod" {
   source = "../../modules/edge"
 
@@ -50,7 +46,7 @@ module "prod" {
   hostname    = "flyingobject.ai"
   zone_id     = data.cloudflare_zone.flyingobject_ai.id
   account_id  = data.cloudflare_zone.flyingobject_ai.account.id
-  origin_base = "https://testing.flyingobject.ai"
+  origin_base = "https://flyingobject.ai"
 }
 
 module "testing" {

@@ -6,7 +6,7 @@ variable "region" {
 variable "image_tag" {
   type        = string
   default     = "latest"
-  description = "Tag for the ufo-control image the control-plane deployment pulls (a pushed git short SHA). deploy.yml passes -var image_tag."
+  description = "Tag for the ufo-control gateway image. deploy.yml passes the git short SHA."
 }
 
 variable "letsencrypt_email" {
@@ -25,12 +25,6 @@ variable "ses_sender" {
   type        = string
   default     = "no-reply@flyingobject.ai"
   description = "From address for onboarding email; its domain is verified as the SES sending identity."
-}
-
-variable "e2b_sandbox_template" {
-  type        = string
-  default     = "ufo-sbx"
-  description = "E2B template id the runtime launches sandboxes from."
 }
 
 variable "cloudflare_api_token" {

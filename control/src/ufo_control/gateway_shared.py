@@ -1,27 +1,10 @@
-"""Shared-tier onboarding: a verified org domain resolves to its one workspace — the dedicated
-tenant when the org runs one, else a workspace ROW in the shared database.
-
-The tenant check comes first because both kinds live in one Postgres: a domain that already has a
-dedicated deploy taking the shared row path would fork the org across two workspaces — its history,
-credentials, and surfaces on the tenant, its new sign-ins on a parallel empty row the tenant's
-surfaces never see. So `joins` — the `TenantJoin` both tiers resolve through — joins the domain's
-tenant when one exists, and only a tenantless domain falls through to the ROW path (RFC 0011): one
-shared serve fleet presents each workspace by RLS, so onboarding a member is a workspace row, that
-member's owner row, and the default `assistant` agent every turn resolves — no `Tenant` CR, no
-dedicated deploy, no subdomain. The shared fleet never runs the per-tenant `ufoctl init` bootstrap,
-so the agent that init would seed is seeded here instead, from the same core defaults, or the first
-turn's `default_agent()` finds no row. The writes run under the ambient `ws(workspace_id)` scope as
-the RLS-subject serve role, so each row lands scoped to exactly that workspace or the policy rejects
-it. The workspace uuid is derived from the domain (`uuid5`), the shared-tier analogue of the
-enterprise `mint_tenant_name`, so a concurrent second onboard for a fresh domain computes the same
-id and the insert is idempotent — never a duplicate workspace — and a later member of the same
-organization joins the one workspace it already has.
-"""
+"""Resolve a verified organization domain to its shared-fleet workspace."""
 
 import os
 from dataclasses import dataclass
-from uuid import NAMESPACE_DNS, uuid4, uuid5
+from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5
 
+import asyncpg
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert
 from ufo.db import workspace_tx
@@ -30,18 +13,14 @@ from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME
 from ufo.workspace import ws
 
-from ufo_control.gateway_provision import TenantJoin
-
 SERVE_DSN_ENV = "UFO_CONTROL_SERVE_DSN"
 
 
 def serve_dsn() -> str:
-    """The RLS-subject serve-role DSN the shared onboarding writes through — the same role the
-    shared serve fleet dials, scoping every transaction by the workspace `ws(...)` binds."""
     dsn = os.environ.get(SERVE_DSN_ENV)
     if not dsn:
         raise RuntimeError(
-            f"{SERVE_DSN_ENV} is unset — shared-tier onboarding writes the workspace row as the "
+            f"{SERVE_DSN_ENV} is unset — hosted onboarding writes the workspace row as the "
             "RLS-subject serve role"
         )
     return dsn
@@ -49,31 +28,16 @@ def serve_dsn() -> str:
 
 @dataclass(frozen=True)
 class SharedWorkspaces:
-    """Resolve a verified org domain to its one workspace: the domain's dedicated tenant when the
-    cluster runs one (`joins.join_existing` — the same join the enterprise tier resolves through,
-    never a provision), else its workspace row in the shared database, adding the member as owner
-    and seeding the default agent. `workspace_url` is the shared serve host the member's `ufo`
-    surface talks to for row-backed workspaces (`app.<apex>`, one fleet for every workspace — no
-    per-workspace subdomain); a joined tenant member talks to the tenant's own URL instead."""
+    """Create or join the one workspace owned by a verified domain."""
 
     workspace_url: str
-    joins: TenantJoin
+    pool: asyncpg.Pool
 
     async def exists(self, domain: str) -> bool:
-        workspace_id = uuid5(NAMESPACE_DNS, domain.lower())
-        with ws(workspace_id):
-            async with workspace_tx() as connection:
-                row = (
-                    await connection.execute(
-                        sa.select(tables.workspace.c.id).where(
-                            tables.workspace.c.id == workspace_id
-                        )
-                    )
-                ).one_or_none()
-        return row is not None
+        return await self._existing(domain) is not None
 
     async def ensure(self, domain: str, email: str) -> str:
-        workspace_id = uuid5(NAMESPACE_DNS, domain.lower())
+        workspace_id = await self._existing(domain) or uuid5(NAMESPACE_DNS, domain.lower())
         member = email.strip().lower()
         with ws(workspace_id):
             async with workspace_tx() as connection:
@@ -111,3 +75,23 @@ class SharedWorkspaces:
                     )
                 )
         return str(workspace_id)
+
+    async def _existing(self, domain: str) -> UUID | None:
+        normalized = domain.lower()
+        deterministic = uuid5(NAMESPACE_DNS, normalized)
+        async with self.pool.acquire() as connection:
+            rows = await connection.fetch(
+                "with first_member as ("
+                "  select distinct on (workspace_id) workspace_id, email"
+                "  from member order by workspace_id, created_at, id) "
+                "select id from workspace where id = $1 "
+                "union "
+                "select workspace_id as id from first_member "
+                "where lower(split_part(email, '@', 2)) = $2 "
+                "order by id",
+                deterministic,
+                normalized,
+            )
+        if len(rows) > 1:
+            raise RuntimeError(f"domain {normalized} maps to {len(rows)} workspaces")
+        return rows[0]["id"] if rows else None

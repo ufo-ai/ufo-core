@@ -1,4 +1,4 @@
-"""A throwaway Postgres for the gateway tests — the pre-tenant `onboard_claim` ledger and the
+"""A throwaway Postgres for the gateway tests — the platform `onboard_claim` ledger and the
 member write both hit a real database. Spun once per session on 5548 (never the shared 5541 or a
 sibling module's port), schema prepared, owner DSN exported; the store fixture hands each test a
 clean table."""
@@ -15,7 +15,7 @@ import pytest
 
 from ufo_control.gateway_invite import InviteCodes
 from ufo_control.gateway_store import OnboardStore
-from ufo_control.members import OWNER_DSN_ENV
+from ufo_control.rls import POSTGRES_OWNER_DSN_ENV
 
 CONTAINER = "ufo-gateway-test-pg"
 PORT = 5548
@@ -23,8 +23,11 @@ OWNER_DSN = f"postgresql://ufo:ufo@127.0.0.1:{PORT}/ufo"
 IMAGE = "pgvector/pgvector:pg17"
 WORKSPACE_ID = "11111111-1111-1111-1111-111111111111"
 
-MEMBER_SCHEMA = (
-    "create table if not exists workspace (id uuid primary key)",
+RUNTIME_SCHEMA = (
+    "create table if not exists workspace ("
+    "  id uuid primary key,"
+    "  created_at timestamptz not null default now(),"
+    "  updated_at timestamptz not null default now())",
     "create table if not exists member ("
     "  id uuid primary key,"
     "  workspace_id uuid not null references workspace(id) on delete cascade,"
@@ -32,6 +35,15 @@ MEMBER_SCHEMA = (
     "  created_at timestamptz not null,"
     "  updated_at timestamptz not null,"
     "  unique (workspace_id, email))",
+    "create table if not exists agent ("
+    "  id uuid primary key,"
+    "  workspace_id uuid not null references workspace(id) on delete cascade,"
+    "  name text not null,"
+    "  prompt text not null,"
+    "  model text not null,"
+    "  created_at timestamptz not null,"
+    "  updated_at timestamptz not null,"
+    "  unique (workspace_id, name))",
 )
 
 
@@ -39,7 +51,7 @@ async def _prepare_schema() -> None:
     pool = await asyncpg.create_pool(OWNER_DSN)
     try:
         async with pool.acquire() as connection:
-            for statement in MEMBER_SCHEMA:
+            for statement in RUNTIME_SCHEMA:
                 await connection.execute(statement)
             await connection.execute(
                 "insert into workspace (id) values ($1) on conflict do nothing",
@@ -83,7 +95,7 @@ def gateway_postgres(monkeypatch_session: pytest.MonkeyPatch) -> Iterator[str]:
     try:
         _await_ready()
         asyncio.run(_prepare_schema())
-        monkeypatch_session.setenv(OWNER_DSN_ENV, OWNER_DSN)
+        monkeypatch_session.setenv(POSTGRES_OWNER_DSN_ENV, OWNER_DSN)
         yield OWNER_DSN
     finally:
         subprocess.run(["docker", "rm", "-f", CONTAINER], capture_output=True, check=False)
@@ -96,6 +108,7 @@ async def store(gateway_postgres: str) -> AsyncIterator[OnboardStore]:
         await connection.execute("truncate ufo_control.onboard_claim")
         await connection.execute("truncate ufo_control.invite_code")
         await connection.execute("delete from member")
+        await connection.execute("delete from agent")
     try:
         yield OnboardStore(pool=pool)
     finally:

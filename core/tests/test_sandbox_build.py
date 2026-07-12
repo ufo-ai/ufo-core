@@ -36,6 +36,7 @@ EXPECTED_APT = (
     "tesseract-ocr",
 )
 EXPECTED_PIP = (
+    "urllib3",
     "markitdown[pptx]",
     "openpyxl",
     "lxml",

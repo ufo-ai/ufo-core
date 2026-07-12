@@ -1,4 +1,6 @@
+import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,9 +19,34 @@ OWNER_LIBPQ_DSN = "postgresql://ufo_owner:pw@db.test/ufo"
 OWNER_ASYNCPG_DSN = "postgresql+asyncpg://ufo_owner:pw@db.test/ufo"
 
 
+class ShutdownProbe:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.stopped = asyncio.Event()
+
+    async def run(self) -> None:
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            self.stopped.set()
+
+
+class FailureProbe:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def run(self) -> None:
+        self.started.set()
+        await self.release.wait()
+        raise RuntimeError("background failed")
+
+
 def _hosted_config() -> Config:
     return Config(
-        database=DatabaseConfig(url="sqlite+aiosqlite:///tenant.db"),
+        database=DatabaseConfig(url="sqlite+aiosqlite:///ufo.db"),
         blob=BlobConfig(backend="filesystem", root=Path("/tmp/blobs")),
         sandbox=SandboxConfig(
             backend="local", proxy_port=9443, proxy_public_url="https://proxy.test"
@@ -29,9 +56,86 @@ def _hosted_config() -> Config:
 
 def _local_config() -> Config:
     return Config(
-        database=DatabaseConfig(url="sqlite+aiosqlite:///tenant.db"),
+        database=DatabaseConfig(url="sqlite+aiosqlite:///ufo.db"),
         blob=BlobConfig(backend="filesystem", root=Path("/tmp/blobs")),
         sandbox=SandboxConfig(backend="local", proxy_port=0),
+    )
+
+
+def test_launch_jobs_reuses_the_boot_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    manifests = (Manifest(name="jobs", version="1"),)
+    registry = object()
+    page_runner = object()
+    captured: dict[str, object] = {}
+    runtime = SimpleNamespace(
+        config=_local_config(),
+        manifests=manifests,
+        dbos=object(),
+        index=object(),
+        embed=object(),
+        blob=object(),
+        registry=registry,
+        carrier=object(),
+    )
+
+    def page_change_runner(**kwargs: object) -> object:
+        captured["page"] = kwargs
+        return page_runner
+
+    class Runner:
+        def __init__(self, **kwargs: object) -> None:
+            captured["jobs"] = kwargs
+
+        def launch(self) -> None:
+            captured["launched"] = True
+
+    monkeypatch.setattr(serve, "PageChangeRunner", page_change_runner)
+    monkeypatch.setattr(serve, "core_jobs", lambda *args: ())
+    monkeypatch.setattr(serve, "bindings_from", lambda *args: ("bindings",))
+    monkeypatch.setattr(serve, "JobRunner", Runner)
+    monkeypatch.setattr(
+        serve, "load_manifests", lambda *args: pytest.fail("manifests loaded twice")
+    )
+    monkeypatch.setattr(
+        serve, "model_registry", lambda *args: pytest.fail("model registry built twice")
+    )
+
+    serve._launch_jobs(runtime, object(), object())
+
+    assert captured["page"]["manifests"] is manifests
+    assert captured["page"]["registry"] is registry
+    assert captured["jobs"]["registry"] is registry
+    assert captured["launched"] is True
+
+
+async def test_serve_lifespan_waits_for_background_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recovery = ShutdownProbe()
+    poller = ShutdownProbe()
+    monkeypatch.setattr(serve, "ExecutorRecovery", lambda: recovery)
+    app = SimpleNamespace(state=SimpleNamespace(writeback_poller=poller))
+    async with serve._serve_lifespan(app):
+        await recovery.started.wait()
+        await poller.started.wait()
+    assert recovery.stopped.is_set()
+    assert poller.stopped.is_set()
+
+
+async def test_serve_lifespan_propagates_a_background_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recovery = FailureProbe()
+    monkeypatch.setattr(serve, "ExecutorRecovery", lambda: recovery)
+    app = SimpleNamespace(state=SimpleNamespace(writeback_poller=None))
+    with pytest.raises(ExceptionGroup) as raised:
+        async with serve._serve_lifespan(app):
+            await recovery.started.wait()
+            recovery.release.set()
+            await asyncio.wait_for(asyncio.Event().wait(), timeout=1)
+    assert any(
+        isinstance(error, RuntimeError) and str(error) == "background failed"
+        for error in raised.value.exceptions
     )
 
 
@@ -39,7 +143,7 @@ def test_hosted_proxy_endpoint_is_built_from_config_and_the_shared_ca(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """With `proxy_public_url` set the proxy runs as standalone `ufoctl proxy`: serve derives the
-    endpoint carriers thread into every sandbox from config — the stable port and off-cluster
+    endpoint carriers thread into every sandbox from config — the stable port and public
     dial-back base — plus the shared CA cert from env, a plain value object with no bound socket."""
     monkeypatch.setenv(EGRESS_CA_CERT_ENV, CA_PEM)
     endpoint = serve._proxy_endpoint(_hosted_config(), (), None, CORE_PRICING)
@@ -63,7 +167,7 @@ def test_local_proxy_mints_an_ephemeral_ca_and_needs_no_shared_ca_env(
 ) -> None:
     """With no `proxy_public_url` (local, single-node) serve runs the proxy in-process on its own
     loop and mints an ephemeral CA — no `UFO_EGRESS_CA_CERT` to source. The returned endpoint binds
-    a real ephemeral port and carries the freshly minted CA, with no off-cluster dial-back base."""
+    a real ephemeral port and carries the freshly minted CA, with no public proxy base."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv(EGRESS_CA_CERT_ENV, raising=False)
@@ -91,7 +195,7 @@ async def test_local_rule_base_is_the_model_base_when_no_slot_injects(
 def test_shared_owner_dsn_from_env_pins_the_async_driver(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The shared fleet opens owner_tx's engine from UFO_OWNER_DSN (a secretKeyRef). The secret's
+    """The shared service opens owner_tx's engine from UFO_OWNER_DSN. The value's
     contract is a plain libpq URL; serve pins the asyncpg driver its subject engine also dials so
     the owner engine bypasses RLS through the table owner rather than falling back to it."""
     monkeypatch.setenv(OWNER_DSN_ENV, OWNER_LIBPQ_DSN)
@@ -103,7 +207,7 @@ def test_shared_owner_dsn_falls_back_to_config_owner_url(
 ) -> None:
     monkeypatch.delenv(OWNER_DSN_ENV, raising=False)
     config = Config(
-        database=DatabaseConfig(url="sqlite+aiosqlite:///tenant.db", owner_url=OWNER_LIBPQ_DSN),
+        database=DatabaseConfig(url="sqlite+aiosqlite:///ufo.db", owner_url=OWNER_LIBPQ_DSN),
         blob=BlobConfig(backend="filesystem", root=Path("/tmp/blobs")),
         sandbox=SandboxConfig(backend="local", proxy_port=0),
     )
@@ -129,7 +233,7 @@ async def test_local_rule_base_fails_loud_on_an_injecting_slot_without_a_key(
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     slot = CredentialSlot(
         name="byok",
-        description="a per-tenant key the local proxy swaps onto the wire",
+        description="a workspace key the local proxy swaps onto the wire",
         injection=InjectionTarget(host="api.inj.test", header="authorization", sentinel="S"),
     )
     manifest = Manifest(name="inj", version="1", credentials=(slot,))

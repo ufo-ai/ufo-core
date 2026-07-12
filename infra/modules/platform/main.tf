@@ -11,8 +11,7 @@ locals {
 
   ecr_registry = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.region}.amazonaws.com"
 
-  # The control plane + apex workspace run here; the operator, ESO target, and IRSA trust name it.
-  # Tenants run in their own ufo-<name> namespaces (the operator creates them at provisioning).
+  # The gateway, shared serve fleet, proxy, and observability stack run here.
   system_namespace = "ufo-system"
 
   # Secrets Manager path prefix for this environment.

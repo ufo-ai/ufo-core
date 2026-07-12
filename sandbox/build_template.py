@@ -33,6 +33,7 @@ from pathlib import Path
 
 from e2b import Sandbox, Template
 from e2b.sandbox.commands.command_handle import CommandExitException
+from ufo_ext_e2b import E2B_TEMPLATE_NAME
 
 ROOT = Path(__file__).resolve().parents[1]
 SBX_BIN_DIR = "/usr/local/bin"
@@ -45,9 +46,6 @@ IMAGE_SOURCE_DIR = ROOT / "core" / "src" / "ufo" / "sandbox" / "image"
 
 E2B_BASE_TEMPLATE = "code-interpreter-v1"
 DOCKER_BASE_IMAGE = "e2bdev/code-interpreter:latest"
-# The name the E2B carrier resolves through UFO_E2B_TEMPLATE, and the tag the Docker carrier
-# runs (ufo.loop.queue.SANDBOX_IMAGE_REF). Kept here because this is where both are produced.
-E2B_TEMPLATE_NAME = "ufo-sbx"
 DOCKER_IMAGE_TAG = "ufo-sandbox:latest"
 START_COMMAND = "tail -f /dev/null"
 # Build as root, run as the base image's non-root user. set_user brackets the layers because
@@ -86,6 +84,7 @@ APT_PACKAGES = (
 )
 # Skill runtimes the office/pdf/media/document-review scripts assume pre-installed.
 PIP_PACKAGES = (
+    "urllib3",
     "markitdown[pptx]",
     "openpyxl",
     "lxml",
@@ -123,7 +122,7 @@ SANDBOX_ENV: dict[str, str] = {
 }
 # The scripts baked into the image and installed by the local carrier, with a version bumped on any
 # content change so the digest moves. sbxfs is the in-sandbox file-op CLI; sbx is the egress CLI.
-SANDBOX_SCRIPTS: tuple[tuple[str, int], ...] = (("sbx", 1), ("sbxfs", 2))
+SANDBOX_SCRIPTS: tuple[tuple[str, int], ...] = (("sbx", 2), ("sbxfs", 2))
 SANDBOX_TEMPLATE_READY_COMMAND = """
 command -v python3 >/dev/null
 command -v node >/dev/null

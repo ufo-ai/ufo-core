@@ -28,6 +28,7 @@ import shlex
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Protocol, cast
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from e2b import Sandbox as E2BSdkSandbox
@@ -56,13 +57,21 @@ from ufo.sdk.sandbox import (
 )
 
 CARRIER_NAME = "e2b"
-E2B_API_KEY_ENVS = ("E2B_API_KEY", "UFO_E2B_API_KEY")
-E2B_TEMPLATE_ENV = "UFO_E2B_TEMPLATE"
+E2B_API_KEY_ENV = "E2B_API_KEY"
+E2B_TEMPLATE_NAME = "ufo-sbx"
 DEFAULT_TIMEOUT_SECONDS = 300
 EXEC_TIMEOUT_CODE = 124
 CONVERSATION_METADATA_KEY = "ufo.conversation_id"
 E2B_LIFECYCLE: SandboxLifecycle = {"on_timeout": "pause", "auto_resume": True}
-CA_SANDBOX_PATH = "/home/user/.ufo-egress-ca.pem"
+CA_STAGING_PATH = "/root/.ufo-egress-ca.pem"
+CA_SANDBOX_PATH = "/usr/local/share/ca-certificates/ufo-egress-ca.crt"
+SYSTEM_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
+CA_INSTALL_TIMEOUT_SECONDS = 30
+INSTALL_CA_COMMAND = (
+    f"cmp -s {CA_STAGING_PATH} {CA_SANDBOX_PATH} || {{ "
+    f"install -m 0644 {CA_STAGING_PATH} {CA_SANDBOX_PATH} && "
+    f"/usr/sbin/update-ca-certificates; }} || {{ rm -f {CA_SANDBOX_PATH}; exit 1; }}"
+)
 
 
 def _egress_env(proxy: ProxyEndpoint, run_token: str) -> dict[str, str]:
@@ -79,8 +88,13 @@ def _egress_env(proxy: ProxyEndpoint, run_token: str) -> dict[str, str]:
             "the e2b carrier runs off-cluster and needs a reachable egress proxy; "
             "set [sandbox] proxy_public_url to the externally-reachable proxy URL"
         )
-    scheme, _, authority = proxy.public_url.partition("://")
-    proxy_url = f"{scheme}://{run_token}:@{authority}"
+    parsed = urlsplit(proxy.public_url)
+    if parsed.scheme != "https" or parsed.hostname is None:
+        raise RuntimeError(
+            "the e2b carrier requires an HTTPS [sandbox] proxy_public_url so its run token is "
+            "encrypted in transit"
+        )
+    proxy_url = f"https://{run_token}:@{parsed.netloc}"
     return {
         "HTTP_PROXY": proxy_url,
         "HTTPS_PROXY": proxy_url,
@@ -88,9 +102,9 @@ def _egress_env(proxy: ProxyEndpoint, run_token: str) -> dict[str, str]:
         "https_proxy": proxy_url,
         "ANTHROPIC_API_KEY": SENTINEL_MODEL_KEY,
         "OPENAI_API_KEY": SENTINEL_MODEL_KEY,
-        "SSL_CERT_FILE": CA_SANDBOX_PATH,
-        "REQUESTS_CA_BUNDLE": CA_SANDBOX_PATH,
-        "CURL_CA_BUNDLE": CA_SANDBOX_PATH,
+        "SSL_CERT_FILE": SYSTEM_CA_BUNDLE,
+        "REQUESTS_CA_BUNDLE": SYSTEM_CA_BUNDLE,
+        "CURL_CA_BUNDLE": SYSTEM_CA_BUNDLE,
         "NODE_EXTRA_CA_CERTS": CA_SANDBOX_PATH,
     }
 
@@ -116,7 +130,7 @@ class E2BCommands(Protocol):
 class E2BFiles(Protocol):
     def make_dir(self, path: str, *, user: str | None = None) -> bool: ...
 
-    def write(self, path: str, data: str | bytes) -> object: ...
+    def write(self, path: str, data: str | bytes, *, user: str | None = None) -> object: ...
 
 
 class E2BSandbox(Protocol):
@@ -178,10 +192,10 @@ class E2BCarrier:
             await asyncio.to_thread(sandbox.files.make_dir, WORKSPACE_DIR)
         self._live[spec.conversation_id] = sandbox
         # Write the proxy CA and (re)build the turn's egress env on every create — a resume (in this
-        # process or a prior one's, reconnected from spec.resume_id) picks up this process's CA (the
-        # proxy mints a fresh one at boot) and this turn's run token, so exec never reads a missing
-        # _egress: create is the one place that seeds it and every turn opens through create.
-        await asyncio.to_thread(sandbox.files.write, CA_SANDBOX_PATH, spec.proxy.ca_cert)
+        # process or a prior one's, reconnected from spec.resume_id) picks up the configured CA and
+        # this turn's run token, so exec never reads a missing _egress: create is the one place that
+        # seeds it and every turn opens through create.
+        await self._install_ca(sandbox, spec.proxy.ca_cert)
         self._egress[spec.conversation_id] = _egress_env(spec.proxy, spec.run_token)
         await self._mount_s3(sandbox, spec.mount)
         return SandboxHandle(
@@ -190,6 +204,19 @@ class E2BCarrier:
             mount=spec.mount,
             traffic_token=sandbox.traffic_access_token,
         )
+
+    async def _install_ca(self, sandbox: E2BSandbox, ca_cert: str) -> None:
+        await asyncio.to_thread(sandbox.files.write, CA_STAGING_PATH, ca_cert, user="root")
+        try:
+            await asyncio.to_thread(
+                sandbox.commands.run,
+                INSTALL_CA_COMMAND,
+                user="root",
+                timeout=CA_INSTALL_TIMEOUT_SECONDS,
+            )
+        except CommandExitException as error:
+            detail = (error.stderr or error.stdout or "").strip()
+            raise RuntimeError(f"sandbox CA install failed: {detail}") from error
 
     async def _mount_s3(self, sandbox: E2BSandbox, mount: MountSpec) -> None:
         """Bring the conversation's workspace S3 prefix up at /workspace over s3fs. Runs on every
@@ -336,20 +363,14 @@ class E2BCarrier:
 
 def build_e2b_carrier() -> E2BCarrier:
     """Build the carrier the `[sandbox] backend = "e2b"` deploy selects: the template and API key
-    come from the environment (`UFO_E2B_TEMPLATE`, and `E2B_API_KEY` / `UFO_E2B_API_KEY`).
-    The template is the one `sandbox/build_template.py` publishes from the single image definition
-    (`ufo-sbx`), so the E2B image and the Docker image never drift. An e2b backend with either
-    unset fails loud at boot rather than on the first turn. `serve` calls this once, only when the
-    deploy selects `e2b`."""
-    template = os.environ.get(E2B_TEMPLATE_ENV)
-    if not template:
-        raise RuntimeError(f"e2b carrier selected but {E2B_TEMPLATE_ENV} is not set")
-    key = next((os.environ[name] for name in E2B_API_KEY_ENVS if os.environ.get(name)), None)
+    are `E2B_TEMPLATE_NAME` and `E2B_API_KEY`. `sandbox/build_template.py` publishes that same
+    constant from the shared image definition, so the E2B image and Docker image never drift. A
+    missing key fails loud at boot rather than on the first turn. `serve` calls this once, only
+    when the deploy selects `e2b`."""
+    key = os.environ.get(E2B_API_KEY_ENV)
     if not key:
-        raise RuntimeError(
-            f"e2b carrier selected but none of {E2B_API_KEY_ENVS} is set in the environment"
-        )
-    return E2BCarrier(api_key=key, template=template)
+        raise RuntimeError(f"e2b carrier selected but {E2B_API_KEY_ENV} is not set")
+    return E2BCarrier(api_key=key, template=E2B_TEMPLATE_NAME)
 
 
 def manifest() -> Manifest:

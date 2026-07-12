@@ -1,9 +1,8 @@
-"""The CLI surface: bearer-token identity, turn admission, live stream, cancel, OAuth callback."""
+"""The dedicated CLI surface and the provider-facing OAuth callback."""
 
 import hashlib
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -11,7 +10,7 @@ from dbos import DBOSClient
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
-from ufo.db import current_workspace, workspace_tx
+from ufo.db import workspace_tx
 from ufo.governance import Governance
 from ufo.grants import (
     ConnectStateInvalid,
@@ -23,7 +22,6 @@ from ufo.hub import Hub, Terminal
 from ufo.o11y import log
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME, TerminalFrame
-from ufo.session_token import SessionTokenError, verify_session_token
 from ufo.surfaces.admission import Admission, MemberAdmission
 from ufo.surfaces.hub_tail import tail_frames, terminal_frame
 
@@ -32,6 +30,7 @@ CORE_PROPOSER = "core"
 CONNECT_CALLBACK_PATH = "/v1/connect/callback"
 
 router = APIRouter(prefix="/v1")
+callback_router = APIRouter(prefix="/v1")
 
 
 @dataclass(frozen=True)
@@ -40,12 +39,10 @@ class CliIdentity:
     workspace_id: UUID
 
 
-async def _authenticate(request: Request, authorization: str) -> CliIdentity:
+async def _authenticate(authorization: str) -> CliIdentity:
     scheme, _, token = authorization.partition(" ")
     if scheme.lower() != "bearer" or not token:
         raise HTTPException(401, "missing bearer token")
-    if request.app.state.shared_workspace:
-        return _authenticate_shared(request, token)
     digest = hashlib.sha256(token.encode()).hexdigest()
     async with workspace_tx() as connection:
         row = (
@@ -63,25 +60,6 @@ async def _authenticate(request: Request, authorization: str) -> CliIdentity:
     return CliIdentity(member_id=row.member_id, workspace_id=row.workspace_id)
 
 
-def _authenticate_shared(request: Request, token: str) -> CliIdentity:
-    """On the shared fleet the token *is* the identity: verify its signature, trust its workspace
-    claim, and bind it as the ambient workspace so every RLS-scoped read this request makes scopes
-    to it. There is no surface_identity lookup — that read would itself need the scope the token
-    supplies, the chicken-and-egg the signed claim exists to break. The binding outlives this call
-    (a live turn's StreamingResponse tails the hub, reading the durable turn under RLS after the
-    handler returns); the shared fleet's `WorkspaceScopeBoundary` releases it once the whole
-    response is sent — a raise after this bind included — so no request leaves it bound for the
-    next request reusing the task's context."""
-    try:
-        claims = verify_session_token(
-            token, request.app.state.session_token_secret, datetime.now(UTC)
-        )
-    except SessionTokenError as error:
-        raise HTTPException(401, str(error)) from error
-    current_workspace.set(claims.workspace_id)
-    return CliIdentity(member_id=claims.member_id, workspace_id=claims.workspace_id)
-
-
 @router.post("/chat")
 async def chat(
     request: Request,
@@ -89,7 +67,7 @@ async def chat(
     x_ufo_session: str = Header(default=""),
     x_ufo_agent: str = Header(default=DEFAULT_AGENT_NAME),
 ) -> dict[str, str]:
-    identity = await _authenticate(request, authorization)
+    identity = await _authenticate(authorization)
     if not x_ufo_session:
         raise HTTPException(400, "missing x-ufo-session header")
     inbound = (await request.body()).decode()
@@ -125,7 +103,7 @@ async def chat(
 async def stream_turn(
     turn_id: UUID, request: Request, authorization: str = Header(default="")
 ) -> StreamingResponse:
-    identity = await _authenticate(request, authorization)
+    identity = await _authenticate(authorization)
     await _require_turn(turn_id, identity)
     hub: Hub = request.app.state.hub
     return StreamingResponse(_frame_lines(hub, turn_id), media_type="application/x-ndjson")
@@ -135,7 +113,7 @@ async def stream_turn(
 async def cancel_turn(
     turn_id: UUID, request: Request, authorization: str = Header(default="")
 ) -> dict[str, str]:
-    identity = await _authenticate(request, authorization)
+    identity = await _authenticate(authorization)
     await _require_turn(turn_id, identity)
     frame = TerminalFrame(status="cancelled")
     async with workspace_tx() as connection:
@@ -164,7 +142,7 @@ async def cancel_turn(
 async def approve_proposal(
     proposal_id: UUID, request: Request, authorization: str = Header(default="")
 ) -> dict[str, str]:
-    identity = await _authenticate(request, authorization)
+    identity = await _authenticate(authorization)
     governance = Governance(workspace_id=identity.workspace_id, extension=CORE_PROPOSER)
     await governance.approve_proposal(proposal_id, identity.member_id)
     async with workspace_tx() as connection:
@@ -182,11 +160,12 @@ async def approve_proposal(
 
 
 @router.get("/connect/callback")
+@callback_router.get("/connect/callback")
 async def connect_callback(state: str = "", code: str = "") -> PlainTextResponse:
     """Complete the OAuth handoff the provider redirects to: verify the sealed state, exchange the
-    code for the account and token, and land the grant. The grant a turn's `connect_account` began
-    lands here. State-verified, not bearer-authenticated — the browser carries no token, only the
-    state the connect tool sealed with the speaking member, agent, and conversation."""
+    code for the broker-owned account, and land the grant. The grant a turn's `connect_account`
+    began lands here. State-verified, not bearer-authenticated — the browser carries only the state
+    the connect tool sealed with the speaking member, agent, and conversation."""
     try:
         flow = installed_connect_flow()
     except ConnectUnavailable as error:

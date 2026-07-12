@@ -18,14 +18,14 @@ curl / ------->|  GET /            CLI UA -> landing card   |
                +----------------------+---------------------+
                                       | origin
                                       v
-                         control plane / apex gateway
+                            hosted apex gateway
                +--------------------------------------------+
 ufo client --->|  GET /ufo -> version-stamped POSIX client  |
                |  POST /v1/onboard/{channel}                |
                |       |                                    |
                |       v                                    |
                |  Onboarding.advance ---------------------->+--> SharedWorkspaces
-               |       +--> onboard_claim rows              |    or JoinOrProvision
+               |       +--> onboard_claim rows              |
                |       +--> email code workflow             |
                |       +--> invite_code burn (create only)  |
                |       +--> bearer token                    |
@@ -33,20 +33,12 @@ ufo client --->|  GET /ufo -> version-stamped POSIX client  |
                                       |
                                       | token + workspace directives -> ~/.ufo/
                                       v
-                         tenant workspace (in chat)
+                         shared workspace runtime
                +--------------------------------------------+
-ufo client --->| slack setup tools (slack extension)        |
-"connect       |  slack_connect · slack_app_manifest        |
- slack"        |  request_credentials (core builtin)        |
-               |    -> secret directives -> hidden prompts  |
-               |    -> fulfillment fills the Slack slots    |
-               +----------------------+---------------------+
-                                      | workspace-global Slack slots
-                                      v
+ufo client --->| ufo surface                                |
+               |  verify bearer · bind workspace            |
+               |  admit turns · stream frames               |
                +--------------------------------------------+
-Slack          | slack surface                              | blob marker:
-Events API --->|  verify signing secret · admit turns       | workspaces/<ws>/surfaces/slack/
-               +--------------------------------------------+                     url_verified
 ```
 
 ## The apex edge
@@ -82,15 +74,17 @@ Onboarding.advance(channel, session, body, install)
   |
   +-- code submitted -------------------> verify claim
   |
-  +-- existing tenant for domain --------> join workspace (never asks for an invite)
+  +-- existing workspace for domain -----> join it (never asks for an invite)
   |
-  +-- no tenant for domain -------------> ask for a one-time invite code
-  |                                         redeem burns it, then create Tenant CR
-  |                                         status + poll until Ready
+  +-- no workspace for domain -----------> ask for a one-time invite code
+  |                                         redeem burns it, then create workspace
   |
-  +-- tenant Ready or joined -----------> mint bearer token
+  +-- workspace ready -------------------> mint bearer token
                                             emit token + workspace directives
 ```
+
+The earliest member's email domain owns the workspace. Resolution fails if that domain owns more
+than one; creation derives the workspace UUID from the domain.
 
 The client is a pure renderer of tab-separated directive lines (`gateway_directives.py`): `say`,
 `ask`, `choose`, `status`, `ufo` (the animation), `poll`, `token`, `workspace`, `install`,
@@ -98,18 +92,16 @@ The client is a pure renderer of tab-separated directive lines (`gateway_directi
 `token` and `workspace` land in `~/.ufo/credentials` (chmod 600) and `~/.ufo/workspace` — the
 token is machine-consumed and never printed.
 
-Creating a workspace is invite-gated; joining an existing one never is. The operator mints codes
-with `ufo-control invite` — the plaintext prints once, only its hash lands in the
+Creating a workspace is invite-gated; joining an existing one never is. `ufo-control invite` prints
+the plaintext once; only its hash lands in the
 `ufo_control.invite_code` ledger, and redeeming burns the code and stamps the claim's `invite_id`
 in one transaction, so one code opens exactly one workspace and a resolution retry never re-asks
-for it. Both tiers resolve tenant-first through the same `TenantJoin`: a domain with a dedicated
-Ready tenant joins it codeless, so an org with its own deploy is never forked onto a parallel
-shared row; on the shared tier only a tenantless domain falls through to the workspace-row path,
-where `SharedWorkspaces.exists` decides create vs join. An invalid or used code re-asks and points
-at the waitlist.
+for it. `SharedWorkspaces.exists` decides create versus join. An
+invalid or used code re-asks and points at the waitlist.
 
-## Connecting Slack in chat
+## Connecting Slack
 
+The `assistant_hosted` shared fleet activates the `slack` extension alongside the ufo chat surface.
 The member says "connect slack"; the agent loads the `slack-app-setup` skill and drives every step
 with tools — there is no setup page and no bespoke endpoint:
 
@@ -190,7 +182,7 @@ marker fingerprint matches current signing secret
 
 `slack_connect` and signed Slack requests use the same `auth.test` identity resolution. A request
 with no identity starts that proof after its response and asks Slack to retry; the retry continues
-through normal admission. `slack_app_manifest` renders the app manifest from the tenant public
+through normal admission. `slack_app_manifest` renders the app manifest from the workspace public
 base URL (`[connect] public_base_url`; events request URL
 `<public_base_url>/surface/slack/<workspace_id>`). The owner enters only the Bot User OAuth Token
 and Signing Secret; the team and bot-user ids are derived metadata, never entered and never slots.
@@ -267,7 +259,7 @@ slack tools (ToolContext)
 Credential slots are keyed by workspace and slot name, not by extension, so fulfillment fills the
 Slack surface's slots without the Slack surface needing a separate setup API.
 
-## Hosted pack entry
+## Pack placement
 
 The `assistant_hosted` pack includes the slack extension — its durable member surface
 (`/surface/slack/<workspace_id>`), its two credential slots, and its setup tools; connecting it is
@@ -275,11 +267,11 @@ a conversation, not a surface.
 
 ## Operational edges
 
-- Gateway environment misconfiguration fails loudly as a 500 before a flow error is rendered.
+- Gateway environment is validated at process startup.
 - The `flyingobject.ai` domain is onboarded in Cloudflare Email Sending; the edge binding permits
   only `no-reply@flyingobject.ai` as its sender.
-- The ufo surface requires `UFO_TOKEN_SECRET`; missing secret is an operator error, not a 401.
-- Only the owner, currently the earliest workspace member, can request credential entry or run
+- The ufo surface requires `UFO_TOKEN_SECRET`; a missing secret is a configuration error, not a 401.
+- Only the owner (the earliest workspace member) can request Slack credential entry or run
   `slack_connect`; a joined teammate's attempt raises before anything seals or writes.
 - A secret value is bounded (4 KiB) and travels bearer-authenticated on the existing chat
   transport; the fulfillment response is a `say` line, never a turn.
@@ -296,12 +288,15 @@ control/src/ufo_control/
   gateway_directives.py   the directive wire the client renders
   gateway_claim.py        email -> 6-digit code -> constant-time verify
   gateway_invite.py       one-time invite codes gating workspace creation
-  gateway_token.py        the bearer mint/verify contract
+  gateway_token.py        bearer minting
+  gateway_shared.py       workspace/member/default-agent writes
+  gateway_store.py        claim custody
+  rls.py                  shared serve role and workspace policies
   client/ufo              the POSIX terminal client (renders `secret` prompts)
 
 extensions/slack/ufo_ext_slack/
-  surface.py              Slack ingest, identity record, URL verification marker
-  tools.py                slack_connect, slack_app_manifest
+  surface.py              workspace-qualified Slack ingest, identity record, URL marker
+  tools.py                slack_connect and slack_app_manifest tools
 
 extensions/ufo/ufo_ext_ufo/
   surface.py              the terminal wire: secret rendering + fulfillment
@@ -314,5 +309,5 @@ core/src/ufo/
 
 packs/assistant_hosted/
   ufo_pack_assistant_hosted.py
-                           includes slack and setup in the hosted pack
+                           shared-mountable ufo + Slack surfaces and hosted capabilities
 ```

@@ -19,14 +19,13 @@ DEFAULT_PROXY_PORT = 8888
 
 class DatabaseConfig(BaseModel):
     """`system_url` is the DBOS system store's sync-driver url. Unset, it derives as a `_dbos`
-    sibling of the schema database — the single-workspace default. A shared-database deploy sets it
-    explicitly per tenant so tenants never derive the same system store and cross-recover each
-    other's workflows.
+    sibling of the application database. A dedicated server and a shared service each use one DBOS
+    store paired with that application database; set it explicitly only when DBOS lives elsewhere.
 
-    `owner_url` is the RLS-bypassing owner-role DSN the shared egress proxy (`ufoctl proxy`) opens:
-    it serves every tenant from one process, so it cannot use a tenant-pinned RLS role, and the
-    proxy's rule resolver scopes each query by the run token's own `workspace_id` instead. Unset for
-    a serve pod (which uses the tenant-scoped `url`); `ufoctl proxy` fails loud without it."""
+    `owner_url` is the RLS-bypassing owner-role DSN shared-service jobs and `ufoctl proxy` use for
+    cross-workspace enumeration. Reads bind or filter the workspace before accessing its data.
+    Dedicated servers need only `url`; shared modes fail loud when neither this field nor their
+    environment override is set."""
 
     model_config = ConfigDict(extra="forbid")
     url: str
@@ -107,16 +106,10 @@ class ServeConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8710
     shared_workspace: bool = False
-    """The shared serve fleet: one process serves every workspace, resolving the workspace per
+    """The shared service: one process serves every workspace, resolving the workspace per
     request (from the member's token) and per turn (from the workflow argument) instead of pinning
     one at boot. It connects as an RLS-*subject* role and scopes each transaction by the ambient
-    `current_workspace`. Default off: the single-workspace per-tenant / dedicated (enterprise)
-    serve, unchanged."""
-    session_secret_env: str = "UFO_SESSION_SECRET"
-    """Env holding the HMAC secret the shared fleet signs member session tokens with — the token
-    carries the workspace claim the surface trusts before any RLS-scoped read. Read only when
-    `shared_workspace` is set; the per-tenant surface authenticates by the stored opaque token and
-    needs no signing secret."""
+    `current_workspace`. Default off for a dedicated single-workspace server."""
 
 
 class ConnectConfig(BaseModel):
@@ -153,11 +146,10 @@ class SandboxConfig(BaseModel):
     carrier registers. Each carrier sources its own parameters (template, keys); core config knows
     only the selected name.
 
-    `proxy_port` is the stable port the in-process egress proxy binds, so an in-pod sandbox forms a
-    fixed proxy address and an off-cluster deploy exposes one known port. `proxy_public_url` is the
-    externally-reachable base an off-cluster sandbox (e2b) dials that proxy at; unset for an in-pod
-    carrier. `serve` fails loud when an off-cluster carrier is selected with no `proxy_public_url` —
-    open, unmetered egress is never a silent default."""
+    `proxy_port` is the stable port the egress proxy binds. `proxy_public_url` is the externally
+    reachable base a remote sandbox carrier such as E2B dials; local carriers leave it unset and
+    reach the process-local proxy directly. `serve` fails loud when a remote carrier has no public
+    proxy URL — open, unmetered egress is never a silent default."""
 
     model_config = ConfigDict(extra="forbid")
     backend: str = "local"
@@ -253,29 +245,6 @@ class PackConfig(BaseModel):
     name: str | None = None
 
 
-class DeployConfig(BaseModel):
-    """`ufoctl deploy` settings — the set-once identity of this deploy, so the verb takes no
-    per-run flags. `backend` selects how the deploy request is realized: `compose` (a local
-    single-box stack) or `k8s` (posted to a ufo-control control plane). `remote` is that control
-    plane's base URL — posting is automatic when it (or `--remote`) is set. `host` is the public
-    hostname; unset, it derives as `<name>.<base_domain>` when `base_domain` is given, else
-    `localhost` for the compose backend (the k8s backend fails loud without one). `name` is the
-    tenant slug, defaulting to the workspace's agent name. `bundle_image` is the digest-pinned
-    (`repo@sha256:…`) serve image the control plane runs; `sandbox_image` is the digest-pinned image
-    the `docker`/`pod` carrier pulls, left unset when the carrier needs none (the `e2b` carrier runs
-    from its own template). Both come from a build+push, so they are set here, not derived.
-    `owner_email` is never here: it is read from the workspace the owner's `ufoctl init` created."""
-
-    model_config = ConfigDict(extra="forbid")
-    backend: Literal["compose", "k8s"] = "compose"
-    remote: str | None = None
-    host: str | None = None
-    base_domain: str | None = None
-    name: str | None = None
-    bundle_image: str | None = None
-    sandbox_image: str | None = None
-
-
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
     database: DatabaseConfig
@@ -295,7 +264,6 @@ class Config(BaseModel):
     connectors: ConnectorsConfig = ConnectorsConfig()
     research: ResearchConfig = ResearchConfig()
     pack: PackConfig = PackConfig()
-    deploy: DeployConfig = DeployConfig()
 
 
 def config_path() -> Path:

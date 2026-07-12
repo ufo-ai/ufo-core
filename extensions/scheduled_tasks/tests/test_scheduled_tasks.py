@@ -165,7 +165,9 @@ async def _turns(conversation_id: UUID) -> list[sa.RowMapping]:
         return list(
             (
                 await connection.execute(
-                    sa.select(tables.turn).where(tables.turn.c.conversation_id == conversation_id)
+                    sa.select(tables.turn)
+                    .where(tables.turn.c.conversation_id == conversation_id)
+                    .order_by(tables.turn.c.seq)
                 )
             )
             .mappings()

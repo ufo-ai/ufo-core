@@ -65,6 +65,11 @@ async def test_put_upserts(db: None) -> None:
     assert await store.get(workspace_id, "sample_api") == "two"
 
 
+async def test_put_rejects_an_empty_value(db: None) -> None:
+    with pytest.raises(ValueError, match="empty"):
+        await _store().put(await _workspace(), "sample_api", "")
+
+
 async def test_unset_slot_raises(db: None) -> None:
     store = _store()
     with pytest.raises(CredentialSlotUnset, match="missing"):

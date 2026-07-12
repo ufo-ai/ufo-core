@@ -31,10 +31,8 @@ module "rds" {
   max_allocated_storage = var.rds_max_allocated_storage
   storage_encrypted     = true
 
-  # The shared application database (RFC 0011 §2: one Postgres DB, RLS on workspace_id). The master
-  # is ufo_owner — table owner, so it bypasses RLS (migrations, RLS bootstrap, control-plane
-  # cross-tenant reads). The RLS-subject roles (ufo_app group, ufo_t_<name> per tenant) are minted
-  # inside this DB by the control plane's postgres.py, not here.
+  # The shared application database. ufo_owner owns schema and migrations; ufo_serve is subject to
+  # workspace RLS policies.
   db_name  = var.app_database_name
   username = "ufo_owner"
   port     = 5432
@@ -49,7 +47,7 @@ module "rds" {
   create_db_subnet_group = true
   vpc_security_group_ids = [aws_security_group.rds.id]
 
-  # On by default in every env: the DB holds all tenant + turn state, so the deploy pipeline must
+  # The DB holds all workspace and turn state, so the deploy pipeline must
   # never be able to drop it. Recreating an env means flipping this off by hand first.
   deletion_protection     = var.rds_deletion_protection
   backup_retention_period = 7

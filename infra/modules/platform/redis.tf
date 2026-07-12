@@ -1,6 +1,5 @@
 # ElastiCache Redis — the live-frame hub (core's [hub] backend="redis"). In-VPC, reachable only from
-# the node group SG. The control plane's platform.toml points tenants at the primary endpoint; core
-# keys hub channels by turn/conversation uuid, so one instance is shared across tenants.
+# the node group SG. The shared runtime uses the primary endpoint and keys channels by conversation.
 
 resource "aws_security_group" "redis" {
   name        = "${local.name}-redis"

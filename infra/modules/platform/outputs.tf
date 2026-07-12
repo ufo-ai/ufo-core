@@ -24,7 +24,7 @@ output "ecr_repository_urls" {
 }
 
 output "system_namespace" {
-  description = "The namespace the control plane + apex workspace run in; ESO + IRSA target it."
+  description = "The namespace the hosted processes run in; External Secrets and IRSA target it."
   value       = local.system_namespace
 }
 
@@ -34,8 +34,18 @@ output "blob_bucket" {
 }
 
 output "sandbox_fs_role_arn" {
-  description = "STS role tenant pods assume to mint per-conversation sandbox mount credentials (blob_sts_role_arn)."
+  description = "STS role the serve fleet assumes to mint per-conversation sandbox mount credentials."
   value       = aws_iam_role.sandbox_fs.arn
+}
+
+output "sandbox_proxy_certificate_arn" {
+  description = "ACM certificate for the public sandbox-proxy NLB TLS listener."
+  value       = aws_acm_certificate.sandbox_proxy.arn
+}
+
+output "egress_ca_cert" {
+  description = "Trust anchor installed in off-cluster sandboxes and used by the proxy TLS gate."
+  value       = tls_self_signed_cert.egress_ca.cert_pem
 }
 
 output "app_s3_role_arn" {
@@ -44,17 +54,13 @@ output "app_s3_role_arn" {
 }
 
 output "gateway_ses_role_arn" {
-  description = "IRSA role annotated on the ufo-operator ServiceAccount — the apex gateway exchanges its web identity for ses:SendEmail credentials. Empty when ses_sender is unset. Constructed, not the module output, so it stays plan-known: the env's manifest for_each rejects apply-time keys."
-  value       = local.ses_enabled ? "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.gateway_ses_role_name}" : ""
+  description = "Deterministic ufo-gateway IRSA ARN; hosted manifest keys must be plan-known."
+  value       = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.gateway_ses_role_name}"
 }
 
-output "rds_endpoint" {
-  value = module.rds.db_instance_endpoint
-}
-
-# The shared serve fleet's identity + minted platform keys (hosted tier). Sensitive: the DSN carries
-# the ufo_serve password and the keys seal credentials/sessions/artifacts. The env's ufo.tf renders
-# them into the ufo-serve Secret (config ufo.toml + the three key env vars).
+# The shared serve fleet's identity and platform keys. Sensitive: the DSN carries
+# the ufo_serve password and the keys seal credentials and artifacts. The env's ufo.tf renders
+# them into the ufo-serve Secret (config ufo.toml + the two key env vars).
 output "serve_dsn" {
   value     = local.serve_dsn
   sensitive = true
@@ -62,11 +68,6 @@ output "serve_dsn" {
 
 output "serve_credential_key" {
   value     = local.serve_credential_key
-  sensitive = true
-}
-
-output "serve_session_secret" {
-  value     = random_password.serve_session_secret.result
   sensitive = true
 }
 

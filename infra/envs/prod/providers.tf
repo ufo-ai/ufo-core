@@ -35,7 +35,7 @@ provider "helm" {
   }
 }
 
-# kubectl provider applies the control-plane + issuer + External Secrets manifests as raw YAML —
+# kubectl applies the hosted service, issuer, and External Secrets manifests as raw YAML —
 # `kubectl apply` adopts the resources without the cluster being reachable at plan time (unlike the
 # kubernetes provider's kubernetes_manifest), so a first apply works.
 provider "kubectl" {

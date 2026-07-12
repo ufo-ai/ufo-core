@@ -1,9 +1,4 @@
-"""The server-driven directive wire the `ufo` client renders.
-
-`client/ufo` is a pure renderer: every onboarding screen is decided here and streamed back as
-tab-separated directive lines the shell reads. `directive` renders one line with the client's exact
-escaping; `first_run_install` prepends the self-install directive until the shell reports it holds
-the binary. Copy-adapted from metalcraft's `gateway/channels/ufo.py`."""
+"""The server-driven directive wire rendered by the ufo terminal client."""
 
 from collections.abc import Mapping
 

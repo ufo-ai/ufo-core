@@ -1,10 +1,4 @@
-"""The ``ufo-control`` entry point — one image, one role per Deployment, selected by argument.
-
-``ufo-control api`` runs the deploy endpoint; ``ufo-control operator`` runs the reconcile loop;
-``ufo-control gateway`` runs the apex onboarding server. This is metalcraft's one-image/console-
-script-args deployment shape (``[metalcraft-operator]``), stripped to the processes this control
-plane needs. All serve ``/healthz`` for probes.
-"""
+"""The hosted gateway and database bootstrap entry point."""
 
 import asyncio
 import logging
@@ -20,8 +14,7 @@ from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.resources import Resource
 
 from ufo_control.gateway_invite import InviteCodes
-from ufo_control.postgres import ensure_serve_role
-from ufo_control.rls import bootstrap_policies, owner_dsn
+from ufo_control.rls import bootstrap_policies, ensure_serve_role, owner_dsn
 
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8080
@@ -33,7 +26,7 @@ SERVICE_NAME = "ufo-control"
 
 @click.group()
 def main() -> None:
-    """The Kubernetes control plane that runs ufo as its per-workspace backend."""
+    """Operate the hosted shared-workspace service."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     _export_logs(os.environ.get(OTLP_ENDPOINT_ENV))
 
@@ -60,31 +53,8 @@ def _install_root_handler(logger_provider: LoggerProvider) -> None:
 
 
 @main.command()
-@click.option("--host", default=DEFAULT_HOST, show_default=True)
-@click.option("--port", default=DEFAULT_PORT, show_default=True)
-def api(host: str, port: int) -> None:
-    """Serve the deploy endpoint (POST /v1/deploy, GET /v1/tenants/{name})."""
-    uvicorn.run("ufo_control.api:app", host=host, port=port, log_level="info", log_config=None)
-
-
-@main.command()
-@click.option("--host", default=DEFAULT_HOST, show_default=True)
-@click.option("--port", default=DEFAULT_PORT, show_default=True)
-def operator(host: str, port: int) -> None:
-    """Run the level-triggered Tenant reconcile loop behind a /healthz probe."""
-    uvicorn.run(
-        "ufo_control.operator:operator_app",
-        host=host,
-        port=port,
-        factory=True,
-        log_level="info",
-        log_config=None,
-    )
-
-
-@main.command()
 def gateway() -> None:
-    """Serve the apex onboarding backend (GET /ufo, POST /v1/onboard/{channel})."""
+    """Serve onboarding, fleet count, and the terminal client."""
     port = int(os.environ.get(GATEWAY_PORT_ENV, str(DEFAULT_PORT)))
     uvicorn.run(
         "ufo_control.gateway:app", host=DEFAULT_HOST, port=port, log_level="info", log_config=None
@@ -93,8 +63,7 @@ def gateway() -> None:
 
 @main.command()
 def invite() -> None:
-    """Mint a one-time invite code that lets onboarding create a new workspace. The plaintext
-    prints once and is never stored."""
+    """Mint a one-time new-workspace invite."""
     click.echo(asyncio.run(_mint_invite()))
 
 
@@ -110,13 +79,12 @@ async def _mint_invite() -> str:
 
 @main.command(name="rls-bootstrap")
 def rls_bootstrap() -> None:
-    """Bring the shared app database to the RLS tier, as the owner: create the shared ``ufo_serve``
-    role the fleet connects as, then enable RLS + the workspace policies. The cluster migrate Job
-    runs this after ``ufoctl migrate``, once per bundle rollout."""
+    """Create the shared serve role and workspace policies."""
     asyncio.run(_bootstrap())
     click.echo("rls policies at head")
 
 
 async def _bootstrap() -> None:
-    await ensure_serve_role(owner_dsn())
-    await bootstrap_policies(owner_dsn())
+    dsn = owner_dsn()
+    await bootstrap_policies(dsn)
+    await ensure_serve_role(dsn)

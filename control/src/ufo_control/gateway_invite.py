@@ -1,13 +1,12 @@
 """One-time invite codes gating new-workspace creation.
 
-A verified email whose domain already has a workspace joins codeless; only the flow that would
-CREATE a workspace asks for a code — one code opens one org. The operator mints with
-``ufo-control invite`` (the plaintext prints once; only its hash persists, beside the claim ledger
-in the control-plane schema). Redeeming burns the code — ``used_at`` claimed under ``used_at is
-null``, so two concurrent flows can never both open a workspace on one code — and stamps the
-claim's ``invite_id`` in the same transaction, so a crash can never leave a burned code detached
-from its claim. The burn lands before the workspace write, and a resolution retry proceeds without
-re-entering a consumed code."""
+A verified email whose domain already has a workspace joins codeless; only the flow that creates a
+workspace asks for a code. ``ufo-control invite`` prints the plaintext once; only its hash persists
+beside the claim ledger in the platform schema. Redeeming burns the code — ``used_at`` claimed under
+``used_at is null``, so two concurrent flows can never both open a workspace on one code — and
+stamps the claim's ``invite_id`` in the same transaction, so a crash can never leave a burned code
+detached from its claim. The burn lands before the workspace write, and a resolution retry proceeds
+without re-entering a consumed code."""
 
 import secrets
 from dataclasses import dataclass

@@ -15,7 +15,7 @@ ANTHROPIC_KEY = "sk-ant-test"
 
 def _config(owner_url: str | None = "postgresql://owner@db/ufo") -> Config:
     return Config(
-        database=DatabaseConfig(url="sqlite+aiosqlite:///tenant.db", owner_url=owner_url),
+        database=DatabaseConfig(url="sqlite+aiosqlite:///ufo.db", owner_url=owner_url),
         blob=BlobConfig(backend="filesystem", root=Path("/tmp/blobs")),
     )
 
@@ -46,9 +46,9 @@ def test_model_rule_base_derives_provider_egress_from_the_env_key(
 
 
 def test_base_is_model_rules_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The shared proxy's static base is exactly the model-provider egress derived from the platform
+    """The shared proxy's static base is exactly the model-provider egress derived from the process
     key in env — one ScopeRule for the provider host plus its sentinel→real injection and token
-    meter, and nothing tenant-specific."""
+    meter, and no workspace-specific secret."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     base = _proxy_serve(_config(), ())._base()
@@ -58,7 +58,7 @@ def test_base_is_model_rules_only(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_base_raises_on_an_injecting_slot(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An injecting credential slot in the active pack means per-tenant secret injection, which the
+    """An injecting credential slot in the active pack means workspace secret injection, which the
     one shared proxy cannot do — it fails loud naming the slot, checked before the model base so the
     diagnosis is the injection, not a missing key."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -69,7 +69,7 @@ def test_base_raises_on_an_injecting_slot(monkeypatch: pytest.MonkeyPatch) -> No
         credentials=(
             CredentialSlot(
                 name="byok",
-                description="a per-tenant key the proxy would swap onto the wire",
+                description="a workspace key the proxy would swap onto the wire",
                 injection=InjectionTarget(
                     host="api.inj.test", header="authorization", sentinel="S"
                 ),
@@ -106,8 +106,8 @@ def test_egress_ca_fails_loud_when_a_half_is_unset(monkeypatch: pytest.MonkeyPat
 def test_owner_dsn_prefers_the_env_and_pins_the_async_driver(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A k8s secretKeyRef injects the password-bearing DSN as UFO_OWNER_DSN, which wins over the
-    (placeholder) config field the proxy config carries. The secret holds a plain libpq URL; the
+    """The password-bearing UFO_OWNER_DSN environment value wins over the config field. It holds a
+    plain libpq URL; the
     proxy pins the async psycopg driver so SQLAlchemy never resolves the sync psycopg2 dialect."""
     monkeypatch.setenv(OWNER_DSN_ENV, "postgresql://env-owner@db/ufo")
     assert _owner_dsn(_config(owner_url="postgresql://config-owner@db/ufo")) == (

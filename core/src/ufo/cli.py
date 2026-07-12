@@ -24,14 +24,6 @@ from ufo.bundle import Bundle, wheel_name
 from ufo.config import Config, config_path, load_config
 from ufo.credentials import CredentialStore
 from ufo.db import apply_migrations, dispose_db, init_db, workspace_tx
-from ufo.deploy import (
-    Deploy,
-    DeployRequest,
-    DeployResolutionError,
-    DeployStatus,
-    WorkspaceIdentity,
-    resolve_request,
-)
 from ufo.ext.loader import load_manifests, lockfile_path
 from ufo.ext.store import ExtensionStore, read_catalog
 from ufo.grants import GrantSummary, grant_summaries
@@ -103,15 +95,9 @@ def main() -> None:
 @main.command()
 @click.option("--email", required=True)
 @click.option("--model", default=DEFAULT_AGENT_MODEL, show_default=True)
-@click.option("--workspace-id", type=click.UUID, default=None)
-@click.option("--skip-migrations", is_flag=True, default=False)
-def init(email: str, model: str, workspace_id: UUID | None, skip_migrations: bool) -> None:
+def init(email: str, model: str) -> None:
     """Write ufo.toml if absent, apply the schema, then onboard the workspace, owner, default
-    agent and model key (plus any extension onboarding steps) and bind this machine's CLI token.
-    `--workspace-id` pins the workspace row's id (the control plane mints it and pins the tenant's
-    RLS GUC to it); unset, one is minted. `--skip-migrations` onboards only — for a shared database
-    whose schema a cluster-scoped job already brought to head over the union of every extension, so
-    a pack-narrowed re-migration here would fail to resolve another pack's revisions."""
+    agent and model key (plus any extension onboarding steps) and bind this machine's CLI token."""
     config_path = Path("ufo.toml")
     if not config_path.exists():
         config_path.write_text(DEFAULT_CONFIG)
@@ -122,11 +108,10 @@ def init(email: str, model: str, workspace_id: UUID | None, skip_migrations: boo
         click.echo(f"wrote {', '.join(added)} to .env — serve auto-loads it")
     if config.database.url.startswith("postgresql"):
         asyncio.run(_create_postgres_system_database(config))
-    if not skip_migrations:
-        apply_migrations(config.database.url, config.pack.name)
+    apply_migrations(config.database.url, config.pack.name)
     token = secrets.token_hex(32)
     try:
-        asyncio.run(_onboard(config, email, model, token, workspace_id))
+        asyncio.run(_onboard(config, email, model, token))
     except (AlreadyInitialized, ValueError, RuntimeError) as error:
         raise click.ClickException(str(error)) from error
     UFOCTL_DIR.mkdir(mode=0o700, exist_ok=True)
@@ -159,9 +144,7 @@ def _write_dev_secrets(config: Config) -> tuple[str, ...]:
     return tuple(added)
 
 
-async def _onboard(
-    config: Config, email: str, model: str, token: str, workspace_id: UUID | None
-) -> None:
+async def _onboard(config: Config, email: str, model: str, token: str) -> None:
     """Open the db boundary once: create the core workspace, bind the CLI token to the new owner
     (the CLI surface's own identity, issued here not in the surface-agnostic engine), THEN run the
     extension onboarding steps — so core access lands before any add-on step that could fail."""
@@ -175,7 +158,6 @@ async def _onboard(
             model=model,
             credentials=credentials,
             manifests=load_manifests(config.pack.name),
-            workspace_id=workspace_id,
         )
         onboarded = await onboarding.create()
         await _bind_cli_token(onboarded, token)
@@ -221,7 +203,7 @@ def migrate() -> None:
     The shared-schema deploy runs this once as the RLS-bypassing owner (the tables' owner), so the
     cluster migrate Job injects the owner DSN as `UFO_OWNER_DSN` — mirroring `ufoctl proxy` — while
     the baked config still supplies `[pack]`. Without it, the config's own `database.url` is used
-    (local dev, per-tenant init)."""
+    for local development or a dedicated server."""
     config = load_config()
     owner = os.environ.get(OWNER_DSN_ENV)
     if owner:
@@ -235,13 +217,13 @@ def migrate() -> None:
 
 @main.command()
 def serve() -> None:
-    """Run the workspace: surfaces + workers, one process."""
+    """Run surfaces, workers, and jobs; embed the egress proxy for single-node config."""
     serve_run()
 
 
 @main.command()
 def proxy() -> None:
-    """Run the shared egress proxy: one service fronting every tenant's sandbox egress."""
+    """Run the shared egress proxy: one service fronting every workspace sandbox."""
     proxy_run()
 
 
@@ -775,98 +757,3 @@ def bundle(out: Path) -> None:
     )
     for pin in result.pins:
         click.echo(f"  {pin.name} {pin.version} {pin.digest}")
-
-
-DEFAULT_DEPLOY_DIR = Path("deploy")
-DEPLOY_POLL_SECONDS = 5.0
-DEPLOY_POLL_TIMEOUT_SECONDS = 600.0
-
-
-@main.command()
-@click.option("--remote", default=None, help="Override [deploy].remote — the control-plane URL.")
-@click.option(
-    "--out", type=click.Path(path_type=Path), default=DEFAULT_DEPLOY_DIR, show_default=True
-)
-def deploy(remote: str | None, out: Path) -> None:
-    """Freeze this deploy into a control-plane request from [deploy] config and the workspace,
-    beside the bundle. Posts to the control plane and waits for Ready when [deploy].remote (or
-    --remote) is set; generate-only otherwise — like bundle, it imports no orchestrator. Everything
-    is derived: the owner from the workspace, the tenant name from [deploy].name or the agent, the
-    Postgres model from the backend. Fails loud naming any underivable [deploy] field it needs."""
-    config = load_config()
-    catalog = read_catalog(config.ext.store) if config.ext.store is not None else None
-    remote_url = remote or config.deploy.remote
-    workspace = asyncio.run(_read_workspace_identity(config))
-    request: DeployRequest | None = None
-    reason = "run ufoctl init first (deploy derives the owner and name from the workspace)"
-    if workspace is not None:
-        try:
-            request = resolve_request(config.deploy, config, config_path(), workspace)
-        except DeployResolutionError as error:
-            reason = str(error)
-    if request is None and remote_url is not None:
-        raise click.ClickException(reason)
-    result = Deploy(config_path=config_path(), catalog=catalog, out=out, request=request).build()
-    click.echo(f"bundle at {result.bundle.out}")
-    if result.request is None:
-        click.echo(f"deploy request skipped — {reason}")
-        return
-    tenant = result.request.tenant
-    click.echo(
-        f"deploy request at {result.request_path} — tenant {tenant.name} → https://{tenant.host}"
-    )
-    if remote_url is None:
-        click.echo("set [deploy].remote (or pass --remote) to post it to a control plane")
-        return
-    status = asyncio.run(_post_deploy(remote_url, result.request))
-    suffix = f" — {status.url}" if status.url else ""
-    click.echo(f"{status.phase}: {status.message}{suffix}")
-    if status.phase == "Failed":
-        raise click.ClickException("deploy failed — see the control plane")
-
-
-async def _read_workspace_identity(config: Config) -> WorkspaceIdentity | None:
-    """The owner email + a default tenant name from the workspace `ufoctl init` created; None when
-    no owner exists yet (not initialized)."""
-    init_db(config.database.url)
-    try:
-        async with workspace_tx() as connection:
-            owner = (await connection.execute(sa.select(tables.member.c.email))).first()
-            if owner is None:
-                return None
-            agent = (
-                await connection.execute(
-                    sa.select(tables.agent.c.name).order_by(tables.agent.c.created_at).limit(1)
-                )
-            ).first()
-            default_name = agent.name if agent is not None else DEFAULT_AGENT_NAME
-            return WorkspaceIdentity(owner_email=owner.email, default_name=default_name)
-    finally:
-        await dispose_db()
-
-
-async def _post_deploy(remote: str, request: DeployRequest) -> DeployStatus:
-    async with httpx.AsyncClient(base_url=remote, timeout=30.0) as client:
-        return await _drive_deploy(client, request)
-
-
-async def _drive_deploy(client: httpx.AsyncClient, request: DeployRequest) -> DeployStatus:
-    """Post the request to the control plane, then poll the tenant to a terminal phase. Retry/poll
-    is legitimate here — the control plane is an external service reconciling asynchronously."""
-    response = await client.post("/v1/deploy", json=request.model_dump(mode="json"))
-    response.raise_for_status()
-    deadline = asyncio.get_event_loop().time() + DEPLOY_POLL_TIMEOUT_SECONDS
-    while True:
-        poll = await client.get(f"/v1/tenants/{request.tenant.name}")
-        poll.raise_for_status()
-        status = DeployStatus.model_validate(poll.json())
-        if status.phase in ("Ready", "Failed"):
-            return status
-        if asyncio.get_event_loop().time() >= deadline:
-            return DeployStatus(
-                tenant=request.tenant.name,
-                phase=status.phase,
-                url=status.url,
-                message="timed out waiting for Ready",
-            )
-        await asyncio.sleep(DEPLOY_POLL_SECONDS)

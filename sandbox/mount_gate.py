@@ -17,6 +17,7 @@ import asyncio
 from uuid import uuid4
 
 from e2b import Sandbox
+from ufo_ext_e2b import E2B_TEMPLATE_NAME
 
 from ufo.sandbox.fs_creds import AwsStsClient, SandboxFsCredentialMinter, workspace_key_prefix
 from ufo.sandbox.fs_mount import (
@@ -47,7 +48,6 @@ def main() -> None:
     parser.add_argument("--role-arn", required=True)
     parser.add_argument("--bucket", required=True)
     parser.add_argument("--region", required=True)
-    parser.add_argument("--template", default="ufo-sbx")
     args = parser.parse_args()
     s3_url = f"https://s3.{args.region}.amazonaws.com"
     conversation = uuid4()
@@ -64,7 +64,7 @@ def main() -> None:
         args.bucket, workspace_key_prefix(conversation), WORKSPACE_DIR, s3_url, args.region, False
     )
     prepare, mount = mount_scripts(WORKSPACE_DIR, s3fs)
-    sandbox = Sandbox.create(template=args.template, timeout=SANDBOX_TIMEOUT_SECONDS)
+    sandbox = Sandbox.create(template=E2B_TEMPLATE_NAME, timeout=SANDBOX_TIMEOUT_SECONDS)
     try:
         sandbox.files.make_dir(WORKSPACE_DIR)
         sandbox.files.write(AWS_CREDENTIALS_PATH, aws_credentials_file(credentials))

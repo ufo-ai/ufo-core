@@ -2,7 +2,7 @@ name: Deploy (testing)
 
 # Merge to main → build the images at the commit short SHA, push to ECR (immutable, skip-if-present
 # so re-runs are idempotent), publish the E2B sandbox template, then terraform apply pins that tag —
-# the control-plane rollout. PRs touching infra run terraform plan only (against the newest pushed
+# the hosted-service rollout. PRs touching infra run terraform plan only (against the newest pushed
 # image, since the ECR digest data source needs a real tag). workflow_dispatch redeploys a chosen
 # tag. Targets envs/testing (stage 1); repoint TF_DIR to envs/prod for stage 2. AWS auth is GitHub
 # OIDC → the github-deploy role (no static keys). The edge job applies envs/edge — the zone-level
@@ -69,10 +69,12 @@ jobs:
         run: |
           TAG="${{ inputs.image_tag }}"
           if [ -z "$TAG" ] && [ "${{ github.event_name }}" = "pull_request" ]; then
-            TAG=$(aws ecr describe-images --repository-name ufo \
-              --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags[0]' --output text)
+            TAG=$(aws ecr describe-images --repository-name ufo --output json \
+              | jq -r '[.imageDetails[] | select(.imageTags != null)] | max_by(.imagePushedAt).imageTags[0] // empty')
           fi
-          [ -z "$TAG" ] || [ "$TAG" = "None" ] && TAG="${GITHUB_SHA::8}"
+          if [ -z "$TAG" ]; then
+            TAG="${GITHUB_SHA::8}"
+          fi
           echo "IMAGE_TAG=$TAG" >> "$GITHUB_ENV"
 
       - uses: astral-sh/setup-uv@v5
@@ -99,7 +101,7 @@ jobs:
           E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
         run: uv run python sandbox/build_template.py
 
-      - name: Build + push control-plane image
+      - name: Build + push gateway image
         if: github.event_name != 'pull_request'
         run: |
           if aws ecr describe-images --repository-name ufo-control --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
@@ -149,6 +151,15 @@ jobs:
             --role-arn "$(terraform -chdir="$TF_DIR" output -raw sandbox_fs_role_arn)" \
             --bucket "$(terraform -chdir="$TF_DIR" output -raw blob_bucket)" \
             --region "$AWS_REGION"
+
+      - name: Gate sandbox egress proxy TLS
+        if: github.event_name != 'pull_request'
+        env:
+          E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+        run: |
+          UFO_EGRESS_CA_CERT="$(terraform -chdir="$TF_DIR" output -raw sandbox_proxy_ca_cert)" \
+            uv run python sandbox/proxy_gate.py \
+            --proxy-url "$(terraform -chdir="$TF_DIR" output -raw sandbox_proxy_url)"
 
   edge:
     runs-on: ubuntu-latest

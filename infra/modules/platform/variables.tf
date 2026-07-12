@@ -123,7 +123,7 @@ variable "rds_multi_az" {
 variable "rds_deletion_protection" {
   type        = bool
   default     = true
-  description = "Block deletion of the DB (holds all tenant + turn state). Flip off by hand to recreate an env."
+  description = "Block deletion of the database that holds workspace and turn state."
 }
 
 variable "app_database_name" {
@@ -148,12 +148,4 @@ variable "redis_num_nodes" {
   type        = number
   default     = 2
   description = "Nodes in the replication group (primary + replicas). >1 enables automatic failover."
-}
-
-# ---- Sandbox ----
-
-variable "e2b_sandbox_template" {
-  type        = string
-  default     = "ufo-sbx"
-  description = "E2B template id the runtime launches sandboxes from; seeded into the platform Secret (e2b-sandbox-template) and replicated to tenant pods."
 }

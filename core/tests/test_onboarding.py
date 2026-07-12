@@ -5,9 +5,7 @@ The engine tests drive `Onboarding.run` against a fresh db (both dialects) and a
 turn path consumes. The cold-start test drives the real `ufoctl init` command through Click: a
 first run writes the token and durable state, a second run fails loud."""
 
-import asyncio
 from pathlib import Path
-from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
@@ -36,7 +34,6 @@ def _onboarding(
     tmp_path: Path,
     credentials: CredentialStore | None = None,
     manifests: tuple = (),
-    workspace_id: UUID | None = None,
 ) -> Onboarding:
     return Onboarding(
         config=Config(
@@ -47,7 +44,6 @@ def _onboarding(
         model=DEFAULT_MODEL,
         credentials=credentials,
         manifests=manifests,
-        workspace_id=workspace_id,
     )
 
 
@@ -72,25 +68,6 @@ async def test_onboarding_creates_the_workspace_owner_and_default_agent(
         DEFAULT_AGENT_PROMPT,
     )
     assert agent.workspace_id == onboarded.workspace_id
-
-
-async def test_onboarding_uses_a_supplied_workspace_id(
-    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The control plane mints the workspace uuid and pins the tenant's RLS GUC to it; init takes
-    that id verbatim for the workspace row so the INSERT satisfies the policy's WITH CHECK, and the
-    owner + default agent attach to it."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-onboard")
-    pinned = uuid4()
-    onboarded = await _onboarding(database_url, tmp_path, workspace_id=pinned).run()
-    assert onboarded.workspace_id == pinned
-    async with workspace_tx() as connection:
-        workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
-        member = (await connection.execute(sa.select(tables.member))).one()
-        agent = (await connection.execute(sa.select(tables.agent))).one()
-    assert workspace_id == pinned
-    assert member.workspace_id == pinned
-    assert agent.workspace_id == pinned
 
 
 async def test_re_running_against_an_initialized_workspace_fails_loud(
@@ -236,68 +213,6 @@ def test_cold_start_init_creates_durable_state_and_then_fails_loud(
         second = runner.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
         assert second.exit_code != 0
         assert "already initialized" in second.output
-
-
-def test_init_workspace_id_option_pins_the_workspace_row(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`ufoctl init --workspace-id <uuid>` threads the supplied id through to the workspace row —
-    the producer for the control plane's minted-and-GUC-pinned uuid."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-onboard")
-    monkeypatch.setenv("UFO_CREDENTIAL_KEY", Fernet.generate_key().decode())
-    monkeypatch.setattr(cli, "UFOCTL_DIR", tmp_path / ".ufoctl")
-    pinned = uuid4()
-    runner = CliRunner()
-    with runner.isolated_filesystem():
-        result = runner.invoke(
-            cli.main, ["init", "--email", OWNER_EMAIL, "--workspace-id", str(pinned)]
-        )
-        assert result.exit_code == 0, result.output
-
-        async def _read() -> tuple[UUID, UUID, UUID]:
-            cli.init_db("sqlite+aiosqlite:///ufo.db")
-            try:
-                async with workspace_tx() as connection:
-                    workspace_id = (
-                        await connection.execute(sa.select(tables.workspace.c.id))
-                    ).scalar_one()
-                    member_ws = (
-                        await connection.execute(sa.select(tables.member.c.workspace_id))
-                    ).scalar_one()
-                    agent_ws = (
-                        await connection.execute(sa.select(tables.agent.c.workspace_id))
-                    ).scalar_one()
-                return workspace_id, member_ws, agent_ws
-            finally:
-                await cli.dispose_db()
-
-        workspace_id, member_ws, agent_ws = asyncio.run(_read())
-    assert workspace_id == pinned
-    assert member_ws == pinned
-    assert agent_ws == pinned
-
-
-def test_init_skip_migrations_onboards_without_migrating(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`--skip-migrations` (the shared-database tenant path) onboards against an already-migrated
-    schema without re-running migrations — so a pack-narrowed re-migration can't fail to resolve
-    another pack's revisions. Migrate once, then init --skip-migrations with `apply_migrations`
-    booby-trapped: it must not be called."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-onboard")
-    monkeypatch.setenv("UFO_CREDENTIAL_KEY", Fernet.generate_key().decode())
-    monkeypatch.setattr(cli, "UFOCTL_DIR", tmp_path / ".ufoctl")
-    runner = CliRunner()
-    with runner.isolated_filesystem():
-        Path("ufo.toml").write_text(cli.DEFAULT_CONFIG)
-        cli.apply_migrations("sqlite+aiosqlite:///ufo.db", None)
-
-        def _boom(*_args: object, **_kwargs: object) -> None:
-            raise AssertionError("apply_migrations must not run under --skip-migrations")
-
-        monkeypatch.setattr(cli, "apply_migrations", _boom)
-        result = runner.invoke(cli.main, ["init", "--email", OWNER_EMAIL, "--skip-migrations"])
-        assert result.exit_code == 0, result.output
 
 
 def test_cold_start_mints_the_credential_key_for_onboarding(

@@ -1,7 +1,7 @@
 [project]
 name = "ufo-control"
 version = "0.1.0"
-description = "The Kubernetes control plane that runs ufo as its per-workspace backend runtime"
+description = "The hosted shared-workspace gateway and database bootstrap for ufo"
 requires-python = ">=3.12"
 dependencies = [
     "asyncpg>=0.31.0",
@@ -11,8 +11,6 @@ dependencies = [
     "opentelemetry-exporter-otlp-proto-http>=1.43",
     "opentelemetry-instrumentation-logging>=0.64b0",
     "opentelemetry-sdk>=1.43",
-    "pydantic>=2.9",
-    "tomli-w>=1.0",
     "uvicorn>=0.30",
 ]
 
@@ -24,9 +22,7 @@ dev = [
     "mypy>=1.13",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
-    "pyyaml>=6.0.3",
     "ruff>=0.7",
-    "types-pyyaml>=6.0.12.20260518",
 ]
 
 [build-system]
@@ -66,10 +62,9 @@ files = ["src/ufo_control", "tests"]
 module = ["asyncpg"]
 ignore_missing_imports = true
 
-# The runtime `ufo` package ships no py.typed marker; follow into its source so control checks
-# against the real DeployRequest/DeployStatus shapes it imports (RFC 0011 §1: one definition).
+# The runtime `ufo` package ships no py.typed marker; follow its shared database and surface types.
 [[tool.mypy.overrides]]
-module = ["ufo.*"]
+module = ["ufo.*", "ufo_ext_ufo.*"]
 follow_untyped_imports = true
 
 [tool.pytest.ini_options]
@@ -77,6 +72,3 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 asyncio_mode = "auto"
 addopts = "--strict-markers"
-markers = [
-    "cluster: needs a live Kubernetes cluster (kubectl/helm apply) — skipped without one",
-]

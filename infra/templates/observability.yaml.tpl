@@ -1,9 +1,8 @@
-# The shared in-cluster OpenTelemetry collector: every tenant's serve process exports OTLP here and
+# The shared in-cluster OpenTelemetry collector receives every hosted process's telemetry and
 # the collector forwards traces/metrics/logs to Datadog with the contrib image's native datadog
 # exporter. The Datadog API key arrives via External Secrets (the datadog-api-key Secret, synced from
 # the api-keys Secrets Manager entry) and MUST be populated out-of-band before deploy — an empty key
-# fails the datadog exporter at startup (fail loud). The collector base its OTLP/HTTP endpoint feeds
-# is templated into every tenant's [o11y] otlp_endpoint by the reconciler (ufo.tf platform_config).
+# fails the datadog exporter at startup.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -15,7 +14,7 @@ data:
       otlp:
         protocols:
           # Bind all interfaces: the collector defaults the OTLP endpoint to localhost, which silently
-          # drops every cross-pod export (tenant serve pods -> collector Service).
+          # drops every cross-pod export.
           grpc:
             endpoint: 0.0.0.0:4317
           http:
@@ -25,7 +24,7 @@ data:
         endpoint: 0.0.0.0:13133
     processors:
       batch: {}
-      # Tenant exporters don't set deployment.environment; the collector stamps its cluster's env
+      # Runtime exporters don't set deployment.environment; the collector stamps its cluster's env
       # on everything it forwards so Datadog's env tag separates prod from testing telemetry.
       resource:
         attributes:
@@ -104,8 +103,7 @@ spec:
     - {name: otlp-grpc, port: 4317, targetPort: otlp-grpc}
     - {name: otlp-http, port: 4318, targetPort: otlp-http}
 ---
-# Operator-only in ufo-system (NOT the replicated ufo-platform-secrets, so it never reaches a tenant
-# pod): the collector reads DD_API_KEY, tenants never do. Reuses the ClusterSecretStore that
+# The collector alone reads DD_API_KEY. Reuses the ClusterSecretStore that
 # cluster-services.yaml.tpl defines. The value arrives empty from api-keys until set out-of-band.
 apiVersion: external-secrets.io/v1beta1
 kind: ExternalSecret
@@ -119,10 +117,7 @@ spec:
   data:
     - {secretKey: DD_API_KEY, remoteRef: {key: ${secret_api_keys}, property: datadog-api-key}}
 ---
-# Cross-namespace ingress to the collector on the OTLP ports. Tenant namespaces carry the operator's
-# label (ufo_control.platform.TENANT_NAMESPACE_LABEL = flyingobject.ai/tenant); same-namespace senders
-# (the apex workspace, control plane) reach it too. Selecting the collector pod flips it to
-# default-deny ingress, so this rule is the only path in. Egress stays open (Datadog on 443).
+# Same-namespace ingress to the collector on the OTLP ports.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -134,8 +129,6 @@ spec:
   policyTypes: [Ingress]
   ingress:
     - from:
-        - namespaceSelector:
-            matchLabels: {flyingobject.ai/tenant: "true"}
         - podSelector: {}
       ports:
         - {protocol: TCP, port: 4317}
@@ -144,9 +137,7 @@ spec:
 # Node-level log agent: a DaemonSet on every node tails the containerd pod logs under /var/log/pods
 # and forwards them over OTLP to the gateway collector above, which holds the sole Datadog key. This
 # captures container stdout/stderr the OTLP SDK never sees — crashes, panics, pre-init output — which
-# the app-level OTLP logs miss entirely. Only ufo's own namespaces are collected (ufo-system + every
-# tenant, all sharing the ufo- prefix); third-party add-ons (kube-system, cert-manager, ingress-nginx)
-# and the collectors' own pods are excluded so the pipeline can't feed itself.
+# the app-level OTLP logs miss entirely. Only the hosted namespace is collected.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -156,8 +147,7 @@ data:
   otel-logs-agent-config.yaml: |
     receivers:
       filelog:
-        # Pod dirs are <namespace>_<pod>_<uid>; the ufo- prefix scopes to system + tenant namespaces.
-        include: [/var/log/pods/ufo-*_*/*/*.log]
+        include: [/var/log/pods/${namespace}_*_*/*/*.log]
         # Never tail the collectors' own pods (this agent + the gateway) — that is the feedback loop.
         exclude: [/var/log/pods/${namespace}_otel-*/*/*.log]
         # Only new lines: a rollout must not replay a node's entire log history into Datadog.
@@ -247,7 +237,7 @@ spec:
       labels: {app.kubernetes.io/name: otel-logs-agent}
     spec:
       serviceAccountName: otel-logs-agent
-      # Land on every node, including any tainted tenant node groups.
+      # Land on every node that can host a service pod.
       tolerations:
         - {operator: Exists}
       containers:

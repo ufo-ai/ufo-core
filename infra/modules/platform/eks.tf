@@ -53,9 +53,6 @@ module "eks" {
     kube-proxy             = {}
     eks-pod-identity-agent = {}
     vpc-cni                = { before_compute = true }
-    aws-ebs-csi-driver = {
-      service_account_role_arn = module.irsa_ebs_csi.iam_role_arn
-    }
   }
 
   eks_managed_node_group_defaults = {

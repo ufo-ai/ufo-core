@@ -442,7 +442,6 @@ def chat_server(
     app.state.hub = hub
     app.state.dbos = dbos_client
     app.state.durable_surfaces = frozenset()
-    app.state.shared_workspace = False
     app.include_router(router)
     server = _ThreadedServer(app, port)
     server.start()

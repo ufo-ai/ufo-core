@@ -1,6 +1,4 @@
-# In-cluster controllers the ufo workloads depend on: the AWS LB controller (fronts ingress-nginx's
-# NLB), metrics-server (tenant HPAs), cert-manager, external-dns, and External Secrets. Installed as
-# upstream Helm releases. Versions are pinned — review on upgrade.
+# In-cluster controllers for ingress, certificates, DNS, and secret projection.
 
 resource "helm_release" "aws_load_balancer_controller" {
   name             = "aws-load-balancer-controller"
@@ -30,17 +28,6 @@ resource "helm_release" "aws_load_balancer_controller" {
     name  = "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
     value = module.irsa_lb_controller.iam_role_arn
   }
-
-  depends_on = [module.eks]
-}
-
-resource "helm_release" "metrics_server" {
-  name             = "metrics-server"
-  repository       = "https://kubernetes-sigs.github.io/metrics-server/"
-  chart            = "metrics-server"
-  version          = "3.12.2"
-  namespace        = "kube-system"
-  create_namespace = false
 
   depends_on = [module.eks]
 }

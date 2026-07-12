@@ -59,15 +59,15 @@ class WorkspaceScope:
         """This workspace's secret for `slot`: its stored BYOK value if set, else the platform
         default read live from env (`env` name, or `SLOT` upper-cased). The single path to any
         secret — fetching one asserts a bound workspace, so a key is always the right workspace's.
-        Set in neither place raises `CredentialSlotUnset`, so a missing key fails the call needing
-        it, never silently."""
+        Missing or empty raises `CredentialSlotUnset`, so an unconfigured key fails the call
+        needing it, never silently."""
         if _store is not None:
             try:
                 return await _store.get(self.workspace_id, slot)
             except CredentialSlotUnset:
                 pass
         value = os.environ.get(env or slot.upper())
-        if value is None:
+        if not value:
             raise CredentialSlotUnset(slot)
         return value
 

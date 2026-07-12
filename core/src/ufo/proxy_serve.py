@@ -1,13 +1,12 @@
-"""Composition root for the shared egress proxy: one standalone service fronting every tenant.
+"""Composition root for the shared egress proxy: one standalone service for every workspace.
 
-`serve` runs the egress proxy in-process, per pod, which needs a per-tenant LoadBalancer for an
-off-cluster sandbox. The proxy is multi-tenant-capable — `PerAgentRules` and `turn_live` resolve
+Dedicated `serve` runs its proxy in-process. The shared proxy resolves
 everything from the run token, which carries `workspace_id`, and every query filters by it — so one
-`ufoctl proxy` process serves all tenants. It opens the RLS-bypassing owner DSN (the resolver's
-explicit `workspace_id` filters do the scoping), signs sandbox leaves from a stable platform CA (so
-a sandbox's trust store validates one chain across restarts), and injects only the platform
-model-provider key — it cannot inject per-tenant credential secrets, so an injecting credential slot
-in the active pack fails loud."""
+`ufoctl proxy` process serves all workspaces. It opens the RLS-bypassing owner DSN (the resolver's
+explicit `workspace_id` filters do the scoping), signs sandbox leaves from a stable shared CA (so a
+sandbox's trust store validates one chain across restarts), and injects only model-provider keys
+from the process environment. Workspace credential injection requires a dedicated in-process
+proxy, so an injecting slot in the shared pack fails loud."""
 
 import asyncio
 import os
@@ -54,7 +53,7 @@ def model_rule_base(config: Config) -> tuple[Rule, ...]:
 
 def run() -> None:
     """Boot the shared egress proxy: load config the way `serve` does, source the owner DSN and the
-    stable CA (failing loud on either unset), export telemetry to the platform collector
+    stable CA (failing loud on either unset), export telemetry to the configured collector
     (`UFO_OTLP_ENDPOINT` over the baked config, like the owner DSN), meter model usage against the
     deploy's merged price table, and serve forever."""
     config = load_config()
@@ -74,28 +73,25 @@ def run() -> None:
 
 
 def _egress_ca() -> tuple[str, str]:
-    """The stable platform CA (cert, key) the proxy signs every per-host leaf from, sourced from env
-    so the same trust material spans proxy restarts and every tenant's sandbox trust store. Both
+    """The stable shared CA (cert, key) the proxy signs every per-host leaf from, sourced from env
+    so the same trust material spans proxy restarts and every workspace's sandbox trust store. Both
     unset means the proxy would mint a per-process CA no sandbox trusts, so it fails loud."""
     cert = os.environ.get(EGRESS_CA_CERT_ENV)
     key = os.environ.get(EGRESS_CA_KEY_ENV)
     if not cert or not key:
         raise RuntimeError(
             f"{EGRESS_CA_CERT_ENV} and {EGRESS_CA_KEY_ENV} must both hold the shared egress CA "
-            "(PEM): the proxy signs sandbox leaves from a stable CA every tenant's trust store "
-            "already carries, never a per-process one"
+            "(PEM): the proxy signs sandbox leaves from one CA every workspace trusts"
         )
     return cert, key
 
 
 def _owner_dsn(config: Config) -> str:
-    """The RLS-bypassing owner DSN the shared proxy opens — never the tenant-scoped `database.url`.
-    One process serves every tenant, so it cannot use a tenant-pinned RLS role; the resolver's
-    explicit `workspace_id` filters scope each query. Read from `UFO_OWNER_DSN` (a k8s secretKeyRef
-    injects it, since a password-bearing DSN cannot ride a configmap), falling back to `[database]
-    owner_url`; neither set fails loud. The secret's contract is a plain libpq URL (its asyncpg
-    consumers dial it verbatim), which SQLAlchemy would map to the sync psycopg2 dialect — pin the
-    async psycopg driver this distribution ships."""
+    """The RLS-bypassing owner DSN the shared proxy opens instead of the scoped `database.url`.
+    One process serves every workspace, so the resolver's explicit `workspace_id` filters scope
+    each query. Read from `UFO_OWNER_DSN`, falling back to `[database] owner_url`; neither set fails
+    loud. The secret's contract is a plain libpq URL, which SQLAlchemy would map to the sync
+    psycopg2 dialect — pin the async psycopg driver this distribution ships."""
     dsn = os.environ.get(OWNER_DSN_ENV) or config.database.owner_url
     if not dsn:
         raise RuntimeError(
@@ -109,7 +105,7 @@ def _owner_dsn(config: Config) -> str:
 @dataclass(frozen=True)
 class ProxyServe:
     """The shared egress proxy run: open the owner DSN, build the workspace-wide model-rule base,
-    and bind one proxy that resolves every tenant's per-turn rules from the run token."""
+    and bind one proxy that resolves every workspace's per-turn rules from the run token."""
 
     config: Config
     manifests: tuple[Manifest, ...]
@@ -136,9 +132,8 @@ class ProxyServe:
 
     def _base(self) -> tuple[Rule, ...]:
         """The proxy's static rule base: the shared model-provider egress (`model_rule_base`) and
-        nothing tenant-specific. The shared proxy cannot inject per-tenant credential secrets, so an
-        injecting credential slot in the active pack fails loud — that deploy needs a per-tenant
-        proxy, not this one — checked before the model base so the diagnosis is the injection."""
+        no workspace-specific secrets. An injecting credential slot requires a dedicated proxy and
+        fails here before model rules are built."""
         injecting = sorted(
             slot.name
             for manifest in self.manifests
@@ -147,7 +142,7 @@ class ProxyServe:
         )
         if injecting:
             raise RuntimeError(
-                f"the shared egress proxy cannot inject per-tenant credential secrets, but the "
+                f"the shared egress proxy cannot inject workspace credential secrets, but the "
                 f"active pack declares injecting credential slot(s) {injecting}"
             )
         return model_rule_base(self.config)

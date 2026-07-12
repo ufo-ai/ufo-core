@@ -7,8 +7,7 @@ module "platform" {
   dns_zone_name        = "flyingobject.ai"
   cloudflare_api_token = var.cloudflare_api_token
 
-  ses_sender           = var.ses_sender
-  e2b_sandbox_template = var.e2b_sandbox_template
+  ses_sender = var.ses_sender
 
   # Static cluster-admins (applier-independent — see eks.tf for why creator-perms is off): the GitHub
   # Actions deploy role AND the account root (root keeps kubectl access; EKS access entries accept it).

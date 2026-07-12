@@ -1,11 +1,4 @@
-"""The code-verify journey: work-email → 6-digit code → constant-time verify under a TTL and an
-attempt cap.
-
-Copy-adapted from metalcraft's `onboard/claim.py`. `start` validates the work-email domain, mints a
-one-time code, persists only its hash, and sends it; `verify` compares in constant time under the
-expiry and attempt cap, then marks the claim verified. The join-or-provision decision that
-metalcraft folded into `verify_code` lives in the onboarding flow instead, because provisioning is
-streamed across the client's polls rather than blocking one request."""
+"""Work-email verification under a time-to-live and attempt cap."""
 
 import hmac
 import logging
@@ -56,22 +49,23 @@ class ClaimWorkflow:
             expires_at=datetime.now(UTC) + self.code_ttl,
             attempts=0,
             verified_at=None,
-            tenant_name=None,
-            resulting_workspace_id=None,
             invite_id=None,
         )
         await self.store.insert_claim(claim)
         try:
             await self.email_sender.send(claim.email, code)
         except Exception as exc:
+            await self.store.delete_claim(claim.claim_id)
             logger.exception("onboard.email.send_failed domain=%s surface=%s", domain, surface)
             raise ClaimError("could not send the verification email; please try again") from exc
         return domain
 
     async def verify(self, claim: OnboardClaim, code: str) -> None:
         if claim.attempts >= self.max_attempts:
+            await self.store.delete_claim(claim.claim_id)
             raise ClaimError("too many attempts; start onboarding again")
         if datetime.now(UTC) >= claim.expires_at:
+            await self.store.delete_claim(claim.claim_id)
             raise ClaimError("verification code expired; start onboarding again")
         await self.store.record_attempt(claim.claim_id, claim.attempts + 1)
         if not hmac.compare_digest(claim.code_hash, hash_code(code)):

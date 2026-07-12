@@ -4,7 +4,7 @@ Isolation is set per transaction from an ambient workspace, so one shared-serve 
 connection pool) safely serves many workspaces: a request/turn/job sets `current_workspace` at its
 boundary, and `workspace_tx` pins the RLS GUC (`app.workspace_id`) for that transaction. The
 contextvar defaults to unset — then `workspace_tx` sets no GUC and the connection's own role
-default scopes it: the single-workspace per-tenant (enterprise) deploy, unchanged.
+default scopes it on a dedicated single-workspace server.
 The shared-serve role is an RLS *subject* with no pinned default, so a transaction that never set
 the workspace fails closed — the policy's `current_setting` errors on the unset GUC, never a leak.
 
@@ -63,8 +63,8 @@ def init_owner_db(url: str) -> None:
     """The RLS-bypassing owner-role engine `owner_tx` enumerates through on the shared fleet, built
     from the owner DSN (`UFO_OWNER_DSN`, the same secret the shared proxy opens). It owns the tables
     and is never FORCEd RLS, so it reads across every workspace — the one cross-tenant path. A
-    per-tenant deploy never sets it: `owner_tx` falls to the tenant-scoped `_engine`, whose pinned
-    role default enumerates that deploy's single workspace."""
+    dedicated server never sets it: `owner_tx` falls to `_engine`, whose role enumerates that
+    server's single workspace."""
     global _owner_engine
     if _owner_engine is not None:
         raise RuntimeError("owner db already initialized")
@@ -129,8 +129,8 @@ async def owner_tx() -> AsyncIterator[AsyncConnection]:
     every workspace this deploy serves. The background sweeps find their work across workspaces
     through it, then re-scope each unit under `with ws(row.workspace_id)`. With an owner engine set
     (shared fleet) it bypasses RLS and sees all workspaces; without one it falls to the main engine,
-    whose per-tenant role default scopes it to that deploy's single workspace — so a per-tenant
-    deploy enumerates its one workspace and a shared deploy enumerates all, by the same call. It
+    whose role scopes it to the dedicated server's single workspace. The same call therefore
+    enumerates one workspace when dedicated and all workspaces when shared. It
     threads no workspace and sets no GUC, so nothing it yields is a tenant boundary: never read a
     row's contents through it beyond the identifiers needed to re-bind that row's own workspace."""
     engine = _owner_engine or _engine
@@ -159,7 +159,7 @@ def apply_migrations(url: str, pack: str | None = None) -> None:
     command.upgrade(config, "heads")
 
 
-def _sqlite_on_connect(dbapi_connection: Any, connection_record: Any) -> None:
+def _sqlite_on_connect(dbapi_connection: Any, _connection_record: Any) -> None:
     dbapi_connection.isolation_level = None
     cursor = dbapi_connection.cursor()
     cursor.execute("pragma journal_mode=wal")

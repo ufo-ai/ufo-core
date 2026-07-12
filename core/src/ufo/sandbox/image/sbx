@@ -11,71 +11,75 @@ the sandbox."""
 from __future__ import annotations
 
 import argparse
-import base64
-import http.client
 import json
 import os
 import ssl
 import sys
-from urllib.parse import urlsplit
+
+import urllib3
 
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_MODEL = "claude-opus-4-8"
 DEFAULT_MAX_TOKENS = 1024
+REQUEST_TIMEOUT_SECONDS = 60.0
 
 
 class SbxError(RuntimeError):
     pass
 
 
-def ssl_context() -> ssl.SSLContext | None:
+def ssl_context() -> ssl.SSLContext:
     cert_file = os.environ.get("SSL_CERT_FILE")
-    if not cert_file:
-        return None
-    return ssl.create_default_context(cafile=cert_file)
+    return (
+        ssl.create_default_context(cafile=cert_file) if cert_file else ssl.create_default_context()
+    )
 
 
-def proxy_connection(target: str) -> http.client.HTTPSConnection:
-    parsed = urlsplit(target)
-    host = parsed.hostname or ""
-    port = parsed.port or 443
+def http_pool() -> urllib3.PoolManager:
+    context = ssl_context()
     proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or ""
     if not proxy:
-        return http.client.HTTPSConnection(host, port, context=ssl_context())
-    # An https target through an http proxy: connect plainly to the proxy, CONNECT with the run
-    # token as Proxy-Authorization, then TLS to the target (the proxy MITMs it with a cert our
-    # SSL_CERT_FILE CA trusts). urllib drops proxy-URL userinfo on CONNECT, so we tunnel by hand.
-    p = urlsplit(proxy if "//" in proxy else f"//{proxy}")
-    connection = http.client.HTTPSConnection(
-        p.hostname or "", p.port or 8888, context=ssl_context()
+        return urllib3.PoolManager(ssl_context=context)
+    parsed = urllib3.util.parse_url(proxy)
+    if parsed.scheme not in {"http", "https"} or parsed.host is None:
+        raise SbxError(f"invalid HTTPS_PROXY URL: {proxy!r}")
+    proxy_headers = (
+        urllib3.make_headers(proxy_basic_auth=parsed.auth) if parsed.auth is not None else None
     )
-    tunnel_headers = {}
-    if p.username:
-        credential = base64.b64encode(f"{p.username}:".encode()).decode()
-        tunnel_headers["Proxy-Authorization"] = f"Basic {credential}"
-    connection.set_tunnel(host, port, tunnel_headers)
-    return connection
+    return urllib3.ProxyManager(
+        parsed._replace(auth=None).url,
+        proxy_headers=proxy_headers,
+        proxy_ssl_context=context,
+        ssl_context=context,
+    )
 
 
 def post_json(url: str, headers: dict[str, str], body: dict[str, object]) -> dict[str, object]:
-    payload = json.dumps(body).encode()
-    path = urlsplit(url).path or "/"
-    connection = proxy_connection(url)
+    pool = http_pool()
     try:
-        connection.request(
-            "POST", path, body=payload, headers={"content-type": "application/json", **headers}
+        response = pool.request(
+            "POST",
+            url,
+            body=json.dumps(body).encode(),
+            headers={"content-type": "application/json", **headers},
+            timeout=REQUEST_TIMEOUT_SECONDS,
+            retries=False,
         )
-        response = connection.getresponse()
-        raw = response.read()
-        status = response.status
+    except urllib3.exceptions.HTTPError as error:
+        raise SbxError(f"{url} failed: {error}") from error
     finally:
-        connection.close()
-    if status != 200:
-        raise SbxError(f"{url} -> {status}: {raw.decode('utf-8', 'replace')}")
-    decoded = json.loads(raw)
+        pool.clear()
+    if response.status != 200:
+        raise SbxError(f"{url} -> {response.status}: {response.data.decode('utf-8', 'replace')}")
+    try:
+        decoded = json.loads(response.data)
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise SbxError(f"{url} returned invalid JSON") from error
     if not isinstance(decoded, dict):
-        raise SbxError(f"{url} returned non-object JSON: {raw.decode('utf-8', 'replace')}")
+        raise SbxError(
+            f"{url} returned non-object JSON: {response.data.decode('utf-8', 'replace')}"
+        )
     return decoded
 
 

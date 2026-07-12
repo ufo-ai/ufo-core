@@ -1,6 +1,4 @@
-# Image registry. One repo per image we build: the bundle image (`ufo serve` of the assistant_hosted
-# / gateway packs), the E2B sandbox image, and the control-plane image (`ufoctl` api/operator).
-# CI builds + pushes by commit SHA; the tenant chart and the control-plane deployment pull by tag.
+# Image registry for the runtime bundle and hosted gateway.
 
 locals {
   ecr_repositories = ["ufo", "ufo-control"]

@@ -77,6 +77,8 @@ class CredentialStore:
     fernet: Fernet
 
     async def put(self, workspace_id: UUID, slot: str, plaintext: str) -> None:
+        if not plaintext:
+            raise ValueError("credential value is empty")
         ciphertext = self.fernet.encrypt(plaintext.encode())
         async with workspace_tx() as connection:
             updated = await connection.execute(

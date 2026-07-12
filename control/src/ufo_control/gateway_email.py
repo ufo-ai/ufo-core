@@ -1,30 +1,26 @@
 """Work-email policy and the verification-code sender.
 
-`WorkEmailPolicy` rejects free, personal, and disposable domains so a tenant maps to a real
+`WorkEmailPolicy` rejects free, personal, and disposable domains so a workspace maps to a real
 organization — the denylist fails CLOSED and a malformed address is rejected up front. The sender
-delivers the 6-digit code: `logging` for dev/tests, `ses` for the hosted apex. The SES backend
+delivers the 6-digit code through SESv2. The sender
 speaks SESv2 `SendEmail` over `httpx` with a local SigV4 signer — signing is pure CPU (hmac/sha256)
 so it runs inline, and every network call is async: no boto3 network client, no sync HTTP on the
 loop. Credentials are the pod's IRSA web identity (`AWS_ROLE_ARN` + `AWS_WEB_IDENTITY_TOKEN_FILE`,
 injected by the EKS pod identity webhook from the gateway ServiceAccount's annotation), exchanged
-at STS per send. The backend is selected by `UFO_GATEWAY_EMAIL_BACKEND`, failing loud on a missing
-SES field."""
+at STS per send. Missing SES configuration fails loud."""
 
 import hashlib
 import hmac
 import json
-import logging
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 from xml.etree import ElementTree
 
 import httpx
-
-logger = logging.getLogger(__name__)
 
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@([^@\s]+\.[^@\s]+)$")
 
@@ -77,7 +73,6 @@ SES_SERVICE = "ses"
 SES_PATH = "/v2/email/outbound-emails"
 SES_TIMEOUT_SECONDS = 10.0
 
-EMAIL_BACKEND_ENV = "UFO_GATEWAY_EMAIL_BACKEND"
 SES_SENDER_ENV = "UFO_SES_SENDER"
 SES_REGION_ENV = "UFO_SES_REGION"
 AWS_ROLE_ARN_ENV = "AWS_ROLE_ARN"
@@ -115,32 +110,8 @@ class WorkEmailPolicy:
         return domain
 
 
-@dataclass(frozen=True)
-class SentCode:
-    email: str
-    code: str
-
-
 class EmailSender(Protocol):
     async def send(self, email: str, code: str) -> None: ...
-
-
-@dataclass
-class LoggingEmailSender:
-    """Dev/test sender: logs the code and keeps every send in `sent` so tests read the minted code
-    without a real mailbox. Never used in a hosted deployment."""
-
-    sent: list[SentCode] = field(default_factory=list)
-
-    async def send(self, email: str, code: str) -> None:
-        self.sent.append(SentCode(email, code))
-        logger.info("onboard verification code for %s: %s", email, code)
-
-    def last_code(self, email: str) -> str:
-        for record in reversed(self.sent):
-            if record.email == email:
-                return record.code
-        raise LookupError(f"no code sent to {email}")
 
 
 @dataclass(frozen=True)
@@ -260,22 +231,17 @@ def _signing_key(secret_key: str, date_stamp: str, region: str) -> bytes:
     return key
 
 
-def email_sender_from_env() -> EmailSender:
-    backend = os.environ.get(EMAIL_BACKEND_ENV, "logging")
-    if backend == "logging":
-        return LoggingEmailSender()
-    if backend == "ses":
-        return SesEmailSender(
-            source=_require_env(SES_SENDER_ENV),
-            region=os.environ.get(SES_REGION_ENV, DEFAULT_SES_REGION),
-            role_arn=_require_env(AWS_ROLE_ARN_ENV),
-            token_file=Path(_require_env(AWS_WEB_IDENTITY_TOKEN_FILE_ENV)),
-        )
-    raise RuntimeError(f"{EMAIL_BACKEND_ENV}={backend!r} is not a known backend (ses|logging)")
+def email_sender_from_env() -> SesEmailSender:
+    return SesEmailSender(
+        source=_require_env(SES_SENDER_ENV),
+        region=os.environ.get(SES_REGION_ENV, DEFAULT_SES_REGION),
+        role_arn=_require_env(AWS_ROLE_ARN_ENV),
+        token_file=Path(_require_env(AWS_WEB_IDENTITY_TOKEN_FILE_ENV)),
+    )
 
 
 def _require_env(name: str) -> str:
     value = os.environ.get(name)
     if not value:
-        raise RuntimeError(f"{name} is unset — required for the ses email backend")
+        raise RuntimeError(f"{name} is unset — required by the email sender")
     return value

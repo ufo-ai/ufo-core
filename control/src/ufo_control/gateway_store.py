@@ -1,12 +1,4 @@
-"""Postgres custody of `onboard_claim` — the pre-tenant onboarding ledger.
-
-Onboarding happens before any workspace exists, so the claim is a control-plane platform record, not
-a tenant row: it lives in the `ufo_control` schema of the shared application database, owned by the
-Postgres owner role and never granted to a tenant role, so no RLS policy touches it. The gateway
-creates the schema and table idempotently at startup (`ensure_table`), because it is provisioned out
-of band from the tenant alembic chain. A partial-unique index keeps one active claim per session ref
-— a claim is active until it resolves to a workspace (`resulting_workspace_id`). The verification
-code is held only as a hash; the plaintext code exists only in the email."""
+"""Postgres custody of the hosted onboarding claim ledger."""
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -30,11 +22,9 @@ DDL = (
     "  attempts integer not null default 0,"
     "  expires_at timestamptz not null,"
     "  verified_at timestamptz,"
-    "  tenant_name text,"
     "  resulting_workspace_id text,"
     "  invite_id uuid,"
     "  created_at timestamptz not null default now())",
-    f"alter table {TABLE} add column if not exists invite_id uuid",
     f"create unique index if not exists {ACTIVE_INDEX} on {TABLE} (surface, surface_ref)"
     "  where resulting_workspace_id is null",
 )
@@ -51,8 +41,6 @@ class OnboardClaim:
     expires_at: datetime
     attempts: int
     verified_at: datetime | None
-    tenant_name: str | None
-    resulting_workspace_id: str | None
     invite_id: UUID | None
 
 
@@ -107,8 +95,6 @@ class OnboardStore:
             expires_at=_aware(row["expires_at"]),  # type: ignore[arg-type]
             attempts=int(row["attempts"]),
             verified_at=_aware(row["verified_at"]),
-            tenant_name=row["tenant_name"],
-            resulting_workspace_id=row["resulting_workspace_id"],
             invite_id=row["invite_id"],
         )
 
@@ -118,18 +104,12 @@ class OnboardStore:
     async def mark_verified(self, claim_id: UUID) -> None:
         await self._update("verified_at = now()", claim_id)
 
-    async def start_provisioning(self, claim_id: UUID, tenant_name: str) -> None:
-        await self._update("tenant_name = $2", claim_id, tenant_name)
+    async def complete(self, claim_id: UUID, resulting_workspace_id: str) -> None:
+        await self._update("resulting_workspace_id = $2", claim_id, resulting_workspace_id)
 
-    async def complete(
-        self, claim_id: UUID, tenant_name: str | None, resulting_workspace_id: str
-    ) -> None:
-        await self._update(
-            "tenant_name = $2, resulting_workspace_id = $3",
-            claim_id,
-            tenant_name,
-            resulting_workspace_id,
-        )
+    async def delete_claim(self, claim_id: UUID) -> None:
+        async with self.pool.acquire() as connection:
+            await connection.execute(f"delete from {TABLE} where id = $1", claim_id)
 
     async def _update(self, assignment: str, claim_id: UUID, *values: object) -> None:
         async with self.pool.acquire() as connection:
