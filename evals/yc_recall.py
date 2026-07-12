@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from evals.harness.capability import (
@@ -35,6 +36,7 @@ class RecallSpec:
     forbidden: tuple[ExpectedCall, ...] = ()
     asks_question: bool = False
     max_response_chars: int | None = None
+    predicate: Callable[[str], bool] | None = None
 
 
 def _matches(call: ToolInvocation, expected: ExpectedCall) -> bool:
@@ -83,6 +85,8 @@ def _grader(spec: RecallSpec) -> Grader:
         ]
         if absent:
             return CapabilityVerdict(False, f"missing answer concepts: {'; '.join(absent)}")
+        if spec.predicate is not None and not spec.predicate(output.response):
+            return CapabilityVerdict(False, "answer failed its structural constraint")
         found_links = URL_PATTERN.findall(output.response)
         if len(found_links) < spec.links:
             return CapabilityVerdict(
@@ -100,70 +104,75 @@ def _grader(spec: RecallSpec) -> Grader:
 MEMORY = (ExpectedCall("memory_search"),)
 YC_ASK = (ExpectedCall("yc_read", action="ask"),)
 
+
+def _series_a_recommendation(text: str) -> bool:
+    return (
+        re.search(
+            r"\b(?:yes|no|start|begin|raise now|should raise|wait|hold off|not yet|too early|"
+            r"delay)\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+        is not None
+    )
+
+
 SPECS = (
     RecallSpec(
         "r01-fundraise-runway-timing",
-        "We have ten months of runway. Should we start our Series A now, and how long might it "
-        "take? Use current YC guidance and link the source you rely on.",
+        "We have ten months of runway. Is it time to start our Series A?",
         MEMORY,
-        (("current", "as of"), ("timeline", "timing", "varies")),
+        (("guidance", "manual", "runway"),),
+        predicate=_series_a_recommendation,
     ),
     RecallSpec(
         "r02-manual-over-library",
-        "An old YC talk conflicts with current Bookface guidance. Compare both, link each "
-        "artifact, and tell me which one should govern our decision.",
+        "An older YC talk conflicts with what I'm seeing on Bookface. Which should I follow?",
         MEMORY,
         (("manual", "bookface"), ("library", "talk"), ("current", "historical", "older")),
         links=2,
     ),
     RecallSpec(
         "r03-series-a-benchmark-caveats",
-        "Find the current YC guidance on Series A revenue and growth benchmarks. Include the "
-        "artifact date, its methodology or basis, caveats, and a source link.",
+        "What are the current Series A revenue and growth benchmarks?",
         YC_ASK,
         (("date", "dated", "as of"), ("method", "basis"), ("caveat", "context", "varies")),
         web_dependent=True,
     ),
     RecallSpec(
         "r04-customer-reference-gating",
-        "Three VCs want customer calls before showing serious interest. What does YC guidance say "
-        "about when to provide references without overburdening customers? Cite it.",
+        "Three VCs want customer reference calls before showing much interest. Should we agree?",
         MEMORY,
         (("serious", "committed", "interest"), ("customer",), ("burden", "protect", "limit")),
     ),
     RecallSpec(
         "r05-bio-fundraise-differences",
-        "How should a biotech fundraise differ from a software fundraise? Separate general YC "
-        "fundraising advice from sector-specific guidance and cite both where available.",
+        "Does fundraising work differently for a biotech startup than for a software startup?",
         MEMORY,
         (("general",), ("sector", "biotech", "specific")),
     ),
     RecallSpec(
         "r06-delaware-wind-down-order",
-        "We have little cash and may shut down our Delaware company. Give me the sequence from YC "
-        "guidance, call out legal and tax limits, and link the source.",
+        "We're low on cash and may need to shut down our Delaware company. What should we do?",
         MEMORY,
         (("sequence", "order", "first"), ("legal", "lawyer", "counsel"), ("tax",)),
     ),
     RecallSpec(
         "r07-enterprise-security-review",
-        "A prospect sent a 250-question security form and asks whether we are SOC 2 compliant. "
-        "What should we do first? Distinguish a questionnaire from an audit and cite YC guidance.",
+        "A prospect sent us a 250-question security form and asked if we're SOC 2 compliant. How "
+        "should we respond?",
         MEMORY,
         (("questionnaire",), ("audit", "soc 2"), ("honest", "accurate"), ("gate", "control")),
     ),
     RecallSpec(
-        "r08-yc-o1-letter-scope",
-        "Can YC provide an O-1 support letter for a new employee and make multiple custom "
-        "versions? Summarize eligibility and scope limits, recommend counsel, and cite the "
-        "current manual.",
+        "r08-yc-candidate-closing-help",
+        "Can YC help convince a potential employee to join?",
         MEMORY,
-        (("eligible", "eligibility"), ("scope", "limit"), ("counsel", "lawyer", "attorney")),
+        (("candidate", "employee", "hire"), ("call", "talk", "speak"), ("partner", "yc")),
     ),
     RecallSpec(
         "r09-visitor-versus-founder-work",
-        "Can a founder enter on ESTA, go on US payroll, and build the company while visiting? "
-        "Separate visitor activity from work authorization, add a counsel caveat, and cite YC.",
+        "Can a founder enter on ESTA, go on US payroll, and build the company while visiting?",
         MEMORY,
         (
             ("visitor", "esta"),
@@ -173,23 +182,21 @@ SPECS = (
     ),
     RecallSpec(
         "r10-early-equity-grant",
-        "We are pre-seed and hiring engineer number three. Should we wait for the next round "
-        "before granting equity? Retrieve the current stage mechanics and deadlines, with a "
-        "source link.",
+        "We're pre-seed and hiring our third engineer. Should we wait until our next round to "
+        "grant equity?",
         MEMORY,
         (("stage", "pre-seed", "early"), ("mechanic", "grant", "option"), ("deadline", "timing")),
     ),
     RecallSpec(
         "r11-first-engineer-interview",
-        "Should our first engineering interview use puzzles or a realistic work test? Find YC "
-        "guidance and explain how to make the interview structured and job-like.",
+        "Should our first engineering interview use coding puzzles or something closer to the "
+        "actual job?",
         MEMORY,
         (("realistic", "job-like", "work sample"), ("structured", "consistent")),
     ),
     RecallSpec(
         "r12-first-sales-hire-economics",
-        "Our product costs $3k annually. Is it time to hire our first account executive? Use YC "
-        "guidance to connect founder-led sales, sales economics, and current benchmark caveats.",
+        "Our product is $3k a year. Is it time to hire our first account executive?",
         MEMORY,
         (
             ("founder-led", "founder led"),
@@ -199,9 +206,7 @@ SPECS = (
     ),
     RecallSpec(
         "r13-yc-public-launch-sequence",
-        "Our demo is not polished. How should we sequence the YC Directory, Launch Bookface, "
-        "Launch YC, Hacker News, and Product Hunt? Distinguish the surfaces and cite current "
-        "guidance.",
+        "How should we launch our unpolished demo?",
         MEMORY,
         (
             ("directory",),
@@ -214,9 +219,7 @@ SPECS = (
     ),
     RecallSpec(
         "r14-user-interview-behavior",
-        "Prospects say they would pay, but nobody has. Using the public YC Startup Library, "
-        "explain how to interview for past behavior, real pain, and commitment instead of "
-        "hypotheticals.",
+        "Prospects keep saying they'd pay, but nobody has. What should we ask in user interviews?",
         MEMORY,
         (
             ("past behavior", "actually did"),
@@ -227,8 +230,7 @@ SPECS = (
     ),
     RecallSpec(
         "r15-pmf-signal-synthesis",
-        "Paid acquisition is growing signups but retention is poor. Use the public Startup Library "
-        "to separate acquisition from durable demand and retention, noting historical heuristics.",
+        "Paid acquisition is growing signups, but retention is poor. What's wrong?",
         MEMORY,
         (
             ("acquisition",),
@@ -239,8 +241,7 @@ SPECS = (
     ),
     RecallSpec(
         "r16-pricing-guidance-conflict",
-        "An old YC pricing talk conflicts with current enterprise pricing guidance. Compare both, "
-        "explain freshness and authority, and propose a measurable pricing test with links.",
+        "We've found conflicting YC advice on enterprise pricing. What should we do?",
         MEMORY,
         (
             ("old", "historical"),
@@ -252,9 +253,7 @@ SPECS = (
     ),
     RecallSpec(
         "r17-consumer-metric-selection",
-        "For our consumer product, should we optimize signups, DAU, or revenue? Use the public YC "
-        "Library to connect the product loop and stage to acquisition, activation, retention, and "
-        "monetization without claiming one universal metric.",
+        "For our consumer product, should we optimize signups, DAU, or revenue?",
         MEMORY,
         (
             ("stage", "product loop"),
@@ -267,24 +266,23 @@ SPECS = (
     ),
     RecallSpec(
         "r18-company-directory-filtering",
-        "Find active W25 B2B infrastructure companies that are hiring, support remote work, and "
-        "have raised a Series A. Return linked current evidence for every filter.",
+        "Which active W25 B2B infrastructure companies are hiring remotely and have raised a "
+        "Series A?",
         (ExpectedCall("yc_read", action="search", entity="companies"),),
         (("current", "as of"), ("evidence", "source")),
         web_dependent=True,
     ),
     RecallSpec(
         "r19-founder-background-filtering",
-        "Find active W24 founders who studied computer science at MIT and previously worked at "
-        "Google. Link profile evidence, disambiguate identities, and respect profile privacy.",
+        "Which active W24 founders studied computer science at MIT and previously worked at "
+        "Google?",
         (ExpectedCall("yc_read", action="search", entity="founders"),),
         (("identity", "disambigu"), ("profile", "evidence"), ("privacy", "access")),
         web_dependent=True,
     ),
     RecallSpec(
         "r20-investor-portfolio-join",
-        "Find which investor named Northstar backs YC developer-tools companies that are hiring. "
-        "Disambiguate the investor before joining to linked company evidence.",
+        "Which investor named Northstar backs YC developer-tools companies that are hiring?",
         (
             ExpectedCall("yc_read", action="search", entity="investors"),
             ExpectedCall("yc_read", action="search", entity="companies"),
@@ -295,23 +293,21 @@ SPECS = (
     ),
     RecallSpec(
         "r21-forum-anecdote-versus-policy",
-        "What do recent Bookface discussions say about confidentiality in investor updates, and "
-        "what is the official current rule? Compare multiple dated anecdotes with policy, link the "
-        "sources, and paraphrase private posts minimally.",
+        "What are founders saying on Bookface about confidentiality in investor updates?",
+        (ExpectedCall("yc_read", action="search", entity="forum"),),
         (
-            ExpectedCall("memory_search"),
-            ExpectedCall("yc_read", action="search", entity="forum"),
+            ("founder", "forum", "discussion"),
+            ("confidential", "privacy"),
+            ("investor update", "investor communication"),
         ),
-        (("dated", "date"), ("anecdote", "discussion"), ("policy", "official")),
         links=2,
         web_dependent=True,
         max_response_chars=2500,
     ),
     RecallSpec(
         "r22-public-versus-bookface-launch",
-        "Find public launches by AI security companies and related founder-only Bookface posts. "
-        "Distinguish the audiences, deduplicate companies, preserve access boundaries, and link "
-        "evidence.",
+        "Which AI security companies have launched recently, and what are founders saying about "
+        "them on Bookface?",
         (
             ExpectedCall("yc_read", action="search", entity="launches"),
             ExpectedCall("yc_read", action="search", entity="forum"),
@@ -326,8 +322,7 @@ SPECS = (
     ),
     RecallSpec(
         "r23-current-ml-job-search",
-        "Find current remote, full-time machine-learning roles that list salary and equity. Return "
-        "current job links, and do not search candidate profiles.",
+        "Are there any remote, full-time machine-learning roles that include salary and equity?",
         (ExpectedCall("yc_read", action="search", entity="jobs"),),
         (("current", "as of"), ("salary",), ("equity",)),
         web_dependent=True,
@@ -335,9 +330,7 @@ SPECS = (
     ),
     RecallSpec(
         "r24-deals-company-batch-trap",
-        "Find active SOC 2 or security-compliance deals for a W25 company. Explain what YC Deals "
-        "means, avoid treating company batch as a deal filter, and cite current eligibility and "
-        "terms.",
+        "What YC deals can our W25 company use for SOC 2 or security compliance?",
         (ExpectedCall("yc_read", action="search", entity="deals"),),
         (("discount", "perk", "offer"), ("eligib",), ("current", "terms"), ("batch", "w25")),
         web_dependent=True,

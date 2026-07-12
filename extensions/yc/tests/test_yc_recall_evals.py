@@ -72,14 +72,61 @@ def test_recall_cases_guard_sensitive_searches_and_private_paraphrase() -> None:
 async def test_indexed_recall_grader_requires_memory_and_grounded_answer() -> None:
     case = _case("r01-fundraise-runway-timing")
     response = (
-        "As of the current manual, the timeline varies by company. "
-        "Source: https://bookface.ycombinator.com/example"
+        "Start now based on the manual guidance. Source: https://bookface.ycombinator.com/example"
     )
     passed = await case.grader(_output(response, _call("memory_search", queries="fundraise")))
     failed = await case.grader(_output(response))
     assert passed.passed
     assert not failed.passed
     assert "memory_search" in failed.reason
+
+
+async def test_runway_answer_requires_a_series_a_recommendation() -> None:
+    case = _case("r01-fundraise-runway-timing")
+    calls = (_call("memory_search", queries="fundraise"),)
+    response = "Current guidance: https://bookface.ycombinator.com/example"
+    assert not (await case.grader(_output(response, *calls))).passed
+    neutral = "Series A raise guidance: https://bookface.ycombinator.com/example"
+    assert not (await case.grader(_output(neutral, *calls))).passed
+    ungrounded = "Yes. Source: https://bookface.ycombinator.com/example"
+    assert not (await case.grader(_output(ungrounded, *calls))).passed
+
+
+async def test_runway_answer_does_not_need_an_unasked_timeline() -> None:
+    case = _case("r01-fundraise-runway-timing")
+    response = (
+        "Based on the current guidance, start now with ten months of runway. "
+        "Source: https://bookface.ycombinator.com/example"
+    )
+    assert (
+        await case.grader(_output(response, _call("memory_search", queries="fundraise")))
+    ).passed
+    natural = (
+        "Yes, the runway guidance says to raise now. "
+        "Source: https://bookface.ycombinator.com/example"
+    )
+    assert (await case.grader(_output(natural, _call("memory_search", queries="fundraise")))).passed
+    negative = "No, ten months of runway is too soon. https://bookface.ycombinator.com/example"
+    assert (
+        await case.grader(_output(negative, _call("memory_search", queries="fundraise")))
+    ).passed
+
+
+async def test_forum_answer_does_not_need_an_unasked_policy_comparison() -> None:
+    case = _case("r21-forum-anecdote-versus-policy")
+    response = (
+        "Founders favor narrow distribution to protect confidentiality in investor updates. "
+        "https://bookface.ycombinator.com/forum/example "
+        "https://bookface.ycombinator.com/knowledge/example"
+    )
+    assert (
+        await case.grader(
+            _output(
+                response,
+                _call("yc_read", action="search", entity="forum"),
+            )
+        )
+    ).passed
 
 
 async def test_live_join_grader_requires_investor_before_company_search() -> None:
