@@ -12,7 +12,7 @@ import base64
 import json
 from collections.abc import Callable, Iterator
 from urllib.parse import parse_qs
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -81,6 +81,10 @@ def _install(
     monkeypatch.setattr(pipedream, "pipedream_client", lambda: client)
 
 
+def _owner(workspace_id: UUID) -> str:
+    return pipedream.connection_user_id(workspace_id, "feed-sync")
+
+
 async def test_pipedream_broker_yields_a_transport_that_proxies_provider_http(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -88,7 +92,7 @@ async def test_pipedream_broker_yields_a_transport_that_proxies_provider_http(
     upstream URL, the caller's interesting headers arrive `x-pd-proxy-`-prefixed, and the upstream
     body and status come back verbatim."""
     workspace_id = uuid4()
-    owner = f"{pipedream.EXTERNAL_USER_PREFIX}{workspace_id}"
+    owner = _owner(workspace_id)
     page = {"history": [], "historyId": "777"}
 
     def upstream(target: str, request: httpx.Request) -> httpx.Response:
@@ -117,7 +121,7 @@ async def test_proxy_passes_an_upstream_404_through_verbatim(
     """Gmail's expired-cursor signal is a 404 on the history walk; the proxy hop must not swallow
     or re-shape it, or the source would never raise `CursorExpired` and refetch."""
     workspace_id = uuid4()
-    owner = f"{pipedream.EXTERNAL_USER_PREFIX}{workspace_id}"
+    owner = _owner(workspace_id)
 
     def upstream(target: str, request: httpx.Request) -> httpx.Response:
         return httpx.Response(404, json={"error": {"code": 404, "message": "historyId expired"}})
@@ -135,10 +139,11 @@ async def test_pipedream_broker_refuses_a_foreign_account(
 ) -> None:
     """The confused-deputy guard reads the account's owning external user (never a token); an
     account owned by another workspace's user fails loud before any transport is built."""
-    foreign = f"{pipedream.EXTERNAL_USER_PREFIX}{uuid4()}"
+    workspace_id = uuid4()
+    foreign = _owner(uuid4())
     _install(monkeypatch, foreign, lambda target, request: httpx.Response(200))
-    with pytest.raises(pipedream.PipedreamError, match="owned by"):
-        await PipedreamBroker().credential(uuid4(), "gmail", ACCOUNT)
+    with pytest.raises(pipedream.PipedreamError, match="not owned by workspace"):
+        await PipedreamBroker().credential(workspace_id, "gmail", ACCOUNT)
 
 
 async def test_pipedream_broker_says_reconnect_for_an_account_it_does_not_hold(
@@ -167,7 +172,7 @@ async def test_pipedream_broker_refuses_an_account_on_the_wrong_app(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace_id = uuid4()
-    owner = f"{pipedream.EXTERNAL_USER_PREFIX}{workspace_id}"
+    owner = _owner(workspace_id)
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/oauth/token":

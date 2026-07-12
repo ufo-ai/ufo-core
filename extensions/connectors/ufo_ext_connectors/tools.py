@@ -46,6 +46,10 @@ class DescribeExternalToolsInput(BaseModel):
 class CallExternalToolInput(BaseModel):
     tool_name: str = Field(description="Exact tool name from describe_external_tools results.")
     source_id: str = Field(description="The connector source ID, e.g. 'github', 'gmail'.")
+    account_id: str | None = Field(
+        default=None,
+        description="Connected-account ID. Required when this agent has multiple accounts.",
+    )
     arguments: dict[str, JsonValue] = Field(
         description="Arguments for the connector tool as a dict. Pass {} for tools that take no "
         "parameters."
@@ -105,7 +109,7 @@ async def describe_external_tools(ctx: ToolContext, args: DescribeExternalToolsI
 
 async def call_external_tool(ctx: ToolContext, args: CallExternalToolInput) -> ToolResult:
     entry = _registry(ctx).entry(args.source_id)
-    account_id = await ctx.connector_account(args.source_id)
+    account_id = await ctx.connector_account(args.source_id, args.account_id)
     response = await entry.broker.execute(
         ctx.turn.workspace_id,
         entry.provider,
@@ -201,7 +205,8 @@ CONNECTOR_TOOLS: tuple[ToolDef, ...] = (
             "Execute an external connector tool. PREREQUISITE: Must call describe_external_tools "
             "first to get the input schema. The tool's own parameters go nested under 'arguments', "
             "never at the top level — e.g. {tool_name: 'GITHUB_LIST_PULL_REQUESTS', source_id: "
-            "'github', arguments: {owner: 'acme', repo: 'widgets', state: 'open'}}."
+            "'github', arguments: {owner: 'acme', repo: 'widgets', state: 'open'}}. Pass "
+            "account_id when this agent has more than one connected account for the source."
         ),
         input_model=CallExternalToolInput,
         handler=call_external_tool,

@@ -6,12 +6,11 @@ this extension's `oauth` route instead. The route (async) mints the token, pinni
 error redirects back to itself, and redirects on to Pipedream's hosted Connect Link scoped to the
 provider's app — riding the deploy's own OAuth client when its env is set, else Pipedream's shared
 one (verified live for Gmail's restricted scopes). Pipedream documents no redirect param carrying
-the account id, so the return
-leg carries only this bridge's own outcome marker: the success leg hands core a fixed
-`code` and `exchange` resolves the account server-side — the newest of this workspace's external
-user's accounts on the app, ownership asserted from the account's `external_id` — so nothing an
-attacker appends to the return leg can name a foreign account into the grant. The flow reads top to
-bottom: authorize_url → oauth_route (start leg, then return leg) → exchange."""
+the account id, so each sealed connect state gets a distinct external user. The success leg resolves
+that user's newest account and hands its id to core; `exchange` retrieves that exact id and
+reasserts the state-scoped owner and app before a grant binds. Overlapping callbacks therefore
+cannot select another flow's account. The flow reads top to bottom: authorize_url → oauth_route
+(start leg, then return leg) → exchange."""
 
 import os
 from dataclasses import dataclass
@@ -40,9 +39,9 @@ class PipedreamOAuthProvider:
     """One provider's OAuth descriptor keyed into `serve`'s connect registry. `host` is the
     provider's own API host the derived grant admits and meters; `app` is the Pipedream app slug
     the consent leg opens. `authorize_url` is pure — it points the browser at the async `oauth`
-    route — and `exchange` binds the account the completed consent produced, resolved server-side
-    from this workspace's external user (never from the return leg). The account's token stays with
-    Pipedream; connector calls execute through it server-side, so no secret is read or stored."""
+    route — and `exchange` binds only the exact account owned by this sealed state's external user.
+    The account's token stays with Pipedream; connector calls execute through it server-side, so no
+    secret is read or stored."""
 
     provider: str
     host: str
@@ -52,29 +51,41 @@ class PipedreamOAuthProvider:
         query = urlencode({"provider": self.provider, "state": state, "callback": redirect_uri})
         return f"{_origin(redirect_uri)}{OAUTH_ROUTE_MOUNT}?{query}"
 
-    async def exchange(self, code: str, redirect_uri: str, workspace_id: UUID) -> OAuthAccount:
-        external_user = f"{pipedream.EXTERNAL_USER_PREFIX}{workspace_id}"
-        account = await pipedream.pipedream_client().newest_account(external_user, self.app)
+    async def exchange(
+        self, code: str, _redirect_uri: str, workspace_id: UUID, state: str
+    ) -> OAuthAccount:
+        external_user = pipedream.connection_user_id(workspace_id, state)
+        account = await pipedream.pipedream_client().connected_account(code, external_user)
+        if account.app != self.app:
+            raise pipedream.PipedreamError(
+                403, f"connected account {code!r} belongs to {account.app!r}, not {self.app!r}"
+            )
         return OAuthAccount(account_id=account.account_id)
 
 
 async def oauth_route(ctx: ExtensionContext, request: Request) -> Response:
     """The browser bridge, both legs. Start leg (no outcome marker yet): mint a Connect token for
-    this workspace's external user with both return legs pinned to this route, and redirect the
+    this sealed state's external user with both return legs pinned to this route, and redirect the
     member to the hosted Connect Link scoped to the provider's app. Return leg
-    (`outcome=connected`): redirect on to core's connect callback, handing the fixed outcome as the
-    `code` — core's `exchange` resolves the account server-side, so the return leg carries no
-    account id to trust. A failed consent is answered loud, never by re-minting consent. The sealed
-    `state` and core `callback` ride through untouched, so the grant still binds to the member,
-    agent, and conversation."""
+    (`outcome=connected`): resolve that user's account and redirect its id to core; core retrieves
+    the exact account and reasserts its owner and app. A failed consent is answered loud, never by
+    re-minting consent. The sealed `state` and core `callback` ride through untouched, so the grant
+    still binds to the member, agent, and conversation."""
     params = request.query_params
     state = params.get("state", "")
     callback = params.get("callback", "")
     if not state or not callback:
         return Response(status_code=400, content="connect bridge is missing state or callback")
+    provider = params.get("provider", "")
+    spec = CONNECTORS.get(provider)
+    if spec is None:
+        return Response(status_code=404, content=f"unknown connector provider {provider!r}")
     outcome = params.get(OUTCOME_PARAM, "")
     if outcome == OUTCOME_CONNECTED:
-        landing = f"{callback}?{urlencode({'state': state, 'code': OUTCOME_CONNECTED})}"
+        account = await pipedream.pipedream_client().newest_account(
+            pipedream.connection_user_id(ctx.store.workspace_id, state), spec.app
+        )
+        landing = f"{callback}?{urlencode({'state': state, 'code': account.account_id})}"
         return Response(status_code=REDIRECT_STATUS, headers={"location": landing})
     if outcome:
         return Response(
@@ -82,14 +93,10 @@ async def oauth_route(ctx: ExtensionContext, request: Request) -> Response:
             content=f"connector consent did not complete (outcome {outcome!r}) — "
             "return to chat and ask the agent to connect again",
         )
-    provider = params.get("provider", "")
-    spec = CONNECTORS.get(provider)
-    if spec is None:
-        return Response(status_code=404, content=f"unknown connector provider {provider!r}")
     bridge = f"{_origin(callback)}{OAUTH_ROUTE_MOUNT}"
     ride_through = {"provider": provider, "state": state, "callback": callback}
     token = await pipedream.pipedream_client().connect_token(
-        external_user_id=f"{pipedream.EXTERNAL_USER_PREFIX}{ctx.store.workspace_id}",
+        external_user_id=pipedream.connection_user_id(ctx.store.workspace_id, state),
         success_redirect_uri=(
             f"{bridge}?{urlencode({**ride_through, OUTCOME_PARAM: OUTCOME_CONNECTED})}"
         ),

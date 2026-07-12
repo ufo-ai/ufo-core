@@ -84,7 +84,7 @@ CONNECTORS: dict[str, ConnectorSpec] = {
     "confluence": ConnectorSpec("Confluence", "confluence", "api.atlassian.com"),
     "freshdesk": ConnectorSpec("Freshdesk", "freshdesk", "api.freshdesk.com"),
     "bamboohr": ConnectorSpec("BambooHR", "bamboohr", "api.bamboohr.com"),
-    "active_campaign": ConnectorSpec("ActiveCampaign", "active_campaign", "api.activecampaign.com"),
+    "activecampaign": ConnectorSpec("ActiveCampaign", "active_campaign", "api.activecampaign.com"),
     "ashby": ConnectorSpec("Ashby", "ashby", "api.ashbyhq.com"),
     "brex": ConnectorSpec("Brex", "brex", "platform.brexapis.com"),
     "instagram": ConnectorSpec("Instagram", "instagram", "graph.instagram.com"),
@@ -111,11 +111,9 @@ class ComposioError(RuntimeError):
 class ComposioClient:
     """Composio v3 over httpx. `connect_link` mints the hosted OAuth link the member opens (riding
     the toolkit's existing auth config, else a managed one), and `connected_account` confirms an
-    account is active
-    and owned by `expected_user_id`, the workspace's brokered Composio user `connect_link` minted
-    against, so a foreign account id (injected on the return leg) is refused — the account's token
-    never leaves Composio, so ownership is asserted from the account's metadata, not by reading a
-    secret. `list_tools` and `tool_schema` are the catalog the dynamic tools search and describe;
+    account is active, owned by the expected workspace user, and authenticates the requested
+    toolkit. A foreign or cross-toolkit account id is refused from metadata without reading a
+    token. `list_tools` and `tool_schema` are the catalog the dynamic tools search and describe;
     `execute_tool` runs one on Composio's server-side execute API for a bound account, bounding the
     arguments payload before the call. Each call opens and closes its own client so a transport
     override (a test's MockTransport) is honoured and no connection leaks."""
@@ -134,7 +132,9 @@ class ComposioClient:
             raise ComposioError(502, f"connect link carried no redirect_url: {payload!r}")
         return redirect
 
-    async def connected_account(self, account_id: str, expected_user_id: str) -> OAuthAccount:
+    async def connected_account(
+        self, account_id: str, expected_user_id: str, expected_toolkit: str
+    ) -> OAuthAccount:
         payload = await self._get(f"/connected_accounts/{account_id}")
         owner = payload.get("user_id")
         if not isinstance(owner, str) or owner != expected_user_id:
@@ -145,6 +145,17 @@ class ComposioClient:
         status = str(payload.get("status") or "").upper()
         if status != ACTIVE_STATUS:
             raise ComposioError(409, f"connected account {account_id!r} is {status or 'unknown'}")
+        toolkit = payload.get("toolkit")
+        auth_config = payload.get("auth_config")
+        if toolkit is None and isinstance(auth_config, dict):
+            toolkit = auth_config.get("toolkit")
+        slug = toolkit.get("slug") if isinstance(toolkit, dict) else toolkit
+        if slug != expected_toolkit:
+            raise ComposioError(
+                403,
+                f"connected account {account_id!r} authenticates toolkit {slug!r}, "
+                f"not {expected_toolkit!r}",
+            )
         return OAuthAccount(account_id=account_id)
 
     async def list_tools(

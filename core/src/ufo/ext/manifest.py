@@ -78,11 +78,14 @@ class JobSpec:
 class RouteSpec:
     """An HTTP endpoint an extension serves. The app mounts `handler` for `method` at
     `/ext/<name>/<path>`; each request is handed the extension's scoped ExtensionContext and the
-    incoming Request, and the handler returns the Response."""
+    incoming Request, and the handler returns the Response. `identify` verifies and returns a
+    request's workspace when the route can run on shared serve; an unidentified route is mounted
+    only on a dedicated server."""
 
     method: Literal["GET", "POST"]
     path: str
     handler: Callable[[ExtensionContext, Request], Awaitable[Response]]
+    identify: Callable[[Request], UUID | None] | None = None
 
 
 @dataclass(frozen=True)

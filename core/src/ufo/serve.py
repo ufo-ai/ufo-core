@@ -181,11 +181,6 @@ def run() -> None:
     app.state.artifact_token_secret = artifact_secret
     app.include_router(router)
     app.include_router(artifacts_router)
-    # Jobs run on both tiers: `fire` enumerates workspaces and binds each, so one launch drives the
-    # whole fleet and a per-tenant deploy is the single-workspace case of the same path. Only the
-    # per-tenant deploy registers its configured sources and mounts its one workspace's extension
-    # routes and installed surfaces here; the shared fleet's per-workspace surfaces are admitted
-    # elsewhere (the control-plane gateway).
     sync_driver = SyncDriver(
         backends=_source_backends(manifests),
         blob=blob,
@@ -198,8 +193,8 @@ def run() -> None:
     _launch_jobs(
         config, manifests, sync_driver, index, embed, page_feed, dbos_client, blob, carrier
     )
+    _mount_ext_routes(app, manifests, workspace_id, credentials, index, embed)
     if workspace_id is not None:
-        _mount_ext_routes(app, manifests, workspace_id, credentials, index, embed)
         _mount_surfaces(
             app,
             manifests,
@@ -596,16 +591,21 @@ def _select_auth_proxy(
 def _mount_ext_routes(
     app: FastAPI,
     manifests: tuple[Manifest, ...],
-    workspace_id: UUID,
+    workspace_id: UUID | None,
     credentials: CredentialStore | None,
     index: IndexBackend,
     embed: EmbedClient,
 ) -> None:
-    """Mount each extension's declared routes at `/ext/<name>/<path>`, every request bound to that
-    extension's workspace-scoped ExtensionContext. An extension serving routes without a credential
-    key set fails loud, since its context needs the credential store."""
+    """Mount extension routes with a verified workspace-scoped context."""
     for manifest in manifests:
-        if not manifest.routes:
+        routes = tuple(
+            spec
+            for spec in manifest.routes
+            if workspace_id is not None or spec.identify is not None
+        )
+        if manifest.routes and not routes:
+            log("serve.shared_route.deferred", extension=manifest.name)
+        if not routes:
             continue
         if credentials is None:
             raise RuntimeError(
@@ -613,15 +613,21 @@ def _mount_ext_routes(
             )
         declared = frozenset(slot.name for slot in manifest.credentials)
         context = context_for(manifest.name, declared, index, embed)
-        for spec in manifest.routes:
+        for spec in routes:
 
             async def endpoint(
                 request: Request,
                 handler=spec.handler,
+                identify=spec.identify,
                 extension_context=context,
-                wsid=workspace_id,
+                pinned_workspace=workspace_id,
             ) -> Response:
-                with ws(wsid):
+                identified = identify(request) if identify is not None else pinned_workspace
+                if identified is None or (
+                    pinned_workspace is not None and identified != pinned_workspace
+                ):
+                    return Response("unauthorized", status_code=401)
+                with ws(identified):
                     return await handler(extension_context, request)
 
             app.add_route(

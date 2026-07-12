@@ -21,19 +21,21 @@ driver reads through the broker — no key ever lands here. Everything this pack
 read-only; grant no write scope anywhere. Confirm with the member before registering anything —
 the speaker gates the granting act.
 
-- Google Meet: ask the member to connect `google_meet`, then call `sync_source` with provider
-  `google_meet`. The source reads generated Meet transcripts (rendered as speaker-grouped
-  dialogue) and Gemini smart notes. The operator first creates a custom Google OAuth auth config
-  for the `googlemeet` toolkit in the Composio project, requesting only
+- Google Meet: ask the member to connect `google_meet`, inspect it with `sync_source`, then
+  register the exact `meeting_artifacts` stream. The source reads generated Meet transcripts
+  (rendered as speaker-grouped dialogue) and Gemini smart notes. The operator first creates a
+  custom Google OAuth auth config for the `googlemeet` toolkit in the Composio project, requesting
+  only
   `https://www.googleapis.com/auth/meetings.space.readonly` — that one scope covers conference
   records, transcripts, and transcript entries. Adding
   `https://www.googleapis.com/auth/documents.readonly` is optional: with it, smart-note Docs are
   inlined as prose; without it, each page keeps the Doc link and syncs fine.
-- Slack chatter: ask the member to connect `slack`, then call `sync_source` with provider
-  `slack`. The sync reads conversations through the granted account, so the consent's scope set
-  must include the conversation read scopes (`channels:read`, `groups:read`, `im:read`,
-  `mpim:read`, and the matching `*:history`); if the project's Slack auth config requests more
-  than reads, have the operator narrow it the same way as Google Meet's.
+- Slack chatter: ask the member to connect `slack`, inspect it with `sync_source`, then register
+  the exact `users`, `conversations`, `conversation_threads`, `messages`, and
+  `message_participants` streams. The sync reads conversations through the granted account, so the
+  consent's scope set must include the conversation read scopes (`channels:read`, `groups:read`,
+  `im:read`, `mpim:read`, and the matching `*:history`); if the project's Slack auth config
+  requests more than reads, have the operator narrow it the same way as Google Meet's.
 
 ## 3 — The state repo
 

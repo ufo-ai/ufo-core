@@ -461,7 +461,9 @@ class _SampleConnectorOAuth:
     def authorize_url(self, state: str, redirect_uri: str) -> str:
         return f"{CONNECTOR_AUTHORIZE_URL}?state={state}&redirect_uri={redirect_uri}"
 
-    async def exchange(self, code: str, redirect_uri: str, workspace_id: UUID) -> OAuthAccount:
+    async def exchange(
+        self, code: str, redirect_uri: str, workspace_id: UUID, state: str
+    ) -> OAuthAccount:
         return OAuthAccount(account_id=CONNECTOR_ACCOUNT)
 
 

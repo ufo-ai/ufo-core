@@ -6,6 +6,7 @@ connect registry and the `ConnectorRegistry` the dynamic connector tools (the `c
 extension) and the sync runner route through; Composio holds each account's token server-side, so
 no secret ever reaches this deploy."""
 
+from ufo.sdk.connectors import connect_bridge_workspace
 from ufo.sdk.manifest import ConnectorProvider, Manifest, RouteSpec
 from ufo_ext_composio.broker import ComposioBroker
 from ufo_ext_composio.client import CONNECTORS
@@ -30,5 +31,12 @@ def manifest() -> Manifest:
             )
             for provider, spec in CONNECTORS.items()
         ),
-        routes=(RouteSpec(method="GET", path=OAUTH_ROUTE_PATH, handler=oauth_route),),
+        routes=(
+            RouteSpec(
+                method="GET",
+                path=OAUTH_ROUTE_PATH,
+                handler=oauth_route,
+                identify=connect_bridge_workspace,
+            ),
+        ),
     )

@@ -34,3 +34,6 @@ from ufo.grants import (
 from ufo.grants import (
     OAuthProvider as OAuthProvider,
 )
+from ufo.grants import (
+    connect_bridge_workspace as connect_bridge_workspace,
+)

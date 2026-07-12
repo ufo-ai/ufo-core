@@ -90,7 +90,7 @@ class ComposioBroker:
         broker_user = f"{composio.EXTERNAL_USER_PREFIX}{workspace_id}"
         client = composio.composio_client()
         try:
-            await client.connected_account(account, broker_user)
+            await client.connected_account(account, broker_user, _toolkit(provider))
         except composio.ComposioError as error:
             if error.status != NOT_FOUND:
                 raise

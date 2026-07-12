@@ -7,9 +7,10 @@ model with one difference that earns the second broker: Pipedream's Google clien
 restricted Gmail scopes, which Google blocks on Composio's shared client.
 
 `connect_token` mints the hosted consent leg (pinning the success/error return legs);
-`newest_account` and `connected_account` are the ownership reads — every lookup asserts the
-account's `external_id` is this workspace's external user (the project token can read any account
-in the project, so the assertion is the confused-deputy guard) and no token is ever read.
+`newest_account` and `connected_account` correlate its return to the state-scoped external user,
+while `workspace_account` admits execution only for an account connected under that workspace.
+The project token can read any account in the project, so these ownership assertions are the
+confused-deputy guard; no provider token is ever read.
 `list_actions`/`action_definition` are the catalog the dynamic tools search and describe;
 `run_action` executes one server-side with the account bound through its component's app prop
 (`authProvisionId`). The client speaks Pipedream's Connect REST API over httpx, authenticating
@@ -21,6 +22,8 @@ import json
 import os
 import time
 from dataclasses import dataclass
+from hashlib import sha256
+from uuid import UUID
 
 import httpx
 
@@ -32,6 +35,7 @@ PIPEDREAM_ENVIRONMENT_ENV = "PIPEDREAM_ENVIRONMENT"
 DEFAULT_ENVIRONMENT = "production"
 ENVIRONMENT_HEADER = "x-pd-environment"
 EXTERNAL_USER_PREFIX = "ufo_"
+CONNECTION_ID_CHARS = 32
 PIPEDREAM_TIMEOUT_SECONDS = 30.0
 TOKEN_EXPIRY_MARGIN_SECONDS = 60.0
 ACTION_SEARCH_LIMIT = 10
@@ -82,11 +86,11 @@ class ConnectToken:
 
 @dataclass(frozen=True)
 class ConnectedAccount:
-    """A connected account as the ownership check reads it: the stable `apn_…` id and the app slug
-    it authenticates (an unhealthy or foreign account raises instead of returning)."""
+    """A healthy connected account with its stable id, app, and Pipedream external owner."""
 
     account_id: str
     app: str
+    external_user_id: str
 
 
 _ACCESS_TOKENS: dict[str, tuple[str, float]] = {}
@@ -155,11 +159,20 @@ class PipedreamClient:
         record = _dict(payload.get("data")) or payload
         return _owned_account(record, account_id, external_user_id)
 
+    async def workspace_account(self, account_id: str, workspace_id: UUID) -> ConnectedAccount:
+        """Read an account granted to one of this workspace's state-scoped connection users."""
+        payload = await self._get(f"/connect/{self.project_id}/accounts/{account_id}")
+        record = _dict(payload.get("data")) or payload
+        account = _account(record, account_id)
+        if not account.external_user_id.startswith(workspace_user_prefix(workspace_id)):
+            raise PipedreamError(
+                403,
+                f"connected account {account_id!r} is not owned by workspace {workspace_id}",
+            )
+        return account
+
     async def newest_account(self, external_user_id: str, app: str) -> ConnectedAccount:
-        """The account a just-completed consent produced: the newest of `external_user_id`'s
-        accounts on `app`. The list is scoped to the workspace's own external user, so a foreign
-        account cannot be named into the lookup at all — the id never rides the untrusted return
-        leg (Pipedream documents no redirect param carrying it)."""
+        """The account a just-completed consent produced for one state-scoped external user."""
         payload = await self._get(
             f"/connect/{self.project_id}/accounts",
             params={"external_user_id": external_user_id, "app": app},
@@ -236,19 +249,38 @@ def _owned_account(
     """Assert `record` is `external_user_id`'s own healthy account and project it. `external_id`
     is Pipedream's echo of the external user the account was connected under — the one ownership
     fact the guard needs."""
-    owner = record.get("external_id")
-    if not isinstance(owner, str) or owner != external_user_id:
+    account = _account(record, account_id)
+    if account.external_user_id != external_user_id:
         raise PipedreamError(
             403,
-            f"connected account {account_id!r} is owned by {owner!r}, not {external_user_id!r}",
+            f"connected account {account_id!r} is owned by {account.external_user_id!r}, "
+            f"not {external_user_id!r}",
         )
+    return account
+
+
+def _account(record: dict[str, object], account_id: str) -> ConnectedAccount:
+    owner = record.get("external_id")
+    if not isinstance(owner, str) or not owner:
+        raise PipedreamError(502, f"connected account {account_id!r} carried no external owner")
     if record.get("healthy") is False:
         raise PipedreamError(409, f"connected account {account_id!r} is unhealthy")
     app = _dict(record.get("app"))
     app_slug = app.get("name_slug")
     return ConnectedAccount(
-        account_id=account_id, app=app_slug if isinstance(app_slug, str) else ""
+        account_id=account_id,
+        app=app_slug if isinstance(app_slug, str) else "",
+        external_user_id=owner,
     )
+
+
+def workspace_user_prefix(workspace_id: UUID) -> str:
+    return f"{EXTERNAL_USER_PREFIX}{workspace_id.hex}_"
+
+
+def connection_user_id(workspace_id: UUID, state: str) -> str:
+    connection_id = sha256(state.encode()).hexdigest()[:CONNECTION_ID_CHARS]
+    return f"{workspace_user_prefix(workspace_id)}{connection_id}"
 
 
 def _body(response: httpx.Response) -> dict[str, object]:

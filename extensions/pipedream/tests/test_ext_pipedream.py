@@ -14,7 +14,7 @@ sample proves that path)."""
 import json
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 from uuid import UUID, uuid4
 
 import httpx
@@ -106,6 +106,7 @@ def _pipedream_handler(
             return httpx.Response(200, json={"data": _account(owner, PIPEDREAM_ACCOUNT)})
         if method == "GET" and path.endswith("/accounts"):
             assert request.url.params["app"] == "gmail"
+            assert request.url.params["external_user_id"] == owner
             return httpx.Response(
                 200,
                 json={
@@ -289,7 +290,8 @@ async def test_oauth_route_start_leg_redirects_to_connect_link(
     _install_transport(monkeypatch, _pipedream_handler("ufo_ws", minted=minted))
     ctx = context_for(pipedream_manifest.NAME, frozenset())
     query = f"provider={PROVIDER}&state=SEALED&callback={EXPECTED_REDIRECT_URI}"
-    with ws(uuid4()):
+    workspace_id = uuid4()
+    with ws(workspace_id):
         response = await provider.oauth_route(ctx, _request(query))
     assert response.status_code == provider.REDIRECT_STATUS
     location = urlparse(response.headers["location"])
@@ -302,6 +304,7 @@ async def test_oauth_route_start_leg_redirects_to_connect_link(
     success_query = parse_qs(success.query)
     assert success_query["state"] == ["SEALED"]
     assert success_query[provider.OUTCOME_PARAM] == [provider.OUTCOME_CONNECTED]
+    assert minted[0]["external_user_id"] == pipedream.connection_user_id(workspace_id, "SEALED")
     error = parse_qs(urlparse(str(minted[0]["error_redirect_uri"])).query)
     assert error[provider.OUTCOME_PARAM] == [provider.OUTCOME_FAILED]
 
@@ -324,23 +327,25 @@ async def test_oauth_route_start_leg_rides_the_shared_client_when_no_custom_one_
     assert "oauthAppId" not in link_query
 
 
-async def test_oauth_route_return_leg_hands_core_the_outcome_as_code() -> None:
-    """The return leg carries no account id — Pipedream documents no redirect param naming one —
-    so the bridge hands core a fixed outcome code and `exchange` resolves the account server-side,
-    scoped to the workspace's own external user."""
+async def test_oauth_route_return_leg_resolves_the_state_scoped_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = uuid4()
+    owner = pipedream.connection_user_id(workspace_id, "SEALED")
+    _install_transport(monkeypatch, _pipedream_handler(owner))
     ctx = context_for(pipedream_manifest.NAME, frozenset())
     query = (
-        f"state=SEALED&callback={EXPECTED_REDIRECT_URI}"
+        f"provider={PROVIDER}&state=SEALED&callback={EXPECTED_REDIRECT_URI}"
         f"&{provider.OUTCOME_PARAM}={provider.OUTCOME_CONNECTED}"
     )
-    with ws(uuid4()):
+    with ws(workspace_id):
         response = await provider.oauth_route(ctx, _request(query))
     assert response.status_code == provider.REDIRECT_STATUS
     landing = urlparse(response.headers["location"])
     assert f"{landing.scheme}://{landing.netloc}{landing.path}" == EXPECTED_REDIRECT_URI
     landing_query = parse_qs(landing.query)
     assert landing_query["state"] == ["SEALED"]
-    assert landing_query["code"] == [provider.OUTCOME_CONNECTED]
+    assert landing_query["code"] == [PIPEDREAM_ACCOUNT]
 
 
 async def test_oauth_route_failed_consent_answers_loud_instead_of_reminting_consent() -> None:
@@ -421,9 +426,6 @@ async def test_connect_binds_a_grant_and_call_external_tool_executes_via_pipedre
     and runs the action server-side with the account bound through the app slot's
     `authProvisionId` — no sandbox, no proxy."""
     workspace_id = await _workspace()
-    owner = f"{pipedream.EXTERNAL_USER_PREFIX}{workspace_id}"
-    executed: list[dict[str, object]] = []
-    _install_transport(monkeypatch, _pipedream_handler(owner, executed=executed))
     member_id, agent_id = await _member_agent(workspace_id)
     conversation_id = await _conversation(workspace_id, member_id)
     turn_id = await _turn(workspace_id, agent_id, conversation_id)
@@ -439,7 +441,10 @@ async def test_connect_binds_a_grant_and_call_external_tool_executes_via_pipedre
         ConnectAccountInput(provider=PROVIDER),
     )
     state = parse_qs(urlparse(begin.content[0].text).query)["state"][0]
-    recorded = await flow.complete(state=state, code=provider.OUTCOME_CONNECTED)
+    owner = pipedream.connection_user_id(workspace_id, state)
+    executed: list[dict[str, object]] = []
+    _install_transport(monkeypatch, _pipedream_handler(owner, executed=executed))
+    recorded = await flow.complete(state=state, code=PIPEDREAM_ACCOUNT)
     assert (recorded.provider, recorded.account_id) == (PROVIDER, PIPEDREAM_ACCOUNT)
     async with workspace_tx() as connection:
         row = (
@@ -493,7 +498,10 @@ async def test_call_external_tool_augments_an_unknown_key_with_the_real_actions(
         grantor_member_id=member_id,
         conversation_id=conversation_id,
     )
-    _install_transport(monkeypatch, _pipedream_handler(f"ufo_{workspace_id}"))
+    _install_transport(
+        monkeypatch,
+        _pipedream_handler(pipedream.connection_user_id(workspace_id, "unknown-key")),
+    )
     ctx = _ctx(workspace_id, agent_id, conversation_id, turn_id, store)
     with pytest.raises(pipedream.PipedreamError, match=f"actions available: {GMAIL_ACTION}"):
         await call_external_tool(
@@ -522,10 +530,10 @@ async def test_call_external_tool_with_a_stale_grant_says_reconnect(
         grantor_member_id=member_id,
         conversation_id=conversation_id,
     )
-    base = _pipedream_handler(f"ufo_{workspace_id}")
+    base = _pipedream_handler(pipedream.connection_user_id(workspace_id, "stale"))
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "POST" and request.url.path.endswith("/actions/run"):
+        if request.method == "GET" and request.url.path.endswith("/accounts/ca_composio_era"):
             return httpx.Response(404, json={"error": "External user not found"})
         return base(request)
 
@@ -554,12 +562,12 @@ async def test_an_in_band_action_error_says_reconnect_only_for_a_stale_account(
         workspace_id=workspace_id,
         agent_id=agent_id,
         provider=PROVIDER,
-        account_id="ca_composio_era",
+        account_id=PIPEDREAM_ACCOUNT,
         host=PROVIDER_HOST,
         grantor_member_id=member_id,
         conversation_id=conversation_id,
     )
-    base = _pipedream_handler(f"ufo_{workspace_id}")
+    base = _pipedream_handler(pipedream.connection_user_id(workspace_id, "in-band"))
     in_band_error: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -587,18 +595,13 @@ async def test_an_in_band_action_error_says_reconnect_only_for_a_stale_account(
     assert "connect_account" not in str(raised.value)
 
 
-async def test_complete_rejects_a_consent_that_produced_no_owned_account(
+async def test_complete_rejects_a_forged_success_marker(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Confused-deputy close: `exchange` lists only this workspace's external user's accounts, so a
-    consent completed under another workspace binds nothing here — no account, no grant."""
-
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/oauth/token":
             return httpx.Response(200, json={"access_token": "at", "expires_in": 3600})
-        if request.url.path.endswith("/accounts"):
-            return httpx.Response(200, json={"data": []})
-        return httpx.Response(404, json={})
+        return httpx.Response(404, json={"error": f"{provider.OUTCOME_CONNECTED} not found"})
 
     _install_transport(monkeypatch, handler)
     workspace_id = uuid4()
@@ -612,7 +615,7 @@ async def test_complete_rejects_a_consent_that_produced_no_owned_account(
         conversation_id=uuid4(),
     )
     state = parse_qs(urlparse(url).query)["state"][0]
-    with pytest.raises(pipedream.PipedreamError, match="no 'gmail' account is connected"):
+    with pytest.raises(pipedream.PipedreamError, match=provider.OUTCOME_CONNECTED):
         await flow.complete(state=state, code=provider.OUTCOME_CONNECTED)
     async with workspace_tx() as connection:
         count = (
@@ -623,6 +626,95 @@ async def test_complete_rejects_a_consent_that_produced_no_owned_account(
             )
         ).scalar_one()
     assert count == 0
+
+
+async def test_overlapping_connect_flows_cannot_cross_bind_accounts(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id = await _workspace()
+    member_a, agent_a = await _member_agent(workspace_id)
+    member_b, agent_b = await _member_agent(workspace_id, "assistant-b")
+    conversation_a = await _conversation(workspace_id, member_a)
+    conversation_b = await _conversation(workspace_id, member_b)
+    flow = _connect_flow(_credentials(), _config(), (pipedream_manifest.manifest(),))
+    assert flow is not None
+
+    state_a = parse_qs(
+        urlparse(
+            flow.authorize(
+                workspace_id=workspace_id,
+                agent_id=agent_a,
+                provider=PROVIDER,
+                grantor_member_id=member_a,
+                conversation_id=conversation_a,
+            )
+        ).query
+    )["state"][0]
+    state_b = parse_qs(
+        urlparse(
+            flow.authorize(
+                workspace_id=workspace_id,
+                agent_id=agent_b,
+                provider=PROVIDER,
+                grantor_member_id=member_b,
+                conversation_id=conversation_b,
+            )
+        ).query
+    )["state"][0]
+    account_a = "apn_flow_a"
+    account_b = "apn_flow_b"
+    owners = {
+        pipedream.connection_user_id(workspace_id, state_a): account_a,
+        pipedream.connection_user_id(workspace_id, state_b): account_b,
+    }
+    accounts = {account_id: _account(owner, account_id) for owner, account_id in owners.items()}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/v1/oauth/token":
+            return httpx.Response(200, json={"access_token": "at", "expires_in": 3600})
+        if request.method == "GET" and path.endswith("/accounts"):
+            owner = request.url.params["external_user_id"]
+            return httpx.Response(200, json={"data": [accounts[owners[owner]]]})
+        if request.method == "GET" and "/accounts/" in path:
+            account_id = path.rsplit("/", 1)[-1]
+            return httpx.Response(200, json={"data": accounts[account_id]})
+        return httpx.Response(404, json={})
+
+    _install_transport(monkeypatch, handler)
+    ctx = context_for(pipedream_manifest.NAME, frozenset())
+
+    async def return_code(state: str) -> str:
+        query = urlencode(
+            {
+                "provider": PROVIDER,
+                "state": state,
+                "callback": EXPECTED_REDIRECT_URI,
+                provider.OUTCOME_PARAM: provider.OUTCOME_CONNECTED,
+            }
+        )
+        response = await provider.oauth_route(ctx, _request(query))
+        return parse_qs(urlparse(response.headers["location"]).query)["code"][0]
+
+    with ws(workspace_id):
+        code_b = await return_code(state_b)
+        code_a = await return_code(state_a)
+    assert (code_a, code_b) == (account_a, account_b)
+
+    with pytest.raises(pipedream.PipedreamError, match="owned by"):
+        await flow.complete(state=state_a, code=code_b)
+    await flow.complete(state=state_a, code=code_a)
+    await flow.complete(state=state_b, code=code_b)
+
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(tables.grant.c.agent_id, tables.grant.c.account_id).where(
+                    tables.grant.c.workspace_id == workspace_id
+                )
+            )
+        ).all()
+    assert set(rows) == {(agent_a, account_a), (agent_b, account_b)}
 
 
 def _request(query: str) -> Request:
@@ -698,7 +790,7 @@ async def _workspace() -> UUID:
     return workspace_id
 
 
-async def _member_agent(workspace_id: UUID) -> tuple[UUID, UUID]:
+async def _member_agent(workspace_id: UUID, agent_name: str = "assistant") -> tuple[UUID, UUID]:
     member_id, agent_id = uuid4(), uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -714,7 +806,7 @@ async def _member_agent(workspace_id: UUID) -> tuple[UUID, UUID]:
             sa.insert(tables.agent).values(
                 id=agent_id,
                 workspace_id=workspace_id,
-                name="assistant",
+                name=agent_name,
                 prompt="p",
                 model="claude-opus-4-8",
                 created_at=sa.func.now(),

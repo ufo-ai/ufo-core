@@ -24,6 +24,8 @@ import ufo_ext_composio.manifest as composio_manifest
 import ufo_ext_composio.provider as provider
 import ufo_ext_connectors.manifest as connectors_manifest
 from cryptography.fernet import Fernet
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
 from starlette.requests import Request
 from ufo_ext_composio.broker import ComposioBroker
 from ufo_ext_connectors.tools import (
@@ -44,7 +46,8 @@ from ufo.ext.loader import turn_tools
 from ufo.grants import GrantStore, install_connect_flow
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
-from ufo.serve import _connect_flow, _connector_registry
+from ufo.serve import _connect_flow, _connector_registry, _mount_ext_routes
+from ufo.surfaces.cli import router
 from ufo.tools.builtins import ConnectAccountInput, connect_account_handler
 from ufo.tools.context import ToolContext
 from ufo.workspace import ws
@@ -89,6 +92,7 @@ def _composio_handler(
                 json={
                     "status": "ACTIVE",
                     "user_id": owner,
+                    "toolkit": {"slug": "github"},
                     "state": {"val": {"access_token": GITHUB_TOKEN}},
                 },
             )
@@ -144,13 +148,15 @@ def _registry() -> ConnectorRegistry:
 
 
 async def test_composio_client_confirms_an_active_accounts_owner() -> None:
-    account = await _mock_client().connected_account(COMPOSIO_ACCOUNT, COMPOSIO_USER)
+    account = await _mock_client().connected_account(COMPOSIO_ACCOUNT, COMPOSIO_USER, "github")
     assert account.account_id == COMPOSIO_ACCOUNT
 
 
 async def test_composio_client_refuses_an_account_owned_by_a_foreign_user() -> None:
     with pytest.raises(composio.ComposioError, match="owned by"):
-        await _mock_client("ufo_someone_else").connected_account(COMPOSIO_ACCOUNT, COMPOSIO_USER)
+        await _mock_client("ufo_someone_else").connected_account(
+            COMPOSIO_ACCOUNT, COMPOSIO_USER, "github"
+        )
 
 
 async def test_composio_client_refuses_an_inactive_account() -> None:
@@ -161,7 +167,12 @@ async def test_composio_client_refuses_an_inactive_account() -> None:
 
     client = composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handler))
     with pytest.raises(composio.ComposioError, match="INITIATED"):
-        await client.connected_account(COMPOSIO_ACCOUNT, COMPOSIO_USER)
+        await client.connected_account(COMPOSIO_ACCOUNT, COMPOSIO_USER, "github")
+
+
+async def test_composio_client_refuses_an_account_for_another_toolkit() -> None:
+    with pytest.raises(composio.ComposioError, match="not 'asana'"):
+        await _mock_client().connected_account(COMPOSIO_ACCOUNT, COMPOSIO_USER, "asana")
 
 
 async def test_composio_client_mints_a_connect_link() -> None:
@@ -296,6 +307,8 @@ def test_serve_registers_every_provider_with_label_and_broker() -> None:
     assert flow is not None
     assert set(flow.providers) == set(composio.CONNECTORS)
     assert "gmail" not in flow.providers
+    assert "activecampaign" in flow.providers
+    assert "active_campaign" not in flow.providers
     assert flow.providers[PROVIDER].host == PROVIDER_HOST
     assert flow.redirect_uri == EXPECTED_REDIRECT_URI
     registry = _registry()
@@ -404,6 +417,96 @@ async def test_connect_binds_a_grant_and_call_external_tool_executes_via_composi
             "connected_account_id": COMPOSIO_ACCOUNT,
         }
     ]
+
+
+async def test_shared_oauth_bridge_verifies_workspace_and_lands_the_grant(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id = await _workspace()
+    owner = f"{composio.EXTERNAL_USER_PREFIX}{workspace_id}"
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    turn_id = await _turn(workspace_id, agent_id, conversation_id)
+    link_requests: list[dict[str, object]] = []
+    base_handler = _composio_handler(owner)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path.endswith("/connected_accounts/link"):
+            link_requests.append(json.loads(request.content))
+        return base_handler(request)
+
+    monkeypatch.setattr(
+        composio,
+        "composio_client",
+        lambda: composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handler)),
+    )
+    credentials = _credentials()
+    flow = _connect_flow(credentials, _config(), (composio_manifest.manifest(),))
+    assert flow is not None
+    install_connect_flow(flow)
+    begun = await connect_account_handler(
+        _turn_context(workspace_id, agent_id, conversation_id, member_id, turn_id),
+        ConnectAccountInput(provider=PROVIDER),
+    )
+    bridge = urlparse(begun.content[0].text)
+    params = {key: values[0] for key, values in parse_qs(bridge.query).items()}
+    app = FastAPI()
+    app.include_router(router)
+    _mount_ext_routes(app, (composio_manifest.manifest(),), None, credentials, None, None)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=PUBLIC_BASE_URL) as client:
+        rejected = await client.get(
+            bridge.path, params={**params, "callback": "https://attacker.test/steal"}
+        )
+        wrong_provider = await client.get(
+            bridge.path, params={**params, "provider": "not-the-sealed-provider"}
+        )
+        started = await client.get(bridge.path, params=params)
+        returned = await client.get(
+            bridge.path,
+            params={
+                **params,
+                "status": "success",
+                "connected_account_id": COMPOSIO_ACCOUNT,
+            },
+        )
+        completed = await client.get(returned.headers["location"])
+
+    assert rejected.status_code == 401
+    assert wrong_provider.status_code == 401
+    assert started.status_code == provider.REDIRECT_STATUS
+    assert started.headers["location"] == COMPOSIO_CONSENT_URL
+    assert link_requests[0]["user_id"] == owner
+    assert completed.status_code == 200
+    async with workspace_tx() as connection:
+        grant = (
+            await connection.execute(
+                sa.select(tables.grant.c.account_id, tables.grant.c.agent_id).where(
+                    tables.grant.c.workspace_id == workspace_id
+                )
+            )
+        ).one()
+    assert (grant.account_id, grant.agent_id) == (COMPOSIO_ACCOUNT, agent_id)
+
+
+async def test_dedicated_oauth_bridge_rejects_another_workspace() -> None:
+    flow = _connect_flow(_credentials(), _config(), (composio_manifest.manifest(),))
+    assert flow is not None
+    install_connect_flow(flow)
+    url = flow.authorize(
+        workspace_id=uuid4(),
+        agent_id=uuid4(),
+        provider=PROVIDER,
+        grantor_member_id=uuid4(),
+        conversation_id=uuid4(),
+    )
+    bridge = urlparse(url)
+    params = {key: values[0] for key, values in parse_qs(bridge.query).items()}
+    app = FastAPI()
+    _mount_ext_routes(app, (composio_manifest.manifest(),), uuid4(), _credentials(), None, None)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=PUBLIC_BASE_URL) as client:
+        response = await client.get(bridge.path, params=params)
+    assert response.status_code == 401
 
 
 async def test_call_external_tool_without_a_grant_fails_loud(

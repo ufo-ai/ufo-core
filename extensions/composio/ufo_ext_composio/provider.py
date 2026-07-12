@@ -5,8 +5,8 @@ Composio connect link is an async API call — so `authorize_url` points the mem
 extension's `oauth` route instead. The route (async) mints the link and redirects on to Composio's
 hosted consent; Composio redirects back to the same route appending `connected_account_id` (and
 `status`) to the callback it was given, and the route hands that id to core's callback as the
-`code`. `exchange` then confirms that account's ownership and binds it. The flow reads top to
-bottom: authorize_url → oauth_route (start leg, then return leg) → exchange."""
+`code`. `exchange` then confirms that account's ownership and toolkit before binding it. The flow
+reads top to bottom: authorize_url → oauth_route (start leg, then return leg) → exchange."""
 
 from dataclasses import dataclass
 from urllib.parse import urlencode, urlparse
@@ -45,9 +45,11 @@ class ComposioOAuthProvider:
         query = urlencode({"provider": self.provider, "state": state, "callback": redirect_uri})
         return f"{_origin(redirect_uri)}{OAUTH_ROUTE_MOUNT}?{query}"
 
-    async def exchange(self, code: str, redirect_uri: str, workspace_id: UUID) -> OAuthAccount:
+    async def exchange(
+        self, code: str, _redirect_uri: str, workspace_id: UUID, _state: str
+    ) -> OAuthAccount:
         expected_user = f"{composio.EXTERNAL_USER_PREFIX}{workspace_id}"
-        return await composio.composio_client().connected_account(code, expected_user)
+        return await composio.composio_client().connected_account(code, expected_user, self.toolkit)
 
 
 async def oauth_route(ctx: ExtensionContext, request: Request) -> Response:

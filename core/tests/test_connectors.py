@@ -196,7 +196,8 @@ async def test_connector_account_is_scoped_to_the_turn_agents_own_grants(db: Non
 
 async def test_connector_account_selects_the_named_account(db: None) -> None:
     """An agent holding two accounts for one provider: `connector_account(provider, account_id=X)`
-    returns X, not the other account, and a name it does not hold fails loud."""
+    returns X, not the other account; omitting the choice or naming one it does not hold fails
+    loud."""
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)
     conversation_id = await _conversation(workspace_id, member_id)
@@ -212,9 +213,34 @@ async def test_connector_account_selects_the_named_account(db: None) -> None:
             conversation_id=conversation_id,
         )
     ctx = _turn_context(workspace_id, agent_id, conversation_id, member_id, grants=store)
+    with pytest.raises(ValueError, match=r"multiple active.*pass account_id"):
+        await ctx.connector_account(sample.CONNECTOR_PROVIDER)
     assert await ctx.connector_account(sample.CONNECTOR_PROVIDER, account_id="acct-2") == "acct-2"
     with pytest.raises(ValueError, match="acct-9"):
         await ctx.connector_account(sample.CONNECTOR_PROVIDER, account_id="acct-9")
+
+
+async def test_connector_accounts_lists_only_the_turn_agents_provider_accounts(db: None) -> None:
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    store = GrantStore()
+    for provider, account in (
+        (sample.CONNECTOR_PROVIDER, "acct-2"),
+        (sample.CONNECTOR_PROVIDER, "acct-1"),
+        ("other", "acct-other"),
+    ):
+        await store.record(
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            provider=provider,
+            account_id=account,
+            host=sample.CONNECTOR_HOST,
+            grantor_member_id=member_id,
+            conversation_id=conversation_id,
+        )
+    ctx = _turn_context(workspace_id, agent_id, conversation_id, member_id, grants=store)
+    assert await ctx.connector_accounts(sample.CONNECTOR_PROVIDER) == ("acct-1", "acct-2")
 
 
 def _turn_context(

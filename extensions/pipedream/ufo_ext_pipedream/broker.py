@@ -8,11 +8,9 @@ an action on Pipedream's server-side run API with the granted account bound thro
 `authProvisionId` — an unknown key is augmented with the app's real keys so the model's next
 attempt is informed, an action-level error raises loud, and a failure naming an account this
 broker does not hold (a grant that predates it) tells the agent to have the member reconnect;
-`search` is the same catalog search
-(Pipedream has no router, so plan/guidance stay empty); `credential` confirms the account is owned
-by this workspace's external user and connected to this provider's app (metadata, never a token —
-the confused-deputy guard) and returns a `Credential` whose transport proxies provider HTTP through
-the Connect Proxy, so a feed-sync source holds no secret."""
+`search` is the same catalog search (Pipedream has no router, so plan/guidance stay empty);
+`credential` verifies the state-scoped account owner and app before returning a Connect Proxy
+transport."""
 
 import json
 from collections.abc import Mapping
@@ -85,9 +83,14 @@ class PipedreamBroker:
         configured: dict[str, object] = dict(arguments)
         configured[_app_slot(definition, slug)] = {"authProvisionId": account_id}
         try:
-            response = await client.run_action(
-                slug, f"{pipedream.EXTERNAL_USER_PREFIX}{workspace_id}", configured
-            )
+            account = await client.workspace_account(account_id, workspace_id)
+            app = _spec(provider).app
+            if account.app != app:
+                raise PipedreamError(
+                    403,
+                    f"connected account {account_id!r} authenticates {account.app!r}, not {app!r}",
+                )
+            response = await client.run_action(slug, account.external_user_id, configured)
         except PipedreamError as error:
             raise (
                 _reconnect_error(error, provider) if _stale_account(error, account_id) else error
@@ -105,10 +108,9 @@ class PipedreamBroker:
 
     async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
         spec = _spec(provider)
-        external_user = f"{pipedream.EXTERNAL_USER_PREFIX}{workspace_id}"
         client = pipedream.pipedream_client()
         try:
-            connected = await client.connected_account(account, external_user)
+            connected = await client.workspace_account(account, workspace_id)
         except PipedreamError as error:
             if error.status != NOT_FOUND:
                 raise
@@ -122,7 +124,7 @@ class PipedreamBroker:
             transport=PipedreamProxyTransport(
                 client=client,
                 account_id=account,
-                external_user_id=external_user,
+                external_user_id=connected.external_user_id,
                 inner=client.transport or httpx.AsyncHTTPTransport(),
             )
         )

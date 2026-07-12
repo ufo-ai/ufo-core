@@ -28,7 +28,15 @@ def _composio_handler(
 
     def handle(request: httpx.Request) -> httpx.Response:
         if request.method == "GET" and "/connected_accounts/" in request.url.path:
-            return httpx.Response(200, json={"id": ACCOUNT, "user_id": owner, "status": "ACTIVE"})
+            return httpx.Response(
+                200,
+                json={
+                    "id": ACCOUNT,
+                    "user_id": owner,
+                    "status": "ACTIVE",
+                    "toolkit": {"slug": "asana"},
+                },
+            )
         if request.method == "POST" and request.url.path.endswith(
             composio_proxy.PROXY_EXECUTE_PATH
         ):
@@ -71,6 +79,16 @@ async def test_composio_broker_refuses_a_foreign_account(
     monkeypatch.setattr(composio, "composio_client", lambda: _client(foreign, {"data": []}))
     with pytest.raises(composio.ComposioError, match="owned by"):
         await ComposioBroker().credential(uuid4(), "asana", ACCOUNT)
+
+
+async def test_composio_broker_refuses_an_account_on_another_toolkit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = uuid4()
+    owner = f"{composio.EXTERNAL_USER_PREFIX}{workspace_id}"
+    monkeypatch.setattr(composio, "composio_client", lambda: _client(owner, {"data": []}))
+    with pytest.raises(composio.ComposioError, match="not 'github'"):
+        await ComposioBroker().credential(workspace_id, "github", ACCOUNT)
 
 
 async def test_composio_broker_says_reconnect_for_an_account_it_does_not_hold(

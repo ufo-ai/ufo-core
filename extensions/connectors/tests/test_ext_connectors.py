@@ -10,8 +10,9 @@ loud. The grant-resolving execute path keeps its end-to-end proof in the composi
 tests."""
 
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import ufo_ext_connectors.manifest as connectors
@@ -29,11 +30,27 @@ from ufo_ext_connectors.tools import (
 
 from ufo.connectors import ConnectorEntry, ConnectorRegistry
 from ufo.ext.loader import turn_tools
+from ufo.grants import Grant, GrantStore
 from ufo.schema.records import Agent, Turn
 from ufo.tools.context import ToolContext
 
 OTHER_PROVIDER = "other_widgets"
 OTHER_LABEL = "Other Widgets"
+
+
+@dataclass(frozen=True)
+class _Grants(GrantStore):
+    accounts: tuple[str, ...]
+
+    async def active_grants(self, _workspace_id: UUID, _agent_id: UUID) -> tuple[Grant, ...]:
+        return tuple(
+            Grant(
+                provider=sample.CONNECTOR_PROVIDER,
+                account_id=account,
+                host=sample.CONNECTOR_HOST,
+            )
+            for account in self.accounts
+        )
 
 
 def _registry() -> ConnectorRegistry:
@@ -50,7 +67,7 @@ def _registry() -> ConnectorRegistry:
     )
 
 
-def _ctx(registry: ConnectorRegistry | None) -> ToolContext:
+def _ctx(registry: ConnectorRegistry | None, accounts: tuple[str, ...] = ()) -> ToolContext:
     return ToolContext(
         sandbox=None,
         blob=None,
@@ -68,6 +85,7 @@ def _ctx(registry: ConnectorRegistry | None) -> ToolContext:
         spawn=None,
         member_id=None,
         artifact_token_secret="",
+        grants=_Grants(accounts),
         connectors=registry,
         idempotency_key="t1/call_external_tool/c1",
     )
@@ -155,6 +173,41 @@ async def test_search_connector_tools_renders_the_brokers_search() -> None:
     assert [tool["slug"] for tool in payload["tools"]] == [sample.BROKER_TOOL_SLUG]
     assert payload["plan"] == [sample.BROKER_SEARCH_PLAN]
     assert payload["guidance"] == []
+
+
+async def test_call_external_tool_uses_the_only_connected_account() -> None:
+    result = await call_external_tool(
+        _ctx(_registry(), accounts=("acct-one",)),
+        CallExternalToolInput(
+            tool_name=sample.BROKER_TOOL_SLUG,
+            source_id=sample.CONNECTOR_PROVIDER,
+            arguments={"limit": 2},
+        ),
+    )
+    assert _payload(result)["account"] == "acct-one"
+
+
+async def test_call_external_tool_requires_a_choice_between_connected_accounts() -> None:
+    ctx = _ctx(_registry(), accounts=("acct-one", "acct-two"))
+    with pytest.raises(ValueError, match=r"multiple active.*pass account_id"):
+        await call_external_tool(
+            ctx,
+            CallExternalToolInput(
+                tool_name=sample.BROKER_TOOL_SLUG,
+                source_id=sample.CONNECTOR_PROVIDER,
+                arguments={},
+            ),
+        )
+    result = await call_external_tool(
+        ctx,
+        CallExternalToolInput(
+            tool_name=sample.BROKER_TOOL_SLUG,
+            source_id=sample.CONNECTOR_PROVIDER,
+            account_id="acct-two",
+            arguments={},
+        ),
+    )
+    assert _payload(result)["account"] == "acct-two"
 
 
 async def test_tools_fail_loud_without_the_registry_or_the_provider() -> None:

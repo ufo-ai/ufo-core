@@ -20,9 +20,11 @@ from cryptography.fernet import Fernet, InvalidToken
 from pydantic import BaseModel
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from starlette.requests import Request
 
 from ufo.db import workspace_tx
 from ufo.schema import tables
+from ufo.workspace import ws
 
 CONNECT_STATE_TTL_SECONDS = 600
 
@@ -53,8 +55,9 @@ class OAuthProvider(Protocol):
     builds the link the member opens; `exchange` turns the returned code into the connected account
     — its id, verified against this workspace's brokered user so a foreign account (injected on the
     return leg) is refused (the confused-deputy guard). `workspace_id` is the sealed workspace the
-    code was scoped to, passed for that check. `host` is the provider's own host the grant admits
-    and meters at the egress proxy — direct-provider-host, provider-agnostic."""
+    code was scoped to; `state` lets a broker bind overlapping consent flows independently. `host`
+    is the provider's own host the grant admits and meters at the egress proxy —
+    direct-provider-host, provider-agnostic."""
 
     @property
     def provider(self) -> str: ...
@@ -64,7 +67,9 @@ class OAuthProvider(Protocol):
 
     def authorize_url(self, state: str, redirect_uri: str) -> str: ...
 
-    async def exchange(self, code: str, redirect_uri: str, workspace_id: UUID) -> OAuthAccount: ...
+    async def exchange(
+        self, code: str, redirect_uri: str, workspace_id: UUID, state: str
+    ) -> OAuthAccount: ...
 
 
 @dataclass(frozen=True)
@@ -227,19 +232,28 @@ class ConnectFlow:
         sealed = self.fernet.encrypt(state.model_dump_json().encode()).decode()
         return descriptor.authorize_url(sealed, self.redirect_uri)
 
+    def bridge_workspace(self, *, state: str, provider: str, callback: str) -> UUID:
+        """Verify a browser bridge request and return the workspace it may run as."""
+        claims = self._open(state)
+        if claims.provider != provider or callback != self.redirect_uri:
+            raise ConnectStateInvalid("connect bridge does not match its sealed state")
+        self._provider(provider)
+        return claims.workspace_id
+
     async def complete(self, *, state: str, code: str) -> GrantRecorded:
         claims = self._open(state)
         descriptor = self._provider(claims.provider)
-        account = await descriptor.exchange(code, self.redirect_uri, claims.workspace_id)
-        await self.store.record(
-            workspace_id=claims.workspace_id,
-            agent_id=claims.agent_id,
-            provider=descriptor.provider,
-            account_id=account.account_id,
-            host=descriptor.host,
-            grantor_member_id=claims.grantor_member_id,
-            conversation_id=claims.conversation_id,
-        )
+        with ws(claims.workspace_id):
+            account = await descriptor.exchange(code, self.redirect_uri, claims.workspace_id, state)
+            await self.store.record(
+                workspace_id=claims.workspace_id,
+                agent_id=claims.agent_id,
+                provider=descriptor.provider,
+                account_id=account.account_id,
+                host=descriptor.host,
+                grantor_member_id=claims.grantor_member_id,
+                conversation_id=claims.conversation_id,
+            )
         return GrantRecorded(
             provider=descriptor.provider, account_id=account.account_id, agent_id=claims.agent_id
         )
@@ -275,6 +289,18 @@ def installed_connect_flow() -> ConnectFlow:
     if _installed_flow is None:
         raise ConnectUnavailable("grants unavailable: no credential key configured")
     return _installed_flow
+
+
+def connect_bridge_workspace(request: Request) -> UUID | None:
+    """The verified workspace for a connector browser bridge request, or None to reject it."""
+    try:
+        return installed_connect_flow().bridge_workspace(
+            state=request.query_params.get("state", ""),
+            provider=request.query_params.get("provider", ""),
+            callback=request.query_params.get("callback", ""),
+        )
+    except (ConnectStateInvalid, ConnectUnavailable, UnknownProvider):
+        return None
 
 
 async def grant_summaries(workspace_id: UUID) -> tuple[GrantSummary, ...]:

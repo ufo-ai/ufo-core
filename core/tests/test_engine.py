@@ -258,7 +258,9 @@ class ConnectStubProvider:
     def authorize_url(self, state: str, redirect_uri: str) -> str:
         return f"{STUB_AUTHORIZE_URL}?state={state}"
 
-    async def exchange(self, code: str, redirect_uri: str, workspace_id: UUID) -> OAuthAccount:
+    async def exchange(
+        self, code: str, redirect_uri: str, workspace_id: UUID, state: str
+    ) -> OAuthAccount:
         return OAuthAccount(account_id="acct-42")
 
 

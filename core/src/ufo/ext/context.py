@@ -352,7 +352,7 @@ class ExtensionContext:
             raise RuntimeError("invoke requires a turn invoker; none is wired")
         return await self.invoker.invoke(conversation_id, agent_id, message, idempotency_key)
 
-    async def register_source(self, backend: str, config: BaseModel) -> None:
+    async def register_source(self, backend: str, config: BaseModel) -> UUID:
         """Register a content-sync source for this workspace under `backend` — a `SourceBackend` an
         extension declared through its Manifest `sources` point — with `config` the backend's typed
         per-source parameters (the connected account, a folder root). Idempotent on (workspace,
@@ -368,7 +368,7 @@ class ExtensionContext:
                 )
             ).one_or_none()
             if present is not None:
-                return
+                return source_id
             await connection.execute(
                 sa.insert(tables.source).values(
                     id=source_id,
@@ -383,6 +383,7 @@ class ExtensionContext:
                     updated_at=sa.func.now(),
                 )
             )
+        return source_id
 
     async def propose_change(self, change: AgentChange) -> ProposalRef:
         """Open a governed proposal against an agent's prompt, stamped with this extension as the

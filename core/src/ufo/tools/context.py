@@ -188,20 +188,28 @@ class ToolContext:
         execute API (the broker holds the account's token and injects it itself, so no sentinel and
         no egress proxy). Resolved strictly from the turn's own workspace and agent, so a tool
         executes only against the turn-agent's accounts, never another agent's. `account_id` targets
-        a specific account when the agent holds several; omitted, any provider grant answers. Fails
-        loud when no grant subsystem is configured or the agent holds no matching grant."""
+        a specific account when the agent holds several; omitted, exactly one provider grant must
+        exist. Fails loud when no grant subsystem is configured or the selection is absent or
+        ambiguous."""
+        accounts = await self.connector_accounts(provider)
+        if account_id is not None:
+            if account_id in accounts:
+                return account_id
+            raise ValueError(
+                f"agent has no active {provider!r} account {account_id!r} grant to authenticate"
+            )
+        if not accounts:
+            raise ValueError(f"agent has no active {provider!r} grant to authenticate")
+        if len(accounts) > 1:
+            raise ValueError(
+                f"agent has multiple active {provider!r} accounts; pass account_id as one of "
+                f"{list(accounts)!r}"
+            )
+        return accounts[0]
+
+    async def connector_accounts(self, provider: str) -> tuple[str, ...]:
+        """The active connected-account ids this turn's agent may use for one provider."""
         if self.grants is None:
             raise ConnectUnavailable("grants unavailable: no credential key configured")
         granted = await self.grants.active_grants(self.turn.workspace_id, self.turn.agent_id)
-        grant = next(
-            (
-                g
-                for g in granted
-                if g.provider == provider and (account_id is None or g.account_id == account_id)
-            ),
-            None,
-        )
-        if grant is None:
-            target = f"{provider!r} account {account_id!r}" if account_id else f"{provider!r}"
-            raise ValueError(f"agent has no active {target} grant to authenticate")
-        return grant.account_id
+        return tuple(sorted({grant.account_id for grant in granted if grant.provider == provider}))
