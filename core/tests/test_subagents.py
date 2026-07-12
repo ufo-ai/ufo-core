@@ -95,6 +95,7 @@ def test_a_deep_profile_lifts_its_round_budget_above_the_subagent_default() -> N
 def test_general_purpose_tool_subset_excludes_the_tools_a_subagent_must_not_hold() -> None:
     profile = SubagentRegistry(CORE_SUBAGENT_PROFILES).get(GENERAL_PURPOSE)
     assert "load_skill" in profile.tool_names
+    assert "list_skills" not in profile.tool_names
     assert {"ask_user", "spawn_subagent", "connect_account"}.isdisjoint(profile.tool_names)
 
 
@@ -177,6 +178,33 @@ def test_subagent_prompt_reads_a_preloaded_skills_braces_as_content() -> None:
     )
     prompt = subagent_system_prompt(_profile("research"), preload=(templated,))
     assert "{{ message }}" in prompt
+
+
+def test_subagent_prompt_uses_the_turns_complete_skill_index() -> None:
+    profile = SubagentProfile(
+        name="slotted",
+        prompt="do the task\n\n{{skill_index}}",
+        tool_names=(),
+        input_model=_Task,
+        output_model=_Finding,
+    )
+    prompt = subagent_system_prompt(
+        profile, skills=(("extension-skill", "A workspace-specific workflow."),)
+    )
+    assert "extension-skill: A workspace-specific workflow." in prompt
+    assert "- sandbox:" not in prompt
+
+
+def test_skill_capable_subagent_requires_a_skill_index_slot() -> None:
+    profile = SubagentProfile(
+        name="missing-index",
+        prompt="do the task",
+        tool_names=("load_skill",),
+        input_model=_Task,
+        output_model=_Finding,
+    )
+    with pytest.raises(ValueError, match="grants load_skill"):
+        subagent_system_prompt(profile)
 
 
 def test_subagent_prompt_fails_loud_on_an_unfilled_slot() -> None:
@@ -389,7 +417,7 @@ async def test_messages_dispatch_in_child_conversation_order(
     assert client.enqueued == [str(first.turn_id)]
 
 
-async def _finished_child(workspace_id: UUID, agent_id: UUID, text: str) -> UUID:
+async def _finished_child(workspace_id: UUID, agent_id: UUID, parent_id: UUID, text: str) -> UUID:
     turn_id = uuid4()
     conversation_id = uuid4()
     terminal = TerminalFrame(status="done", text=text)
@@ -415,6 +443,8 @@ async def _finished_child(workspace_id: UUID, agent_id: UUID, text: str) -> UUID
                 status="done",
                 inbound="x",
                 terminal=terminal.model_dump(mode="json"),
+                parent_turn_id=parent_id,
+                subagent_profile=GENERAL_PURPOSE,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -622,8 +652,6 @@ async def test_wait_reports_every_already_finished_childs_status(
                 updated_at=sa.func.now(),
             )
         )
-    first = await _finished_child(workspace_id, agent_id, "first done")
-    second = await _finished_child(workspace_id, agent_id, "second done")
     parent = Turn(
         id=uuid4(),
         workspace_id=workspace_id,
@@ -634,9 +662,33 @@ async def test_wait_reports_every_already_finished_childs_status(
         inbound="parent",
         created_at=datetime(2026, 7, 9, tzinfo=UTC),
     )
+    first = await _finished_child(workspace_id, agent_id, parent.id, "first done")
+    second = await _finished_child(workspace_id, agent_id, parent.id, "second done")
     client = DBOSClient(system_database_url=dbos_launched.database.system_url)
     subagents = Subagents(client=client, registry=SubagentRegistry(()), parent=parent)
     statuses = await subagents.wait((first, second))
     assert [status.turn_id for status in statuses] == [first, second]
     assert [status.text for status in statuses] == ["first done", "second done"]
     assert all(status.status == "done" for status in statuses)
+
+
+async def test_wait_refuses_a_turn_this_parent_did_not_spawn(
+    db: None, dbos_launched: Config
+) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    parent = Turn(
+        id=uuid4(),
+        workspace_id=workspace_id,
+        conversation_id=uuid4(),
+        agent_id=agent_id,
+        seq=1,
+        status="running",
+        inbound="parent",
+        created_at=datetime(2026, 7, 9, tzinfo=UTC),
+    )
+    child = await _finished_child(workspace_id, agent_id, parent.id, "child result")
+    stranger = await _finished_child(workspace_id, agent_id, uuid4(), "private result")
+    client = DBOSClient(system_database_url=dbos_launched.database.system_url)
+    subagents = Subagents(client=client, registry=SubagentRegistry(()), parent=parent)
+    with pytest.raises(ValueError, match="not a subagent this turn spawned"):
+        await subagents.wait((child, stranger))

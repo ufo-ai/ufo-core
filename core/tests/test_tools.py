@@ -145,7 +145,6 @@ def test_registry_schemas_cover_every_tool() -> None:
         "request_credentials",
         "load_skill",
         "connect_account",
-        "list_skills",
         "wait_for_subagents",
         "cancel_subagent",
         "message_subagent",
@@ -255,15 +254,6 @@ async def test_load_skill_unknown_name_fails_loud(tmp_path: Path) -> None:
     ctx = make_context(FakeSandbox(), tmp_path)
     with pytest.raises(ValueError, match="unknown skill 'nope'"):
         await _load_skill(ctx, "nope")
-
-
-async def test_list_skills_reports_the_loadable_skills(tmp_path: Path) -> None:
-    ctx = make_context(FakeSandbox(), tmp_path)
-    result = await run("list_skills", ctx)
-    skills = json.loads(result.content[0].text)["skills"]
-    names = {skill["name"] for skill in skills}
-    assert {"delegation", "sandbox"} <= names
-    assert all(skill["description"] for skill in skills)
 
 
 async def test_wait_for_subagents_awaits_each_child_and_reports_status(tmp_path: Path) -> None:

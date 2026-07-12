@@ -34,6 +34,9 @@ from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, context_for
 from ufo.ext.loader import turn_runtime_skills
+from ufo.loop.profiles import GENERAL_PURPOSE_PROFILE
+from ufo.loop.prompts.render import render_system_prompt
+from ufo.loop.subagents import subagent_system_prompt
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import (
     MountSpec,
@@ -236,6 +239,12 @@ async def test_turn_runtime_skills_feeds_a_saved_skill_into_the_merge(db: None) 
     assert [skill.name for skill in provided] == ["greet"]
     merged = CORE_SKILL_REGISTRY.merged_with(provided)
     assert ("greet", "greets people") in merged.index()
+    main_prompt = render_system_prompt(
+        "You are the assistant.", (), skills=merged.index(), model="claude-opus-4-8"
+    ).content
+    subagent_prompt = subagent_system_prompt(GENERAL_PURPOSE_PROFILE, skills=merged.index())
+    assert "- greet: greets people" in main_prompt
+    assert "- greet: greets people" in subagent_prompt
 
     with ws(other):
         assert await turn_runtime_skills((manifest(),), _credential_store()) == ()

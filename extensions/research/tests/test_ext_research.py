@@ -271,11 +271,15 @@ def test_deep_research_lifts_its_round_budget_above_the_default() -> None:
 
 
 def test_research_profile_prompt_wraps_with_citation_and_fills_the_skill_index() -> None:
-    prompt = subagent_system_prompt(RESEARCH_PROFILE)
-    assert "{{skill_index}}" not in prompt
-    assert "<available_skills>" in prompt
-    assert "<citation_instructions>" in prompt
-    assert "search_vertical" in prompt
+    skills = (("extension-skill", "A turn-specific research workflow."),)
+    for profile in (RESEARCH_PROFILE, DEEP_RESEARCH_PROFILE):
+        prompt = subagent_system_prompt(profile, skills=skills)
+        assert "{{skill_index}}" not in prompt
+        assert "<available_skills>" in prompt
+        assert "- extension-skill: A turn-specific research workflow." in prompt
+        assert "<citation_instructions>" in prompt
+        assert "search_vertical" in prompt
+        assert "list_skills" not in profile.tool_names
 
 
 def test_research_skills_parse_and_index() -> None:

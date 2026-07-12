@@ -215,7 +215,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                     resolved_skills.setdefault(skill.name, skill)
             preload = tuple(resolved_skills.values())
             resolved = Agent(
-                prompt=subagent_system_prompt(profile, preload),
+                prompt=subagent_system_prompt(profile, skills=skills.index(), preload=preload),
                 model=runtime.registry.resolve(profile.model or agent.model),
             )
             allowed = set(profile.tool_names) | runtime.subagent_grants.get(

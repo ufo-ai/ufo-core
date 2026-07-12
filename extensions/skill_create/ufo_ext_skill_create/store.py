@@ -6,9 +6,9 @@ The content — the `SKILL.md` text plus any bundled assets — is serialized to
 held in the `content` column of the extension's own `user_skill` table, keyed under the workspace;
 a `digest` over the serialized bundle carries change identity. `load_all` is what the runtime-skills
 provider reads each turn to merge a workspace's saved skills into that turn's `SkillRegistry`, so
-`load_skill`/`list_skills`/the `{{skill_index}}` resolve them beside core's own. The scoping is the
-whole point: a saved skill is user-controlled text mounted into the agent's own context, so it is
-bound to one workspace and can never be seen by another, nor shadow a core or pack skill."""
+`load_skill` and the `{{skill_index}}` resolve them beside core's own. The scoping is the whole
+point: a saved skill is user-controlled text mounted into the agent's own context, so it is bound
+to one workspace and can never be seen by another, nor shadow a core or pack skill."""
 
 import base64
 import hashlib

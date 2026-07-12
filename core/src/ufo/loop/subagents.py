@@ -8,6 +8,7 @@ returns its schema-validated output; background returns the child turn id at onc
 
 import asyncio
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -51,9 +52,7 @@ SUBAGENT_OUTPUT_DISCIPLINE = (
     .strip()
     .replace(CITATION_SLOT, CITATION_BLOCK)
 )
-SUBAGENT_SKILL_INDEX = render_skill_index(
-    tuple((skill.name, skill.description) for skill in CORE_SKILLS)
-)
+CORE_SKILL_INDEX = tuple((skill.name, skill.description) for skill in CORE_SKILLS)
 
 
 @dataclass(frozen=True)
@@ -77,7 +76,12 @@ class SubagentRegistry:
         raise KeyError(f"unknown subagent profile: {name}")
 
 
-def subagent_system_prompt(profile: SubagentProfile, preload: tuple[RuntimeSkill, ...] = ()) -> str:
+def subagent_system_prompt(
+    profile: SubagentProfile,
+    *,
+    skills: Sequence[tuple[str, str]] = CORE_SKILL_INDEX,
+    preload: tuple[RuntimeSkill, ...] = (),
+) -> str:
     """The child's system prompt: the profile's own instructions with its `{{skill_index}}` slot
     filled from the loadable-skill index, then any preloaded skills' instructions, then the shared
     output discipline (citation and formatting rules, wrapped around every profile so a subagent
@@ -88,7 +92,12 @@ def subagent_system_prompt(profile: SubagentProfile, preload: tuple[RuntimeSkill
     model as a literal brace; preloaded bodies over the char bound fail loud rather than blowing
     the model call. Skill bodies are injected after slot validation — a literal brace inside a
     skill is content, never an unfilled slot."""
-    body = profile.prompt.replace(SKILL_INDEX_SLOT, SUBAGENT_SKILL_INDEX)
+    if "load_skill" in profile.tool_names and SKILL_INDEX_SLOT not in profile.prompt:
+        raise ValueError(
+            f"subagent profile {profile.name!r} grants load_skill but has no "
+            f"{SKILL_INDEX_SLOT} slot"
+        )
+    body = profile.prompt.replace(SKILL_INDEX_SLOT, render_skill_index(skills))
     if unresolved := frozenset(PROMPT_VAR_RE.findall(f"{body}\n\n{SUBAGENT_OUTPUT_DISCIPLINE}")):
         raise ValueError(f"subagent prompt has unresolved slots: {', '.join(sorted(unresolved))}")
     if preload:
@@ -149,6 +158,8 @@ class Subagents:
         ends its own turn and calls this when it has no other independent work, completing the
         background-spawn loop. Each id is polled through the same terminal read a foreground spawn
         awaits, so a child that has already finished returns at once."""
+        for turn_id in turn_ids:
+            await self._require_child(turn_id)
         statuses = []
         for turn_id in turn_ids:
             terminal = await self._await_terminal(turn_id)

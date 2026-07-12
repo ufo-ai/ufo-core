@@ -23,6 +23,7 @@ from ufo_ext_sites.tools import (
 
 from ufo.blob import FilesystemBlobStore
 from ufo.ext.loader import skill_registry
+from ufo.loop.subagents import subagent_system_prompt
 from ufo.sandbox.session import ExecResult
 from ufo.schema.records import Agent, Turn
 from ufo.skills.runtime import mount_skill
@@ -100,6 +101,16 @@ def test_manifest_declares_the_tools_the_profile_and_the_section() -> None:
     assert profile.name == "website_building"
     (section,) = manifest.prompt_sections
     assert section.name == "sites" and "<sites>" in section.body
+
+
+def test_website_profile_receives_the_complete_per_turn_skill_index() -> None:
+    profile = sites_manifest.manifest().subagents[0]
+    prompt = subagent_system_prompt(
+        profile, skills=(("extension-skill", "A turn-specific website workflow."),)
+    )
+    assert "{{skill_index}}" not in prompt
+    assert "<available_skills>" in prompt
+    assert "- extension-skill: A turn-specific website workflow." in prompt
 
 
 async def test_build_website_forwards_the_optional_knobs_into_the_spawn(tmp_path: Path) -> None:

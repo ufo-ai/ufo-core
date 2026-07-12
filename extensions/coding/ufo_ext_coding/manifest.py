@@ -3,7 +3,7 @@
 
 `spawn_subagent("coding", {"objective": ...})` runs a child that explores a repo, edits code, runs
 tests, and reports a self-contained result. The profile names only tool names — bash/read/write/
-edit/glob/grep to work the code, load_skill/list_skills to pull a workflow, share_file to hand back
+edit/glob/grep to work the code, load_skill to pull a workflow, share_file to hand back
 an artifact, and js_repl to exercise Node code — so the pack is self-contained and carries no
 cross-extension import. Core wraps the prompt with the shared citation/formatting discipline and
 fills its skill index. The `coding` skill teaches the main agent to route repo work to that child;
@@ -28,7 +28,6 @@ CODING_TOOL_NAMES = (
     "glob",
     "grep",
     "load_skill",
-    "list_skills",
     "share_file",
     "js_repl",
     "search_web",

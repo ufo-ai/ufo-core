@@ -36,7 +36,6 @@ RESEARCH_TOOL_NAMES = (
     "glob",
     "grep",
     "load_skill",
-    "list_skills",
     "share_file",
     "memory_search",
     "xlsx_repl",

@@ -10,8 +10,8 @@ other profile is extension-provided through the manifest; this is the floor."""
 
 from pydantic import BaseModel
 
+from ufo.loop.prompts.render import SKILL_INDEX_SLOT
 from ufo.loop.subagents import SubagentProfile
-from ufo.skills.runtime import CORE_SKILLS
 
 GENERAL_PURPOSE = "general_purpose"
 
@@ -23,7 +23,6 @@ GENERAL_PURPOSE_TOOLS = (
     "glob",
     "grep",
     "load_skill",
-    "list_skills",
     "share_file",
     # Cross-extension tools matching the source general_purpose's set: web search/fetch, the
     # connector trio, and the spreadsheet REPL. Names resolve only if the owning extension is
@@ -47,8 +46,6 @@ class GeneralPurposeOutput(BaseModel):
     result: str
 
 
-_AVAILABLE_SKILLS = "\n".join(f"- {skill.name}: {skill.description}" for skill in CORE_SKILLS)
-
 _PARAGRAPHS = (
     "You are a focused subagent working on a specific task delegated by a parent agent.",
     (
@@ -61,15 +58,15 @@ _PARAGRAPHS = (
         "decide the next step."
     ),
     (
-        "Start by loading any skills relevant to the task with load_skill — they carry workflows "
-        "that make you far more effective; use list_skills to see the full set beyond the core "
-        "skills listed below."
+        "Start by loading any skills relevant to the task from <available_skills> with load_skill "
+        "— they carry workflows that make you far more effective. The index below is complete "
+        "for this turn."
     ),
     (
         "A formal document deliverable must use its Office format — .docx, .pptx, or .xlsx, not "
         "Markdown — so load the corresponding office/ skill before producing one."
     ),
-    f"<available_skills>\n{_AVAILABLE_SKILLS}\n</available_skills>",
+    SKILL_INDEX_SLOT,
     (
         "You share the /workspace directory with the parent agent and any sibling subagents. Save "
         "findings, data, and artifacts to files there with clear, unique names so they can be read "

@@ -5,8 +5,8 @@ teaching skill, and the `runtime_skills` provider.
 persists it workspace-scoped through the extension's own `user_skill` table; the create-skill skill
 walks that authoring workflow. The `runtime_skills` provider is the per-turn seam core calls to
 merge this workspace's saved skills back into the turn's `SkillRegistry`, so a saved skill is
-resolvable by `load_skill`, listed by `list_skills`, and indexed in the prompt on later turns —
-scoped to this workspace alone and never able to shadow a core or pack skill."""
+resolvable by `load_skill` and indexed in the prompt on later turns — scoped to this workspace
+alone and never able to shadow a core or pack skill."""
 
 import base64
 import json
@@ -67,8 +67,8 @@ async def save_custom_skill_handler(ctx: ToolContext, args: SaveCustomSkillInput
     """Read the authored skill directory out of the sandbox, validate it with the skill parser (a
     bad or missing SKILL.md fails loud as a recoverable tool error), and persist it for this
     workspace so it survives across turns and sandboxes. The saved skill joins this workspace's
-    loadable set on later turns — resolvable by `load_skill`, listed by `list_skills`, indexed in
-    the prompt — but is scoped to this workspace alone and may not shadow a core or pack skill."""
+    loadable set on later turns — resolvable by `load_skill` and indexed in the prompt — but is
+    scoped to this workspace alone and may not shadow a core or pack skill."""
     if ctx.ext is None:
         raise RuntimeError("save_custom_skill dispatched without its ExtensionContext")
     scoped = workspace_path(args.path)

@@ -45,9 +45,13 @@ def test_coding_skills_parse_and_index() -> None:
 
 
 def test_coding_prompt_wraps_with_citation_and_fills_the_skill_index() -> None:
-    prompt = subagent_system_prompt(coding.CODING_PROFILE)
+    prompt = subagent_system_prompt(
+        coding.CODING_PROFILE, skills=(("extension-skill", "A turn-specific coding workflow."),)
+    )
     assert "{{skill_index}}" not in prompt
     assert "<available_skills>" in prompt
+    assert "- extension-skill: A turn-specific coding workflow." in prompt
     assert "<citation_instructions>" in prompt
     assert "software-engineering task" in prompt
     assert "JSON" in prompt
+    assert "list_skills" not in coding.CODING_PROFILE.tool_names

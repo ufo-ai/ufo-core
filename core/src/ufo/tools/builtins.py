@@ -1,5 +1,5 @@
 """The builtin tool set: bash, read, write, edit, glob, grep, share_file, spawn_subagent,
-load_sessions, ask_user, request_credentials, load_skill, connect_account, list_skills,
+load_sessions, ask_user, request_credentials, load_skill, connect_account,
 wait_for_subagents, cancel_subagent, message_subagent.
 
 Each file/shell handler reaches the workspace only through `ctx.sandbox`, so the carrier's scoping
@@ -20,9 +20,8 @@ structures a question or confirmation the agent poses in its reply, whose answer
 next message — no out-of-band prompt. `request_credentials` is its secret-collecting sibling: it
 seals which slots the speaking owner will fill and ends the turn; a capable surface prompts for the
 values privately and fulfillment lands them in the encrypted store, never the transcript.
-`load_skill` mounts a skill's `SKILL.md` and assets into the
-workspace and returns its workflow instructions. `list_skills` reports the loadable skills so the
-agent can discover a workflow before starting.
+`load_skill` mounts a skill's `SKILL.md` and assets into the workspace and returns its workflow
+instructions; the system prompt's `<available_skills>` block is its complete per-turn index.
 `wait_for_subagents`, `cancel_subagent`, and `message_subagent` reach `ctx.subagents`, the same
 Subagents workflow that backs `spawn`, to await a background child's terminal, cancel a running one,
 or queue it a follow-up message that runs as its next turn — scoped to the children this turn
@@ -208,8 +207,8 @@ class LoadSessionsInput(BaseModel):
 
 class LoadSkillInput(BaseModel):
     name: str = Field(
-        description="The skill name, e.g. 'office/pptx', 'data/visualization'. See list_skills for "
-        "the full set."
+        description="The skill name, e.g. 'office/pptx', 'data/visualization'. Choose from the "
+        "system prompt's <available_skills> index."
     )
 
 
@@ -228,10 +227,6 @@ class RequestCredentialsInput(BaseModel):
         max_length=MAX_REQUESTED_SLOTS,
         description="The slots to fill and what to ask for each.",
     )
-
-
-class ListSkillsInput(BaseModel):
-    pass
 
 
 class WaitForSubagentsInput(BaseModel):
@@ -635,16 +630,6 @@ async def request_credentials_handler(
     )
 
 
-async def list_skills_handler(ctx: ToolContext, args: ListSkillsInput) -> ToolResult:
-    """List the loadable skills, each with its one-line description, so the agent can discover a
-    workflow to load_skill before starting a domain task. The workspace's own saved user-skills are
-    merged into this set, so a skill authored in this workspace shows up here on later turns."""
-    skills = [
-        {"name": name, "description": description} for name, description in ctx.skills.index()
-    ]
-    return ToolResult(content=(TextContent(text=json.dumps({"skills": skills})),))
-
-
 async def wait_for_subagents_handler(ctx: ToolContext, args: WaitForSubagentsInput) -> ToolResult:
     """Await each background subagent's terminal and report its status and final answer. A malformed
     id raises a recoverable tool error; a control surface that is not wired fails loud."""
@@ -838,12 +823,6 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=RequestCredentialsInput,
         handler=request_credentials_handler,
-    ),
-    ToolDef(
-        name="list_skills",
-        description="List the Skills this turn can load.",
-        input_model=ListSkillsInput,
-        handler=list_skills_handler,
     ),
     ToolDef(
         name="wait_for_subagents",

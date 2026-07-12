@@ -98,6 +98,14 @@ def test_skill_index_renders_a_block_and_is_empty_without_skills() -> None:
     assert "- memory: store facts" in block
 
 
+def test_main_prompt_renders_the_complete_per_turn_skill_index() -> None:
+    skills = (("first", "First workflow."), ("second", "Second workflow."))
+    prompt = render_system_prompt("A", (), skills=skills, model="claude-opus-4-8").content
+    assert "<available_skills>" in prompt
+    assert "</available_skills>" in prompt
+    assert all(f"- {name}: {description}" in prompt for name, description in skills)
+
+
 def test_an_unresolved_slot_in_a_section_fails_loud() -> None:
     with pytest.raises(ValueError, match="unresolved slots: leftover"):
         render_system_prompt("A", (("bad", "<bad>{{leftover}}</bad>"),), model="claude-opus-4-8")

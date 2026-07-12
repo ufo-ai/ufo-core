@@ -6,7 +6,7 @@ description: "Create or modify a custom skill for this workspace. Load when the 
 
 This skill walks you through authoring an Agent Skill in the workspace and saving it so it persists
 across turns. A saved skill is scoped to this workspace: later turns can load it with `load_skill`
-and it appears in `list_skills`, but it never reaches another workspace and can never replace a
+and see it in `<available_skills>`, but it never reaches another workspace and can never replace a
 built-in skill.
 
 ## When to Use This Skill
@@ -81,8 +81,8 @@ Example inputs and expected outputs.
 1. **Understand the requirement.** Ask the user what the skill should accomplish and when it should
    apply. If a detail would change the workflow, ask before writing.
 
-2. **Check existing skills.** Call `list_skills` so you do not reuse a name that already exists and
-   so you can see whether an existing skill already covers the need.
+2. **Check existing skills.** Read the complete `<available_skills>` index in the system prompt so
+   you do not reuse a name that already exists and can see whether a skill already covers the need.
 
 3. **Choose a name and write a clear description** following the requirements above.
 
@@ -101,7 +101,7 @@ Example inputs and expected outputs.
    for this workspace. If validation fails, read the error, fix `SKILL.md`, and save again.
 
 7. **Confirm to the user** that the skill was saved. It is available to `load_skill` and appears in
-   `list_skills` on subsequent turns.
+   `<available_skills>` on subsequent turns.
 
 ## Modifying an Existing Skill
 
