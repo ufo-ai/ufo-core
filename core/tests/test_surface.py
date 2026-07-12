@@ -4,6 +4,7 @@ dependency, never the thing asserted; every assertion reads durable rows (turn, 
 writeback) and blob bytes that core wrote. The full end-to-end through a real registered surface is
 proven by the sample-extension conformance probe and the Slack extension's own tests."""
 
+import asyncio
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -12,6 +13,7 @@ import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 
+import ufo.ext.surface as surface_module
 from ufo.blob import FilesystemBlobStore
 from ufo.credentials import (
     CredentialRequestInvalid,
@@ -25,6 +27,7 @@ from ufo.ext.surface import (
     WRITEBACK_DELIVERED,
     WRITEBACK_FAILED,
     WRITEBACK_MAX_AGE_SECONDS,
+    WRITEBACK_WORKSPACE_BATCH,
     SharedArtifact,
     SurfaceContext,
     SurfaceRoute,
@@ -32,6 +35,7 @@ from ufo.ext.surface import (
     Writeback,
     WritebackPoller,
     workspace_key,
+    writeback_workspaces,
 )
 from ufo.hub import InProcessHub
 from ufo.loop.queue import _load_turn
@@ -59,17 +63,41 @@ class RecordingSurface:
 
     ref: str = "posted-ref"
     fail_post: bool = False
+    fail_attach_attempts: int = 0
+    posted: list[UUID] = field(default_factory=list)
+    attach_attempts: int = 0
     attached: list[tuple[UUID, str, tuple[str, ...]]] = field(default_factory=list)
 
     async def post(self, ctx: SurfaceContext, writeback: Writeback) -> str:
+        self.posted.append(writeback.turn_id)
         if self.fail_post:
             raise RuntimeError("post failed")
         return self.ref
 
     async def attach(self, ctx: SurfaceContext, writeback: Writeback, reply_ref: str) -> None:
+        self.attach_attempts += 1
+        if self.attach_attempts <= self.fail_attach_attempts:
+            raise RuntimeError("attach failed")
         self.attached.append(
             (writeback.turn_id, reply_ref, tuple(a.filename for a in writeback.artifacts))
         )
+
+
+@dataclass
+class BlockingSurface(RecordingSurface):
+    blocked_workspace: UUID | None = None
+    blocked: asyncio.Event = field(default_factory=asyncio.Event)
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+    fast: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def post(self, ctx: SurfaceContext, writeback: Writeback) -> str:
+        self.posted.append(writeback.turn_id)
+        if ctx.workspace_id == self.blocked_workspace:
+            self.blocked.set()
+            await self.release.wait()
+        else:
+            self.fast.set()
+        return self.ref
 
 
 async def _unused_ingest(ctx: SurfaceContext, request: object) -> object:
@@ -223,17 +251,27 @@ async def _set_writeback(turn_id: UUID, **values: object) -> None:
 def _poller(
     workspace_id: UUID, surface: RecordingSurface, blob: FilesystemBlobStore
 ) -> tuple[WritebackPoller, RecordingSurface]:
+    context = _context(workspace_id, StubDbos(), blob)
+    return _fleet_poller({workspace_id: context}, surface), surface
+
+
+def _fleet_poller(
+    contexts: dict[UUID, SurfaceContext],
+    surface: RecordingSurface,
+    worker_id: str = "worker-1",
+) -> WritebackPoller:
     spec = SurfaceSpec(
         name=SURFACE,
         routes=(SurfaceRoute(method="POST", path="", handler=_unused_ingest),),
         post=surface.post,
         attach=surface.attach,
     )
-    context = _context(workspace_id, StubDbos(), blob)
-    poller = WritebackPoller(
-        workspace_id=workspace_id, worker_id="worker-1", surfaces={SURFACE: (spec, context)}
+    return WritebackPoller(
+        worker_id=worker_id,
+        surfaces={SURFACE: spec},
+        context_for=lambda workspace_id, _name: contexts[workspace_id],
+        candidates=writeback_workspaces(),
     )
-    return poller, surface
 
 
 def test_workspace_key_scopes_under_the_conversation_workspace() -> None:
@@ -244,6 +282,17 @@ def test_workspace_key_scopes_under_the_conversation_workspace() -> None:
     for bad in ("../escape", "/etc/passwd", "a/../../b", ""):
         with pytest.raises(ValueError):
             workspace_key(cid, bad)
+
+
+async def test_writeback_due_index_is_installed(db: None) -> None:
+    async with workspace_tx() as connection:
+        dialect = connection.dialect.name
+        indexes = await connection.run_sync(lambda sync: sa.inspect(sync).get_indexes("writeback"))
+    due = next(index for index in indexes if index["name"] == "writeback_due")
+    assert due["column_names"] == ["workspace_id", "created_at"]
+    predicate = str(due["dialect_options"][f"{dialect}_where"])
+    assert "pending" in predicate
+    assert "claimed" in predicate
 
 
 async def test_admit_queues_a_turn_and_registers_a_writeback(db: None, tmp_path) -> None:
@@ -445,6 +494,90 @@ async def test_poller_delivers_a_done_turn_and_attaches_its_files(db: None, tmp_
     assert surface.attached == [(turn_id, "C5:9.9", ("report.pdf",))]
 
 
+async def test_workspace_candidates_rotate_and_recover_from_cursor_deletion_and_restart(
+    db: None,
+) -> None:
+    workspaces: list[UUID] = []
+    turns: dict[UUID, UUID] = {}
+    for index in range(WRITEBACK_WORKSPACE_BATCH + 1):
+        workspace_id, _, _ = await _seed()
+        turns[workspace_id] = await _seed_turn(workspace_id, f"C{index}:1.0", "done", str(index))
+        workspaces.append(workspace_id)
+    candidates = writeback_workspaces()
+    first = await candidates()
+    second = await candidates()
+    assert len(first) == WRITEBACK_WORKSPACE_BATCH
+    assert set(first).isdisjoint(second)
+    assert set((*first, *second)) == set(workspaces)
+    await _set_writeback(turns[second[-1]], status=WRITEBACK_DELIVERED)
+    assert set(await candidates()) == set(first)
+    assert set(await writeback_workspaces()()) == set(first)
+
+
+async def test_a_slow_workspace_does_not_block_another_workspace(db: None, tmp_path) -> None:
+    slow_workspace, _, _ = await _seed()
+    fast_workspace, _, _ = await _seed()
+    slow_turn = await _seed_turn(slow_workspace, "CSLOW:1.0", "done", "slow")
+    fast_turn = await _seed_turn(fast_workspace, "CFAST:1.0", "done", "fast")
+    blob = FilesystemBlobStore(root=tmp_path)
+    contexts = {
+        workspace_id: _context(workspace_id, StubDbos(), blob)
+        for workspace_id in (slow_workspace, fast_workspace)
+    }
+    surface = BlockingSurface(blocked_workspace=slow_workspace)
+    drain = asyncio.create_task(_fleet_poller(contexts, surface).drain())
+    try:
+        await asyncio.wait_for(surface.blocked.wait(), timeout=1)
+        await asyncio.wait_for(surface.fast.wait(), timeout=1)
+        deadline = asyncio.get_running_loop().time() + 1
+        while (await _writeback(fast_turn)).status != WRITEBACK_DELIVERED:
+            assert asyncio.get_running_loop().time() < deadline
+            await asyncio.sleep(0.01)
+        assert fast_turn in surface.posted
+    finally:
+        surface.release.set()
+        await asyncio.wait_for(drain, timeout=1)
+    assert (await _writeback(slow_turn)).status == WRITEBACK_DELIVERED
+
+
+async def test_runner_pages_beyond_a_slow_workspace(
+    db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(surface_module, "WRITEBACK_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(surface_module, "WRITEBACK_WORKSPACE_BATCH", 2)
+    monkeypatch.setattr(surface_module, "WRITEBACK_WORKSPACE_IN_FLIGHT", 4)
+    monkeypatch.setattr(surface_module, "WRITEBACK_WORKSPACE_CONCURRENCY", 2)
+    workspaces: list[UUID] = []
+    turns: dict[UUID, UUID] = {}
+    for index in range(3):
+        workspace_id, _, _ = await _seed()
+        turns[workspace_id] = await _seed_turn(workspace_id, f"CPAGE:{index}.0", "done", str(index))
+        workspaces.append(workspace_id)
+    ordered = sorted(workspaces)
+    blocked_workspace, later_workspace = ordered[0], ordered[-1]
+    blob = FilesystemBlobStore(root=tmp_path)
+    contexts = {
+        workspace_id: _context(workspace_id, StubDbos(), blob) for workspace_id in workspaces
+    }
+    surface = BlockingSurface(blocked_workspace=blocked_workspace)
+    running = asyncio.create_task(_fleet_poller(contexts, surface).run())
+    try:
+        await asyncio.wait_for(surface.blocked.wait(), timeout=1)
+        deadline = asyncio.get_running_loop().time() + 1
+        while (await _writeback(turns[later_workspace])).status != WRITEBACK_DELIVERED:
+            assert asyncio.get_running_loop().time() < deadline
+            await asyncio.sleep(0.01)
+        assert (await _writeback(turns[blocked_workspace])).status == WRITEBACK_CLAIMED
+    finally:
+        surface.release.set()
+        deadline = asyncio.get_running_loop().time() + 1
+        while (await _writeback(turns[blocked_workspace])).status != WRITEBACK_DELIVERED:
+            assert asyncio.get_running_loop().time() < deadline
+            await asyncio.sleep(0.01)
+        running.cancel()
+        await asyncio.gather(running, return_exceptions=True)
+
+
 async def test_poller_leaves_a_non_terminal_turn_undelivered(db: None, tmp_path) -> None:
     workspace_id, _, _ = await _seed()
     turn_id = await _seed_turn(workspace_id, "C6:1.0", "queued", "")
@@ -454,9 +587,20 @@ async def test_poller_leaves_a_non_terminal_turn_undelivered(db: None, tmp_path)
     assert (await _writeback(turn_id)).status == WRITEBACK_PENDING
 
 
-async def test_poller_finalizes_a_recorded_ref_without_reposting(db: None, tmp_path) -> None:
+async def test_poller_resumes_attachments_from_a_recorded_ref_without_reposting(
+    db: None, tmp_path
+) -> None:
     workspace_id, _, _ = await _seed()
-    turn_id = await _seed_turn(workspace_id, "C7:1.0", "done", "already sent")
+    artifact = SharedArtifact(
+        blob_key="artifacts/x/resume.txt",
+        filename="resume.txt",
+        subject=None,
+        media_type="text/plain",
+        size_bytes=6,
+    )
+    turn_id = await _seed_turn(
+        workspace_id, "C7:1.0", "done", "already sent", artifacts=(artifact,)
+    )
     await _set_writeback(
         turn_id,
         status=WRITEBACK_CLAIMED,
@@ -466,10 +610,112 @@ async def test_poller_finalizes_a_recorded_ref_without_reposting(db: None, tmp_p
     )
     poller, surface = _poller(workspace_id, RecordingSurface(), FilesystemBlobStore(root=tmp_path))
     await poller.drain()
-    assert surface.attached == []
+    assert surface.posted == []
+    assert surface.attached == [(turn_id, "C7:5.5", ("resume.txt",))]
     row = await _writeback(turn_id)
     assert row.status == WRITEBACK_DELIVERED
     assert row.reply_ref == "C7:5.5"
+
+
+async def test_attachment_failure_retries_from_the_recorded_reply(db: None, tmp_path) -> None:
+    workspace_id, _, _ = await _seed()
+    artifact = SharedArtifact(
+        blob_key="artifacts/x/retry.txt",
+        filename="retry.txt",
+        subject=None,
+        media_type="text/plain",
+        size_bytes=5,
+    )
+    turn_id = await _seed_turn(workspace_id, "C8:1.0", "done", "sent once", artifacts=(artifact,))
+    surface = RecordingSurface(fail_attach_attempts=1)
+    poller, _ = _poller(workspace_id, surface, FilesystemBlobStore(root=tmp_path))
+    await poller.drain()
+    failed = await _writeback(turn_id)
+    assert failed.status == WRITEBACK_PENDING
+    assert failed.reply_ref == "posted-ref"
+    await _set_writeback(turn_id, claim_expires_at=None)
+    await poller.drain()
+    assert surface.posted == [turn_id]
+    assert surface.attach_attempts == 2
+    assert surface.attached == [(turn_id, "posted-ref", ("retry.txt",))]
+    assert (await _writeback(turn_id)).status == WRITEBACK_DELIVERED
+
+
+async def test_live_delivery_renews_its_claim_before_a_peer_can_recover_it(
+    db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(surface_module, "WRITEBACK_CLAIM_REFRESH_SECONDS", 0.01)
+    workspace_id, _, _ = await _seed()
+    turn_ids = (
+        await _seed_turn(workspace_id, "CLEASE:1.0", "done", "slow"),
+        await _seed_turn(workspace_id, "CLEASE:2.0", "done", "waiting"),
+    )
+    blob = FilesystemBlobStore(root=tmp_path)
+    contexts = {workspace_id: _context(workspace_id, StubDbos(), blob)}
+    surface = BlockingSurface(blocked_workspace=workspace_id)
+    first = _fleet_poller(contexts, surface, worker_id="worker-1")
+    running = asyncio.create_task(first.drain())
+    try:
+        await asyncio.wait_for(surface.blocked.wait(), timeout=1)
+        expired = datetime.now(UTC) - timedelta(seconds=1)
+        for turn_id in turn_ids:
+            await _set_writeback(turn_id, claim_expires_at=expired)
+        forced_expiries = {
+            turn_id: (await _writeback(turn_id)).claim_expires_at for turn_id in turn_ids
+        }
+        deadline = asyncio.get_running_loop().time() + 1
+        while True:
+            current = {
+                turn_id: (await _writeback(turn_id)).claim_expires_at for turn_id in turn_ids
+            }
+            if all(current[turn_id] != forced_expiries[turn_id] for turn_id in turn_ids):
+                break
+            assert asyncio.get_running_loop().time() < deadline
+            await asyncio.sleep(0.01)
+        for turn_id in turn_ids:
+            renewed = await _writeback(turn_id)
+            assert renewed.status == WRITEBACK_CLAIMED
+            assert renewed.claimed_by == "worker-1"
+        peer_surface = RecordingSurface()
+        await _fleet_poller(contexts, peer_surface, worker_id="worker-2").drain()
+        assert peer_surface.posted == []
+    finally:
+        surface.release.set()
+        await asyncio.wait_for(running, timeout=1)
+    assert [(await _writeback(turn_id)).status for turn_id in turn_ids] == [
+        WRITEBACK_DELIVERED,
+        WRITEBACK_DELIVERED,
+    ]
+
+
+async def test_claim_renewal_cancels_external_delivery_when_ownership_changes(
+    db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(surface_module, "WRITEBACK_CLAIM_REFRESH_SECONDS", 0.01)
+    workspace_id, _, _ = await _seed()
+    turn_id = await _seed_turn(workspace_id, "CSTOLEN:1.0", "done", "slow")
+    blob = FilesystemBlobStore(root=tmp_path)
+    contexts = {workspace_id: _context(workspace_id, StubDbos(), blob)}
+    surface = BlockingSurface(blocked_workspace=workspace_id)
+    running = asyncio.create_task(_fleet_poller(contexts, surface, worker_id="worker-1").drain())
+    try:
+        await asyncio.wait_for(surface.blocked.wait(), timeout=1)
+        await _set_writeback(
+            turn_id,
+            claimed_by="worker-2",
+            claim_expires_at=datetime.now(UTC) + timedelta(seconds=60),
+        )
+        await asyncio.wait_for(running, timeout=1)
+    finally:
+        surface.release.set()
+        if not running.done():
+            running.cancel()
+            await asyncio.gather(running, return_exceptions=True)
+    row = await _writeback(turn_id)
+    assert row.status == WRITEBACK_CLAIMED
+    assert row.claimed_by == "worker-2"
+    assert surface.posted == [turn_id]
+    assert surface.attach_attempts == 0
 
 
 async def test_poller_backs_off_a_young_failure_then_terminally_fails_when_aged_out(

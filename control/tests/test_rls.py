@@ -227,6 +227,49 @@ async def test_no_cross_tenant_visibility(rls_env: RlsEnv) -> None:
         await connection.close()
 
 
+async def test_surface_installations_are_hidden_but_globally_unique(rls_env: RlsEnv) -> None:
+    acme, globex = rls_env.tenants
+    installation_id = "slack-app-team-fingerprint"
+    acme_connection = await asyncpg.connect(_libpq(acme.postgres.url))
+    globex_connection = await asyncpg.connect(_libpq(globex.postgres.url))
+    try:
+        await acme_connection.execute(
+            "insert into surface_installation "
+            "(workspace_id, surface, installation_id, created_at, updated_at) "
+            "values ($1, 'slack', $2, now(), now())",
+            UUID(acme.workspace_id),
+            installation_id,
+        )
+        assert (
+            await acme_connection.fetchval("select installation_id from surface_installation")
+            == installation_id
+        )
+        assert (
+            await globex_connection.fetch("select installation_id from surface_installation") == []
+        )
+        with pytest.raises(asyncpg.UniqueViolationError):
+            await globex_connection.execute(
+                "insert into surface_installation "
+                "(workspace_id, surface, installation_id, created_at, updated_at) "
+                "values ($1, 'slack', $2, now(), now())",
+                UUID(globex.workspace_id),
+                installation_id,
+            )
+        await globex_connection.execute(
+            "insert into surface_installation "
+            "(workspace_id, surface, installation_id, created_at, updated_at) "
+            "values ($1, 'slack', 'globex-installation', now(), now())",
+            UUID(globex.workspace_id),
+        )
+        assert (
+            await globex_connection.fetchval("select installation_id from surface_installation")
+            == "globex-installation"
+        )
+    finally:
+        await acme_connection.close()
+        await globex_connection.close()
+
+
 async def test_with_check_rejects_a_foreign_workspace_insert(rls_env: RlsEnv) -> None:
     acme, globex = rls_env.tenants
     connection = await asyncpg.connect(_libpq(acme.postgres.url))

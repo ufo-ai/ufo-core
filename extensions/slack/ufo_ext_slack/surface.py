@@ -54,7 +54,10 @@ from ufo.sdk.surfaces import (
     AskUserInput,
     CredentialSlotUnset,
     SharedArtifact,
+    SurfaceAuth,
     SurfaceContext,
+    SurfaceInstallationConflict,
+    SurfaceWorkspaceUnknown,
     TurnContext,
     Writeback,
 )
@@ -228,7 +231,8 @@ SLACK_BUTTON_TEXT_LIMIT = 75
 SLACK_BUTTON_VALUE_LIMIT = 2_000
 
 SLACK_REPLAY_SECONDS = 300
-MAX_SLACK_EVENT_BYTES = 1_000_000
+MAX_SLACK_EVENT_BYTES = 1024 * 1024
+SLACK_RAW_BODY_STATE_KEY = "slack_raw_body"
 MESSAGE_EVENT_TYPES = ("app_mention", "message")
 MEMBER_MESSAGE_SUBTYPES = (None, "file_share", "thread_broadcast")
 
@@ -271,6 +275,10 @@ _LOG = logging.getLogger("ufo_ext_slack")
 
 class SlackSignatureError(Exception):
     """The request's Slack signature is missing, stale, or does not match the signing secret."""
+
+
+class SlackBodyTooLarge(Exception):
+    """The streamed Slack request crossed the inbound payload bound."""
 
 
 class SlackApiError(RuntimeError):
@@ -324,16 +332,120 @@ def verify_slack_signature(
         raise SlackSignatureError("invalid Slack signature")
 
 
+_RAW_BODY_MISSING = object()
+_RAW_BODY_OVERFLOW = object()
+
+
+async def _slack_request_body(request: Request) -> bytes:
+    state = request.scope.setdefault("state", {})
+    cached = state.get(SLACK_RAW_BODY_STATE_KEY, _RAW_BODY_MISSING)
+    if cached is _RAW_BODY_OVERFLOW:
+        raise SlackBodyTooLarge
+    if cached is not _RAW_BODY_MISSING:
+        if not isinstance(cached, bytes):
+            raise RuntimeError("Slack raw body cache is invalid")
+        return cached
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > MAX_SLACK_EVENT_BYTES:
+            request.state.slack_raw_body = _RAW_BODY_OVERFLOW
+            raise SlackBodyTooLarge
+        chunks.append(chunk)
+    raw = b"".join(chunks)
+    request.state.slack_raw_body = raw
+    return raw
+
+
 def url_verification_challenge(body: bytes) -> str | None:
     """The challenge from a Slack `url_verification` handshake, else None for a real event."""
     try:
         payload = json.loads(body)
-    except json.JSONDecodeError:
+    except (UnicodeDecodeError, json.JSONDecodeError):
         return None
     if not isinstance(payload, dict) or payload.get("type") != "url_verification":
         return None
     challenge = payload.get("challenge")
     return challenge if isinstance(challenge, str) else ""
+
+
+def signed_team_id(body: bytes) -> str | None:
+    try:
+        payload = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        try:
+            encoded = parse_qs(body.decode()).get("payload")
+            payload = json.loads(encoded[0]) if encoded else None
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None
+    if not isinstance(payload, dict):
+        return None
+    candidate = payload.get("team_id")
+    if not isinstance(candidate, str):
+        team = payload.get("team")
+        candidate = team.get("id") if isinstance(team, dict) else None
+    if not isinstance(candidate, str) or re.fullmatch(TEAM_ID_PATTERN, candidate) is None:
+        return None
+    return candidate
+
+
+def slack_installation_id(signing_secret: str, team_id: str) -> str:
+    return hmac.new(
+        signing_secret.encode(), f"{SURFACE_SLACK}:{team_id}".encode(), hashlib.sha256
+    ).hexdigest()
+
+
+def routed_workspace(request: Request) -> UUID | None:
+    raw = request.path_params.get("workspace_id")
+    try:
+        return UUID(str(raw))
+    except ValueError:
+        return None
+
+
+def workspace_route_matches(request: Request, workspace_id: UUID) -> bool:
+    raw = request.path_params.get("workspace_id")
+    if raw is None:
+        return True
+    try:
+        return UUID(str(raw)) == workspace_id
+    except ValueError:
+        return False
+
+
+async def resolve_workspace(request: Request, auth: SurfaceAuth) -> UUID | None:
+    """Authenticate a workspace-qualified Slack callback before shared serve binds it. A stored
+    signing secret must verify the exact raw body, then the signed Slack team and app-secret
+    fingerprint must belong to this workspace alone. Before the workspace has a signing secret,
+    only Slack's inert URL-verification challenge may enter."""
+    workspace_id = routed_workspace(request)
+    if workspace_id is None:
+        return None
+    try:
+        raw = await _slack_request_body(request)
+    except SlackBodyTooLarge:
+        return None
+    try:
+        signing_secret = await auth.credential(workspace_id, SLACK_SIGNING_SECRET_SLOT)
+    except SurfaceWorkspaceUnknown:
+        return None
+    except CredentialSlotUnset:
+        return workspace_id if url_verification_challenge(raw) is not None else None
+    try:
+        verify_slack_signature(request.headers, raw, signing_secret)
+    except SlackSignatureError:
+        return None
+    if url_verification_challenge(raw) is not None:
+        return workspace_id
+    team_id = signed_team_id(raw)
+    if team_id is None:
+        return None
+    try:
+        await auth.bind_installation(workspace_id, slack_installation_id(signing_secret, team_id))
+    except SurfaceInstallationConflict:
+        return None
+    return workspace_id
 
 
 def slack_thread_key(channel: str, root_ts: str, is_dm: bool) -> str:
@@ -459,8 +571,11 @@ async def _mark_url_verified(ctx: SurfaceContext, signing_secret: str) -> None:
 
 
 async def ingest(ctx: SurfaceContext, request: Request) -> Response:
-    raw = await request.body()
-    if len(raw) > MAX_SLACK_EVENT_BYTES:
+    if not workspace_route_matches(request, ctx.workspace_id):
+        return Response("unauthorized", status_code=401)
+    try:
+        raw = await _slack_request_body(request)
+    except SlackBodyTooLarge:
         return Response("Slack event too large", status_code=413)
     try:
         signing_secret = await ctx.credential(SLACK_SIGNING_SECRET_SLOT)
@@ -850,7 +965,10 @@ class ThreadStatus:
                 await self._set(client, bot_token, STATUS_CLEAR_TEXT)
 
     async def _set(self, client: httpx.AsyncClient, bot_token: str, status: str) -> None:
-        if _THREAD_WRITERS.get((self.channel, self.thread_ts)) != self.turn_id:
+        if (
+            _THREAD_WRITERS.get((self.ctx.workspace_id, self.channel, self.thread_ts))
+            != self.turn_id
+        ):
             return
         await _slack_ok(
             client.post(
@@ -901,7 +1019,7 @@ class ThreadStatus:
 
 
 _STATUS_TASKS: dict[UUID, asyncio.Task[None]] = {}
-_THREAD_WRITERS: dict[tuple[str, str], UUID] = {}
+_THREAD_WRITERS: dict[tuple[UUID, str, str], UUID] = {}
 
 
 def _track_status(ctx: SurfaceContext, turn_id: UUID, queue_key: str, message_ts: str) -> None:
@@ -915,15 +1033,16 @@ def _track_status(ctx: SurfaceContext, turn_id: UUID, queue_key: str, message_ts
         return
     channel, separator, root_ts = queue_key.partition(":")
     thread = (channel, root_ts if separator else message_ts)
+    writer = (ctx.workspace_id, *thread)
     status = ThreadStatus(ctx=ctx, turn_id=turn_id, channel=thread[0], thread_ts=thread[1])
-    _THREAD_WRITERS[thread] = turn_id
+    _THREAD_WRITERS[writer] = turn_id
     task = asyncio.create_task(_run_status(status))
     _STATUS_TASKS[turn_id] = task
 
     def _untrack(_done: asyncio.Task[None]) -> None:
         _STATUS_TASKS.pop(turn_id, None)
-        if _THREAD_WRITERS.get(thread) == turn_id:
-            del _THREAD_WRITERS[thread]
+        if _THREAD_WRITERS.get(writer) == turn_id:
+            del _THREAD_WRITERS[writer]
 
     task.add_done_callback(_untrack)
 
@@ -957,8 +1076,11 @@ async def interactive(ctx: SurfaceContext, request: Request) -> Response:
     turn stored rewrites (a losing click must not display an answer the agent never saw), and the
     rewrite rides its own task so the ack beats Slack's three-second budget — Block Kit allows no
     message in the direct response, only the ack."""
-    raw = await request.body()
-    if len(raw) > MAX_SLACK_EVENT_BYTES:
+    if not workspace_route_matches(request, ctx.workspace_id):
+        return Response("unauthorized", status_code=401)
+    try:
+        raw = await _slack_request_body(request)
+    except SlackBodyTooLarge:
         return Response("Slack payload too large", status_code=413)
     try:
         signing_secret = await ctx.credential(SLACK_SIGNING_SECRET_SLOT)

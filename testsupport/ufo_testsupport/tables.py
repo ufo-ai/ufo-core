@@ -16,6 +16,7 @@ DELETE_ORDER = (
     tables.turn,
     tables.conversation,
     tables.surface_identity,
+    tables.surface_installation,
     tables.agent,
     tables.ext_store,
     tables.credential,

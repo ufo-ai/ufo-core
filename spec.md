@@ -44,6 +44,7 @@ Tables (all keyed by `workspace_id`, `created_at`, `updated_at`):
 |---|---|
 | `workspace` | The team unit: name, config digest. |
 | `member` | A human. Role: `owner` or `member`. Surface identities link here (Slack user id, CLI token, web session) — one human, many surfaces, one memory subject. |
+| `surface_installation` | One workspace binding per surface; an installation identity belongs to only one workspace across the fleet. |
 | `agent` | A configured agent: name, prompt, model policy, granted tool set, skill packs, memory scope. |
 | `grant` | Agent ← capability binding: a connector account, a credential slot, a tool group. Records grantor, when, via which conversation. Created through chat; the speaker gates the *granting act*, never subsequent use. |
 | `credential` | BYOK secrets, encrypted at rest. Slots are declared by extensions; values are workspace-scoped. |
@@ -211,8 +212,10 @@ allocation, delivery registration, and enqueue recovery remain one implementatio
   surface ingest, a scheduled fire, an extension invoke alike. A `WritebackPoller` delivers the
   terminal reply at-least-once (the hub is lossy), two-phase: `post` returns the reply's durable
   reference (recorded before any upload), then `attach` streams the turn's shared files into the
-  conversation, with rich rendering. A turn that ended by asking (`ask_user` as its final act) rides the
-  writeback as a structured `question`, so the surface can render the options as its own answer
+  conversation, with rich rendering. Recovery resumes `attach` without re-posting; attachment
+  delivery is at-least-once and may repeat after a crash between upload and the delivered commit.
+  A turn that ended by asking (`ask_user` as its final act) rides the writeback as a structured
+  `question`, so the surface can render the options as its own answer
   affordance (Slack buttons) whose use admits the answer as the conversation's next turn — the
   first answer wins the idempotent admit, and `turn_inbound` is how the surface confirms which
   landed before rewriting the affordance; a durable surface may also `tail` a turn it admitted for
@@ -233,6 +236,14 @@ from `url_private` into the conversation's workspace before the turn runs; a sha
 (`share_file` → a `shared_artifact` record) streams from the blob store to Slack's chunked
 external-upload API, into the conversation's thread (Slack forbids threading on a reply's ts). `surface_identity` and `conversation.surface`
 are open namespaces validated by surface registration, not a fixed enum.
+
+Shared surface requests authenticate their workspace before core binds it. Slack callback URLs
+carry the workspace id and verify the raw request with only that workspace's stored signing secret;
+an event or click binds the app-secret + Slack-team fingerprint uniquely to that workspace, while an
+unsigned URL-verification challenge is accepted only while that workspace has no secret.
+Surface identities and conversation keys include `workspace_id`. Durable writeback enumerates a
+bounded set of workspace ids through the owner connection, then binds each before reading or
+delivering any tenant data.
 
 Onboarding flow engine is core (steps are contributed by extensions/packs); first-run creates the
 workspace and its first `owner`.

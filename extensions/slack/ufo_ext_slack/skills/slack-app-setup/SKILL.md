@@ -77,7 +77,7 @@ oauth_config:
       - users:read.email
 settings:
   event_subscriptions:
-    request_url: <public_base_url>/surface/slack
+    request_url: <public_base_url>/surface/slack/<workspace_id>
     bot_events:
       - app_home_opened
       - app_mention
@@ -87,7 +87,7 @@ settings:
       - message.mpim
   interactivity:
     is_enabled: true
-    request_url: <public_base_url>/surface/slack/interactive
+    request_url: <public_base_url>/surface/slack/<workspace_id>/interactive
   org_deploy_enabled: false
   socket_mode_enabled: false
   token_rotation_enabled: false

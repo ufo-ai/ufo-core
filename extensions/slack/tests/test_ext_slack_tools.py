@@ -196,7 +196,7 @@ async def test_slack_connect_walks_the_state_machine(
         bare = json.loads(await _run(registry, "slack_connect", owner))
         assert bare["state"] == "not_configured"
         assert set(bare["missing"]) == set(tools.SLACK_SECRET_SLOTS)
-        assert bare["events_url"] == f"{PUBLIC_BASE_URL}/surface/slack"
+        assert bare["events_url"] == f"{PUBLIC_BASE_URL}/surface/slack/{workspace_id}"
         await store.put(workspace_id, SLACK_BOT_TOKEN_SLOT, "xoxb-1")
         await store.put(workspace_id, SLACK_SIGNING_SECRET_SLOT, "shhh")
         with pytest.raises(ValueError, match="workspace owner"):
@@ -263,10 +263,10 @@ async def test_manifest_tool_matches_the_skill_and_validates_the_name(
     served = yaml.safe_load(await _run(registry, "slack_app_manifest", ctx, name="acme bot"))
     assert served["display_information"]["name"] == "acme bot"
     assert served["settings"]["event_subscriptions"]["request_url"] == (
-        f"{PUBLIC_BASE_URL}/surface/slack"
+        f"{PUBLIC_BASE_URL}/surface/slack/{workspace_id}"
     )
     assert served["settings"]["interactivity"]["request_url"] == (
-        f"{PUBLIC_BASE_URL}/surface/slack/interactive"
+        f"{PUBLIC_BASE_URL}/surface/slack/{workspace_id}/interactive"
     )
     skill_body = skill_registry((slack_manifest(),)).named("slack-app-setup").instructions
     block = re.search(r"```yaml\n(.*?)```", skill_body, re.DOTALL)
@@ -275,10 +275,13 @@ async def test_manifest_tool_matches_the_skill_and_validates_the_name(
         block.group(1)
         .replace("<bot display name>", "acme bot")
         .replace(
-            "<public_base_url>/surface/slack/interactive",
-            f"{PUBLIC_BASE_URL}/surface/slack/interactive",
+            "<public_base_url>/surface/slack/<workspace_id>/interactive",
+            f"{PUBLIC_BASE_URL}/surface/slack/{workspace_id}/interactive",
         )
-        .replace("<public_base_url>/surface/slack", f"{PUBLIC_BASE_URL}/surface/slack")
+        .replace(
+            "<public_base_url>/surface/slack/<workspace_id>",
+            f"{PUBLIC_BASE_URL}/surface/slack/{workspace_id}",
+        )
     )
     assert served == skill_yaml
     with pytest.raises(ValueError, match="display name"):

@@ -37,6 +37,8 @@ from typing import Literal, Protocol
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from starlette.requests import Request
 from starlette.responses import Response
 
@@ -47,6 +49,7 @@ from ufo.artifact_token import (
     mint_artifact_token,
 )
 from ufo.blob import BlobStore
+from ufo.candidates import WorkspaceCandidates, owner_candidates
 from ufo.credentials import (
     CredentialRequestInvalid,
     CredentialStore,
@@ -68,6 +71,7 @@ from ufo.schema.records import (
     TerminalStatus,
     TurnContext,
 )
+from ufo.workspace import ws
 
 WORKSPACE_SEGMENT = "workspace"
 
@@ -98,9 +102,13 @@ TERMINAL_TURN_STATUSES: tuple[str, ...] = ("done", "failed", "cancelled")
 MAX_WRITEBACK_ERROR_CHARS = 2_048
 WRITEBACK_POLL_SECONDS = 1.0
 WRITEBACK_CLAIM_SECONDS = 300
+WRITEBACK_CLAIM_REFRESH_SECONDS = 60
 WRITEBACK_RETRY_BACKOFF_SECONDS = 60
 WRITEBACK_MAX_AGE_SECONDS = 3600
 WRITEBACK_CLAIM_BATCH = 16
+WRITEBACK_WORKSPACE_BATCH = 16
+WRITEBACK_WORKSPACE_CONCURRENCY = 4
+WRITEBACK_WORKSPACE_IN_FLIGHT = WRITEBACK_WORKSPACE_BATCH * 2
 
 
 def workspace_key(conversation_id: UUID, rel: str) -> str:
@@ -526,18 +534,115 @@ class SurfaceContext:
         await self.blob.put_stream(workspace_key(conversation_id, rel), chunks)
 
 
+class SurfaceWorkspaceUnknown(LookupError):
+    """A shared surface request names no workspace this deployment serves."""
+
+
+class SurfaceInstallationConflict(LookupError):
+    """A shared surface installation is already bound to another workspace."""
+
+
+@dataclass(frozen=True)
+class SurfaceAuth:
+    """The pre-binding gate for a shared surface resolver. A resolver may read only a credential
+    slot its own manifest declared, and may bind only its own installation identity. Each operation
+    runs under the named workspace; the installation's global uniqueness rejects cross-workspace
+    reuse even though RLS hides the row that owns it."""
+
+    _credentials: CredentialStore | None
+    _declared: frozenset[str]
+    _surface: str
+
+    async def credential(self, workspace_id: UUID, slot: str) -> str:
+        if slot not in self._declared:
+            raise ValueError(f"surface resolver reads undeclared credential slot {slot!r}")
+        if self._credentials is None:
+            raise RuntimeError("surface resolver reads a credential but no store is configured")
+        with ws(workspace_id):
+            async with workspace_tx() as connection:
+                exists = (
+                    await connection.execute(
+                        sa.select(tables.workspace.c.id).where(
+                            tables.workspace.c.id == workspace_id
+                        )
+                    )
+                ).one_or_none()
+            if exists is None:
+                raise SurfaceWorkspaceUnknown(str(workspace_id))
+            return await self._credentials.get(workspace_id, slot)
+
+    async def bind_installation(self, workspace_id: UUID, installation_id: str) -> None:
+        """Bind this surface installation to one workspace. Reconfiguration replaces this
+        workspace's binding atomically; the global installation identity rejects a second
+        workspace even when RLS hides the row that owns it."""
+        if not installation_id:
+            raise ValueError("surface installation id is empty")
+        with ws(workspace_id):
+            try:
+                async with workspace_tx() as connection:
+                    match connection.dialect.name:
+                        case "postgresql":
+                            postgres_statement = postgres_insert(
+                                tables.surface_installation
+                            ).values(
+                                workspace_id=workspace_id,
+                                surface=self._surface,
+                                installation_id=installation_id,
+                                created_at=sa.func.now(),
+                                updated_at=sa.func.now(),
+                            )
+                            bound = (
+                                await connection.execute(
+                                    postgres_statement.on_conflict_do_update(
+                                        index_elements=("workspace_id", "surface"),
+                                        set_={
+                                            "installation_id": installation_id,
+                                            "updated_at": sa.func.now(),
+                                        },
+                                    ).returning(tables.surface_installation.c.installation_id)
+                                )
+                            ).scalar_one()
+                        case "sqlite":
+                            sqlite_statement = sqlite_insert(tables.surface_installation).values(
+                                workspace_id=workspace_id,
+                                surface=self._surface,
+                                installation_id=installation_id,
+                                created_at=sa.func.now(),
+                                updated_at=sa.func.now(),
+                            )
+                            bound = (
+                                await connection.execute(
+                                    sqlite_statement.on_conflict_do_update(
+                                        index_elements=("workspace_id", "surface"),
+                                        set_={
+                                            "installation_id": installation_id,
+                                            "updated_at": sa.func.now(),
+                                        },
+                                    ).returning(tables.surface_installation.c.installation_id)
+                                )
+                            ).scalar_one()
+                        case name:
+                            raise RuntimeError(
+                                f"surface installation binding does not support {name}"
+                            )
+                    if bound != installation_id:
+                        raise RuntimeError("surface installation binding returned another identity")
+            except sa.exc.IntegrityError as error:
+                raise SurfaceInstallationConflict(self._surface) from error
+
+
 RouteHandler = Callable[[SurfaceContext, Request], Awaitable[Response]]
 PostHandler = Callable[[SurfaceContext, Writeback], Awaitable[str]]
 AttachHandler = Callable[[SurfaceContext, Writeback, str], Awaitable[None]]
-WorkspaceResolver = Callable[[Request], UUID | None]
+WorkspaceResolver = Callable[[Request, SurfaceAuth], Awaitable[UUID | None]]
+SurfaceContextFactory = Callable[[UUID, str], SurfaceContext]
 
 
 @dataclass(frozen=True)
 class SurfaceRoute:
     """One HTTP route a surface serves. Core mounts `handler` for `method` at
     `/surface/<name>/<path>` bound to the surface's `SurfaceContext` (the handler reads path and
-    query params off the Request and returns the Response). A durable surface declares one route
-    (its ingest, `path=""`); a live surface declares several — chat page, admit, SSE tail, spend."""
+    query params off the Request and returns the Response)."""
 
     method: Literal["GET", "POST"]
     path: str
@@ -549,9 +654,11 @@ class SurfaceSpec:
     """One surface an extension registers. Core mounts each of `routes` under `/surface/<name>`
     bound to the surface's `SurfaceContext`. A **durable** surface also declares its two-phase
     writeback delivery: `post` sends the reply and returns its durable reference (recorded before
-    any upload, so a recovered delivery skips the re-post), then `attach` uploads the turn's shared
-    files into that reply — best effort, so a rejected file never re-posts the reply or blocks the
-    rest; the poller drives these for every turn its ingest admitted with writeback. A **live**
+    any upload, so recovery skips the re-post), then `attach` uploads the turn's shared files into
+    that reply. Recovery repeats `attach`: attachment delivery is at-least-once because a crash
+    after upload but before the delivered commit cannot distinguish the completed upload. A
+    surface may make individual files best effort so one rejection does not block its siblings.
+    The poller drives these for every turn its ingest admitted with writeback. A **live**
     surface omits them (`post=attach=None`): it admits without writeback and delivers by tailing the
     hub in its own route, so the poller never sees its turns."""
 
@@ -560,11 +667,76 @@ class SurfaceSpec:
     post: PostHandler | None = None
     attach: AttachHandler | None = None
     identify: WorkspaceResolver | None = None
-    """How the shared fleet resolves a request's workspace before binding it — verify the surface's
-    own signed bearer and return the workspace it claims (the signature is the authority; no pinned
-    workspace to match against), or None to reject as unauthenticated. A per-tenant deploy pins one
-    workspace at boot and never calls this; a surface that omits it is per-tenant-only and is not
-    mounted on the shared fleet, where a request carries no boot-pinned scope."""
+    """How shared serve resolves a request's workspace before binding it. The async resolver
+    verifies the request through `SurfaceAuth`, whose declared-slot gate permits a workspace's
+    stored credential to authenticate its own workspace-qualified route. None rejects the request.
+    A dedicated deploy pins one workspace and never calls this; a surface that omits it is not
+    mounted on shared serve."""
+
+
+def _writeback_due(now: datetime) -> sa.ColumnElement[bool]:
+    return sa.and_(
+        tables.turn.c.status.in_(TERMINAL_TURN_STATUSES),
+        sa.or_(
+            sa.and_(
+                tables.writeback.c.status == WRITEBACK_PENDING,
+                sa.or_(
+                    tables.writeback.c.claim_expires_at.is_(None),
+                    tables.writeback.c.claim_expires_at <= now,
+                ),
+            ),
+            sa.and_(
+                tables.writeback.c.status == WRITEBACK_CLAIMED,
+                tables.writeback.c.claim_expires_at <= now,
+            ),
+        ),
+    )
+
+
+def writeback_workspaces() -> WorkspaceCandidates:
+    """A rotating bounded page of workspace ids holding deliverable writebacks. This is the
+    poller's only owner read; every claim, build, credential read, post, attachment, and state
+    transition happens after the returned id is bound through the normal workspace boundary."""
+
+    cursor: UUID | None = None
+
+    def due() -> sa.Select[tuple[UUID]]:
+        now = datetime.now(UTC)
+        query = (
+            sa.select(tables.writeback.c.workspace_id)
+            .select_from(
+                tables.writeback.join(tables.turn, tables.turn.c.id == tables.writeback.c.turn_id)
+            )
+            .where(_writeback_due(now))
+            .group_by(tables.writeback.c.workspace_id)
+            .order_by(tables.writeback.c.workspace_id)
+            .limit(WRITEBACK_WORKSPACE_BATCH)
+        )
+        if cursor is not None:
+            query = query.where(tables.writeback.c.workspace_id > cursor)
+        return query
+
+    read_due = owner_candidates(due)
+
+    async def candidates() -> tuple[UUID, ...]:
+        nonlocal cursor
+        workspace_ids = await read_due()
+        if not workspace_ids and cursor is not None:
+            cursor = None
+            workspace_ids = await read_due()
+        if workspace_ids:
+            cursor = workspace_ids[-1]
+        return workspace_ids
+
+    return candidates
+
+
+class _WritebackClaimLost(RuntimeError):
+    pass
+
+
+class _WritebackDeliveryFailed(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -576,29 +748,84 @@ class WritebackPoller:
     out and is terminally failed — so an undeliverable reply neither hot-loops nor lingers. A claim
     (a worker id plus an expiry) is safe under concurrent instances: Postgres skips a peer's locked
     rows, SQLite's single writer serializes them, and a compare-and-swap on the owner means only the
-    worker still holding the claim advances it. A crash after the ref is recorded re-finalizes
-    without re-posting or re-uploading; the only double is a crash between a successful post and its
-    ref commit — the trade is guaranteed delivery over a never-doubled one."""
+    worker still holding the claim advances it. The worker refreshes its lease while external
+    delivery is live; a crash after the ref is recorded resumes attachment delivery without
+    re-posting. Attachments are at-least-once and can repeat after a crash between upload and the
+    delivered commit. A reply can repeat only after a crash between a successful post and its ref
+    commit — the trade is guaranteed delivery over a never-doubled one."""
 
-    workspace_id: UUID
     worker_id: str
-    surfaces: Mapping[str, tuple[SurfaceSpec, SurfaceContext]]
+    surfaces: Mapping[str, SurfaceSpec]
+    context_for: SurfaceContextFactory
+    candidates: WorkspaceCandidates
 
     async def run(self) -> None:
-        while True:
-            try:
-                await self.drain()
-            except Exception as error:
-                log("surface.writeback_drain_failed", error_class=type(error).__name__)
-            await asyncio.sleep(WRITEBACK_POLL_SECONDS)
+        semaphore = asyncio.Semaphore(WRITEBACK_WORKSPACE_CONCURRENCY)
+        in_flight: dict[UUID, asyncio.Task[None]] = {}
+        try:
+            while True:
+                for workspace_id, task in tuple(in_flight.items()):
+                    if not task.done():
+                        continue
+                    del in_flight[workspace_id]
+                    if task.cancelled():
+                        continue
+                    error = task.exception()
+                    if error is not None:
+                        log(
+                            "surface.writeback_workspace_failed",
+                            workspace_id=str(workspace_id),
+                            error_class=type(error).__name__,
+                        )
+                if len(in_flight) <= WRITEBACK_WORKSPACE_IN_FLIGHT - WRITEBACK_WORKSPACE_BATCH:
+                    try:
+                        workspace_ids = await self.candidates()
+                    except Exception as error:
+                        log("surface.writeback_drain_failed", error_class=type(error).__name__)
+                    else:
+                        for workspace_id in workspace_ids:
+                            if workspace_id not in in_flight:
+                                in_flight[workspace_id] = asyncio.create_task(
+                                    self._drain_workspace(workspace_id, semaphore)
+                                )
+                await asyncio.sleep(WRITEBACK_POLL_SECONDS)
+        finally:
+            for task in in_flight.values():
+                task.cancel()
+            await asyncio.gather(*in_flight.values(), return_exceptions=True)
 
     async def drain(self) -> None:
-        for row in await self._claim():
-            if row.last_error is not None:
-                log("surface.writeback_retry", turn_id=str(row.turn_id), last_error=row.last_error)
-            await self._deliver(row.turn_id, row.reply_ref)
+        workspace_ids = await self.candidates()
+        semaphore = asyncio.Semaphore(WRITEBACK_WORKSPACE_CONCURRENCY)
+        results = await asyncio.gather(
+            *(self._drain_workspace(workspace_id, semaphore) for workspace_id in workspace_ids),
+            return_exceptions=True,
+        )
+        errors = [result for result in results if isinstance(result, Exception)]
+        if errors:
+            raise ExceptionGroup("writeback workspace drains failed", errors)
 
-    async def _claim(self) -> Sequence[sa.Row]:
+    async def _drain_workspace(self, workspace_id: UUID, semaphore: asyncio.Semaphore) -> None:
+        async with semaphore:
+            with ws(workspace_id):
+                rows = await self._claim(workspace_id)
+                renewals = [asyncio.create_task(self._renew_claim(row.turn_id)) for row in rows]
+                try:
+                    for row, renewal in zip(rows, renewals, strict=True):
+                        if row.last_error is not None:
+                            log(
+                                "surface.writeback_retry",
+                                turn_id=str(row.turn_id),
+                                last_error=row.last_error,
+                            )
+                        await self._deliver(workspace_id, row.turn_id, row.reply_ref, renewal)
+                finally:
+                    for renewal in renewals:
+                        if not renewal.done():
+                            renewal.cancel()
+                    await asyncio.gather(*renewals, return_exceptions=True)
+
+    async def _claim(self, workspace_id: UUID) -> Sequence[sa.Row]:
         now = datetime.now(UTC)
         claimable = (
             sa.select(tables.writeback.c.turn_id)
@@ -606,21 +833,8 @@ class WritebackPoller:
                 tables.writeback.join(tables.turn, tables.turn.c.id == tables.writeback.c.turn_id)
             )
             .where(
-                tables.writeback.c.workspace_id == self.workspace_id,
-                tables.turn.c.status.in_(TERMINAL_TURN_STATUSES),
-                sa.or_(
-                    sa.and_(
-                        tables.writeback.c.status == WRITEBACK_PENDING,
-                        sa.or_(
-                            tables.writeback.c.claim_expires_at.is_(None),
-                            tables.writeback.c.claim_expires_at <= now,
-                        ),
-                    ),
-                    sa.and_(
-                        tables.writeback.c.status == WRITEBACK_CLAIMED,
-                        tables.writeback.c.claim_expires_at <= now,
-                    ),
-                ),
+                tables.writeback.c.workspace_id == workspace_id,
+                _writeback_due(now),
             )
             .order_by(tables.writeback.c.created_at)
             .limit(WRITEBACK_CLAIM_BATCH)
@@ -646,31 +860,98 @@ class WritebackPoller:
                 )
             ).all()
 
-    async def _deliver(self, turn_id: UUID, reply_ref: str | None) -> None:
+    async def _deliver(
+        self,
+        workspace_id: UUID,
+        turn_id: UUID,
+        reply_ref: str | None,
+        renewal: asyncio.Task[None],
+    ) -> None:
+        try:
+            await self._deliver_with_lease(workspace_id, turn_id, reply_ref, renewal)
+        except _WritebackClaimLost:
+            log("surface.writeback_claim_lost", turn_id=str(turn_id))
+        except _WritebackDeliveryFailed as error:
+            log(
+                "surface.writeback_post_failed",
+                turn_id=str(turn_id),
+                error_class=type(error.__cause__).__name__,
+            )
+            await self._fail_or_retry(turn_id, str(error)[:MAX_WRITEBACK_ERROR_CHARS])
+
+    async def _deliver_with_lease(
+        self,
+        workspace_id: UUID,
+        turn_id: UUID,
+        reply_ref: str | None,
+        renewal: asyncio.Task[None],
+    ) -> None:
+        delivery = asyncio.create_task(self._deliver_claimed(workspace_id, turn_id, reply_ref))
+        try:
+            done, _pending = await asyncio.wait(
+                (delivery, renewal), return_when=asyncio.FIRST_COMPLETED
+            )
+            if delivery in done:
+                await delivery
+                return
+            if renewal.cancelled():
+                raise asyncio.CancelledError
+            error = renewal.exception()
+            if error is None:
+                raise RuntimeError("writeback claim renewal stopped")
+            raise error
+        finally:
+            for task in (delivery, renewal):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(delivery, renewal, return_exceptions=True)
+
+    async def _deliver_claimed(
+        self, workspace_id: UUID, turn_id: UUID, reply_ref: str | None
+    ) -> None:
         writeback, surface_name = await self._build(turn_id)
         entry = self.surfaces.get(surface_name)
         if entry is None:
             log("surface.writeback_no_surface", turn_id=str(turn_id), surface=surface_name)
             await self._mark_delivered(turn_id)
             return
-        spec, context = entry
+        spec = entry
         if spec.post is None or spec.attach is None:
             log("surface.writeback_no_delivery", turn_id=str(turn_id), surface=surface_name)
             await self._mark_delivered(turn_id)
             return
-        try:
-            if reply_ref is None:
+        context = self.context_for(workspace_id, surface_name)
+        if reply_ref is None:
+            try:
                 reply_ref = await spec.post(context, writeback)
-                await self._record_ref(turn_id, reply_ref)
-                await spec.attach(context, writeback, reply_ref)
-            await self._mark_delivered(turn_id)
+            except Exception as error:
+                raise _WritebackDeliveryFailed(str(error)) from error
+            await self._record_ref(turn_id, reply_ref)
+        try:
+            await spec.attach(context, writeback, reply_ref)
         except Exception as error:
-            log(
-                "surface.writeback_post_failed",
-                turn_id=str(turn_id),
-                error_class=type(error).__name__,
-            )
-            await self._fail_or_retry(turn_id, str(error)[:MAX_WRITEBACK_ERROR_CHARS])
+            raise _WritebackDeliveryFailed(str(error)) from error
+        await self._mark_delivered(turn_id)
+
+    async def _renew_claim(self, turn_id: UUID) -> None:
+        while True:
+            await asyncio.sleep(WRITEBACK_CLAIM_REFRESH_SECONDS)
+            now = datetime.now(UTC)
+            async with workspace_tx() as connection:
+                renewed = await connection.execute(
+                    sa.update(tables.writeback)
+                    .where(
+                        tables.writeback.c.turn_id == turn_id,
+                        tables.writeback.c.status == WRITEBACK_CLAIMED,
+                        tables.writeback.c.claimed_by == self.worker_id,
+                    )
+                    .values(
+                        claim_expires_at=now + timedelta(seconds=WRITEBACK_CLAIM_SECONDS),
+                        updated_at=sa.func.now(),
+                    )
+                )
+            if renewed.rowcount != 1:
+                raise _WritebackClaimLost(str(turn_id))
 
     async def _build(self, turn_id: UUID) -> tuple[Writeback, str]:
         async with workspace_tx() as connection:
@@ -726,21 +1007,25 @@ class WritebackPoller:
 
     async def _record_ref(self, turn_id: UUID, reply_ref: str) -> None:
         async with workspace_tx() as connection:
-            await connection.execute(
+            updated = await connection.execute(
                 sa.update(tables.writeback)
                 .where(
                     tables.writeback.c.turn_id == turn_id,
+                    tables.writeback.c.status == WRITEBACK_CLAIMED,
                     tables.writeback.c.claimed_by == self.worker_id,
                 )
                 .values(reply_ref=reply_ref, updated_at=sa.func.now())
             )
+        if updated.rowcount != 1:
+            raise _WritebackClaimLost(str(turn_id))
 
     async def _mark_delivered(self, turn_id: UUID) -> None:
         async with workspace_tx() as connection:
-            await connection.execute(
+            updated = await connection.execute(
                 sa.update(tables.writeback)
                 .where(
                     tables.writeback.c.turn_id == turn_id,
+                    tables.writeback.c.status == WRITEBACK_CLAIMED,
                     tables.writeback.c.claimed_by == self.worker_id,
                 )
                 .values(
@@ -751,6 +1036,8 @@ class WritebackPoller:
                     updated_at=sa.func.now(),
                 )
             )
+        if updated.rowcount != 1:
+            raise _WritebackClaimLost(str(turn_id))
 
     async def _fail_or_retry(self, turn_id: UUID, last_error: str) -> None:
         now = datetime.now(UTC)

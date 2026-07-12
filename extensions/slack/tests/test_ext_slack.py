@@ -25,6 +25,7 @@ import ufo_ext_slack.surface as slack
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from starlette.requests import Request as StarletteRequest
 from ufo_ext_slack.manifest import manifest as slack_manifest
 
 import ufo.surfaces.hub_tail as hub_tail
@@ -43,7 +44,7 @@ from ufo.schema.records import (
     QuestionOption,
     TerminalFrame,
 )
-from ufo.serve import _mount_surfaces
+from ufo.serve import _mount_shared_surfaces, _mount_surfaces
 
 TEAM_ID = "T0000001"
 BOT_USER_ID = "UBOT00000"
@@ -55,6 +56,14 @@ ARTIFACT_SECRET = "artifact-token-secret"
 PUBLIC_BASE_URL = "https://ufo.example.test"
 
 REAL_ASYNC_CLIENT = httpx.AsyncClient
+
+
+def _events_path(workspace_id: UUID) -> str:
+    return f"/surface/slack/{workspace_id}"
+
+
+def _interactive_path(workspace_id: UUID) -> str:
+    return f"{_events_path(workspace_id)}/interactive"
 
 
 @pytest.fixture(autouse=True)
@@ -130,7 +139,10 @@ def _mock_transport(
             return httpx.Response(
                 200, json={"ok": True, "team_id": TEAM_ID, "user_id": BOT_USER_ID}
             )
-        if url in (slack.SLACK_CONVERSATIONS_REPLIES_URL, slack.SLACK_CONVERSATIONS_HISTORY_URL):
+        if url in (
+            slack.SLACK_CONVERSATIONS_REPLIES_URL,
+            slack.SLACK_CONVERSATIONS_HISTORY_URL,
+        ):
             return httpx.Response(200, json={"ok": True, "messages": []})
         if url == slack.SLACK_CHAT_POST_MESSAGE_URL:
             return httpx.Response(200, json={"ok": True, "channel": "C5", "ts": "999.100"})
@@ -166,11 +178,17 @@ async def _store(workspace_id: UUID) -> CredentialStore:
     return store
 
 
-async def _write_identity(blob: FilesystemBlobStore, workspace_id: UUID) -> None:
+async def _write_identity(
+    blob: FilesystemBlobStore,
+    workspace_id: UUID,
+    bot_token: str = BOT_TOKEN,
+    team_id: str = TEAM_ID,
+    bot_user_id: str = BOT_USER_ID,
+) -> None:
     identity = slack.SlackIdentity(
-        bot_token_fingerprint=slack.bot_token_fingerprint(BOT_TOKEN),
-        team_id=TEAM_ID,
-        bot_user_id=BOT_USER_ID,
+        bot_token_fingerprint=slack.bot_token_fingerprint(bot_token),
+        team_id=team_id,
+        bot_user_id=bot_user_id,
     )
     await blob.put(slack.identity_blob_key(workspace_id), identity.model_dump_json().encode())
 
@@ -268,12 +286,12 @@ async def test_first_signed_event_proves_identity_and_retry_admits(
     )
     async with client:
         first = await client.post(
-            "/surface/slack", content=body, headers=_sign(body, int(time.time()))
+            _events_path(workspace_id), content=body, headers=_sign(body, int(time.time()))
         )
         assert first.status_code == 503
         await asyncio.gather(*slack._IDENTITY_TASKS.values())
         response = await client.post(
-            "/surface/slack", content=body, headers=_sign(body, int(time.time()))
+            _events_path(workspace_id), content=body, headers=_sign(body, int(time.time()))
         )
     assert response.status_code == 200
     assert await slack.read_identity(blob, workspace_id, BOT_TOKEN) == slack.SlackIdentity(
@@ -319,7 +337,7 @@ async def test_identity_proof_failure_returns_before_slack_ack_deadline(
     with caplog.at_level(logging.ERROR, logger="ufo_ext_slack"):
         async with client:
             response = await client.post(
-                "/surface/slack", content=body, headers=_sign(body, int(time.time()))
+                _events_path(workspace_id), content=body, headers=_sign(body, int(time.time()))
             )
         assert response.status_code == 503
         await asyncio.gather(*slack._IDENTITY_TASKS.values())
@@ -364,6 +382,59 @@ def test_signature_verify_accepts_valid_and_rejects_tampered() -> None:
         slack.verify_slack_signature(headers, body + b"x", SIGNING_SECRET, now=now)
     with pytest.raises(slack.SlackSignatureError):
         slack.verify_slack_signature(headers, body, SIGNING_SECRET, now=now + 10_000)
+
+
+async def test_raw_request_body_is_cached_exactly() -> None:
+    messages = [
+        {"type": "http.request", "body": b'{"team_', "more_body": True},
+        {"type": "http.request", "body": b'id":"T1"}', "more_body": False},
+    ]
+    reads = 0
+
+    async def receive() -> dict[str, object]:
+        nonlocal reads
+        message = messages[reads]
+        reads += 1
+        return message
+
+    request = StarletteRequest(
+        {"type": "http", "method": "POST", "headers": [], "state": {}}, receive
+    )
+    expected = b'{"team_id":"T1"}'
+
+    assert await slack._slack_request_body(request) == expected
+    assert await slack._slack_request_body(request) == expected
+    assert request.state.slack_raw_body == expected
+    assert reads == 2
+
+
+async def test_raw_request_body_stops_on_the_first_chunk_past_one_mib() -> None:
+    messages = [
+        {
+            "type": "http.request",
+            "body": b"a" * slack.MAX_SLACK_EVENT_BYTES,
+            "more_body": True,
+        },
+        {"type": "http.request", "body": b"b", "more_body": True},
+        {"type": "http.request", "body": b"never-read", "more_body": False},
+    ]
+    reads = 0
+
+    async def receive() -> dict[str, object]:
+        nonlocal reads
+        message = messages[reads]
+        reads += 1
+        return message
+
+    request = StarletteRequest(
+        {"type": "http", "method": "POST", "headers": [], "state": {}}, receive
+    )
+
+    with pytest.raises(slack.SlackBodyTooLarge):
+        await slack._slack_request_body(request)
+    with pytest.raises(slack.SlackBodyTooLarge):
+        await slack._slack_request_body(request)
+    assert reads == 2
 
 
 def test_block_kit_reply_body_renders_markdown_and_degrades() -> None:
@@ -448,8 +519,8 @@ def test_slack_app_setup_skill_parses_indexes_and_names_the_real_tools_and_slots
     index = dict(registry.index())
     assert "slack-app-setup" in index
     body = registry.named("slack-app-setup").instructions
-    assert "/surface/slack" in body
-    assert "/surface/slack/interactive" in body
+    assert "/surface/slack/<workspace_id>" in body
+    assert "/surface/slack/<workspace_id>/interactive" in body
     for tool in ("slack_connect", "slack_app_manifest", "request_credentials"):
         assert f"`{tool}`" in body
     assert "slack_status" not in body
@@ -465,7 +536,7 @@ async def test_bad_signature_is_rejected(db: None, tmp_path, monkeypatch) -> Non
     body = _event_body(type="app_mention", user="U1", channel="C1", ts="1.0", text="<@UBOT00000>")
     async with client:
         response = await client.post(
-            "/surface/slack",
+            _events_path(workspace_id),
             content=body,
             headers={
                 "x-slack-request-timestamp": str(int(time.time())),
@@ -475,6 +546,30 @@ async def test_bad_signature_is_rejected(db: None, tmp_path, monkeypatch) -> Non
     assert response.status_code == 401
 
 
+async def test_dedicated_surface_accepts_unqualified_event_and_interactive_routes(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, _ = await _seed()
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, [])
+    event = _event_body(type="app_home_opened", user="U1", channel="D1")
+    interactive = urlencode(
+        {"payload": json.dumps({"type": "view_submission", "team": {"id": TEAM_ID}})}
+    ).encode()
+
+    async with client:
+        event_response = await client.post(
+            "/surface/slack", content=event, headers=_sign(event, int(time.time()))
+        )
+        interactive_response = await client.post(
+            "/surface/slack/interactive",
+            content=interactive,
+            headers=_sign(interactive, int(time.time())),
+        )
+
+    assert event_response.json() == {"ok": True, "ignored": True}
+    assert interactive_response.json() == {"ok": True, "ignored": True}
+
+
 async def test_url_verification_answers_the_challenge_and_marks_verified(
     db: None, tmp_path, monkeypatch
 ) -> None:
@@ -482,11 +577,11 @@ async def test_url_verification_answers_the_challenge_and_marks_verified(
     _, client, blob = await _mount(monkeypatch, workspace_id, tmp_path, [])
     body = json.dumps({"type": "url_verification", "challenge": "chal-1"}).encode()
     async with client:
-        unsigned = await client.post("/surface/slack", content=body)
+        unsigned = await client.post(_events_path(workspace_id), content=body)
         assert unsigned.status_code == 401
         assert not await blob.exists(slack.url_verified_blob_key(workspace_id))
         answered = await client.post(
-            "/surface/slack", content=body, headers=_sign(body, int(time.time()))
+            _events_path(workspace_id), content=body, headers=_sign(body, int(time.time()))
         )
     assert answered.status_code == 200
     assert answered.json() == {"challenge": "chal-1"}
@@ -519,9 +614,9 @@ async def test_handshake_before_the_secret_exists_echoes_and_events_stay_401(
     handshake = json.dumps({"type": "url_verification", "challenge": "c"}).encode()
     event = _event_body(type="app_mention", user="U1", channel="C1", ts="1.0", text="hi")
     async with client:
-        echoed = await client.post("/surface/slack", content=handshake)
+        echoed = await client.post(_events_path(workspace_id), content=handshake)
         rejected = await client.post(
-            "/surface/slack",
+            _events_path(workspace_id),
             content=event,
             headers={"x-slack-request-timestamp": "1", "x-slack-signature": "v0=x"},
         )
@@ -529,6 +624,55 @@ async def test_handshake_before_the_secret_exists_echoes_and_events_stay_401(
     assert echoed.json() == {"challenge": "c"}
     assert rejected.status_code == 401
     assert not await blob.exists(slack.url_verified_blob_key(workspace_id))
+
+
+async def test_shared_handshake_is_unsigned_only_for_an_existing_workspace_without_a_secret(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, _ = await _seed()
+    _patch_httpx(monkeypatch, _mock_transport([], {}))
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    blob = FilesystemBlobStore(root=tmp_path)
+    app = FastAPI()
+    _mount_shared_surfaces(
+        app,
+        (slack_manifest(),),
+        store,
+        blob,
+        InProcessHub(),
+        StubDbos(),
+        ARTIFACT_SECRET,
+        PUBLIC_BASE_URL,
+    )
+    handshake = json.dumps({"type": "url_verification", "challenge": "shared-c"}).encode()
+    event = _event_body(type="app_mention", user="U1", channel="C1", ts="1.0", text="hi")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://fleet") as client:
+        echoed = await client.post(_events_path(workspace_id), content=handshake)
+        unknown = await client.post(_events_path(uuid4()), content=handshake)
+        event_without_secret = await client.post(_events_path(workspace_id), content=event)
+        await store.put(workspace_id, slack.SLACK_SIGNING_SECRET_SLOT, SIGNING_SECRET)
+        unsigned_after_secret = await client.post(_events_path(workspace_id), content=handshake)
+        signed_after_secret = await client.post(
+            _events_path(workspace_id),
+            content=handshake,
+            headers=_sign(handshake, int(time.time())),
+        )
+        unqualified_shared = await client.post(
+            "/surface/slack", content=handshake, headers=_sign(handshake, int(time.time()))
+        )
+    assert echoed.json() == {"challenge": "shared-c"}
+    assert unknown.status_code == 401
+    assert event_without_secret.status_code == 401
+    assert unsigned_after_secret.status_code == 401
+    assert signed_after_secret.json() == {"challenge": "shared-c"}
+    assert unqualified_shared.status_code == 401
+    async with workspace_tx() as connection:
+        bindings = (
+            await connection.execute(
+                sa.select(sa.func.count()).select_from(tables.surface_installation)
+            )
+        ).scalar_one()
+    assert bindings == 0
 
 
 async def test_first_signed_event_marks_verified_and_a_rotated_secret_re_proves(
@@ -558,7 +702,7 @@ async def test_first_signed_event_marks_verified_and_a_rotated_secret_re_proves(
     body = _event_body(type="app_mention", user="U1", channel="C1", ts="1.0", text="<@UBOT00000>")
     async with client:
         response = await client.post(
-            "/surface/slack", content=body, headers=_sign(body, int(time.time()))
+            _events_path(workspace_id), content=body, headers=_sign(body, int(time.time()))
         )
         assert response.status_code == 200
         marker = json.loads(await blob.get(slack.url_verified_blob_key(workspace_id)))
@@ -566,7 +710,7 @@ async def test_first_signed_event_marks_verified_and_a_rotated_secret_re_proves(
         rotated = "rotated-secret"
         await store.put(workspace_id, slack.SLACK_SIGNING_SECRET_SLOT, rotated)
         response = await client.post(
-            "/surface/slack", content=body, headers=_sign_with(rotated, body)
+            _events_path(workspace_id), content=body, headers=_sign_with(rotated, body)
         )
         assert response.status_code == 200
         marker = json.loads(await blob.get(slack.url_verified_blob_key(workspace_id)))
@@ -575,7 +719,7 @@ async def test_first_signed_event_marks_verified_and_a_rotated_secret_re_proves(
         # written fingerprint, not every fingerprint ever written.
         await store.put(workspace_id, slack.SLACK_SIGNING_SECRET_SLOT, SIGNING_SECRET)
         response = await client.post(
-            "/surface/slack", content=body, headers=_sign_with(SIGNING_SECRET, body)
+            _events_path(workspace_id), content=body, headers=_sign_with(SIGNING_SECRET, body)
         )
         assert response.status_code == 200
     marker = json.loads(await blob.get(slack.url_verified_blob_key(workspace_id)))
@@ -608,12 +752,12 @@ async def test_marker_needs_the_configured_team_but_a_click_counts(
     click = _click_body()
     async with client:
         ignored = await client.post(
-            "/surface/slack", content=foreign, headers=_sign(foreign, int(time.time()))
+            _events_path(workspace_id), content=foreign, headers=_sign(foreign, int(time.time()))
         )
         assert ignored.json() == {"ok": True, "ignored": True}
         assert not await blob.exists(slack.url_verified_blob_key(workspace_id))
         answered = await client.post(
-            "/surface/slack/interactive", content=click, headers=_signed_form(click)
+            _interactive_path(workspace_id), content=click, headers=_signed_form(click)
         )
         assert answered.status_code == 200
         await asyncio.gather(*slack._REWRITE_TASKS)
@@ -633,11 +777,13 @@ async def test_one_mention_admits_exactly_one_turn(db: None, tmp_path, monkeypat
     async with client:
         for body in deliveries:
             response = await client.post(
-                "/surface/slack", content=body, headers=_sign(body, int(time.time()))
+                _events_path(workspace_id), content=body, headers=_sign(body, int(time.time()))
             )
             assert response.status_code == 200
         opened = await client.post(
-            "/surface/slack", content=home_opened, headers=_sign(home_opened, int(time.time()))
+            _events_path(workspace_id),
+            content=home_opened,
+            headers=_sign(home_opened, int(time.time())),
         )
         assert opened.json() == {"ok": True, "ignored": True}
     async with workspace_tx() as connection:
@@ -720,7 +866,7 @@ async def test_mid_thread_mention_prepends_unseen_thread_history(
     )
     async with client:
         response = await client.post(
-            "/surface/slack", content=body, headers=_sign(body, int(time.time()))
+            _events_path(workspace_id), content=body, headers=_sign(body, int(time.time()))
         )
     assert response.status_code == 200
     fetches = _fetches(recorder, slack.SLACK_CONVERSATIONS_REPLIES_URL)
@@ -760,7 +906,7 @@ async def test_new_mention_prepends_recent_channel_history(db: None, tmp_path, m
     )
     async with client:
         response = await client.post(
-            "/surface/slack", content=body, headers=_sign(body, int(time.time()))
+            _events_path(workspace_id), content=body, headers=_sign(body, int(time.time()))
         )
     assert response.status_code == 200
     fetches = _fetches(recorder, slack.SLACK_CONVERSATIONS_HISTORY_URL)
@@ -789,7 +935,7 @@ async def test_thread_root_mention_in_a_quiet_channel_admits_the_plain_body(
     )
     async with client:
         response = await client.post(
-            "/surface/slack", content=body, headers=_sign(body, int(time.time()))
+            _events_path(workspace_id), content=body, headers=_sign(body, int(time.time()))
         )
     assert response.status_code == 200
     assert not _fetches(recorder, slack.SLACK_CONVERSATIONS_REPLIES_URL)
@@ -812,7 +958,7 @@ async def test_dm_never_fetches_thread_context(db: None, tmp_path, monkeypatch) 
     )
     async with client:
         response = await client.post(
-            "/surface/slack", content=dm, headers=_sign(dm, int(time.time()))
+            _events_path(workspace_id), content=dm, headers=_sign(dm, int(time.time()))
         )
     assert response.status_code == 200
     assert not _fetches(recorder, slack.SLACK_CONVERSATIONS_REPLIES_URL)
@@ -836,7 +982,7 @@ async def test_replies_fetch_failure_still_admits(db: None, tmp_path, monkeypatc
     )
     async with client:
         response = await client.post(
-            "/surface/slack", content=body, headers=_sign(body, int(time.time()))
+            _events_path(workspace_id), content=body, headers=_sign(body, int(time.time()))
         )
     assert response.status_code == 200
     assert len(_fetches(recorder, slack.SLACK_CONVERSATIONS_REPLIES_URL)) == 1
@@ -912,12 +1058,12 @@ async def test_participating_thread_admits_unmentioned_replies_on_the_transcript
     async with client:
         for body in admitted:
             response = await client.post(
-                "/surface/slack", content=body, headers=_sign(body, int(time.time()))
+                _events_path(workspace_id), content=body, headers=_sign(body, int(time.time()))
             )
             assert response.json() == {"ok": True}
         for body in ignored:
             response = await client.post(
-                "/surface/slack", content=body, headers=_sign(body, int(time.time()))
+                _events_path(workspace_id), content=body, headers=_sign(body, int(time.time()))
             )
             assert response.json() == {"ok": True, "ignored": True}
     async with workspace_tx() as connection:
@@ -1001,11 +1147,11 @@ async def test_a_bare_conversation_row_is_not_participation(
     )
     async with client:
         ignored = await client.post(
-            "/surface/slack", content=reply, headers=_sign(reply, int(time.time()))
+            _events_path(workspace_id), content=reply, headers=_sign(reply, int(time.time()))
         )
         assert ignored.json() == {"ok": True, "ignored": True}
         admitted = await client.post(
-            "/surface/slack", content=mention, headers=_sign(mention, int(time.time()))
+            _events_path(workspace_id), content=mention, headers=_sign(mention, int(time.time()))
         )
         assert admitted.json() == {"ok": True}
     async with workspace_tx() as connection:
@@ -1038,7 +1184,7 @@ async def test_dm_links_member_by_email_and_status_anchors_to_the_message(
     )
     async with client:
         response = await client.post(
-            "/surface/slack", content=dm, headers=_sign(dm, int(time.time()))
+            _events_path(workspace_id), content=dm, headers=_sign(dm, int(time.time()))
         )
     assert response.status_code == 200
     deadline = time.monotonic() + 5
@@ -1095,7 +1241,7 @@ async def test_first_time_same_domain_dm_speaker_joins_as_a_member(
     )
     async with client:
         response = await client.post(
-            "/surface/slack", content=dm, headers=_sign(dm, int(time.time()))
+            _events_path(workspace_id), content=dm, headers=_sign(dm, int(time.time()))
         )
     assert response.status_code == 200
     async with workspace_tx() as connection:
@@ -1146,7 +1292,7 @@ async def test_dm_without_a_confirmed_same_domain_email_stays_unlinked(
     )
     async with client:
         response = await client.post(
-            "/surface/slack", content=dm, headers=_sign(dm, int(time.time()))
+            _events_path(workspace_id), content=dm, headers=_sign(dm, int(time.time()))
         )
     assert response.status_code == 200
     async with workspace_tx() as connection:
@@ -1199,9 +1345,13 @@ async def test_confirmed_email_claims_the_dm_that_began_unconfirmed(
         type="message", channel_type="im", user="UNEW", channel="D7", ts="9.0", text="me again"
     )
     async with client:
-        await client.post("/surface/slack", content=first, headers=_sign(first, int(time.time())))
+        await client.post(
+            _events_path(workspace_id), content=first, headers=_sign(first, int(time.time()))
+        )
         unconfirmed.clear()
-        await client.post("/surface/slack", content=second, headers=_sign(second, int(time.time())))
+        await client.post(
+            _events_path(workspace_id), content=second, headers=_sign(second, int(time.time()))
+        )
     async with workspace_tx() as connection:
         member_id = (
             await connection.execute(
@@ -1243,7 +1393,9 @@ async def test_unlinked_dm_fails_loud_when_the_sender_read_is_unavailable(
     )
     async with client:
         with pytest.raises(slack.SlackApiError, match="cannot resolve the DM member UBEE"):
-            await client.post("/surface/slack", content=dm, headers=_sign(dm, int(time.time())))
+            await client.post(
+                _events_path(workspace_id), content=dm, headers=_sign(dm, int(time.time()))
+            )
     async with workspace_tx() as connection:
         admitted = (
             await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
@@ -1270,7 +1422,7 @@ async def test_inbound_file_streams_into_the_workspace(db: None, tmp_path, monke
     )
     async with client:
         response = await client.post(
-            "/surface/slack", content=body, headers=_sign(body, int(time.time()))
+            _events_path(workspace_id), content=body, headers=_sign(body, int(time.time()))
         )
     assert response.status_code == 200
     async with workspace_tx() as connection:
@@ -1317,10 +1469,10 @@ async def test_file_share_subtype_is_a_member_message_whose_file_lands(
     )
     async with client:
         admitted = await client.post(
-            "/surface/slack", content=shared, headers=_sign(shared, int(time.time()))
+            _events_path(workspace_id), content=shared, headers=_sign(shared, int(time.time()))
         )
         ignored = await client.post(
-            "/surface/slack", content=edited, headers=_sign(edited, int(time.time()))
+            _events_path(workspace_id), content=edited, headers=_sign(edited, int(time.time()))
         )
     assert admitted.status_code == 200
     assert ignored.json() == {"ok": True, "ignored": True}
@@ -1413,6 +1565,317 @@ async def _seed_done_turn(
                 )
             )
     return turn_id
+
+
+def _shared_slack_transport(
+    recorder: list[httpx.Request], tokens: dict[str, str]
+) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        recorder.append(request)
+        label = tokens.get(request.headers.get("authorization", ""))
+        url = str(request.url).split("?")[0]
+        if url == slack.SLACK_USERS_INFO_URL and label is not None:
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "user": {
+                        "real_name": f"Member {label}",
+                        "tz": "America/New_York",
+                        "is_email_confirmed": True,
+                        "profile": {"email": "shared@example.com"},
+                    },
+                },
+            )
+        if label is not None and url in (
+            slack.SLACK_CONVERSATIONS_REPLIES_URL,
+            slack.SLACK_CONVERSATIONS_HISTORY_URL,
+        ):
+            return httpx.Response(200, json={"ok": True, "messages": []})
+        if url == slack.SLACK_ASSISTANT_STATUS_URL and label is not None:
+            return httpx.Response(200, json={"ok": True})
+        if url == slack.SLACK_CHAT_POST_MESSAGE_URL and label is not None:
+            return httpx.Response(200, json={"ok": True, "channel": f"C{label}", "ts": label})
+        if url == slack.SLACK_FILES_GET_UPLOAD_URL and label is not None:
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "upload_url": f"https://files.slack.com/upload/{label}",
+                    "file_id": f"F{label}",
+                },
+            )
+        if url in {"https://files.slack.com/upload/A", "https://files.slack.com/upload/B"}:
+            return httpx.Response(200, text="OK")
+        if url == slack.SLACK_FILES_COMPLETE_UPLOAD and label is not None:
+            return httpx.Response(200, json={"ok": True, "files": [{"id": f"F{label}"}]})
+        return httpx.Response(403, json={"ok": False, "error": "wrong_workspace_credential"})
+
+    return httpx.MockTransport(handler)
+
+
+async def test_shared_slack_rejects_one_installation_bound_to_two_workspaces(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_a, _ = await _seed(member_email="shared@example.com")
+    workspace_b, _ = await _seed(member_email="shared@example.com")
+    signing_secret = "one-app-secret"
+    bot_token = "xoxb-one-installation"
+    team_id = "TONE0001"
+    bot_id = "UONE0001"
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    for workspace_id in (workspace_a, workspace_b):
+        await store.put(workspace_id, slack.SLACK_SIGNING_SECRET_SLOT, signing_secret)
+        await store.put(workspace_id, slack.SLACK_BOT_TOKEN_SLOT, bot_token)
+    blob = FilesystemBlobStore(root=tmp_path)
+    await _write_identity(blob, workspace_a, bot_token, team_id, bot_id)
+    await _write_identity(blob, workspace_b, bot_token, team_id, bot_id)
+    recorder: list[httpx.Request] = []
+    _patch_httpx(
+        monkeypatch,
+        _shared_slack_transport(recorder, {f"Bearer {bot_token}": "ONE"}),
+    )
+    app = FastAPI()
+    _mount_shared_surfaces(
+        app,
+        (slack_manifest(),),
+        store,
+        blob,
+        InProcessHub(),
+        StubDbos(),
+        ARTIFACT_SECRET,
+        PUBLIC_BASE_URL,
+    )
+    body = json.dumps(
+        {
+            "team_id": team_id,
+            "event": {
+                "type": "message",
+                "user": "USAME",
+                "channel": "DSAME",
+                "channel_type": "im",
+                "ts": "1.0",
+                "text": "only workspace a",
+            },
+        }
+    ).encode()
+    headers = _sign_with(signing_secret, body)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://fleet") as client:
+        accepted = await client.post(_events_path(workspace_a), content=body, headers=headers)
+        replayed = await client.post(_events_path(workspace_b), content=body, headers=headers)
+
+    assert accepted.status_code == 200
+    assert replayed.status_code == 401
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(
+                sa.select(tables.turn.c.workspace_id).where(
+                    tables.turn.c.workspace_id.in_((workspace_a, workspace_b))
+                )
+            )
+        ).scalars()
+        bindings = (
+            await connection.execute(
+                sa.select(
+                    tables.surface_installation.c.workspace_id,
+                    tables.surface_installation.c.installation_id,
+                ).where(tables.surface_installation.c.surface == slack.SURFACE_SLACK)
+            )
+        ).all()
+    assert list(turns) == [workspace_a]
+    assert [tuple(row) for row in bindings] == [
+        (workspace_a, slack.slack_installation_id(signing_secret, team_id))
+    ]
+
+
+async def test_shared_slack_allows_one_app_secret_across_teams_without_crossing_state(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_a, member_a = await _seed(member_email="shared@example.com")
+    workspace_b, member_b = await _seed(member_email="shared@example.com")
+    secret_a = secret_b = "one-app-secret"
+    token_a, token_b = "xoxb-a", "xoxb-b"
+    team_a, team_b = "TA000001", "TB000001"
+    bot_a, bot_b = "UA000001", "UB000001"
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    for workspace_id, signing_secret, bot_token in (
+        (workspace_a, secret_a, token_a),
+        (workspace_b, secret_b, token_b),
+    ):
+        await store.put(workspace_id, slack.SLACK_SIGNING_SECRET_SLOT, signing_secret)
+        await store.put(workspace_id, slack.SLACK_BOT_TOKEN_SLOT, bot_token)
+    blob = FilesystemBlobStore(root=tmp_path)
+    await _write_identity(blob, workspace_a, token_a, team_a, bot_a)
+    await _write_identity(blob, workspace_b, token_b, team_b, bot_b)
+    recorder: list[httpx.Request] = []
+    _patch_httpx(
+        monkeypatch,
+        _shared_slack_transport(
+            recorder,
+            {f"Bearer {token_a}": "A", f"Bearer {token_b}": "B"},
+        ),
+    )
+    app = FastAPI()
+    _mount_shared_surfaces(
+        app,
+        (slack_manifest(),),
+        store,
+        blob,
+        InProcessHub(),
+        StubDbos(),
+        ARTIFACT_SECRET,
+        PUBLIC_BASE_URL,
+    )
+    body_a = json.dumps(
+        {
+            "team_id": team_a,
+            "event": {
+                "type": "message",
+                "user": "USAME",
+                "channel": "DSAME",
+                "channel_type": "im",
+                "ts": "1.0",
+                "text": "message-a",
+            },
+        }
+    ).encode()
+    body_b = json.dumps(
+        {
+            "team_id": team_b,
+            "event": {
+                "type": "message",
+                "user": "USAME",
+                "channel": "DSAME",
+                "channel_type": "im",
+                "ts": "1.0",
+                "text": "message-b",
+            },
+        }
+    ).encode()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://fleet") as client:
+        accepted_a = await client.post(
+            _events_path(workspace_a), content=body_a, headers=_sign_with(secret_a, body_a)
+        )
+        replayed_to_b = await client.post(
+            _events_path(workspace_b), content=body_a, headers=_sign_with(secret_a, body_a)
+        )
+        accepted_b = await client.post(
+            _events_path(workspace_b), content=body_b, headers=_sign_with(secret_b, body_b)
+        )
+    assert accepted_a.status_code == 200
+    assert replayed_to_b.status_code == 401
+    assert accepted_b.status_code == 200
+    deadline = time.monotonic() + 5
+    while len(_requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)) < 2:
+        assert time.monotonic() < deadline, "both workspace statuses never reached Slack"
+        await asyncio.sleep(0.01)
+    statuses = _requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)
+    assert {request.headers["authorization"] for request in statuses} >= {
+        f"Bearer {token_a}",
+        f"Bearer {token_b}",
+    }
+    assert {key[0] for key in slack._THREAD_WRITERS} == {workspace_a, workspace_b}
+    async with workspace_tx() as connection:
+        routed = (
+            await connection.execute(
+                sa.select(tables.turn.c.workspace_id, tables.turn.c.inbound).where(
+                    tables.turn.c.workspace_id.in_((workspace_a, workspace_b))
+                )
+            )
+        ).all()
+        identities = (
+            await connection.execute(
+                sa.select(
+                    tables.surface_identity.c.workspace_id,
+                    tables.surface_identity.c.member_id,
+                    tables.surface_identity.c.external_id,
+                ).where(
+                    tables.surface_identity.c.workspace_id.in_((workspace_a, workspace_b)),
+                    tables.surface_identity.c.surface == slack.SURFACE_SLACK,
+                )
+            )
+        ).all()
+        bindings = (
+            await connection.execute(
+                sa.select(
+                    tables.surface_installation.c.workspace_id,
+                    tables.surface_installation.c.installation_id,
+                ).where(tables.surface_installation.c.surface == slack.SURFACE_SLACK)
+            )
+        ).all()
+    assert len(routed) == 2
+    assert {
+        (row.workspace_id, "message-a" in row.inbound, "message-b" in row.inbound) for row in routed
+    } == {
+        (workspace_a, True, False),
+        (workspace_b, False, True),
+    }
+    assert {tuple(row) for row in identities} == {
+        (workspace_a, member_a, "USAME"),
+        (workspace_b, member_b, "USAME"),
+    }
+    assert {tuple(row) for row in bindings} == {
+        (workspace_a, slack.slack_installation_id(secret_a, team_a)),
+        (workspace_b, slack.slack_installation_id(secret_b, team_b)),
+    }
+
+    await blob.put("artifacts/a/a.txt", b"A-FILE")
+    await blob.put("artifacts/b/b.txt", b"B-FILE")
+    turn_a = await _seed_done_turn(
+        workspace_a,
+        "CDELIVER:10.0",
+        "reply-a",
+        blob,
+        artifact=True,
+        artifact_name="a.txt",
+        artifact_key="artifacts/a/a.txt",
+        artifact_size=6,
+        artifact_media_type="text/plain",
+    )
+    turn_b = await _seed_done_turn(
+        workspace_b,
+        "CDELIVER:10.0",
+        "reply-b",
+        blob,
+        artifact=True,
+        artifact_name="b.txt",
+        artifact_key="artifacts/b/b.txt",
+        artifact_size=6,
+        artifact_media_type="text/plain",
+    )
+    await app.state.writeback_poller.drain()
+
+    posts = _requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)
+    posted = {json.loads(request.content)["text"]: request for request in posts}
+    assert posted["reply-a"].headers["authorization"] == f"Bearer {token_a}"
+    assert posted["reply-b"].headers["authorization"] == f"Bearer {token_b}"
+    uploads = {
+        str(request.url): request.content
+        for request in recorder
+        if str(request.url).startswith("https://files.slack.com/upload/")
+    }
+    assert uploads == {
+        "https://files.slack.com/upload/A": b"A-FILE",
+        "https://files.slack.com/upload/B": b"B-FILE",
+    }
+    completes = _requests_to(recorder, slack.SLACK_FILES_COMPLETE_UPLOAD)
+    assert {
+        (request.headers["authorization"], json.loads(request.content)["files"][0]["id"])
+        for request in completes
+    } == {(f"Bearer {token_a}", "FA"), (f"Bearer {token_b}", "FB")}
+    async with workspace_tx() as connection:
+        delivered = (
+            await connection.execute(
+                sa.select(tables.writeback.c.turn_id, tables.writeback.c.status).where(
+                    tables.writeback.c.turn_id.in_((turn_a, turn_b))
+                )
+            )
+        ).all()
+    assert {tuple(row) for row in delivered} == {
+        (turn_a, WRITEBACK_DELIVERED),
+        (turn_b, WRITEBACK_DELIVERED),
+    }
 
 
 async def test_writeback_posts_block_kit_reply_and_streams_the_attachment(
@@ -1610,7 +2073,7 @@ async def test_inbound_oversize_file_is_skipped_and_reported(
     )
     async with client:
         response = await client.post(
-            "/surface/slack", content=body, headers=_sign(body, int(time.time()))
+            _events_path(workspace_id), content=body, headers=_sign(body, int(time.time()))
         )
     assert response.status_code == 200
 
@@ -1658,7 +2121,7 @@ async def test_status_follows_the_turn_and_clears_at_terminal(
     )
     async with client:
         response = await client.post(
-            "/surface/slack", content=mention, headers=_sign(mention, int(time.time()))
+            _events_path(workspace_id), content=mention, headers=_sign(mention, int(time.time()))
         )
     assert response.status_code == 200
     async with workspace_tx() as connection:
@@ -1702,7 +2165,7 @@ async def test_status_re_stamps_before_slack_drops_it(db: None, tmp_path, monkey
     )
     async with client:
         response = await client.post(
-            "/surface/slack", content=mention, headers=_sign(mention, int(time.time()))
+            _events_path(workspace_id), content=mention, headers=_sign(mention, int(time.time()))
         )
     assert response.status_code == 200
     deadline = time.monotonic() + 5
@@ -1736,7 +2199,7 @@ async def test_newest_turn_owns_the_thread_status(db: None, tmp_path, monkeypatc
     async with client:
         for body in (first, second):
             response = await client.post(
-                "/surface/slack", content=body, headers=_sign(body, int(time.time()))
+                _events_path(workspace_id), content=body, headers=_sign(body, int(time.time()))
             )
             assert response.status_code == 200
     async with workspace_tx() as connection:
@@ -1876,12 +2339,12 @@ async def test_first_signed_click_proves_identity_and_retry_admits(
     click = _click_body()
     async with client:
         first = await client.post(
-            "/surface/slack/interactive", content=click, headers=_signed_form(click)
+            _interactive_path(workspace_id), content=click, headers=_signed_form(click)
         )
         assert first.status_code == 503
         await asyncio.gather(*slack._IDENTITY_TASKS.values())
         response = await client.post(
-            "/surface/slack/interactive", content=click, headers=_signed_form(click)
+            _interactive_path(workspace_id), content=click, headers=_signed_form(click)
         )
     assert response.status_code == 200
     assert await slack.read_identity(blob, workspace_id, BOT_TOKEN) == slack.SlackIdentity(
@@ -1908,22 +2371,22 @@ async def test_first_click_wins_and_alone_rewrites_the_message(
     _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
     winner = _click_body()
     async with client:
-        unsigned = await client.post("/surface/slack/interactive", content=winner)
+        unsigned = await client.post(_interactive_path(workspace_id), content=winner)
         assert unsigned.status_code == 401
         first = await client.post(
-            "/surface/slack/interactive", content=winner, headers=_signed_form(winner)
+            _interactive_path(workspace_id), content=winner, headers=_signed_form(winner)
         )
         assert first.status_code == 200
         await asyncio.gather(*slack._REWRITE_TASKS)
         loser = _click_body(value="Hold", user="U8")
         second = await client.post(
-            "/surface/slack/interactive", content=loser, headers=_signed_form(loser)
+            _interactive_path(workspace_id), content=loser, headers=_signed_form(loser)
         )
         assert second.status_code == 200
         await asyncio.gather(*slack._REWRITE_TASKS)
         foreign = _click_body(action_id="other:0")
         ignored = await client.post(
-            "/surface/slack/interactive", content=foreign, headers=_signed_form(foreign)
+            _interactive_path(workspace_id), content=foreign, headers=_signed_form(foreign)
         )
         assert ignored.json() == {"ok": True, "ignored": True}
 

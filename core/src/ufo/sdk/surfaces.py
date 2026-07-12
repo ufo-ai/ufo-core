@@ -15,13 +15,22 @@ from ufo.ext.surface import (
     SharedArtifact as SharedArtifact,
 )
 from ufo.ext.surface import (
+    SurfaceAuth as SurfaceAuth,
+)
+from ufo.ext.surface import (
     SurfaceContext as SurfaceContext,
+)
+from ufo.ext.surface import (
+    SurfaceInstallationConflict as SurfaceInstallationConflict,
 )
 from ufo.ext.surface import (
     SurfaceRoute as SurfaceRoute,
 )
 from ufo.ext.surface import (
     SurfaceSpec as SurfaceSpec,
+)
+from ufo.ext.surface import (
+    SurfaceWorkspaceUnknown as SurfaceWorkspaceUnknown,
 )
 from ufo.ext.surface import (
     Writeback as Writeback,

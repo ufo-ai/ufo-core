@@ -43,7 +43,13 @@ from ufo.ext.loader import (
     validate_ext_tools,
 )
 from ufo.ext.manifest import AuthProxySpec, CdpProviderSpec, Manifest, SearchProviderSpec
-from ufo.ext.surface import SurfaceContext, SurfaceSpec, WritebackPoller
+from ufo.ext.surface import (
+    SurfaceAuth,
+    SurfaceContext,
+    SurfaceSpec,
+    WritebackPoller,
+    writeback_workspaces,
+)
 from ufo.grants import ConnectFlow, GrantStore, OAuthProvider, install_connect_flow
 from ufo.hub import Hub, InProcessHub
 from ufo.indexing import EmbedClient, IndexBackend
@@ -665,7 +671,8 @@ def _mount_surfaces(
         admission=Admission(dbos=dbos_client, durable_surfaces=durable_surfaces(manifests)),
     )
     tailer = HubTailer(hub=hub)
-    registered: dict[str, tuple[SurfaceSpec, SurfaceContext]] = {}
+    registered: dict[str, SurfaceSpec] = {}
+    contexts: dict[str, SurfaceContext] = {}
     for manifest in manifests:
         for spec in manifest.surfaces:
             if manifest.credentials and credentials is None:
@@ -680,8 +687,9 @@ def _mount_surfaces(
                 _artifact_token_secret=artifact_secret,
                 _public_base_url=public_base_url,
             )
+            contexts[spec.name] = context
             if spec.post is not None:
-                registered[spec.name] = (spec, context)
+                registered[spec.name] = spec
             for route in spec.routes:
 
                 async def endpoint(
@@ -699,8 +707,17 @@ def _mount_surfaces(
                     methods=[route.method],
                 )
     if registered:
+
+        def context_for(candidate_workspace: UUID, surface: str) -> SurfaceContext:
+            if candidate_workspace != workspace_id:
+                raise RuntimeError("dedicated writeback selected another workspace")
+            return contexts[surface]
+
         app.state.writeback_poller = WritebackPoller(
-            workspace_id=workspace_id, worker_id=uuid4().hex, surfaces=registered
+            worker_id=uuid4().hex,
+            surfaces=registered,
+            context_for=context_for,
+            candidates=writeback_workspaces(),
         )
 
 
@@ -735,10 +752,9 @@ class WorkspaceScopeBoundary:
 
 
 def _shared_fleet_capable(spec: SurfaceSpec) -> bool:
-    """Whether the shared fleet can mount this surface: it must resolve each request's workspace
-    (`identify`) and deliver live — durable writeback needs the per-workspace poller the fleet
-    does not run."""
-    return spec.identify is not None and spec.post is None
+    """Whether shared serve can mount this surface: every request must authenticate its workspace
+    before core binds it. Live and durable delivery use the same bound context."""
+    return spec.identify is not None
 
 
 def _shared_fleet_manifests(manifests: tuple[Manifest, ...]) -> tuple[Manifest, ...]:
@@ -779,22 +795,42 @@ def _mount_shared_surfaces(
     per-request SurfaceContext carries a `MemberAdmission` bound to that workspace so its
     admitted turn lands scoped to the token's workspace and no other.
 
-    A surface that declares no `identify` cannot scope a shared request and is per-tenant-only, so
-    it is skipped here (logged); a durable surface would need the fleet-wide, per-workspace
-    writeback poller the shared fleet does not run (`_serve_lifespan`), so only live surfaces mount
-    — a durable one is skipped the same way. The turn path is the live `ufo` surface; Slack and the
-    setup portal stay per-tenant until the shared fleet grows fleet-wide writeback."""
+    A surface that declares no `identify` cannot scope a shared request and is skipped. Durable
+    surfaces share one bounded writeback poller: its owner read selects only workspace ids, then
+    every claim, build, credential read, post, and attachment runs under that workspace's
+    binding."""
     app.add_middleware(WorkspaceScopeBoundary)
     admission = Admission(dbos=dbos_client, durable_surfaces=durable_surfaces(manifests))
     tailer = HubTailer(hub=hub)
+    registered: dict[str, SurfaceSpec] = {}
+
+    def context_for(workspace_id: UUID, surface: str) -> SurfaceContext:
+        return SurfaceContext(
+            workspace_id=workspace_id,
+            surface=surface,
+            blob=blob,
+            _admitter=MemberAdmission(admission=admission, workspace_id=workspace_id),
+            _tailer=tailer,
+            _credentials=credentials,
+            _artifact_token_secret=artifact_secret,
+            _public_base_url=public_base_url,
+        )
+
     for manifest in manifests:
         for spec in manifest.surfaces:
+            auth = SurfaceAuth(
+                _credentials=credentials,
+                _declared=frozenset(slot.name for slot in manifest.credentials),
+                _surface=spec.name,
+            )
             resolver = spec.identify
             if resolver is None or not _shared_fleet_capable(spec):
                 log("serve.shared_surface.deferred", surface=spec.name)
                 continue
             if manifest.credentials and credentials is None:
                 raise RuntimeError(f"surface {spec.name!r} needs a credential key but none is set")
+            if spec.post is not None:
+                registered[spec.name] = spec
             for route in spec.routes:
 
                 async def endpoint(
@@ -802,22 +838,13 @@ def _mount_shared_surfaces(
                     handler=route.handler,
                     identify=resolver,
                     surface=spec.name,
+                    surface_auth=auth,
                 ) -> Response:
-                    workspace_id = identify(request)
+                    workspace_id = await identify(request, surface_auth)
                     if workspace_id is None:
                         return Response("unauthorized", status_code=401)
                     current_workspace.set(workspace_id)
-                    context = SurfaceContext(
-                        workspace_id=workspace_id,
-                        surface=surface,
-                        blob=blob,
-                        _admitter=MemberAdmission(admission=admission, workspace_id=workspace_id),
-                        _tailer=tailer,
-                        _credentials=credentials,
-                        _artifact_token_secret=artifact_secret,
-                        _public_base_url=public_base_url,
-                    )
-                    return await handler(context, request)
+                    return await handler(context_for(workspace_id, surface), request)
 
                 app.add_route(
                     f"/surface/{spec.name}/{route.path}".rstrip("/"),
@@ -825,6 +852,13 @@ def _mount_shared_surfaces(
                     methods=[route.method],
                 )
             log("serve.shared_surface.mounted", surface=spec.name)
+    if registered:
+        app.state.writeback_poller = WritebackPoller(
+            worker_id=uuid4().hex,
+            surfaces=registered,
+            context_for=context_for,
+            candidates=writeback_workspaces(),
+        )
 
 
 @asynccontextmanager
@@ -832,8 +866,7 @@ async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Run this instance's app-loop background work: the executor-recovery sweep that re-dispatches
     workflows stranded by dead peers, and, when a durable surface is installed, the writeback
     poller, the durable half of surface delivery off the hub and off the turn loop. The shared
-    fleet polls no writebacks (it holds no single workspace's surfaces), but it sweeps like any
-    instance — its turns strand and recover the same way. The heartbeat is NOT here: liveness must
+    poller binds each selected workspace before delivery. The heartbeat is NOT here: liveness must
     span the whole boot (jobs enqueue under this executor id before uvicorn starts) and survive an
     app-loop stall, so `run` drives it on a dedicated thread from the moment the seat exists, and
     retires the seat only after `DBOS.destroy` has stopped all execution — a seat freed while

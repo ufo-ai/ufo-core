@@ -26,12 +26,32 @@ member = sa.Table(
 surface_identity = sa.Table(
     "surface_identity",
     metadata,
-    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
+    sa.Column(
+        "workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), primary_key=True, nullable=False
+    ),
     sa.Column("member_id", sa.Uuid, sa.ForeignKey("member.id"), nullable=False),
     sa.Column("surface", sa.Text, primary_key=True),
     sa.Column("external_id", sa.Text, primary_key=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+)
+
+surface_installation = sa.Table(
+    "surface_installation",
+    metadata,
+    sa.Column(
+        "workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), primary_key=True, nullable=False
+    ),
+    sa.Column("surface", sa.Text, primary_key=True),
+    sa.Column("installation_id", sa.Text, nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.UniqueConstraint(
+        "surface",
+        "installation_id",
+        name="surface_installation_surface_installation_id_key",
+    ),
+    sa.CheckConstraint("installation_id <> ''", name="surface_installation_id_nonempty"),
 )
 
 agent = sa.Table(
@@ -58,7 +78,12 @@ conversation = sa.Table(
     sa.Column("sandbox_handle", sa.Text, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-    sa.UniqueConstraint("surface", "queue_key"),
+    sa.UniqueConstraint(
+        "workspace_id",
+        "surface",
+        "queue_key",
+        name="conversation_workspace_surface_queue_key_key",
+    ),
     sa.Index("conversation_workspace", "workspace_id"),
     sa.Index(
         "conversation_sandbox",
@@ -213,6 +238,13 @@ writeback = sa.Table(
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.CheckConstraint(
         "status in ('pending', 'claimed', 'delivered', 'failed')", name="writeback_status"
+    ),
+    sa.Index(
+        "writeback_due",
+        "workspace_id",
+        "created_at",
+        postgresql_where=sa.text("status in ('pending', 'claimed')"),
+        sqlite_where=sa.text("status in ('pending', 'claimed')"),
     ),
 )
 

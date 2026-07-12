@@ -192,8 +192,8 @@ marker fingerprint matches current signing secret
 with no identity starts that proof after its response and asks Slack to retry; the retry continues
 through normal admission. `slack_app_manifest` renders the app manifest from the tenant public
 base URL (`[connect] public_base_url`; events request URL
-`<public_base_url>/surface/slack`). The owner enters only the Bot User OAuth Token and Signing
-Secret; the team and bot-user ids are derived metadata, never entered and never slots.
+`<public_base_url>/surface/slack/<workspace_id>`). The owner enters only the Bot User OAuth Token
+and Signing Secret; the team and bot-user ids are derived metadata, never entered and never slots.
 
 ## URL verification signal
 
@@ -203,7 +203,7 @@ request — the `url_verification` handshake or a real event:
 ```text
 Slack Events API
   |
-  | POST /surface/slack
+  | POST /surface/slack/<workspace_id>
   | x-slack-signature + x-slack-request-timestamp
   v
 slack surface
@@ -213,6 +213,7 @@ slack surface
   |     unset + event            -> 401
   +-- verify HMAC and replay window
   +-- url_verification -> write marker, return {"challenge": "..."}
+  +-- event / click -> bind HMAC-secret + team fingerprint to this workspace
   +-- foreign team_id  -> ignored, no marker
   +-- event / click    -> write marker, admit turn
 ```
@@ -231,6 +232,10 @@ no reliable retry. Because any signed request from the configured team writes th
 handshake carries no team and always counts), the member's first DM or @mention is what flips setup
 to connected — no manual re-save of the request URL, and no false green from an event the team gate
 drops.
+
+A signed event or click binds its app-secret and Slack-team fingerprint to one UFO workspace. The
+same Slack app may serve different Slack teams, while replaying one installation into another UFO
+workspace is rejected. URL verification carries no team and creates no installation binding.
 
 `slack_connect` trusts the marker only while its fingerprint matches the currently stored
 signing secret. Rotating the signing secret therefore reads as pending until Slack's next signed
@@ -265,8 +270,8 @@ Slack surface's slots without the Slack surface needing a separate setup API.
 ## Hosted pack entry
 
 The `assistant_hosted` pack includes the slack extension — its durable member surface
-(`/surface/slack`), its four credential slots, and its setup tools; connecting it is a
-conversation, not a surface.
+(`/surface/slack/<workspace_id>`), its two credential slots, and its setup tools; connecting it is
+a conversation, not a surface.
 
 ## Operational edges
 

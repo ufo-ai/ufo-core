@@ -31,6 +31,7 @@ from ufo.sdk.hub import CostTick, LiveFrame, Parked, SkillLoad, Terminal, TextDe
 from ufo.sdk.surfaces import (
     CredentialPrompt,
     CredentialRequestInvalid,
+    SurfaceAuth,
     SurfaceContext,
     SurfaceRoute,
 )
@@ -115,7 +116,7 @@ def workspace_claim(secret: str, token: str, now: int | None = None) -> UUID | N
         return None
 
 
-def resolve_workspace(request: Request) -> UUID | None:
+async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | None:
     """The `SurfaceSpec.identify` the shared fleet calls to scope a request before its handler runs:
     the workspace the request's bearer claims, or None to reject. The same bearer the handler
     re-verifies for the member email — workspace here, identity there, from the one signature."""

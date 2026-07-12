@@ -12,6 +12,7 @@ test, so the scopes and events can never drift apart."""
 
 import json
 import re
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
@@ -88,8 +89,8 @@ class SlackManifestInput(BaseModel):
     )
 
 
-def _events_url(public_base_url: str) -> str:
-    return f"{public_base_url.rstrip('/')}/surface/slack"
+def _events_url(public_base_url: str, workspace_id: UUID) -> str:
+    return f"{public_base_url.rstrip('/')}/surface/slack/{workspace_id}"
 
 
 def _state(state: str, hint: str, events_url: str | None, **extra: object) -> ToolResult:
@@ -104,7 +105,11 @@ async def slack_connect_handler(ctx: ToolContext, args: SlackConnectInput) -> To
     the bot is shared by every member; a signed Slack request proves the same record itself, the
     signature gating what the owner gates here."""
     assert ctx.ext is not None
-    events_url = None if ctx.public_base_url is None else _events_url(ctx.public_base_url)
+    events_url = (
+        None
+        if ctx.public_base_url is None
+        else _events_url(ctx.public_base_url, ctx.turn.workspace_id)
+    )
     missing = []
     for slot in SLACK_SECRET_SLOTS:
         try:
@@ -189,7 +194,7 @@ async def slack_manifest_handler(ctx: ToolContext, args: SlackManifestInput) -> 
         raise ValueError(
             "no public base URL — set [connect] public_base_url and restart the deploy"
         )
-    events_url = _events_url(base)
+    events_url = _events_url(base, ctx.turn.workspace_id)
     manifest = SLACK_APP_MANIFEST_TEMPLATE.format(
         name=args.name, request_url=events_url, interactivity_url=f"{events_url}/interactive"
     )

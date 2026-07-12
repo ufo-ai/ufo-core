@@ -48,6 +48,7 @@ from ufo.models.registry import ModelRegistry
 from ufo.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
 from ufo.schema import tables
 from ufo.schema.records import CredentialPrompt, CredentialRequest, TerminalFrame, Usage
+from ufo.sdk.surfaces import SurfaceAuth
 from ufo.serve import _mount_shared_surfaces, _mount_surfaces
 
 SECRET = "ufo-token-secret"
@@ -204,15 +205,19 @@ def _get_request(headers: dict[str, str]) -> StarletteRequest:
     return StarletteRequest({"type": "http", "method": "POST", "headers": raw})
 
 
-def test_resolve_workspace_reads_the_bearer(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_resolve_workspace_reads_the_bearer(monkeypatch: pytest.MonkeyPatch) -> None:
     """SurfaceSpec.identify: the workspace a request's bearer claims, or None to reject — the shared
     fleet binds it before the handler runs. A missing or non-bearer authorization yields None."""
     monkeypatch.setenv("UFO_TOKEN_SECRET", SECRET)
     workspace_id = uuid4()
     token = _mint(SECRET, workspace_id, "owner@example.com", _future())
-    assert resolve_workspace(_get_request({"authorization": f"Bearer {token}"})) == workspace_id
-    assert resolve_workspace(_get_request({})) is None
-    assert resolve_workspace(_get_request({"authorization": token})) is None
+    auth = SurfaceAuth(_credentials=None, _declared=frozenset(), _surface="ufo")
+    assert (
+        await resolve_workspace(_get_request({"authorization": f"Bearer {token}"}), auth)
+        == workspace_id
+    )
+    assert await resolve_workspace(_get_request({}), auth) is None
+    assert await resolve_workspace(_get_request({"authorization": token}), auth) is None
 
 
 @dataclass(frozen=True)
