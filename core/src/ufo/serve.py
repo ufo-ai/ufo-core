@@ -370,14 +370,18 @@ def _select_carrier(config: Config, manifests: tuple[Manifest, ...]) -> Carrier:
 
 def _source_backends(manifests: tuple[Manifest, ...]) -> dict[str, SourceBackend]:
     """The sync driver's backend map: core's folder backend plus every backend an extension
-    registers through its Manifest `sources` point. Two extensions claiming one backend name fail
-    loud at boot, so a source row's backend resolves to exactly one implementation."""
+    registers through its Manifest `sources` point, built with a credential reader restricted to
+    the declaring extension's slots. Two extensions claiming one backend name fail loud at boot,
+    so a source row's backend resolves to exactly one implementation."""
     backends: dict[str, SourceBackend] = {FOLDER_BACKEND: FolderSource()}
     for manifest in manifests:
+        credentials = CredentialAccess(
+            declared=frozenset(slot.name for slot in manifest.credentials)
+        )
         for provider in manifest.sources:
             if provider.backend in backends:
                 raise RuntimeError(f"two extensions register source backend {provider.backend!r}")
-            backends[provider.backend] = provider.source
+            backends[provider.backend] = provider.build(credentials)
     return backends
 
 

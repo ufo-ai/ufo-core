@@ -8,9 +8,12 @@ Pipedream) and every other to the selected fallback. `serve` sources the backend
 driver's backend map (so a registered account syncs offline into memory) and builds this sole
 `direct` proxy automatically with a reader scoped to these slots."""
 
+from dataclasses import dataclass
+
 from ufo.sdk.authproxy import AuthProxySpec
+from ufo.sdk.context import CredentialAccess
 from ufo.sdk.manifest import CredentialSlot, Manifest, SourceProvider
-from ufo.sdk.sources import ConnectorBackend
+from ufo.sdk.sources import Connector, ConnectorBackend
 from ufo_ext_sources.direct import DirectAuthProxy
 from ufo_ext_sources.registry import CONNECTORS
 from ufo_ext_sources.tools import SYNC_SOURCE_TOOL
@@ -20,13 +23,24 @@ VERSION = "0.1.0"
 DIRECT_BACKEND = "direct"
 
 
+@dataclass(frozen=True)
+class ConnectorSourceFactory:
+    connector: type[Connector]
+
+    def __call__(self, _credentials: CredentialAccess) -> ConnectorBackend:
+        return ConnectorBackend(connector=self.connector())
+
+
 def manifest() -> Manifest:
     return Manifest(
         name=NAME,
         version=VERSION,
         tools=(SYNC_SOURCE_TOOL,),
         sources=tuple(
-            SourceProvider(backend=name, source=ConnectorBackend(connector=cls()))
+            SourceProvider(
+                backend=name,
+                build=ConnectorSourceFactory(connector=cls),
+            )
             for name, cls in CONNECTORS.items()
         ),
         credentials=tuple(

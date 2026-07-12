@@ -12,10 +12,12 @@ from evals import (
     skill_routing,
     tool_calling,
     web_research,
+    yc_recall,
+    yc_workflows,
 )
-from evals.harness.registry import EvalTask, capability_task
+from evals.harness.registry import EvalTask, capability_task, selected_tasks
 
-TASKS: tuple[EvalTask, ...] = (
+DEFAULT_TASKS: tuple[EvalTask, ...] = (
     capability_task("basics", basics.CASES),
     capability_task("semantic_quality", semantic_quality.CASES),
     capability_task("skill_routing", skill_routing.CASES),
@@ -26,3 +28,12 @@ TASKS: tuple[EvalTask, ...] = (
     capability_task("site_build", site_build.CASES),
     capability_task("web_research", web_research.CASES),
 )
+TASKS: tuple[EvalTask, ...] = (
+    *DEFAULT_TASKS,
+    capability_task("yc_recall", yc_recall.CASES),
+    capability_task("yc_workflows", yc_workflows.CASES),
+)
+
+
+def selected_run_tasks(names: tuple[str, ...] = ()) -> tuple[EvalTask, ...]:
+    return selected_tasks(TASKS if names else DEFAULT_TASKS, names)

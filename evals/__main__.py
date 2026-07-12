@@ -24,7 +24,7 @@ from evals.harness.judge import JUDGE_REVISION, ModelJudge
 from evals.harness.registry import selected_tasks
 from evals.harness.report_html import render_report_html
 from evals.harness.target import InProcessTarget
-from evals.registry import TASKS
+from evals.registry import TASKS, selected_run_tasks
 from ufo.blob import blob_store_for
 from ufo.config import Config, load_config
 from ufo.credentials import CredentialStore
@@ -95,7 +95,7 @@ async def _run(
             blob=blob,
         )
         with ws(workspace_id):
-            reports = tuple([await task.run(target) for task in selected_tasks(TASKS, names)])
+            reports = tuple([await task.run(target) for task in selected_run_tasks(names)])
         return tuple(
             replace(
                 report,

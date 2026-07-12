@@ -71,6 +71,19 @@ class WorkspaceScope:
             raise CredentialSlotUnset(slot)
         return value
 
+    async def rotate_credential(self, slot: str, expected: str, plaintext: str) -> bool:
+        """Compare-and-swap an existing encrypted workspace credential. A platform environment
+        default has no row to rotate and remains unchanged."""
+        if _store is None:
+            return False
+        return await _store.rotate(self.workspace_id, slot, expected, plaintext)
+
+    async def put_credential(self, slot: str, plaintext: str) -> None:
+        """Store an owner-authorized initial credential through the bound workspace."""
+        if _store is None:
+            raise RuntimeError("credential store is not configured")
+        await _store.put(self.workspace_id, slot, plaintext)
+
     @asynccontextmanager
     async def billable_event(self) -> AsyncIterator[BillableEvent]:
         """Book spend to this workspace when the block succeeds. Accrue model usage inside; on clean

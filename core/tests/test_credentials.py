@@ -65,6 +65,19 @@ async def test_put_upserts(db: None) -> None:
     assert await store.get(workspace_id, "sample_api") == "two"
 
 
+async def test_rotate_updates_only_the_expected_existing_value(db: None) -> None:
+    workspace_id = await _workspace()
+    store = _store()
+    await store.put(workspace_id, "oauth", "old")
+    assert await store.rotate(workspace_id, "oauth", "old", "new")
+    assert await store.get(workspace_id, "oauth") == "new"
+    assert not await store.rotate(workspace_id, "oauth", "old", "stale")
+    assert await store.get(workspace_id, "oauth") == "new"
+    assert not await store.rotate(workspace_id, "missing", "old", "new")
+    with pytest.raises(ValueError, match="empty"):
+        await store.rotate(workspace_id, "oauth", "new", "")
+
+
 async def test_put_rejects_an_empty_value(db: None) -> None:
     with pytest.raises(ValueError, match="empty"):
         await _store().put(await _workspace(), "sample_api", "")
@@ -155,3 +168,21 @@ def test_credential_requests_seal_only_declared_slots() -> None:
     assert requests.seal(uuid4(), uuid4(), ("a",))
     with pytest.raises(ValueError, match="declares credential slot"):
         requests.seal(uuid4(), uuid4(), ("a", "nope"))
+
+
+async def test_credential_requests_open_an_owner_bound_authorization(db: None) -> None:
+    workspace_id = await _workspace()
+    member_id = uuid4()
+    requests = CredentialRequests(fernet=Fernet(Fernet.generate_key()), declared=frozenset({"yc"}))
+    with pytest.raises(ValueError, match="empty"):
+        requests.authorize(workspace_id, member_id, "yc", "")
+    sealed = requests.authorize(workspace_id, member_id, "yc", '{"device":"secret"}')
+    assert (
+        requests.open_authorization(sealed, workspace_id, member_id, "yc") == '{"device":"secret"}'
+    )
+    with pytest.raises(CredentialRequestInvalid, match="workspace"):
+        requests.open_authorization(sealed, uuid4(), member_id, "yc")
+    with pytest.raises(CredentialRequestInvalid, match="member"):
+        requests.open_authorization(sealed, workspace_id, uuid4(), "yc")
+    with pytest.raises(CredentialRequestInvalid, match="slot"):
+        requests.open_authorization(sealed, workspace_id, member_id, "other")

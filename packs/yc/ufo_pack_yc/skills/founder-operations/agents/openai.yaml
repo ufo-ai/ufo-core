@@ -1,0 +1,4 @@
+interface:
+  display_name: "Founder Operations"
+  short_description: "Run disciplined founder operating workflows"
+  default_prompt: "Turn this founder operating question into a grounded plan and measurable next action."

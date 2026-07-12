@@ -13,8 +13,9 @@ from pydantic import BaseModel
 
 from ufo.blob import FilesystemBlobStore
 from ufo.connectors import ConnectorRegistry
-from ufo.credentials import CredentialRequests, open_credential_request
+from ufo.credentials import CredentialRequests, CredentialStore, open_credential_request
 from ufo.db import workspace_tx
+from ufo.ext.context import context_for
 from ufo.ext.loader import HookChain
 from ufo.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
 from ufo.hub import InProcessHub, LiveFrame, SkillLoad, ToolCall
@@ -85,7 +86,7 @@ from ufo.tools.context import (
 )
 from ufo.tools.registry import ToolDef, ToolRegistry
 from ufo.transcript import Conversation
-from ufo.workspace import ws
+from ufo.workspace import init_workspace_credentials, ws
 
 
 @dataclass
@@ -838,6 +839,47 @@ async def test_request_credentials_gates_on_owner_key_and_declared_slots(
     )
     with pytest.raises(ValueError, match="declares credential slot"):
         await request_credentials_handler(context(owner, requests), undeclared)
+
+
+async def test_extension_tool_authorizes_its_declared_credential_as_the_owner(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    owner = await _seeded_member(turn.workspace_id)
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    requests = CredentialRequests(fernet=store.fernet, declared=frozenset({"sample_api"}))
+    context = ToolContext(
+        sandbox=SandboxSession(
+            carrier=RecordingCarrier(),
+            handle=SandboxHandle(conversation_id=turn.conversation_id, container_id="test"),
+        ),
+        blob=FilesystemBlobStore(root=tmp_path),
+        turn=turn,
+        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        spawn=_unavailable_spawn,
+        member_id=owner,
+        artifact_token_secret="",
+        requestable_credentials=requests,
+        ext=context_for("sample", frozenset({"sample_api"})),
+    )
+    init_workspace_credentials(store)
+    try:
+        with ws(turn.workspace_id):
+            with pytest.raises(ValueError, match="workspace owner"):
+                await replace(context, member_id=uuid4()).begin_credential_authorization(
+                    "sample_api", "provider-state"
+                )
+            with pytest.raises(ValueError, match="does not declare"):
+                await context.begin_credential_authorization("other", "provider-state")
+            sealed = await context.begin_credential_authorization("sample_api", "provider-state")
+            assert (
+                await context.open_credential_authorization("sample_api", sealed)
+                == "provider-state"
+            )
+            await context.fulfill_credential_authorization("sample_api", sealed, "secret")
+    finally:
+        init_workspace_credentials(None)
+    assert await store.get(turn.workspace_id, "sample_api") == "secret"
 
 
 def test_requested_credentials_reads_the_handlers_result_not_the_raw_call() -> None:

@@ -12,6 +12,7 @@ import pytest
 import ufo_pack_assistant as assistant
 import ufo_pack_assistant_hosted as assistant_hosted
 import ufo_pack_chief_of_staff as chief_of_staff
+import ufo_pack_yc.manifest as yc
 
 import ufo.ext.loader as loader
 from ufo.ext.loader import discovered_packs, load_manifests
@@ -36,6 +37,12 @@ def test_assistant_hosted_pack_is_discovered_with_its_bundle() -> None:
     packs = discovered_packs()
     assert assistant_hosted.NAME in packs
     assert packs[assistant_hosted.NAME].extensions == assistant_hosted.EXTENSIONS
+
+
+def test_yc_pack_is_discovered_with_its_bundle_and_skills() -> None:
+    packs = discovered_packs()
+    assert packs[yc.NAME].extensions == yc.EXTENSIONS
+    assert {skill.path.name for skill in packs[yc.NAME].skills} == set(yc.SKILL_NAMES)
 
 
 def test_activating_the_assistant_hosted_pack_makes_exactly_its_bundle_active() -> None:
@@ -64,6 +71,11 @@ def test_activating_the_chief_of_staff_pack_makes_exactly_its_bundle_active() ->
     own = manifests[-1]
     parsed = {parse_skill(spec.path).name for spec in own.skills}
     assert parsed == set(chief_of_staff.SKILL_NAMES)
+
+
+def test_activating_the_yc_pack_makes_exactly_its_bundle_active() -> None:
+    names = [manifest.name for manifest in load_manifests(yc.NAME)]
+    assert names == [*yc.EXTENSIONS, yc.NAME]
 
 
 def test_no_pack_selected_leaves_the_unnarrowed_extension_set() -> None:

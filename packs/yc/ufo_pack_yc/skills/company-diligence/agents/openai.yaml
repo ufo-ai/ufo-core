@@ -1,0 +1,4 @@
+interface:
+  display_name: "Company Diligence"
+  short_description: "Analyze company and fundraising materials"
+  default_prompt: "Analyze these company materials into evidence, risks, and open questions."

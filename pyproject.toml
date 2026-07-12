@@ -68,12 +68,14 @@ todos = "ufo_ext_todos:manifest"
 turbopuffer = "ufo_ext_turbopuffer:manifest"
 ufo = "ufo_ext_ufo.manifest:manifest"
 web = "ufo_ext_web.manifest:manifest"
+yc_cli = "ufo_ext_yc.manifest:manifest"
 
 [project.entry-points."ufo.pack"]
 assistant = "ufo_pack_assistant:pack"
 assistant_hosted = "ufo_pack_assistant_hosted:pack"
 chief_of_staff = "ufo_pack_chief_of_staff:pack"
 sample_pack = "ufo_pack_sample:pack"
+yc = "ufo_pack_yc.manifest:pack"
 
 [project.entry-points.pytest11]
 ufo_testsupport = "ufo_testsupport.plugin"
@@ -124,6 +126,8 @@ packages = [
     "extensions/sources/ufo_ext_sources",
     "extensions/ufo/ufo_ext_ufo",
     "extensions/web/ufo_ext_web",
+    "extensions/yc/ufo_ext_yc",
+    "packs/yc/ufo_pack_yc",
     "testsupport/ufo_testsupport",
 ]
 exclude = ["**/__pycache__", "**/*.pyc"]

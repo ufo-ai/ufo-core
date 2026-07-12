@@ -148,6 +148,13 @@ class CredentialAccess:
             raise UndeclaredCredentialSlot(slot)
         return await ws_current().credential(slot)
 
+    async def rotate(self, slot: str, expected: str, plaintext: str) -> bool:
+        """Compare-and-swap an existing declared slot after an external provider rotates it. This
+        cannot create the initial credential: that remains the member-sealed surface handoff."""
+        if slot not in self.declared:
+            raise UndeclaredCredentialSlot(slot)
+        return await ws_current().rotate_credential(slot, expected, plaintext)
+
 
 @dataclass(frozen=True)
 class Trajectory:

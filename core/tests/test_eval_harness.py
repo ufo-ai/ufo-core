@@ -46,6 +46,7 @@ from evals.harness.scorers import (
     skill_scorer,
 )
 from evals.harness.target import InProcessTarget, TargetResult, capability_output
+from evals.registry import TASKS, selected_run_tasks
 from ufo.accounting import CORE_PRICING, Pricing
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
@@ -68,6 +69,15 @@ from ufo.workspace import ws
 MODEL = "claude-opus-4-8"
 PROMPT = "You are a helpful assistant."
 EXTENSION = "evals"
+
+
+def test_yc_evals_require_explicit_selection() -> None:
+    assert all(not task.name.startswith("yc_") for task in selected_run_tasks())
+    assert [task.name for task in selected_run_tasks(("yc_recall", "yc_workflows"))] == [
+        "yc_recall",
+        "yc_workflows",
+    ]
+    assert {task.name for task in TASKS} >= {"yc_recall", "yc_workflows"}
 
 
 def _research_transcript() -> tuple[Message, ...]:

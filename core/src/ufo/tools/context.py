@@ -42,6 +42,7 @@ from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.search import SearchProvider
 from ufo.skills.runtime import CORE_SKILL_REGISTRY, SkillRegistry
+from ufo.workspace import ws_current
 
 
 class TextContent(BaseModel):
@@ -182,6 +183,32 @@ class ToolContext:
                 )
             ).one_or_none()
         return earliest is not None and earliest.id == self.member_id
+
+    async def begin_credential_authorization(self, slot: str, payload: str) -> str:
+        requests, member_id = await self._credential_authorization(slot)
+        return requests.authorize(self.turn.workspace_id, member_id, slot, payload)
+
+    async def open_credential_authorization(self, slot: str, sealed: str) -> str:
+        requests, member_id = await self._credential_authorization(slot)
+        return requests.open_authorization(sealed, self.turn.workspace_id, member_id, slot)
+
+    async def fulfill_credential_authorization(
+        self, slot: str, sealed: str, plaintext: str
+    ) -> None:
+        requests, member_id = await self._credential_authorization(slot)
+        requests.open_authorization(sealed, self.turn.workspace_id, member_id, slot)
+        await ws_current().put_credential(slot, plaintext)
+
+    async def _credential_authorization(self, slot: str) -> tuple[CredentialRequests, UUID]:
+        if self.member_id is None:
+            raise ValueError("credential authorization requires a speaking member")
+        if self.ext is None or slot not in self.ext.credentials.declared:
+            raise ValueError(f"this extension does not declare credential slot {slot!r}")
+        if self.requestable_credentials is None:
+            raise ValueError("no credential key is configured — this deploy cannot store secrets")
+        if not await self.speaker_is_owner():
+            raise ValueError("only the workspace owner can authorize credential slots")
+        return self.requestable_credentials, self.member_id
 
     async def connector_account(self, provider: str, account_id: str | None = None) -> str:
         """The broker's connected-account id a connector tool passes to the broker's server-side

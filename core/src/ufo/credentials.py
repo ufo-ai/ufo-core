@@ -31,13 +31,13 @@ class CredentialRequestInvalid(ValueError):
 
 
 class CredentialRequestState(BaseModel):
-    """The claims a `request_credentials` call seals: which member (the speaking owner) will fill
-    which slots of which workspace. Fernet-sealed under the same key that encrypts the slots and
-    TTL-bounded at open, so fulfillment trusts the seal without a server-side pending row."""
+    """The claims a member credential action seals: workspace, speaking owner, slots, and optional
+    provider authorization state. The credential Fernet encrypts it and bounds its lifetime."""
 
     workspace_id: UUID
     member_id: UUID
     slots: tuple[str, ...]
+    payload: str | None = None
 
 
 def seal_credential_request(fernet: Fernet, state: CredentialRequestState) -> str:
@@ -54,10 +54,9 @@ def open_credential_request(fernet: Fernet, sealed: str) -> CredentialRequestSta
 
 @dataclass(frozen=True)
 class CredentialRequests:
-    """The `request_credentials` tool's sealing arm: the Fernet that guards the slots and the
-    deploy's declared slot set, so a request can only ever name slots some installed extension
-    declared. Absent (None on the tool context) when no credential key is configured — collecting
-    BYOK secrets is then unavailable and the tool fails loud."""
+    """The member-sealed credential arm: the Fernet that guards the slots and the deploy's declared
+    slot set, so a private prompt or provider authorization can name only an installed extension's
+    slot. Absent when no credential key is configured."""
 
     fernet: Fernet
     declared: frozenset[str]
@@ -70,6 +69,37 @@ class CredentialRequests:
             self.fernet,
             CredentialRequestState(workspace_id=workspace_id, member_id=member_id, slots=slots),
         )
+
+    def authorize(self, workspace_id: UUID, member_id: UUID, slot: str, payload: str) -> str:
+        if slot not in self.declared:
+            raise ValueError(f"no installed extension declares credential slot {slot!r}")
+        if not payload:
+            raise ValueError("credential authorization provider state is empty")
+        return seal_credential_request(
+            self.fernet,
+            CredentialRequestState(
+                workspace_id=workspace_id,
+                member_id=member_id,
+                slots=(slot,),
+                payload=payload,
+            ),
+        )
+
+    def open_authorization(
+        self, sealed: str, workspace_id: UUID, member_id: UUID, slot: str
+    ) -> str:
+        state = open_credential_request(self.fernet, sealed)
+        if state.workspace_id != workspace_id:
+            raise CredentialRequestInvalid("credential authorization belongs to another workspace")
+        if state.member_id != member_id:
+            raise CredentialRequestInvalid("credential authorization belongs to another member")
+        if state.slots != (slot,):
+            raise CredentialRequestInvalid("credential authorization names another slot")
+        if slot not in self.declared:
+            raise ValueError(f"no installed extension declares credential slot {slot!r}")
+        if state.payload is None:
+            raise CredentialRequestInvalid("credential authorization carries no provider state")
+        return state.payload
 
 
 @dataclass(frozen=True)
@@ -113,3 +143,36 @@ class CredentialStore:
         if row is None:
             raise CredentialSlotUnset(slot)
         return self.fernet.decrypt(row.ciphertext).decode()
+
+    async def rotate(self, workspace_id: UUID, slot: str, expected: str, plaintext: str) -> bool:
+        """Replace an existing slot only while it still contains `expected`. OAuth clients use
+        this after an external refresh so a concurrent call cannot overwrite a newer credential.
+        The initial value still enters through the member-sealed fulfillment path."""
+        if not plaintext:
+            raise ValueError("credential value is empty")
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(tables.credential.c.ciphertext).where(
+                        tables.credential.c.workspace_id == workspace_id,
+                        tables.credential.c.slot == slot,
+                    )
+                )
+            ).one_or_none()
+            if row is None:
+                return False
+            if self.fernet.decrypt(row.ciphertext).decode() != expected:
+                return False
+            updated = await connection.execute(
+                sa.update(tables.credential)
+                .values(
+                    ciphertext=self.fernet.encrypt(plaintext.encode()),
+                    updated_at=sa.func.now(),
+                )
+                .where(
+                    tables.credential.c.workspace_id == workspace_id,
+                    tables.credential.c.slot == slot,
+                    tables.credential.c.ciphertext == row.ciphertext,
+                )
+            )
+        return updated.rowcount == 1

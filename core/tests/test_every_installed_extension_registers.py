@@ -207,7 +207,7 @@ def _check_sources(manifest: Manifest) -> None:
         return
     backends = _source_backends((manifest,))
     for provider in manifest.sources:
-        assert backends[provider.backend] is provider.source
+        assert backends[provider.backend].config_model is not None
 
 
 def _check_auth_proxies(manifest: Manifest, store: CredentialStore) -> None:

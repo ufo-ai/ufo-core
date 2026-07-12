@@ -86,6 +86,7 @@ from ufo.serve import (
     _select_cdp_provider,
     _select_hub,
     _select_search_provider,
+    _source_backends,
     _validate_requires,
 )
 from ufo.skills.runtime import mount_skill
@@ -855,11 +856,14 @@ async def test_context_confines_the_credential_handle(db: None) -> None:
     ):
         assert {name for name in dir(context.credentials) if not name.startswith("_")} == {
             "get",
+            "rotate",
             "workspace_id",
             "declared",
         }
         with pytest.raises(UndeclaredCredentialSlot, match=sample.UNDECLARED_SLOT):
             await context.credentials.get(sample.UNDECLARED_SLOT)
+        with pytest.raises(UndeclaredCredentialSlot, match=sample.UNDECLARED_SLOT):
+            await context.credentials.rotate(sample.UNDECLARED_SLOT, "old", "new")
 
 
 def test_a_route_without_a_credential_key_fails_loud() -> None:
@@ -1339,7 +1343,7 @@ async def test_sample_source_syncs_a_page_recallable_through_memory(
     blob = FilesystemBlobStore(root=tmp_path)
     postgres = database_url.startswith("postgresql")
     driver = SyncDriver(
-        backends={source.backend: source.source for source in manifest.sources},
+        backends=_source_backends((manifest,)),
         blob=blob,
         postgres=postgres,
     )

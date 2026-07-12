@@ -137,14 +137,14 @@ class CarrierSpec:
 @dataclass(frozen=True)
 class SourceProvider:
     """One content-source backend an extension registers: the `backend` name that keys its `source`
-    rows and the `SourceBackend` the core sync driver drives for them. `serve` sources these into
-    the driver's backend map, so a row with this backend name syncs through this backend and its
-    pages land in memory via the derivation pipeline exactly as the core folder source's do. A
-    source row is created in chat (an extension calls `ExtensionContext.register_source`), never a
-    deploy-config knob."""
+    rows and the factory that builds the `SourceBackend` with access to that extension's declared
+    credential slots. `serve` sources these into the driver's backend map, so a row with this
+    backend name syncs through this backend and its pages land in memory via the derivation pipeline
+    exactly as the core folder source's do. A source row is created in chat through
+    `ExtensionContext.register_source`."""
 
     backend: str
-    source: SourceBackend
+    build: Callable[[CredentialAccess], SourceBackend]
 
 
 @dataclass(frozen=True)

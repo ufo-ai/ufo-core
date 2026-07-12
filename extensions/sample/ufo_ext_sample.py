@@ -857,7 +857,9 @@ def manifest() -> Manifest:
                 ),
             ),
         ),
-        sources=(SourceProvider(backend=SOURCE_BACKEND, source=SampleSource()),),
+        sources=(
+            SourceProvider(backend=SOURCE_BACKEND, build=lambda _credentials: SampleSource()),
+        ),
         indexes=(
             IndexBackendSpec(
                 name=INDEX_BACKEND, factory=lambda embed, ctx: SampleIndex(embed=embed)

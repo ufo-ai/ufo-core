@@ -139,12 +139,12 @@ Manifest registers (each optional):
 | `prompt_sections` | Capability sections a pack contributes to the agent's system prompt, rendered into the shell's `{{sections}}` slot ordered by name — a pack's rules (web search, browsing, office docs) reach the agent without core naming the capability. |
 | `skills` | Skill folders (SKILL.md + bundled scripts/assets) contributed to the loadable set; the loader parses each into the registry `load_skill` and the `{{skill_index}}` consult, mounted into the sandbox under `.skills/<name>/` beside core's own three. A skill script imports nothing from ufo (it runs in the sandbox) — a CI gate holds that boundary. |
 | `connectors` | One brokered provider per declaration: its OAuth descriptor (grant flow), member-facing label, and `ConnectorBroker` — catalog, server-side execute, feed-sync credential. `serve` merges every declaration into the one `ConnectorRegistry`; the `connectors` extension's broker-generic dynamic tools (list/describe/search/call) dispatch through it, and the sync runner resolves a brokered provider's feed-sync `Credential` through its own broker. Two broker extensions ship — `composio` (most providers) and `pipedream` (Gmail: Google blocks restricted Gmail scopes on Composio's shared client; the deploy's own Google OAuth client rides Pipedream Connect). **A broker brokers auth by PROXY: every call goes through the broker (its execute API for tools; a proxying transport for feed-sync source HTTP) carrying `(external user, connected account id)` — the broker holds the provider token and injects it server-side; the token is NEVER exposed to us. A connector grant stores only the connected-account id; the confused-deputy check reads the account's owner metadata, never a token. Broker grants derive NO egress InjectionRule — the sentinel→key swap (§Sandboxing) is ONLY for user-supplied BYOK `credentials` keys.** |
-| `sources` | Data-feed backends: `sync(cursor) -> pages` run as jobs; pages land in memory/knowledge via the derivation pipeline. Each backend is pluggable — S3, connector/provider APIs, webhooks; core ships only `folder` (local files). Connector source providers live in `extensions/sources`, built on the read-only REST connector framework core exposes through `ufo.sdk.sources` (so any extension can provide a source); each resolves a provider `Credential` through the pluggable **auth-proxy** seam, never importing a broker. |
+| `sources` | Data-feed backends: `sync(cursor) -> pages` run as jobs; pages land in memory/knowledge via the derivation pipeline. Each provider is a backend factory receiving only its declaring extension's scoped credential access; extensions cannot otherwise express an authenticated direct source without exposing encrypted secrets. Core ships only `folder` (local files). Connector source providers live in `extensions/sources`, built on the read-only REST connector framework core exposes through `ufo.sdk.sources`; each resolves a provider `Credential` through the pluggable **auth-proxy** seam, never importing a broker. |
 | `hooks` | Reactive lifecycle handlers on Claude Code's taxonomy, scoped like a job. Seven fire on the turn loop — `pre_tool_use`/`post_tool_use`/`post_tool_use_failure`, `user_prompt_submit`, `stop`, `pre_compact`/`post_compact` — as a runtime policy filter over the tools grants already admit (observe, deny, modify, or inject), never a second grant path. The eighth, `page_change`, is the data-plane seam (data → memory): a core batched cursor-runner replays each changed source page to a consumer's hook off that extension's own cursor — the path the memory indexer and knowledge-graph extractor ride. (Claude Code's session/permission/subagent-stop/notification events have no producer here and are not members until one lands with a consumer.) |
 | `jobs` | Recurring/one-time background work. |
 | `routes` | HTTP endpoints under `/ext/<name>/` (webhooks, OAuth callbacks, plugin UIs). |
 | `surfaces` | A chat surface on the one privileged surface seam: its `SurfaceRoute`s mounted under `/surface/<name>`. A **durable** surface (Slack) declares two-phase delivery (`post` then `attach`) the poller drives — declaring `post` is what marks it durable, and admission registers every turn entering its conversations for delivery, whoever admits it; a **live** surface (web) tails the hub over SSE in its own route. Core's CLI is the built-in live twin. |
-| `credentials` | Named BYOK slots the workspace must fill (drives onboarding); `ufoctl init` seeds a slot from its upper-cased env var (`SLACK_BOT_TOKEN` → `slack_bot_token`), and the operator fills or rotates one anytime with `ufoctl credential set <slot>`. A member fills one in chat through `request_credentials`: the owner's ask seals which slots they will fill, a capable surface prompts for each value privately, and fulfillment verifies the seal before the encrypted store takes it — the plaintext never enters the transcript or the sandbox. |
+| `credentials` | Named BYOK slots the workspace must fill (drives onboarding); `ufoctl init` seeds a slot from its upper-cased env var (`SLACK_BOT_TOKEN` → `slack_bot_token`), and the operator fills or rotates one anytime with `ufoctl credential set <slot>`. A member fills one in chat through `request_credentials`: the owner's ask seals which slots they will fill, a capable surface prompts for each value privately, and fulfillment verifies the seal before the encrypted store takes it — the plaintext never enters the transcript or the sandbox. An extension tool may instead seal provider authorization state to its own declared slot and the speaking owner, then fulfill that seal with the resulting credential; URL/code handoffs therefore stay in chat while provider secrets do not. Extensions may read their declared slots and compare-and-swap an existing value when an upstream client refreshes it; only an owner-sealed or operator path creates a value. |
 | `onboarding` | Steps contributed to the workspace/pack onboarding flow. |
 | `models` | Model providers behind `ModelClient` (OpenRouter, local runtimes). |
 | `carriers` | Sandbox carriers — Docker, E2B, remote runners; core's default is a local temp-dir carrier. |
@@ -158,7 +158,8 @@ Manifest registers (each optional):
 | `requires` | Sub-seams this extension consumes from another (the browser pack `requires` `cdp_providers`); `serve` resolves each at boot and fails loud — naming the extension and the seam — if the backend is absent, unknown, or unkeyed, so a missing dependency stops startup rather than the first tool call. |
 
 `ExtensionContext` (capability-scoped, handed to every handler): workspace-scoped store access,
-`credentials.get(slot)`, the selected `index`/`embed` backends,
+`credentials.get(slot)` / `credentials.rotate(slot, expected, value)`, the selected `index`/`embed`
+backends,
 `pages` (the `PageFeed` replaying
 source-page changes under a resumable cursor), `transaction()` over the extension's own tables,
 `invoke(agent, input, conversation=...)`, metered `model.complete(...)`/`model.turn(...)`,
@@ -192,7 +193,15 @@ so pack integrity derives from the pinned extensions it names. Absent config, th
 unnarrowed set (the lockfile's pins, or every discovered extension in dev). The flagship is
 **assistant** — memory (with its index and embed backends), the browser pack (its BUA engine over
 the default `sandbox_cdp` transport), brokered connectors (Composio; Pipedream for Gmail), and web
-research (the research tools over the Exa search backend).
+research (the research tools over the Exa search backend). **yc** is the founder workspace: the
+authenticated YC CLI, Bookface Knowledge Base and Startup Library sources, memory and graph
+derivations, documents, scheduled tasks, todos, and pack-level founder-operations and diligence
+skills.
+
+The YC extension's `yc_auth` tool runs that owner-sealed device flow: the member receives the YC
+URL and code in chat, approves in the browser, then the encrypted credential is available to the
+CLI, tools, and sources without entering the transcript. One owner-authorized YC identity serves
+the workspace, and every provider operation exposed by the extension is read-only.
 
 ## Surfaces
 
@@ -354,6 +363,7 @@ bundle installs OSS, on-prem, or hosted.
 | Redis stream hub | hubs |
 | turbopuffer index | indexes |
 | GitHub / Asana feed-sync sources | sources, credentials, auth_proxies (`direct`) |
+| YC CLI + Bookface guidance | tools, sources, credentials, skills, onboarding |
 | Agent-guided education / onboarding | onboarding, tools |
 | Scheduled tasks (cron / one-time) | jobs, invoke, tools, requires (`memory_search`) |
 | GH code review on PR + auto-merge | routes (webhook), credentials, invoke, tools |
@@ -369,10 +379,10 @@ Packs (activation bundles, not code — see Packs): **assistant** bundles memory
 brokered connector grants plus feed sync (Google Meet transcripts and Gemini smart notes, Slack, a
 folder-synced state repo) with memory and the graph, the Slack surface, scheduling, page watches,
 todos, workspace skills, and self-improvement behind four pack skills (`sync`, `prep`, `triage`,
-setup); **startup** and
-**support bot** name the extensions plus pack-level onboarding a product needs (YC/fundraising docs
-and search; knowledgebase + keys onboarding with the websites plugin). Each activates one coherent
-config, no code of its own beyond what it references.
+setup); **yc** bundles authenticated YC
+research, indexed YC guidance, memory, graph, documents, scheduled tasks, todos, and founder
+workflows. **support bot** bundles knowledge sources, keys onboarding, and websites. Each activates
+one coherent config, no code of its own beyond what it references.
 
 ## Non-goals (core, now)
 
