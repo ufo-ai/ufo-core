@@ -26,6 +26,7 @@ from ufo.models.interface import (
     TextBlock,
     TextDelta,
     ToolResultBlock,
+    ToolSchema,
     ToolUseBlock,
     trim_images,
 )
@@ -245,6 +246,33 @@ async def test_anthropic_request_carries_image_and_tool_result_images() -> None:
         {"type": "text", "text": "chart.png"},
         {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "BBBB"}},
     ]
+
+
+async def test_anthropic_caches_tools_system_and_growing_conversation() -> None:
+    create = CapturingCreate(
+        ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
+    )
+    request = REQUEST.model_copy(
+        update={
+            "tools": (
+                ToolSchema(name="first", description="one", input_schema={"type": "object"}),
+                ToolSchema(name="last", description="two", input_schema={"type": "object"}),
+            )
+        }
+    )
+    async for _ in AnthropicClient(client=anthropic_sdk(create)).complete(request):
+        pass
+    assert create.kwargs["cache_control"] == {"type": "ephemeral"}
+    assert create.kwargs["system"] == [
+        {
+            "type": "text",
+            "text": "be terse",
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+    tools = create.kwargs["tools"]
+    assert "cache_control" not in tools[0]
+    assert tools[1]["cache_control"] == {"type": "ephemeral"}
 
 
 async def test_openai_request_carries_image_url_and_lifts_tool_result_images() -> None:

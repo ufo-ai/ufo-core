@@ -109,13 +109,20 @@ class AnthropicClient:
             stop_reason: str | None = None
             create_kwargs: dict[str, Any] = {
                 "model": request.model,
-                "system": request.system,
+                "system": [
+                    {
+                        "type": "text",
+                        "text": request.system,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
                 "messages": [
                     {"role": m.role, "content": anthropic_content(m.content)}
                     for m in trim_images(request.messages)
                 ],
                 "max_tokens": request.max_tokens,
                 "stream": True,
+                "cache_control": {"type": "ephemeral"},
             }
             if request.reasoning != "off":
                 create_kwargs["thinking"] = {"type": "adaptive"}
@@ -125,6 +132,7 @@ class AnthropicClient:
                     {"name": t.name, "description": t.description, "input_schema": t.input_schema}
                     for t in request.tools
                 ]
+                create_kwargs["tools"][-1]["cache_control"] = {"type": "ephemeral"}
             try:
                 stream = await self.client.messages.create(**create_kwargs)
                 async for event in stream:
