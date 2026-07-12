@@ -64,7 +64,7 @@ Durable state is keyed by `turn_id`, which doubles as the DBOS `workflow_id`
 (`ledger_id_for(workspace, turn, dimension, attempt)`, `records.py:32-37`; `attempt = DBOS.workflow_id
 or turn_id`, `queue.py:188`), so a crash-recovery re-run (same `workflow_id` → same attempt) collapses
 onto the same ledger rows while a park→resume (fresh `workflow_id`, `jobs.py:129`) bills each partial
-burn separately. The run guard on `turn` — `running_attempt`, `resume_enqueued_at` (`tables.py:77-78`)
+burn separately. The run guard on `turn` — `running_attempt`, `dispatch_enqueued_at` (`tables.py:77-78`)
 — lets exactly one execution claim a turn (`_mark_running`, `engine.py:247-275`).
 
 | Concern | Survives a crash | Lost + redone on recovery |

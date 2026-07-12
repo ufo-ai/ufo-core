@@ -28,7 +28,7 @@ from ufo.governance import Governance, prompt_digest
 from ufo.indexing import EmbedClient, IndexBackend
 from ufo.models.interface import Message, ModelClient, ModelRequest, TextDelta
 from ufo.o11y import log
-from ufo.scheduling import ScheduleStore
+from ufo.scheduling import ScheduleInvoker, ScheduleStore
 from ufo.schema import tables
 from ufo.schema.records import AgentChange, ProposalRef, Usage
 from ufo.sources.sync import PageFeed, source_row_id
@@ -251,9 +251,8 @@ def trajectory_workspaces() -> WorkspaceCandidates:
 
 
 class TurnInvoker(Protocol):
-    """The admit-turn seam a background handler drives: place one turn for a conversation's agent on
-    the durable queue and return its id. `idempotency_key` collapses a redelivered fire to the turn
-    already admitted, so a refired schedule tick never spawns a second turn."""
+    """The internal turn seam a background handler drives. It never consumes a member's pause;
+    idempotency collapses a redelivered invocation to the turn already admitted."""
 
     async def invoke(
         self, conversation_id: UUID, agent_id: UUID, message: str, idempotency_key: str
@@ -346,8 +345,8 @@ class ExtensionContext:
     async def invoke(
         self, conversation_id: UUID, agent_id: UUID, message: str, idempotency_key: str
     ) -> UUID:
-        """Kick a turn for `agent_id` in `conversation_id` through the admit-turn seam. Fails loud
-        when no invoker is wired, rather than silently dropping a scheduled fire."""
+        """Kick an internal turn for `agent_id` in `conversation_id`. Fails loud when no invoker is
+        wired rather than silently dropping the invocation."""
         if self.invoker is None:
             raise RuntimeError("invoke requires a turn invoker; none is wired")
         return await self.invoker.invoke(conversation_id, agent_id, message, idempotency_key)
@@ -410,6 +409,7 @@ def context_for(
     blob: BlobStore | None = None,
     invoker: TurnInvoker | None = None,
     model_resolver: ModelResolver | None = None,
+    schedule_invoker: ScheduleInvoker | None = None,
 ) -> ExtensionContext:
     """The scoped handle a handler receives — no workspace passed: every accessor reads the ambient
     workspace the turn or job bound (`ws_current()`), so the one context object serves whichever
@@ -423,7 +423,7 @@ def context_for(
         embed=embed,
         pages=pages,
         corpus=None if blob is None else TrajectoryCorpus(blob),
-        scheduler=ScheduleStore(),
+        scheduler=ScheduleStore(schedule_invoker),
         invoker=invoker,
         model=None if model_resolver is None else ModelAccess(model_resolver),
     )

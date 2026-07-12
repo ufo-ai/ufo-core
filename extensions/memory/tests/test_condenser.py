@@ -45,7 +45,7 @@ from ufo.ext.manifest import (
     ModelProviderSpec,
 )
 from ufo.indexing import OWNER_KIND_MEMORY_ITEM, Chunk
-from ufo.jobs import PageChangeRunner, SandboxReaper, SpendResume, core_jobs
+from ufo.jobs import PageChangeRunner, SandboxReaper, TurnDispatcher, core_jobs
 from ufo.models.interface import ModelClient, ModelEvent, ModelRequest, TextDelta
 from ufo.models.registry import ModelRegistry
 from ufo.sandbox.local import LocalCarrier
@@ -549,7 +549,7 @@ def test_memory_registers_two_independent_page_change_consumers(tmp_path: object
 
     specs = core_jobs(
         SyncDriver(backends={"folder": FolderSource()}, blob=blob, postgres=False),
-        SpendResume(client=None),
+        TurnDispatcher(client=None),
         SandboxReaper(carrier=LocalCarrier(), backend="local"),
         runner,
     )

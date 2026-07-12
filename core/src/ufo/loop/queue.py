@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 import sqlalchemy as sa
-from dbos import DBOS, DBOSClient, Queue
+from dbos import DBOS, DBOSClient, EnqueueOptions, Queue
 
 from ufo.blob import BlobStore, FilesystemBlobStore, S3BlobStore
 from ufo.browser import CdpProvider
@@ -21,7 +21,12 @@ from ufo.grants import GrantStore
 from ufo.hub import Hub, Terminal
 from ufo.indexing import EmbedClient, IndexBackend
 from ufo.loop.compaction import Compaction
-from ufo.loop.engine import MAIN_ROUND_LIMIT, TurnEngine, TurnParked
+from ufo.loop.engine import (
+    MAIN_ROUND_LIMIT,
+    TurnEngine,
+    TurnParked,
+    _claim_turn_with_handoff,
+)
 from ufo.loop.prompts.render import render_system_prompt, rendered_prompt
 from ufo.loop.subagents import SubagentRegistry, Subagents, subagent_system_prompt
 from ufo.loop.transcript import Transcript
@@ -43,6 +48,7 @@ from ufo.sandbox.session import (
 )
 from ufo.schema import tables
 from ufo.schema.records import (
+    DBOS_APP_VERSION,
     TURN_QUEUE_NAME,
     TURN_WORKFLOW_NAME,
     Agent,
@@ -111,8 +117,9 @@ def reset_runtime() -> None:
 async def _execute_turn(workspace_id: str, turn_id: str) -> str:
     """The turn body, run directly in the `turn_workflow` DBOS workflow — not wrapped in a step, so
     the model-round, tool-dispatch, and compaction steps inside `engine.run()` are the workflow's
-    own steps and memoize for crash-recovery replay. Setup (load, sandbox create-or-attach, engine
-    build) re-runs each recovery and is idempotent; a fault outside the engine commits the terminal
+    own steps and memoize for crash-recovery replay. Setup (claim, load, sandbox create-or-attach,
+    engine build) re-runs each recovery and is idempotent; claiming before load keeps queued input
+    mutable only until execution can observe it. A fault outside the engine commits the terminal
     through the backstop so the client's wait still ends. The workspace is bound from the workflow
     argument for the whole body via `with ws(...)`: every query, credential read, and model call
     inside runs under it — the RLS scope on the shared RLS-subject role, the workspace's BYOK keys,
@@ -125,8 +132,56 @@ async def _execute_turn(workspace_id: str, turn_id: str) -> str:
         return await _run_turn(runtime, turn_id)
 
 
+async def _enqueue_handoff(
+    client: DBOSClient,
+    workspace_id: UUID,
+    turn_id: UUID,
+    conversation_id: UUID,
+) -> None:
+    options: EnqueueOptions = {
+        "queue_name": TURN_QUEUE_NAME,
+        "workflow_name": TURN_WORKFLOW_NAME,
+        "workflow_id": str(turn_id),
+        "queue_partition_key": str(conversation_id),
+        "app_version": DBOS_APP_VERSION,
+    }
+    try:
+        await client.enqueue_async(options, str(workspace_id), str(turn_id))
+    except asyncio.CancelledError:
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.turn)
+                .values(dispatch_enqueued_at=None, updated_at=sa.func.now())
+                .where(tables.turn.c.id == turn_id, tables.turn.c.status == "queued")
+            )
+        raise
+    except Exception as error:
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.turn)
+                .values(dispatch_enqueued_at=None, updated_at=sa.func.now())
+                .where(tables.turn.c.id == turn_id, tables.turn.c.status == "queued")
+            )
+        log(
+            "turn.enqueue_deferred",
+            turn_id=str(turn_id),
+            error_class=type(error).__name__,
+        )
+
+
 async def _run_turn(runtime: Runtime, turn_id: str) -> str:
     try:
+        attempt = DBOS.workflow_id or turn_id
+        claimed, handoff = await _claim_turn_with_handoff(UUID(turn_id), attempt)
+        if not claimed:
+            return "superseded"
+        if handoff is not None:
+            await _enqueue_handoff(
+                runtime.dbos,
+                handoff.workspace_id,
+                handoff.id,
+                handoff.conversation_id,
+            )
         turn, agent, member_id = await _load_turn(UUID(turn_id))
         subagents = Subagents(client=runtime.dbos, registry=runtime.subagents, parent=turn)
         all_tools, tool_ext = turn_tools(
@@ -226,7 +281,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             grants=(GrantStore() if runtime.credentials is not None else None),
             pricing=runtime.registry.pricing,
             reasoning=runtime.config.models.reasoning_effort,
-            attempt=DBOS.workflow_id or turn_id,
+            attempt=attempt,
             max_rounds=max_rounds,
             skills=skills,
         )

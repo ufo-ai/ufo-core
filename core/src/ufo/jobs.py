@@ -11,6 +11,7 @@ ExtensionContext, so a core job and an extension job run the identical path."""
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Protocol
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -26,6 +27,7 @@ from ufo.indexing import EmbedClient, IndexBackend
 from ufo.models.registry import ModelRegistry
 from ufo.o11y import log
 from ufo.sandbox.session import Carrier, SandboxHandle, sandbox_handle_id
+from ufo.scheduling import ScheduleInvoker
 from ufo.schema import tables
 from ufo.schema.records import (
     DBOS_APP_VERSION,
@@ -33,6 +35,7 @@ from ufo.schema.records import (
     PARKED,
     TURN_QUEUE_NAME,
     TURN_WORKFLOW_NAME,
+    TurnStatus,
 )
 from ufo.sources.sync import (
     SOURCE_SYNC_JOB,
@@ -42,15 +45,20 @@ from ufo.sources.sync import (
 )
 from ufo.workspace import ws, ws_current
 
-InvokerFactory = Callable[[UUID], TurnInvoker]
+
+class JobInvoker(TurnInvoker, ScheduleInvoker, Protocol):
+    pass
+
+
+InvokerFactory = Callable[[UUID], JobInvoker]
 
 JOB_QUEUE_NAME = "jobs"
 JOB_WORKFLOW_NAME = "job"
 CORE_EXTENSION = "core"
-SPEND_RESUME_JOB = "spend_resume"
-SPEND_RESUME_SCHEDULE = "0 * * * * *"
-RESUME_ENQUEUE_GRACE_SECONDS = 300
-SPEND_RESUME_BATCH_TURNS = 100
+TURN_DISPATCH_JOB = "turn_dispatch"
+TURN_DISPATCH_SCHEDULE = "0 * * * * *"
+TURN_DISPATCH_GRACE_SECONDS = 300
+TURN_DISPATCH_BATCH_TURNS = 100
 SANDBOX_REAP_JOB = "sandbox_reap"
 SANDBOX_REAP_SCHEDULE = "0 */10 * * * *"
 SANDBOX_IDLE_TTL_SECONDS = 1800
@@ -59,83 +67,62 @@ PAGE_CHANGE_SCHEDULE = "0 * * * * *"
 PAGE_CHANGE_CURSOR_KEY = "page_change_cursor"
 PAGE_CHANGE_BATCH = 50
 JOB_QUEUE = Queue(JOB_QUEUE_NAME)
+QUEUED: TurnStatus = "queued"
 
 
 @dataclass(frozen=True, slots=True)
-class _ParkedTurn:
+class _DispatchTurn:
     id: UUID
     workspace_id: UUID
     conversation_id: UUID
     agent_id: UUID
     member_id: UUID | None
+    status: TurnStatus
 
 
 @dataclass(frozen=True)
-class SpendResume:
-    """Re-admit parked turns whose caps now have headroom — the resume half of parking. A
-    batch-at-interval job, never fired by the spend_cap write it reacts to, so raising a cap frees
-    its parked turns on the next sweep. It only ENQUEUES; the turn stays PARKED until its own
-    execution atomically claims it (parked → running), so a crash between decide and enqueue leaves
-    it re-enqueueable rather than orphaned. Each run is a fresh DBOS workflow id (the original was
-    consumed by the run that parked it); the transcript and per-attempt ledger stay keyed by the
-    turn id, so the re-run is idempotent at the durable layer and each attempt's real spend is
-    billed.
+class TurnDispatcher:
+    """Dispatch durable turn rows onto the conversation-partitioned worker queue. QUEUED is an
+    outbox state: admission stamps and offers the first turn immediately, while this bounded sweep
+    recovers an unstamped or stale offer. Only the lowest-sequence QUEUED turn in a conversation is
+    eligible, so a later turn cannot overtake an earlier offer that has not started. Its DBOS
+    workflow id is the turn id, making an ambiguous duplicate offer safe.
 
-    A parked turn's resume can linger unclaimed while its conversation partition is busy, so the
-    enqueue stamps an advisory `resume_enqueued_at`: a sweep skips a turn stamped within the grace
-    window, bounding a lingering turn to one in-flight resume instead of one per sweep. The stamp is
-    advisory, not a status flip — set before the enqueue and cleared by the claim, so a crash
-    between stamp and enqueue merely delays re-admission to the end of the grace window rather than
-    orphaning the turn.
+    PARKED rows share the same scanner and advisory dispatch stamp, but remain spend-gated. A
+    resumed PARKED row needs a fresh DBOS workflow id because the run that parked it consumed its
+    original id. The worker claim clears the stamp for either state. A stamp set before an external
+    enqueue and left behind by a process failure becomes eligible again after the grace window.
 
-    `run` operates on the bound workspace alone: the dispatcher names the candidate workspaces
-    through `candidate_workspaces` and binds each, so `run` reads that workspace's parked turns
-    through RLS, decides each cap against that workspace's spend, and places the resume on that
-    workspace's partition — exactly as a turn would. `candidate_workspaces` is the one `owner_tx`
-    read (the RLS-bypass path) naming only the workspaces that hold a resumable parked turn, so a
-    workspace with none is never bound. On a per-tenant deploy `owner_tx` resolves to the single
-    workspace, unchanged.
-
-    A sweep re-admits at most `resume_batch` turns per workspace, oldest first — a workspace that
-    parked thousands makes bounded progress each tick instead of holding one tick for minutes; the
-    remainder stays PARKED and unstamped, so the next tick's candidate read picks it up."""
+    `candidate_workspaces` is the only fleet-wide owner read. `run` executes inside each returned
+    workspace through RLS, claims at most `dispatch_batch` rows, and offers only rows whose stale
+    stamp it atomically replaces. Concurrent sweepers therefore cannot both make a fresh offer."""
 
     client: DBOSClient
-    resume_batch: int = SPEND_RESUME_BATCH_TURNS
+    dispatch_batch: int = TURN_DISPATCH_BATCH_TURNS
 
     async def run(self) -> None:
-        for turn in await self._parked_turns():
-            async with workspace_tx() as connection:
-                decision = await SpendEvaluator(
-                    turn.workspace_id, turn.member_id, turn.agent_id
-                ).decide(connection, 0)
-            if decision.outcome == ALLOW:
-                await self._enqueue(turn)
+        for turn in await self._dispatchable_turns():
+            if turn.status == PARKED:
+                async with workspace_tx() as connection:
+                    decision = await SpendEvaluator(
+                        turn.workspace_id, turn.member_id, turn.agent_id
+                    ).decide(connection, 0)
+                if decision.outcome != ALLOW:
+                    continue
+            await self._enqueue(turn)
 
     async def candidate_workspaces(self) -> tuple[UUID, ...]:
-        """Workspaces holding a resumable parked turn — one distinct `workspace_id` per workspace
-        with a turn PARKED and unstamped or past its resume grace window, read in one `owner_tx`
-        (RLS bypass). A workspace with none is never bound, so no transaction runs against it on
-        the tick."""
-        cutoff = datetime.now(UTC) - timedelta(seconds=RESUME_ENQUEUE_GRACE_SECONDS)
+        cutoff = datetime.now(UTC) - timedelta(seconds=TURN_DISPATCH_GRACE_SECONDS)
         async with owner_tx() as connection:
             rows = (
                 await connection.execute(
-                    sa.select(tables.turn.c.workspace_id)
-                    .where(
-                        tables.turn.c.status == PARKED,
-                        sa.or_(
-                            tables.turn.c.resume_enqueued_at.is_(None),
-                            tables.turn.c.resume_enqueued_at < cutoff,
-                        ),
-                    )
-                    .distinct()
+                    sa.select(tables.turn.c.workspace_id).where(self._eligible(cutoff)).distinct()
                 )
             ).all()
         return tuple(row.workspace_id for row in rows)
 
-    async def _parked_turns(self) -> tuple[_ParkedTurn, ...]:
-        cutoff = datetime.now(UTC) - timedelta(seconds=RESUME_ENQUEUE_GRACE_SECONDS)
+    async def _dispatchable_turns(self) -> tuple[_DispatchTurn, ...]:
+        cutoff = datetime.now(UTC) - timedelta(seconds=TURN_DISPATCH_GRACE_SECONDS)
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
@@ -145,39 +132,84 @@ class SpendResume:
                         tables.turn.c.conversation_id,
                         tables.turn.c.agent_id,
                         tables.conversation.c.member_id,
+                        tables.turn.c.status,
                     )
                     .select_from(tables.turn.join(tables.conversation))
-                    .where(
-                        tables.turn.c.status == PARKED,
-                        sa.or_(
-                            tables.turn.c.resume_enqueued_at.is_(None),
-                            tables.turn.c.resume_enqueued_at < cutoff,
-                        ),
+                    .where(self._eligible(cutoff))
+                    .order_by(
+                        sa.case((tables.turn.c.status == QUEUED, 0), else_=1),
+                        tables.turn.c.created_at,
+                        tables.turn.c.seq,
                     )
-                    .order_by(tables.turn.c.created_at)
-                    .limit(self.resume_batch)
+                    .limit(self.dispatch_batch)
                 )
             ).all()
         return tuple(
-            _ParkedTurn(r.id, r.workspace_id, r.conversation_id, r.agent_id, r.member_id)
+            _DispatchTurn(
+                r.id,
+                r.workspace_id,
+                r.conversation_id,
+                r.agent_id,
+                r.member_id,
+                r.status,
+            )
             for r in rows
         )
 
-    async def _enqueue(self, turn: _ParkedTurn) -> None:
+    async def _enqueue(self, turn: _DispatchTurn) -> None:
+        cutoff = datetime.now(UTC) - timedelta(seconds=TURN_DISPATCH_GRACE_SECONDS)
+        order_guard = self._first_in_status(turn.status)
         async with workspace_tx() as connection:
-            await connection.execute(
-                sa.update(tables.turn)
-                .values(resume_enqueued_at=sa.func.now())
-                .where(tables.turn.c.id == turn.id, tables.turn.c.status == PARKED)
-            )
+            claimed = (
+                await connection.execute(
+                    sa.update(tables.turn)
+                    .values(dispatch_enqueued_at=sa.func.now(), updated_at=sa.func.now())
+                    .where(
+                        tables.turn.c.id == turn.id,
+                        tables.turn.c.status == turn.status,
+                        self._stale(cutoff),
+                        order_guard,
+                    )
+                    .returning(tables.turn.c.id)
+                )
+            ).scalar_one_or_none()
+        if claimed is None:
+            return
         options: EnqueueOptions = {
             "queue_name": TURN_QUEUE_NAME,
             "workflow_name": TURN_WORKFLOW_NAME,
-            "workflow_id": uuid4().hex,
+            "workflow_id": str(turn.id) if turn.status == QUEUED else uuid4().hex,
             "queue_partition_key": str(turn.conversation_id),
             "app_version": DBOS_APP_VERSION,
         }
         await self.client.enqueue_async(options, str(turn.workspace_id), str(turn.id))
+
+    def _eligible(self, cutoff: datetime) -> sa.ColumnElement[bool]:
+        return sa.and_(
+            tables.turn.c.status.in_((QUEUED, PARKED)),
+            self._stale(cutoff),
+            sa.or_(
+                sa.and_(tables.turn.c.status == QUEUED, self._first_in_status(QUEUED)),
+                sa.and_(tables.turn.c.status == PARKED, self._first_in_status(PARKED)),
+            ),
+        )
+
+    def _stale(self, cutoff: datetime) -> sa.ColumnElement[bool]:
+        return sa.or_(
+            tables.turn.c.dispatch_enqueued_at.is_(None),
+            tables.turn.c.dispatch_enqueued_at < cutoff,
+        )
+
+    def _first_in_status(self, status: TurnStatus) -> sa.ColumnElement[bool]:
+        earlier = tables.turn.alias(f"earlier_{status}_turn")
+        return ~sa.exists(
+            sa.select(earlier.c.id).where(
+                earlier.c.workspace_id == tables.turn.c.workspace_id,
+                earlier.c.conversation_id == tables.turn.c.conversation_id,
+                earlier.c.status == status,
+                earlier.c.seq < tables.turn.c.seq,
+            )
+        )
 
 
 @dataclass(frozen=True)
@@ -494,7 +526,7 @@ class PageChangeRunner:
 
 def core_jobs(
     sync_driver: SyncDriver,
-    spend_resume: SpendResume,
+    turn_dispatcher: TurnDispatcher,
     reaper: SandboxReaper,
     page_change_runner: PageChangeRunner,
 ) -> tuple[JobSpec, ...]:
@@ -503,8 +535,8 @@ def core_jobs(
     polls each source and lands its pages; the page-change runner contributes one
     `page_change:<ext>:<hook>` job per registered consumer, each replaying those pages to that
     consumer's hook off its own cursor as its own workflow (the memory page indexer, the memory
-    fact deriver, and the graph extractor among them); the spend-resume sweep re-admits parked
-    turns their caps now allow; the sandbox
+    fact deriver, and the graph extractor among them); the turn dispatcher recovers queued outbox
+    rows and re-admits parked turns their caps now allow; the sandbox
     reaper destroys the disposable container behind each idle conversation through the carrier seam.
     None fires on its own writes. (Memory-item indexing stays the memory extension's own job; page
     derivation is a page_change hook this runner drives.)"""
@@ -512,8 +544,8 @@ def core_jobs(
     async def _sync_sources(context: ExtensionContext) -> None:
         await sync_driver.run()
 
-    async def _resume_spend(context: ExtensionContext) -> None:
-        await spend_resume.run()
+    async def _dispatch_turns(context: ExtensionContext) -> None:
+        await turn_dispatcher.run()
 
     async def _reap_sandboxes(context: ExtensionContext) -> None:
         await reaper.run()
@@ -550,10 +582,10 @@ def core_jobs(
         ),
         *page_change,
         JobSpec(
-            name=SPEND_RESUME_JOB,
-            schedule=SPEND_RESUME_SCHEDULE,
-            handler=_resume_spend,
-            candidates=spend_resume.candidate_workspaces,
+            name=TURN_DISPATCH_JOB,
+            schedule=TURN_DISPATCH_SCHEDULE,
+            handler=_dispatch_turns,
+            candidates=turn_dispatcher.candidate_workspaces,
         ),
         JobSpec(
             name=SANDBOX_REAP_JOB,
@@ -659,6 +691,7 @@ class JobRunner:
                     self.blob,
                     invoker,
                     self.registry,
+                    schedule_invoker=invoker,
                 )
                 await binding.spec.handler(context)
 

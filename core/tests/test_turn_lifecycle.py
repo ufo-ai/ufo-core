@@ -24,7 +24,7 @@ from ufo.db import workspace_tx
 from ufo.ext.loader import embed_backend, index_backend, skill_registry
 from ufo.ext.manifest import EmbedBackendSpec, IndexBackendSpec, Manifest, ModelProviderSpec
 from ufo.hub import Hub, InProcessHub
-from ufo.jobs import SpendResume
+from ufo.jobs import TurnDispatcher
 from ufo.loop import queue as loop_queue
 from ufo.loop.engine import EMPTY_RESPONSE_NUDGE, FORCE_FINAL_PROMPT
 from ufo.loop.subagents import SubagentProfile, SubagentRegistry, Subagents
@@ -683,7 +683,7 @@ async def test_member_cap_parks_a_turn_in_surface_then_resumes_when_raised(
         )
     assert loop_queue._runtime is not None
     with ws(workspace_id):
-        await SpendResume(client=loop_queue._runtime.dbos).run()
+        await TurnDispatcher(client=loop_queue._runtime.dbos).run()
     await _await_status(second, "done")
     async with workspace_tx() as connection:
         billed = (

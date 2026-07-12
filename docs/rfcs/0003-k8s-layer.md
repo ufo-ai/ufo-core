@@ -141,7 +141,7 @@ image — but the workload is now the whole selfhost runtime, not a per-role pro
 |---|---|---|
 | gateway Deployment (HPA 2→10) | `serve` **surfaces** role behind an Ingress; N stateless replicas | `_mount_surfaces` / `_mount_ext_routes` (`serve.py:156-157`); sessions/idempotency in Postgres |
 | executor Deployment (HPA 2→20) | `serve` **workers** role; N replicas pull the same DBOS queue | `loop/queue.py` `TURN_QUEUE` (`concurrency=1`, partitioned on conversation) |
-| job-runner Deployment + CronJobs | `serve` **jobs** role; DBOS schedules replace CronJob objects | `core_jobs`, `SandboxReaper`, `SpendResume` (`serve.py:204`) |
+| job-runner Deployment + CronJobs | `serve` **jobs** role; DBOS schedules replace CronJob objects | `core_jobs`, `SandboxReaper`, `TurnDispatcher` (`serve.py`) |
 | egress/sandbox proxy Deployments | `serve` **proxy** role; core's own `EgressProxy` | `sandbox/proxy/server.py:157` `EgressProxy`, derived rules (§3.3) |
 | executor `sandbox-manager` (StatefulSet+PVC+exec) | a **pod carrier** on the `carriers` seam | `Carrier` protocol (`sandbox/session.py:117`) |
 | Redis stream hub | `hubs` seam, `extensions/redis_hub` | `Hub` protocol (`hub.py:67`) — same Redis Streams |

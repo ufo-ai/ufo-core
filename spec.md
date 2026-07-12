@@ -191,8 +191,8 @@ research (the research tools over the Exa search backend).
 Core owns **one surface seam**, not every surface. A surface is trusted infrastructure — it asserts
 a member's identity and admits turns as that member — so its `SurfaceContext` is deliberately
 privileged (distinct from the scoped extension context): **admit** an inbound message onto the
-durable turn queue (the one `invoke` boundary scheduled tasks and the operator eval harness also
-call, so the spend cap is evaluated once) with its ambient `TurnContext` — the sender and IANA timezone the
+durable turn queue through the member-only admission capability, consuming any pending one-time
+pause, with its ambient `TurnContext` — the sender and IANA timezone the
 surface knows, which the engine renders as the `<context>` tag (the admission moment, local when a
 timezone is known; sender) before each member inbound — **identity** resolution (an external id → member + conversation,
 linking a `surface_identity` on first contact — `join_member` also creates the member when a
@@ -201,6 +201,10 @@ owner onboards through provisioning — and `adopt_identity` to span a member ac
 surfaces), plus `tail`/`turn_owner`/`spend_rollup` for a live view. An extension registers a
 `surfaces` Manifest point; core mounts its `SurfaceRoute`s under `/surface/<name>`, each bound to the
 one context. The seam supports two delivery modes; a surface uses only the subset it needs:
+
+Jobs and evals receive the separate internal `invoke` capability, which never consumes a member's
+pause. Both capabilities delegate to the same admission workflow, so spend enforcement, turn
+allocation, delivery registration, and enqueue recovery remain one implementation.
 
 - **Durable** (Slack) — the member is elsewhere; declaring `post` is what marks the surface
   durable, and admission registers a writeback for every turn entering its conversations — a

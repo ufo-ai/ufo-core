@@ -37,7 +37,7 @@ from ufo.hub import InProcessHub
 from ufo.loop.queue import _load_turn
 from ufo.schema import tables
 from ufo.schema.records import WRITEBACK_PENDING, TerminalFrame, TurnContext
-from ufo.surfaces.admission import Admission, AdmissionInvoker
+from ufo.surfaces.admission import Admission, MemberAdmission
 from ufo.surfaces.hub_tail import HubTailer
 
 SURFACE = "test_surface"
@@ -115,7 +115,7 @@ def _context(workspace_id: UUID, dbos: StubDbos, blob: FilesystemBlobStore) -> S
         workspace_id=workspace_id,
         surface=SURFACE,
         blob=blob,
-        _invoker=AdmissionInvoker(
+        _admitter=MemberAdmission(
             workspace_id=workspace_id,
             admission=Admission(dbos=dbos, durable_surfaces=frozenset({SURFACE})),
         ),

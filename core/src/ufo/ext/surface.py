@@ -3,10 +3,11 @@
 A surface is trusted infrastructure — it asserts a member's identity and admits turns as that member
 — so unlike the scoped `ExtensionContext` (a ScopedStore, declared credential slots, a read-only
 trajectory corpus), a surface context carries privileged capabilities a scoped extension may not
-hold: admit a turn onto the durable queue (the same `invoke` scheduled tasks and the eval harness
-call), resolve an external id to a member and a conversation (linking a `surface_identity` on first
-contact — and joining a channel-verified email whose domain is the workspace's own as a new
-member), and read the workspace's credential slots in-process.
+hold: admit a member turn onto the durable queue, resolve an external id to a member and a
+conversation (linking a `surface_identity` on first contact — and joining a channel-verified email
+whose domain is the workspace's own as a new member), and read the workspace's credential slots
+in-process. Member admission consumes a pending one-time pause; the `invoke` capability held by
+scheduled tasks and evals cannot.
 
 One `SurfaceSpec`/`SurfaceContext` expresses both shapes of surface, differing only in how the reply
 gets back and thus in how much of the one context each uses:
@@ -71,12 +72,10 @@ from ufo.schema.records import (
 WORKSPACE_SEGMENT = "workspace"
 
 
-class TurnInvoker(Protocol):
-    """Admit an inbound message onto the durable turn queue and return its turn id — the one
-    boundary that evaluates the spend cap. The concrete invoker binds the workspace; a surface, a
-    job, or an extension `invoke` all reach the queue through this one primitive."""
+class MemberAdmitter(Protocol):
+    """Admit a member message and consume the conversation's pending one-time pause."""
 
-    async def invoke(
+    async def admit(
         self,
         conversation_id: UUID,
         agent_id: UUID,
@@ -88,9 +87,9 @@ class TurnInvoker(Protocol):
 
 class TurnTailer(Protocol):
     """Tail one turn's live frames until it ends, each frame with its replay cursor — the live
-    surface's read half, mirroring `TurnInvoker`'s write half. The concrete tailer binds the process
-    hub and ends the stream on the durable terminal-or-parked state; a live surface never touches
-    the hub directly, it reaches it through this one primitive."""
+    surface's read half, mirroring `MemberAdmitter`'s write half. The concrete tailer binds the
+    process hub and ends the stream on the durable terminal-or-parked state; a live surface never
+    touches the hub directly, it reaches it through this one primitive."""
 
     def tail(self, turn_id: UUID, since: str = "") -> AsyncIterator[tuple[str, LiveFrame]]: ...
 
@@ -175,7 +174,7 @@ class SurfaceContext:
     workspace_id: UUID
     surface: str
     blob: BlobStore
-    _invoker: TurnInvoker
+    _admitter: MemberAdmitter
     _tailer: TurnTailer
     _credentials: CredentialStore | None
     _artifact_token_secret: str
@@ -448,8 +447,12 @@ class SurfaceContext:
         and its member tails the hub — the surface supplies only the message, its idempotency
         key, and the ambient `TurnContext` (sender, timezone) the engine renders before the
         inbound. A redelivery deduped to the turn already admitted joins it."""
-        return await self._invoker.invoke(
-            conversation_id, agent_id, body, idempotency_key=idempotency_key, context=context
+        return await self._admitter.admit(
+            conversation_id,
+            agent_id,
+            body,
+            idempotency_key=idempotency_key,
+            context=context,
         )
 
     async def turn_inbound(self, turn_id: UUID) -> str | None:

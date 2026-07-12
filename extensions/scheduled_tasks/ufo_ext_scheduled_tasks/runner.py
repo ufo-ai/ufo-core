@@ -2,17 +2,18 @@
 
 It runs as the extension's recurring job, so it fires on the clock — never on the schedule rows it
 writes. Each tick claims the due tasks (a lease, so an overlapping tick never fires one twice),
-invokes each back into its conversation with a per-fire idempotency key (a refired key collapses to
-the turn already admitted), and reschedules it to its next cron fire — advancing past the fire
-whether the invoke landed or not, so one poisoned task neither replays every tick nor blocks its
-siblings. A tick that saw any fire fail ends by raising the names that could not fire, so the
-failure surfaces rather than being swallowed."""
+invokes each exact claimed version back into its conversation (a refire collapses to the turn
+already admitted), and advances a cron row once that occurrence is accepted by the turn outbox.
+Member admission and a claimed one-time pause arbitrate under the conversation lock; the pause
+remains recovery state until the turn worker claims it. A failed fire keeps its leased occurrence
+for retry. A tick with failures raises their names.
+"""
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from ufo.sdk.context import ExtensionContext
-from ufo.sdk.scheduling import ScheduledTask, ScheduleStore
+from ufo.sdk.scheduling import ONE_TIME_SCHEDULE, ScheduledTask, ScheduleStore
 from ufo_ext_scheduled_tasks.cron import next_fire
 
 CLAIM_LEASE_SECONDS = 300
@@ -39,11 +40,14 @@ class ScheduledTaskRunner:
     async def _fire(
         self, scheduler: ScheduleStore, task: ScheduledTask, now: datetime
     ) -> str | None:
-        firing_key = f"{task.id}:{task.next_run_at.isoformat()}"
         failure: str | None = None
         try:
-            await self.ctx.invoke(task.conversation_id, task.agent_id, task.prompt, firing_key)
+            turn_id = await scheduler.invoke(task)
         except Exception as raised:
             failure = f"{task.name} ({type(raised).__name__})"
-        await scheduler.reschedule(task.id, next_fire(task.schedule, now), now)
+        else:
+            if turn_id is None:
+                return None
+        if task.schedule != ONE_TIME_SCHEDULE and failure is None:
+            await scheduler.reschedule(task, next_fire(task.schedule, now), now)
         return failure

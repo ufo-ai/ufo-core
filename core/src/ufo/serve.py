@@ -51,7 +51,7 @@ from ufo.jobs import (
     JobRunner,
     PageChangeRunner,
     SandboxReaper,
-    SpendResume,
+    TurnDispatcher,
     bindings_from,
     core_jobs,
 )
@@ -78,7 +78,7 @@ from ufo.sources.sync import (
     SyncDriver,
     register_sources,
 )
-from ufo.surfaces.admission import Admission, AdmissionInvoker
+from ufo.surfaces.admission import Admission, AdmissionInvoker, MemberAdmission
 from ufo.surfaces.artifacts import router as artifacts_router
 from ufo.surfaces.cli import CONNECT_CALLBACK_PATH, router
 from ufo.surfaces.hub_tail import HubTailer
@@ -278,8 +278,8 @@ def _launch_jobs(
     blob: BlobStore,
     carrier: Carrier,
 ) -> None:
-    """Register this workspace's jobs — core's own (the source sync driver, the spend-resume sweep
-    that re-admits parked turns, and the sandbox reaper that reclaims idle containers) plus every
+    """Register this workspace's jobs — core's own (the source sync driver, the turn dispatcher
+    that recovers queued turns and re-admits parked turns, and the sandbox reaper) plus every
     installed extension's (the memory extension's memory-index and page-index jobs among them) — as
     DBOS schedules and one-shot enqueues, after
     launch so the system store is live. `manifests` is the boot's one extension set — on the shared
@@ -311,7 +311,7 @@ def _launch_jobs(
         manifests,
         core_jobs(
             sync_driver,
-            SpendResume(client=dbos_client),
+            TurnDispatcher(client=dbos_client),
             SandboxReaper(carrier=carrier, backend=config.sandbox.backend),
             page_change_runner,
         ),
@@ -654,9 +654,9 @@ def _mount_surfaces(
     so an installed surface whose extension declares slots without a credential key set fails loud
     at boot rather than on the first event; a slotless surface (web) mounts with no key. A durable
     surface (declaring `post`/`attach`) joins the poller; a live surface admits without writeback
-    and tails the hub in its own route, so the poller never sees its turns — the tailer is injected
-    the same way the admission invoker is."""
-    invoker = AdmissionInvoker(
+    and tails the hub in its own route, so the poller never sees its turns — the tailer and member
+    admission are injected capabilities."""
+    member_admission = MemberAdmission(
         workspace_id=workspace_id,
         admission=Admission(dbos=dbos_client, durable_surfaces=durable_surfaces(manifests)),
     )
@@ -670,7 +670,7 @@ def _mount_surfaces(
                 workspace_id=workspace_id,
                 surface=spec.name,
                 blob=blob,
-                _invoker=invoker,
+                _admitter=member_admission,
                 _tailer=tailer,
                 _credentials=credentials,
                 _artifact_token_secret=artifact_secret,
@@ -772,7 +772,7 @@ def _mount_shared_surfaces(
     `SurfaceSpec.identify` verifies the request's signed bearer and returns the workspace it
     claims, which the endpoint binds via `current_workspace.set` for the whole request (an
     unresolved token is a 401) and the boundary releases once the response has fully streamed. The
-    per-request SurfaceContext carries an `AdmissionInvoker` bound to that workspace so its
+    per-request SurfaceContext carries a `MemberAdmission` bound to that workspace so its
     admitted turn lands scoped to the token's workspace and no other.
 
     A surface that declares no `identify` cannot scope a shared request and is per-tenant-only, so
@@ -807,7 +807,7 @@ def _mount_shared_surfaces(
                         workspace_id=workspace_id,
                         surface=surface,
                         blob=blob,
-                        _invoker=AdmissionInvoker(admission=admission, workspace_id=workspace_id),
+                        _admitter=MemberAdmission(admission=admission, workspace_id=workspace_id),
                         _tailer=tailer,
                         _credentials=credentials,
                         _artifact_token_secret=artifact_secret,

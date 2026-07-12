@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 TurnStatus = Literal["queued", "running", "parked", "done", "failed", "cancelled"]
 TerminalStatus = Literal["done", "failed", "cancelled"]
+TurnAdmissionSource = Literal["member", "internal"]
 NON_TERMINAL_STATUSES: tuple[TurnStatus, ...] = ("queued", "running", "parked")
 WritebackStatus = Literal["pending", "claimed", "delivered", "failed"]
 WRITEBACK_PENDING: WritebackStatus = "pending"
@@ -18,6 +19,8 @@ WRITEBACK_DELIVERED: WritebackStatus = "delivered"
 WRITEBACK_FAILED: WritebackStatus = "failed"
 RUNNING: TurnStatus = "running"
 PARKED: TurnStatus = "parked"
+MEMBER_ADMISSION: TurnAdmissionSource = "member"
+INTERNAL_ADMISSION: TurnAdmissionSource = "internal"
 
 ProposalStatus = Literal["pending", "approved", "rejected"]
 PENDING: ProposalStatus = "pending"

@@ -5,6 +5,9 @@ scheduled-task value object its methods return.
 code in any `__init__.py`), so the public surface lives in named modules like this one."""
 
 from ufo.scheduling import (
+    ONE_TIME_SCHEDULE as ONE_TIME_SCHEDULE,
+)
+from ufo.scheduling import (
     ScheduledTask as ScheduledTask,
 )
 from ufo.scheduling import (

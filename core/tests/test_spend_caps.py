@@ -1,8 +1,10 @@
+import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
+from dbos import EnqueueOptions
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.accounting import SpendEvaluator, record_sandbox_tokens, record_workspace_usage
@@ -11,13 +13,14 @@ from ufo.ext.context import ExtensionContext
 from ufo.ext.manifest import JobSpec
 from ufo.jobs import (
     CORE_EXTENSION,
-    RESUME_ENQUEUE_GRACE_SECONDS,
-    SPEND_RESUME_BATCH_TURNS,
-    SPEND_RESUME_JOB,
+    TURN_DISPATCH_BATCH_TURNS,
+    TURN_DISPATCH_GRACE_SECONDS,
+    TURN_DISPATCH_JOB,
     JobRunner,
-    SpendResume,
+    TurnDispatcher,
     bindings_from,
 )
+from ufo.loop.engine import _claim_turn
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame, Usage
 from ufo.surfaces.admission import Admission
@@ -26,35 +29,45 @@ from ufo.surfaces.admission import Admission
 @dataclass
 class StubDbos:
     """Records the workflow arguments each enqueue carries — the turn id, and the (workspace, turn)
-    pair — so a test reads back which turns admission or the resume sweep placed on the queue and
+    pair — so a test reads back which turns admission or the dispatcher placed on the queue and
     the workspace each was scoped to, never asserting DBOS itself."""
 
     enqueued: list[str] = field(default_factory=list)
     scoped: list[tuple[str, str]] = field(default_factory=list)
+    workflow_ids: list[str] = field(default_factory=list)
 
-    async def enqueue_async(self, options: object, workspace_id: str, turn_id: str) -> None:
+    async def enqueue_async(self, options: EnqueueOptions, workspace_id: str, turn_id: str) -> None:
         self.enqueued.append(turn_id)
         self.scoped.append((workspace_id, turn_id))
+        self.workflow_ids.append(options["workflow_id"])
 
 
-async def _resume(client: object, resume_batch: int = SPEND_RESUME_BATCH_TURNS) -> None:
-    """Drive the resume sweep through the real dispatch: the spend-resume JobSpec's candidate names
-    the workspaces holding a resumable parked turn, and `fire` binds each before running the sweep —
-    so the cap decision and enqueue run scoped per workspace and never unbound, and a workspace with
-    no resumable parked turn (absent from the candidates) is never opened."""
-    resume = SpendResume(client=client, resume_batch=resume_batch)
+@dataclass
+class BlockingDbos(StubDbos):
+    started: asyncio.Event = field(default_factory=asyncio.Event)
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def enqueue_async(self, options: EnqueueOptions, workspace_id: str, turn_id: str) -> None:
+        await super().enqueue_async(options, workspace_id, turn_id)
+        self.started.set()
+        await self.release.wait()
+
+
+async def _dispatch(client: object, dispatch_batch: int = TURN_DISPATCH_BATCH_TURNS) -> None:
+    """Drive the turn dispatcher through the real job fan-out and workspace binding."""
+    dispatcher = TurnDispatcher(client=client, dispatch_batch=dispatch_batch)
 
     async def _handler(context: ExtensionContext) -> None:
-        await resume.run()
+        await dispatcher.run()
 
     spec = JobSpec(
-        name=SPEND_RESUME_JOB,
+        name=TURN_DISPATCH_JOB,
         schedule=None,
         handler=_handler,
-        candidates=resume.candidate_workspaces,
+        candidates=dispatcher.candidate_workspaces,
     )
     runner = JobRunner(bindings=bindings_from((), (spec,)))
-    await runner.fire(f"{CORE_EXTENSION}:{SPEND_RESUME_JOB}")
+    await runner.fire(f"{CORE_EXTENSION}:{TURN_DISPATCH_JOB}")
 
 
 async def _seed(connection: AsyncConnection) -> tuple[UUID, UUID, UUID, UUID]:
@@ -197,11 +210,47 @@ async def _insert_parked(
     return turn_id
 
 
+async def _insert_queued(
+    connection: AsyncConnection,
+    workspace_id: UUID,
+    conversation_id: UUID,
+    agent_id: UUID,
+    seq: int,
+    dispatch_enqueued_at: datetime | None = None,
+) -> UUID:
+    turn_id = uuid4()
+    await connection.execute(
+        sa.insert(tables.turn).values(
+            id=turn_id,
+            workspace_id=workspace_id,
+            conversation_id=conversation_id,
+            agent_id=agent_id,
+            seq=seq,
+            status="queued",
+            inbound="waiting",
+            terminal=None,
+            dispatch_enqueued_at=dispatch_enqueued_at,
+            created_at=sa.func.now(),
+            updated_at=sa.func.now(),
+        )
+    )
+    return turn_id
+
+
 async def _status(turn_id: UUID) -> str:
     async with workspace_tx() as connection:
         return (
             await connection.execute(
                 sa.select(tables.turn.c.status).where(tables.turn.c.id == turn_id)
+            )
+        ).scalar_one()
+
+
+async def _dispatch_stamp(turn_id: UUID) -> datetime | None:
+    async with workspace_tx() as connection:
+        return (
+            await connection.execute(
+                sa.select(tables.turn.c.dispatch_enqueued_at).where(tables.turn.c.id == turn_id)
             )
         ).scalar_one()
 
@@ -389,7 +438,7 @@ async def test_admission_parks_over_cap_member_without_enqueue(db: None) -> None
         await _bill(connection, workspace_id, conversation_id, agent_id, 100, seq=1)
         await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "park")
     dbos = StubDbos()
-    turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset()).admit(
+    turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset()).invoke(
         workspace_id, conversation_id, agent_id, "hi"
     )
     assert dbos.enqueued == []
@@ -402,7 +451,7 @@ async def test_admission_rejects_over_cap_member_with_reason(db: None) -> None:
         await _bill(connection, workspace_id, conversation_id, agent_id, 100, seq=1)
         await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "reject")
     dbos = StubDbos()
-    turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset()).admit(
+    turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset()).invoke(
         workspace_id, conversation_id, agent_id, "hi"
     )
     assert dbos.enqueued == []
@@ -424,11 +473,100 @@ async def test_admission_under_cap_enqueues(db: None) -> None:
         await _bill(connection, workspace_id, conversation_id, agent_id, 40, seq=1)
         await _set_cap(connection, workspace_id, "member", member_id, 3600, 100, "park")
     dbos = StubDbos()
-    turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset()).admit(
+    turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset()).invoke(
         workspace_id, conversation_id, agent_id, "hi"
     )
     assert dbos.enqueued == [str(turn_id)]
     assert await _status(turn_id) == "queued"
+
+
+async def test_dispatch_recovers_an_unstamped_queued_turn(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, _, agent_id, conversation_id = await _seed(connection)
+        queued = await _insert_queued(connection, workspace_id, conversation_id, agent_id, seq=1)
+    dbos = StubDbos()
+    await _dispatch(dbos)
+    assert dbos.enqueued == [str(queued)]
+    assert dbos.workflow_ids == [str(queued)]
+    assert await _dispatch_stamp(queued) is not None
+
+
+async def test_dispatch_waits_for_the_earlier_queued_turn_to_start(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, _, agent_id, conversation_id = await _seed(connection)
+        first = await _insert_queued(connection, workspace_id, conversation_id, agent_id, seq=1)
+        second = await _insert_queued(connection, workspace_id, conversation_id, agent_id, seq=2)
+    dbos = StubDbos()
+    await _dispatch(dbos)
+    assert dbos.enqueued == [str(first)]
+    assert await _dispatch_stamp(first) is not None
+    assert await _dispatch_stamp(second) is None
+
+    assert await _claim_turn(first, "first-attempt")
+    again = StubDbos()
+    await _dispatch(again)
+    assert again.enqueued == [str(second)]
+    assert again.workflow_ids == [str(second)]
+
+
+async def test_dispatch_skips_a_fresh_queued_offer_and_its_successor(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, _, agent_id, conversation_id = await _seed(connection)
+        first = await _insert_queued(
+            connection,
+            workspace_id,
+            conversation_id,
+            agent_id,
+            seq=1,
+            dispatch_enqueued_at=datetime.now(UTC),
+        )
+        second = await _insert_queued(connection, workspace_id, conversation_id, agent_id, seq=2)
+    dbos = StubDbos()
+    await _dispatch(dbos)
+    assert dbos.enqueued == []
+    assert await _dispatch_stamp(first) is not None
+    assert await _dispatch_stamp(second) is None
+
+
+async def test_dispatch_retries_a_stale_queued_offer_with_the_same_workflow_id(db: None) -> None:
+    stale = datetime.now(UTC) - timedelta(seconds=TURN_DISPATCH_GRACE_SECONDS + 60)
+    async with workspace_tx() as connection:
+        workspace_id, _, agent_id, conversation_id = await _seed(connection)
+        queued = await _insert_queued(
+            connection,
+            workspace_id,
+            conversation_id,
+            agent_id,
+            seq=1,
+            dispatch_enqueued_at=stale,
+        )
+    first = StubDbos()
+    await _dispatch(first)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(dispatch_enqueued_at=stale)
+            .where(tables.turn.c.id == queued)
+        )
+    second = StubDbos()
+    await _dispatch(second)
+    assert first.enqueued == second.enqueued == [str(queued)]
+    assert first.workflow_ids == second.workflow_ids == [str(queued)]
+
+
+async def test_dispatch_stamp_excludes_a_concurrent_sweep(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, _, agent_id, conversation_id = await _seed(connection)
+        queued = await _insert_queued(connection, workspace_id, conversation_id, agent_id, seq=1)
+    blocked = BlockingDbos()
+    first = asyncio.create_task(_dispatch(blocked))
+    await blocked.started.wait()
+    second = StubDbos()
+    await _dispatch(second)
+    blocked.release.set()
+    await first
+    assert blocked.enqueued == [str(queued)]
+    assert second.enqueued == []
 
 
 async def test_resume_skips_turn_still_over_cap(db: None) -> None:
@@ -438,7 +576,7 @@ async def test_resume_skips_turn_still_over_cap(db: None) -> None:
         await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "park")
         parked = await _insert_parked(connection, workspace_id, conversation_id, agent_id, seq=2)
     dbos = StubDbos()
-    await _resume(dbos)
+    await _dispatch(dbos)
     assert dbos.enqueued == []
     assert await _status(parked) == "parked"
 
@@ -449,48 +587,49 @@ async def test_resume_skips_a_recently_enqueued_parked_turn(db: None) -> None:
         recent = await _insert_parked(connection, workspace_id, conversation_id, agent_id, seq=1)
         await connection.execute(
             sa.update(tables.turn)
-            .values(resume_enqueued_at=sa.func.now())
+            .values(dispatch_enqueued_at=sa.func.now())
             .where(tables.turn.c.id == recent)
         )
     dbos = StubDbos()
-    await _resume(dbos)
+    await _dispatch(dbos)
     assert dbos.enqueued == []
     assert await _status(recent) == "parked"
 
 
 async def test_resume_reenqueues_a_parked_turn_past_the_grace_window(db: None) -> None:
-    stale = datetime.now(UTC) - timedelta(seconds=RESUME_ENQUEUE_GRACE_SECONDS + 60)
+    stale = datetime.now(UTC) - timedelta(seconds=TURN_DISPATCH_GRACE_SECONDS + 60)
     async with workspace_tx() as connection:
         workspace_id, _, agent_id, conversation_id = await _seed(connection)
         parked = await _insert_parked(connection, workspace_id, conversation_id, agent_id, seq=1)
         await connection.execute(
             sa.update(tables.turn)
-            .values(resume_enqueued_at=stale)
+            .values(dispatch_enqueued_at=stale)
             .where(tables.turn.c.id == parked)
         )
     dbos = StubDbos()
-    await _resume(dbos)
+    await _dispatch(dbos)
     assert dbos.enqueued == [str(parked)]
+    assert dbos.workflow_ids != [str(parked)]
     again = StubDbos()
-    await _resume(again)
+    await _dispatch(again)
     assert again.enqueued == []
 
 
 async def test_resume_sweep_bounds_its_batch_and_progresses_across_sweeps(db: None) -> None:
-    """A sweep re-admits at most `resume_batch` turns per workspace — a workspace that parked many
-    makes bounded progress each tick rather than holding one tick for all of them; the enqueued
-    turn's grace stamp keeps the next sweep off it, so the remainder drains sweep by sweep."""
+    """A sweep re-admits at most `dispatch_batch` turns per workspace — a workspace that parked many
+    makes bounded progress each tick rather than holding one tick for all of them. A later parked
+    turn becomes eligible after the earlier one starts, preserving conversation sequence."""
     async with workspace_tx() as connection:
         workspace_id, _, agent_id, conversation_id = await _seed(connection)
         first = await _insert_parked(connection, workspace_id, conversation_id, agent_id, seq=1)
         second = await _insert_parked(connection, workspace_id, conversation_id, agent_id, seq=2)
     dbos = StubDbos()
-    await _resume(dbos, resume_batch=1)
-    assert len(dbos.enqueued) == 1
+    await _dispatch(dbos, dispatch_batch=1)
+    assert dbos.enqueued == [str(first)]
+    assert await _claim_turn(first, "first-parked-attempt")
     again = StubDbos()
-    await _resume(again, resume_batch=1)
-    assert len(again.enqueued) == 1
-    assert set(dbos.enqueued) | set(again.enqueued) == {str(first), str(second)}
+    await _dispatch(again, dispatch_batch=1)
+    assert again.enqueued == [str(second)]
 
 
 async def test_resume_readmits_when_cap_raised(db: None) -> None:
@@ -506,7 +645,7 @@ async def test_resume_readmits_when_cap_raised(db: None) -> None:
             .where(tables.spend_cap.c.id == cap_id)
         )
     dbos = StubDbos()
-    await _resume(dbos)
+    await _dispatch(dbos)
     assert dbos.enqueued == [str(parked)]
     # the sweep only enqueues; the turn's own execution claims parked -> running, so with no
     # worker running here the durable status stays parked (a crash pre-claim leaves it re-runnable)
@@ -523,7 +662,7 @@ async def test_resume_touches_only_the_workspace_holding_a_parked_turn(db: None)
         parked_a = await _insert_parked(connection, ws_a, conv_a, agent_a, seq=1)
         ws_b, _, _, _ = await _seed(connection)
     dbos = StubDbos()
-    await _resume(dbos)
+    await _dispatch(dbos)
     assert dbos.enqueued == [str(parked_a)]
     assert dbos.scoped == [(str(ws_a), str(parked_a))]
     assert all(scoped_ws != str(ws_b) for scoped_ws, _ in dbos.scoped)
@@ -542,7 +681,7 @@ async def test_resume_scopes_the_cap_decision_to_each_workspace(db: None) -> Non
         free_ws, _, free_agent, free_conv = await _seed(connection)
         free_parked = await _insert_parked(connection, free_ws, free_conv, free_agent, seq=1)
     dbos = StubDbos()
-    await _resume(dbos)
+    await _dispatch(dbos)
     assert dbos.enqueued == [str(free_parked)]
     assert dbos.scoped == [(str(free_ws), str(free_parked))]
     assert await _status(over_parked) == "parked"

@@ -5,8 +5,9 @@ units are DBOS steps — each model round (`_stream_once`), each tool dispatch (
 compaction (`Compaction._compact`). On a crash the workflow re-dispatches under the same
 `workflow_id`: every recorded step replays from DBOS's `operation_outputs` without re-executing —
 completed rounds are not re-called, completed tools not re-applied — and execution resumes at the
-first unrecorded step. Setup (load, sandbox create-or-attach, spend re-decision, the run claim)
-re-runs each recovery and is idempotent, so the step sequence is stable across replay."""
+first unrecorded step. The queue claims before loading; setup then reclaims the same attempt while
+loading context, attaching the sandbox, and re-deciding spend. Each step is idempotent across
+replay."""
 
 import asyncio
 import json
@@ -108,6 +109,114 @@ COMMIT_RETRY_MAX_SECONDS = 30.0
 SKILL_LOAD_TOOL = "load_skill"
 ASK_USER_TOOL = "ask_user"
 REQUEST_CREDENTIALS_TOOL = "request_credentials"
+
+
+async def _claim_turn(turn_id: UUID, attempt: str) -> bool:
+    async with workspace_tx() as connection:
+        conversation_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.conversation_id).where(tables.turn.c.id == turn_id)
+            )
+        ).scalar_one()
+        await connection.execute(
+            sa.select(tables.conversation.c.id)
+            .where(tables.conversation.c.id == conversation_id)
+            .with_for_update()
+        )
+        workspace_id = (
+            await connection.execute(
+                sa.update(tables.turn)
+                .values(
+                    status=RUNNING,
+                    running_attempt=attempt,
+                    dispatch_enqueued_at=None,
+                    updated_at=sa.func.now(),
+                )
+                .where(
+                    tables.turn.c.id == turn_id,
+                    sa.or_(
+                        tables.turn.c.status.in_(("queued", PARKED)),
+                        sa.and_(
+                            tables.turn.c.status == RUNNING,
+                            tables.turn.c.running_attempt == attempt,
+                        ),
+                    ),
+                )
+                .returning(tables.turn.c.workspace_id)
+            )
+        ).scalar_one_or_none()
+        if workspace_id is not None:
+            await connection.execute(
+                sa.delete(tables.scheduled_task).where(
+                    tables.scheduled_task.c.workspace_id == workspace_id,
+                    tables.scheduled_task.c.resume_turn_id == turn_id,
+                    tables.scheduled_task.c.schedule == "@once",
+                )
+            )
+    return workspace_id is not None
+
+
+@dataclass(frozen=True)
+class _TurnHandoff:
+    id: UUID
+    workspace_id: UUID
+    conversation_id: UUID
+
+
+async def _claim_turn_with_handoff(turn_id: UUID, attempt: str) -> tuple[bool, _TurnHandoff | None]:
+    if not await _claim_turn(turn_id, attempt):
+        return False, None
+    async with workspace_tx() as connection:
+        turn_scope = (
+            await connection.execute(
+                sa.select(
+                    tables.turn.c.workspace_id,
+                    tables.turn.c.conversation_id,
+                ).where(tables.turn.c.id == turn_id)
+            )
+        ).one()
+        await connection.execute(
+            sa.select(tables.conversation.c.id)
+            .where(tables.conversation.c.id == turn_scope.conversation_id)
+            .with_for_update()
+        )
+        next_turn = (
+            await connection.execute(
+                sa.select(
+                    tables.turn.c.id,
+                    tables.turn.c.dispatch_enqueued_at,
+                )
+                .where(
+                    tables.turn.c.conversation_id == turn_scope.conversation_id,
+                    tables.turn.c.status == "queued",
+                )
+                .order_by(tables.turn.c.seq)
+                .limit(1)
+                .with_for_update()
+            )
+        ).one_or_none()
+        if next_turn is None or next_turn.dispatch_enqueued_at is not None:
+            return True, None
+        stamped = (
+            await connection.execute(
+                sa.update(tables.turn)
+                .values(dispatch_enqueued_at=sa.func.now(), updated_at=sa.func.now())
+                .where(
+                    tables.turn.c.id == next_turn.id,
+                    tables.turn.c.status == "queued",
+                    tables.turn.c.dispatch_enqueued_at.is_(None),
+                )
+                .returning(tables.turn.c.id)
+            )
+        ).scalar_one_or_none()
+    return (
+        True,
+        None
+        if stamped is None
+        else _TurnHandoff(stamped, turn_scope.workspace_id, turn_scope.conversation_id),
+    )
+
+
 TOOL_CALL_PREVIEW_CHARS = 200
 MAX_TOOL_RESULT_CHARS = 1_048_576
 TOOL_RESULT_PREVIEW_CHARS = 2_000
@@ -378,29 +487,9 @@ class TurnEngine:
         re-claimed only by the same id — a DBOS crash-recovery replay of this very workflow, which
         must resume its own turn. A different id (a redundant resume enqueue) matches nothing, loses
         the claim, and is resolved as superseded, so single ownership is the DB claim itself, not
-        the per-conversation partition. Clearing the advisory resume stamp here is what tells the
-        resume sweep the turn is live; a crash before this leaves the turn re-enqueueable."""
-        async with workspace_tx() as connection:
-            updated = await connection.execute(
-                sa.update(tables.turn)
-                .values(
-                    status=RUNNING,
-                    running_attempt=self.attempt,
-                    resume_enqueued_at=None,
-                    updated_at=sa.func.now(),
-                )
-                .where(
-                    tables.turn.c.id == self.turn.id,
-                    sa.or_(
-                        tables.turn.c.status.in_(("queued", PARKED)),
-                        sa.and_(
-                            tables.turn.c.status == RUNNING,
-                            tables.turn.c.running_attempt == self.attempt,
-                        ),
-                    ),
-                )
-            )
-        return updated.rowcount == 1
+        the per-conversation partition. Clearing the advisory dispatch stamp here tells the outbox
+        the turn is live; a crash before this leaves the turn re-enqueueable."""
+        return await _claim_turn(self.turn.id, self.attempt)
 
     async def _load_messages(self) -> tuple[Message, ...]:
         """Prior transcript plus this turn's inbound, prefixed with the <context> tag on a member

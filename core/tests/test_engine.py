@@ -469,7 +469,7 @@ async def test_running_turn_is_claimed_only_by_its_own_workflow_id(
     async with workspace_tx() as connection:
         await connection.execute(
             sa.update(tables.turn)
-            .values(running_attempt="attempt-A", resume_enqueued_at=sa.func.now())
+            .values(running_attempt="attempt-A", dispatch_enqueued_at=sa.func.now())
             .where(tables.turn.c.id == turn.id)
         )
     intruder = replace(_engine(turn, EchoModel(), tmp_path), attempt="attempt-B")
@@ -480,7 +480,7 @@ async def test_running_turn_is_claimed_only_by_its_own_workflow_id(
     async with workspace_tx() as connection:
         stamp = (
             await connection.execute(
-                sa.select(tables.turn.c.resume_enqueued_at).where(tables.turn.c.id == turn.id)
+                sa.select(tables.turn.c.dispatch_enqueued_at).where(tables.turn.c.id == turn.id)
             )
         ).scalar_one()
     assert stamp is None
@@ -1046,7 +1046,7 @@ async def test_per_step_park_then_resume_persists_full_transcript(db: None, tmp_
     assert answer.content == "answer"
 
 
-async def test_member_inbound_carries_the_context_tag_and_a_subagent_inbound_does_not(
+async def test_member_turn_carries_the_context_tag_and_a_subagent_turn_does_not(
     db: None, tmp_path: Path
 ) -> None:
     """The model has no clock: a member turn's inbound reaches it behind a <context> tag carrying

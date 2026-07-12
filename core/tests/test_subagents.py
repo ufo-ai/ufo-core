@@ -226,6 +226,11 @@ class _RecordingClient:
         self.enqueued.append(turn_id)
 
 
+class _FailingClient:
+    async def enqueue_async(self, options: object, workspace_id: str, turn_id: str) -> None:
+        raise RuntimeError("enqueue failed")
+
+
 async def _workspace_agent() -> tuple[UUID, UUID]:
     workspace_id, agent_id = uuid4(), uuid4()
     async with workspace_tx() as connection:
@@ -345,6 +350,43 @@ async def test_message_refuses_a_turn_this_parent_did_not_spawn(
     subagents = Subagents(client=_RecordingClient(), registry=SubagentRegistry(()), parent=parent)
     with pytest.raises(ValueError, match="not a subagent this turn spawned"):
         await subagents.message(stranger, "hello")
+
+
+async def test_messages_dispatch_in_child_conversation_order(
+    db: None, dbos_launched: Config
+) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    parent = Turn(
+        id=uuid4(),
+        workspace_id=workspace_id,
+        conversation_id=uuid4(),
+        agent_id=agent_id,
+        seq=1,
+        status="running",
+        inbound="parent",
+        created_at=datetime(2026, 7, 9, tzinfo=UTC),
+    )
+    child_id, _ = await _running_child(workspace_id, agent_id, parent.id)
+    client = _RecordingClient()
+    subagents = Subagents(client=client, registry=SubagentRegistry(()), parent=parent)
+    first = await subagents.message(child_id, "first follow-up")
+    second = await subagents.message(child_id, "second follow-up")
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(
+                    tables.turn.c.id,
+                    tables.turn.c.seq,
+                    tables.turn.c.dispatch_enqueued_at,
+                )
+                .where(tables.turn.c.id.in_((first.turn_id, second.turn_id)))
+                .order_by(tables.turn.c.seq)
+            )
+        ).all()
+    assert [row.id for row in rows] == [first.turn_id, second.turn_id]
+    assert rows[0].dispatch_enqueued_at is not None
+    assert rows[1].dispatch_enqueued_at is None
+    assert client.enqueued == [str(first.turn_id)]
 
 
 async def _finished_child(workspace_id: UUID, agent_id: UUID, text: str) -> UUID:
@@ -477,6 +519,28 @@ async def test_spawn_distinct_dedup_keys_admit_distinct_children(
             )
         ).scalar_one()
     assert children == 2
+
+
+async def test_spawn_enqueue_failure_leaves_the_child_in_the_outbox(
+    db: None, dbos_launched: Config
+) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    parent = await _parent(workspace_id, agent_id)
+    result = await Subagents(
+        client=_FailingClient(),
+        registry=SubagentRegistry((_profile("research"),)),
+        parent=parent,
+    ).spawn("research", {"task": "acme"}, background=True)
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.turn.c.status,
+                    tables.turn.c.dispatch_enqueued_at,
+                ).where(tables.turn.c.id == result.turn_id)
+            )
+        ).one()
+    assert tuple(row) == ("queued", None)
 
 
 async def test_spawn_without_a_dedup_key_mints_a_fresh_child_each_call(

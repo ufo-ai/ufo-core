@@ -78,6 +78,7 @@ turn = sa.Table(
     sa.Column("seq", sa.Integer, nullable=False),
     sa.Column("status", sa.Text, nullable=False),
     sa.Column("inbound", sa.Text, nullable=False),
+    sa.Column("admission_source", sa.Text, nullable=False, server_default="internal"),
     sa.Column("context", sa.JSON(none_as_null=True), nullable=True),
     sa.Column("terminal", sa.JSON(none_as_null=True), nullable=True),
     sa.Column("parent_turn_id", sa.Uuid, nullable=True),
@@ -85,7 +86,7 @@ turn = sa.Table(
     sa.Column("traceparent", sa.Text, nullable=True),
     sa.Column("idempotency_key", sa.Text, nullable=True),
     sa.Column("running_attempt", sa.Text, nullable=True),
-    sa.Column("resume_enqueued_at", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("dispatch_enqueued_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint("conversation_id", "seq"),
@@ -94,6 +95,7 @@ turn = sa.Table(
         "status in ('queued', 'running', 'parked', 'done', 'failed', 'cancelled')",
         name="turn_status",
     ),
+    sa.CheckConstraint("admission_source in ('member', 'internal')", name="turn_admission_source"),
     sa.CheckConstraint(
         "(status in ('queued', 'running', 'parked')) = (terminal is null)", name="turn_terminal"
     ),
@@ -284,12 +286,22 @@ scheduled_task = sa.Table(
     sa.Column("description", sa.Text, nullable=False),
     sa.Column("next_run_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("last_run_at", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("origin_seq", sa.Integer, nullable=True),
+    sa.Column("resume_turn_id", sa.Uuid, nullable=True),
     sa.Column("claimed_by", sa.Text, nullable=True),
     sa.Column("claim_expires_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint("workspace_id", "name", name="scheduled_task_name"),
     sa.Index("scheduled_task_due", "next_run_at"),
+    sa.Index(
+        "scheduled_task_pause",
+        "workspace_id",
+        "conversation_id",
+        unique=True,
+        postgresql_where=sa.text("schedule = '@once'"),
+        sqlite_where=sa.text("schedule = '@once'"),
+    ),
 )
 
 page = sa.Table(

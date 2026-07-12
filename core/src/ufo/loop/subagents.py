@@ -27,10 +27,11 @@ from ufo.loop.prompts.render import (
     SKILL_INDEX_SLOT,
     render_skill_index,
 )
-from ufo.o11y import current_traceparent
+from ufo.o11y import current_traceparent, log
 from ufo.schema import tables
 from ufo.schema.records import (
     DBOS_APP_VERSION,
+    INTERNAL_ADMISSION,
     TURN_QUEUE_NAME,
     TURN_WORKFLOW_NAME,
     TerminalFrame,
@@ -133,8 +134,8 @@ class Subagents:
             else uuid4()
         )
         turn_id = turn_id_for(self.parent.workspace_id, conversation_id, 1)
-        await self._admit(conversation_id, turn_id, profile, typed_input.model_dump_json())
-        await self._enqueue(turn_id, conversation_id)
+        if await self._admit(conversation_id, turn_id, profile, typed_input.model_dump_json()):
+            await self._enqueue(turn_id, conversation_id)
         if background:
             return SpawnResult(turn_id=turn_id, output=None)
         terminal = await self._await_terminal(turn_id)
@@ -191,6 +192,11 @@ class Subagents:
                     ).where(tables.turn.c.id == turn_id)
                 )
             ).one()
+            await connection.execute(
+                sa.select(tables.conversation.c.id)
+                .where(tables.conversation.c.id == child.conversation_id)
+                .with_for_update()
+            )
             next_seq = (
                 await connection.execute(
                     sa.select(sa.func.max(tables.turn.c.seq)).where(
@@ -208,6 +214,7 @@ class Subagents:
                     seq=next_seq,
                     status="queued",
                     inbound=text,
+                    admission_source=INTERNAL_ADMISSION,
                     terminal=None,
                     parent_turn_id=self.parent.id,
                     subagent_profile=child.subagent_profile,
@@ -216,7 +223,27 @@ class Subagents:
                     updated_at=sa.func.now(),
                 )
             )
-        await self._enqueue(followup_id, child.conversation_id)
+            earlier_queued = (
+                await connection.execute(
+                    sa.select(
+                        sa.exists(
+                            sa.select(tables.turn.c.id).where(
+                                tables.turn.c.conversation_id == child.conversation_id,
+                                tables.turn.c.status == "queued",
+                                tables.turn.c.seq < next_seq,
+                            )
+                        )
+                    )
+                )
+            ).scalar_one()
+            if not earlier_queued:
+                await connection.execute(
+                    sa.update(tables.turn)
+                    .values(dispatch_enqueued_at=sa.func.now(), updated_at=sa.func.now())
+                    .where(tables.turn.c.id == followup_id)
+                )
+        if not earlier_queued:
+            await self._enqueue(followup_id, child.conversation_id)
         return SubagentStatus(turn_id=followup_id, status="queued", text="")
 
     async def _require_child(self, turn_id: UUID) -> None:
@@ -231,7 +258,7 @@ class Subagents:
 
     async def _admit(
         self, conversation_id: UUID, turn_id: UUID, profile: str, inbound: str
-    ) -> None:
+    ) -> bool:
         """Insert the child conversation and its first turn, stamped with the spawning turn's
         traceparent so the child's span joins the parent's trace. The inserts do nothing on
         conflict, so a deterministic (`dedup_key`) child re-admitted by a recovery re-run of the
@@ -269,6 +296,7 @@ class Subagents:
                     seq=1,
                     status="queued",
                     inbound=inbound,
+                    admission_source=INTERNAL_ADMISSION,
                     terminal=None,
                     parent_turn_id=self.parent.id,
                     subagent_profile=profile,
@@ -278,6 +306,21 @@ class Subagents:
                 )
                 .on_conflict_do_nothing()
             )
+            status = (
+                await connection.execute(
+                    sa.select(tables.turn.c.status)
+                    .where(tables.turn.c.id == turn_id)
+                    .with_for_update()
+                )
+            ).scalar_one()
+            if status != "queued":
+                return False
+            await connection.execute(
+                sa.update(tables.turn)
+                .values(dispatch_enqueued_at=sa.func.now(), updated_at=sa.func.now())
+                .where(tables.turn.c.id == turn_id, tables.turn.c.status == "queued")
+            )
+        return True
 
     async def _enqueue(self, turn_id: UUID, conversation_id: UUID) -> None:
         options: EnqueueOptions = {
@@ -287,7 +330,28 @@ class Subagents:
             "queue_partition_key": str(conversation_id),
             "app_version": DBOS_APP_VERSION,
         }
-        await self.client.enqueue_async(options, str(self.parent.workspace_id), str(turn_id))
+        try:
+            await self.client.enqueue_async(options, str(self.parent.workspace_id), str(turn_id))
+        except asyncio.CancelledError:
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.update(tables.turn)
+                    .values(dispatch_enqueued_at=None, updated_at=sa.func.now())
+                    .where(tables.turn.c.id == turn_id, tables.turn.c.status == "queued")
+                )
+            raise
+        except Exception as error:
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.update(tables.turn)
+                    .values(dispatch_enqueued_at=None, updated_at=sa.func.now())
+                    .where(tables.turn.c.id == turn_id, tables.turn.c.status == "queued")
+                )
+            log(
+                "turn.enqueue_deferred",
+                turn_id=str(turn_id),
+                error_class=type(error).__name__,
+            )
 
     async def _await_terminal(self, turn_id: UUID) -> TerminalFrame:
         while True:

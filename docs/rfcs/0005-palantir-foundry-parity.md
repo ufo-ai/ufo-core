@@ -98,7 +98,7 @@ scope, token-requested scope, principal's permissions).**
 | Tools | `ToolRegistry` (frozen tuple), 17 builtins (`bash/read/write/edit/glob/grep/share_file/spawn_subagent/load_sessions/ask_user/load_skill/connect_account/pause_and_wait/list_skills/wait/cancel/message_subagent`). Extensions add via `Manifest.tools`. Native tool-calling. `untrusted` flag walls a result as data. `ask_user`/`pause_and_wait` ≈ Request clarification; `connect_account` ≈ OAuth-tool. | `tools/registry.py:20`; `builtins.py:720` |
 | Subagents | `SubagentProfile(name, prompt, tool_names subset, input_model, output_model, max_rounds, model)` — **typed I/O already exists here.** One core profile `general_purpose`; extensions register more. | `ext/manifest.py:335`; `loop/profiles.py:16` |
 | Skills | SKILL.md folders; 2 core (`sandbox`, `delegation`); packs/extensions add. Not per-agent. | `skills/runtime.py:33,163` |
-| Invoke seam | `TurnInvoker.invoke(conversation, agent, message, idempotency_key)` — "the one boundary that evaluates the spend cap," shared by surfaces, jobs, scheduled tasks, the eval harness. `ExtensionContext.invoke` wraps it. | `ext/surface.py:54`; `ext/context.py:224`; `surfaces/admission.py:36` |
+| Invoke seam | Member surfaces receive `MemberAdmission.admit`; jobs and evals receive `AdmissionInvoker.invoke`. Both delegate to one admission workflow, but only member ingress consumes a pending pause. | `ext/surface.py`; `ext/context.py`; `surfaces/admission.py` |
 
 **Gap:** no agent-authoring path, no typed top-level I/O, and the `agent` record is under-built vs
 spec. The invoke primitive is the "chatbot as function" engine — but internal-only.

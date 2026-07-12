@@ -24,7 +24,7 @@ from ufo.o11y import log
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME, TerminalFrame
 from ufo.session_token import SessionTokenError, verify_session_token
-from ufo.surfaces.admission import Admission
+from ufo.surfaces.admission import Admission, MemberAdmission
 from ufo.surfaces.hub_tail import tail_frames, terminal_frame
 
 MAX_INBOUND_CHARS = 200_000
@@ -111,9 +111,13 @@ async def chat(
         ).one_or_none()
     if agent is None:
         raise HTTPException(404, f"no agent named {x_ufo_agent!r}")
-    turn_id = await Admission(
-        dbos=request.app.state.dbos, durable_surfaces=request.app.state.durable_surfaces
-    ).admit(identity.workspace_id, conversation.id, agent.id, inbound)
+    turn_id = await MemberAdmission(
+        workspace_id=identity.workspace_id,
+        admission=Admission(
+            dbos=request.app.state.dbos,
+            durable_surfaces=request.app.state.durable_surfaces,
+        ),
+    ).admit(conversation.id, agent.id, inbound)
     return {"turn_id": str(turn_id)}
 
 

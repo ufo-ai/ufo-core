@@ -145,7 +145,6 @@ def test_registry_schemas_cover_every_tool() -> None:
         "request_credentials",
         "load_skill",
         "connect_account",
-        "pause_and_wait",
         "list_skills",
         "wait_for_subagents",
         "cancel_subagent",
@@ -256,25 +255,6 @@ async def test_load_skill_unknown_name_fails_loud(tmp_path: Path) -> None:
     ctx = make_context(FakeSandbox(), tmp_path)
     with pytest.raises(ValueError, match="unknown skill 'nope'"):
         await _load_skill(ctx, "nope")
-
-
-async def test_pause_and_wait_returns_the_timer_directive_and_payload(tmp_path: Path) -> None:
-    ctx = make_context(FakeSandbox(), tmp_path)
-    result = await run(
-        "pause_and_wait",
-        ctx,
-        ai_response="I'll wait for the verification email.",
-        wait_minutes=10,
-        next_steps="Read the code once it arrives.",
-        reason="verification email",
-    )
-    assert result.is_error is False
-    directive, payload_json = result.content[0].text.split("\n", 1)
-    assert "end your turn" in directive
-    payload = json.loads(payload_json)
-    assert payload["awaiting"] == "timer"
-    assert payload["wait_minutes"] == 10
-    assert payload["reason"] == "verification email"
 
 
 async def test_list_skills_reports_the_loadable_skills(tmp_path: Path) -> None:

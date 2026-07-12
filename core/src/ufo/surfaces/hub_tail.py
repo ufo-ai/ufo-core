@@ -104,7 +104,7 @@ async def terminal_frame(turn_id: UUID) -> TerminalFrame | None:
 class HubTailer:
     """The live-surface seam's tail primitive bound to the process hub: tails one turn's frames off
     the hub, ending on the durable terminal-or-parked state. Structurally a `TurnTailer`, injected
-    into a `LiveSurfaceContext` exactly as `AdmissionInvoker` injects admit — so a surface extension
+    into a `SurfaceContext` exactly as `MemberAdmission` injects admit — so a surface extension
     tails a turn without importing the hub or this role package."""
 
     hub: Hub

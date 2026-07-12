@@ -31,7 +31,7 @@ from ufo.jobs import (
     PAGE_CHANGE_JOB,
     PageChangeRunner,
     SandboxReaper,
-    SpendResume,
+    TurnDispatcher,
     bindings_from,
     core_jobs,
 )
@@ -167,7 +167,7 @@ def test_each_page_change_consumer_registers_as_its_own_job(tmp_path: object) ->
     )
     specs = core_jobs(
         SyncDriver(backends={"folder": FolderSource()}, blob=blob, postgres=False),
-        SpendResume(client=None),
+        TurnDispatcher(client=None),
         SandboxReaper(carrier=LocalCarrier(), backend="local"),
         runner,
     )

@@ -63,7 +63,7 @@ as part of closing this out.
 
 ## Verified SOUND (checked, not cripples — so we don't re-flag)
 
-Compaction (real summarize, fail-loud), background subagents (real child turns), result-bound/offload, grant scoping (default-deny at CONNECT + confused-deputy guard), park/`SpendResume`, caps at inbound+per-round+resume across all scopes, Fernet credentials, every hub frame has a producer, the sandbox reaper, sentinel swap + workspace-mount guard, S3 blob, folder source + `CorePageFeed`, hooks firing, **recall richness** (full gbrain port — multi-query interleave, RRF+cosine, decay, diversity, tail leg), **sources/sync** (cursor/claim/commit, snapshot-vs-delta, loud skips), `self_improvement`, and the fail-loud backend extensions (docker/redis_hub/index_default/turbopuffer/embed_openai/openrouter).
+Compaction (real summarize, fail-loud), background subagents (real child turns), result-bound/offload, grant scoping (default-deny at CONNECT + confused-deputy guard), queued/parked `TurnDispatcher`, caps at inbound+per-round+dispatch across all scopes, Fernet credentials, every hub frame has a producer, the sandbox reaper, sentinel swap + workspace-mount guard, S3 blob, folder source + `CorePageFeed`, hooks firing, **recall richness** (full gbrain port — multi-query interleave, RRF+cosine, decay, diversity, tail leg), **sources/sync** (cursor/claim/commit, snapshot-vs-delta, loud skips), `self_improvement`, and the fail-loud backend extensions (docker/redis_hub/index_default/turbopuffer/embed_openai/openrouter).
 
 ## Recommended order
 

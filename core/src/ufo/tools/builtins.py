@@ -1,6 +1,6 @@
 """The builtin tool set: bash, read, write, edit, glob, grep, share_file, spawn_subagent,
-load_sessions, ask_user, request_credentials, load_skill, connect_account, pause_and_wait,
-list_skills, wait_for_subagents, cancel_subagent, message_subagent.
+load_sessions, ask_user, request_credentials, load_skill, connect_account, list_skills,
+wait_for_subagents, cancel_subagent, message_subagent.
 
 Each file/shell handler reaches the workspace only through `ctx.sandbox`, so the carrier's scoping
 and egress rules apply whether a byte arrives via a shell command or a file op. `read`, `edit`, and
@@ -22,8 +22,7 @@ seals which slots the speaking owner will fill and ends the turn; a capable surf
 values privately and fulfillment lands them in the encrypted store, never the transcript.
 `load_skill` mounts a skill's `SKILL.md` and assets into the
 workspace and returns its workflow instructions. `list_skills` reports the loadable skills so the
-agent can discover a workflow before starting. `pause_and_wait` is chat-native like `ask_user`: it
-structures a wait the agent poses in its reply and ends the turn, resuming on the next inbound.
+agent can discover a workflow before starting.
 `wait_for_subagents`, `cancel_subagent`, and `message_subagent` reach `ctx.subagents`, the same
 Subagents workflow that backs `spawn`, to await a background child's terminal, cancel a running one,
 or queue it a follow-up message that runs as its next turn — scoped to the children this turn
@@ -38,7 +37,7 @@ from typing import Any, Literal
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
-from pydantic import BaseModel, Field, JsonValue
+from pydantic import BaseModel, Field
 
 from ufo.artifact_token import (
     ARTIFACT_DOWNLOAD_PATH,
@@ -228,23 +227,6 @@ class RequestCredentialsInput(BaseModel):
         min_length=1,
         max_length=MAX_REQUESTED_SLOTS,
         description="The slots to fill and what to ask for each.",
-    )
-
-
-class PauseAndWaitInput(BaseModel):
-    ai_response: str = Field(
-        description="Message shown to the user while waiting. Should explain what you're waiting "
-        "for and why."
-    )
-    wait_minutes: int = Field(
-        description="Number of minutes to wait before automatically resuming."
-    )
-    next_steps: str = Field(
-        description="Internal notes about what to do when resuming. Not shown to the user."
-    )
-    reason: str = Field(description="Internal reason for the pause, for logging/debugging.")
-    metadata: dict[str, JsonValue] | None = Field(
-        default=None, description="Optional key-value data to store during the pause."
     )
 
 
@@ -653,25 +635,6 @@ async def request_credentials_handler(
     )
 
 
-PAUSE_DIRECTIVE = (
-    "Pause here and end your turn — you resume when the awaited event arrives or the wait elapses."
-)
-
-
-async def pause_and_wait_handler(ctx: ToolContext, args: PauseAndWaitInput) -> ToolResult:
-    """Chat-native pause: structure the wait the agent poses in its reply, then end the turn. Like
-    ask_user, the resume rides the next inbound message (a member reply or a scheduled tick), never
-    an out-of-band timer the loop holds — the payload's `wait_minutes` is advisory."""
-    payload = {
-        "awaiting": "timer",
-        "ai_response": args.ai_response,
-        "wait_minutes": args.wait_minutes,
-        "next_steps": args.next_steps,
-        "reason": args.reason,
-    }
-    return ToolResult(content=(TextContent(text=f"{PAUSE_DIRECTIVE}\n{json.dumps(payload)}"),))
-
-
 async def list_skills_handler(ctx: ToolContext, args: ListSkillsInput) -> ToolResult:
     """List the loadable skills, each with its one-line description, so the agent can discover a
     workflow to load_skill before starting a domain task. The workspace's own saved user-skills are
@@ -875,16 +838,6 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=RequestCredentialsInput,
         handler=request_credentials_handler,
-    ),
-    ToolDef(
-        name="pause_and_wait",
-        description=(
-            "Pause a workflow until an external event occurs or a timer expires. Use for waiting "
-            "on verification emails, manual approvals, or API cooldowns. NOT for user-requested "
-            "reminders or delayed actions — use a scheduled task for those."
-        ),
-        input_model=PauseAndWaitInput,
-        handler=pause_and_wait_handler,
     ),
     ToolDef(
         name="list_skills",

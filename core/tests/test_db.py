@@ -94,7 +94,7 @@ async def test_workspace_tx_requires_init() -> None:
             pass
 
 
-async def test_turn_terminal_consistency_enforced(db: None) -> None:
+async def test_turn_protocol_state_is_constrained(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, member_id, agent_id, conversation_id = uuid4(), uuid4(), uuid4(), uuid4()
         await connection.execute(
@@ -134,17 +134,35 @@ async def test_turn_terminal_consistency_enforced(db: None) -> None:
             )
         )
         with pytest.raises(sa.exc.IntegrityError):
-            await connection.execute(
-                sa.insert(tables.turn).values(
-                    id=uuid4(),
-                    workspace_id=workspace_id,
-                    conversation_id=conversation_id,
-                    agent_id=agent_id,
-                    seq=1,
-                    status="done",
-                    inbound="hi",
-                    terminal=None,
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
+            async with connection.begin_nested():
+                await connection.execute(
+                    sa.insert(tables.turn).values(
+                        id=uuid4(),
+                        workspace_id=workspace_id,
+                        conversation_id=conversation_id,
+                        agent_id=agent_id,
+                        seq=1,
+                        status="queued",
+                        inbound="hi",
+                        admission_source="typo",
+                        terminal=None,
+                        created_at=sa.func.now(),
+                        updated_at=sa.func.now(),
+                    )
                 )
-            )
+        with pytest.raises(sa.exc.IntegrityError):
+            async with connection.begin_nested():
+                await connection.execute(
+                    sa.insert(tables.turn).values(
+                        id=uuid4(),
+                        workspace_id=workspace_id,
+                        conversation_id=conversation_id,
+                        agent_id=agent_id,
+                        seq=1,
+                        status="done",
+                        inbound="hi",
+                        terminal=None,
+                        created_at=sa.func.now(),
+                        updated_at=sa.func.now(),
+                    )
+                )

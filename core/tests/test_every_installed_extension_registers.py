@@ -110,7 +110,7 @@ class _StubEmbed:
 
 
 class _StubDbos:
-    """Stands in for the DBOS client the surface mount threads into its admission invoker; mounting
+    """Stands in for the DBOS client the surface mount threads into member admission; mounting
     only registers routes, so no method is called — the mounted route is what is asserted."""
 
     async def enqueue_async(self, options: object, workspace_id: str, turn_id: str) -> None: ...
