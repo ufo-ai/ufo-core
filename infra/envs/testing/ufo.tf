@@ -30,9 +30,42 @@ locals {
 
   ufo_prerequisite_manifests = data.kubectl_file_documents.cluster_services.manifests
 
+  sandbox_proxy_manifests = {
+    "/api/v1/namespaces/${local.system_namespace}/services/ufo-sandbox-proxy" = yamlencode({
+      apiVersion = "v1"
+      kind       = "Service"
+      metadata = {
+        name      = "ufo-sandbox-proxy"
+        namespace = local.system_namespace
+        labels    = { app = "ufo-sandbox-proxy" }
+        annotations = {
+          "external-dns.alpha.kubernetes.io/hostname"                           = "sandbox-proxy.${module.platform.hostname}"
+          "external-dns.alpha.kubernetes.io/cloudflare-proxied"                 = "false"
+          "service.beta.kubernetes.io/aws-load-balancer-type"                   = "external"
+          "service.beta.kubernetes.io/aws-load-balancer-nlb-target-type"        = "ip"
+          "service.beta.kubernetes.io/aws-load-balancer-scheme"                 = "internet-facing"
+          "service.beta.kubernetes.io/aws-load-balancer-ssl-cert"               = module.platform.sandbox_proxy_certificate_arn
+          "service.beta.kubernetes.io/aws-load-balancer-ssl-ports"              = "443"
+          "service.beta.kubernetes.io/aws-load-balancer-ssl-negotiation-policy" = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+        }
+      }
+      spec = {
+        selector = { app = "ufo-sandbox-proxy" }
+        type     = "LoadBalancer"
+        ports = [{
+          name       = "proxy-tls"
+          port       = 443
+          targetPort = "proxy"
+          protocol   = "TCP"
+        }]
+      }
+    })
+  }
+
   ufo_workload_manifests = { for path, manifest in merge(
     data.kubectl_file_documents.hosted.manifests,
     data.kubectl_file_documents.observability.manifests,
+    local.sandbox_proxy_manifests,
   ) : path => manifest if !strcontains(path, "/jobs/ufo-migrate-") }
 
   ufo_migrate_manifest = one([
@@ -138,40 +171,6 @@ resource "kubernetes_namespace_v1" "ufo_system" {
   }
   depends_on = [module.platform]
 }
-
-resource "kubernetes_service_v1" "sandbox_proxy" {
-  metadata {
-    name      = "ufo-sandbox-proxy"
-    namespace = local.system_namespace
-    labels    = { app = "ufo-sandbox-proxy" }
-    annotations = {
-      "external-dns.alpha.kubernetes.io/hostname"                           = "sandbox-proxy.${module.platform.hostname}"
-      "external-dns.alpha.kubernetes.io/cloudflare-proxied"                 = "false"
-      "service.beta.kubernetes.io/aws-load-balancer-type"                   = "external"
-      "service.beta.kubernetes.io/aws-load-balancer-nlb-target-type"        = "ip"
-      "service.beta.kubernetes.io/aws-load-balancer-scheme"                 = "internet-facing"
-      "service.beta.kubernetes.io/aws-load-balancer-ssl-cert"               = module.platform.sandbox_proxy_certificate_arn
-      "service.beta.kubernetes.io/aws-load-balancer-ssl-ports"              = "443"
-      "service.beta.kubernetes.io/aws-load-balancer-ssl-negotiation-policy" = "ELBSecurityPolicy-TLS13-1-2-2021-06"
-    }
-  }
-
-  spec {
-    selector = { app = "ufo-sandbox-proxy" }
-    type     = "LoadBalancer"
-
-    port {
-      name        = "proxy-tls"
-      port        = 443
-      target_port = "proxy"
-      protocol    = "TCP"
-    }
-  }
-
-  depends_on = [module.platform, kubernetes_namespace_v1.ufo_system]
-}
-
-
 
 data "aws_ecr_image" "ufo" {
   repository_name = "ufo"
