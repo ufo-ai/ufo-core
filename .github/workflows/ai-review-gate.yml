@@ -9,6 +9,9 @@ on:
     types: [created, edited, deleted]
   issue_comment:
     types: [created, edited, deleted]
+  workflow_run:
+    workflows: [Claude Code Review]
+    types: [completed]
   schedule:
     - cron: '*/5 * * * *'
   workflow_dispatch:
@@ -20,6 +23,7 @@ on:
 permissions:
   contents: read
   pull-requests: read
+  checks: read
   statuses: write
 
 jobs:

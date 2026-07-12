@@ -5,24 +5,27 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-AI_REVIEWERS = frozenset(
+CODEX_REVIEWERS = frozenset(
     {
         "codex",
         "codex[bot]",
         "openai-codex[bot]",
         "chatgpt-codex-connector",
-        "claude",
-        "claude[bot]",
-        "claude-code[bot]",
+        "chatgpt-codex-connector[bot]",
     }
 )
+AI_REVIEWERS = CODEX_REVIEWERS | frozenset({"claude", "claude[bot]", "claude-code[bot]"})
 STATUS_CONTEXT = "AI Review Gate"
+REVIEW_CHECK_NAME = "claude-review"
+REVIEWED_COMMIT_PATTERN = re.compile(r"\*\*Reviewed commit:\*\* `([0-9a-f]{7,40})`")
+CODEX_CLEAN_PASS = "Didn't find any major issues"
 
 JsonObject = Mapping[str, object]
 
@@ -67,12 +70,31 @@ class Review:
     body: str
     url: str
     state: str
+    commit_oid: str | None
+
+
+@dataclass(frozen=True)
+class IssueComment:
+    author: str
+    body: str
+
+
+@dataclass(frozen=True)
+class IssueCommentsPage:
+    comments: tuple[IssueComment, ...]
+    page_info: PageInfo
 
 
 @dataclass(frozen=True)
 class ReviewsPage:
     reviews: tuple[Review, ...]
     page_info: PageInfo
+
+
+@dataclass(frozen=True)
+class CheckRun:
+    status: str
+    conclusion: str | None
 
 
 @dataclass(frozen=True)
@@ -91,17 +113,27 @@ def main() -> int:
         return 0
 
     dry_run = os.environ.get("AI_REVIEW_GATE_DRY_RUN") == "1"
-    saw_blockers = False
+    saw_blocking = False
     for number in numbers:
         pull_request = fetch_pull_request(owner, repo, number)
-        blockers = gate_blockers(owner, repo, number)
-        saw_blockers = saw_blockers or bool(blockers)
-        print_result(pull_request, blockers)
+        reviews = pull_request_reviews(owner, repo, number)
+        comments = issue_comments(owner, repo, number)
+        blockers = unresolved_thread_blockers(review_threads(owner, repo, number))
+        blockers.extend(changes_requested_blockers(reviews, pull_request.head_oid))
+        awaiting = awaiting_reasons(
+            claude_review_runs(owner, repo, pull_request.head_oid),
+            reviews,
+            comments,
+            pull_request.head_oid,
+        )
+        state, description = gate_state(blockers, awaiting)
+        saw_blocking = saw_blocking or state != "success"
+        print_result(pull_request, blockers, awaiting)
         if dry_run:
             continue
-        publish_status(owner, repo, pull_request, blockers)
+        publish_status(owner, repo, pull_request, state, description)
 
-    return 1 if dry_run and saw_blockers else 0
+    return 1 if dry_run and saw_blocking else 0
 
 
 def repository() -> tuple[str, str]:
@@ -123,6 +155,14 @@ def target_pull_requests(owner: str, repo: str) -> tuple[int, ...]:
         pr_input = inputs.get("pr")
         if isinstance(pr_input, str) and pr_input.strip():
             return (int(pr_input),)
+
+    if event_name == "workflow_run":
+        workflow_run = json_object(event.get("workflow_run"), "workflow_run")
+        rows = json_list(workflow_run.get("pull_requests"), "workflow_run.pull_requests")
+        return tuple(
+            json_int(json_object(row, "workflow_run pull request").get("number"), "number")
+            for row in rows
+        )
 
     pull_request = event.get("pull_request")
     if isinstance(pull_request, Mapping):
@@ -188,12 +228,78 @@ def fetch_pull_request(owner: str, repo: str, number: int) -> PullRequest:
     )
 
 
-def gate_blockers(owner: str, repo: str, number: int) -> list[Blocker]:
-    threads = review_threads(owner, repo, number)
-    reviews = pull_request_reviews(owner, repo, number)
-    blockers = unresolved_thread_blockers(threads)
-    blockers.extend(changes_requested_blockers(reviews))
-    return blockers
+def claude_review_runs(owner: str, repo: str, head_oid: str) -> tuple[CheckRun, ...]:
+    result = run(
+        [
+            "gh",
+            "api",
+            f"repos/{owner}/{repo}/commits/{head_oid}/check-runs"
+            f"?check_name={REVIEW_CHECK_NAME}&per_page=100",
+        ]
+    )
+    payload = json_object(json.loads(result.stdout), "check runs response")
+    rows = json_list(payload.get("check_runs"), "check_runs")
+    return tuple(check_run(json_object(row, "check run")) for row in rows)
+
+
+def check_run(node: JsonObject) -> CheckRun:
+    return CheckRun(
+        status=json_str(node.get("status"), "check_run.status"),
+        conclusion=json_optional_str(node.get("conclusion"), "check_run.conclusion"),
+    )
+
+
+def awaiting_reasons(
+    runs: tuple[CheckRun, ...],
+    reviews: tuple[Review, ...],
+    comments: tuple[IssueComment, ...],
+    head_oid: str,
+) -> tuple[str, ...]:
+    reasons = []
+    claude = claude_awaiting(runs)
+    if claude:
+        reasons.append(claude)
+    if not codex_reviewed(reviews, comments, head_oid):
+        reasons.append(f"codex has not reviewed {head_oid[:10]}")
+    return tuple(reasons)
+
+
+def claude_awaiting(runs: tuple[CheckRun, ...]) -> str | None:
+    if any(item.status == "completed" and item.conclusion == "success" for item in runs):
+        return None
+    if not runs:
+        return f"{REVIEW_CHECK_NAME} has not started"
+    if any(item.status != "completed" for item in runs):
+        return f"{REVIEW_CHECK_NAME} is running"
+    return f"{REVIEW_CHECK_NAME} did not succeed"
+
+
+def codex_reviewed(
+    reviews: tuple[Review, ...], comments: tuple[IssueComment, ...], head_oid: str
+) -> bool:
+    if any(
+        item.reviewer.lower() in CODEX_REVIEWERS
+        and item.commit_oid == head_oid
+        and item.state != "DISMISSED"
+        for item in reviews
+    ):
+        return True
+    return any(
+        comment.author.lower() in CODEX_REVIEWERS
+        and CODEX_CLEAN_PASS in comment.body
+        and any(
+            head_oid.startswith(prefix) for prefix in REVIEWED_COMMIT_PATTERN.findall(comment.body)
+        )
+        for comment in comments
+    )
+
+
+def gate_state(blockers: list[Blocker], awaiting: tuple[str, ...]) -> tuple[str, str]:
+    if blockers:
+        return "failure", f"{len(blockers)} unresolved AI review item(s)"
+    if awaiting:
+        return "pending", f"Awaiting AI review: {'; '.join(awaiting)}"
+    return "success", "AI review complete; no unresolved feedback"
 
 
 def review_threads(owner: str, repo: str, number: int) -> tuple[ReviewThread, ...]:
@@ -243,6 +349,7 @@ def pull_request_reviews(owner: str, repo: str, number: int) -> tuple[Review, ..
               body
               url
               state
+              commit { oid }
             }
           }
         }
@@ -258,6 +365,34 @@ def pull_request_reviews(owner: str, repo: str, number: int) -> tuple[Review, ..
         reviews.extend(page.reviews)
         if not page.page_info.has_next_page:
             return tuple(reviews)
+        after = page.page_info.end_cursor
+
+
+def issue_comments(owner: str, repo: str, number: int) -> tuple[IssueComment, ...]:
+    query = """
+    query($owner: String!, $repo: String!, $number: Int!, $after: String) {
+      repository(owner: $owner, name: $repo) {
+        pullRequest(number: $number) {
+          comments(first: 100, after: $after) {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+              author { login }
+              body
+            }
+          }
+        }
+      }
+    }
+    """
+    comments: list[IssueComment] = []
+    after: str | None = None
+    while True:
+        page = issue_comments_page(
+            graphql(query, {"owner": owner, "repo": repo, "number": number, "after": after})
+        )
+        comments.extend(page.comments)
+        if not page.page_info.has_next_page:
+            return tuple(comments)
         after = page.page_info.end_cursor
 
 
@@ -310,9 +445,8 @@ def review_thread(node: JsonObject) -> ReviewThread:
 
 
 def review_comment(node: JsonObject) -> ReviewComment:
-    author = json_object(node.get("author"), "comment author")
     return ReviewComment(
-        reviewer=json_str(author.get("login"), "author.login"),
+        reviewer=author_login(node),
         body=json_str(node.get("body"), "comment.body"),
         url=json_str(node.get("url"), "comment.url"),
     )
@@ -326,13 +460,39 @@ def reviews_page(data: JsonObject) -> ReviewsPage:
 
 
 def review(node: JsonObject) -> Review:
-    author = json_object(node.get("author"), "review author")
+    commit = node.get("commit")
     return Review(
-        reviewer=json_str(author.get("login"), "author.login"),
+        reviewer=author_login(node),
         body=json_str(node.get("body"), "review.body"),
         url=json_str(node.get("url"), "review.url"),
         state=json_str(node.get("state"), "review.state"),
+        commit_oid=(
+            json_str(json_object(commit, "review.commit").get("oid"), "commit.oid")
+            if commit is not None
+            else None
+        ),
     )
+
+
+def issue_comments_page(data: JsonObject) -> IssueCommentsPage:
+    connection = json_object(pull_request_node(data).get("comments"), "comments")
+    nodes = json_list(connection.get("nodes"), "comments.nodes")
+    comments = tuple(issue_comment(json_object(node, "issue comment")) for node in nodes)
+    return IssueCommentsPage(comments=comments, page_info=page_info(connection))
+
+
+def issue_comment(node: JsonObject) -> IssueComment:
+    return IssueComment(
+        author=author_login(node),
+        body=json_str(node.get("body"), "comment.body"),
+    )
+
+
+def author_login(node: JsonObject) -> str:
+    author = node.get("author")
+    if author is None:
+        return ""
+    return json_str(json_object(author, "author").get("login"), "author.login")
 
 
 def unresolved_thread_blockers(threads: tuple[ReviewThread, ...]) -> list[Blocker]:
@@ -358,11 +518,11 @@ def unresolved_thread_blockers(threads: tuple[ReviewThread, ...]) -> list[Blocke
     return blockers
 
 
-def changes_requested_blockers(reviews: tuple[Review, ...]) -> list[Blocker]:
+def changes_requested_blockers(reviews: tuple[Review, ...], head_oid: str) -> list[Blocker]:
     latest_by_author: dict[str, Review] = {}
     for item in reviews:
         reviewer = item.reviewer.lower()
-        if reviewer in AI_REVIEWERS:
+        if reviewer in AI_REVIEWERS and item.commit_oid == head_oid:
             latest_by_author[reviewer] = item
 
     blockers: list[Blocker] = []
@@ -381,14 +541,8 @@ def changes_requested_blockers(reviews: tuple[Review, ...]) -> list[Blocker]:
 
 
 def publish_status(
-    owner: str, repo: str, pull_request: PullRequest, blockers: list[Blocker]
+    owner: str, repo: str, pull_request: PullRequest, state: str, description: str
 ) -> None:
-    state = "failure" if blockers else "success"
-    description = (
-        f"{len(blockers)} unresolved AI review item(s)"
-        if blockers
-        else "No unresolved AI review feedback"
-    )
     command = [
         "gh",
         "api",
@@ -415,9 +569,14 @@ def status_target_url(pull_request: PullRequest) -> str:
     return pull_request.url
 
 
-def print_result(pull_request: PullRequest, blockers: list[Blocker]) -> None:
+def print_result(
+    pull_request: PullRequest, blockers: list[Blocker], awaiting: tuple[str, ...]
+) -> None:
     if not blockers:
-        print(f"No unresolved AI review feedback found on PR #{pull_request.number}.")
+        if awaiting:
+            print(f"PR #{pull_request.number} is awaiting AI review: {'; '.join(awaiting)}.")
+        else:
+            print(f"No unresolved AI review feedback found on PR #{pull_request.number}.")
         return
     print(f"AI review gate found {len(blockers)} blocking item(s) on PR #{pull_request.number}:")
     for blocker in blockers:
