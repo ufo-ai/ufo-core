@@ -9,6 +9,7 @@ path an extension does. The `ExtensionContext` shape is open: it carries the sel
 backends, a transaction over the extension's own tables, governed proposals, and invoke, without
 reshaping what handlers already hold."""
 
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -26,7 +27,16 @@ from ufo.candidates import WorkspaceCandidates, owner_candidates
 from ufo.db import workspace_tx
 from ufo.governance import Governance, prompt_digest
 from ufo.indexing import EmbedClient, IndexBackend
-from ufo.models.interface import Message, ModelClient, ModelRequest, TextDelta
+from ufo.models.interface import (
+    Message,
+    ModelClient,
+    ModelRequest,
+    TextBlock,
+    TextDelta,
+    ToolCallDelta,
+    ToolCallStart,
+    ToolUseBlock,
+)
 from ufo.o11y import log
 from ufo.scheduling import ScheduleInvoker, ScheduleStore
 from ufo.schema import tables
@@ -276,12 +286,13 @@ class ModelResolver(Protocol):
 
 @dataclass(frozen=True)
 class ModelAccess:
-    """The metered LLM a background handler reaches: one completion against the deploy's default
-    model, keyed to and billed to the ambient workspace. It resolves its client through the same
+    """The metered LLM a background handler reaches: one model turn against the deploy's default,
+    keyed to and billed to the ambient workspace. It resolves its client through the same
     `client_for` a turn uses (the workspace's BYOK key, else the platform key) and books usage
     through the same `billable_event`, so the key's workspace and the billed workspace are one, by
-    construction — never an unmetered direct egress. `complete` fixes the request's model to the
-    deploy default, so the model billed is always the model called."""
+    construction — never an unmetered direct egress. Both operations fix the request's model to the
+    deploy default, so the model billed is always the model called; `turn` preserves requested tool
+    calls in the existing assistant `Message` shape and `complete` returns only its text."""
 
     _resolver: ModelResolver
 
@@ -294,17 +305,43 @@ class ModelAccess:
         """Stream one completion against the deploy default, book its token usage to the bound
         workspace when the block succeeds, and return the assembled text. Bound `request.max_tokens`
         and the payload at the call site — this seam prices whatever the provider returns."""
+        response = await self.turn(request)
+        if isinstance(response.content, str):
+            return response.content
+        return "".join(block.text for block in response.content if isinstance(block, TextBlock))
+
+    async def turn(self, request: ModelRequest) -> Message:
+        """Run one tool-aware model turn and return its assistant message after metering it."""
         model = self._resolver.auto_model
         client = await self._resolver.client_for(model)
         parts: list[str] = []
+        call_names: dict[str, str] = {}
+        call_json: dict[str, list[str]] = {}
+        call_order: list[str] = []
         usages: list[Usage] = []
         async with ws_current().billable_event() as bill:
             async for event in client.complete(request.model_copy(update={"model": model})):
                 match event:
                     case TextDelta(text=text):
                         parts.append(text)
+                    case ToolCallStart(id=call_id, name=name):
+                        call_names[call_id] = name
+                        call_json[call_id] = []
+                        call_order.append(call_id)
+                    case ToolCallDelta(id=call_id, partial_json=partial):
+                        call_json[call_id].append(partial)
                     case Usage():
                         usages.append(event)
+            if not usages:
+                raise RuntimeError("model stream produced no usage")
+            tool_calls = tuple(
+                ToolUseBlock(
+                    id=call_id,
+                    name=call_names[call_id],
+                    input=json.loads("".join(call_json[call_id]) or "{}"),
+                )
+                for call_id in call_order
+            )
             bill.usage(
                 model,
                 Usage(
@@ -315,7 +352,13 @@ class ModelAccess:
                 ),
                 self._resolver.pricing,
             )
-        return "".join(parts)
+        text = "".join(parts)
+        if not tool_calls:
+            return Message(role="assistant", content=text)
+        return Message(
+            role="assistant",
+            content=(*((TextBlock(text=text),) if text else ()), *tool_calls),
+        )
 
 
 @dataclass(frozen=True)

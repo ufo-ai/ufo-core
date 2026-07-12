@@ -4,7 +4,7 @@ import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 
-from ufo.credentials import CredentialStore
+from ufo.credentials import CredentialSlotUnset, CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import (
     CredentialAccess,
@@ -117,6 +117,15 @@ async def test_credential_access_falls_back_to_platform_env(
     access = CredentialAccess(declared=frozenset({"sample_api"}))
     with ws(await _workspace()):
         assert await access.get("sample_api") == "sk-platform"
+
+
+async def test_empty_platform_credential_is_unset(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SAMPLE_API", "")
+    access = CredentialAccess(declared=frozenset({"sample_api"}))
+    with ws(await _workspace()), pytest.raises(CredentialSlotUnset):
+        await access.get("sample_api")
 
 
 async def test_credential_access_outside_a_workspace_scope_fails_loud(db: None) -> None:

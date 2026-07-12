@@ -15,8 +15,8 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from ufo.sdk.models import Message, ToolResultBlock, ToolUseBlock
-from ufo_ext_self_improvement.model import ReplayLeg, ToolSchema
+from ufo.sdk.models import Message, TextBlock, ToolResultBlock, ToolSchema, ToolUseBlock
+from ufo_ext_self_improvement.model import ReplayLeg
 
 REPLAY_ROUND_LIMIT = 6
 
@@ -88,11 +88,11 @@ def replay_tools(messages: tuple[Message, ...]) -> tuple[ToolSchema, ...]:
             if isinstance(block, ToolUseBlock) and block.name not in names:
                 names.append(block.name)
     return tuple(
-        {
-            "name": name,
-            "description": "Archived tool replayed from the trajectory.",
-            "input_schema": {"type": "object", "additionalProperties": True},
-        }
+        ToolSchema(
+            name=name,
+            description="Archived tool replayed from the trajectory.",
+            input_schema={"type": "object", "additionalProperties": True},
+        )
         for name in names
     )
 
@@ -133,11 +133,18 @@ class ReplayEvaluation:
         last_text = ""
         for turn in range(1, self.round_limit + 1):
             leg = await self.model.turn(system_prompt, messages, tools)
-            if not leg.tool_uses:
-                return ReplayResult(leg.text, diverged=False, rounds=turn)
-            fed = _feed_archived(leg.tool_uses, results)
+            content = leg.content
+            if isinstance(content, str):
+                text = content
+                tool_uses: tuple[ToolUseBlock, ...] = ()
+            else:
+                text = "".join(block.text for block in content if isinstance(block, TextBlock))
+                tool_uses = tuple(block for block in content if isinstance(block, ToolUseBlock))
+            if not tool_uses:
+                return ReplayResult(text, diverged=False, rounds=turn)
+            fed = _feed_archived(tool_uses, results)
             if fed is None:
                 return ReplayResult(last_text, diverged=True, rounds=turn)
-            messages = (*messages, Message(role="assistant", content=leg.content), fed)
-            last_text = leg.text or last_text
+            messages = (*messages, leg, fed)
+            last_text = text or last_text
         return ReplayResult(last_text, diverged=True, rounds=self.round_limit)

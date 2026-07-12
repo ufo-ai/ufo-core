@@ -46,6 +46,9 @@ from ufo.models.interface import (
     ToolResultBlock as ToolResultBlock,
 )
 from ufo.models.interface import (
+    ToolSchema as ToolSchema,
+)
+from ufo.models.interface import (
     ToolUseBlock as ToolUseBlock,
 )
 from ufo.models.openai import (

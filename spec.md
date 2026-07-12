@@ -156,7 +156,7 @@ Manifest registers (each optional):
 `ExtensionContext` (capability-scoped, handed to every handler): workspace-scoped store access,
 `credentials.get(slot)`, the selected `index`/`embed` backends, `pages` (the `PageFeed` replaying
 source-page changes under a resumable cursor), `transaction()` over the extension's own tables,
-`invoke(agent, input, conversation=...)`,
+`invoke(agent, input, conversation=...)`, metered `model.complete(...)`/`model.turn(...)`,
 `schedule(job)`, `trajectories.read(...)` (transcript/turn evidence), and
 `agents.propose_change(...)` — the governed promotion path: an extension never edits agent config
 directly; it opens a proposal (prompt, skills, tool grants) that applies through the same

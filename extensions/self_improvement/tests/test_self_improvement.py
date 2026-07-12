@@ -7,9 +7,11 @@ promotion until it stabilizes, that promotion opens a pending Proposal (never a 
 write), and that a resolved candidate is suppressed on later ticks."""
 
 import json
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
+import pytest
 import sqlalchemy as sa
 from ufo_ext_self_improvement import manifest as si
 from ufo_ext_self_improvement.corpus import task_classes
@@ -27,18 +29,31 @@ from ufo_ext_self_improvement.gate import (
     score_gate,
     two_stage_gate,
 )
-from ufo_ext_self_improvement.model import ReplayTurn, ToolSchema
+from ufo_ext_self_improvement.model import ModelAccessLeg
 from ufo_ext_self_improvement.proposer import PromptProposer
 from ufo_ext_self_improvement.replay import ReplayEvaluation
 
+from ufo.accounting import CORE_PRICING, TOKENS_DIMENSION, Pricing
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import Trajectory, context_for
+from ufo.ext.context import ModelAccess, Trajectory, context_for
 from ufo.ext.loader import load_manifests
 from ufo.governance import prompt_digest
 from ufo.loop.transcript import Transcript
-from ufo.models.interface import Message, TextBlock, ToolResultBlock, ToolUseBlock
+from ufo.models.interface import (
+    Message,
+    ModelClient,
+    ModelEvent,
+    ModelRequest,
+    TextDelta,
+    ToolCallDelta,
+    ToolCallStart,
+    ToolResultBlock,
+    ToolSchema,
+    ToolUseBlock,
+)
 from ufo.schema import tables
+from ufo.schema.records import Usage
 from ufo.transcript import Conversation
 from ufo.workspace import ws
 
@@ -66,8 +81,8 @@ class ArmEchoLeg:
 
     async def turn(
         self, system: str, messages: tuple[Message, ...], tools: tuple[ToolSchema, ...]
-    ) -> ReplayTurn:
-        return ReplayTurn(text=system, content=(TextBlock(text=system),), tool_uses=())
+    ) -> Message:
+        return Message(role="assistant", content=system)
 
 
 @dataclass(frozen=True)
@@ -159,7 +174,7 @@ async def _seed_agent(workspace_id: UUID, blob: FilesystemBlobStore, count: int)
 
 
 def _context(blob: FilesystemBlobStore):
-    return context_for(si.NAME, frozenset({si.MODEL_KEY_SLOT}), blob=blob)
+    return context_for(si.NAME, frozenset(), blob=blob)
 
 
 def _cron(ctx, judge_marker: str = IMPROVED_MARKER) -> ImproveCron:
@@ -202,12 +217,18 @@ async def _agent_prompt(workspace_id: UUID, agent_id: UUID) -> str:
         ).scalar_one()
 
 
-def test_manifest_declares_a_scheduled_eval_cron_and_a_model_key_slot() -> None:
+def test_manifest_declares_only_the_scheduled_eval_cron() -> None:
     found = next((m for m in load_manifests() if m.name == si.NAME), None)
     assert found is not None, "self_improvement extension not discovered — run `uv sync`"
     assert {job.name for job in found.jobs} == {si.EVAL_JOB}
     assert found.jobs[0].schedule == si.EVAL_SCHEDULE
-    assert {slot.name for slot in found.credentials} == {si.MODEL_KEY_SLOT}
+    assert found.credentials == ()
+
+
+async def test_eval_cron_fails_without_model_access(tmp_path) -> None:
+    job = si.manifest().jobs[0]
+    with pytest.raises(RuntimeError, match="requires model access"):
+        await job.handler(_context(FilesystemBlobStore(root=tmp_path)))
 
 
 def test_corpus_groups_tool_errors_into_a_split_class() -> None:
@@ -286,13 +307,13 @@ class ScriptedReplayLeg:
     """A replay stand-in that plays a fixed list of turns and records the messages it last saw, so a
     test can assert the archived tool result was fed back into the replay context."""
 
-    turns: list[ReplayTurn]
+    turns: list[Message]
     seen: tuple[Message, ...] = ()
     index: int = 0
 
     async def turn(
         self, system: str, messages: tuple[Message, ...], tools: tuple[ToolSchema, ...]
-    ) -> ReplayTurn:
+    ) -> Message:
         self.seen = messages
         played = self.turns[self.index]
         self.index += 1
@@ -314,16 +335,73 @@ def _archived_bash(command: str, result: str) -> tuple[Message, ...]:
     )
 
 
+@dataclass
+class MeteredReplayClient:
+    requests: list[ModelRequest]
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            yield ToolCallStart(id="r1", name="bash")
+            yield ToolCallDelta(id="r1", partial_json='{"command":"ls"}')
+            yield Usage(input_tokens=4, output_tokens=2)
+            return
+        yield TextDelta(text="regenerated final")
+        yield Usage(input_tokens=3, output_tokens=1)
+
+
+@dataclass(frozen=True)
+class ModelResolver:
+    auto_model: str
+    pricing: Pricing
+    client: ModelClient
+
+    async def client_for(self, model: str) -> ModelClient:
+        assert model == self.auto_model
+        return self.client
+
+
+async def test_replay_uses_metered_model_access_and_feeds_archived_results(db: None) -> None:
+    workspace_id = await _workspace()
+    client = MeteredReplayClient(requests=[])
+    model = ModelAccess(ModelResolver(MODEL, CORE_PRICING, client))
+
+    with ws(workspace_id):
+        result = await ReplayEvaluation(ModelAccessLeg(model)).replay(
+            _archived_bash("ls", "file-a\nfile-b"), SEED_PROMPT
+        )
+        async with workspace_tx() as connection:
+            billed = (
+                await connection.execute(
+                    sa.select(sa.func.count(), sa.func.sum(tables.ledger.c.amount)).where(
+                        tables.ledger.c.workspace_id == workspace_id,
+                        tables.ledger.c.turn_id.is_(None),
+                        tables.ledger.c.dimension == TOKENS_DIMENSION,
+                    )
+                )
+            ).one()
+
+    assert result.final_text == "regenerated final"
+    assert not result.diverged
+    assert billed[0] == 2
+    assert billed[1] == 10
+    fed = client.requests[1].messages[-1]
+    assert not isinstance(fed.content, str)
+    assert any(
+        isinstance(block, ToolResultBlock) and block.content == "file-a\nfile-b"
+        for block in fed.content
+    )
+
+
 async def test_replay_feeds_the_archived_tool_result_back() -> None:
     archived = _archived_bash("ls", "file-a\nfile-b")
     leg = ScriptedReplayLeg(
         turns=[
-            ReplayTurn(
-                text="",
+            Message(
+                role="assistant",
                 content=(ToolUseBlock(id="r1", name="bash", input={"command": "ls"}),),
-                tool_uses=(ToolUseBlock(id="r1", name="bash", input={"command": "ls"}),),
             ),
-            ReplayTurn(text="regenerated final", content=(TextBlock(text="x"),), tool_uses=()),
+            Message(role="assistant", content="regenerated final"),
         ]
     )
     result = await ReplayEvaluation(leg).replay(archived, "SYSTEM PROMPT")
@@ -342,10 +420,9 @@ async def test_replay_diverges_when_a_call_has_no_archived_result() -> None:
     archived = _archived_bash("ls", "file-a")
     leg = ScriptedReplayLeg(
         turns=[
-            ReplayTurn(
-                text="",
+            Message(
+                role="assistant",
                 content=(ToolUseBlock(id="r1", name="bash", input={"command": "rm -rf /"}),),
-                tool_uses=(ToolUseBlock(id="r1", name="bash", input={"command": "rm -rf /"}),),
             )
         ]
     )
