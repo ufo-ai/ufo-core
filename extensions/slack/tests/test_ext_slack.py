@@ -34,7 +34,12 @@ from ufo.blob import BlobNotFound, FilesystemBlobStore
 from ufo.credentials import CredentialStore
 from ufo.db import current_workspace, workspace_tx
 from ufo.ext.loader import skill_registry, turn_tools
-from ufo.ext.surface import WRITEBACK_DELIVERED, workspace_key
+from ufo.ext.surface import (
+    WRITEBACK_DELIVERED,
+    WRITEBACK_FAILED,
+    WRITEBACK_MAX_AGE_SECONDS,
+    workspace_key,
+)
 from ufo.hub import InProcessHub, Terminal, ToolCall
 from ufo.schema import tables
 from ufo.schema.records import (
@@ -1905,6 +1910,93 @@ async def test_writeback_posts_block_kit_reply_and_streams_the_attachment(
     assert row.reply_ref == "C5:999.100"
 
 
+async def test_writeback_persists_slack_retry_after(
+    db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+
+    def rate_limited(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == slack.SLACK_CHAT_POST_MESSAGE_URL:
+            recorder.append(request)
+            return httpx.Response(
+                429,
+                headers={"Retry-After": "23"},
+                json={"ok": False, "error": "ratelimited"},
+            )
+        return httpx.Response(404, json={"ok": False, "error": "not_mocked"})
+
+    app, _, blob = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, httpx.MockTransport(rate_limited)
+    )
+    first_turn_id = await _seed_done_turn(workspace_id, "C429:200.0", "first", blob, artifact=False)
+    second_turn_id = await _seed_done_turn(
+        workspace_id, "C429:201.0", "second", blob, artifact=False
+    )
+
+    await app.state.writeback_poller.drain()
+
+    async with workspace_tx() as connection:
+        writebacks = (
+            await connection.execute(
+                sa.select(
+                    tables.writeback.c.turn_id,
+                    tables.writeback.c.status,
+                    tables.writeback.c.claim_expires_at,
+                    tables.writeback.c.last_error,
+                ).where(tables.writeback.c.turn_id.in_((first_turn_id, second_turn_id)))
+            )
+        ).all()
+    assert len(recorder) == 1
+    assert {row.turn_id for row in writebacks} == {first_turn_id, second_turn_id}
+    assert {row.status for row in writebacks} == {WRITEBACK_PENDING}
+    assert len({row.claim_expires_at for row in writebacks}) == 1
+    assert {row.last_error for row in writebacks} == {
+        None,
+        "chat.postMessage HTTP 429: ratelimited; retry_after_seconds=23",
+    }
+    due = writebacks[0].claim_expires_at.replace(tzinfo=UTC)
+    assert 22 <= (due - datetime.now(UTC)).total_seconds() <= 23
+
+
+async def test_writeback_bounds_unrepresentable_slack_retry_after(
+    db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id, _ = await _seed()
+
+    def rate_limited(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == slack.SLACK_CHAT_POST_MESSAGE_URL
+        return httpx.Response(
+            429,
+            headers={"Retry-After": "9" * 5_000},
+            json={"ok": False, "error": "ratelimited"},
+        )
+
+    app, _, blob = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, httpx.MockTransport(rate_limited)
+    )
+    turn_id = await _seed_done_turn(workspace_id, "C429:300.0", "hi", blob, artifact=False)
+
+    await app.state.writeback_poller.drain()
+
+    async with workspace_tx() as connection:
+        writeback = (
+            await connection.execute(
+                sa.select(
+                    tables.writeback.c.status,
+                    tables.writeback.c.claim_expires_at,
+                    tables.writeback.c.last_error,
+                ).where(tables.writeback.c.turn_id == turn_id)
+            )
+        ).one()
+    assert writeback.status == WRITEBACK_FAILED
+    assert writeback.claim_expires_at is None
+    assert writeback.last_error == (
+        "chat.postMessage HTTP 429: ratelimited; "
+        f"retry_after_seconds={WRITEBACK_MAX_AGE_SECONDS + 1}"
+    )
+
+
 async def test_writeback_streams_dm_attachment_without_threading_under_the_bot_reply(
     db: None, tmp_path, monkeypatch
 ) -> None:
@@ -2202,7 +2294,14 @@ async def test_newest_turn_owns_the_thread_status(db: None, tmp_path, monkeypatc
     turns = {row.idempotency_key: row.id for row in rows}
 
     first_task = slack._STATUS_TASKS[turns["C1:100.5"]]
-    await hub.publish(turns["C1:100.5"], Terminal(frame=TerminalFrame(status="done", text="one")))
+    first_terminal = TerminalFrame(status="done", text="one")
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == turns["C1:100.5"])
+            .values(status="done", terminal=first_terminal.model_dump(mode="json"))
+        )
+    await hub.publish(turns["C1:100.5"], Terminal(frame=first_terminal))
     await first_task
     statuses = [
         json.loads(r.content) for r in _requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)
@@ -2220,7 +2319,14 @@ async def test_newest_turn_owns_the_thread_status(db: None, tmp_path, monkeypatc
     ):
         assert time.monotonic() < deadline, "the surviving turn never wrote its status"
         await asyncio.sleep(0.01)
-    await hub.publish(turns["C1:101.0"], Terminal(frame=TerminalFrame(status="done", text="two")))
+    second_terminal = TerminalFrame(status="done", text="two")
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == turns["C1:101.0"])
+            .values(status="done", terminal=second_terminal.model_dump(mode="json"))
+        )
+    await hub.publish(turns["C1:101.0"], Terminal(frame=second_terminal))
     await second_task
     final = json.loads(_requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)[-1].content)
     assert final == {"channel_id": "C1", "thread_ts": "100.5", "status": slack.STATUS_CLEAR_TEXT}

@@ -106,6 +106,7 @@ WRITEBACK_CLAIM_SECONDS = 300
 WRITEBACK_CLAIM_REFRESH_SECONDS = 60
 WRITEBACK_RETRY_BACKOFF_SECONDS = 60
 WRITEBACK_MAX_AGE_SECONDS = 3600
+WRITEBACK_RETRY_WINDOW_ERROR = "surface retry delay exceeds writeback lifetime"
 WRITEBACK_CLAIM_BATCH = 16
 WRITEBACK_WORKSPACE_BATCH = 16
 WRITEBACK_WORKSPACE_CONCURRENCY = 4
@@ -666,6 +667,23 @@ WorkspaceResolver = Callable[[Request, SurfaceAuth], Awaitable[UUID | Response |
 SurfaceContextFactory = Callable[[UUID, str], SurfaceContext]
 
 
+class SurfaceDeliveryError(RuntimeError):
+    """A durable surface failure with external response details the poller can schedule by."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        http_status: int | None = None,
+        retry_after_seconds: int | None = None,
+    ) -> None:
+        if retry_after_seconds is not None and retry_after_seconds < 0:
+            raise ValueError("retry_after_seconds must be nonnegative")
+        self.http_status = http_status
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__(message)
+
+
 @dataclass(frozen=True)
 class SurfaceRoute:
     """One HTTP route a surface serves. Core mounts `handler` for `method` at
@@ -764,7 +782,10 @@ class _WritebackClaimLost(RuntimeError):
 
 
 class _WritebackDeliveryFailed(RuntimeError):
-    pass
+    def __init__(self, phase: Literal["post", "attach"], error: Exception) -> None:
+        self.phase = phase
+        self.error = error
+        super().__init__(str(error) or type(error).__name__)
 
 
 @dataclass(frozen=True)
@@ -838,15 +859,28 @@ class WritebackPoller:
             with ws(workspace_id):
                 rows = await self._claim(workspace_id)
                 renewals = [asyncio.create_task(self._renew_claim(row.turn_id)) for row in rows]
+                deferred_surfaces: set[str] = set()
                 try:
                     for row, renewal in zip(rows, renewals, strict=True):
+                        if row.surface in deferred_surfaces and row.reply_ref is None:
+                            continue
                         if row.last_error is not None:
                             log(
                                 "surface.writeback_retry",
                                 turn_id=str(row.turn_id),
                                 last_error=row.last_error,
                             )
-                        await self._deliver(workspace_id, row.turn_id, row.reply_ref, renewal)
+                        delayed_until = await self._deliver(
+                            workspace_id,
+                            row.turn_id,
+                            row.reply_ref,
+                            renewal,
+                        )
+                        if delayed_until is not None:
+                            deferred_surfaces.add(row.surface)
+                            await self._defer_surface_posts(
+                                workspace_id, row.surface, delayed_until
+                            )
                 finally:
                     for renewal in renewals:
                         if not renewal.done():
@@ -870,21 +904,44 @@ class WritebackPoller:
             .cte("claimable")
         )
         async with workspace_tx() as connection:
+            turn_ids = (
+                (
+                    await connection.execute(
+                        sa.update(tables.writeback)
+                        .where(tables.writeback.c.turn_id == claimable.c.turn_id)
+                        .values(
+                            status=WRITEBACK_CLAIMED,
+                            claimed_by=self.worker_id,
+                            claim_expires_at=now + timedelta(seconds=WRITEBACK_CLAIM_SECONDS),
+                            updated_at=sa.func.now(),
+                        )
+                        .returning(tables.writeback.c.turn_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if not turn_ids:
+                return ()
             return (
                 await connection.execute(
-                    sa.update(tables.writeback)
-                    .where(tables.writeback.c.turn_id == claimable.c.turn_id)
-                    .values(
-                        status=WRITEBACK_CLAIMED,
-                        claimed_by=self.worker_id,
-                        claim_expires_at=now + timedelta(seconds=WRITEBACK_CLAIM_SECONDS),
-                        updated_at=sa.func.now(),
-                    )
-                    .returning(
+                    sa.select(
                         tables.writeback.c.turn_id,
                         tables.writeback.c.reply_ref,
                         tables.writeback.c.last_error,
+                        tables.conversation.c.surface,
                     )
+                    .select_from(
+                        tables.writeback.join(
+                            tables.turn,
+                            tables.turn.c.id == tables.writeback.c.turn_id,
+                        ).join(
+                            tables.conversation,
+                            tables.conversation.c.id == tables.turn.c.conversation_id,
+                        )
+                    )
+                    .where(tables.writeback.c.turn_id.in_(turn_ids))
+                    .order_by(tables.writeback.c.created_at)
                 )
             ).all()
 
@@ -894,18 +951,54 @@ class WritebackPoller:
         turn_id: UUID,
         reply_ref: str | None,
         renewal: asyncio.Task[None],
-    ) -> None:
+    ) -> datetime | None:
+        started_at = datetime.now(UTC)
         try:
             await self._deliver_with_lease(workspace_id, turn_id, reply_ref, renewal)
         except _WritebackClaimLost:
             log("surface.writeback_claim_lost", turn_id=str(turn_id))
+            return None
         except _WritebackDeliveryFailed as error:
-            log(
-                "surface.writeback_post_failed",
-                turn_id=str(turn_id),
-                error_class=type(error.__cause__).__name__,
+            outcome, last_error, next_attempt_at, post_not_before = await self._fail_or_retry(
+                turn_id, error
             )
-            await self._fail_or_retry(turn_id, str(error)[:MAX_WRITEBACK_ERROR_CHARS])
+            if outcome == "claim_lost":
+                log("surface.writeback_claim_lost", turn_id=str(turn_id))
+                return None
+            match error.error:
+                case SurfaceDeliveryError() as delivery_error:
+                    http_status = delivery_error.http_status
+                    retry_after_seconds = (
+                        min(
+                            delivery_error.retry_after_seconds,
+                            WRITEBACK_MAX_AGE_SECONDS + 1,
+                        )
+                        if delivery_error.retry_after_seconds is not None
+                        else None
+                    )
+                case _:
+                    http_status = None
+                    retry_after_seconds = None
+            log(
+                "surface.writeback_failed",
+                turn_id=str(turn_id),
+                phase=error.phase,
+                outcome=outcome,
+                error_class=type(error.error).__name__,
+                last_error=last_error,
+                http_status=http_status,
+                retry_after_seconds=retry_after_seconds,
+                next_attempt_at=next_attempt_at,
+                elapsed_ms=int((datetime.now(UTC) - started_at).total_seconds() * 1_000),
+            )
+            return post_not_before
+        else:
+            log(
+                "surface.writeback_delivered",
+                turn_id=str(turn_id),
+                elapsed_ms=int((datetime.now(UTC) - started_at).total_seconds() * 1_000),
+            )
+            return None
 
     async def _deliver_with_lease(
         self,
@@ -953,12 +1046,12 @@ class WritebackPoller:
             try:
                 reply_ref = await spec.post(context, writeback)
             except Exception as error:
-                raise _WritebackDeliveryFailed(str(error)) from error
+                raise _WritebackDeliveryFailed("post", error) from error
             await self._record_ref(turn_id, reply_ref)
         try:
             await spec.attach(context, writeback, reply_ref)
         except Exception as error:
-            raise _WritebackDeliveryFailed(str(error)) from error
+            raise _WritebackDeliveryFailed("attach", error) from error
         await self._mark_delivered(turn_id)
 
     async def _renew_claim(self, turn_id: UUID) -> None:
@@ -1063,7 +1156,6 @@ class WritebackPoller:
                 )
                 .values(
                     status=WRITEBACK_DELIVERED,
-                    last_error=None,
                     claimed_by=None,
                     claim_expires_at=None,
                     updated_at=sa.func.now(),
@@ -1072,25 +1164,130 @@ class WritebackPoller:
         if updated.rowcount != 1:
             raise _WritebackClaimLost(str(turn_id))
 
-    async def _fail_or_retry(self, turn_id: UUID, last_error: str) -> None:
+    async def _fail_or_retry(
+        self, turn_id: UUID, error: _WritebackDeliveryFailed
+    ) -> tuple[str, str, datetime | None, datetime | None]:
         now = datetime.now(UTC)
         give_up_before = now - timedelta(seconds=WRITEBACK_MAX_AGE_SECONDS)
-        aged_out = tables.writeback.c.created_at <= give_up_before
+        match error.error:
+            case SurfaceDeliveryError() as delivery_error:
+                retry_after_seconds = delivery_error.retry_after_seconds
+            case _:
+                retry_after_seconds = None
+        bounded_retry_after = (
+            min(retry_after_seconds, WRITEBACK_MAX_AGE_SECONDS + 1)
+            if retry_after_seconds is not None
+            else None
+        )
+        retry_seconds = min(
+            bounded_retry_after
+            if bounded_retry_after is not None
+            else WRITEBACK_RETRY_BACKOFF_SECONDS,
+            WRITEBACK_MAX_AGE_SECONDS,
+        )
+        requested_retry_at = now + timedelta(seconds=retry_seconds)
+        retry_detail = (
+            f"; retry_after_seconds={bounded_retry_after}"
+            if bounded_retry_after is not None
+            else ""
+        )
+        last_error = f"{error}{retry_detail}"[:MAX_WRITEBACK_ERROR_CHARS]
+        async with workspace_tx() as connection:
+            retry_at = requested_retry_at
+            terminal = sa.or_(
+                tables.writeback.c.created_at <= give_up_before,
+                tables.writeback.c.created_at
+                < retry_at - timedelta(seconds=WRITEBACK_MAX_AGE_SECONDS),
+                sa.true()
+                if bounded_retry_after is not None
+                and bounded_retry_after > WRITEBACK_MAX_AGE_SECONDS
+                else sa.false(),
+            )
+            row = (
+                await connection.execute(
+                    sa.update(tables.writeback)
+                    .where(
+                        tables.writeback.c.turn_id == turn_id,
+                        tables.writeback.c.claimed_by == self.worker_id,
+                    )
+                    .values(
+                        status=sa.case((terminal, WRITEBACK_FAILED), else_=WRITEBACK_PENDING),
+                        claim_expires_at=sa.case(
+                            (terminal, None),
+                            else_=retry_at,
+                        ),
+                        claimed_by=None,
+                        last_error=last_error,
+                        updated_at=sa.func.now(),
+                    )
+                    .returning(tables.writeback.c.status, tables.writeback.c.claim_expires_at)
+                )
+            ).one_or_none()
+            outcome = (
+                "claim_lost"
+                if row is None
+                else "failed"
+                if row.status == WRITEBACK_FAILED
+                else "retry"
+            )
+        batch_post_not_before = (
+            retry_at if bounded_retry_after is not None and error.phase == "post" else None
+        )
+        return (
+            outcome,
+            last_error,
+            None if row is None else row.claim_expires_at,
+            batch_post_not_before,
+        )
+
+    async def _defer_surface_posts(
+        self, workspace_id: UUID, surface: str, not_before: datetime
+    ) -> None:
+        surface_turns = (
+            sa.select(tables.turn.c.id)
+            .select_from(
+                tables.turn.join(
+                    tables.conversation,
+                    tables.conversation.c.id == tables.turn.c.conversation_id,
+                )
+            )
+            .where(
+                tables.conversation.c.surface == surface,
+                tables.turn.c.status.in_(TERMINAL_TURN_STATUSES),
+            )
+        )
+        terminal = tables.writeback.c.created_at < not_before - timedelta(
+            seconds=WRITEBACK_MAX_AGE_SECONDS
+        )
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.update(tables.writeback)
                 .where(
-                    tables.writeback.c.turn_id == turn_id,
-                    tables.writeback.c.claimed_by == self.worker_id,
+                    tables.writeback.c.workspace_id == workspace_id,
+                    tables.writeback.c.reply_ref.is_(None),
+                    tables.writeback.c.turn_id.in_(surface_turns),
+                    sa.or_(
+                        sa.and_(
+                            tables.writeback.c.status == WRITEBACK_CLAIMED,
+                            tables.writeback.c.claimed_by == self.worker_id,
+                        ),
+                        sa.and_(
+                            tables.writeback.c.status == WRITEBACK_PENDING,
+                            sa.or_(
+                                tables.writeback.c.claim_expires_at.is_(None),
+                                tables.writeback.c.claim_expires_at < not_before,
+                            ),
+                        ),
+                    ),
                 )
                 .values(
-                    status=sa.case((aged_out, WRITEBACK_FAILED), else_=WRITEBACK_PENDING),
-                    claim_expires_at=sa.case(
-                        (aged_out, None),
-                        else_=now + timedelta(seconds=WRITEBACK_RETRY_BACKOFF_SECONDS),
-                    ),
+                    status=sa.case((terminal, WRITEBACK_FAILED), else_=WRITEBACK_PENDING),
                     claimed_by=None,
-                    last_error=last_error,
+                    claim_expires_at=sa.case((terminal, None), else_=not_before),
+                    last_error=sa.case(
+                        (terminal, WRITEBACK_RETRY_WINDOW_ERROR),
+                        else_=tables.writeback.c.last_error,
+                    ),
                     updated_at=sa.func.now(),
                 )
             )

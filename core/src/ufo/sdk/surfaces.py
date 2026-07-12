@@ -21,6 +21,9 @@ from ufo.ext.surface import (
     SurfaceContext as SurfaceContext,
 )
 from ufo.ext.surface import (
+    SurfaceDeliveryError as SurfaceDeliveryError,
+)
+from ufo.ext.surface import (
     SurfaceInstallationConflict as SurfaceInstallationConflict,
 )
 from ufo.ext.surface import (

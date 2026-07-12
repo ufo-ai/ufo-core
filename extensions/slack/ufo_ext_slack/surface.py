@@ -56,6 +56,7 @@ from ufo.sdk.surfaces import (
     SharedArtifact,
     SurfaceAuth,
     SurfaceContext,
+    SurfaceDeliveryError,
     SurfaceWorkspaceUnknown,
     TurnContext,
     Writeback,
@@ -256,6 +257,7 @@ SLACK_INVALID_BLOCKS_ERROR = "invalid_blocks"
 SLACK_OVERSIZE_HEADING = "**Attachments (too large to upload):**"
 
 SLACK_API_TIMEOUT_SECONDS = 20
+SLACK_RETRY_AFTER_MAX_SECONDS = 2_147_483_647
 SLACK_UPLOAD_READ_TIMEOUT_SECONDS = 60
 SLACK_UPLOAD_WRITE_TIMEOUT_SECONDS = 600
 SLACK_DOWNLOAD_TIMEOUT_SECONDS = 600
@@ -999,6 +1001,7 @@ class ThreadStatus:
                 shown, sent_at = text, time.monotonic()
         finally:
             upcoming.cancel()
+            await asyncio.gather(upcoming, return_exceptions=True)
 
 
 _STATUS_TASKS: dict[UUID, asyncio.Task[None]] = {}
@@ -1262,7 +1265,32 @@ async def _chat_post(
             "Content-Type": "application/json; charset=utf-8",
         },
     )
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as error:
+        try:
+            error_payload = response.json()
+        except ValueError:
+            error_code = None
+        else:
+            match error_payload:
+                case {"error": str() as value} if value:
+                    error_code = value
+                case _:
+                    error_code = None
+        retry_after_seconds = None
+        retry_after = response.headers.get("retry-after")
+        if response.status_code == 429 and retry_after is not None and retry_after.isdecimal():
+            try:
+                retry_after_seconds = min(int(retry_after), SLACK_RETRY_AFTER_MAX_SECONDS)
+            except ValueError:
+                retry_after_seconds = SLACK_RETRY_AFTER_MAX_SECONDS
+        error_suffix = f": {error_code}" if error_code is not None else ""
+        raise SurfaceDeliveryError(
+            f"chat.postMessage HTTP {response.status_code}{error_suffix}",
+            http_status=response.status_code,
+            retry_after_seconds=retry_after_seconds,
+        ) from error
     return response.json()
 
 
