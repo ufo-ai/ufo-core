@@ -2,8 +2,8 @@
 file — grading the artifact, not just the trajectory. `documents` is pure `load_skill` +
 `bash`/`write`/`read`, so the case asserts the builtin tools the workflow actually requires."""
 
-from ufo_ext_eval_harness.capability import CapabilityCase, Grader
-from ufo_ext_eval_harness.scorers import combine, exact_scorer, required_tools_scorer
+from evals.harness.capability import CapabilityCase, Grader
+from evals.harness.scorers import combine, exact_scorer, required_tools_scorer
 
 SPECS: list[tuple[str, str, Grader]] = [
     (

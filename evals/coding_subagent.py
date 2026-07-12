@@ -2,8 +2,8 @@
 delegated to it (`spawn_subagent` with profile "coding") and relayed the correct result back —
 grading the delegation lane, not just the answer."""
 
-from ufo_ext_eval_harness.capability import CapabilityCase, Grader
-from ufo_ext_eval_harness.scorers import combine, exact_scorer, lane_scorer
+from evals.harness.capability import CapabilityCase, Grader
+from evals.harness.scorers import combine, exact_scorer, lane_scorer
 
 SPECS: list[tuple[str, str, Grader]] = [
     (
@@ -17,6 +17,6 @@ SPECS: list[tuple[str, str, Grader]] = [
 ]
 
 CASES = tuple(
-    CapabilityCase(name, brief, grader, digest_tag=f"deliverable:{name}")
+    CapabilityCase(name, brief, grader, digest_tag=f"delegation:{name}")
     for name, brief, grader in SPECS
 )

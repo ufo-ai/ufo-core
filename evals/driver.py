@@ -12,18 +12,19 @@ from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
-from cryptography.fernet import Fernet
 from dbos import DBOSClient
 
 from ufo.blob import BlobNotFound, BlobStore
 from ufo.config import Config
-from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, Trajectory, context_for
+from ufo.ext.loader import load_manifests
 from ufo.governance import prompt_digest
+from ufo.models.registry import model_registry
 from ufo.schema import tables
 from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.transcript import TranscriptDecodeError, decode, transcript_key
+from ufo.workspace import ws
 
 EVAL_SURFACE = "eval"
 POLL_INTERVAL_SECONDS = 1.0
@@ -31,30 +32,37 @@ MAX_POLLS = 300
 TERMINAL_STATUSES = frozenset({"done", "cancelled", "failed"})
 
 
-async def resolve_workspace_and_agent(agent_name: str) -> tuple[UUID, UUID, str]:
-    """The single workspace and the named agent's id + prompt — the target every eval case runs."""
-    async with workspace_tx() as connection:
-        workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
-        agent = (
-            await connection.execute(
-                sa.select(tables.agent.c.id, tables.agent.c.prompt).where(
-                    tables.agent.c.workspace_id == workspace_id,
-                    tables.agent.c.name == agent_name,
+async def resolve_workspace_and_agent(
+    agent_name: str, workspace_id: UUID | None = None
+) -> tuple[UUID, UUID, str, str]:
+    """Resolve the named target agent in an explicit workspace or the dedicated workspace."""
+    if workspace_id is None:
+        async with workspace_tx() as connection:
+            workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            agent = (
+                await connection.execute(
+                    sa.select(tables.agent.c.id, tables.agent.c.prompt, tables.agent.c.model).where(
+                        tables.agent.c.workspace_id == workspace_id,
+                        tables.agent.c.name == agent_name,
+                    )
                 )
-            )
-        ).one()
-    return workspace_id, agent.id, agent.prompt
+            ).one()
+    return workspace_id, agent.id, agent.prompt, agent.model
 
 
 def eval_context(config: Config, workspace_id: UUID, blob: BlobStore) -> ExtensionContext:
     dbos = DBOSClient(system_database_url=config.database.system_url)
     return context_for(
-        workspace_id,
-        "eval_harness",
+        "evals",
         frozenset(),
-        CredentialStore(fernet=Fernet(Fernet.generate_key())),
         blob=blob,
-        invoker=AdmissionInvoker(admission=Admission(dbos=dbos), workspace_id=workspace_id),
+        invoker=AdmissionInvoker(
+            admission=Admission(dbos=dbos, durable_surfaces=frozenset()),
+            workspace_id=workspace_id,
+        ),
+        model_resolver=model_registry(config, load_manifests(config.pack.name)),
     )
 
 

@@ -4,13 +4,13 @@ STABLE, well-known page whose content will not drift. A restraint case checks th
 reach for the browser on a question it can answer from its own knowledge. `web_dependent` marks the
 navigation cases: a real outage infra-excludes them rather than counting a capability failure."""
 
-from ufo_ext_eval_harness.capability import (
+from evals.harness.capability import (
     CapabilityCase,
     CapabilityOutput,
     CapabilityVerdict,
     Grader,
 )
-from ufo_ext_eval_harness.scorers import combine, exact_scorer, restraint_scorer
+from evals.harness.scorers import combine, exact_scorer, restraint_scorer
 
 BROWSER_TOOLS = (
     "navigate",
@@ -29,11 +29,15 @@ PAGE_READ_TOOLS = frozenset({"get_page_text", "read_page", "find"})
 
 
 async def _browsed(output: CapabilityOutput) -> CapabilityVerdict:
-    if "navigate" not in output.tools:
-        return CapabilityVerdict(False, "did not call navigate")
-    if not any(tool in PAGE_READ_TOOLS for tool in output.tools):
-        return CapabilityVerdict(False, f"did not read the page: {list(output.tools)}")
-    return CapabilityVerdict(True, f"browsed: {', '.join(output.tools)}")
+    navigated = [call for call in output.calls if call.name == "navigate" and call.succeeded]
+    if not navigated:
+        return CapabilityVerdict(False, "navigate did not complete successfully")
+    readers = [
+        call.name for call in output.calls if call.name in PAGE_READ_TOOLS and call.succeeded
+    ]
+    if not readers:
+        return CapabilityVerdict(False, "no page-reading tool completed successfully")
+    return CapabilityVerdict(True, f"browsed: navigate, {', '.join(readers)}")
 
 
 NAVIGATION_SPECS: list[tuple[str, str, Grader]] = [

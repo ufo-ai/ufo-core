@@ -28,6 +28,9 @@ class EvalReport:
     suite: str
     digest: str
     cases: tuple[EvalCaseResult, ...]
+    target_model: str | None = None
+    judge_model: str | None = None
+    judge_revision: str | None = None
 
     @property
     def scored(self) -> tuple[EvalCaseResult, ...]:
@@ -58,6 +61,9 @@ class EvalReport:
             "name": self.name,
             "suite": self.suite,
             "digest": self.digest,
+            "targetModel": self.target_model,
+            "judgeModel": self.judge_model,
+            "judgeRevision": self.judge_revision,
             "passed": self.passed,
             "passRate": self.pass_rate,
             "excludedCount": self.excluded_count,
@@ -79,10 +85,6 @@ def digest_payload(payload: Mapping[str, Json]) -> str:
     return f"sha256:{sha256(raw).hexdigest()}"
 
 
-# Substrings in a tool error that mean the EXTERNAL service failed (quota, rate limit, 5xx, network)
-# rather than the agent's mistake. A web-dependent case that fails behind one of these is
-# infra-excluded — counted as NEITHER pass nor fail, out of both the suite verdict
-# and the pass rate (never a pass).
 INFRA_ERROR_MARKERS = (
     "402",
     "429",

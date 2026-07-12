@@ -15,7 +15,6 @@ _spec.loader.exec_module(gates)
 ROGUE = Path("extensions/rogue/rogue.py")
 CORE_FILE = Path("core/src/ufo/db.py")
 EXT_TEST = Path("extensions/exa/tests/test_ext_exa.py")
-EXT_EVAL = Path("extensions/research/evals/web_research.py")
 EXT_SHIPPED_MODULE = Path("extensions/exa/ufo_ext_exa.py")
 EXT_SHIPPED_PACKAGE = Path("extensions/memory/ufo_ext_memory/store.py")
 
@@ -41,11 +40,8 @@ def test_sdk_only_gate_ignores_core_internal_imports() -> None:
     assert gates._sdk_import_failures(trees) == []
 
 
-def test_sdk_only_gate_exempts_extension_test_and_eval_scaffold() -> None:
-    trees = {
-        EXT_TEST: ast.parse("from ufo.db import workspace_tx\n"),
-        EXT_EVAL: ast.parse("from ufo.config import Config\n"),
-    }
+def test_sdk_only_gate_exempts_extension_test_scaffold() -> None:
+    trees = {EXT_TEST: ast.parse("from ufo.db import workspace_tx\n")}
     assert gates._sdk_import_failures(trees) == []
 
 

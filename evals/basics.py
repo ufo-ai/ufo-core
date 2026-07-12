@@ -2,8 +2,8 @@
 exact string, numeric within tolerance, and a shape predicate. Deterministic, no tool trajectory
 required."""
 
-from ufo_ext_eval_harness.capability import CapabilityCase
-from ufo_ext_eval_harness.scorers import exact_scorer, numeric_scorer, predicate_scorer
+from evals.harness.capability import CapabilityCase
+from evals.harness.scorers import exact_scorer, numeric_scorer, predicate_scorer
 
 
 def _three_bullets(text: str) -> bool:

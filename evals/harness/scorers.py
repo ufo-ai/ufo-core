@@ -6,16 +6,25 @@ Every grader FAILS on bad output."""
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable
 
-from ufo_ext_eval_harness.capability import CapabilityOutput, CapabilityVerdict, Grader
+from evals.harness.artifact_checks import (
+    ArtifactCheck,
+    board_presentation,
+    forecast_workbook,
+    site_archive,
+)
+from evals.harness.capability import (
+    CapabilityOutput,
+    CapabilityVerdict,
+    Grader,
+    SharedArtifact,
+)
 
 ANSWER_TOLERANCE = 0.05
 
-# ufo's tool names: the web pack contributes search_web/fetch_url; the file/shell builtins are
-# read/write/edit/bash plus the dedicated grep/glob search tools. Skills load via load_skill;
-# delegation spawns via spawn_subagent.
 WEB_TOOLS = ("search_web", "fetch_url")
 LOCAL_FS_TOOLS = frozenset({"read", "write", "edit", "bash", "grep", "glob"})
 
@@ -84,13 +93,13 @@ def _safe(predicate: Callable[[str], bool], text: str) -> bool:
 def required_tools_scorer(
     required: tuple[str, ...], orderings: tuple[tuple[str, str], ...] = ()
 ) -> Grader:
-    """Every tool in `required` ran, and each `(before, after)` ordering held."""
+    """Every required tool completed successfully, and each requested ordering held."""
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
-        names = list(output.tools)
+        names = [call.name for call in output.calls if call.succeeded]
         missing = [tool for tool in required if tool not in names]
         if missing:
-            return CapabilityVerdict(False, f"did not call: {', '.join(missing)}")
+            return CapabilityVerdict(False, f"did not complete successfully: {', '.join(missing)}")
         for before, after in orderings:
             if names.index(before) > names.index(after):
                 return CapabilityVerdict(False, f"{before} must precede {after}")
@@ -112,63 +121,112 @@ def restraint_scorer(forbidden: tuple[str, ...]) -> Grader:
 
 
 def local_fs_scorer() -> Grader:
-    """A local-file task: the agent reaches for file/bash, not the web."""
+    """A local-file task: a file/bash call succeeds and no web call is attempted."""
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
-        names = output.tools
-        if not any(tool in LOCAL_FS_TOOLS for tool in names):
+        successful = [call.name for call in output.calls if call.succeeded]
+        if not any(tool in LOCAL_FS_TOOLS for tool in successful):
             return CapabilityVerdict(
-                False, f"used no local filesystem tool: {list(names) or '(none)'}"
+                False, f"completed no local filesystem tool: {successful or '(none)'}"
             )
-        web = [tool for tool in names if tool in WEB_TOOLS]
+        web = [tool for tool in output.tools if tool in WEB_TOOLS]
         if web:
             return CapabilityVerdict(False, f"reached for web on a local task: {', '.join(web)}")
-        return CapabilityVerdict(True, f"local fs: {', '.join(names)}")
+        return CapabilityVerdict(True, f"local fs: {', '.join(successful)}")
 
     return grade
 
 
-def first_loaded_skill(output: CapabilityOutput) -> str | None:
-    for call in output.calls:
-        if call.name == "load_skill":
-            name = call.input.get("name")
-            return str(name) if name else None
-    return None
-
-
 def skill_scorer(expected: str, distractor: str) -> Grader:
-    """Pass iff the agent's FIRST skill load was the matching skill (not the distractor)."""
+    """Pass iff the first skill load succeeds and matches the task instead of its distractor."""
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
-        first = first_loaded_skill(output)
+        first = next((call for call in output.calls if call.name == "load_skill"), None)
         if first is None:
-            return CapabilityVerdict(
-                False, f"did not load matching skill {expected!r} (loaded: none)"
-            )
-        if first == distractor:
-            return CapabilityVerdict(False, f"loaded the irrelevant skill {distractor!r} first")
-        if first != expected:
-            return CapabilityVerdict(False, f"loaded {first!r} first, expected {expected!r}")
+            return CapabilityVerdict(False, f"did not load matching skill {expected!r}")
+        loaded = first.input.get("name")
+        name = str(loaded) if loaded else None
+        if name == distractor:
+            return CapabilityVerdict(False, f"loaded the distractor {distractor!r} first")
+        if name != expected:
+            return CapabilityVerdict(False, f"loaded {name!r} first, expected {expected!r}")
+        if not first.has_result:
+            return CapabilityVerdict(False, f"skill {expected!r} produced no result")
+        if first.is_error:
+            return CapabilityVerdict(False, f"skill {expected!r} failed: {first.result[:120]}")
         return CapabilityVerdict(True, f"loaded {expected!r}")
 
     return grade
 
 
-def first_spawn_type(output: CapabilityOutput) -> str | None:
+ArtifactValidator = Callable[[bytes], ArtifactCheck]
+
+
+def shared_artifact_scorer(suffix: str, validate: ArtifactValidator | None = None) -> Grader:
+    """Pass iff `share_file` succeeds and its durable artifact passes optional inspection."""
+
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        if output.artifact_error:
+            return CapabilityVerdict(False, f"artifact inspection failed: {output.artifact_error}")
+        delivered = _delivered_artifact(output, suffix)
+        if delivered is None:
+            return CapabilityVerdict(False, f"did not successfully share a {suffix} artifact")
+        if validate is None:
+            return CapabilityVerdict(True, f"shared {delivered.name}")
+        checked = validate(delivered.content)
+        return CapabilityVerdict(checked.passed, f"{delivered.name}: {checked.reason}")
+
+    return grade
+
+
+def site_archive_scorer(expected_heading: str) -> Grader:
+    return shared_artifact_scorer(
+        ".tar.gz", lambda content: site_archive(content, expected_heading)
+    )
+
+
+def forecast_workbook_scorer(expected_revenue: tuple[int, ...]) -> Grader:
+    return shared_artifact_scorer(
+        ".xlsx", lambda content: forecast_workbook(content, expected_revenue)
+    )
+
+
+def board_presentation_scorer(expected_slides: int, expected_revenue: tuple[int, ...]) -> Grader:
+    return shared_artifact_scorer(
+        ".pptx",
+        lambda content: board_presentation(content, expected_slides, expected_revenue),
+    )
+
+
+def _delivered_artifact(output: CapabilityOutput, suffix: str) -> SharedArtifact | None:
+    artifacts = {artifact.name: artifact for artifact in output.artifacts}
     for call in output.calls:
-        if call.name == "spawn_subagent":
-            kind = call.input.get("subagent_type") or call.input.get("profile")
-            return str(kind) if kind else "subagent"
+        if call.name != "share_file" or not call.succeeded:
+            continue
+        try:
+            payload = json.loads(call.result)
+        except json.JSONDecodeError:
+            continue
+        match payload:
+            case {"name": str() as name} if name.lower().endswith(suffix.lower()):
+                if artifact := artifacts.get(name):
+                    return artifact
     return None
 
 
 def lane_scorer(acceptable: frozenset[str]) -> Grader:
-    """Pass iff the agent delegated and its chosen subagent type falls in `acceptable`."""
+    """Pass iff the first delegation succeeds in an acceptable subagent lane."""
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
-        chosen = first_spawn_type(output)
-        if chosen is None:
+        first = next((call for call in output.calls if call.name == "spawn_subagent"), None)
+        if first is None:
             return CapabilityVerdict(False, "did not delegate")
+        chosen_raw = first.input.get("subagent_type") or first.input.get("profile")
+        chosen = str(chosen_raw) if chosen_raw else "subagent"
+        if not first.has_result:
+            return CapabilityVerdict(False, f"{chosen!r} delegation produced no result")
+        if first.is_error:
+            return CapabilityVerdict(False, f"{chosen!r} delegation failed: {first.result[:120]}")
         if chosen in acceptable:
             return CapabilityVerdict(True, f"spawned {chosen!r}")
         return CapabilityVerdict(False, f"spawned {chosen!r}, expected one of {sorted(acceptable)}")

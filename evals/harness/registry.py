@@ -7,9 +7,9 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from ufo_ext_eval_harness.capability import CapabilityCase, run_capability_case
-from ufo_ext_eval_harness.harness import EvalReport, digest_payload
-from ufo_ext_eval_harness.target import CapabilityTarget
+from evals.harness.capability import CapabilityCase, run_capability_case
+from evals.harness.harness import EvalReport, digest_payload
+from evals.harness.target import CapabilityTarget
 
 type EvalRunner = Callable[[CapabilityTarget], Awaitable[EvalReport]]
 
@@ -45,9 +45,3 @@ def selected_tasks(
     if missing:
         raise ValueError(f"unknown eval task: {', '.join(missing)}")
     return tuple(by_name[name] for name in names)
-
-
-async def run_tasks(
-    tasks: tuple[EvalTask, ...], target: CapabilityTarget, names: tuple[str, ...] = ()
-) -> tuple[EvalReport, ...]:
-    return tuple([await task.run(target) for task in selected_tasks(tasks, names)])

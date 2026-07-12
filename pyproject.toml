@@ -1,7 +1,7 @@
 [project]
 name = "ufo"
 version = "0.1.0"
-description = "An agent runtime a developer can run, read, and extend — core, every first-party extension, and every pack in one install"
+description = "An agent runtime with its first-party extensions, packs, and operator evals"
 requires-python = ">=3.12"
 dependencies = [
     "aiobotocore>=3.7.0",
@@ -45,7 +45,6 @@ docker = "ufo_ext_docker:manifest"
 documents = "ufo_ext_documents.manifest:manifest"
 e2b = "ufo_ext_e2b:manifest"
 embed_openai = "ufo_ext_embed_openai:manifest"
-eval_harness = "ufo_ext_eval_harness.manifest:manifest"
 exa = "ufo_ext_exa:manifest"
 index_default = "ufo_ext_index_default:manifest"
 knowledge_graph = "ufo_ext_knowledge_graph.manifest:manifest"
@@ -96,7 +95,8 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-# One wheel bundles core, every first-party extension, and every pack. Package extensions and packs
+# One wheel bundles core, every first-party extension, every pack, and the eval runner. Package
+# extensions and packs
 # (a source directory whose basename is the import name) map 1:1 through `packages`; the source tree
 # stays in core/, extensions/*, packs/*, testsupport/ exactly as it lives.
 [tool.hatch.build.targets.wheel]
@@ -108,7 +108,7 @@ packages = [
     "extensions/composio/ufo_ext_composio",
     "extensions/connectors/ufo_ext_connectors",
     "extensions/documents/ufo_ext_documents",
-    "extensions/eval_harness/ufo_ext_eval_harness",
+    "evals",
     "extensions/page_alerts/ufo_ext_page_alerts",
     "extensions/knowledge_graph/ufo_ext_knowledge_graph",
     "extensions/memory/ufo_ext_memory",
@@ -164,7 +164,7 @@ extend-exclude = ["extensions/**/skills/**", ".worktrees"]
 select = ["E", "F", "W", "I", "UP", "B", "ASYNC", "PTH", "RUF", "TID", "ERA"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["ufo"]
+known-first-party = ["evals", "ufo"]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "requests" = { msg = "sync HTTP client blocks the loop; use httpx.AsyncClient" }
@@ -177,8 +177,8 @@ no_implicit_optional = true
 warn_unused_ignores = true
 warn_redundant_casts = true
 mypy_path = "core/src"
-files = ["core/src/ufo", "extensions", "gates.py"]
-exclude = ["extensions/.*/skills/", "extensions/.*/tests/", "extensions/.*/evals/"]
+files = ["core/src/ufo", "extensions", "evals", "gates.py"]
+exclude = ["extensions/.*/skills/", "extensions/.*/tests/"]
 
 [[tool.mypy.overrides]]
 module = ["asyncpg", "aiobotocore.*", "botocore.*", "lz4.*"]

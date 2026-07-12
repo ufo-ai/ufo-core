@@ -3,8 +3,8 @@ live web lookup (the research pack's `search_web`/`fetch_url`) and has a stable,
 checkable answer, so grading the answer never goes stale even though the fact must be looked up.
 `web_dependent` marks every case: a real outage infra-excludes it rather than counting a failure."""
 
-from ufo_ext_eval_harness.capability import CapabilityCase, Grader
-from ufo_ext_eval_harness.scorers import (
+from evals.harness.capability import CapabilityCase, Grader
+from evals.harness.scorers import (
     combine,
     exact_scorer,
     numeric_scorer,

@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from ufo.ext.manifest import Manifest, Pack
 
 ROOT = Path(__file__).parent
-SOURCE_ROOTS = ("core", "extensions", "packs")
+SOURCE_ROOTS = ("core", "extensions", "packs", "evals")
 CORE_SRC = Path("core/src/ufo")
 FORBIDDEN_MODULE_NAMES = {"utils", "helpers", "common"}
 DB_MODULE = CORE_SRC / "db.py"
@@ -25,7 +25,7 @@ ENVELOPE_COLUMNS = {"workspace_id", "created_at", "updated_at"}
 SCHEMA_TABLES = CORE_SRC / "schema" / "tables.py"
 EXTENSIONS_ROOT = "extensions"
 PACKS_ROOT = "packs"
-EXT_SCAFFOLD_DIRS = frozenset({"tests", "evals"})
+EXT_SCAFFOLD_DIRS = frozenset({"tests"})
 SDK_PUBLIC_PREFIX = "ufo.sdk"
 MANIFEST_MODULE = CORE_SRC / "ext" / "manifest.py"
 SAMPLE_MODULE = Path(EXTENSIONS_ROOT) / "sample" / "ufo_ext_sample.py"
@@ -130,10 +130,9 @@ def _boundary_failures(trees: dict[Path, ast.Module]) -> list[str]:
 
 
 def _is_ext_scaffold(rel: Path) -> bool:
-    """A test or eval file under an extension — `extensions/<name>/{tests,evals}/...`. It is an
-    in-repo consumer of the extension, never shipped in its wheel, so it reaches core internals for
-    setup exactly as core's own tests do; the SDK seam is held only for the shipped package
-    (`extensions/<name>/<module>`), never for its test/eval scaffold."""
+    """A test under an extension is an in-repo consumer, never shipped in its wheel, so it reaches
+    core internals for setup exactly as core's own tests do. The SDK seam is held only for the
+    shipped package (`extensions/<name>/<module>`), never for its test scaffold."""
     return len(rel.parts) > 2 and rel.parts[2] in EXT_SCAFFOLD_DIRS
 
 

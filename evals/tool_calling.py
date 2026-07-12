@@ -1,10 +1,10 @@
 """Trajectory cases: score the agent's real tool choices, not its prose — required tools in the
 right order, restraint on questions it can answer from its own knowledge, and file/shell (not web)
-on a local task. No LLM judge, no variance. A `web_dependent` case infra-excludes on a web outage —
-the grader checks the agent CALLED the web tool, which holds even when the call errors."""
+on a local task. No LLM judge, no variance. Required tools count only when their transcript result
+completed without error; a `web_dependent` case behind a provider outage is infra-excluded."""
 
-from ufo_ext_eval_harness.capability import CapabilityCase, Grader
-from ufo_ext_eval_harness.scorers import (
+from evals.harness.capability import CapabilityCase, Grader
+from evals.harness.scorers import (
     WEB_TOOLS,
     local_fs_scorer,
     required_tools_scorer,

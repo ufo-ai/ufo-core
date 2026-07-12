@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from html import escape
 
-from ufo_ext_eval_harness.harness import EvalCaseResult, EvalReport
+from evals.harness.harness import EvalCaseResult, EvalReport
 
 STYLE = """
 body { font: 14px/1.5 -apple-system, system-ui, sans-serif; margin: 2rem; color: #1a1a1a; }
@@ -32,6 +32,12 @@ def render_report_html(report: EvalReport) -> bytes:
     passed = sum(1 for case in scored if case.passed)
     header_class, header_label = _verdict(report.passed, False)
     rows = "\n".join(_case_section(case) for case in report.cases)
+    models = ""
+    if report.target_model is not None and report.judge_model is not None:
+        models = (
+            f" · target {escape(report.target_model)} · judge {escape(report.judge_model)} "
+            f"({escape(report.judge_revision or 'unversioned')})"
+        )
     doc = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -43,7 +49,7 @@ def render_report_html(report: EvalReport) -> bytes:
 <h1>{escape(report.name)}
 <span class="badge {header_class}">{header_label}</span></h1>
 <div class="meta">suite {escape(report.suite)} · {passed}/{len(scored)} passed ·
-{report.excluded_count} excluded · {escape(report.digest)}</div>
+{report.excluded_count} excluded · {escape(report.digest)}{models}</div>
 {rows}
 </body>
 </html>

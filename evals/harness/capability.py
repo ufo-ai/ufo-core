@@ -1,12 +1,8 @@
-"""One capability case: a message the live agent answers, and a grader over its final answer and
-the tool trajectory it took. The grader FAILS on bad output. A case runs against a `Target` that
-drives a real turn and reconstructs the answer + tool calls from the durable transcript.
-
-The trajectory is reconstructed from the transcript's structured tool-use / tool-result blocks —
-the call names and inputs ride faithfully, but a tool's result is only its transcript text (the
-transcript drops the structured result payload), so a result-payload grader cannot be scored from
-it. Per-case tool/skill scoping is not expressible either: `invoke` sends a message to an agent
-whose tool set is fixed by its config. Both want a structured trajectory-audit-trail core unit."""
+"""One capability case: a message the live agent answers, a deterministic grader over its answer
+and tool trajectory, and an optional semantic rubric. Deterministic checks run first; a passing
+rubric case then reaches the target's model judge. A case runs against a `Target` that drives a real
+turn and reconstructs the answer + tool calls from the durable transcript. Transcript tool results
+retain text, completion, and error state; the agent's configured tool set remains fixed per run."""
 
 from __future__ import annotations
 
@@ -14,10 +10,11 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ufo_ext_eval_harness.harness import EvalCaseResult, JsonObject, infra_error
+from evals.harness.harness import EvalCaseResult, JsonObject, infra_error
+from evals.harness.judge import JUDGE_REVISION, rubric_pass
 
 if TYPE_CHECKING:
-    from ufo_ext_eval_harness.target import CapabilityTarget
+    from evals.harness.target import CapabilityTarget
 
 
 @dataclass(frozen=True)
@@ -28,11 +25,25 @@ class CapabilityVerdict:
 
 @dataclass(frozen=True)
 class ToolInvocation:
-    """One tool call the agent made: its name, its input, and the transcript text of its result."""
+    """One tool call and the completion state reconstructed from its transcript result."""
 
     name: str
     input: JsonObject
     result: str = ""
+    has_result: bool = False
+    is_error: bool = False
+
+    @property
+    def succeeded(self) -> bool:
+        return self.has_result and not self.is_error
+
+
+@dataclass(frozen=True)
+class SharedArtifact:
+    """One artifact durably attached to the evaluated turn."""
+
+    name: str
+    content: bytes
 
 
 @dataclass(frozen=True)
@@ -43,6 +54,8 @@ class CapabilityOutput:
     response: str
     calls: tuple[ToolInvocation, ...]
     tool_errors: tuple[str, ...] = ()
+    artifacts: tuple[SharedArtifact, ...] = ()
+    artifact_error: str = ""
 
     @property
     def tools(self) -> tuple[str, ...]:
@@ -54,10 +67,9 @@ type Grader = Callable[[CapabilityOutput], Awaitable[CapabilityVerdict]]
 
 @dataclass(frozen=True)
 class CapabilityCase:
-    """A message and a grader over the answer + trajectory it produces. `web_dependent` marks a case
-    that reaches the live web, so a tool failure from an external outage is infra-excluded — neither
-    pass nor fail, out of scoring — rather than counted a capability failure; `samples` re-runs the
-    case and passes if any sample passes; `digest_tag` stabilizes the suite digest."""
+    """A message and its deterministic and semantic criteria. `web_dependent` infra-excludes an
+    external outage; `samples` re-runs the case and passes if any sample passes; `digest_tag`
+    stabilizes the suite digest."""
 
     name: str
     message: str
@@ -65,15 +77,20 @@ class CapabilityCase:
     samples: int = 1
     web_dependent: bool = False
     digest_tag: str = ""
+    rubric: tuple[str, ...] = ()
 
     def payload(self) -> JsonObject:
-        return {
+        payload: JsonObject = {
             "name": self.name,
             "message": self.message,
             "samples": self.samples,
             "webDependent": self.web_dependent,
             "grader": self.digest_tag or self.name,
+            "rubric": list(self.rubric),
         }
+        if self.rubric:
+            payload["judgeRevision"] = JUDGE_REVISION
+        return payload
 
 
 async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) -> EvalCaseResult:
@@ -101,6 +118,8 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
         {
             "response": output.response,
             "tools": list(output.tools),
+            "artifacts": [artifact.name for artifact in output.artifacts],
+            "artifactError": output.artifact_error or None,
             "samples": len(samples),
             "samplesPassed": len(won),
         },
@@ -113,4 +132,12 @@ async def sample_capability(
     result = await target.run(case)
     if not result.clean:
         return result.output, CapabilityVerdict(False, result.failure_reason)
-    return result.output, await case.grader(result.output)
+    deterministic = await case.grader(result.output)
+    if not deterministic.passed or not case.rubric:
+        return result.output, deterministic
+    if target.judge is None:
+        return result.output, CapabilityVerdict(False, "semantic rubric requires a model judge")
+    passed, reason = await rubric_pass(
+        case.message, result.output.response, case.rubric, target.judge
+    )
+    return result.output, CapabilityVerdict(passed, f"{deterministic.reason}; {reason}")
