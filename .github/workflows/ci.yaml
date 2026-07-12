@@ -23,6 +23,21 @@ jobs:
           enable-cache: true
       - run: uv sync
       - run: uv run pre-commit run --all-files --hook-stage pre-push
+      - name: Gate production wheel
+        run: |
+          uv build --wheel --out-dir /tmp/ufo-wheel
+          uv venv --python 3.12 /tmp/ufo-wheel-venv
+          uv pip install --python /tmp/ufo-wheel-venv/bin/python /tmp/ufo-wheel/ufo-*.whl
+          /tmp/ufo-wheel-venv/bin/ufoctl --help >/dev/null
+          /tmp/ufo-wheel-venv/bin/python - <<'PY'
+          from importlib.metadata import entry_points
+
+          for group in ("ufo.extension", "ufo.pack"):
+              entries = entry_points(group=group)
+              assert entries, group
+              for entry in entries:
+                  entry.load()()
+          PY
       - run: node --test infra/modules/edge/*.test.mjs
       - run: uv run pytest --collect-only -m integration -q
 

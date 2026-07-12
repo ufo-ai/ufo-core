@@ -2,29 +2,15 @@ name: Deploy (testing)
 
 # Merge to main → build the images at the commit short SHA, push to ECR (immutable, skip-if-present
 # so re-runs are idempotent), publish the E2B sandbox template, then terraform apply pins that tag —
-# the hosted-service rollout. PRs touching infra run terraform plan only (against the newest pushed
-# image, since the ECR digest data source needs a real tag). workflow_dispatch redeploys a chosen
-# tag. Targets envs/testing (stage 1); repoint TF_DIR to envs/prod for stage 2. AWS auth is GitHub
-# OIDC → the github-deploy role (no static keys). The edge job applies envs/edge — the zone-level
-# Cloudflare worker fronting both apexes — from its own state, in parallel with the deploy.
+# the hosted-service rollout. Every PR gets one `deployment` gate: changes to testing or edge inputs
+# plan both Terraform roots; everything else is a no-op. workflow_dispatch redeploys a
+# chosen tag. AWS auth is GitHub OIDC → the github-deploy role (no static keys). The edge job
+# applies envs/edge — the zone-level Cloudflare worker fronting both apexes — from its own state,
+# in parallel with the platform rollout.
 on:
   push:
     branches: [main]
-    paths:
-      - core/**
-      - control/**
-      - extensions/**
-      - packs/**
-      - sandbox/**
-      - infra/**
-      - hosted.toml
-      - pyproject.toml
-      - uv.lock
-      - .github/workflows/deploy.yml
   pull_request:
-    paths:
-      - infra/**
-      - .github/workflows/deploy.yml
   workflow_dispatch:
     inputs:
       image_tag:
@@ -52,7 +38,36 @@ env:
   DD_APP_KEY: ${{ secrets.DD_APP_KEY }}
 
 jobs:
-  deploy:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      deploy: ${{ steps.select.outputs.deploy }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select deployment work
+        id: select
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          DEPLOY_PATHS_PATTERN: ^(\.github/workflows/deploy\.yml$|infra/(envs/(testing|edge)|modules/(platform|edge)|templates)/)
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/deploy-paths"
+            if grep -Eq "$DEPLOY_PATHS_PATTERN" "$RUNNER_TEMP/deploy-paths"; then
+              echo "deploy=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "deploy=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+  rollout:
+    needs: changes
+    if: needs.changes.outputs.deploy == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -80,6 +95,8 @@ jobs:
 
       - uses: astral-sh/setup-uv@v5
         if: github.event_name != 'pull_request'
+        with:
+          python-version: "3.12"
 
       # Bundle image: `ufoctl bundle` freezes the assistant_hosted pack into a build context
       # (Dockerfile + ufo.toml + ufo.lock), then docker build installs the pinned ufo distribution.
@@ -163,6 +180,8 @@ jobs:
             --proxy-url "$(terraform -chdir="$TF_DIR" output -raw sandbox_proxy_url)"
 
   edge:
+    needs: changes
+    if: needs.changes.outputs.deploy == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -193,3 +212,33 @@ jobs:
         env:
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: terraform apply -auto-approve -input=false
+
+  deploy:
+    name: deployment
+    needs: [changes, rollout, edge]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the selected deployment work
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          DEPLOY_SELECTED: ${{ needs.changes.outputs.deploy }}
+          ROLLOUT_RESULT: ${{ needs.rollout.result }}
+          EDGE_RESULT: ${{ needs.edge.result }}
+        run: |
+          test "$CHANGES_RESULT" = "success"
+          case "$DEPLOY_SELECTED" in
+            true)
+              test "$ROLLOUT_RESULT" = "success"
+              test "$EDGE_RESULT" = "success"
+              ;;
+            false)
+              test "$ROLLOUT_RESULT" = "skipped"
+              test "$EDGE_RESULT" = "skipped"
+              echo "No deployment-relevant changes."
+              ;;
+            *)
+              echo "Invalid deployment selection: $DEPLOY_SELECTED" >&2
+              exit 1
+              ;;
+          esac
