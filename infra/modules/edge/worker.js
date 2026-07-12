@@ -14,6 +14,11 @@ const SCHEMA =
   "create table if not exists waitlist (" +
   "  email text primary key," +
   "  created_at text not null default (datetime('now')))";
+const EMAIL_SCHEMA =
+  "create table if not exists waitlist_email (" +
+  "  email text primary key," +
+  "  queued_at text," +
+  "  sent_at text)";
 
 let counted = { count: null, at: 0 };
 let fleet = { count: null, at: 0 };
@@ -110,7 +115,7 @@ async function join(request, env, url) {
     return text(usage(url.hostname), 400);
   }
   await env.DB.prepare(SCHEMA).run();
-  const inserted = await env.DB.prepare(
+  await env.DB.prepare(
     "insert into waitlist (email) values (?1) on conflict (email) do nothing",
   )
     .bind(email)
@@ -121,8 +126,20 @@ async function join(request, env, url) {
   )
     .bind(email)
     .first();
-  if (inserted.meta.changes === 1) {
-    await env.WAITLIST_EMAILS.send({ email, position: row.n });
+  await env.DB.prepare(EMAIL_SCHEMA).run();
+  await env.DB.prepare("insert into waitlist_email (email) values (?1) on conflict do nothing")
+    .bind(email)
+    .run();
+  const delivery = await env.DB.prepare(
+    "select queued_at, sent_at from waitlist_email where email = ?1",
+  )
+    .bind(email)
+    .first();
+  if (delivery.queued_at === null && delivery.sent_at === null) {
+    await env.WAITLIST_EMAILS.send({ email, position: row.n }, { contentType: "json" });
+    await env.DB.prepare("update waitlist_email set queued_at = datetime('now') where email = ?1")
+      .bind(email)
+      .run();
   }
   counted = { count: null, at: 0 };
   return text(ack(email, row.n));
@@ -145,15 +162,29 @@ export default {
   },
   async queue(batch, env) {
     if (batch.queue === env.WAITLIST_DEAD_LETTER_QUEUE) {
-      batch.messages.forEach((message) => {
-        console.error(`waitlist confirmation failed for ${message.body.email}`);
-        message.ack();
-      });
+      await Promise.all(
+        batch.messages.map(async (message) => {
+          await env.DB.prepare("update waitlist_email set queued_at = null where email = ?1")
+            .bind(message.body.email)
+            .run();
+          console.error(`waitlist confirmation failed for ${message.body.email}`);
+          message.ack();
+        }),
+      );
       return;
     }
     await Promise.all(
       batch.messages.map(async (message) => {
         const { email, position } = message.body;
+        const delivery = await env.DB.prepare(
+          "select queued_at, sent_at from waitlist_email where email = ?1",
+        )
+          .bind(email)
+          .first();
+        if (delivery.sent_at !== null) {
+          message.ack();
+          return;
+        }
         await env.EMAIL.send({
           to: email,
           from: WAITLIST_SENDER,
@@ -163,6 +194,9 @@ export default {
             `You are flying object #${position}.\n` +
             "We'll signal you when it's time to board.\n",
         });
+        await env.DB.prepare("update waitlist_email set sent_at = datetime('now') where email = ?1")
+          .bind(email)
+          .run();
         message.ack();
       }),
     );

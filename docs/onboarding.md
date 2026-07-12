@@ -58,8 +58,9 @@ paths — every other request passes through to what the host serves:
   one-liner); any other agent lands on the one site at the prod apex — proxied on the site's own
   host, a redirect (query intact) from any other.
 - `POST /waitlist -d email=…` — records the email in a per-apex D1 database, idempotent, with a
-  positional ack; a first insert queues a matching confirmation email, retried five times before
-  its terminal failure is logged by the dead-letter consumer. The card's "N identified flying
+  positional ack; D1 tracks the confirmation's queued and sent states, so a duplicate repairs a
+  failed publish without resending delivered mail. Delivery retries five times before its terminal
+  failure is logged and re-armed by the dead-letter consumer. The card's "N identified flying
   objects" counter reads D1 (≤1h stale per isolate, busted on join).
 - `GET /install` / `/install.sh` — proxies the gateway's stamped `/ufo` from the module's
   `origin_base`; both apexes point at the one live fleet.

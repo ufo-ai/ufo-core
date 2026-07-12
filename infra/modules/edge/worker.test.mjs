@@ -17,6 +17,7 @@ const worker = await importWorker("shared");
 
 function fakeD1() {
   const rows = new Map();
+  const deliveries = new Map();
   return {
     prepare(sql) {
       const stmt = { sql, args: [] };
@@ -27,13 +28,30 @@ function fakeD1() {
         },
         async run() {
           let changes = 0;
-          if (stmt.sql.startsWith("insert") && !rows.has(stmt.args[0])) {
+          if (stmt.sql.startsWith("insert into waitlist (") && !rows.has(stmt.args[0])) {
             rows.set(stmt.args[0], rows.size + 1);
+            changes = 1;
+          }
+          if (stmt.sql.startsWith("insert into waitlist_email") && !deliveries.has(stmt.args[0])) {
+            deliveries.set(stmt.args[0], { queued_at: null, sent_at: null });
+            changes = 1;
+          }
+          if (stmt.sql.startsWith("update waitlist_email set queued_at = datetime")) {
+            deliveries.get(stmt.args[0]).queued_at = "now";
+            changes = 1;
+          }
+          if (stmt.sql.startsWith("update waitlist_email set queued_at = null")) {
+            deliveries.get(stmt.args[0]).queued_at = null;
+            changes = 1;
+          }
+          if (stmt.sql.startsWith("update waitlist_email set sent_at")) {
+            deliveries.get(stmt.args[0]).sent_at = "now";
             changes = 1;
           }
           return { meta: { changes } };
         },
         async first() {
+          if (stmt.sql.startsWith("select queued_at")) return deliveries.get(stmt.args[0]);
           if (stmt.sql.includes("where created_at <=")) return { n: rows.get(stmt.args[0]) };
           return { n: rows.size };
         },
@@ -174,8 +192,8 @@ test("a first join queues and delivers one confirmation email", async () => {
     ORIGIN_BASE: "https://testing.flyingobject.ai",
     WAITLIST_DEAD_LETTER_QUEUE: "ufo-edge-waitlist-email-dead-letters",
     WAITLIST_EMAILS: {
-      async send(message) {
-        queued.push(message);
+      async send(message, options) {
+        queued.push({ message, options });
       },
     },
     EMAIL: {
@@ -193,7 +211,12 @@ test("a first join queues and delivers one confirmation email", async () => {
     });
   await fresh.fetch(signup(), isolated);
   await fresh.fetch(signup(), isolated);
-  assert.deepEqual(queued, [{ email: "pilot@example.com", position: 1 }]);
+  assert.deepEqual(queued, [
+    {
+      message: { email: "pilot@example.com", position: 1 },
+      options: { contentType: "json" },
+    },
+  ]);
 
   let acknowledged = false;
   await fresh.queue(
@@ -201,7 +224,7 @@ test("a first join queues and delivers one confirmation email", async () => {
       queue: "ufo-edge-waitlist-email",
       messages: [
         {
-          body: queued[0],
+          body: queued[0].message,
           ack() {
             acknowledged = true;
           },
@@ -222,9 +245,17 @@ test("a first join queues and delivers one confirmation email", async () => {
     },
   ]);
   assert.equal(acknowledged, true);
+
+  await fresh.fetch(signup(), isolated);
+  assert.equal(queued.length, 1);
 });
 
 test("a failed confirmation remains unacknowledged for queue retry", async () => {
+  const database = fakeD1();
+  await database
+    .prepare("insert into waitlist_email (email) values (?1) on conflict do nothing")
+    .bind("pilot@example.com")
+    .run();
   let acknowledged = false;
   await assert.rejects(
     worker.queue(
@@ -240,6 +271,7 @@ test("a failed confirmation remains unacknowledged for queue retry", async () =>
         ],
       },
       {
+        DB: database,
         EMAIL: {
           async send() {
             throw new Error("email unavailable");
@@ -253,8 +285,51 @@ test("a failed confirmation remains unacknowledged for queue retry", async () =>
   assert.equal(acknowledged, false);
 });
 
+test("a signup retries an unqueued confirmation", async () => {
+  const queued = [];
+  let attempt = 0;
+  const isolated = {
+    DB: fakeD1(),
+    ORIGIN_BASE: "https://testing.flyingobject.ai",
+    WAITLIST_DEAD_LETTER_QUEUE: "ufo-edge-waitlist-email-dead-letters",
+    WAITLIST_EMAILS: {
+      async send(message, options) {
+        attempt += 1;
+        if (attempt === 1) throw new Error("queue unavailable");
+        queued.push({ message, options });
+      },
+    },
+  };
+  const fresh = await importWorker("waitlist-email-retry");
+  const signup = () =>
+    new Request("https://flyingobject.ai/waitlist", {
+      method: "POST",
+      body: "email=Pilot@Example.com",
+      headers: { "user-agent": "curl/8.6.0" },
+    });
+
+  await assert.rejects(fresh.fetch(signup(), isolated), /queue unavailable/);
+  const reply = await fresh.fetch(signup(), isolated);
+  assert.equal(reply.status, 200);
+  assert.deepEqual(queued, [
+    {
+      message: { email: "pilot@example.com", position: 1 },
+      options: { contentType: "json" },
+    },
+  ]);
+});
+
 test("an exhausted confirmation is surfaced and consumed", async (context) => {
   const logged = context.mock.method(console, "error", () => {});
+  const database = fakeD1();
+  await database
+    .prepare("insert into waitlist_email (email) values (?1) on conflict do nothing")
+    .bind("pilot@example.com")
+    .run();
+  await database
+    .prepare("update waitlist_email set queued_at = datetime('now') where email = ?1")
+    .bind("pilot@example.com")
+    .run();
   let acknowledged = false;
   await worker.queue(
     {
@@ -268,12 +343,22 @@ test("an exhausted confirmation is surfaced and consumed", async (context) => {
         },
       ],
     },
-    { WAITLIST_DEAD_LETTER_QUEUE: "ufo-edge-waitlist-email-dead-letters" },
+    {
+      DB: database,
+      WAITLIST_DEAD_LETTER_QUEUE: "ufo-edge-waitlist-email-dead-letters",
+    },
   );
   assert.equal(acknowledged, true);
   assert.deepEqual(logged.mock.calls[0].arguments, [
     "waitlist confirmation failed for pilot@example.com",
   ]);
+  assert.deepEqual(
+    await database
+      .prepare("select queued_at, sent_at from waitlist_email where email = ?1")
+      .bind("pilot@example.com")
+      .first(),
+    { queued_at: null, sent_at: null },
+  );
 });
 
 test("a join busts the counter cache so the card reflects it", async () => {
