@@ -171,6 +171,30 @@ async def test_composio_client_mints_a_connect_link() -> None:
     assert redirect == COMPOSIO_CONSENT_URL
 
 
+async def test_connect_link_rides_the_projects_own_auth_config() -> None:
+    """The auth-config lookup takes the project's existing config whether managed or custom, so an
+    operator-created Google OAuth config carrying only a connector's minimal scopes is the one the
+    consent leg opens."""
+    lookups: list[dict[str, str]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path.endswith("/auth_configs"):
+            lookups.append(dict(request.url.params))
+            return httpx.Response(200, json={"items": [{"id": "ac_custom_google"}]})
+        if request.method == "POST" and request.url.path.endswith("/connected_accounts/link"):
+            body = json.loads(request.content)
+            assert body["auth_config_id"] == "ac_custom_google"
+            return httpx.Response(200, json={"redirect_url": COMPOSIO_CONSENT_URL})
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    client = composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handle))
+    redirect = await client.connect_link(
+        toolkit="googlemeet", user_id="ufo_ws", callback_url="https://ufo.example.com/back"
+    )
+    assert redirect == COMPOSIO_CONSENT_URL
+    assert lookups == [{"toolkit_slug": "googlemeet", "limit": "1"}]
+
+
 async def test_composio_client_executes_a_tool_with_the_bound_account() -> None:
     executed: list[dict[str, object]] = []
     response = await _mock_client(executed=executed).execute_tool(

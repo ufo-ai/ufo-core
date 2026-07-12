@@ -3,6 +3,9 @@
 Extensions type their job/handler signatures against these; the concrete shapes live in
 `ufo.ext.context`, reached only through this surface."""
 
+from ufo.credentials import (
+    CredentialSlotUnset as CredentialSlotUnset,
+)
 from ufo.ext.context import (
     CredentialAccess as CredentialAccess,
 )

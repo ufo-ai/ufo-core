@@ -339,7 +339,11 @@ bundle installs OSS, on-prem, or hosted.
 
 Packs (activation bundles, not code — see Packs): **assistant** bundles memory, the browser pack
 (its BUA engine over the default `sandbox_cdp` transport), brokered connectors, and web research
-(the research tools over the Exa search backend) (the flagship); **startup** and
+(the research tools over the Exa search backend) (the flagship); **chief-of-staff** bundles
+brokered connector grants plus feed sync (Google Meet transcripts and Gemini smart notes, Slack, a
+folder-synced state repo) with memory and the graph, the Slack surface, scheduling, page watches,
+todos, workspace skills, and self-improvement behind four pack skills (`sync`, `prep`, `triage`,
+setup); **startup** and
 **support bot** name the extensions plus pack-level onboarding a product needs (YC/fundraising docs
 and search; knowledgebase + keys onboarding with the websites plugin). Each activates one coherent
 config, no code of its own beyond what it references.

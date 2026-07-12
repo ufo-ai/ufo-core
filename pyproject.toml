@@ -73,6 +73,7 @@ web = "ufo_ext_web.manifest:manifest"
 [project.entry-points."ufo.pack"]
 assistant = "ufo_pack_assistant:pack"
 assistant_hosted = "ufo_pack_assistant_hosted:pack"
+chief_of_staff = "ufo_pack_chief_of_staff:pack"
 sample_pack = "ufo_pack_sample:pack"
 
 [project.entry-points.pytest11]
@@ -149,6 +150,8 @@ exclude = ["**/__pycache__", "**/*.pyc"]
 "extensions/todos/todo_list_section.md" = "ufo_ext_todos/todo_list_section.md"
 "packs/assistant_dev/ufo_pack_assistant.py" = "ufo_pack_assistant.py"
 "packs/assistant_hosted/ufo_pack_assistant_hosted.py" = "ufo_pack_assistant_hosted.py"
+"packs/chief_of_staff/ufo_pack_chief_of_staff.py" = "ufo_pack_chief_of_staff/__init__.py"
+"packs/chief_of_staff/skills" = "ufo_pack_chief_of_staff/skills"
 "packs/sample_pack/ufo_pack_sample.py" = "ufo_pack_sample/__init__.py"
 "packs/sample_pack/skills" = "ufo_pack_sample/skills"
 

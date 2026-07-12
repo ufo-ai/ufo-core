@@ -37,9 +37,9 @@ COMPOSIO_SEARCH_TOOL = "COMPOSIO_SEARCH_TOOLS"
 
 @dataclass(frozen=True)
 class ConnectorSpec:
-    """One brokered connector: the member-facing label, the Composio toolkit slug whose managed
-    OAuth grants the account, and the provider's own API `host` the derived grant admits and injects
-    at the egress proxy — direct-provider-host, never Composio's backend."""
+    """One brokered connector: the member-facing label, the Composio toolkit slug whose managed or
+    custom OAuth config grants the account, and the provider's own API `host` the derived grant
+    admits and injects at the egress proxy — direct-provider-host, never Composio's backend."""
 
     label: str
     toolkit: str
@@ -61,6 +61,7 @@ CONNECTORS: dict[str, ConnectorSpec] = {
     "google_calendar": ConnectorSpec("Google Calendar", "googlecalendar", "www.googleapis.com"),
     "google_sheets": ConnectorSpec("Google Sheets", "googlesheets", "sheets.googleapis.com"),
     "google_drive": ConnectorSpec("Google Drive", "googledrive", "www.googleapis.com"),
+    "google_meet": ConnectorSpec("Google Meet", "googlemeet", "meet.googleapis.com"),
     "slack": ConnectorSpec("Slack", "slack", "slack.com"),
     "notion": ConnectorSpec("Notion", "notion", "api.notion.com"),
     "linear": ConnectorSpec("Linear", "linear", "api.linear.app"),
@@ -108,8 +109,9 @@ class ComposioError(RuntimeError):
 
 @dataclass(frozen=True)
 class ComposioClient:
-    """Composio v3 over httpx. `connect_link` mints the hosted OAuth link the member opens (ensuring
-    the toolkit's managed auth config first), and `connected_account` confirms an account is active
+    """Composio v3 over httpx. `connect_link` mints the hosted OAuth link the member opens (riding
+    the toolkit's existing auth config, else a managed one), and `connected_account` confirms an
+    account is active
     and owned by `expected_user_id`, the workspace's brokered Composio user `connect_link` minted
     against, so a foreign account id (injected on the return leg) is refused — the account's token
     never leaves Composio, so ownership is asserted from the account's metadata, not by reading a
@@ -186,25 +188,24 @@ class ComposioClient:
         return ToolRouterSession(id=session_id, url=url)
 
     async def _auth_config(self, toolkit: str) -> str:
-        existing = await self._get(
-            "/auth_configs",
-            params={"toolkit_slug": toolkit, "is_composio_managed": "true", "limit": "1"},
-        )
-        items = existing.get("items")
-        if isinstance(items, list):
-            for item in items:
-                if isinstance(item, dict) and isinstance(item.get("id"), str):
-                    return item["id"]
+        """The auth config the consent leg rides: the project's existing config for the toolkit —
+        managed or custom, so an operator-created config (e.g. the deploy's own Google client
+        requesting only the scopes a connector needs) wins — else a Composio-managed one is
+        created."""
+        existing = await self._get("/auth_configs", params={"toolkit_slug": toolkit, "limit": "1"})
+        config_id = _auth_config_id(existing)
+        if config_id:
+            return config_id
         created = await self._post(
             "/auth_configs",
             {"toolkit": {"slug": toolkit}, "auth_config": {"type": "use_composio_managed_auth"}},
         )
         record = created.get("auth_config")
         record = record if isinstance(record, dict) else created
-        config_id = record.get("id")
-        if not isinstance(config_id, str):
+        created_id = record.get("id")
+        if not isinstance(created_id, str):
             raise ComposioError(502, f"auth config carried no id: {created!r}")
-        return config_id
+        return created_id
 
     async def _get(self, path: str, params: dict[str, str] | None = None) -> dict[str, object]:
         async with self._http() as http:
@@ -234,6 +235,16 @@ def _body(response: httpx.Response) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise ComposioError(response.status_code, f"composio answered a non-object: {payload!r}")
     return payload
+
+
+def _auth_config_id(payload: dict[str, object]) -> str | None:
+    items = payload.get("items")
+    if not isinstance(items, list):
+        return None
+    for item in items:
+        if isinstance(item, dict) and isinstance(item.get("id"), str):
+            return item["id"]
+    return None
 
 
 def composio_client() -> ComposioClient:

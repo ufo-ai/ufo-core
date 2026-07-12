@@ -26,6 +26,7 @@ from ufo_ext_sources.google_ads import GoogleAdsConnector
 from ufo_ext_sources.google_calendar import GoogleCalendarConnector
 from ufo_ext_sources.google_docs import GoogleDocsConnector
 from ufo_ext_sources.google_drive import GoogleDriveConnector
+from ufo_ext_sources.google_meet import GoogleMeetConnector
 from ufo_ext_sources.google_sheets import GoogleSheetsConnector
 from ufo_ext_sources.greenhouse import GreenhouseConnector
 from ufo_ext_sources.hubspot import HubSpotConnector
@@ -75,6 +76,7 @@ CONNECTORS: dict[str, type[Connector]] = {
     GoogleCalendarConnector.name: GoogleCalendarConnector,
     GoogleDocsConnector.name: GoogleDocsConnector,
     GoogleDriveConnector.name: GoogleDriveConnector,
+    GoogleMeetConnector.name: GoogleMeetConnector,
     GoogleSheetsConnector.name: GoogleSheetsConnector,
     GreenhouseConnector.name: GreenhouseConnector,
     HubSpotConnector.name: HubSpotConnector,

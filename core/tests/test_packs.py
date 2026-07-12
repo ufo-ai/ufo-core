@@ -11,10 +11,12 @@ collision cases stub discovery — the real dependency — to drive the real nar
 import pytest
 import ufo_pack_assistant as assistant
 import ufo_pack_assistant_hosted as assistant_hosted
+import ufo_pack_chief_of_staff as chief_of_staff
 
 import ufo.ext.loader as loader
 from ufo.ext.loader import discovered_packs, load_manifests
 from ufo.ext.manifest import Pack
+from ufo.skills.runtime import parse_skill
 
 
 def test_assistant_pack_is_discovered_with_its_bundle() -> None:
@@ -41,6 +43,27 @@ def test_activating_the_assistant_hosted_pack_makes_exactly_its_bundle_active() 
     of the assistant capabilities) in declared order, followed by the pack's own manifest."""
     names = [manifest.name for manifest in load_manifests(assistant_hosted.NAME)]
     assert names == [*assistant_hosted.EXTENSIONS, assistant_hosted.NAME]
+
+
+def test_chief_of_staff_pack_is_discovered_with_its_bundle() -> None:
+    packs = discovered_packs()
+    assert chief_of_staff.NAME in packs
+    assert packs[chief_of_staff.NAME].extensions == chief_of_staff.EXTENSIONS
+
+
+def test_activating_the_chief_of_staff_pack_makes_exactly_its_bundle_active() -> None:
+    """The chief-of-staff pack narrows to its feed-and-review bundle (brokered connectors plus
+    sources, memory and the graph, the Slack front door, scheduling, watches, todos, workspace
+    skills, self-improvement) in declared order, followed by the pack's own manifest carrying its
+    four workflow skills."""
+    manifests = load_manifests(chief_of_staff.NAME)
+    assert [manifest.name for manifest in manifests] == [
+        *chief_of_staff.EXTENSIONS,
+        chief_of_staff.NAME,
+    ]
+    own = manifests[-1]
+    parsed = {parse_skill(spec.path).name for spec in own.skills}
+    assert parsed == set(chief_of_staff.SKILL_NAMES)
 
 
 def test_no_pack_selected_leaves_the_unnarrowed_extension_set() -> None:
