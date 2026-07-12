@@ -85,6 +85,28 @@ def _owner(workspace_id: UUID) -> str:
     return pipedream.connection_user_id(workspace_id, "feed-sync")
 
 
+def test_workspace_external_user_ownership_is_exact() -> None:
+    workspace_id = UUID("f795c197-6a20-4bb7-82f0-4d220fe1a62d")
+    foreign_workspace_id = UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+    assert pipedream._workspace_owns_external_user(
+        workspace_id, f"{pipedream.EXTERNAL_USER_PREFIX}{workspace_id}"
+    )
+    assert pipedream._workspace_owns_external_user(
+        workspace_id, pipedream.connection_user_id(workspace_id, "state")
+    )
+    refused = (
+        f"{pipedream.EXTERNAL_USER_PREFIX}{workspace_id}x",
+        f"{pipedream.EXTERNAL_USER_PREFIX}{foreign_workspace_id}",
+        pipedream.connection_user_id(foreign_workspace_id, "state"),
+        f"{pipedream.workspace_user_prefix(workspace_id)}{'f' * 31}",
+        f"{pipedream.workspace_user_prefix(workspace_id)}{'F' * 32}",
+        f"{pipedream.workspace_user_prefix(workspace_id)}{'g' * 32}",
+    )
+    assert not any(
+        pipedream._workspace_owns_external_user(workspace_id, owner) for owner in refused
+    )
+
+
 async def test_pipedream_broker_yields_a_transport_that_proxies_provider_http(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -113,6 +135,23 @@ async def test_pipedream_broker_yields_a_transport_that_proxies_provider_http(
         )
     assert response.status_code == 200
     assert response.json() == page
+
+
+async def test_pipedream_broker_proxies_a_workspace_owned_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = uuid4()
+    owner = f"{pipedream.EXTERNAL_USER_PREFIX}{workspace_id}"
+
+    def upstream(target: str, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"history": [], "historyId": "777"})
+
+    _install(monkeypatch, owner, upstream)
+    credential = await PipedreamBroker().credential(workspace_id, "gmail", ACCOUNT)
+    assert credential.transport is not None
+    async with httpx.AsyncClient(base_url=GMAIL_BASE, transport=credential.transport) as http:
+        response = await http.get(HISTORY_PATH)
+    assert response.status_code == 200
 
 
 async def test_proxy_passes_an_upstream_404_through_verbatim(

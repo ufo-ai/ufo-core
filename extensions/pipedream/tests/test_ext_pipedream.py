@@ -481,6 +481,47 @@ async def test_connect_binds_a_grant_and_call_external_tool_executes_via_pipedre
     ]
 
 
+async def test_call_external_tool_executes_a_workspace_owned_grant(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    turn_id = await _turn(workspace_id, agent_id, conversation_id)
+    store = GrantStore()
+    await store.record(
+        workspace_id=workspace_id,
+        agent_id=agent_id,
+        provider=PROVIDER,
+        account_id=PIPEDREAM_ACCOUNT,
+        host=PROVIDER_HOST,
+        grantor_member_id=member_id,
+        conversation_id=conversation_id,
+    )
+    owner = f"{pipedream.EXTERNAL_USER_PREFIX}{workspace_id}"
+    executed: list[dict[str, object]] = []
+    _install_transport(monkeypatch, _pipedream_handler(owner, executed=executed))
+    result = await call_external_tool(
+        _ctx(workspace_id, agent_id, conversation_id, turn_id, store),
+        CallExternalToolInput(
+            tool_name=GMAIL_ACTION,
+            source_id=PROVIDER,
+            arguments={"to": "a@b.test"},
+        ),
+    )
+    assert result.is_error is False
+    assert executed == [
+        {
+            "id": GMAIL_ACTION,
+            "external_user_id": owner,
+            "configured_props": {
+                "to": "a@b.test",
+                "gmail": {"authProvisionId": PIPEDREAM_ACCOUNT},
+            },
+        }
+    ]
+
+
 async def test_call_external_tool_augments_an_unknown_key_with_the_real_actions(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

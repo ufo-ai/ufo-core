@@ -36,6 +36,7 @@ DEFAULT_ENVIRONMENT = "production"
 ENVIRONMENT_HEADER = "x-pd-environment"
 EXTERNAL_USER_PREFIX = "ufo_"
 CONNECTION_ID_CHARS = 32
+LOWER_HEX_DIGITS = frozenset("0123456789abcdef")
 PIPEDREAM_TIMEOUT_SECONDS = 30.0
 TOKEN_EXPIRY_MARGIN_SECONDS = 60.0
 ACTION_SEARCH_LIMIT = 10
@@ -160,11 +161,11 @@ class PipedreamClient:
         return _owned_account(record, account_id, external_user_id)
 
     async def workspace_account(self, account_id: str, workspace_id: UUID) -> ConnectedAccount:
-        """Read an account granted to one of this workspace's state-scoped connection users."""
+        """Read an account granted to one of this workspace's connection users."""
         payload = await self._get(f"/connect/{self.project_id}/accounts/{account_id}")
         record = _dict(payload.get("data")) or payload
         account = _account(record, account_id)
-        if not account.external_user_id.startswith(workspace_user_prefix(workspace_id)):
+        if not _workspace_owns_external_user(workspace_id, account.external_user_id):
             raise PipedreamError(
                 403,
                 f"connected account {account_id!r} is not owned by workspace {workspace_id}",
@@ -276,6 +277,18 @@ def _account(record: dict[str, object], account_id: str) -> ConnectedAccount:
 
 def workspace_user_prefix(workspace_id: UUID) -> str:
     return f"{EXTERNAL_USER_PREFIX}{workspace_id.hex}_"
+
+
+def _workspace_owns_external_user(workspace_id: UUID, external_user_id: str) -> bool:
+    if external_user_id == f"{EXTERNAL_USER_PREFIX}{workspace_id}":
+        return True
+    prefix = workspace_user_prefix(workspace_id)
+    if not external_user_id.startswith(prefix):
+        return False
+    connection_id = external_user_id.removeprefix(prefix)
+    return len(connection_id) == CONNECTION_ID_CHARS and all(
+        character in LOWER_HEX_DIGITS for character in connection_id
+    )
 
 
 def connection_user_id(workspace_id: UUID, state: str) -> str:
