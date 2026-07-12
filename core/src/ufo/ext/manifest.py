@@ -211,12 +211,12 @@ class HubSpec:
 @dataclass(frozen=True)
 class AuthProxySpec:
     """One auth-proxy backend an extension registers, mirroring `CdpProviderSpec`: the `backend`
-    name a deploy selects it by (`config.connectors.auth_backend`, unset by default) and the `build`
-    core calls once at boot, only when selected, given a credential reader scoped to this manifest's
-    slots. The selected backend is the `ConnectorRegistry`'s fallback for providers no installed
-    broker claims — the direct/BYOK backend reads a member-added provider key through that reader
-    host-side and returns a bearer; a brokered provider resolves through its own broker's
-    `credential` instead, never this seam."""
+    name a deploy selects it by (`config.connectors.auth_backend`) when several are installed and
+    the `build` core calls once at boot, given a credential reader scoped to this manifest's slots.
+    A sole backend is automatic. The selected backend is the `ConnectorRegistry`'s fallback for
+    providers no installed broker claims — the direct/BYOK backend reads a member-added provider
+    key through that reader host-side and returns a bearer; a brokered provider resolves through
+    its own broker's `credential` instead, never this seam."""
 
     backend: str
     build: Callable[[CredentialAccess], AuthProxy]

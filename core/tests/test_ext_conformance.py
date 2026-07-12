@@ -57,7 +57,7 @@ from ufo.ext.loader import (
     turn_subagents,
     turn_tools,
 )
-from ufo.ext.manifest import CarrierSpec, Manifest
+from ufo.ext.manifest import AuthProxySpec, CarrierSpec, Manifest
 from ufo.ext.surface import WRITEBACK_DELIVERED, workspace_key
 from ufo.governance import prompt_digest
 from ufo.grants import GrantStore
@@ -326,17 +326,37 @@ def _connectors_config(backend: str | None) -> Config:
 
 def test_core_selects_a_manifest_contributed_auth_proxy() -> None:
     """The `auth_proxies` seam end to end: core's boot-time selection has no built-in auth proxy, so
-    resolving the sample's backend name proves the Manifest `auth_proxies` point flowed into
-    selection and was built with a credential reader. An unset knob yields None (a brokered
-    provider resolves through its own broker, folder sources need none); selecting a name no
-    extension registers, two extensions claiming one name, and a selected backend with no
-    credential key each fail loud."""
+    automatically resolving the sample's sole backend proves the Manifest `auth_proxies` point
+    flowed into selection and was built with a credential reader. An explicit name selects among
+    multiple backends; an unset ambiguous choice names every option. An unknown name, duplicate
+    registration, and a selected backend with no credential key each fail loud."""
     manifest = _sample_manifest()
     store = _credential_store()
+    other_backend = "other_auth_proxy"
+    other = Manifest(
+        name="other-auth-proxy",
+        version="1",
+        auth_proxies=(
+            AuthProxySpec(
+                backend=other_backend,
+                build=lambda _credentials: pytest.fail("selected the wrong auth proxy"),
+            ),
+        ),
+    )
 
+    assert _select_auth_proxy(_connectors_config(None), (), store) is None
+    automatic = _select_auth_proxy(_connectors_config(None), (manifest,), store)
+    assert isinstance(automatic, sample.SampleAuthProxy)
     selected = _select_auth_proxy(_connectors_config(sample.AUTH_PROXY_BACKEND), (manifest,), store)
     assert isinstance(selected, sample.SampleAuthProxy)
-    assert _select_auth_proxy(_connectors_config(None), (manifest,), store) is None
+    explicit = _select_auth_proxy(
+        _connectors_config(sample.AUTH_PROXY_BACKEND), (other, manifest), store
+    )
+    assert isinstance(explicit, sample.SampleAuthProxy)
+    with pytest.raises(RuntimeError, match="auth_backend is unset") as ambiguity:
+        _select_auth_proxy(_connectors_config(None), (other, manifest), store)
+    assert other_backend in str(ambiguity.value)
+    assert sample.AUTH_PROXY_BACKEND in str(ambiguity.value)
     with pytest.raises(RuntimeError, match="no extension registers it"):
         _select_auth_proxy(_connectors_config("nope"), (manifest,), store)
     with pytest.raises(RuntimeError, match="two extensions register auth proxy"):
@@ -351,7 +371,7 @@ async def test_connector_registry_routes_a_brokered_provider_to_its_own_broker()
     """The `ConnectorRegistry` half of the connectors seam: `serve`'s registry build folds the
     sample's ConnectorProvider — label and broker included — and `credential` routes the sample
     provider to the sample broker while an unregistered provider falls back to the deploy-selected
-    auth backend. With no fallback selected, an unregistered provider fails loud."""
+    auth backend. With no fallback installed, an unregistered provider fails loud."""
     manifest = _sample_manifest()
     store = _credential_store()
     workspace_id = uuid4()
@@ -366,7 +386,9 @@ async def test_connector_registry_routes_a_brokered_provider_to_its_own_broker()
     fallback = await registry.credential(workspace_id, "unbrokered", "acct-9")
     assert fallback.bearer == sample.AUTH_PROXY_BEARER
 
-    bare = _connector_registry(_connectors_config(None), (manifest,), store)
+    bare = _connector_registry(
+        _connectors_config(None), (replace(manifest, auth_proxies=()),), store
+    )
     with pytest.raises(RuntimeError, match="no connector broker"):
         await bare.credential(workspace_id, "unbrokered", "acct-9")
     with pytest.raises(KeyError, match="no installed connector"):

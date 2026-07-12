@@ -558,32 +558,36 @@ def _select_auth_proxy(
     credentials: CredentialStore | None,
 ) -> AuthProxy | None:
     """The fallback auth-proxy backend the `ConnectorRegistry` resolves an unbrokered provider's
-    feed-sync credential through, chosen by `[connectors] auth_backend`: a backend an extension
-    registers through its Manifest `auth_proxies` point, built once at boot with a credential
-    reader scoped to its slots (a direct BYOK backend reads its key in-process, host-side, never in
-    the sandbox). Unset selects no fallback — a brokered provider resolves through its own broker
-    regardless. Two extensions claiming one name fail loud, as does selecting a name no extension
-    registers or building a selected backend with no credential key set."""
+    feed-sync credential through: the sole registered backend is automatic, while `[connectors]
+    auth_backend` selects among several. The backend is built once at boot with a credential reader
+    scoped to its slots (a direct BYOK backend reads its key in-process, host-side, never in the
+    sandbox). A brokered provider resolves through its own broker regardless. Duplicate names,
+    ambiguous selection, an unknown explicit name, and a missing credential key each fail loud."""
     specs: dict[str, tuple[AuthProxySpec, Manifest]] = {}
     for manifest in manifests:
         for spec in manifest.auth_proxies:
             if spec.backend in specs:
                 raise RuntimeError(f"two extensions register auth proxy backend {spec.backend!r}")
             specs[spec.backend] = (spec, manifest)
-    if config.connectors.auth_backend is None:
-        return None
-    found = specs.get(config.connectors.auth_backend)
+    backend = config.connectors.auth_backend
+    if backend is None:
+        if not specs:
+            return None
+        if len(specs) > 1:
+            choices = ", ".join(repr(name) for name in sorted(specs))
+            raise RuntimeError(
+                f"[connectors] auth_backend is unset; choose one of the installed auth proxy "
+                f"backends: {choices}"
+            )
+        backend = next(iter(specs))
+    found = specs.get(backend)
     if found is None:
         raise NotRegisteredError(
-            f"config selects auth proxy backend {config.connectors.auth_backend!r} "
-            "but no extension registers it"
+            f"config selects auth proxy backend {backend!r} but no extension registers it"
         )
     spec, manifest = found
     if credentials is None:
-        raise RuntimeError(
-            f"auth proxy backend {config.connectors.auth_backend!r} needs a credential key "
-            "but none is set"
-        )
+        raise RuntimeError(f"auth proxy backend {backend!r} needs a credential key but none is set")
     declared = frozenset(slot.name for slot in manifest.credentials)
     return spec.build(CredentialAccess(declared=declared))
 

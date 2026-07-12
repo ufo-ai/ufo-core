@@ -4,10 +4,9 @@ itself, and the `sync_source` chat tool that turns a granted or keyed provider i
 source rows. One extension, N backends — each provider builds on the REST connector framework from
 `ufo.sdk.sources`, consuming the pluggable auth-proxy seam rather than importing a broker: the sync
 runner routes a brokered provider's credential to the broker extension that registers it (Composio,
-Pipedream) and every other to the deploy-selected fallback. `serve` sources the backends into the
-sync driver's backend map (so a registered account syncs offline into memory) and, when a deploy
-selects `[connectors] auth_backend = "direct"`, builds the direct proxy with a reader scoped to
-these slots."""
+Pipedream) and every other to the selected fallback. `serve` sources the backends into the sync
+driver's backend map (so a registered account syncs offline into memory) and builds this sole
+`direct` proxy automatically with a reader scoped to these slots."""
 
 from ufo.sdk.authproxy import AuthProxySpec
 from ufo.sdk.manifest import CredentialSlot, Manifest, SourceProvider

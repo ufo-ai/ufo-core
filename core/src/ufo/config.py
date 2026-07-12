@@ -226,8 +226,8 @@ class ConnectorsConfig(BaseModel):
     broker (the extension that registers the connector), never a config knob; `auth_backend` names
     the auth-proxy backend for every other provider — the `direct` BYOK backend (a member-added key
     read host-side) or any backend an extension registers through its Manifest `auth_proxies`
-    point. Unset selects no fallback; selecting a name no extension registers fails loud at
-    boot."""
+    point. The sole installed backend is automatic; with several installed, this setting is
+    required. Selecting a name no extension registers fails loud at boot."""
 
     model_config = ConfigDict(extra="forbid")
     auth_backend: str | None = None
