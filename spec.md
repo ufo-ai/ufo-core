@@ -44,7 +44,7 @@ Tables (all keyed by `workspace_id`, `created_at`, `updated_at`):
 |---|---|
 | `workspace` | The team unit: name, config digest. |
 | `member` | A human. Role: `owner` or `member`. Surface identities link here (Slack user id, CLI token, web session) — one human, many surfaces, one memory subject. |
-| `surface_installation` | One workspace binding per surface; an installation identity belongs to only one workspace across the fleet. |
+| `surface_installation` | A chat installation's unique external identity → workspace binding. Shared ingress uses it only to select a candidate credential, authenticates the original request bytes, then binds that workspace. |
 | `agent` | A configured agent: name, prompt, model policy, granted tool set, skill packs, memory scope. |
 | `grant` | Agent ← capability binding: a connector account, a credential slot, a tool group. Records grantor, when, via which conversation. Created through chat; the speaker gates the *granting act*, never subsequent use. |
 | `credential` | BYOK secrets, encrypted at rest. Slots are declared by extensions; values are workspace-scoped. |
@@ -239,10 +239,11 @@ from `url_private` into the conversation's workspace before the turn runs; a sha
 external-upload API, into the conversation's thread (Slack forbids threading on a reply's ts). `surface_identity` and `conversation.surface`
 are open namespaces validated by surface registration, not a fixed enum.
 
-Shared surface requests authenticate their workspace before core binds it. Slack callback URLs
-carry the workspace id and verify the raw request with only that workspace's stored signing secret;
-an event or click binds the app-secret + Slack-team fingerprint uniquely to that workspace, while an
-unsigned URL-verification challenge is accepted only while that workspace has no secret.
+Shared surface requests authenticate their workspace before core binds it. Slack uses canonical
+event and interactive URLs: the untrusted team id selects one unique `surface_installation`, its
+workspace's signing secret verifies the original bounded bytes, and only then does the request bind
+that workspace. Unknown installations and bad signatures share one rejection. URL verification has
+no team id, so its bounded challenge echoes without binding a workspace or marking it connected.
 Surface identities and conversation keys include `workspace_id`. Durable writeback enumerates a
 bounded set of workspace ids through the owner connection, then binds each before reading or
 delivering any tenant data.

@@ -2,17 +2,17 @@
 
 A handler never sees a raw DB handle, a raw blob store, or another workspace: it gets a
 `ScopedStore` (its own key space under one workspace), `CredentialAccess` (only the slots its
-manifest declared), and — when trajectory reads are wired — a `TrajectoryCorpus` (this workspace's
-transcripts, read only). `context_for` builds the same shape for an extension (its manifest name +
-declared slots) and for a core job (the `core` namespace, no slots) — so a core job rides the exact
-path an extension does. The `ExtensionContext` shape is open: it carries the selected index/embed
-backends, a transaction over the extension's own tables, governed proposals, and invoke, without
-reshaping what handlers already hold."""
+manifest declared), manifest-scoped surface installation registration for tools, and — when
+trajectory reads are wired — a `TrajectoryCorpus` (this workspace's transcripts, read only).
+`context_for` builds the same shape for an extension and for a core job, so a core job rides the
+exact path an extension does. The `ExtensionContext` shape is open: it carries the selected
+index/embed backends, a transaction over the extension's own tables, governed proposals, and
+invoke, without reshaping what handlers already hold."""
 
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Protocol
 from uuid import UUID
@@ -25,6 +25,7 @@ from ufo.accounting import Pricing
 from ufo.blob import BlobNotFound, BlobStore
 from ufo.candidates import WorkspaceCandidates, owner_candidates
 from ufo.db import workspace_tx
+from ufo.ext.surface import SurfaceInstallationAccess
 from ufo.governance import Governance, prompt_digest
 from ufo.indexing import EmbedClient, IndexBackend
 from ufo.models.interface import (
@@ -365,6 +366,9 @@ class ModelAccess:
 class ExtensionContext:
     store: ScopedStore
     credentials: CredentialAccess
+    installations: SurfaceInstallationAccess = field(
+        default_factory=lambda: SurfaceInstallationAccess(frozenset())
+    )
     index: IndexBackend | None = None
     embed: EmbedClient | None = None
     pages: PageFeed | None = None
@@ -453,15 +457,17 @@ def context_for(
     invoker: TurnInvoker | None = None,
     model_resolver: ModelResolver | None = None,
     schedule_invoker: ScheduleInvoker | None = None,
+    surfaces: frozenset[str] = frozenset(),
 ) -> ExtensionContext:
     """The scoped handle a handler receives — no workspace passed: every accessor reads the ambient
     workspace the turn or job bound (`ws_current()`), so the one context object serves whichever
-    workspace is bound when a handler runs. `declared` gates which credential slots it may read; a
-    `model_resolver` (the registry) wires the metered model seam, keyed and billed to that same
-    workspace."""
+    workspace is bound when a handler runs. `declared` gates credential slots and `surfaces` gates
+    installation registration; a `model_resolver` wires the metered model seam, keyed and billed
+    to that same workspace."""
     return ExtensionContext(
         store=ScopedStore(extension=extension),
         credentials=CredentialAccess(declared=declared),
+        installations=SurfaceInstallationAccess(declared=surfaces),
         index=index,
         embed=embed,
         pages=pages,

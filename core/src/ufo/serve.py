@@ -813,9 +813,12 @@ def _mount_shared_surfaces(
                     surface=spec.name,
                     surface_auth=auth,
                 ) -> Response:
-                    workspace_id = await identify(request, surface_auth)
-                    if workspace_id is None:
+                    resolution = await identify(request, surface_auth)
+                    if isinstance(resolution, Response):
+                        return resolution
+                    if resolution is None:
                         return Response("unauthorized", status_code=401)
+                    workspace_id = resolution
                     current_workspace.set(workspace_id)
                     return await handler(context_for(workspace_id, surface), request)
 

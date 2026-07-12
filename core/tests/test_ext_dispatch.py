@@ -16,6 +16,7 @@ from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, ScopedStore, context_for
 from ufo.ext.loader import HookChain, turn_tools, validate_ext_tools
 from ufo.ext.manifest import CredentialSlot, Manifest
+from ufo.ext.surface import SurfaceSpec
 from ufo.hub import InProcessHub
 from ufo.loop.compaction import Compaction
 from ufo.loop.engine import TurnEngine
@@ -329,6 +330,7 @@ def test_turn_tools_maps_extension_tools_to_owning_context_and_leaves_builtins_u
         version="0.1.0",
         tools=(NOTE_TOOL,),
         credentials=(CredentialSlot(name="sample_api", description="key"),),
+        surfaces=(SurfaceSpec(name="slack", routes=()),),
     )
     tools, ext_by_tool = turn_tools((manifest,), store)
     names = {tool.name for tool in tools}
@@ -340,6 +342,7 @@ def test_turn_tools_maps_extension_tools_to_owning_context_and_leaves_builtins_u
     with ws(workspace_id):
         assert context.store.workspace_id == workspace_id
     assert context.credentials.declared == frozenset({"sample_api"})
+    assert context.installations.declared == frozenset({"slack"})
     assert not any(builtin.name in ext_by_tool for builtin in BUILTIN_TOOLS)
 
 

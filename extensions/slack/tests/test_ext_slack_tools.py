@@ -35,7 +35,12 @@ from ufo.ext.loader import skill_registry, turn_tools
 from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
-from ufo.sdk.surfaces import CredentialPrompt, CredentialRequest, SurfaceContext, Writeback
+from ufo.sdk.surfaces import (
+    CredentialPrompt,
+    CredentialRequest,
+    SurfaceContext,
+    Writeback,
+)
 from ufo.tools.context import SpawnResult, ToolContext
 from ufo.workspace import init_workspace_credentials, ws
 
@@ -196,7 +201,7 @@ async def test_slack_connect_walks_the_state_machine(
         bare = json.loads(await _run(registry, "slack_connect", owner))
         assert bare["state"] == "not_configured"
         assert set(bare["missing"]) == set(tools.SLACK_SECRET_SLOTS)
-        assert bare["events_url"] == f"{PUBLIC_BASE_URL}/surface/slack/{workspace_id}"
+        assert bare["events_url"] == f"{PUBLIC_BASE_URL}/surface/slack"
         await store.put(workspace_id, SLACK_BOT_TOKEN_SLOT, "xoxb-1")
         await store.put(workspace_id, SLACK_SIGNING_SECRET_SLOT, "shhh")
         with pytest.raises(ValueError, match="workspace owner"):
@@ -209,6 +214,16 @@ async def test_slack_connect_walks_the_state_machine(
         identity = await read_identity(blob, workspace_id, "xoxb-1")
         assert identity is not None and identity.bot_user_id == BOT_USER_ID
         assert identity.bot_token_fingerprint == bot_token_fingerprint("xoxb-1")
+        async with workspace_tx() as connection:
+            registration = (
+                await connection.execute(
+                    sa.select(tables.surface_installation.c.installation_id).where(
+                        tables.surface_installation.c.workspace_id == workspace_id,
+                        tables.surface_installation.c.surface == slack.SURFACE_SLACK,
+                    )
+                )
+            ).scalar_one()
+        assert registration == slack.slack_installation_id(TEAM_ID)
         # identity now proven: a joiner's call is a pure read, no auth.test, no gate
         again = json.loads(await _run(registry, "slack_connect", joiner))
         assert again["state"] == "pending"
@@ -248,6 +263,54 @@ async def test_connect_reports_a_rejected_token_without_persisting(
         assert rejected["state"] == "not_configured"
         assert "rejected the bot token" in rejected["hint"]
         assert await read_identity(blob, workspace_id, "xoxb-revoked") is None
+        async with workspace_tx() as connection:
+            registrations = (
+                await connection.execute(
+                    sa.select(sa.func.count()).select_from(tables.surface_installation)
+                )
+            ).scalar_one()
+        assert registrations == 0
+
+
+async def test_slack_connect_rejects_an_installation_owned_by_another_workspace(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_a, owner_a, _ = await _seed()
+    workspace_b, owner_b, _ = await _seed()
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    init_workspace_credentials(store)
+    for workspace_id in (workspace_a, workspace_b):
+        await store.put(workspace_id, SLACK_BOT_TOKEN_SLOT, "xoxb-shared")
+        await store.put(workspace_id, SLACK_SIGNING_SECRET_SLOT, "shared-secret")
+    _patch_httpx(monkeypatch, _auth_test_transport([]))
+    registry, ext_by_tool = _registry(store)
+    blob = FilesystemBlobStore(root=tmp_path)
+    ext = ext_by_tool["slack_connect"]
+
+    with ws(workspace_a):
+        first = json.loads(
+            await _run(registry, "slack_connect", _context(workspace_a, ext, blob, owner_a))
+        )
+    with ws(workspace_b):
+        second = json.loads(
+            await _run(registry, "slack_connect", _context(workspace_b, ext, blob, owner_b))
+        )
+
+    assert first["state"] == "pending"
+    assert second["state"] == "not_configured"
+    assert second["hint"] == "This Slack workspace is already connected to another UFO workspace."
+    async with workspace_tx() as connection:
+        registrations = (
+            await connection.execute(
+                sa.select(
+                    tables.surface_installation.c.workspace_id,
+                    tables.surface_installation.c.installation_id,
+                ).where(tables.surface_installation.c.surface == slack.SURFACE_SLACK)
+            )
+        ).all()
+    assert [tuple(row) for row in registrations] == [
+        (workspace_a, slack.slack_installation_id(TEAM_ID))
+    ]
 
 
 async def test_manifest_tool_matches_the_skill_and_validates_the_name(
@@ -263,10 +326,10 @@ async def test_manifest_tool_matches_the_skill_and_validates_the_name(
     served = yaml.safe_load(await _run(registry, "slack_app_manifest", ctx, name="acme bot"))
     assert served["display_information"]["name"] == "acme bot"
     assert served["settings"]["event_subscriptions"]["request_url"] == (
-        f"{PUBLIC_BASE_URL}/surface/slack/{workspace_id}"
+        f"{PUBLIC_BASE_URL}/surface/slack"
     )
     assert served["settings"]["interactivity"]["request_url"] == (
-        f"{PUBLIC_BASE_URL}/surface/slack/{workspace_id}/interactive"
+        f"{PUBLIC_BASE_URL}/surface/slack/interactive"
     )
     skill_body = skill_registry((slack_manifest(),)).named("slack-app-setup").instructions
     block = re.search(r"```yaml\n(.*?)```", skill_body, re.DOTALL)
@@ -274,14 +337,7 @@ async def test_manifest_tool_matches_the_skill_and_validates_the_name(
     skill_yaml = yaml.safe_load(
         block.group(1)
         .replace("<bot display name>", "acme bot")
-        .replace(
-            "<public_base_url>/surface/slack/<workspace_id>/interactive",
-            f"{PUBLIC_BASE_URL}/surface/slack/{workspace_id}/interactive",
-        )
-        .replace(
-            "<public_base_url>/surface/slack/<workspace_id>",
-            f"{PUBLIC_BASE_URL}/surface/slack/{workspace_id}",
-        )
+        .replace("<public_base_url>", PUBLIC_BASE_URL)
     )
     assert served == skill_yaml
     with pytest.raises(ValueError, match="display name"):

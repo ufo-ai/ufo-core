@@ -16,11 +16,11 @@ Slack's own pages and enters two values privately in their terminal.
 
 - **HTTP Events API only.** Never offer Socket Mode; the manifest below sets
   `socket_mode_enabled: false`.
-- **Signature-verified.** The surface verifies every event's Slack signature against the signing
-  secret before acting on it. The one exception is Slack's `url_verification` handshake while the
-  `slack_signing_secret` slot is still empty — the challenge echoes back (it stores and grants
-  nothing), so the request URL verifies the moment the app is created, before the secrets land. If
-  verification fails anyway, the deploy isn't reachable at the URL — the URL is wrong.
+- **Signature-verified.** The surface uses the event's team id only to select a registered signing
+  secret, verifies Slack's signature over the original bytes, and only then enters that workspace.
+  Slack's `url_verification` body has no team id, so its bounded challenge echoes without binding
+  a workspace or marking setup connected. If verification fails anyway, the deploy isn't reachable
+  at the URL — the URL is wrong.
 - **Don't probe the URL.** The sandbox egress proxy denies arbitrary hosts, so `curl`/`dig`
   against the deploy or Slack proves nothing. The URL is correct by construction; use it.
 - **Secrets never enter this chat.** The bot token and signing secret travel through
@@ -77,7 +77,7 @@ oauth_config:
       - users:read.email
 settings:
   event_subscriptions:
-    request_url: <public_base_url>/surface/slack/<workspace_id>
+    request_url: <public_base_url>/surface/slack
     bot_events:
       - app_home_opened
       - app_mention
@@ -87,7 +87,7 @@ settings:
       - message.mpim
   interactivity:
     is_enabled: true
-    request_url: <public_base_url>/surface/slack/<workspace_id>/interactive
+    request_url: <public_base_url>/surface/slack/interactive
   org_deploy_enabled: false
   socket_mode_enabled: false
   token_rotation_enabled: false

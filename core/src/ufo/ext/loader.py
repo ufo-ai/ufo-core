@@ -285,7 +285,8 @@ def turn_tools(
     tool is scoped to its declaring extension exactly as a plain tool is, so its egress reaches the
     provider host under that extension's context. Only an extension that declares credential slots
     needs the credential key — a tool-only extension with no slots (a todo list) builds its context
-    with none; a slot-declaring extension with no key set fails loud."""
+    with none; a slot-declaring extension with no key set fails loud. Installation registration is
+    limited to the surfaces that same manifest declares."""
     tools: list[ToolDef] = list(BUILTIN_TOOLS)
     ext_by_tool: dict[str, ExtensionContext] = {}
     for manifest in manifests:
@@ -301,7 +302,13 @@ def turn_tools(
                 f"extension {manifest.name!r} declares credential slots {sorted(declared)} "
                 "but no credential key is set"
             )
-        context = context_for(manifest.name, declared, index, embed)
+        context = context_for(
+            manifest.name,
+            declared,
+            index,
+            embed,
+            surfaces=frozenset(surface.name for surface in manifest.surfaces),
+        )
         for tool in declared_tools:
             tools.append(tool)
             ext_by_tool[tool.name] = context

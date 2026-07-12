@@ -12,6 +12,7 @@ from ufo.ext.context import (
     UndeclaredCredentialSlot,
     context_for,
 )
+from ufo.ext.surface import SurfaceInstallationConflict, UndeclaredSurface
 from ufo.schema import tables
 from ufo.workspace import WorkspaceUnbound, init_workspace_credentials, ws
 
@@ -139,5 +140,24 @@ async def test_core_context_builds_and_is_usable(db: None) -> None:
     with ws(await _workspace()):
         context = context_for("core", frozenset())
         assert context.store.extension == "core"
+        assert context.installations.declared == frozenset()
         await context.store.put("tick", {"count": 1})
         assert await context.store.get("tick") == {"count": 1}
+
+
+async def test_installation_access_rejects_a_surface_the_manifest_did_not_declare(
+    db: None,
+) -> None:
+    context = context_for("slack", frozenset())
+    with ws(await _workspace()), pytest.raises(UndeclaredSurface, match="slack"):
+        await context.installations.bind("slack", "team-a")
+
+
+async def test_installation_access_preserves_fleet_wide_uniqueness(db: None) -> None:
+    first, second = await _workspace(), await _workspace()
+    context = context_for("slack", frozenset(), surfaces=frozenset({"slack"}))
+    with ws(first):
+        await context.installations.bind("slack", "team-a")
+        await context.installations.bind("slack", "team-a")
+    with ws(second), pytest.raises(SurfaceInstallationConflict, match="slack"):
+        await context.installations.bind("slack", "team-a")

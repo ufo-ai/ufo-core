@@ -56,7 +56,6 @@ from ufo.sdk.surfaces import (
     SharedArtifact,
     SurfaceAuth,
     SurfaceContext,
-    SurfaceInstallationConflict,
     SurfaceWorkspaceUnknown,
     TurnContext,
     Writeback,
@@ -370,7 +369,7 @@ def url_verification_challenge(body: bytes) -> str | None:
     return challenge if isinstance(challenge, str) else ""
 
 
-def signed_team_id(body: bytes) -> str | None:
+def slack_team_hint(body: bytes) -> str | None:
     try:
         payload = json.loads(body)
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -390,60 +389,37 @@ def signed_team_id(body: bytes) -> str | None:
     return candidate
 
 
-def slack_installation_id(signing_secret: str, team_id: str) -> str:
-    return hmac.new(
-        signing_secret.encode(), f"{SURFACE_SLACK}:{team_id}".encode(), hashlib.sha256
-    ).hexdigest()
+def slack_installation_id(team_id: str) -> str:
+    return f"team:{team_id}"
 
 
-def routed_workspace(request: Request) -> UUID | None:
-    raw = request.path_params.get("workspace_id")
-    try:
-        return UUID(str(raw))
-    except ValueError:
-        return None
-
-
-def workspace_route_matches(request: Request, workspace_id: UUID) -> bool:
-    raw = request.path_params.get("workspace_id")
-    if raw is None:
-        return True
-    try:
-        return UUID(str(raw)) == workspace_id
-    except ValueError:
-        return False
-
-
-async def resolve_workspace(request: Request, auth: SurfaceAuth) -> UUID | None:
-    """Authenticate a workspace-qualified Slack callback before shared serve binds it. A stored
-    signing secret must verify the exact raw body, then the signed Slack team and app-secret
-    fingerprint must belong to this workspace alone. Before the workspace has a signing secret,
-    only Slack's inert URL-verification challenge may enter."""
-    workspace_id = routed_workspace(request)
-    if workspace_id is None:
-        return None
+async def resolve_workspace(request: Request, auth: SurfaceAuth) -> UUID | Response | None:
+    """Resolve a canonical Slack callback through its registered team, then authenticate the exact
+    bytes with that workspace's signing secret before core binds its RLS scope. The team id is only
+    a lookup hint; unknown teams and bad signatures share the same rejection. URL verification has
+    no team id, so its bounded challenge echoes without binding or storing state."""
     try:
         raw = await _slack_request_body(request)
     except SlackBodyTooLarge:
+        return None
+    challenge = url_verification_challenge(raw)
+    if challenge is not None:
+        return JSONResponse({"challenge": challenge})
+    team_id = slack_team_hint(raw)
+    if team_id is None:
+        return None
+    workspace_id = await auth.workspace(slack_installation_id(team_id))
+    if workspace_id is None:
         return None
     try:
         signing_secret = await auth.credential(workspace_id, SLACK_SIGNING_SECRET_SLOT)
     except SurfaceWorkspaceUnknown:
         return None
     except CredentialSlotUnset:
-        return workspace_id if url_verification_challenge(raw) is not None else None
+        return None
     try:
         verify_slack_signature(request.headers, raw, signing_secret)
     except SlackSignatureError:
-        return None
-    if url_verification_challenge(raw) is not None:
-        return workspace_id
-    team_id = signed_team_id(raw)
-    if team_id is None:
-        return None
-    try:
-        await auth.bind_installation(workspace_id, slack_installation_id(signing_secret, team_id))
-    except SurfaceInstallationConflict:
         return None
     return workspace_id
 
@@ -571,8 +547,6 @@ async def _mark_url_verified(ctx: SurfaceContext, signing_secret: str) -> None:
 
 
 async def ingest(ctx: SurfaceContext, request: Request) -> Response:
-    if not workspace_route_matches(request, ctx.workspace_id):
-        return Response("unauthorized", status_code=401)
     try:
         raw = await _slack_request_body(request)
     except SlackBodyTooLarge:
@@ -1076,8 +1050,6 @@ async def interactive(ctx: SurfaceContext, request: Request) -> Response:
     turn stored rewrites (a losing click must not display an answer the agent never saw), and the
     rewrite rides its own task so the ack beats Slack's three-second budget — Block Kit allows no
     message in the direct response, only the ack."""
-    if not workspace_route_matches(request, ctx.workspace_id):
-        return Response("unauthorized", status_code=401)
     try:
         raw = await _slack_request_body(request)
     except SlackBodyTooLarge:

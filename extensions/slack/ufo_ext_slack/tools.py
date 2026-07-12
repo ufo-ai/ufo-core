@@ -2,30 +2,32 @@
 
 `slack_connect` is the idempotent state machine — missing secrets read as `not_configured`; stored
 secrets with an absent or rotation-staled identity run `auth.test` (Slack's authentication-and-
-identity check) and persist the derived team/bot ids as the surface's own identity record; a valid
-identity awaiting Slack's first signed event reads `pending`; a fingerprint-matching url-verified
-marker reads `connected`. `slack_app_manifest` renders the exact app manifest for this deploy so
-the member creates the app with the right scopes and request URLs. The two secrets (bot token,
+identity check), persist the derived team/bot ids, and uniquely register that Slack team to this
+workspace; a valid identity awaiting Slack's first signed event reads `pending`; a
+fingerprint-matching url-verified marker reads `connected`. `slack_app_manifest` renders the exact
+app manifest for this deploy so the member creates the app with the right scopes and request URLs.
+The two secrets (bot token,
 signing secret) travel through `request_credentials` fulfillment — the member's terminal prompts
 privately — and never through chat. The manifest template below is pinned to the skill's YAML by a
 test, so the scopes and events can never drift apart."""
 
 import json
 import re
-from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from ufo.sdk.surfaces import CredentialSlotUnset
+from ufo.sdk.surfaces import CredentialSlotUnset, SurfaceInstallationConflict
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_slack.surface import (
     MALFORMED_IDENTITY_ERROR,
     SLACK_BOT_TOKEN_SLOT,
     SLACK_SIGNING_SECRET_SLOT,
+    SURFACE_SLACK,
     SlackIdentityError,
     SlackIdentityResolver,
     read_identity,
     signing_secret_fingerprint,
+    slack_installation_id,
     url_verified_blob_key,
 )
 
@@ -89,8 +91,8 @@ class SlackManifestInput(BaseModel):
     )
 
 
-def _events_url(public_base_url: str, workspace_id: UUID) -> str:
-    return f"{public_base_url.rstrip('/')}/surface/slack/{workspace_id}"
+def _events_url(public_base_url: str) -> str:
+    return f"{public_base_url.rstrip('/')}/surface/slack"
 
 
 def _state(state: str, hint: str, events_url: str | None, **extra: object) -> ToolResult:
@@ -105,11 +107,7 @@ async def slack_connect_handler(ctx: ToolContext, args: SlackConnectInput) -> To
     the bot is shared by every member; a signed Slack request proves the same record itself, the
     signature gating what the owner gates here."""
     assert ctx.ext is not None
-    events_url = (
-        None
-        if ctx.public_base_url is None
-        else _events_url(ctx.public_base_url, ctx.turn.workspace_id)
-    )
+    events_url = None if ctx.public_base_url is None else _events_url(ctx.public_base_url)
     missing = []
     for slot in SLACK_SECRET_SLOTS:
         try:
@@ -146,6 +144,14 @@ async def slack_connect_handler(ctx: ToolContext, args: SlackConnectInput) -> To
                 _token_diagnosis(error.error),
                 events_url,
             )
+    try:
+        await ctx.ext.installations.bind(SURFACE_SLACK, slack_installation_id(identity.team_id))
+    except SurfaceInstallationConflict:
+        return _state(
+            "not_configured",
+            "This Slack workspace is already connected to another UFO workspace.",
+            events_url,
+        )
     if await _verified(ctx):
         return _state(
             "connected",
@@ -194,7 +200,7 @@ async def slack_manifest_handler(ctx: ToolContext, args: SlackManifestInput) -> 
         raise ValueError(
             "no public base URL — set [connect] public_base_url and restart the deploy"
         )
-    events_url = _events_url(base, ctx.turn.workspace_id)
+    events_url = _events_url(base)
     manifest = SLACK_APP_MANIFEST_TEMPLATE.format(
         name=args.name, request_url=events_url, interactivity_url=f"{events_url}/interactive"
     )

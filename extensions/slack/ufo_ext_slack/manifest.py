@@ -42,10 +42,6 @@ def manifest() -> Manifest:
                 routes=(
                     SurfaceRoute(method="POST", path="", handler=ingest),
                     SurfaceRoute(method="POST", path="interactive", handler=interactive),
-                    SurfaceRoute(method="POST", path="{workspace_id}", handler=ingest),
-                    SurfaceRoute(
-                        method="POST", path="{workspace_id}/interactive", handler=interactive
-                    ),
                 ),
                 post=post,
                 attach=attach,

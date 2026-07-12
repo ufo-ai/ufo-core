@@ -55,7 +55,7 @@ from ufo.credentials import (
     CredentialStore,
     open_credential_request,
 )
-from ufo.db import workspace_tx
+from ufo.db import owner_tx, workspace_tx
 from ufo.hub import LiveFrame
 from ufo.o11y import log
 from ufo.schema import tables
@@ -71,7 +71,7 @@ from ufo.schema.records import (
     TerminalStatus,
     TurnContext,
 )
-from ufo.workspace import ws
+from ufo.workspace import ws, ws_current
 
 WORKSPACE_SEGMENT = "workspace"
 
@@ -542,16 +542,97 @@ class SurfaceInstallationConflict(LookupError):
     """A shared surface installation is already bound to another workspace."""
 
 
+class UndeclaredSurface(KeyError):
+    """A tool tried to register an installation for a surface its manifest does not declare."""
+
+
+@dataclass(frozen=True)
+class SurfaceInstallationAccess:
+    """A tool's manifest-scoped installation registry under the ambient workspace."""
+
+    declared: frozenset[str]
+
+    async def bind(self, surface: str, installation_id: str) -> None:
+        """Bind one declared surface's installation to this workspace. Reconfiguration replaces
+        this workspace's binding; the fleet-wide identity constraint rejects another workspace."""
+        if surface not in self.declared:
+            raise UndeclaredSurface(surface)
+        if not installation_id:
+            raise ValueError("surface installation id is empty")
+        workspace_id = ws_current().workspace_id
+        try:
+            async with workspace_tx() as connection:
+                match connection.dialect.name:
+                    case "postgresql":
+                        bound = (
+                            await connection.execute(
+                                postgres_insert(tables.surface_installation)
+                                .values(
+                                    workspace_id=workspace_id,
+                                    surface=surface,
+                                    installation_id=installation_id,
+                                    created_at=sa.func.now(),
+                                    updated_at=sa.func.now(),
+                                )
+                                .on_conflict_do_update(
+                                    index_elements=("workspace_id", "surface"),
+                                    set_={
+                                        "installation_id": installation_id,
+                                        "updated_at": sa.func.now(),
+                                    },
+                                )
+                                .returning(tables.surface_installation.c.installation_id)
+                            )
+                        ).scalar_one()
+                    case "sqlite":
+                        bound = (
+                            await connection.execute(
+                                sqlite_insert(tables.surface_installation)
+                                .values(
+                                    workspace_id=workspace_id,
+                                    surface=surface,
+                                    installation_id=installation_id,
+                                    created_at=sa.func.now(),
+                                    updated_at=sa.func.now(),
+                                )
+                                .on_conflict_do_update(
+                                    index_elements=("workspace_id", "surface"),
+                                    set_={
+                                        "installation_id": installation_id,
+                                        "updated_at": sa.func.now(),
+                                    },
+                                )
+                                .returning(tables.surface_installation.c.installation_id)
+                            )
+                        ).scalar_one()
+                    case name:
+                        raise RuntimeError(f"surface installation binding does not support {name}")
+                if bound != installation_id:
+                    raise RuntimeError("surface installation binding returned another identity")
+        except sa.exc.IntegrityError as error:
+            raise SurfaceInstallationConflict(surface) from error
+
+
 @dataclass(frozen=True)
 class SurfaceAuth:
-    """The pre-binding gate for a shared surface resolver. A resolver may read only a credential
-    slot its own manifest declared, and may bind only its own installation identity. Each operation
-    runs under the named workspace; the installation's global uniqueness rejects cross-workspace
-    reuse even though RLS hides the row that owns it."""
+    """The pre-binding gate for a shared surface resolver. Fleet lookup returns only the workspace
+    owning an exact installation identity; credential reads remain manifest-slot gated."""
 
     _credentials: CredentialStore | None
     _declared: frozenset[str]
     _surface: str
+
+    async def workspace(self, installation_id: str) -> UUID | None:
+        async with owner_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(tables.surface_installation.c.workspace_id).where(
+                        tables.surface_installation.c.surface == self._surface,
+                        tables.surface_installation.c.installation_id == installation_id,
+                    )
+                )
+            ).one_or_none()
+        return None if row is None else row.workspace_id
 
     async def credential(self, workspace_id: UUID, slot: str) -> str:
         if slot not in self._declared:
@@ -571,70 +652,11 @@ class SurfaceAuth:
                 raise SurfaceWorkspaceUnknown(str(workspace_id))
             return await self._credentials.get(workspace_id, slot)
 
-    async def bind_installation(self, workspace_id: UUID, installation_id: str) -> None:
-        """Bind this surface installation to one workspace. Reconfiguration replaces this
-        workspace's binding atomically; the global installation identity rejects a second
-        workspace even when RLS hides the row that owns it."""
-        if not installation_id:
-            raise ValueError("surface installation id is empty")
-        with ws(workspace_id):
-            try:
-                async with workspace_tx() as connection:
-                    match connection.dialect.name:
-                        case "postgresql":
-                            postgres_statement = postgres_insert(
-                                tables.surface_installation
-                            ).values(
-                                workspace_id=workspace_id,
-                                surface=self._surface,
-                                installation_id=installation_id,
-                                created_at=sa.func.now(),
-                                updated_at=sa.func.now(),
-                            )
-                            bound = (
-                                await connection.execute(
-                                    postgres_statement.on_conflict_do_update(
-                                        index_elements=("workspace_id", "surface"),
-                                        set_={
-                                            "installation_id": installation_id,
-                                            "updated_at": sa.func.now(),
-                                        },
-                                    ).returning(tables.surface_installation.c.installation_id)
-                                )
-                            ).scalar_one()
-                        case "sqlite":
-                            sqlite_statement = sqlite_insert(tables.surface_installation).values(
-                                workspace_id=workspace_id,
-                                surface=self._surface,
-                                installation_id=installation_id,
-                                created_at=sa.func.now(),
-                                updated_at=sa.func.now(),
-                            )
-                            bound = (
-                                await connection.execute(
-                                    sqlite_statement.on_conflict_do_update(
-                                        index_elements=("workspace_id", "surface"),
-                                        set_={
-                                            "installation_id": installation_id,
-                                            "updated_at": sa.func.now(),
-                                        },
-                                    ).returning(tables.surface_installation.c.installation_id)
-                                )
-                            ).scalar_one()
-                        case name:
-                            raise RuntimeError(
-                                f"surface installation binding does not support {name}"
-                            )
-                    if bound != installation_id:
-                        raise RuntimeError("surface installation binding returned another identity")
-            except sa.exc.IntegrityError as error:
-                raise SurfaceInstallationConflict(self._surface) from error
-
 
 RouteHandler = Callable[[SurfaceContext, Request], Awaitable[Response]]
 PostHandler = Callable[[SurfaceContext, Writeback], Awaitable[str]]
 AttachHandler = Callable[[SurfaceContext, Writeback, str], Awaitable[None]]
-WorkspaceResolver = Callable[[Request, SurfaceAuth], Awaitable[UUID | None]]
+WorkspaceResolver = Callable[[Request, SurfaceAuth], Awaitable[UUID | Response | None]]
 SurfaceContextFactory = Callable[[UUID, str], SurfaceContext]
 
 
@@ -668,10 +690,10 @@ class SurfaceSpec:
     attach: AttachHandler | None = None
     identify: WorkspaceResolver | None = None
     """How shared serve resolves a request's workspace before binding it. The async resolver
-    verifies the request through `SurfaceAuth`, whose declared-slot gate permits a workspace's
-    stored credential to authenticate its own workspace-qualified route. None rejects the request.
-    A dedicated deploy pins one workspace and never calls this; a surface that omits it is not
-    mounted on shared serve."""
+    uses `SurfaceAuth` to map an installation and verify that workspace's credential. A UUID binds
+    that workspace, None rejects the request, and a Response completes a bounded side-effect-free
+    pre-binding handshake. A dedicated deploy pins one workspace and never calls this; a surface
+    that omits it is not mounted on shared serve."""
 
 
 def _writeback_due(now: datetime) -> sa.ColumnElement[bool]:
