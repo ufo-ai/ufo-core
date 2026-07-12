@@ -97,6 +97,22 @@ hard-to-vary decision; cut the words around it. Prefer a table to prose. One exa
 - Bound every payload sent to an external API next to the call.
 - Event-fired work must be unable to fire on events it caused; batch-at-interval is the default.
 
+## Hard problems
+
+A problem that survives the first approach — a wedged bug, an open design, deep research — runs
+as a portfolio, not a single bet:
+
+- Keep a registry of approaches tried and exactly where each failed. A stalled route is blocked;
+  it earns renewed effort only with a materially new mechanism, never a rerun.
+- No route dominates on elegance. Keep incompatible routes alive across rounds; cross-pollinate
+  only after each has exposed its real strengths and gaps.
+- Subagents return concrete work — a failing test, a measurement, a counterexample, a diff, a
+  primary source — never status reports. "Routine" and "should work" are rejected for any
+  unproven step; the same bar governs review: audit a change against its known failure modes.
+- The orchestrating agent synthesizes, challenges, redirects, and launches new rounds; a failed
+  first wave is data, not a stopping condition. Budget effort in rounds, not wall-clock —
+  parallelism compresses time, never rigor.
+
 ## Testing
 
 - New function → new test; bug fix → the test that would have caught it.
