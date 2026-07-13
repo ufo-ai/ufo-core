@@ -25,7 +25,6 @@ from ufo.sdk.manifest import IndexBackendSpec, Manifest
 NAME = "index_default"
 VERSION = "0.1.0"
 INDEX_BACKEND = "default"
-EMBED_DIM = 3072
 
 Transaction = Callable[[], AbstractAsyncContextManager[AsyncConnection]]
 
