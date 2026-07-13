@@ -11,7 +11,7 @@ to core."""
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from uuid import UUID, uuid4
 
@@ -24,6 +24,7 @@ from starlette.requests import Request
 
 from ufo.db import workspace_tx
 from ufo.schema import tables
+from ufo.schema.records import TerminalFrame
 from ufo.workspace import ws
 
 CONNECT_STATE_TTL_SECONDS = 600
@@ -40,6 +41,10 @@ class ConnectStateInvalid(ValueError):
 class ConnectUnavailable(RuntimeError):
     """No connect flow is installed — the deploy set no credential key, so grants can be neither
     sealed nor recorded. The `connect_account` tool and the OAuth callback fail loud with this."""
+
+
+class ConnectRequestInvalid(ValueError):
+    """A private connect handoff is absent, stale, or belongs to another member."""
 
 
 @dataclass(frozen=True)
@@ -232,6 +237,9 @@ class ConnectFlow:
         sealed = self.fernet.encrypt(state.model_dump_json().encode()).decode()
         return descriptor.authorize_url(sealed, self.redirect_uri)
 
+    def validate_provider(self, provider: str) -> None:
+        self._provider(provider)
+
     def bridge_workspace(self, *, state: str, provider: str, callback: str) -> UUID:
         """Verify a browser bridge request and return the workspace it may run as."""
         claims = self._open(state)
@@ -272,12 +280,106 @@ class ConnectFlow:
         return ConnectState.model_validate_json(raw)
 
 
+@dataclass(frozen=True)
+class ConnectHandoff:
+    """Memoize a terminal connect request's OAuth URL for its speaking member."""
+
+    flow: ConnectFlow
+
+    async def authorize(self, workspace_id: UUID, turn_id: UUID, member_id: UUID) -> str:
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(
+                        tables.turn.c.agent_id,
+                        tables.turn.c.conversation_id,
+                        tables.turn.c.speaker_member_id,
+                        tables.turn.c.connect_authorization_url,
+                        tables.turn.c.connect_authorized_at,
+                        tables.turn.c.terminal,
+                        tables.turn.c.updated_at,
+                    )
+                    .where(
+                        tables.turn.c.id == turn_id,
+                        tables.turn.c.workspace_id == workspace_id,
+                    )
+                    .with_for_update()
+                )
+            ).one_or_none()
+            if row is None or row.speaker_member_id != member_id:
+                raise ConnectRequestInvalid("connect request belongs to another member")
+            if row.terminal is None:
+                raise ConnectRequestInvalid("connect request is no longer available")
+            terminal = TerminalFrame.model_validate(row.terminal)
+            request = terminal.connect_request
+            if request is None:
+                raise ConnectRequestInvalid("connect request is no longer available")
+            try:
+                self.flow.validate_provider(request.provider)
+            except UnknownProvider as error:
+                raise ConnectRequestInvalid("connect provider is no longer available") from error
+            now = datetime.now(UTC)
+            if row.connect_authorization_url is not None:
+                if row.connect_authorized_at is None:
+                    raise ConnectRequestInvalid("connect authorization is incomplete")
+                authorized_at = (
+                    row.connect_authorized_at
+                    if row.connect_authorized_at.tzinfo is not None
+                    else row.connect_authorized_at.replace(tzinfo=UTC)
+                )
+                if now - authorized_at > timedelta(seconds=CONNECT_STATE_TTL_SECONDS):
+                    raise ConnectRequestInvalid("connect authorization has expired")
+                return row.connect_authorization_url
+            updated_at = (
+                row.updated_at
+                if row.updated_at.tzinfo is not None
+                else row.updated_at.replace(tzinfo=UTC)
+            )
+            if now - updated_at > timedelta(seconds=CONNECT_STATE_TTL_SECONDS):
+                raise ConnectRequestInvalid("connect request has expired")
+            url = self.flow.authorize(
+                workspace_id=workspace_id,
+                agent_id=row.agent_id,
+                provider=request.provider,
+                grantor_member_id=member_id,
+                conversation_id=row.conversation_id,
+            )
+            updated = await connection.execute(
+                sa.update(tables.turn)
+                .values(connect_authorization_url=url, connect_authorized_at=sa.func.now())
+                .where(
+                    tables.turn.c.id == turn_id,
+                    tables.turn.c.workspace_id == workspace_id,
+                    tables.turn.c.speaker_member_id == member_id,
+                    tables.turn.c.connect_authorization_url.is_(None),
+                )
+            )
+            if updated.rowcount == 1:
+                return url
+            memoized = (
+                await connection.execute(
+                    sa.select(
+                        tables.turn.c.connect_authorization_url,
+                        tables.turn.c.connect_authorized_at,
+                    ).where(
+                        tables.turn.c.id == turn_id,
+                        tables.turn.c.workspace_id == workspace_id,
+                        tables.turn.c.speaker_member_id == member_id,
+                    )
+                )
+            ).one_or_none()
+            if memoized is None or memoized.connect_authorization_url is None:
+                raise ConnectRequestInvalid("connect request is no longer available")
+            return memoized.connect_authorization_url
+
+
 _installed_flow: ConnectFlow | None = None
 
 
 def install_connect_flow(flow: ConnectFlow | None) -> None:
     """The process's single connect flow, installed once at serve boot before any turn runs. The
-    `connect_account` tool a turn dispatches and the OAuth callback both read it here rather than
+    `connect_account` tool validates against it, a surface mints a checked private URL through it,
+    and the OAuth callback completes through it rather than
     threading a deploy-fixed singleton (one credential key, one provider map, one callback URL)
     through every turn's tool context. None when no credential key is set — both readers then fail
     loud with `ConnectUnavailable`. A test reinstalls to inject a stub provider."""

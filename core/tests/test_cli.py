@@ -1,12 +1,14 @@
 """The chat stream renderer: the live cost meter may never corrupt streamed text."""
 
 import io
+import json
 import os
 from pathlib import Path
 
+import httpx
 import pytest
 
-from ufo.cli import _load_dotenv, _TurnDisplay
+from ufo.cli import _load_dotenv, _stream_turn, _TurnDisplay
 
 DONE_FRAME: dict[str, object] = {
     "status": "done",
@@ -125,6 +127,49 @@ def test_activity_note_streams_on_its_own_line_without_corrupting_text_or_meter(
         "claude-opus-4-8 · 1834 tok · $0.009430",
         "",
     ]
+
+
+async def test_stream_renders_connect_and_error_frames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(200, json={"turn_id": "turn-1"})
+        frames = (
+            {"connect_url": "https://oauth.example.test/authorize"},
+            {"connect_error": "Connection request unavailable"},
+            {"frame": DONE_FRAME},
+        )
+        return httpx.Response(
+            200,
+            content=b"".join(json.dumps(frame).encode() + b"\n" for frame in frames),
+        )
+
+    monkeypatch.setattr(
+        "ufo.cli.httpx.AsyncClient",
+        lambda **kwargs: async_client(
+            transport=httpx.MockTransport(handler),
+            base_url=kwargs["base_url"],
+            timeout=kwargs["timeout"],
+        ),
+    )
+    out, err = io.StringIO(), io.StringIO()
+    monkeypatch.setattr("ufo.cli.sys.stdout", out)
+    monkeypatch.setattr("ufo.cli.sys.stderr", err)
+    current: dict[str, str] = {}
+
+    await _stream_turn("http://ufo.test", {}, "connect", current)
+
+    assert current == {"turn_id": "turn-1"}
+    assert out.getvalue().splitlines() == [
+        "Connect account: https://oauth.example.test/authorize",
+        "Connection request unavailable",
+        "Hi! How can I help you today?",
+        "claude-opus-4-8 · 1834 tok · $0.009430",
+    ]
+    assert err.getvalue() == ""
 
 
 def test_cancelled_erases_pending_meter() -> None:

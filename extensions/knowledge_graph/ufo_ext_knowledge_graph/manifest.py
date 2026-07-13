@@ -77,7 +77,7 @@ async def graph_search_handler(ctx: ToolContext, args: GraphSearchInput) -> Tool
     edge_types = frozenset(to_edge_type(kind) for kind in args.edge_types or ())
     store = GraphStore(transaction=ctx.ext.transaction, workspace_id=ctx.ext.store.workspace_id)
     subgraph = await store.traverse(
-        args.entity, graph_subjects(ctx.member_id), args.hops, edge_types
+        args.entity, graph_subjects(ctx.audience_member_id), args.hops, edge_types
     )
     lines = render_subgraph(subgraph)
     if not lines:
@@ -101,7 +101,7 @@ async def graph_context_hook(ctx: HookContext) -> HookOutcome:
                 transaction=ctx.ext.transaction, workspace_id=ctx.ext.store.workspace_id
             )
             subgraph = await store.context_for(
-                ctx.payload.text, graph_subjects(ctx.member_id), DEFAULT_HOPS
+                ctx.payload.text, graph_subjects(ctx.audience_member_id), DEFAULT_HOPS
             )
     except Exception:
         logger.warning("knowledge_graph.context_hook.degraded", exc_info=True)

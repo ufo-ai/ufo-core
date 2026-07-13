@@ -207,7 +207,9 @@ async def memory_search_handler(ctx: ToolContext, args: MemorySearchInput) -> To
         raise RuntimeError("memory_search dispatched without its ExtensionContext")
     start = _date_bound(args.start_date, end=False)
     end = _date_bound(args.end_date, end=True)
-    matches = await MemorySearchService(ctx.ext).search(args.queries, ctx.member_id, start, end)
+    matches = await MemorySearchService(ctx.ext).search(
+        args.queries, ctx.audience_member_id, start, end
+    )
     if not matches:
         return ToolResult(content=(TextContent(text="No matching memory."),))
     return ToolResult(
@@ -221,7 +223,9 @@ async def memory_update_handler(ctx: ToolContext, args: MemoryUpdateInput) -> To
     if ctx.ext is None:
         raise RuntimeError("memory_update dispatched without its ExtensionContext")
     subject = (
-        SHARED_SUBJECT if args.shared or ctx.member_id is None else member_subject(ctx.member_id)
+        SHARED_SUBJECT
+        if args.shared or ctx.audience_member_id is None
+        else member_subject(ctx.audience_member_id)
     )
     await store_for(ctx.ext).commit(
         MemoryWrite(
@@ -243,7 +247,7 @@ async def recall_hook(ctx: HookContext) -> HookOutcome:
     on any failure or empty result rather than ever failing the turn."""
     if not isinstance(ctx.payload, UserPromptSubmit):
         return None
-    subjects = recall_subjects(ctx.member_id)
+    subjects = recall_subjects(ctx.audience_member_id)
     try:
         async with asyncio.timeout(RECALL_SOFT_TIMEOUT_SECONDS):
             recalled = await store_for(ctx.ext).recall(ctx.payload.text, subjects, RECALL_LIMIT)

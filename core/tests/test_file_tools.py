@@ -215,7 +215,8 @@ def file_ctx(sandbox_image: str, tmp_path: Path) -> Iterator[tuple[ToolContext, 
         turn=turn,
         agent=Agent(prompt="be terse", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
-        member_id=None,
+        speaker_member_id=None,
+        audience_member_id=None,
         artifact_token_secret=ARTIFACT_SECRET,
     )
     try:
@@ -557,7 +558,7 @@ async def test_engine_offloads_an_oversize_result_to_a_readable_workspace_file(
         hooks=HookChain(),
         blob=ctx.blob,
         spawn=ctx.spawn,
-        member_id=ctx.member_id,
+        audience_member_id=ctx.audience_member_id,
         artifact_token_secret=ctx.artifact_token_secret,
         grants=None,
     )

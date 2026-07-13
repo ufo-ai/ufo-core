@@ -208,7 +208,8 @@ async def test_device_auth_starts_in_chat_and_fulfills_the_encrypted_slot(
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=cast(Spawn, None),
-        member_id=owner_id,
+        speaker_member_id=owner_id,
+        audience_member_id=owner_id,
         artifact_token_secret="",
         idempotency_key="turn/tool/call",
         ext=ext,
@@ -257,8 +258,21 @@ async def test_device_auth_starts_in_chat_and_fulfills_the_encrypted_slot(
         )
         async with async_client(transport=httpx.MockTransport(auth)) as http:
             with ws(workspace_id):
+                with pytest.raises(ValueError, match="private audience"):
+                    await YcAuth(replace(context, audience_member_id=None), http).run(
+                        "start", "session"
+                    )
+                non_owner = uuid4()
                 with pytest.raises(ValueError, match="workspace owner"):
-                    await YcAuth(replace(context, member_id=uuid4()), http).run("start", "session")
+                    await YcAuth(
+                        replace(
+                            context,
+                            speaker_member_id=non_owner,
+                            audience_member_id=non_owner,
+                        ),
+                        http,
+                    ).run("start", "session")
+                assert authorization_calls == 0
         with ws(workspace_id):
             tool_result = await yc_auth(context, YcAuthInput(action="start"))
             started = YcAuthResult.model_validate_json(tool_result.content[0].text)

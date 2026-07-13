@@ -1,6 +1,7 @@
 """The dedicated CLI surface and the provider-facing OAuth callback."""
 
 import hashlib
+import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from uuid import UUID, uuid4
@@ -13,6 +14,8 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 from ufo.db import workspace_tx
 from ufo.governance import Governance
 from ufo.grants import (
+    ConnectHandoff,
+    ConnectRequestInvalid,
     ConnectStateInvalid,
     ConnectUnavailable,
     UnknownProvider,
@@ -95,7 +98,7 @@ async def chat(
             dbos=request.app.state.dbos,
             durable_surfaces=request.app.state.durable_surfaces,
         ),
-    ).admit(conversation.id, agent.id, inbound)
+    ).admit(conversation.id, agent.id, inbound, speaker_member_id=identity.member_id)
     return {"turn_id": str(turn_id)}
 
 
@@ -106,7 +109,9 @@ async def stream_turn(
     identity = await _authenticate(authorization)
     await _require_turn(turn_id, identity)
     hub: Hub = request.app.state.hub
-    return StreamingResponse(_frame_lines(hub, turn_id), media_type="application/x-ndjson")
+    return StreamingResponse(
+        _frame_lines(hub, turn_id, identity), media_type="application/x-ndjson"
+    )
 
 
 @router.post("/turns/{turn_id}/cancel")
@@ -179,7 +184,8 @@ async def connect_callback(state: str = "", code: str = "") -> PlainTextResponse
     except UnknownProvider:
         raise HTTPException(404, "connector provider is not installed") from None
     return PlainTextResponse(
-        f"connected {recorded.provider} account {recorded.account_id}; you can close this window"
+        f"connected {recorded.provider} account {recorded.account_id}; "
+        "return to chat and ask me to continue"
     )
 
 
@@ -230,6 +236,24 @@ async def _require_turn(turn_id: UUID, identity: CliIdentity) -> None:
         raise HTTPException(403, "turn belongs to another member")
 
 
-async def _frame_lines(hub: Hub, turn_id: UUID) -> AsyncIterator[bytes]:
+async def _frame_lines(hub: Hub, turn_id: UUID, identity: CliIdentity) -> AsyncIterator[bytes]:
     async for _cursor, frame in tail_frames(hub, turn_id):
+        if isinstance(frame, Terminal) and frame.frame.connect_request is not None:
+            try:
+                url = await ConnectHandoff(installed_connect_flow()).authorize(
+                    identity.workspace_id, turn_id, identity.member_id
+                )
+            except (ConnectRequestInvalid, ConnectUnavailable):
+                yield (
+                    json.dumps(
+                        {
+                            "connect_error": (
+                                "Connection request unavailable; ask me to connect again."
+                            )
+                        }
+                    ).encode()
+                    + b"\n"
+                )
+            else:
+                yield json.dumps({"connect_url": url}).encode() + b"\n"
         yield frame.model_dump_json().encode() + b"\n"

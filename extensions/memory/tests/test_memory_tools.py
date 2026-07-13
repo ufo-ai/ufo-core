@@ -123,7 +123,8 @@ def _tool_ctx(
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
-        member_id=member_id,
+        speaker_member_id=member_id,
+        audience_member_id=member_id,
         artifact_token_secret="",
         ext=ext,
     )
@@ -187,7 +188,8 @@ async def test_user_prompt_submit_hook_injects_a_recalled_fact(clean: None) -> N
                 ),
                 agent=Agent(prompt="p", model="claude-opus-4-8"),
                 spawn=_unavailable_spawn,
-                member_id=member,
+                speaker_member_id=member,
+                audience_member_id=member,
                 artifact_token_secret="",
                 ext=ext,
             ),
@@ -209,7 +211,8 @@ async def test_user_prompt_submit_hook_injects_a_recalled_fact(clean: None) -> N
                     created_at=datetime(2026, 7, 9, tzinfo=UTC),
                 ),
                 agent=Agent(prompt="p", model="claude-opus-4-8"),
-                member_id=member,
+                speaker_member_id=member,
+                audience_member_id=member,
                 payload=UserPromptSubmit(text="what is the vault code"),
             )
         )
@@ -251,7 +254,8 @@ async def test_recall_hook_excludes_episodic_topic_pointers(clean: None, tmp_pat
                     created_at=datetime(2026, 7, 9, tzinfo=UTC),
                 ),
                 agent=Agent(prompt="p", model="claude-opus-4-8"),
-                member_id=member,
+                speaker_member_id=member,
+                audience_member_id=member,
                 payload=UserPromptSubmit(text="api key pricing"),
             )
         )
@@ -279,7 +283,8 @@ async def test_recall_hook_ignores_a_non_prompt_payload(clean: None) -> None:
                     created_at=datetime(2026, 7, 9, tzinfo=UTC),
                 ),
                 agent=Agent(prompt="p", model="claude-opus-4-8"),
-                member_id=None,
+                speaker_member_id=None,
+                audience_member_id=None,
                 payload=None,
             )
         )

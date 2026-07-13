@@ -40,12 +40,14 @@ from ufo.ext.surface import (
     WRITEBACK_MAX_AGE_SECONDS,
     workspace_key,
 )
+from ufo.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
 from ufo.hub import InProcessHub, Terminal, ToolCall
 from ufo.schema import tables
 from ufo.schema.records import (
     WRITEBACK_PENDING,
     AskQuestion,
     AskUserInput,
+    ConnectRequest,
     QuestionOption,
     TerminalFrame,
 )
@@ -460,6 +462,10 @@ def test_block_kit_reply_body_renders_markdown_and_degrades() -> None:
     degraded = json.loads(slack.slack_reply_body("C5", None, big, metadata))
     assert "blocks" not in degraded
     assert degraded["text"] == f"{big}\n\n{metadata}"
+    connect = slack.slack_connect_actions(ConnectRequest(provider="github"), uuid4())
+    preserved = json.loads(slack.slack_reply_body("C5", None, big, metadata, actions=connect))
+    assert "".join(block["text"] for block in preserved["blocks"][:-2]) == big
+    assert preserved["blocks"][-2] == connect
     with pytest.raises(ValueError, match="metadata is too large"):
         slack.slack_reply_body("C5", None, "hi", "x" * (slack.SLACK_CONTEXT_TEXT_LIMIT + 1))
 
@@ -1231,6 +1237,38 @@ async def test_dm_links_member_by_email_and_status_anchors_to_the_message(
     }
 
 
+async def test_channel_persists_the_speaker_without_claiming_the_conversation(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, member_id = await _seed(member_email="bee@example.com")
+    _, client, _ = await _mount(
+        monkeypatch, workspace_id, tmp_path, [], users={"UBEE": "bee@example.com"}
+    )
+    mention = _event_body(
+        type="app_mention",
+        user="UBEE",
+        channel="C9",
+        ts="10.0",
+        text=f"<@{BOT_USER_ID}> connect my calendar",
+    )
+    async with client:
+        response = await client.post(
+            EVENTS_PATH, content=mention, headers=_sign(mention, int(time.time()))
+        )
+    assert response.status_code == 200
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.turn.c.speaker_member_id,
+                    tables.conversation.c.member_id,
+                ).select_from(tables.turn.join(tables.conversation))
+            )
+        ).one()
+    assert row.speaker_member_id == member_id
+    assert row.member_id is None
+
+
 async def test_first_time_same_domain_dm_speaker_joins_as_a_member(
     db: None, tmp_path, monkeypatch
 ) -> None:
@@ -1501,6 +1539,8 @@ async def _seed_done_turn(
     artifact_size: int = 11,
     artifact_media_type: str = "application/pdf",
     question: AskUserInput | None = None,
+    connect_request: ConnectRequest | None = None,
+    speaker_member_id: UUID | None = None,
 ) -> UUID:
     conversation_id, turn_id = uuid4(), uuid4()
     async with workspace_tx() as connection:
@@ -1529,6 +1569,7 @@ async def _seed_done_turn(
                 seq=1,
                 status="done",
                 inbound="ask",
+                speaker_member_id=speaker_member_id,
                 terminal=TerminalFrame(
                     status="done",
                     text=text,
@@ -1538,6 +1579,7 @@ async def _seed_done_turn(
                     model="claude-opus-4-8",
                     reasoning="high",
                     question=question,
+                    connect_request=connect_request,
                 ).model_dump(mode="json"),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
@@ -2067,7 +2109,13 @@ async def test_oversize_artifact_is_delivered_as_a_download_link(
     assert status == WRITEBACK_DELIVERED
 
 
-async def test_invalid_blocks_reposts_once_as_plain_text(db: None, tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("connect_request", [None, ConnectRequest(provider="google_calendar")])
+async def test_invalid_blocks_reposts_once(
+    db: None,
+    tmp_path,
+    monkeypatch,
+    connect_request: ConnectRequest | None,
+) -> None:
     workspace_id, _ = await _seed()
     recorder: list[httpx.Request] = []
 
@@ -2085,7 +2133,14 @@ async def test_invalid_blocks_reposts_once_as_plain_text(db: None, tmp_path, mon
     app, _, blob = await _mount_transport(
         monkeypatch, workspace_id, tmp_path, httpx.MockTransport(handler)
     )
-    turn_id = await _seed_done_turn(workspace_id, "C5:200.0", "hi **there**", blob, artifact=False)
+    turn_id = await _seed_done_turn(
+        workspace_id,
+        "C5:200.0",
+        "hi **there**",
+        blob,
+        artifact=False,
+        connect_request=connect_request,
+    )
 
     await app.state.writeback_poller.drain()
 
@@ -2094,10 +2149,17 @@ async def test_invalid_blocks_reposts_once_as_plain_text(db: None, tmp_path, mon
     first = json.loads(posts[0].content)
     second = json.loads(posts[1].content)
     assert first["blocks"][-1]["type"] == "context"
-    assert "blocks" not in second
-    assert second["text"] == (
-        "hi **there**\n\n$0.001234 (1,234 tokens, 42% cached) · claude-opus-4-8-[high]"
-    )
+    if connect_request is None:
+        assert "blocks" not in second
+        assert second["text"] == (
+            "hi **there**\n\n$0.001234 (1,234 tokens, 42% cached) · claude-opus-4-8-[high]"
+        )
+    else:
+        assert second["blocks"][0] == {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "hi **there**"},
+        }
+        assert second["blocks"][-2]["elements"][0]["action_id"] == slack.CONNECT_ACTION_ID
 
     async with workspace_tx() as connection:
         row = (
@@ -2400,13 +2462,97 @@ async def test_question_writeback_posts_answer_buttons(db: None, tmp_path, monke
     assert reply["blocks"][-1]["type"] == "context"
 
 
-def _click_body(action_id: str = "ask:0", value: str = "Ship", user: str = "U9") -> bytes:
+@dataclass(frozen=True)
+class _ConnectProvider:
+    provider: str = "google_calendar"
+    host: str = "calendar.example.test"
+
+    def authorize_url(self, state: str, redirect_uri: str) -> str:
+        return f"https://oauth.example.test/authorize?state={state}"
+
+    async def exchange(
+        self, code: str, redirect_uri: str, workspace_id: UUID, state: str
+    ) -> OAuthAccount:
+        return OAuthAccount(account_id="calendar-account")
+
+
+async def test_connect_writeback_keeps_oauth_private_and_checks_the_requester(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, member_id = await _seed(member_email="bee@example.com")
+    assert member_id is not None
+    recorder: list[httpx.Request] = []
+    app, client, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    flow = ConnectFlow(
+        providers={"google_calendar": _ConnectProvider()},
+        fernet=Fernet(Fernet.generate_key()),
+        store=GrantStore(),
+        redirect_uri="https://ufo.example.test/v1/connect/callback",
+    )
+    install_connect_flow(flow)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.surface_identity).values(
+                workspace_id=workspace_id,
+                member_id=member_id,
+                surface=slack.SURFACE_SLACK,
+                external_id="U9",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    turn_id = await _seed_done_turn(
+        workspace_id,
+        "C5:200.0",
+        "Use the private connection control.",
+        blob,
+        artifact=False,
+        connect_request=ConnectRequest(provider="google_calendar"),
+        speaker_member_id=member_id,
+    )
+    try:
+        await app.state.writeback_poller.drain()
+        public = json.loads(_requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)[0].content)
+        assert "oauth.example.test" not in json.dumps(public)
+        assert public["blocks"][1]["elements"][0] == {
+            "type": "button",
+            "text": {"type": "plain_text", "text": "Connect google_calendar"},
+            "action_id": slack.CONNECT_ACTION_ID,
+            "value": str(turn_id),
+        }
+        wrong = _click_body(action_id=slack.CONNECT_ACTION_ID, value=str(turn_id), user="U8")
+        right = _click_body(action_id=slack.CONNECT_ACTION_ID, value=str(turn_id), user="U9")
+        async with client:
+            await client.post(INTERACTIVE_PATH, content=wrong, headers=_signed_form(wrong))
+            await asyncio.gather(*slack._REWRITE_TASKS)
+            await client.post(INTERACTIVE_PATH, content=right, headers=_signed_form(right))
+            await asyncio.gather(*slack._REWRITE_TASKS)
+            await client.post(INTERACTIVE_PATH, content=right, headers=_signed_form(right))
+            await asyncio.gather(*slack._REWRITE_TASKS)
+    finally:
+        install_connect_flow(None)
+    private = [json.loads(request.content) for request in _requests_to(recorder, RESPONSE_URL)]
+    assert private[0]["text"] == "This connection request is not available to you."
+    assert "https://oauth.example.test/authorize" in private[1]["text"]
+    assert private[2]["text"] == private[1]["text"]
+
+
+def _click_body(
+    action_id: str = "ask:0",
+    value: str = "Ship",
+    user: str = "U9",
+    channel: str = "C5",
+    thread: str | None = "200.0",
+) -> bytes:
+    message = {"ts": "999.100", "text": "Ship it? (Ship / Hold)"}
+    if thread is not None:
+        message["thread_ts"] = thread
     payload = {
         "type": "block_actions",
         "team": {"id": TEAM_ID},
         "user": {"id": user},
-        "channel": {"id": "C5"},
-        "message": {"ts": "999.100", "thread_ts": "200.0", "text": "Ship it? (Ship / Hold)"},
+        "channel": {"id": channel},
+        "message": message,
         "actions": [{"action_id": action_id, "value": value}],
         "response_url": RESPONSE_URL,
     }
@@ -2420,12 +2566,67 @@ def _signed_form(body: bytes) -> dict[str, str]:
     }
 
 
+async def _seed_answer_conversation(workspace_id: UUID, queue_key: str = "C5:200.0") -> UUID:
+    conversation_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                surface=slack.SURFACE_SLACK,
+                queue_key=queue_key,
+                member_id=None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return conversation_id
+
+
+async def test_dm_answer_click_claims_the_conversation_for_its_resolved_member(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, member_id = await _seed(member_email="bee@example.com")
+    assert member_id is not None
+    conversation_id = await _seed_answer_conversation(workspace_id, "D5")
+    recorder: list[httpx.Request] = []
+    _, client, _ = await _mount(
+        monkeypatch, workspace_id, tmp_path, recorder, users={"U9": "bee@example.com"}
+    )
+    click = _click_body(channel="D5", thread=None)
+
+    async with client:
+        response = await client.post(INTERACTIVE_PATH, content=click, headers=_signed_form(click))
+
+    assert response.status_code == 200
+    async with workspace_tx() as connection:
+        conversation_member, turn_speaker = (
+            await connection.execute(
+                sa.select(
+                    tables.conversation.c.member_id,
+                    tables.turn.c.speaker_member_id,
+                )
+                .select_from(
+                    tables.conversation.join(
+                        tables.turn,
+                        tables.turn.c.conversation_id == tables.conversation.c.id,
+                    )
+                )
+                .where(tables.conversation.c.id == conversation_id)
+            )
+        ).one()
+    assert conversation_member == member_id
+    assert turn_speaker == member_id
+    assert len(_fetches(recorder, slack.SLACK_USERS_INFO_URL)) == 1
+
+
 async def test_shared_interactive_routes_by_registered_team(
     db: None, tmp_path, monkeypatch
 ) -> None:
-    workspace_id, _ = await _seed()
+    workspace_id, member_id = await _seed(member_email="bee@example.com")
+    conversation_id = await _seed_answer_conversation(workspace_id)
     recorder: list[httpx.Request] = []
-    _patch_httpx(monkeypatch, _mock_transport(recorder, {}))
+    _patch_httpx(monkeypatch, _mock_transport(recorder, {"U9": "bee@example.com"}))
     store = await _store(workspace_id)
     await _register_slack(store, workspace_id)
     blob = FilesystemBlobStore(root=tmp_path)
@@ -2474,19 +2675,34 @@ async def test_shared_interactive_routes_by_registered_team(
     async with workspace_tx() as connection:
         routed = (
             await connection.execute(
-                sa.select(tables.turn.c.workspace_id, tables.turn.c.inbound).where(
-                    tables.turn.c.workspace_id == workspace_id
+                sa.select(
+                    tables.turn.c.workspace_id,
+                    tables.turn.c.inbound,
+                    tables.turn.c.speaker_member_id,
+                    tables.conversation.c.id.label("conversation_id"),
+                    tables.conversation.c.member_id,
                 )
+                .select_from(
+                    tables.turn.join(
+                        tables.conversation,
+                        tables.conversation.c.id == tables.turn.c.conversation_id,
+                    )
+                )
+                .where(tables.turn.c.workspace_id == workspace_id)
             )
         ).one()
     assert routed.workspace_id == workspace_id
     assert routed.inbound == "[Answered by <@U9> via button] Ship"
+    assert routed.speaker_member_id == member_id
+    assert routed.conversation_id == conversation_id
+    assert routed.member_id is None
 
 
 async def test_first_signed_click_proves_identity_and_retry_admits(
     db: None, tmp_path, monkeypatch
 ) -> None:
     workspace_id, _ = await _seed()
+    await _seed_answer_conversation(workspace_id)
     recorder: list[httpx.Request] = []
     _, client, blob = await _mount_transport(
         monkeypatch,
@@ -2522,6 +2738,7 @@ async def test_first_click_wins_and_alone_rewrites_the_message(
     db: None, tmp_path, monkeypatch
 ) -> None:
     workspace_id, _ = await _seed()
+    await _seed_answer_conversation(workspace_id)
     recorder: list[httpx.Request] = []
     _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
     winner = _click_body()

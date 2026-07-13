@@ -24,12 +24,12 @@ from cryptography.fernet import Fernet
 from ufo.config import Config
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
-from ufo.grants import GrantStore, install_connect_flow
+from ufo.grants import ConnectHandoff, GrantStore, install_connect_flow
 from ufo.sandbox.proxy.rules import GRANT_METER_DIMENSION, MeterRule, ScopeRule
 from ufo.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
 from ufo.sandbox.session import RunToken
 from ufo.schema import tables
-from ufo.schema.records import Agent, Turn
+from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
 from ufo.serve import _connect_flow, _connect_redirect_uri
 from ufo.tools.builtins import ConnectAccountInput, connect_account_handler
 from ufo.tools.context import ToolContext
@@ -118,11 +118,25 @@ async def test_connect_binds_a_grant_and_the_proxy_admits_and_meters_the_host(
     assert flow is not None
     install_connect_flow(flow)
 
-    ctx = _turn_context(workspace_id, agent_id, conversation_id, member_id)
+    ctx = _turn_context(workspace_id, agent_id, conversation_id, member_id, turn_id=turn_id)
     result = await connect_account_handler(
         ctx, ConnectAccountInput(provider=sample.CONNECTOR_PROVIDER)
     )
-    url = result.content[0].text
+    request = ConnectRequest.model_validate_json(result.content[0].text.splitlines()[1])
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == turn_id)
+            .values(
+                status="done",
+                speaker_member_id=member_id,
+                terminal=TerminalFrame(status="done", connect_request=request).model_dump(
+                    mode="json"
+                ),
+                updated_at=sa.func.now(),
+            )
+        )
+    url = await ConnectHandoff(flow).authorize(workspace_id, turn_id, member_id)
     assert url.startswith(sample.CONNECTOR_AUTHORIZE_URL)
     state = parse_qs(urlparse(url).query)["state"][0]
     recorded = await flow.complete(state=state, code="the-code")
@@ -249,9 +263,10 @@ def _turn_context(
     conversation_id: UUID,
     member_id: UUID,
     grants: GrantStore | None = None,
+    turn_id: UUID | None = None,
 ) -> ToolContext:
     turn = Turn(
-        id=uuid4(),
+        id=turn_id or uuid4(),
         workspace_id=workspace_id,
         conversation_id=conversation_id,
         agent_id=agent_id,
@@ -266,7 +281,8 @@ def _turn_context(
         turn=turn,
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=None,
-        member_id=member_id,
+        speaker_member_id=member_id,
+        audience_member_id=member_id,
         artifact_token_secret="",
         grants=grants,
     )

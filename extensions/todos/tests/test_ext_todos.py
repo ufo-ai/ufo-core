@@ -65,7 +65,8 @@ def _context(workspace_id: UUID, conversation_id: UUID, tmp_path: Path) -> ToolC
         turn=turn,
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
-        member_id=None,
+        speaker_member_id=None,
+        audience_member_id=None,
         artifact_token_secret="",
         ext=ext,
     )
@@ -169,7 +170,8 @@ async def test_requires_the_extension_context(tmp_path: Path) -> None:
         turn=turn,
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
-        member_id=None,
+        speaker_member_id=None,
+        audience_member_id=None,
         artifact_token_secret="",
         ext=None,
     )

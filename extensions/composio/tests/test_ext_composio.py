@@ -43,9 +43,9 @@ from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import context_for
 from ufo.ext.loader import turn_tools
-from ufo.grants import GrantStore, install_connect_flow
+from ufo.grants import ConnectHandoff, GrantStore, install_connect_flow
 from ufo.schema import tables
-from ufo.schema.records import Agent, Turn
+from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
 from ufo.serve import _connect_flow, _connector_registry, _mount_ext_routes
 from ufo.surfaces.cli import router
 from ufo.tools.builtins import ConnectAccountInput, connect_account_handler
@@ -384,7 +384,22 @@ async def test_connect_binds_a_grant_and_call_external_tool_executes_via_composi
         _turn_context(workspace_id, agent_id, conversation_id, member_id, turn_id),
         ConnectAccountInput(provider=PROVIDER),
     )
-    state = parse_qs(urlparse(begin.content[0].text).query)["state"][0]
+    request = ConnectRequest.model_validate_json(begin.content[0].text.splitlines()[1])
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == turn_id)
+            .values(
+                status="done",
+                speaker_member_id=member_id,
+                terminal=TerminalFrame(status="done", connect_request=request).model_dump(
+                    mode="json"
+                ),
+                updated_at=sa.func.now(),
+            )
+        )
+    url = await ConnectHandoff(flow).authorize(workspace_id, turn_id, member_id)
+    state = parse_qs(urlparse(url).query)["state"][0]
     recorded = await flow.complete(state=state, code=COMPOSIO_ACCOUNT)
     assert (recorded.provider, recorded.account_id) == (PROVIDER, COMPOSIO_ACCOUNT)
     async with workspace_tx() as connection:
@@ -448,7 +463,21 @@ async def test_shared_oauth_bridge_verifies_workspace_and_lands_the_grant(
         _turn_context(workspace_id, agent_id, conversation_id, member_id, turn_id),
         ConnectAccountInput(provider=PROVIDER),
     )
-    bridge = urlparse(begun.content[0].text)
+    request = ConnectRequest.model_validate_json(begun.content[0].text.splitlines()[1])
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == turn_id)
+            .values(
+                status="done",
+                speaker_member_id=member_id,
+                terminal=TerminalFrame(status="done", connect_request=request).model_dump(
+                    mode="json"
+                ),
+                updated_at=sa.func.now(),
+            )
+        )
+    bridge = urlparse(await ConnectHandoff(flow).authorize(workspace_id, turn_id, member_id))
     params = {key: values[0] for key, values in parse_qs(bridge.query).items()}
     app = FastAPI()
     app.include_router(router)
@@ -649,7 +678,8 @@ def _turn_context(
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=None,
-        member_id=member_id,
+        speaker_member_id=member_id,
+        audience_member_id=member_id,
         artifact_token_secret="",
     )
 
@@ -677,7 +707,8 @@ def _ctx(
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=None,
-        member_id=None,
+        speaker_member_id=None,
+        audience_member_id=None,
         artifact_token_secret="",
         grants=grants,
         ext=ext,

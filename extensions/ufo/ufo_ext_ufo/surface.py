@@ -23,12 +23,14 @@ import json
 import os
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
+from functools import partial
 from uuid import UUID
 
 from ufo.sdk.accounting import MICRO_USD_PER_USD
 from ufo.sdk.http import PlainTextResponse, Request, Response, StreamingResponse
 from ufo.sdk.hub import CostTick, LiveFrame, Parked, SkillLoad, Terminal, TextDelta, ToolCall
 from ufo.sdk.surfaces import (
+    ConnectRequestInvalid,
     CredentialPrompt,
     CredentialRequestInvalid,
     SurfaceAuth,
@@ -131,7 +133,10 @@ def _b64url_decode(value: str) -> bytes:
 
 
 def directives_for(
-    frame: LiveFrame, streamed: bool, collect: tuple[CredentialPrompt, ...] = ()
+    frame: LiveFrame,
+    streamed: bool,
+    collect: tuple[CredentialPrompt, ...] = (),
+    connect_message: str | None = None,
 ) -> tuple[bytes, ...]:
     """The directive lines one live frame renders to. Token deltas stream as `txt`; tool and skill
     activity narrates as `note`; a running cost meter is a transient `status`; the terminal frame
@@ -148,7 +153,7 @@ def directives_for(
             cost = frame.cost_micro_usd / MICRO_USD_PER_USD
             return (directive("status", f"{frame.tokens} tok - ${cost:.6f}"),)
         case Terminal():
-            return _answer(frame, streamed, collect)
+            return _answer(frame, streamed, collect, connect_message)
         case Parked():
             return (directive("say", frame.message), directive("ask", PROMPT))
     raise ValueError(f"unmapped live frame {type(frame).__name__}")
@@ -160,7 +165,10 @@ def _activity(frame: ToolCall) -> str:
 
 
 def _answer(
-    terminal: Terminal, streamed: bool, collect: tuple[CredentialPrompt, ...] = ()
+    terminal: Terminal,
+    streamed: bool,
+    collect: tuple[CredentialPrompt, ...] = (),
+    connect_message: str | None = None,
 ) -> tuple[bytes, ...]:
     """Cap a turn. A done turn prompts (`ask`) after its answer — already streamed as `txt`, else
     said now, preceded by one `secret` line per still-unanswered credential prompt, so the shell
@@ -175,7 +183,8 @@ def _answer(
             secrets = tuple(
                 directive("secret", sealed, prompt.slot, prompt.prompt) for prompt in collect
             )
-            return (*said, *secrets, directive("ask", PROMPT))
+            connect = () if connect_message is None else (directive("say", connect_message),)
+            return (*said, *secrets, *connect, directive("ask", PROMPT))
         case "failed":
             return (
                 *_say_lines(frame.text or frame.error_class or "the turn failed"),
@@ -194,6 +203,7 @@ async def stream_directives(
     frames: AsyncIterator[tuple[str, LiveFrame]],
     hold_seconds: float,
     pending: Callable[[str, str], Awaitable[bool]] | None = None,
+    connect: Callable[[], Awaitable[str]] | None = None,
 ) -> AsyncIterator[bytes]:
     """Render a turn's live frames as directives, holding at most `hold_seconds`. A terminal or
     parked frame closes the stream on its own cap; if the hold elapses first the stream ends with
@@ -226,7 +236,18 @@ async def stream_directives(
                 collect = tuple(
                     [p for p in request.prompts if await pending(request.sealed, p.slot)]
                 )
-            lines = directives_for(frame, streamed, collect)
+            connect_message: str | None = None
+            if isinstance(frame, Terminal) and frame.frame.connect_request is not None:
+                if connect is None:
+                    connect_message = "Connection request unavailable; ask me to connect again."
+                else:
+                    try:
+                        url = await connect()
+                    except ConnectRequestInvalid:
+                        connect_message = "Connection request unavailable; ask me to connect again."
+                    else:
+                        connect_message = f"Complete the connection: {url}"
+            lines = directives_for(frame, streamed, collect, connect_message)
             if lines and isinstance(frame, TextDelta):
                 streamed = True
             for line in lines:
@@ -282,16 +303,19 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
         turn_id = await ctx.latest_turn(conversation_id)
         if turn_id is None:
             return PlainTextResponse(directive("ask", PROMPT))
-        return StreamingResponse(
-            stream_directives(ctx.tail(turn_id), HOLD_SECONDS, ctx.credential_prompt_pending),
-            media_type="text/plain",
-        )
-    if len(body.encode()) > MAX_MESSAGE_BYTES:
-        return PlainTextResponse("message too large", status_code=413)
-    agent_id = await ctx.default_agent()
-    turn_id = await ctx.admit(conversation_id, agent_id, body)
+    else:
+        if len(body.encode()) > MAX_MESSAGE_BYTES:
+            return PlainTextResponse("message too large", status_code=413)
+        agent_id = await ctx.default_agent()
+        turn_id = await ctx.admit(conversation_id, agent_id, body, speaker_member_id=member_id)
+    connect = None if member_id is None else partial(ctx.connect_url, turn_id, member_id)
     return StreamingResponse(
-        stream_directives(ctx.tail(turn_id), HOLD_SECONDS, ctx.credential_prompt_pending),
+        stream_directives(
+            ctx.tail(turn_id),
+            HOLD_SECONDS,
+            ctx.credential_prompt_pending,
+            connect,
+        ),
         media_type="text/plain",
     )
 

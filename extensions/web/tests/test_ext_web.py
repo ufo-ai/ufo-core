@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
+from cryptography.fernet import Fernet
 from dbos import DBOSClient
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
@@ -24,6 +25,7 @@ from ufo.connectors import ConnectorRegistry
 from ufo.db import workspace_tx
 from ufo.ext.loader import skill_registry
 from ufo.ext.manifest import ModelProviderSpec
+from ufo.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
 from ufo.hub import InProcessHub, SkillLoad, ToolCall
 from ufo.loop import queue as loop_queue
 from ufo.loop.subagents import SubagentRegistry
@@ -31,7 +33,7 @@ from ufo.models.interface import ModelEvent, ModelRequest, TextDelta
 from ufo.models.registry import ModelRegistry
 from ufo.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
 from ufo.schema import tables
-from ufo.schema.records import TerminalFrame, Usage
+from ufo.schema.records import ConnectRequest, TerminalFrame, Usage
 from ufo.serve import _mount_surfaces
 from ufo.subjects import SHARED_SUBJECT, member_subject
 from ufo.surfaces import hub_tail
@@ -94,6 +96,20 @@ class StandInCarrier:
 class StubEmbed:
     async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
         return tuple(() for _ in texts)
+
+
+@dataclass(frozen=True)
+class ConnectProvider:
+    provider: str = "github"
+    host: str = "api.github.test"
+
+    def authorize_url(self, state: str, redirect_uri: str) -> str:
+        return f"https://oauth.example.test/authorize?state={state}"
+
+    async def exchange(
+        self, code: str, redirect_uri: str, workspace_id: UUID, state: str
+    ) -> OAuthAccount:
+        return OAuthAccount(account_id="github-account")
 
 
 async def _seed_workspace() -> UUID:
@@ -281,6 +297,77 @@ async def test_unknown_session_token_is_rejected(web: tuple[AsyncClient, UUID]) 
     assert denied.status_code == 401
     missing = await client.post("/surface/web/chat", content=b"hi")
     assert missing.status_code == 401
+
+
+async def test_web_stream_privately_opens_the_speakers_connect_handoff(
+    web: tuple[AsyncClient, UUID],
+) -> None:
+    client, workspace_id = web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com")
+    flow = ConnectFlow(
+        providers={"github": ConnectProvider()},
+        fernet=Fernet(Fernet.generate_key()),
+        store=GrantStore(),
+        redirect_uri="https://ufo.example.test/v1/connect/callback",
+    )
+    install_connect_flow(flow)
+    conversation_id, turn_id = uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        agent_id = (await connection.execute(sa.select(tables.agent.c.id))).scalar_one()
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                surface="web",
+                queue_key=uuid4().hex,
+                member_id=member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="done",
+                inbound="connect github",
+                admission_source="member",
+                speaker_member_id=member_id,
+                terminal=TerminalFrame(
+                    status="done",
+                    text="Use the connection control.",
+                    connect_request=ConnectRequest(provider="github"),
+                ).model_dump(mode="json"),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    try:
+        response = await client.get(
+            f"/surface/web/turns/{turn_id}/stream",
+            headers={"cookie": f"{SESSION_COOKIE}={token}"},
+        )
+    finally:
+        install_connect_flow(None)
+    assert response.status_code == 200
+    lines = response.text.splitlines()
+    connect_data = json.loads(lines[lines.index("event: connect") + 1].removeprefix("data: "))
+    assert connect_data["url"].startswith("https://oauth.example.test/authorize")
+    assert lines.index("event: connect") < lines.index("event: terminal")
+    assert "if (frame.text && !streamed)" in CHAT_PAGE
+    assert "reply.insertBefore(document.createTextNode(frame.text), reply.firstChild)" in CHAT_PAGE
+    async with workspace_tx() as connection:
+        memoized_url = (
+            await connection.execute(
+                sa.select(tables.turn.c.connect_authorization_url).where(
+                    tables.turn.c.id == turn_id
+                )
+            )
+        ).scalar_one()
+    assert memoized_url == connect_data["url"]
 
 
 async def test_two_web_members_get_isolated_subjects_and_cannot_cross(

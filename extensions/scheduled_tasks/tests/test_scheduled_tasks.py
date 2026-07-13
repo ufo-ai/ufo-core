@@ -150,7 +150,8 @@ def _tool_ctx(workspace_id: UUID, conversation_id: UUID, agent_id: UUID) -> Tool
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
-        member_id=None,
+        speaker_member_id=None,
+        audience_member_id=None,
         artifact_token_secret="",
         ext=context_for(NAME, frozenset()),
     )
@@ -364,6 +365,7 @@ async def test_new_message_resumes_pause_and_cancels_timer(db: None) -> None:
             agent_id,
             "The approval arrived.",
             "approval-1",
+            speaker_member_id=None,
         )
         async with workspace_tx() as connection:
             resume_turn_id = (
@@ -414,7 +416,11 @@ async def test_pause_does_not_arm_after_a_newer_member_was_admitted(db: None) ->
     )
     with ws(workspace_id):
         member_turn_id = await member_admission.admit(
-            conversation_id, agent_id, "new message", "newer-member"
+            conversation_id,
+            agent_id,
+            "new message",
+            "newer-member",
+            speaker_member_id=None,
         )
         result = await pause_and_wait(
             ctx,
@@ -460,6 +466,7 @@ async def test_redelivered_terminal_message_does_not_cancel_a_later_pause(db: No
             agent_id,
             "The approval arrived.",
             "approval-redelivery",
+            speaker_member_id=None,
         )
         async with workspace_tx() as connection:
             await connection.execute(
@@ -503,6 +510,7 @@ async def test_redelivered_terminal_message_does_not_cancel_a_later_pause(db: No
             agent_id,
             "The approval arrived.",
             "approval-redelivery",
+            speaker_member_id=None,
         )
         async with workspace_tx() as connection:
             pauses = (
@@ -539,6 +547,7 @@ async def test_failed_member_enqueue_preserves_pause_for_the_same_turn_retry(db:
             agent_id,
             "The approval arrived.",
             "approval-retry",
+            speaker_member_id=None,
         )
         async with workspace_tx() as connection:
             pause = (
@@ -557,6 +566,7 @@ async def test_failed_member_enqueue_preserves_pause_for_the_same_turn_retry(db:
             agent_id,
             "The approval arrived.",
             "approval-retry",
+            speaker_member_id=None,
         )
         turns = await _turns(conversation_id)
         async with workspace_tx() as connection:
@@ -601,6 +611,7 @@ async def test_redundant_enqueue_survives_an_ambiguous_failure_until_claim(db: N
                 agent_id,
                 "The approval arrived.",
                 "approval-ambiguous",
+                speaker_member_id=None,
             )
         )
         await dbos.entered.wait()
@@ -609,6 +620,7 @@ async def test_redundant_enqueue_survives_an_ambiguous_failure_until_claim(db: N
             agent_id,
             "The approval arrived.",
             "approval-ambiguous",
+            speaker_member_id=None,
         )
         dbos.release.set()
         accepted = await first
@@ -739,6 +751,7 @@ async def test_member_admission_wins_against_an_already_claimed_pause(db: None) 
                 agent_id,
                 "The approval arrived.",
                 "approval-race",
+                speaker_member_id=None,
             )
         )
         await dbos.entered.wait()
@@ -835,6 +848,7 @@ async def test_member_message_takes_over_a_timer_waiting_to_enqueue(db: None) ->
             agent_id,
             "The approval arrived.",
             "approval-after-timer",
+            speaker_member_id=None,
         )
         dbos.release.set()
         assert await timer_fire is None
@@ -885,6 +899,7 @@ async def test_member_does_not_rewrite_a_timer_with_a_newer_internal_turn(db: No
             agent_id,
             "member reply",
             "member-after-internal",
+            speaker_member_id=None,
         )
         dbos.release.set()
         assert await timer_fire is None
@@ -928,11 +943,21 @@ async def test_later_member_waits_behind_the_first_queued_turn(db: None) -> None
             0,
         )
         first = asyncio.create_task(
-            member_admission.admit(conversation_id, agent_id, "first", "member-first")
+            member_admission.admit(
+                conversation_id,
+                agent_id,
+                "first",
+                "member-first",
+                speaker_member_id=None,
+            )
         )
         await dbos.entered.wait()
         second_turn = await member_admission.admit(
-            conversation_id, agent_id, "second", "member-second"
+            conversation_id,
+            agent_id,
+            "second",
+            "member-second",
+            speaker_member_id=None,
         )
         dbos.release.set()
         first_turn = await first
@@ -971,7 +996,13 @@ async def test_pause_recovers_the_member_turn_after_process_death(db: None) -> N
             0,
         )
         member = asyncio.create_task(
-            member_admission.admit(conversation_id, agent_id, "approved", "member-crash")
+            member_admission.admit(
+                conversation_id,
+                agent_id,
+                "approved",
+                "member-crash",
+                speaker_member_id=None,
+            )
         )
         await blocked.entered.wait()
         member.cancel()

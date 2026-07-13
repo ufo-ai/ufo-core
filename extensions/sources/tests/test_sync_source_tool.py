@@ -123,7 +123,8 @@ def _context(
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=None,
-        member_id=speaker_id or state.owner_id,
+        speaker_member_id=speaker_id or state.owner_id,
+        audience_member_id=speaker_id or state.owner_id,
         artifact_token_secret="",
         grants=grants,
         connectors=ConnectorRegistry(

@@ -184,7 +184,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 handoff.id,
                 handoff.conversation_id,
             )
-        turn, agent, member_id = await _load_turn(UUID(turn_id))
+        turn, agent, audience_member_id = await _load_turn(UUID(turn_id))
         subagents = Subagents(client=runtime.dbos, registry=runtime.subagents, parent=turn)
         all_tools, tool_ext = turn_tools(
             runtime.manifests, runtime.credentials, runtime.index, runtime.embed
@@ -254,7 +254,8 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 hooks=hooks,
                 turn=turn,
                 agent=resolved,
-                member_id=member_id,
+                audience_member_id=audience_member_id,
+                speaker_member_id=turn.speaker_member_id,
             ),
             hub=runtime.hub,
             sandbox=sandbox,
@@ -279,7 +280,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             blob=runtime.blob,
             spawn=subagents.spawn,
             subagents=subagents,
-            member_id=member_id,
+            audience_member_id=audience_member_id,
             artifact_token_secret=runtime.artifact_token_secret,
             grants=(GrantStore() if runtime.credentials is not None else None),
             pricing=runtime.registry.pricing,
@@ -350,6 +351,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, UUID | None]:
                     tables.turn.c.status,
                     tables.turn.c.inbound,
                     tables.turn.c.admission_source,
+                    tables.turn.c.speaker_member_id,
                     tables.turn.c.created_at,
                     tables.turn.c.context,
                     tables.turn.c.terminal,
@@ -373,6 +375,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, UUID | None]:
         status=row.status,
         inbound=row.inbound,
         admission_source=row.admission_source,
+        speaker_member_id=row.speaker_member_id,
         created_at=row.created_at,
         context=None if row.context is None else TurnContext.model_validate(row.context),
         terminal=None if row.terminal is None else TerminalFrame.model_validate(row.terminal),

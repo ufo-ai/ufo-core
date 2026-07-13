@@ -80,7 +80,8 @@ def _context(sandbox: FakeSandbox, tmp_path: Path) -> ToolContext:
         turn=turn,
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
-        member_id=None,
+        speaker_member_id=None,
+        audience_member_id=None,
         artifact_token_secret="",
     )
 

@@ -38,11 +38,17 @@ from ufo.ext.surface import (
 from ufo.ext.surface import (
     Writeback as Writeback,
 )
+from ufo.grants import (
+    ConnectRequestInvalid as ConnectRequestInvalid,
+)
 from ufo.schema.records import (
     AskQuestion as AskQuestion,
 )
 from ufo.schema.records import (
     AskUserInput as AskUserInput,
+)
+from ufo.schema.records import (
+    ConnectRequest as ConnectRequest,
 )
 from ufo.schema.records import (
     CredentialPrompt as CredentialPrompt,

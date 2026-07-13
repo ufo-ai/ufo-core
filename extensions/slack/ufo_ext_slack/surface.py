@@ -52,6 +52,8 @@ from ufo.sdk.hub import Parked, SkillLoad, Terminal, ToolCall
 from ufo.sdk.sandbox import BlobStore
 from ufo.sdk.surfaces import (
     AskUserInput,
+    ConnectRequest,
+    ConnectRequestInvalid,
     CredentialSlotUnset,
     SharedArtifact,
     SurfaceAuth,
@@ -226,6 +228,7 @@ STATUS_UPDATE_MIN_SECONDS = 1.0
 STATUS_REFRESH_SECONDS = 90.0
 
 ASK_ACTION_ID_PREFIX = "ask:"
+CONNECT_ACTION_ID = "connect"
 MAX_ANSWER_BUTTONS = 10
 SLACK_BUTTON_TEXT_LIMIT = 75
 SLACK_BUTTON_VALUE_LIMIT = 2_000
@@ -250,8 +253,10 @@ AMBIENT_CHANNEL_HEADER = (
 )
 AMBIENT_OMITTED_MARKER = "[… earlier messages omitted …]"
 SLACK_MARKDOWN_TEXT_LIMIT = 12_000
+SLACK_SECTION_TEXT_LIMIT = 3_000
 SLACK_CONTEXT_TEXT_LIMIT = 3_000
 MAX_SLACK_MESSAGE_BYTES = 40_000
+MAX_SLACK_BLOCK_MESSAGE_BYTES = 100_000
 SLACK_UPLOAD_MAX_BYTES = 25 * 1024 * 1024
 SLACK_INVALID_BLOCKS_ERROR = "invalid_blocks"
 SLACK_OVERSIZE_HEADING = "**Attachments (too large to upload):**"
@@ -452,14 +457,15 @@ def slack_reply_body(
     metadata: str,
     blocks: bool = True,
     actions: dict[str, object] | None = None,
+    sections: bool = False,
 ) -> bytes:
     """The chat.postMessage body: one Block Kit `markdown` block so Slack renders the agent's own
     markdown natively, plus the answer-button `actions` block when the turn ended on a question and
     a final `context` block for the turn's accounting and model metadata —
-    degrading to a text-only body (buttons and all) when the reply exceeds Slack's block-character
-    or payload-byte caps, or when `blocks=False` forces plain text after Slack rejects the blocks as
-    `invalid_blocks`. `text` always carries the whole reply as the notification fallback, and the
-    question rides it in prose, so a degraded reply is still answerable by a typed reply."""
+    degrading to a text-only body when a reply without required actions exceeds Slack's block or
+    payload caps. Action-bearing replies split their text across bounded blocks; `sections=True`
+    uses conservative section blocks after Slack rejects markdown blocks as `invalid_blocks`.
+    `text` always carries the whole reply as the notification fallback."""
     if not text or not metadata:
         raise ValueError("Slack reply text and metadata are required")
     if len(metadata) > SLACK_CONTEXT_TEXT_LIMIT:
@@ -467,8 +473,17 @@ def slack_reply_body(
     base: dict[str, object] = {"channel": channel, "text": text}
     if thread_ts is not None:
         base["thread_ts"] = thread_ts
-    if blocks and len(text) <= SLACK_MARKDOWN_TEXT_LIMIT:
-        block_list: list[dict[str, object]] = [{"type": "markdown", "text": text}]
+    if blocks and (len(text) <= SLACK_MARKDOWN_TEXT_LIMIT or actions is not None):
+        limit = SLACK_SECTION_TEXT_LIMIT if sections else SLACK_MARKDOWN_TEXT_LIMIT
+        chunks = [text[start : start + limit] for start in range(0, len(text), limit)]
+        block_list: list[dict[str, object]] = [
+            (
+                {"type": "section", "text": {"type": "mrkdwn", "text": chunk}}
+                if sections
+                else {"type": "markdown", "text": chunk}
+            )
+            for chunk in chunks
+        ]
         if actions is not None:
             block_list.append(actions)
         block_list.append(
@@ -476,7 +491,8 @@ def slack_reply_body(
         )
         with_blocks = {**base, "blocks": block_list}
         encoded = json.dumps(with_blocks, separators=(",", ":")).encode()
-        if len(encoded) <= MAX_SLACK_MESSAGE_BYTES:
+        bound = MAX_SLACK_BLOCK_MESSAGE_BYTES if actions is not None else MAX_SLACK_MESSAGE_BYTES
+        if len(encoded) <= bound:
             return encoded
     base["text"] = f"{text}\n\n{metadata}"
     encoded = json.dumps(base, separators=(",", ":")).encode()
@@ -508,6 +524,28 @@ def slack_answer_actions(question: AskUserInput | None) -> dict[str, object] | N
                 "value": option.label[:SLACK_BUTTON_VALUE_LIMIT],
             }
             for index, option in enumerate(only.options)
+        ],
+    }
+
+
+def slack_connect_actions(
+    request: ConnectRequest | None, turn_id: UUID
+) -> dict[str, object] | None:
+    """The requester-checked private OAuth handoff for a terminal connect request."""
+    if request is None:
+        return None
+    return {
+        "type": "actions",
+        "elements": [
+            {
+                "type": "button",
+                "text": {
+                    "type": "plain_text",
+                    "text": f"Connect {request.provider}"[:SLACK_BUTTON_TEXT_LIMIT],
+                },
+                "action_id": CONNECT_ACTION_ID,
+                "value": str(turn_id),
+            }
         ],
     }
 
@@ -600,10 +638,12 @@ async def ingest(ctx: SurfaceContext, request: Request) -> Response:
         _slack_user(bot_token, inbound.slack_user_id),
         _ambient_context(ctx, bot_token, inbound, identity),
     )
-    member_id = await _resolve_member(ctx, inbound, sender) if inbound.is_dm else None
+    member_id = await _resolve_member(ctx, inbound.slack_user_id, inbound.is_dm, sender)
     conversation_id = inbound.conversation_id
     if conversation_id is None:
-        conversation_id = await ctx.conversation_for(inbound.queue_key, member_id)
+        conversation_id = await ctx.conversation_for(
+            inbound.queue_key, member_id if inbound.is_dm else None
+        )
     body = f"{context}{inbound.body}"
     if inbound.files:
         downloaded = await _download_files(ctx, conversation_id, bot_token, inbound.files)
@@ -615,6 +655,7 @@ async def ingest(ctx: SurfaceContext, request: Request) -> Response:
         body,
         idempotency_key=inbound.message_id,
         context=_turn_context(sender),
+        speaker_member_id=member_id,
     )
     _track_status(ctx, turn_id, inbound.queue_key, inbound.ts)
     return JSONResponse({"ok": True})
@@ -733,22 +774,24 @@ def _turn_context(sender: SlackUser | None) -> TurnContext:
 
 
 async def _resolve_member(
-    ctx: SurfaceContext, inbound: Inbound, sender: SlackUser | None
+    ctx: SurfaceContext, slack_user_id: str, is_dm: bool, sender: SlackUser | None
 ) -> UUID | None:
-    """The DM speaker's member: the already-linked identity, else what their Slack-confirmed email
+    """The speaker's member: the already-linked identity, else what their Slack-confirmed email
     resolves — an existing member links, and a same-domain email joins them as a new member, so
     only the owner ever onboards through the CLI and teammates become members on first contact.
-    No confirmed email leaves the DM a shared, memberless conversation."""
-    linked = await ctx.linked_member(inbound.slack_user_id)
+    No confirmed email leaves the turn without a speaker."""
+    linked = await ctx.linked_member(slack_user_id)
     if linked is not None:
         return linked
     if sender is None:
-        raise SlackApiError(
-            f"users.info unavailable; cannot resolve the DM member {inbound.slack_user_id}"
-        )
+        if is_dm:
+            raise SlackApiError(
+                f"users.info unavailable; cannot resolve the DM member {slack_user_id}"
+            )
+        return None
     if sender.email is None:
         return None
-    return await ctx.join_member(inbound.slack_user_id, sender.email)
+    return await ctx.join_member(slack_user_id, sender.email)
 
 
 async def _ambient_context(
@@ -1048,9 +1091,19 @@ class AnswerClick:
 
     slack_user_id: str
     queue_key: str
+    is_dm: bool
     message_ts: str
     message_text: str
     label: str
+    response_url: str
+
+
+@dataclass(frozen=True)
+class ConnectClick:
+    """A verified click on a terminal connect handoff."""
+
+    slack_user_id: str
+    turn_id: UUID
     response_url: str
 
 
@@ -1078,23 +1131,47 @@ async def interactive(ctx: SurfaceContext, request: Request) -> Response:
     if identity is None:
         _prove_identity_in_background(ctx)
         return Response("Slack identity is being verified", status_code=503)
-    click = await _to_click(ctx, raw, identity)
+    click = _to_click(raw, identity)
     if click is None:
         return JSONResponse({"ok": True, "ignored": True})
     await _mark_url_verified(ctx, signing_secret)
     member_id = await ctx.linked_member(click.slack_user_id)
-    conversation_id = await ctx.conversation_for(click.queue_key, member_id)
-    agent_id = await ctx.default_agent()
-    body = f"[Answered by <@{click.slack_user_id}> via button] {click.label}"
-    turn_id = await ctx.admit(
-        conversation_id,
-        agent_id,
-        body,
-        idempotency_key=f"{click.queue_key}:{click.message_ts}:answer",
-    )
-    _track_status(ctx, turn_id, click.queue_key, click.message_ts)
-    if await ctx.turn_inbound(turn_id) == body:
-        _rewrite_in_background(click)
+    match click:
+        case ConnectClick():
+            if member_id is None:
+                text = "This connection request is not available to you."
+            else:
+                try:
+                    url = await ctx.connect_url(click.turn_id, member_id)
+                except ConnectRequestInvalid:
+                    text = (
+                        "This connection request is no longer available. Ask me to connect again."
+                    )
+                else:
+                    text = f"Complete the connection privately: <{url}|Open authorization>"
+            _ephemeral_in_background(click.response_url, text)
+        case AnswerClick():
+            if member_id is None:
+                bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
+                sender = await _slack_user(bot_token, click.slack_user_id)
+                member_id = await _resolve_member(ctx, click.slack_user_id, click.is_dm, sender)
+            conversation_id = await ctx.find_conversation(click.queue_key)
+            if conversation_id is None:
+                return JSONResponse({"ok": True, "ignored": True})
+            if click.is_dm and member_id is not None:
+                conversation_id = await ctx.conversation_for(click.queue_key, member_id)
+            agent_id = await ctx.default_agent()
+            body = f"[Answered by <@{click.slack_user_id}> via button] {click.label}"
+            turn_id = await ctx.admit(
+                conversation_id,
+                agent_id,
+                body,
+                idempotency_key=f"{click.queue_key}:{click.message_ts}:answer",
+                speaker_member_id=member_id,
+            )
+            _track_status(ctx, turn_id, click.queue_key, click.message_ts)
+            if await ctx.turn_inbound(turn_id) == body:
+                _rewrite_in_background(click)
     return JSONResponse({"ok": True})
 
 
@@ -1114,7 +1191,27 @@ async def _run_rewrite(click: AnswerClick) -> None:
         _LOG.warning("slack answer rewrite failed for %s: %s", click.message_ts, error)
 
 
-async def _to_click(ctx: SurfaceContext, raw: bytes, identity: SlackIdentity) -> AnswerClick | None:
+def _ephemeral_in_background(response_url: str, text: str) -> None:
+    task = asyncio.create_task(_post_ephemeral(response_url, text))
+    _REWRITE_TASKS.add(task)
+    task.add_done_callback(_REWRITE_TASKS.discard)
+
+
+async def _post_ephemeral(response_url: str, text: str) -> None:
+    try:
+        if not _slack_download_host_ok(response_url):
+            raise ValueError("refusing to answer a non-Slack response_url")
+        async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
+            response = await client.post(
+                response_url,
+                json={"response_type": "ephemeral", "replace_original": False, "text": text},
+            )
+        response.raise_for_status()
+    except Exception as error:
+        _LOG.warning("slack private connect response failed: %s", error)
+
+
+def _to_click(raw: bytes, identity: SlackIdentity) -> AnswerClick | ConnectClick | None:
     form = parse_qs(raw.decode())
     encoded = form.get("payload")
     if not encoded:
@@ -1126,33 +1223,36 @@ async def _to_click(ctx: SurfaceContext, raw: bytes, identity: SlackIdentity) ->
     team_id = team.get("id") if isinstance(team, dict) else None
     if team_id != identity.team_id:
         return None
-    label = _clicked_answer(payload)
-    if label is None:
+    actions = payload.get("actions")
+    action = actions[0] if isinstance(actions, list) and actions else None
+    if not isinstance(action, dict):
+        return None
+    action_id = action.get("action_id")
+    value = action.get("value")
+    if not isinstance(action_id, str) or not isinstance(value, str) or not value:
+        return None
+    user_id = _string_field(_dict_field(payload, "user"), "id")
+    response_url = _string_field(payload, "response_url")
+    if action_id == CONNECT_ACTION_ID:
+        try:
+            turn_id = UUID(value)
+        except ValueError:
+            return None
+        return ConnectClick(slack_user_id=user_id, turn_id=turn_id, response_url=response_url)
+    if not action_id.startswith(ASK_ACTION_ID_PREFIX):
         return None
     channel_id = _string_field(_dict_field(payload, "channel"), "id")
     message = _dict_field(payload, "message")
     thread = message.get("thread_ts")
     return AnswerClick(
-        slack_user_id=_string_field(_dict_field(payload, "user"), "id"),
+        slack_user_id=user_id,
         queue_key=(f"{channel_id}:{thread}" if isinstance(thread, str) and thread else channel_id),
+        is_dm=channel_id.startswith("D"),
         message_ts=_string_field(message, "ts"),
         message_text=str(message.get("text") or ""),
-        label=label,
-        response_url=_string_field(payload, "response_url"),
+        label=value,
+        response_url=response_url,
     )
-
-
-def _clicked_answer(payload: Mapping[str, object]) -> str | None:
-    """The clicked option's label when the click is on one of this surface's ask buttons, else None
-    — any other interactive payload is ignored, not an error."""
-    actions = payload.get("actions")
-    action = actions[0] if isinstance(actions, list) and actions else None
-    if not isinstance(action, dict):
-        return None
-    if not str(action.get("action_id") or "").startswith(ASK_ACTION_ID_PREFIX):
-        return None
-    value = action.get("value")
-    return value if isinstance(value, str) and value else None
 
 
 def _dict_field(payload: Mapping[str, object], field: str) -> Mapping[str, object]:
@@ -1228,7 +1328,9 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
     thread = thread_ts if separator else None
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
     text = _reply_with_oversize_links(ctx, writeback)
-    actions = slack_answer_actions(writeback.question)
+    answer_actions = slack_answer_actions(writeback.question)
+    connect_actions = slack_connect_actions(writeback.connect_request, writeback.turn_id)
+    actions = answer_actions or connect_actions
     model = writeback.model or "no-model"
     params = f"-[{writeback.reasoning}]" if writeback.reasoning is not None else ""
     metadata = (
@@ -1242,7 +1344,17 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
         )
         if payload.get("error") == SLACK_INVALID_BLOCKS_ERROR:
             payload = await _chat_post(
-                client, bot_token, slack_reply_body(channel, thread, text, metadata, blocks=False)
+                client,
+                bot_token,
+                slack_reply_body(
+                    channel,
+                    thread,
+                    text,
+                    metadata,
+                    blocks=connect_actions is not None,
+                    actions=connect_actions,
+                    sections=connect_actions is not None,
+                ),
             )
     if payload.get("ok") is not True:
         raise SlackApiError(str(payload.get("error")))

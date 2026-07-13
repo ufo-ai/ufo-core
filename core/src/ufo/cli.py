@@ -295,6 +295,12 @@ async def _stream_turn(
                         if not line:
                             continue
                         frame = json.loads(line)
+                        if "connect_url" in frame:
+                            display.connect(str(frame["connect_url"]))
+                            continue
+                        if "connect_error" in frame:
+                            display.message(str(frame["connect_error"]))
+                            continue
                         if "frame" in frame:
                             display.terminal(frame["frame"])
                             return
@@ -365,6 +371,10 @@ class _TurnDisplay:
         erased first so streamed text is never corrupted, and the stream continues after it."""
         self._close_line()
         click.echo(click.style(note, dim=True), file=self.out)
+
+    def connect(self, url: str) -> None:
+        self._close_line()
+        click.echo(f"Connect account: {url}", file=self.out)
 
     def terminal(self, frame: dict[str, object]) -> None:
         self._close_line()

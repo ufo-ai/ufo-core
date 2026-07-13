@@ -65,6 +65,7 @@ from ufo.schema.records import (
     SCHEDULED_ADMISSION,
     Agent,
     AskUserInput,
+    ConnectRequest,
     CredentialRequest,
     TerminalFrame,
     Turn,
@@ -439,6 +440,7 @@ def _engine(
     carrier = carrier or RecordingCarrier()
     blob = FilesystemBlobStore(root=tmp_path)
     handle = SandboxHandle(conversation_id=turn.conversation_id, container_id="test")
+    turn = turn.model_copy(update={"speaker_member_id": member_id})
     return TurnEngine(
         turn=turn,
         agent=Agent(prompt="p", model="claude-opus-4-8"),
@@ -459,7 +461,7 @@ def _engine(
         hooks=HookChain(),
         blob=blob,
         spawn=_unavailable_spawn,
-        member_id=member_id,
+        audience_member_id=member_id,
         artifact_token_secret="",
         grants=None,
         requestable_credentials=requestable_credentials,
@@ -771,7 +773,11 @@ async def test_request_credentials_as_the_final_act_rides_the_terminal_frame(
     fernet = Fernet(Fernet.generate_key())
     requests = CredentialRequests(fernet=fernet, declared=frozenset({"sample_api"}))
     engine = _engine(
-        turn, CollectThenEndModel(), tmp_path, member_id=owner, requestable_credentials=requests
+        turn,
+        CollectThenEndModel(),
+        tmp_path,
+        member_id=owner,
+        requestable_credentials=requests,
     )
     frame = await engine.run()
     assert frame.status == "done"
@@ -795,7 +801,8 @@ async def test_request_credentials_gates_on_owner_key_and_declared_slots(
     db: None, tmp_path: Path
 ) -> None:
     """The granting act's guards, each failing loud before anything seals: no speaker, no
-    credential key, a non-owner speaker (a later-joined member), and an undeclared slot."""
+    private audience, credential key, a non-owner speaker (a later-joined member), and an
+    undeclared slot."""
     turn = await _seed_turn("queued", None)
     owner = await _seeded_member(turn.workspace_id)
     joiner = uuid4()
@@ -823,13 +830,18 @@ async def test_request_credentials_gates_on_owner_key_and_declared_slots(
             turn=turn,
             agent=Agent(prompt="p", model="claude-opus-4-8"),
             spawn=_unavailable_spawn,
-            member_id=member,
+            speaker_member_id=member,
+            audience_member_id=member,
             artifact_token_secret="",
             requestable_credentials=requestable,
         )
 
     with pytest.raises(ValueError, match="speaking member"):
         await request_credentials_handler(context(None, requests), args)
+    with pytest.raises(ValueError, match="private audience"):
+        await request_credentials_handler(
+            replace(context(owner, requests), audience_member_id=None), args
+        )
     with pytest.raises(ValueError, match="no credential key"):
         await request_credentials_handler(context(owner, None), args)
     with pytest.raises(ValueError, match="workspace owner"):
@@ -857,7 +869,8 @@ async def test_extension_tool_authorizes_its_declared_credential_as_the_owner(
         turn=turn,
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
-        member_id=owner,
+        speaker_member_id=owner,
+        audience_member_id=owner,
         artifact_token_secret="",
         requestable_credentials=requests,
         ext=context_for("sample", frozenset({"sample_api"})),
@@ -865,10 +878,17 @@ async def test_extension_tool_authorizes_its_declared_credential_as_the_owner(
     init_workspace_credentials(store)
     try:
         with ws(turn.workspace_id):
-            with pytest.raises(ValueError, match="workspace owner"):
-                await replace(context, member_id=uuid4()).begin_credential_authorization(
+            with pytest.raises(ValueError, match="private audience"):
+                await replace(context, audience_member_id=None).begin_credential_authorization(
                     "sample_api", "provider-state"
                 )
+            non_owner = uuid4()
+            with pytest.raises(ValueError, match="workspace owner"):
+                await replace(
+                    context,
+                    speaker_member_id=non_owner,
+                    audience_member_id=non_owner,
+                ).begin_credential_authorization("sample_api", "provider-state")
             with pytest.raises(ValueError, match="does not declare"):
                 await context.begin_credential_authorization("other", "provider-state")
             sealed = await context.begin_credential_authorization("sample_api", "provider-state")
@@ -917,7 +937,7 @@ async def test_round_budget_exhaustion_forces_a_final_answer_instead_of_failing(
     assert stored.messages[-1] == Message(role="assistant", content="best effort")
 
 
-async def test_connect_account_tool_call_in_a_turn_yields_the_authorize_url(
+async def test_connect_account_tool_call_in_a_turn_yields_a_terminal_handoff(
     db: None, tmp_path: Path
 ) -> None:
     turn = await _seed_turn("queued", None)
@@ -931,7 +951,8 @@ async def test_connect_account_tool_call_in_a_turn_yields_the_authorize_url(
         )
     )
     try:
-        engine = replace(_engine(turn, ConnectCallingModel(), tmp_path), member_id=uuid4())
+        engine = _engine(turn, ConnectCallingModel(), tmp_path)
+        engine = replace(engine, turn=engine.turn.model_copy(update={"speaker_member_id": uuid4()}))
         frame = await engine.run()
     finally:
         install_connect_flow(None)
@@ -941,7 +962,8 @@ async def test_connect_account_tool_call_in_a_turn_yields_the_authorize_url(
     tool_result = stored.messages[2].content
     assert isinstance(tool_result, tuple) and isinstance(tool_result[0], ToolResultBlock)
     assert tool_result[0].is_error is False
-    assert STUB_AUTHORIZE_URL in tool_result[0].content
+    assert STUB_AUTHORIZE_URL not in tool_result[0].content
+    assert frame.connect_request == ConnectRequest(provider="stub")
 
 
 async def test_engine_compacts_history_before_the_round_and_bills_the_summary(
@@ -1248,7 +1270,8 @@ async def test_dispatch_bounds_an_oversize_error_result_and_leaves_within_cap_un
         turn=engine.turn,
         agent=engine.agent,
         spawn=engine.spawn,
-        member_id=engine.member_id,
+        speaker_member_id=engine.turn.speaker_member_id,
+        audience_member_id=engine.audience_member_id,
         artifact_token_secret=engine.artifact_token_secret,
         grants=engine.grants,
     )
@@ -1280,7 +1303,8 @@ async def test_dispatch_offloads_an_oversize_nonerror_result_and_keeps_a_preview
         turn=engine.turn,
         agent=engine.agent,
         spawn=engine.spawn,
-        member_id=engine.member_id,
+        speaker_member_id=engine.turn.speaker_member_id,
+        audience_member_id=engine.audience_member_id,
         artifact_token_secret=engine.artifact_token_secret,
         grants=engine.grants,
     )
@@ -1318,7 +1342,8 @@ async def test_dispatch_offload_preview_is_walled_for_an_untrusted_tool(
         turn=engine.turn,
         agent=engine.agent,
         spawn=engine.spawn,
-        member_id=engine.member_id,
+        speaker_member_id=engine.turn.speaker_member_id,
+        audience_member_id=engine.audience_member_id,
         artifact_token_secret=engine.artifact_token_secret,
         grants=engine.grants,
     )
@@ -1360,7 +1385,8 @@ async def test_dispatch_folds_tool_image_content_into_the_tool_result_block(
         turn=engine.turn,
         agent=engine.agent,
         spawn=engine.spawn,
-        member_id=engine.member_id,
+        speaker_member_id=engine.turn.speaker_member_id,
+        audience_member_id=engine.audience_member_id,
         artifact_token_secret=engine.artifact_token_secret,
         grants=engine.grants,
     )
@@ -1402,7 +1428,8 @@ async def test_dispatch_step_offloads_image_bytes_to_a_blob_reference(
         turn=engine.turn,
         agent=engine.agent,
         spawn=engine.spawn,
-        member_id=engine.member_id,
+        speaker_member_id=engine.turn.speaker_member_id,
+        audience_member_id=engine.audience_member_id,
         artifact_token_secret=engine.artifact_token_secret,
         grants=engine.grants,
     )
@@ -1452,7 +1479,8 @@ async def test_dispatch_keeps_an_error_result_str_typed_and_drops_image_content(
         turn=engine.turn,
         agent=engine.agent,
         spawn=engine.spawn,
-        member_id=engine.member_id,
+        speaker_member_id=engine.turn.speaker_member_id,
+        audience_member_id=engine.audience_member_id,
         artifact_token_secret=engine.artifact_token_secret,
         grants=engine.grants,
     )

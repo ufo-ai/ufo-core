@@ -40,6 +40,7 @@ from ufo.ext.manifest import (
     ModifyOutput,
     PostToolUse,
     PreToolUse,
+    Stop,
     UserPromptSubmit,
 )
 from ufo.hub import InProcessHub
@@ -97,11 +98,43 @@ async def _fire(chain: HookChain, event: str, payload: object) -> loader.HookRes
         inbound="hi",
         created_at=datetime(2026, 7, 9, tzinfo=UTC),
     )
-    return await chain.fire(event, payload, turn, Agent(prompt="p", model="claude-opus-4-8"), None)
+    return await chain.fire(
+        event, payload, turn, Agent(prompt="p", model="claude-opus-4-8"), None, None
+    )
 
 
 def _pre(tool_name: str = "t") -> PreToolUse:
     return PreToolUse(tool_name=tool_name, tool_input=Args(value="x"))
+
+
+async def test_hook_context_keeps_speaker_and_audience_separate() -> None:
+    seen: list[tuple[UUID | None, UUID | None]] = []
+
+    async def capture(ctx: HookContext) -> HookOutcome:
+        seen.append((ctx.speaker_member_id, ctx.audience_member_id))
+        return None
+
+    speaker, audience = uuid4(), uuid4()
+    turn = Turn(
+        id=uuid4(),
+        workspace_id=uuid4(),
+        conversation_id=uuid4(),
+        agent_id=uuid4(),
+        seq=1,
+        status="running",
+        inbound="hi",
+        speaker_member_id=speaker,
+        created_at=datetime(2026, 7, 9, tzinfo=UTC),
+    )
+    await _chain("stop", _ext(), HookSpec(event="stop", handler=capture)).fire(
+        "stop",
+        Stop(answer="done"),
+        turn,
+        Agent(prompt="p", model="claude-opus-4-8"),
+        audience,
+        speaker,
+    )
+    assert seen == [(speaker, audience)]
 
 
 # --- composition model, asserted directly against fire's resolution -----------------------------
@@ -459,7 +492,8 @@ def _engine(
             hooks=hooks,
             turn=turn,
             agent=agent,
-            member_id=None,
+            audience_member_id=None,
+            speaker_member_id=None,
         ),
         hub=InProcessHub(),
         sandbox=SandboxSession(carrier=carrier or RecordingCarrier(), handle=handle),
@@ -471,7 +505,7 @@ def _engine(
         hooks=hooks,
         blob=blob,
         spawn=_unavailable_spawn,
-        member_id=None,
+        audience_member_id=None,
         artifact_token_secret="",
         grants=None,
     )

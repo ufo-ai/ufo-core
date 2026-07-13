@@ -128,7 +128,8 @@ def _context(
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
-        member_id=member_id,
+        speaker_member_id=member_id,
+        audience_member_id=member_id,
         artifact_token_secret="",
         ext=ext,
         public_base_url=public_base_url,
@@ -367,6 +368,7 @@ def test_slack_writeback_hints_at_the_terminal_for_a_credential_request() -> Non
             prompts=(CredentialPrompt(slot=SLACK_BOT_TOKEN_SLOT, prompt="Bot User OAuth Token"),),
             sealed="opaque",
         ),
+        connect_request=None,
     )
     text = _reply_with_oversize_links(cast(SurfaceContext, None), writeback)
     assert "connecting Slack" in text

@@ -322,26 +322,73 @@ async def test_writeback_due_index_is_installed(db: None) -> None:
 
 
 async def test_admit_queues_a_turn_and_registers_a_writeback(db: None, tmp_path) -> None:
-    workspace_id, agent_id, _ = await _seed()
+    workspace_id, agent_id, member_id = await _seed(member_email="bee@example.com")
     dbos = StubDbos()
     context = _context(workspace_id, dbos, FilesystemBlobStore(root=tmp_path))
     conversation_id = await context.conversation_for("C1:1.0", None)
-    turn_id = await context.admit(conversation_id, agent_id, "hello", idempotency_key="C1:1.0")
+    turn_id = await context.admit(
+        conversation_id,
+        agent_id,
+        "hello",
+        idempotency_key="C1:1.0",
+        speaker_member_id=member_id,
+    )
     assert dbos.enqueued == [str(turn_id)]
     async with workspace_tx() as connection:
         turn = (
             await connection.execute(
-                sa.select(tables.turn.c.status, tables.turn.c.inbound).where(
-                    tables.turn.c.id == turn_id
+                sa.select(
+                    tables.turn.c.status,
+                    tables.turn.c.inbound,
+                    tables.turn.c.speaker_member_id,
+                    tables.conversation.c.member_id,
                 )
+                .select_from(tables.turn.join(tables.conversation))
+                .where(tables.turn.c.id == turn_id)
             )
         ).one()
     assert turn.status == "queued"
     assert turn.inbound == "hello"
+    assert turn.speaker_member_id == member_id
+    assert turn.member_id is None
     assert (await _writeback(turn_id)).status == WRITEBACK_PENDING
     # A redelivery of the same message joins the one turn and one writeback.
-    again = await context.admit(conversation_id, agent_id, "hello", idempotency_key="C1:1.0")
+    again = await context.admit(
+        conversation_id,
+        agent_id,
+        "hello",
+        idempotency_key="C1:1.0",
+        speaker_member_id=member_id,
+    )
     assert again == turn_id
+
+
+async def test_admit_refuses_a_speaker_from_another_workspace(db: None, tmp_path) -> None:
+    workspace_id, agent_id, _ = await _seed()
+    _, _, foreign_member_id = await _seed(member_email="foreign@example.com")
+    assert foreign_member_id is not None
+    dbos = StubDbos()
+    context = _context(workspace_id, dbos, FilesystemBlobStore(root=tmp_path))
+    conversation_id = await context.conversation_for("C1:1.0", None)
+
+    with pytest.raises(ValueError, match="not a member of this workspace"):
+        await context.admit(
+            conversation_id,
+            agent_id,
+            "hello",
+            speaker_member_id=foreign_member_id,
+        )
+
+    assert dbos.enqueued == []
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.turn)
+                .where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    assert turns == 0
 
 
 async def test_find_conversation_reads_without_creating(db: None, tmp_path) -> None:
@@ -397,15 +444,21 @@ async def test_admitted_context_round_trips_to_the_loaded_turn(db: None, tmp_pat
     """Both ends of the turn.context column: the surface admits its ambient TurnContext, and the
     queue loader — the engine's one read path — validates the same record back off the row, with
     the admission stamp the engine renders from."""
-    workspace_id, agent_id, _ = await _seed()
+    workspace_id, agent_id, member_id = await _seed(member_email="bee@example.com")
     context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
     conversation_id = await context.conversation_for("C1:1.0", None)
     ambient = TurnContext(sender="Bee Jones (bee@example.com)", timezone="America/New_York")
     turn_id = await context.admit(
-        conversation_id, agent_id, "hello", idempotency_key="C1:2.0", context=ambient
+        conversation_id,
+        agent_id,
+        "hello",
+        idempotency_key="C1:2.0",
+        context=ambient,
+        speaker_member_id=member_id,
     )
     turn, _, _ = await _load_turn(turn_id)
     assert turn.context == ambient
+    assert turn.speaker_member_id == member_id
     assert turn.created_at.tzinfo is not None
 
 

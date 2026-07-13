@@ -1,8 +1,10 @@
 import asyncio
 import base64
+import hashlib
+import json
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID, uuid4
 
@@ -15,6 +17,8 @@ from httpx import ASGITransport, AsyncClient
 from ufo.db import workspace_tx
 from ufo.grants import (
     ConnectFlow,
+    ConnectHandoff,
+    ConnectRequestInvalid,
     ConnectStateInvalid,
     ConnectUnavailable,
     Grant,
@@ -24,6 +28,7 @@ from ufo.grants import (
     grant_summaries,
     install_connect_flow,
 )
+from ufo.hub import InProcessHub
 from ufo.sandbox.proxy.rules import (
     GRANT_METER_DIMENSION,
     InjectionRule,
@@ -34,7 +39,7 @@ from ufo.sandbox.proxy.rules import (
 from ufo.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
 from ufo.sandbox.session import RunToken
 from ufo.schema import tables
-from ufo.schema.records import Agent, Turn
+from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
 from ufo.surfaces.cli import router
 from ufo.tools.builtins import ConnectAccountInput, connect_account_handler
 from ufo.tools.context import ToolContext
@@ -382,7 +387,7 @@ def _turn_context(
         seq=1,
         status="running",
         inbound="connect my gmail",
-        created_at=datetime(2026, 7, 9, tzinfo=UTC),
+        created_at=datetime.now(UTC),
     )
     return ToolContext(
         sandbox=None,
@@ -390,30 +395,59 @@ def _turn_context(
         turn=turn,
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=None,
-        member_id=member_id,
+        speaker_member_id=member_id,
+        audience_member_id=member_id,
         artifact_token_secret="",
     )
 
 
-async def test_connect_account_tool_yields_authorize_url_and_callback_binds_the_speaker(
+async def test_connect_account_handoff_is_private_memoized_and_binds_the_speaker(
     db: None,
 ) -> None:
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)
     conversation_id = await _conversation(workspace_id, member_id)
-    install_connect_flow(
-        ConnectFlow(
-            providers={"stub": StubProvider()},
-            fernet=Fernet(Fernet.generate_key()),
-            store=GrantStore(),
-            redirect_uri=REDIRECT_URI,
-        )
+    flow = ConnectFlow(
+        providers={"stub": StubProvider()},
+        fernet=Fernet(Fernet.generate_key()),
+        store=GrantStore(),
+        redirect_uri=REDIRECT_URI,
     )
+    install_connect_flow(flow)
     ctx = _turn_context(workspace_id, agent_id, conversation_id, member_id)
     result = await connect_account_handler(ctx, ConnectAccountInput(provider="stub"))
-    url = result.content[0].text
     assert result.is_error is False
+    tool_text = result.content[0].text
+    assert "https://" not in tool_text
+    request = ConnectRequest.model_validate_json(tool_text.splitlines()[1])
+    terminal = TerminalFrame(status="done", connect_request=request)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=ctx.turn.id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="done",
+                inbound="connect my gmail",
+                admission_source="member",
+                speaker_member_id=member_id,
+                terminal=terminal.model_dump(mode="json"),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    with pytest.raises(ConnectRequestInvalid, match="another member"):
+        await ConnectHandoff(flow).authorize(workspace_id, ctx.turn.id, uuid4())
+    urls = await asyncio.gather(
+        ConnectHandoff(flow).authorize(workspace_id, ctx.turn.id, member_id),
+        ConnectHandoff(flow).authorize(workspace_id, ctx.turn.id, member_id),
+    )
+    assert urls[0] == urls[1]
+    url = urls[0]
     assert url.startswith("https://stub.test/oauth")
+    assert await ConnectHandoff(flow).authorize(workspace_id, ctx.turn.id, member_id) == url
     state = parse_qs(urlparse(url).query)["state"][0]
     app = FastAPI()
     app.state.shared_workspace = False
@@ -424,6 +458,7 @@ async def test_connect_account_tool_yields_authorize_url_and_callback_binds_the_
                 "/v1/connect/callback", params={"state": state, "code": "the-code"}
             )
             assert done.status_code == 200
+            assert "return to chat and ask me to continue" in done.text
     async with workspace_tx() as connection:
         rows = (
             await connection.execute(
@@ -438,6 +473,141 @@ async def test_connect_account_tool_yields_authorize_url_and_callback_binds_the_
     assert len(rows) == 1
     assert (rows[0].account_id, rows[0].agent_id) == ("acct-42", agent_id)
     assert (rows[0].grantor_member_id, rows[0].conversation_id) == (member_id, conversation_id)
+
+
+async def test_connect_handoff_expires_with_its_terminal_request(db: None) -> None:
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    flow = ConnectFlow(
+        providers={"stub": StubProvider()},
+        fernet=Fernet(Fernet.generate_key()),
+        store=GrantStore(),
+        redirect_uri=REDIRECT_URI,
+    )
+    turn_id = uuid4()
+    terminal = TerminalFrame(status="done", connect_request=ConnectRequest(provider="stub"))
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="done",
+                inbound="connect",
+                admission_source="member",
+                speaker_member_id=member_id,
+                terminal=terminal.model_dump(mode="json"),
+                created_at=sa.func.now(),
+                updated_at=datetime.now(UTC) - timedelta(minutes=11),
+            )
+        )
+    with pytest.raises(ConnectRequestInvalid, match="expired"):
+        await ConnectHandoff(flow).authorize(workspace_id, turn_id, member_id)
+
+
+async def test_connect_handoff_replays_against_its_authorization_ttl(db: None) -> None:
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    flow = ConnectFlow(
+        providers={"stub": StubProvider()},
+        fernet=Fernet(Fernet.generate_key()),
+        store=GrantStore(),
+        redirect_uri=REDIRECT_URI,
+    )
+    turn_id = uuid4()
+    terminal = TerminalFrame(status="done", connect_request=ConnectRequest(provider="stub"))
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="done",
+                inbound="connect",
+                admission_source="member",
+                speaker_member_id=member_id,
+                terminal=terminal.model_dump(mode="json"),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    handoff = ConnectHandoff(flow)
+    url = await handoff.authorize(workspace_id, turn_id, member_id)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(updated_at=datetime.now(UTC) - timedelta(minutes=11))
+            .where(tables.turn.c.id == turn_id)
+        )
+    assert await handoff.authorize(workspace_id, turn_id, member_id) == url
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(connect_authorized_at=datetime.now(UTC) - timedelta(minutes=11))
+            .where(tables.turn.c.id == turn_id)
+        )
+    with pytest.raises(ConnectRequestInvalid, match="authorization has expired"):
+        await handoff.authorize(workspace_id, turn_id, member_id)
+
+
+async def test_cli_stream_privately_opens_the_speakers_connect_handoff(db: None) -> None:
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    token = "cli-secret"
+    flow = ConnectFlow(
+        providers={"stub": StubProvider()},
+        fernet=Fernet(Fernet.generate_key()),
+        store=GrantStore(),
+        redirect_uri=REDIRECT_URI,
+    )
+    install_connect_flow(flow)
+    turn_id = uuid4()
+    terminal = TerminalFrame(status="done", connect_request=ConnectRequest(provider="stub"))
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.surface_identity).values(
+                workspace_id=workspace_id,
+                member_id=member_id,
+                surface="cli",
+                external_id=hashlib.sha256(token.encode()).hexdigest(),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="done",
+                inbound="connect",
+                admission_source="member",
+                speaker_member_id=member_id,
+                terminal=terminal.model_dump(mode="json"),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    app = FastAPI()
+    app.state.hub = InProcessHub()
+    app.include_router(router)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://surface") as client:
+        response = await client.get(
+            f"/v1/turns/{turn_id}/stream",
+            headers={"authorization": f"Bearer {token}"},
+        )
+    frames = [json.loads(line) for line in response.text.splitlines()]
+    assert frames[0]["connect_url"].startswith("https://stub.test/oauth")
+    assert frames[1]["frame"]["connect_request"] == {"provider": "stub"}
 
 
 async def test_connect_account_without_a_speaker_is_refused() -> None:

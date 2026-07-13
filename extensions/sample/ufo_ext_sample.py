@@ -571,7 +571,11 @@ async def _surface_ingest(ctx: SurfaceContext, request: Request) -> Response:
         )
     agent_id = await ctx.default_agent()
     turn_id = await ctx.admit(
-        conversation_id, agent_id, args.message, idempotency_key=args.external_id
+        conversation_id,
+        agent_id,
+        args.message,
+        idempotency_key=args.external_id,
+        speaker_member_id=member_id,
     )
     return JSONResponse({"turn_id": str(turn_id), "conversation_id": str(conversation_id)})
 
@@ -601,7 +605,7 @@ async def _surface_live_admit(ctx: SurfaceContext, request: Request) -> Response
         member_id = await ctx.adopt_identity(SURFACE_PEER, args.external_id)
     conversation_id = await ctx.conversation_for(args.external_id, member_id)
     agent_id = await ctx.default_agent()
-    turn_id = await ctx.admit(conversation_id, agent_id, args.message)
+    turn_id = await ctx.admit(conversation_id, agent_id, args.message, speaker_member_id=member_id)
     owner = await ctx.turn_owner(turn_id)
     report = await ctx.spend_rollup(SURFACE_SPEND_WINDOW_SECONDS)
     return JSONResponse(

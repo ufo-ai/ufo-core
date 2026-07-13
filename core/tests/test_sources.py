@@ -245,7 +245,8 @@ def _context(memory: MemoryStore, member_id: UUID | None, blob_root: Path) -> To
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
-        member_id=member_id,
+        speaker_member_id=member_id,
+        audience_member_id=member_id,
         artifact_token_secret="",
         ext=ext,
     )

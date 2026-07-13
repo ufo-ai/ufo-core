@@ -56,6 +56,12 @@ from ufo.credentials import (
     open_credential_request,
 )
 from ufo.db import owner_tx, workspace_tx
+from ufo.grants import (
+    ConnectHandoff,
+    ConnectRequestInvalid,
+    ConnectUnavailable,
+    installed_connect_flow,
+)
 from ufo.hub import LiveFrame
 from ufo.o11y import log
 from ufo.schema import tables
@@ -66,6 +72,7 @@ from ufo.schema.records import (
     WRITEBACK_FAILED,
     WRITEBACK_PENDING,
     AskUserInput,
+    ConnectRequest,
     CredentialRequest,
     ReasoningEffort,
     TerminalFrame,
@@ -87,6 +94,8 @@ class MemberAdmitter(Protocol):
         message: str,
         idempotency_key: str | None = None,
         context: TurnContext | None = None,
+        *,
+        speaker_member_id: UUID | None,
     ) -> UUID: ...
 
 
@@ -141,9 +150,9 @@ class SharedArtifact:
 class Writeback:
     """One terminal turn ready for delivery: the conversation's `queue_key` (the surface decodes its
     own channel/thread from it), the terminal outcome and its accounting/model metadata, the files
-    the turn shared, and the structured `question` when asking the user was the turn's final act. A
-    surface renders the reply and metadata, uploads `artifacts`, and may render `question` as its
-    own answer affordance (buttons) — the answer arrives as the conversation's next turn."""
+    the turn shared, and any structured final handoff. A surface renders the reply and metadata,
+    uploads `artifacts`, renders `question` as its own answer affordance, collects credentials
+    privately, or exposes `connect_request` only through its authenticated member channel."""
 
     turn_id: UUID
     queue_key: str
@@ -157,6 +166,7 @@ class Writeback:
     artifacts: tuple[SharedArtifact, ...]
     question: AskUserInput | None
     credential_request: CredentialRequest | None
+    connect_request: ConnectRequest | None
 
 
 def _fulfilled_marker_key(workspace_id: UUID, sealed: str, slot: str) -> str:
@@ -455,6 +465,8 @@ class SurfaceContext:
         body: str,
         idempotency_key: str | None = None,
         context: TurnContext | None = None,
+        *,
+        speaker_member_id: UUID | None,
     ) -> UUID:
         """Admit an inbound message onto the durable turn queue and return its turn id. Delivery is
         admission's concern, derived from the conversation's surface: a durable-surface turn
@@ -468,7 +480,16 @@ class SurfaceContext:
             body,
             idempotency_key=idempotency_key,
             context=context,
+            speaker_member_id=speaker_member_id,
         )
+
+    async def connect_url(self, turn_id: UUID, member_id: UUID) -> str:
+        """Open a terminal connect request as its speaking member."""
+        try:
+            flow = installed_connect_flow()
+        except ConnectUnavailable as error:
+            raise ConnectRequestInvalid("connect flow is unavailable") from error
+        return await ConnectHandoff(flow).authorize(self.workspace_id, turn_id, member_id)
 
     async def turn_inbound(self, turn_id: UUID) -> str | None:
         """The inbound message a turn was admitted with, or None when no such turn exists — how a
@@ -1118,6 +1139,7 @@ class WritebackPoller:
             reasoning=terminal.reasoning,
             question=terminal.question,
             credential_request=terminal.credential_request,
+            connect_request=terminal.connect_request,
             artifacts=tuple(
                 SharedArtifact(
                     blob_key=artifact.blob_key,

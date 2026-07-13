@@ -77,7 +77,8 @@ def _context(
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=spawn,
-        member_id=None,
+        speaker_member_id=None,
+        audience_member_id=None,
         artifact_token_secret="",
         idempotency_key=idempotency_key,
     )

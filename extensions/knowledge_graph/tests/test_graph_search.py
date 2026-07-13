@@ -99,7 +99,8 @@ def _tool_ctx(ext: ExtensionContext) -> ToolContext:
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
-        member_id=None,
+        speaker_member_id=None,
+        audience_member_id=None,
         artifact_token_secret="",
         ext=ext,
     )
@@ -119,7 +120,8 @@ def _hook_ctx(ext: ExtensionContext, text: str, payload: object) -> HookContext:
             created_at=datetime(2026, 7, 9, tzinfo=UTC),
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
-        member_id=None,
+        speaker_member_id=None,
+        audience_member_id=None,
         payload=payload,
     )
 

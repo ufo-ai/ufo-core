@@ -99,7 +99,8 @@ def make_context(
         turn=turn,
         agent=Agent(prompt="be terse", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
-        member_id=None,
+        speaker_member_id=None,
+        audience_member_id=None,
         artifact_token_secret=artifact_secret,
         subagents=subagents,
     )

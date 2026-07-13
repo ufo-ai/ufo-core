@@ -12,13 +12,14 @@ gate pins."""
 
 import hashlib
 import html
+import json
 from collections.abc import AsyncIterator
 from uuid import UUID
 
 from ufo.sdk.accounting import MICRO_USD_PER_USD, SpendReport, SubjectTotal
 from ufo.sdk.http import HTMLResponse, JSONResponse, Request, Response, StreamingResponse
 from ufo.sdk.hub import CostTick, LiveFrame, Parked, SkillLoad, Terminal, ToolCall
-from ufo.sdk.surfaces import SurfaceContext, SurfaceRoute
+from ufo.sdk.surfaces import ConnectRequestInvalid, SurfaceContext, SurfaceRoute
 
 SURFACE_WEB = "web"
 SURFACE_CLI = "cli"
@@ -61,7 +62,7 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
         return Response(f"message exceeds {MAX_INBOUND_CHARS} characters", status_code=413)
     conversation_id = await ctx.conversation_for(digest, member_id)
     agent_id = await ctx.default_agent()
-    turn_id = await ctx.admit(conversation_id, agent_id, inbound)
+    turn_id = await ctx.admit(conversation_id, agent_id, inbound, speaker_member_id=member_id)
     return JSONResponse({"turn_id": str(turn_id)})
 
 
@@ -80,11 +81,28 @@ async def stream(ctx: SurfaceContext, request: Request) -> Response:
     if owner != member_id:
         return Response("turn belongs to another member", status_code=403)
     since = request.headers.get("last-event-id", "")
-    return StreamingResponse(_events(ctx, turn_id, since), media_type="text/event-stream")
+    return StreamingResponse(
+        _events(ctx, turn_id, member_id, since), media_type="text/event-stream"
+    )
 
 
-async def _events(ctx: SurfaceContext, turn_id: UUID, since: str) -> AsyncIterator[bytes]:
+async def _events(
+    ctx: SurfaceContext, turn_id: UUID, member_id: UUID, since: str
+) -> AsyncIterator[bytes]:
     async for cursor, frame in ctx.tail(turn_id, since):
+        if isinstance(frame, Terminal) and frame.frame.connect_request is not None:
+            try:
+                url = await ctx.connect_url(turn_id, member_id)
+            except ConnectRequestInvalid:
+                yield (
+                    b"event: connect_error\ndata: "
+                    + json.dumps(
+                        {"message": "Connection request unavailable; ask me to connect again."}
+                    ).encode()
+                    + b"\n\n"
+                )
+            else:
+                yield b"event: connect\ndata: " + json.dumps({"url": url}).encode() + b"\n\n"
         yield _sse(cursor, frame)
 
 
@@ -238,6 +256,7 @@ form.addEventListener('submit', async (event) => {
   }
   const turnId = (await res.json()).turn_id;
   const source = new EventSource('/surface/web/turns/' + turnId + '/stream');
+  let streamed = false;
   let meter = null;
   let activity = null;
   function note(text) {
@@ -250,6 +269,7 @@ form.addEventListener('submit', async (event) => {
     log.scrollTop = log.scrollHeight;
   }
   source.onmessage = (event) => {
+    streamed = true;
     reply.textContent += JSON.parse(event.data).text;
     log.scrollTop = log.scrollHeight;
   };
@@ -271,10 +291,24 @@ form.addEventListener('submit', async (event) => {
     meter.textContent = frame.tokens + ' tok · $' + (frame.cost_micro_usd / 1e6).toFixed(6);
     log.scrollTop = log.scrollHeight;
   });
+  source.addEventListener('connect', (event) => {
+    const link = document.createElement('a');
+    link.href = JSON.parse(event.data).url;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.textContent = 'Connect account';
+    reply.appendChild(link);
+    log.scrollTop = log.scrollHeight;
+  });
+  source.addEventListener('connect_error', (event) => {
+    note(JSON.parse(event.data).message);
+  });
   source.addEventListener('terminal', (event) => {
     const frame = JSON.parse(event.data);
     if (frame.status === 'done') {
-      if (frame.text && !reply.textContent) reply.textContent = frame.text;
+      if (frame.text && !streamed) {
+        reply.insertBefore(document.createTextNode(frame.text), reply.firstChild);
+      }
       const meta = document.createElement('div');
       meta.className = 'meta';
       meta.textContent = frame.model + ' · ' + frame.tokens + ' tok · $'

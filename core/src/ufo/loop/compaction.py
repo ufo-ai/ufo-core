@@ -132,7 +132,8 @@ class Compaction:
     hooks: HookChain = field(default_factory=HookChain)
     turn: Turn | None = None
     agent: Agent | None = None
-    member_id: UUID | None = None
+    audience_member_id: UUID | None = None
+    speaker_member_id: UUID | None = None
 
     async def maybe_compact(
         self, messages: tuple[Message, ...], force: bool = False
@@ -174,7 +175,8 @@ class Compaction:
             PreCompact(reason=reason, before_tokens=before_tokens),
             self.turn,
             self.agent,
-            self.member_id,
+            self.audience_member_id,
+            self.speaker_member_id,
         )
         index = await self._next_index()
         summary, usages = await self._summarize(head_rounds)
@@ -189,7 +191,8 @@ class Compaction:
             ),
             self.turn,
             self.agent,
-            self.member_id,
+            self.audience_member_id,
+            self.speaker_member_id,
         )
         return after, usages
 

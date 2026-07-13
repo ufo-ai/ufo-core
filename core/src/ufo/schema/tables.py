@@ -104,6 +104,9 @@ turn = sa.Table(
     sa.Column("status", sa.Text, nullable=False),
     sa.Column("inbound", sa.Text, nullable=False),
     sa.Column("admission_source", sa.Text, nullable=False, server_default="internal"),
+    sa.Column("speaker_member_id", sa.Uuid, sa.ForeignKey("member.id"), nullable=True),
+    sa.Column("connect_authorization_url", sa.Text, nullable=True),
+    sa.Column("connect_authorized_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("context", sa.JSON(none_as_null=True), nullable=True),
     sa.Column("terminal", sa.JSON(none_as_null=True), nullable=True),
     sa.Column("parent_turn_id", sa.Uuid, nullable=True),
@@ -125,6 +128,10 @@ turn = sa.Table(
     ),
     sa.CheckConstraint(
         "(status in ('queued', 'running', 'parked')) = (terminal is null)", name="turn_terminal"
+    ),
+    sa.CheckConstraint(
+        "(connect_authorization_url is null) = (connect_authorized_at is null)",
+        name="turn_connect_authorization",
     ),
     sa.Index("turn_idempotency_key", "workspace_id", "idempotency_key", unique=True),
     sa.Index("turn_conversation_activity", "conversation_id", "updated_at"),

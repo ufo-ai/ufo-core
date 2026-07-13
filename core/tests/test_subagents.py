@@ -331,6 +331,7 @@ async def test_message_admits_the_running_childs_next_turn_and_enqueues_it(
         status="running",
         inbound="parent",
         created_at=datetime(2026, 7, 9, tzinfo=UTC),
+        speaker_member_id=uuid4(),
     )
     child_id, child_conversation = await _running_child(workspace_id, agent_id, parent.id)
     client = _RecordingClient()
@@ -348,6 +349,7 @@ async def test_message_admits_the_running_childs_next_turn_and_enqueues_it(
                     tables.turn.c.inbound,
                     tables.turn.c.subagent_profile,
                     tables.turn.c.parent_turn_id,
+                    tables.turn.c.speaker_member_id,
                     tables.turn.c.traceparent,
                 ).where(tables.turn.c.id == status.turn_id)
             )
@@ -356,6 +358,7 @@ async def test_message_admits_the_running_childs_next_turn_and_enqueues_it(
     assert (row.seq, row.status, row.inbound) == (2, "queued", "also summarize the risks")
     assert row.subagent_profile == GENERAL_PURPOSE
     assert row.parent_turn_id == parent.id
+    assert row.speaker_member_id is None
     assert row.traceparent == SPAWNING_TRACEPARENT
     assert client.enqueued == [str(status.turn_id)]
 
@@ -489,7 +492,20 @@ async def test_spawn_with_a_dedup_key_reconnects_to_a_finished_child_without_res
     that already finished returns its memoized output — so the second spawn reconnects to the one
     child, never a duplicate row and never recomputed work."""
     workspace_id, agent_id = await _workspace_agent()
-    parent = await _parent(workspace_id, agent_id)
+    speaker = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=speaker,
+                workspace_id=workspace_id,
+                email="speaker@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    parent = (await _parent(workspace_id, agent_id)).model_copy(
+        update={"speaker_member_id": speaker}
+    )
     subagents = Subagents(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
@@ -515,14 +531,15 @@ async def test_spawn_with_a_dedup_key_reconnects_to_a_finished_child_without_res
     assert second.output.model_dump()["finding"] == "acme done"
 
     async with workspace_tx() as connection:
-        children = (
+        child = (
             await connection.execute(
-                sa.select(sa.func.count())
-                .select_from(tables.turn)
+                sa.select(tables.turn.c.speaker_member_id, sa.func.count().label("count"))
                 .where(tables.turn.c.parent_turn_id == parent.id)
+                .group_by(tables.turn.c.speaker_member_id)
             )
-        ).scalar_one()
-    assert children == 1
+        ).one()
+    assert child.speaker_member_id is None
+    assert child.count == 1
 
 
 async def test_spawn_distinct_dedup_keys_admit_distinct_children(

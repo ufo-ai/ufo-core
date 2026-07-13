@@ -80,6 +80,7 @@ from ufo.schema.records import (
     SCHEDULED_ADMISSION,
     Agent,
     AskUserInput,
+    ConnectRequest,
     CredentialRequest,
     ReasoningEffort,
     TerminalFrame,
@@ -112,6 +113,7 @@ COMMIT_RETRY_MAX_SECONDS = 30.0
 SKILL_LOAD_TOOL = "load_skill"
 ASK_USER_TOOL = "ask_user"
 REQUEST_CREDENTIALS_TOOL = "request_credentials"
+CONNECT_ACCOUNT_TOOL = "connect_account"
 SCHEDULED_MEMORY_CONTEXT = "<recalled_memory>\n{recalled}\n</recalled_memory>"
 SCHEDULED_MEMORY_SEARCH_TIMEOUT_SECONDS = 4.0
 
@@ -372,7 +374,7 @@ class TurnEngine:
     hooks: HookChain
     blob: BlobStore
     spawn: Spawn
-    member_id: UUID | None
+    audience_member_id: UUID | None
     artifact_token_secret: str
     grants: GrantStore | None
     requestable_credentials: CredentialRequests | None = None
@@ -422,7 +424,8 @@ class TurnEngine:
                 agent=self.agent,
                 spawn=self.spawn,
                 subagents=self.subagents,
-                member_id=self.member_id,
+                speaker_member_id=self.turn.speaker_member_id,
+                audience_member_id=self.audience_member_id,
                 artifact_token_secret=self.artifact_token_secret,
                 grants=self.grants,
                 skills=self.skills,
@@ -444,7 +447,8 @@ class TurnEngine:
                     UserPromptSubmit(text=self.turn.inbound),
                     self.turn,
                     self.agent,
-                    self.member_id,
+                    self.audience_member_id,
+                    self.turn.speaker_member_id,
                 )
                 if inbound.denied is not None:
                     frame = await self._commit("done", usage_events, answer=inbound.denied)
@@ -452,11 +456,22 @@ class TurnEngine:
                     return frame
                 if inbound.injected:
                     system = f"{system}\n\n{inbound.injected}"
-                final_messages, answer, question, credential_request = await self._model_round(
+                (
+                    final_messages,
+                    answer,
+                    question,
+                    credential_request,
+                    connect_request,
+                ) = await self._model_round(
                     context, await self._load_messages(), usage_events, system
                 )
                 await self.hooks.fire(
-                    "stop", Stop(answer=answer), self.turn, self.agent, self.member_id
+                    "stop",
+                    Stop(answer=answer),
+                    self.turn,
+                    self.agent,
+                    self.audience_member_id,
+                    self.turn.speaker_member_id,
                 )
                 frame = await self._commit(
                     "done",
@@ -464,6 +479,7 @@ class TurnEngine:
                     answer=answer,
                     question=question,
                     credential_request=credential_request,
+                    connect_request=connect_request,
                 )
                 if frame.status == "done":
                     await self._persist_transcript(final_messages, answer)
@@ -541,15 +557,22 @@ class TurnEngine:
         messages: tuple[Message, ...],
         usage_events: list[Usage],
         system: str,
-    ) -> tuple[tuple[Message, ...], str, AskUserInput | None, CredentialRequest | None]:
+    ) -> tuple[
+        tuple[Message, ...],
+        str,
+        AskUserInput | None,
+        CredentialRequest | None,
+        ConnectRequest | None,
+    ]:
         """Call the model until it answers with text and no tool calls; each tool-calling round
         dispatches the calls in the sandbox and feeds the results back as the next user turn. Also
-        returns the structured question or credential request left pending when asking was the
-        turn's final tool act — each round overwrites both, so a turn that asked and then worked
-        on carries neither."""
+        returns the structured question, credential request, or connect request left pending when
+        its tool was the turn's final act — each round overwrites all three, so a turn that asked
+        and then worked on carries none."""
         nudged = False
         question: AskUserInput | None = None
         credential_request: CredentialRequest | None = None
+        connect_request: ConnectRequest | None = None
         for _round in range(self.max_rounds):
             await self._enforce_spend(usage_events)
             messages, compaction_usage = await self.compaction.maybe_compact(messages)
@@ -560,7 +583,7 @@ class TurnEngine:
             await self._publish_cost(usage_events)
             if not tool_calls:
                 if text.strip():
-                    return messages, text, question, credential_request
+                    return messages, text, question, credential_request, connect_request
                 if nudged:
                     raise RuntimeError("model returned an empty response twice")
                 nudged = True
@@ -572,13 +595,14 @@ class TurnEngine:
             credential_request = _final_act(
                 tool_calls, results, REQUEST_CREDENTIALS_TOOL, CredentialRequest
             )
+            connect_request = _final_act(tool_calls, results, CONNECT_ACCOUNT_TOOL, ConnectRequest)
             messages = (
                 *messages,
                 Message(role="assistant", content=assistant_blocks),
                 Message(role="user", content=results),
             )
         messages, text = await self._force_final(messages, usage_events, system)
-        return messages, text, None, None
+        return messages, text, None, None, None
 
     async def _force_final(
         self,
@@ -649,12 +673,14 @@ class TurnEngine:
         turn already running has real spend to preserve. A foreground subagent that parks under a
         reject cap holds its awaiting parent until the cap is raised. The no-caps fast-path skips
         the DB round-trip entirely once a recent decision confirmed no cap applies to this turn."""
-        if applicable_caps_absent(self.turn.workspace_id, self.member_id, self.turn.agent_id):
+        if applicable_caps_absent(
+            self.turn.workspace_id, self.audience_member_id, self.turn.agent_id
+        ):
             return
         pending = self.pricing.micro_usd(self.agent.model, _total_usage(usage_events))
         async with workspace_tx() as connection:
             decision = await SpendEvaluator(
-                self.turn.workspace_id, self.member_id, self.turn.agent_id
+                self.turn.workspace_id, self.audience_member_id, self.turn.agent_id
             ).decide(connection, pending)
         if decision.outcome != ALLOW:
             raise TurnParked(decision.message)
@@ -821,7 +847,8 @@ class TurnEngine:
             PreToolUse(tool_name=call.name, tool_input=args),
             self.turn,
             self.agent,
-            self.member_id,
+            self.audience_member_id,
+            self.turn.speaker_member_id,
         )
         if pre.denied is not None:
             return DispatchResult(tool_use_id=call.id, text=pre.denied, is_error=True)
@@ -868,7 +895,8 @@ class TurnEngine:
                 PostToolUseFailure(tool_name=call.name, tool_input=args, output=content),
                 self.turn,
                 self.agent,
-                self.member_id,
+                self.audience_member_id,
+                self.turn.speaker_member_id,
             )
         else:
             post = await self.hooks.fire(
@@ -876,7 +904,8 @@ class TurnEngine:
                 PostToolUse(tool_name=call.name, tool_input=args, output=content),
                 self.turn,
                 self.agent,
-                self.member_id,
+                self.audience_member_id,
+                self.turn.speaker_member_id,
             )
             if post.output is not None:
                 content = post.output
@@ -924,6 +953,7 @@ class TurnEngine:
         error_class: str | None = None,
         question: AskUserInput | None = None,
         credential_request: CredentialRequest | None = None,
+        connect_request: ConnectRequest | None = None,
     ) -> TerminalFrame:
         """Retries until the terminal state is durable: a client's wait always ends,
         so a database outage delays the commit rather than losing it."""
@@ -931,7 +961,13 @@ class TurnEngine:
         while True:
             try:
                 frame = await self._commit_once(
-                    status, usage_events, answer, error_class, question, credential_request
+                    status,
+                    usage_events,
+                    answer,
+                    error_class,
+                    question,
+                    credential_request,
+                    connect_request,
                 )
                 break
             except Exception as error:
@@ -955,6 +991,7 @@ class TurnEngine:
         error_class: str | None,
         question: AskUserInput | None,
         credential_request: CredentialRequest | None,
+        connect_request: ConnectRequest | None,
     ) -> TerminalFrame:
         usage = _total_usage(usage_events)
         async with workspace_tx() as connection:
@@ -983,6 +1020,7 @@ class TurnEngine:
                 reasoning=self.reasoning if model else None,
                 question=question,
                 credential_request=credential_request,
+                connect_request=connect_request,
             )
             updated = await connection.execute(
                 sa.update(tables.turn)

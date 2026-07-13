@@ -261,7 +261,7 @@ async def test_turn_execs_bash_in_a_live_container(
         hooks=HookChain(),
         blob=blob,
         spawn=_unavailable_spawn,
-        member_id=None,
+        audience_member_id=None,
         artifact_token_secret="",
         grants=None,
     )

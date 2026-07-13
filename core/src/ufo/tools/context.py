@@ -2,7 +2,8 @@
 
 A handler reaches the outside world only through the fields here: the sandbox for filesystem and
 shell, the blob store for artifacts, the turn/agent it runs under, `spawn` to delegate a typed
-subtask to a child turn, the conversation's `member_id`, and `artifact_token_secret` with which
+subtask to a child turn, the speaking member who gates authorization, the conversation audience
+member that scopes disclosure, and `artifact_token_secret` with which
 `share_file` mints the signed download URLs the web surface verifies. `read_paths` is the working
 set that lets `edit` refuse to touch a file the turn has not read first. `connector_account` hands
 a connector tool the broker's connected-account id it passes to the broker's server-side execute
@@ -150,7 +151,8 @@ class ToolContext:
     turn: Turn
     agent: Agent
     spawn: Spawn
-    member_id: UUID | None
+    speaker_member_id: UUID | None
+    audience_member_id: UUID | None
     artifact_token_secret: str
     grants: GrantStore | None = None
     subagents: SubagentControl | None = None
@@ -171,7 +173,7 @@ class ToolContext:
         (there is no owner column; roles are deferred). Workspace-wide acts a tool drives (filling a
         shared credential slot) gate on this, so a joined teammate cannot rewrite what every member
         shares. No speaker is never the owner."""
-        if self.member_id is None:
+        if self.speaker_member_id is None:
             return False
         async with workspace_tx() as connection:
             earliest = (
@@ -182,7 +184,7 @@ class ToolContext:
                     .limit(1)
                 )
             ).one_or_none()
-        return earliest is not None and earliest.id == self.member_id
+        return earliest is not None and earliest.id == self.speaker_member_id
 
     async def begin_credential_authorization(self, slot: str, payload: str) -> str:
         requests, member_id = await self._credential_authorization(slot)
@@ -200,15 +202,17 @@ class ToolContext:
         await ws_current().put_credential(slot, plaintext)
 
     async def _credential_authorization(self, slot: str) -> tuple[CredentialRequests, UUID]:
-        if self.member_id is None:
+        if self.speaker_member_id is None:
             raise ValueError("credential authorization requires a speaking member")
+        if self.audience_member_id != self.speaker_member_id:
+            raise ValueError("credential authorization requires the speaker's private audience")
         if self.ext is None or slot not in self.ext.credentials.declared:
             raise ValueError(f"this extension does not declare credential slot {slot!r}")
         if self.requestable_credentials is None:
             raise ValueError("no credential key is configured — this deploy cannot store secrets")
         if not await self.speaker_is_owner():
             raise ValueError("only the workspace owner can authorize credential slots")
-        return self.requestable_credentials, self.member_id
+        return self.requestable_credentials, self.speaker_member_id
 
     async def connector_account(self, provider: str, account_id: str | None = None) -> str:
         """The broker's connected-account id a connector tool passes to the broker's server-side

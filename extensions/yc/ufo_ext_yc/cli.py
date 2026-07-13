@@ -102,6 +102,8 @@ class YcAuth:
     async def run(self, action: Literal["start", "complete"], session: str) -> YcAuthResult:
         if self.ctx.ext is None:
             raise RuntimeError("yc_auth dispatched without the YC extension context")
+        if self.ctx.audience_member_id != self.ctx.speaker_member_id:
+            raise ValueError("YC authorization requires the speaker's private audience")
         if self.ctx.requestable_credentials is None:
             raise ValueError("no credential key is configured — this deploy cannot store secrets")
         if YC_CREDENTIALS_SLOT not in self.ctx.ext.credentials.declared:

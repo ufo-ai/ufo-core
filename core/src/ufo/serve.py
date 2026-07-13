@@ -1012,11 +1012,12 @@ def _connector_registry(
 def _connect_flow(
     credentials: CredentialStore | None, config: Config, manifests: tuple[Manifest, ...]
 ) -> ConnectFlow | None:
-    """The process's connect flow — the `connect_account` tool authorizes through it and the OAuth
-    callback completes through it — sharing the credential key that seals its state and encrypts its
-    tokens. No key means grants cannot be recorded, so both fail loud. The provider registry is
-    every installed connector's OAuth descriptor keyed by its provider name; the `redirect_uri` is
-    this deploy's external callback URL, the one value both legs of the handoff present."""
+    """The process's connect flow — the tool validates against it, a surface privately authorizes
+    through it, and the OAuth callback completes through it — sharing the credential key that seals
+    its state and encrypts its tokens. No key means grants cannot be recorded, so all fail loud.
+    The provider registry is every installed connector's OAuth descriptor keyed by its provider
+    name; the `redirect_uri` is this deploy's external callback URL, the one value both legs of the
+    handoff present."""
     if credentials is None:
         return None
     providers: dict[str, OAuthProvider] = {}

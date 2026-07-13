@@ -114,6 +114,13 @@ class CredentialRequest(BaseModel):
     sealed: str
 
 
+class ConnectRequest(BaseModel):
+    """The `connect_account` tool's structured terminal handoff. The provider is durable while
+    the authorization URL is minted only after the speaking member privately claims it."""
+
+    provider: str
+
+
 class TerminalFrame(BaseModel):
     status: TerminalStatus
     text: str = ""
@@ -125,6 +132,7 @@ class TerminalFrame(BaseModel):
     reasoning: ReasoningEffort | None = None
     question: AskUserInput | None = None
     credential_request: CredentialRequest | None = None
+    connect_request: ConnectRequest | None = None
 
 
 class Agent(BaseModel):
@@ -172,6 +180,7 @@ class Turn(BaseModel):
     inbound: str
     created_at: datetime
     admission_source: TurnAdmissionSource = INTERNAL_ADMISSION
+    speaker_member_id: UUID | None = None
     context: TurnContext | None = None
     terminal: TerminalFrame | None = None
     parent_turn_id: UUID | None = None

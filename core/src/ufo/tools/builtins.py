@@ -14,8 +14,8 @@ produced workspace file straight out of the mount into the blob
 store under `artifacts/<uuid>/` and returns a TTL-token URL core's artifact route serves — the only
 path that hands a file back outside the sandbox, with no read cap and no whole-file buffer.
 `spawn_subagent` delegates a typed subtask to a child turn through `ctx.spawn`. `load_sessions`
-reads specific past conversation transcripts back from the blob store, scoped to the speaking
-member's own conversations. `ask_user` is chat-native: it
+reads specific past conversation transcripts back from the blob store, scoped to the conversation
+audience member. `ask_user` is chat-native: it
 structures a question or confirmation the agent poses in its reply, whose answer rides the member's
 next message — no out-of-band prompt. `request_credentials` is its secret-collecting sibling: it
 seals which slots the speaking owner will fill and ends the turn; a capable surface prompts for the
@@ -50,7 +50,7 @@ from ufo.grants import installed_connect_flow
 from ufo.models.interface import TextBlock
 from ufo.sandbox.session import WORKSPACE_DIR, workspace_path
 from ufo.schema import tables
-from ufo.schema.records import AskUserInput, CredentialPrompt, CredentialRequest
+from ufo.schema.records import AskUserInput, ConnectRequest, CredentialPrompt, CredentialRequest
 from ufo.skills.runtime import mount_skill
 from ufo.tools.context import ImageContent, TextContent, ToolContext, ToolResult
 from ufo.tools.registry import ToolDef
@@ -504,8 +504,8 @@ async def load_sessions_handler(ctx: ToolContext, args: LoadSessionsInput) -> To
             failed.append(raw)
     scope = (
         tables.conversation.c.member_id.is_(None)
-        if ctx.member_id is None
-        else tables.conversation.c.member_id == ctx.member_id
+        if ctx.audience_member_id is None
+        else tables.conversation.c.member_id == ctx.audience_member_id
     )
     surfaces: dict[UUID, str] = {}
     if requested:
@@ -582,22 +582,21 @@ async def load_skill_handler(ctx: ToolContext, args: LoadSkillInput) -> ToolResu
     return ToolResult(content=(TextContent(text=f"{header}\n\n{bodies}"),))
 
 
+CONNECT_ACCOUNT_DIRECTIVE = (
+    "Tell the member to use the private connection control in your reply, then end your turn — "
+    "the authorization URL never appears in this conversation."
+)
+
+
 async def connect_account_handler(ctx: ToolContext, args: ConnectAccountInput) -> ToolResult:
-    """Begin the OAuth handoff for the speaking member: the grantor is this turn's member and the
-    grant binds to this turn's agent and conversation, all read from the context — the speaker gates
-    the granting act, never the caller identity of a route. Returns the provider's authorize URL so
-    the agent hands the member a link in its reply. A missing speaker, an uninstalled provider, or
-    no credential key raises, surfacing to the model as a recoverable tool error."""
-    if ctx.member_id is None:
+    """Leave a provider-validated private OAuth handoff for the speaking member."""
+    if ctx.speaker_member_id is None:
         raise ValueError("connect requires a speaking member to gate the grant")
-    url = installed_connect_flow().authorize(
-        workspace_id=ctx.turn.workspace_id,
-        agent_id=ctx.turn.agent_id,
-        provider=args.provider,
-        grantor_member_id=ctx.member_id,
-        conversation_id=ctx.turn.conversation_id,
+    installed_connect_flow().validate_provider(args.provider)
+    request = ConnectRequest(provider=args.provider)
+    return ToolResult(
+        content=(TextContent(text=f"{CONNECT_ACCOUNT_DIRECTIVE}\n{request.model_dump_json()}"),)
     )
-    return ToolResult(content=(TextContent(text=url),))
 
 
 REQUEST_CREDENTIALS_DIRECTIVE = (
@@ -615,14 +614,18 @@ async def request_credentials_handler(
     fulfills against the seal. Ends the turn like ask_user — the member returns once entered. Slots
     are workspace-global, so only the owner may fill them; a non-owner speaker, an undeclared slot,
     or a deploy without a credential key raises, surfacing as a recoverable tool error."""
-    if ctx.member_id is None:
+    if ctx.speaker_member_id is None:
         raise ValueError("collecting credentials requires a speaking member")
+    if ctx.audience_member_id != ctx.speaker_member_id:
+        raise ValueError("collecting credentials requires the speaker's private audience")
     if ctx.requestable_credentials is None:
         raise ValueError("no credential key is configured — this deploy cannot store secrets")
     if not await ctx.speaker_is_owner():
         raise ValueError("only the workspace owner can fill credential slots")
     sealed = ctx.requestable_credentials.seal(
-        ctx.turn.workspace_id, ctx.member_id, tuple(prompt.slot for prompt in args.prompts)
+        ctx.turn.workspace_id,
+        ctx.speaker_member_id,
+        tuple(prompt.slot for prompt in args.prompts),
     )
     request = CredentialRequest(reason=args.reason, prompts=args.prompts, sealed=sealed)
     return ToolResult(
@@ -803,10 +806,9 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         name="connect_account",
         description=(
             "Connect an external account to this agent through OAuth when the member asks in chat "
-            "to connect a provider (for example their Gmail or GitHub). Returns an authorization "
-            "URL — reply with the link so the member can open it and grant access; the account is "
-            "linked once they finish. The connection is bound to the member who asked and this "
-            "conversation."
+            "to connect a provider (for example their Gmail or GitHub). This creates a private "
+            "connection control for the member who asked; tell them to use it and end your turn. "
+            "Never invent or expose an authorization URL in the conversation."
         ),
         input_model=ConnectAccountInput,
         handler=connect_account_handler,

@@ -533,7 +533,8 @@ class HookChain:
         payload: HookPayload,
         turn: Turn | None,
         agent: Agent | None,
-        member_id: UUID | None,
+        audience_member_id: UUID | None,
+        speaker_member_id: UUID | None,
     ) -> HookResolution:
         """Run every hook bound to `event` in order and fold their outcomes. Any Deny denies and
         short-circuits (later hooks skip); ModifyInput/ModifyOutput fold left-to-right so each hook
@@ -563,7 +564,12 @@ class HookChain:
                 case _:
                     current = payload
             context = HookContext(
-                ext=hook.ext, payload=current, turn=turn, agent=agent, member_id=member_id
+                ext=hook.ext,
+                payload=current,
+                turn=turn,
+                agent=agent,
+                audience_member_id=audience_member_id,
+                speaker_member_id=speaker_member_id,
             )
             try:
                 async with asyncio.timeout(HOOK_TIMEOUT_SECONDS):

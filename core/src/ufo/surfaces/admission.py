@@ -73,6 +73,7 @@ class Admission:
         conversation_id: UUID,
         agent_id: UUID,
         body: str,
+        speaker_member_id: UUID | None,
         idempotency_key: str | None = None,
         context: TurnContext | None = None,
     ) -> UUID:
@@ -81,6 +82,7 @@ class Admission:
             conversation_id,
             agent_id,
             body,
+            speaker_member_id,
             idempotency_key,
             context,
             _PendingPause(workspace_id, conversation_id),
@@ -101,6 +103,7 @@ class Admission:
             conversation_id,
             agent_id,
             body,
+            None,
             idempotency_key,
             context,
             None,
@@ -117,6 +120,7 @@ class Admission:
                 task.conversation_id,
                 task.agent_id,
                 task.prompt,
+                None,
                 firing_key,
                 None,
                 None,
@@ -131,6 +135,7 @@ class Admission:
         conversation_id: UUID,
         agent_id: UUID,
         body: str,
+        speaker_member_id: UUID | None,
         idempotency_key: str | None,
         context: TurnContext | None,
         pending_pause: _PendingPause | None,
@@ -145,6 +150,17 @@ class Admission:
                     .with_for_update()
                 )
             ).one()
+            if speaker_member_id is not None:
+                speaker = (
+                    await connection.execute(
+                        sa.select(tables.member.c.id).where(
+                            tables.member.c.id == speaker_member_id,
+                            tables.member.c.workspace_id == workspace_id,
+                        )
+                    )
+                ).one_or_none()
+                if speaker is None:
+                    raise ValueError("turn speaker is not a member of this workspace")
             resumed_turn_id: UUID | None = None
             if scheduled_task is not None:
                 claimed = (
@@ -251,6 +267,7 @@ class Admission:
                             .values(
                                 inbound=body,
                                 admission_source=MEMBER_ADMISSION,
+                                speaker_member_id=speaker_member_id,
                                 context=None
                                 if context is None
                                 else context.model_dump(mode="json"),
@@ -338,6 +355,7 @@ class Admission:
                             if scheduled_task is not None
                             else INTERNAL_ADMISSION
                         ),
+                        speaker_member_id=speaker_member_id,
                         context=None if context is None else context.model_dump(mode="json"),
                         terminal=None if terminal is None else terminal.model_dump(mode="json"),
                         idempotency_key=idempotency_key,
@@ -510,12 +528,15 @@ class MemberAdmission:
         message: str,
         idempotency_key: str | None = None,
         context: TurnContext | None = None,
+        *,
+        speaker_member_id: UUID | None,
     ) -> UUID:
         return await self.admission.admit_member(
             self.workspace_id,
             conversation_id,
             agent_id,
             message,
+            speaker_member_id,
             idempotency_key=idempotency_key,
             context=context,
         )
