@@ -31,6 +31,8 @@ INITIAL_RETRY_DELAY_SECONDS = 2.0
 MAX_RETRY_DELAY_SECONDS = 60.0
 MAX_EMPTY_PROVIDER_RETRIES = 3
 
+CACHE_CONTROL = {"type": "ephemeral", "ttl": "1h"}
+
 
 def anthropic_sdk_client(api_key: str) -> anthropic.AsyncAnthropic:
     """SDK client with its own retries disabled: the retry policy lives in AnthropicClient."""
@@ -113,7 +115,7 @@ class AnthropicClient:
                     {
                         "type": "text",
                         "text": request.system,
-                        "cache_control": {"type": "ephemeral"},
+                        "cache_control": CACHE_CONTROL,
                     }
                 ],
                 "messages": [
@@ -122,7 +124,7 @@ class AnthropicClient:
                 ],
                 "max_tokens": request.max_tokens,
                 "stream": True,
-                "cache_control": {"type": "ephemeral"},
+                "cache_control": CACHE_CONTROL,
             }
             if request.reasoning != "off":
                 create_kwargs["thinking"] = {"type": "adaptive"}
@@ -132,7 +134,7 @@ class AnthropicClient:
                     {"name": t.name, "description": t.description, "input_schema": t.input_schema}
                     for t in request.tools
                 ]
-                create_kwargs["tools"][-1]["cache_control"] = {"type": "ephemeral"}
+                create_kwargs["tools"][-1]["cache_control"] = CACHE_CONTROL
             try:
                 stream = await self.client.messages.create(**create_kwargs)
                 async for event in stream:

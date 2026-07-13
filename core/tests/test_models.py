@@ -262,17 +262,17 @@ async def test_anthropic_caches_tools_system_and_growing_conversation() -> None:
     )
     async for _ in AnthropicClient(client=anthropic_sdk(create)).complete(request):
         pass
-    assert create.kwargs["cache_control"] == {"type": "ephemeral"}
+    assert create.kwargs["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
     assert create.kwargs["system"] == [
         {
             "type": "text",
             "text": "be terse",
-            "cache_control": {"type": "ephemeral"},
+            "cache_control": {"type": "ephemeral", "ttl": "1h"},
         }
     ]
     tools = create.kwargs["tools"]
     assert "cache_control" not in tools[0]
-    assert tools[1]["cache_control"] == {"type": "ephemeral"}
+    assert tools[1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
 
 
 async def test_openai_request_carries_image_url_and_lifts_tool_result_images() -> None:
