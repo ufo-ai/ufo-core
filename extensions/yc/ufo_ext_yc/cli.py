@@ -54,7 +54,6 @@ class YcDeviceAuthorization(BaseModel):
     verification_uri: HttpUrl
     verification_uri_complete: HttpUrl | None = None
     expires_in: int = Field(gt=0, le=3600)
-    interval: int = Field(default=5, ge=1, le=60)
 
     @model_validator(mode="after")
     def validate_verification_url(self) -> "YcDeviceAuthorization":
