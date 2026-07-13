@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo
 import sqlalchemy as sa
 from dbos import DBOS
 from dbos._error import DBOSWorkflowCancelledError
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, model_validator
 
 from ufo.accounting import (
     ALLOW,
@@ -238,6 +238,7 @@ UNTRUSTED_RESULT_NOTICE = (
 UNTRUSTED_RESULT_OPEN = '<untrusted-content source="{source}">'
 UNTRUSTED_RESULT_CLOSE = "</untrusted-content>"
 UNTRUSTED_RESULT_CLOSE_ESCAPE = "&lt;/untrusted-content&gt;"
+EMPTY_ERROR_RESULT_TEXT = "tool errored without a message"
 
 
 class StreamResult(BaseModel):
@@ -273,12 +274,21 @@ class DispatchResult(BaseModel):
     parts — the text (already bounded), the error flag, and any image blocks replaced by blob
     references. Keeping images out of `content` keeps the step log bounded even for a
     screenshot-heavy browser turn; the workflow reassembles the `ToolResultBlock` (rehydrating the
-    referenced images) after the step returns."""
+    referenced images) after the step returns. An errored result always carries text — the model
+    cannot react to a blank failure, and Anthropic rejects an empty `is_error` tool_result. The
+    dispatch path normalizes a blank error before the untrusted wall and the failure hook (both
+    must see what the model sees); this validator backstops every other producer."""
 
     tool_use_id: str
     text: str
     is_error: bool
     image_refs: tuple[ImageRef, ...] = ()
+
+    @model_validator(mode="after")
+    def _error_carries_a_message(self) -> "DispatchResult":
+        if self.is_error and not self.text:
+            self.text = EMPTY_ERROR_RESULT_TEXT
+        return self
 
 
 class ModelStreamError(Exception):
@@ -874,7 +884,7 @@ class TurnEngine:
         except Exception as error:
             content, is_error = f"{type(error).__name__}: {error}", True
         if is_error:
-            content = _bounded(content)
+            content = _bounded(content) or EMPTY_ERROR_RESULT_TEXT
         elif len(content) > MAX_TOOL_RESULT_CHARS:
             path = workspace_path(f"{TOOL_OUTPUT_DIR}/{call.id}.txt")
             await self.sandbox.write_file(path, content.encode())

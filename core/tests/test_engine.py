@@ -26,6 +26,7 @@ from ufo.loop.compaction import (
 )
 from ufo.loop.engine import (
     ASK_USER_TOOL,
+    EMPTY_ERROR_RESULT_TEXT,
     FORCE_FINAL_PROMPT,
     MAX_TOOL_RESULT_CHARS,
     OFFLOAD_NOTICE,
@@ -37,6 +38,7 @@ from ufo.loop.engine import (
     UNTRUSTED_RESULT_CLOSE_ESCAPE,
     UNTRUSTED_RESULT_NOTICE,
     UNTRUSTED_RESULT_OPEN,
+    DispatchResult,
     TurnEngine,
     TurnParked,
     _bounded,
@@ -1284,6 +1286,65 @@ async def test_dispatch_bounds_an_oversize_error_result_and_leaves_within_cap_un
 
     small = await engine._dispatch(context, ToolUseBlock(id="c3", name="small", input={}))
     assert small.content == "c" * (MAX_TOOL_RESULT_CHARS - 1)
+
+
+def test_dispatch_result_normalizes_only_an_empty_errored_text() -> None:
+    assert DispatchResult(tool_use_id="t", text="", is_error=True).text == EMPTY_ERROR_RESULT_TEXT
+    assert DispatchResult(tool_use_id="t", text="", is_error=False).text == ""
+    assert DispatchResult(tool_use_id="t", text="boom", is_error=True).text == "boom"
+
+
+async def test_dispatch_gives_an_empty_errored_result_a_message(db: None, tmp_path: Path) -> None:
+    turn = await _seed_turn("queued", None)
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        tools=ToolRegistry((_fixed_result_tool("blank_error", "", is_error=True),)),
+    )
+    context = ToolContext(
+        sandbox=engine.sandbox,
+        blob=engine.blob,
+        turn=engine.turn,
+        agent=engine.agent,
+        spawn=engine.spawn,
+        speaker_member_id=engine.turn.speaker_member_id,
+        audience_member_id=engine.audience_member_id,
+        artifact_token_secret=engine.artifact_token_secret,
+        grants=engine.grants,
+    )
+    block = await engine._dispatch(context, ToolUseBlock(id="c1", name="blank_error", input={}))
+    assert block.is_error
+    assert block.content == EMPTY_ERROR_RESULT_TEXT
+
+
+async def test_dispatch_normalizes_a_blank_untrusted_error_before_the_wall(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        tools=ToolRegistry(
+            (_fixed_result_tool("blank_untrusted", "", is_error=True, untrusted=True),)
+        ),
+    )
+    context = ToolContext(
+        sandbox=engine.sandbox,
+        blob=engine.blob,
+        turn=engine.turn,
+        agent=engine.agent,
+        spawn=engine.spawn,
+        speaker_member_id=engine.turn.speaker_member_id,
+        audience_member_id=engine.audience_member_id,
+        artifact_token_secret=engine.artifact_token_secret,
+        grants=engine.grants,
+    )
+    block = await engine._dispatch(context, ToolUseBlock(id="c1", name="blank_untrusted", input={}))
+    assert block.is_error
+    assert block.content == (
+        UNTRUSTED_RESULT_NOTICE.format(source="blank_untrusted")
+        + UNTRUSTED_RESULT_OPEN.format(source="blank_untrusted")
+        + EMPTY_ERROR_RESULT_TEXT
+        + UNTRUSTED_RESULT_CLOSE
+    )
 
 
 async def test_dispatch_offloads_an_oversize_nonerror_result_and_keeps_a_preview(
