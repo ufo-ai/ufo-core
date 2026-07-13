@@ -158,7 +158,15 @@ async def test_bash_combines_output_and_flags_nonzero_exit(tmp_path: Path) -> No
     sandbox = FakeSandbox(bash_result=ExecResult(stdout="out", stderr="err", exit_code=1))
     ctx = make_context(sandbox, tmp_path)
     result = await run("bash", ctx, command="do it")
-    assert result.content[0].text == "outerr"
+    assert result.content[0].text == "outerr\nexit code: 1"
+    assert result.is_error is True
+
+
+async def test_bash_silent_failure_reports_the_exit_code(tmp_path: Path) -> None:
+    sandbox = FakeSandbox(bash_result=ExecResult(stdout="", stderr="", exit_code=56))
+    ctx = make_context(sandbox, tmp_path)
+    result = await run("bash", ctx, command="curl -s https://blocked.example")
+    assert result.content[0].text == "exit code: 56"
     assert result.is_error is True
 
 

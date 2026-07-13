@@ -258,9 +258,13 @@ class MessageSubagentInput(BaseModel):
 async def bash_handler(ctx: ToolContext, args: BashInput) -> ToolResult:
     timeout_s = int(min(args.timeout, MAX_BASH_TIMEOUT_MS) / 1000) if args.timeout else None
     result = await ctx.sandbox.bash(args.command, timeout_s=timeout_s)
+    output = result.stdout + result.stderr
+    if result.exit_code == 0:
+        return ToolResult(content=(TextContent(text=output),))
+    exit_line = f"exit code: {result.exit_code}"
     return ToolResult(
-        content=(TextContent(text=result.stdout + result.stderr),),
-        is_error=result.exit_code != 0,
+        content=(TextContent(text=f"{output}\n{exit_line}" if output else exit_line),),
+        is_error=True,
     )
 
 
