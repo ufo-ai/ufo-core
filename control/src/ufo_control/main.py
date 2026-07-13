@@ -13,7 +13,8 @@ from opentelemetry.sdk._logs import LoggerProvider
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.resources import Resource
 
-from ufo_control.gateway_invite import InviteCodes
+from ufo_control.gateway_email import invite_email, public_apex_host
+from ufo_control.gateway_invite import InviteCodes, InviteError
 from ufo_control.rls import bootstrap_policies, ensure_serve_role, owner_dsn
 
 DEFAULT_HOST = "0.0.0.0"
@@ -62,19 +63,26 @@ def gateway() -> None:
 
 
 @main.command()
-def invite() -> None:
-    """Mint a one-time new-workspace invite."""
-    click.echo(asyncio.run(_mint_invite()))
+@click.argument("object_number", type=click.IntRange(min=1))
+def invite(object_number: int) -> None:
+    """Mint a one-time new-workspace invite and print its email, code included, once."""
+    try:
+        click.echo(asyncio.run(_mint_invite(object_number)))
+    except InviteError as error:
+        raise click.ClickException(str(error)) from error
 
 
-async def _mint_invite() -> str:
+async def _mint_invite(object_number: int) -> str:
+    apex_host = public_apex_host()
     pool = await asyncpg.create_pool(dsn=owner_dsn(), min_size=1, max_size=1)
     try:
         invites = InviteCodes(pool=pool)
         await invites.ensure_table()
-        return await invites.mint()
+        minted = await invites.mint(object_number)
     finally:
         await pool.close()
+    subject, body = invite_email(minted.object_number, minted.code, minted.expires_at, apex_host)
+    return f"Subject: {subject}\n\n{body}"
 
 
 @main.command(name="rls-bootstrap")

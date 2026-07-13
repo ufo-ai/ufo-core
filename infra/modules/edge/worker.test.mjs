@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 // The same substitution main.tf applies at deploy, so the tested worker is the shipped artifact.
@@ -15,50 +16,40 @@ async function importWorker(tag) {
 }
 const worker = await importWorker("shared");
 
-function fakeD1() {
-  const rows = new Map();
-  const deliveries = new Map();
+function d1(database = new DatabaseSync(":memory:")) {
   return {
+    database,
     prepare(sql) {
-      const stmt = { sql, args: [] };
+      let args = [];
       return {
-        bind(...args) {
-          stmt.args = args;
+        bind(...bound) {
+          args = bound;
           return this;
         },
         async run() {
-          let changes = 0;
-          if (stmt.sql.startsWith("insert into waitlist (") && !rows.has(stmt.args[0])) {
-            rows.set(stmt.args[0], rows.size + 1);
-            changes = 1;
-          }
-          if (stmt.sql.startsWith("insert into waitlist_email") && !deliveries.has(stmt.args[0])) {
-            deliveries.set(stmt.args[0], { queued_at: null, sent_at: null });
-            changes = 1;
-          }
-          if (stmt.sql.startsWith("update waitlist_email set queued_at = datetime")) {
-            deliveries.get(stmt.args[0]).queued_at = "now";
-            changes = 1;
-          }
-          if (stmt.sql.startsWith("update waitlist_email set queued_at = null")) {
-            deliveries.get(stmt.args[0]).queued_at = null;
-            changes = 1;
-          }
-          if (stmt.sql.startsWith("update waitlist_email set sent_at")) {
-            deliveries.get(stmt.args[0]).sent_at = "now";
-            changes = 1;
-          }
-          return { meta: { changes } };
+          return { meta: database.prepare(sql).run(...args) };
         },
         async first() {
-          if (stmt.sql.startsWith("select queued_at")) return deliveries.get(stmt.args[0]);
-          if (stmt.sql.includes("where created_at <=")) return { n: rows.get(stmt.args[0]) };
-          return { n: rows.size };
+          const row = database.prepare(sql).get(...args);
+          return row === undefined ? null : { ...row };
         },
       };
     },
+    async batch(statements) {
+      database.exec("begin");
+      try {
+        for (const statement of statements) await statement.run();
+        database.exec("commit");
+      } catch (error) {
+        database.exec("rollback");
+        throw error;
+      }
+    },
   };
 }
+
+const EMAIL_LEDGER =
+  "create table if not exists waitlist_email (email text primary key, queued_at text, sent_at text)";
 
 const passedThrough = [];
 let fleetReply = () => Response.json({ craft: 0 });
@@ -70,7 +61,7 @@ globalThis.fetch = async (input) => {
 };
 
 const env = {
-  DB: fakeD1(),
+  DB: d1(),
   ORIGIN_BASE: "https://testing.flyingobject.ai",
   WAITLIST_EMAILS: { async send() {} },
   WAITLIST_DEAD_LETTER_QUEUE: "ufo-edge-waitlist-email-dead-letters",
@@ -80,12 +71,15 @@ function request(url, { ua = "curl/8.6.0", method = "GET", body } = {}) {
   return worker.fetch(new Request(url, { method, body, headers: { "user-agent": ua } }), env);
 }
 
-test("curl landing renders the card with the live count and https commands", async () => {
+test("curl landing renders the ledger card with live counts and https commands", async () => {
   const reply = await request("https://flyingobject.ai/");
   const body = await reply.text();
   assert.equal(reply.headers.get("content-type"), "text/plain; charset=utf-8");
   assert.match(body, /◉ ◉ ◉/);
-  assert.match(body, /0 crafts on waitlist\./);
+  assert.match(body, /you found us\./);
+  assert.match(body, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z/);
+  assert.match(body, /0 objects\. 0 unidentified\./);
+  assert.match(body, /request identification:/);
   assert.match(body, /curl https:\/\/flyingobject\.ai\/waitlist -d email=/);
   assert.match(body, /curl -fsSL https:\/\/flyingobject\.ai\/install \| sh/);
 });
@@ -94,7 +88,7 @@ test("curl landing over plain http gets the card directly", async () => {
   const reply = await request("http://flyingobject.ai/");
   assert.equal(reply.status, 200);
   assert.equal(reply.headers.get("content-type"), "text/plain; charset=utf-8");
-  assert.match(await reply.text(), /crafts on waitlist/);
+  assert.match(await reply.text(), /objects\. \d+ unidentified\./);
 });
 
 test("browser landing over plain http is bounced to https with its query intact", async () => {
@@ -165,30 +159,33 @@ test("a gateway outage lands an empty sky, not an error", async () => {
   fleetReply = () => Response.json({ craft: 0 });
 });
 
-test("joining is positional, idempotent, and normalizes the email", async () => {
+test("signup is positional, idempotent, and normalizes the email", async () => {
   const first = await request("https://flyingobject.ai/waitlist", {
     method: "POST",
     body: "email=You@YourCo.com",
   });
   assert.equal(first.status, 200);
-  assert.match(await first.text(), /transmission received: you@yourco\.com[\s\S]*#1\./);
+  assert.match(
+    await first.text(),
+    /object #1 logged \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\. status: unidentified\. watch your inbox\./,
+  );
   const second = await request("https://flyingobject.ai/waitlist", {
     method: "POST",
     body: "email=second@co.com&junk=1",
   });
-  assert.match(await second.text(), /#2\./);
+  assert.match(await second.text(), /object #2 logged/);
   const duplicate = await request("https://flyingobject.ai/waitlist", {
     method: "POST",
     body: "email=you@yourco.com",
   });
-  assert.match(await duplicate.text(), /#1\./);
+  assert.match(await duplicate.text(), /object #1 logged/);
 });
 
 test("a first join queues and delivers one confirmation email", async () => {
   const queued = [];
   const sent = [];
   const isolated = {
-    DB: fakeD1(),
+    DB: d1(),
     ORIGIN_BASE: "https://testing.flyingobject.ai",
     WAITLIST_DEAD_LETTER_QUEUE: "ufo-edge-waitlist-email-dead-letters",
     WAITLIST_EMAILS: {
@@ -211,11 +208,11 @@ test("a first join queues and delivers one confirmation email", async () => {
     });
   await fresh.fetch(signup(), isolated);
   await fresh.fetch(signup(), isolated);
+  const loggedAt = isolated.DB.database
+    .prepare("select created_at from waitlist where email = 'pilot@example.com'")
+    .get().created_at;
   assert.deepEqual(queued, [
-    {
-      message: { email: "pilot@example.com", position: 1 },
-      options: { contentType: "json" },
-    },
+    { message: { email: "pilot@example.com" }, options: { contentType: "json" } },
   ]);
 
   let acknowledged = false;
@@ -237,11 +234,14 @@ test("a first join queues and delivers one confirmation email", async () => {
     {
       to: "pilot@example.com",
       from: "no-reply@flyingobject.ai",
-      subject: "You're on the flyingobject.ai waitlist",
+      subject: "object #1 logged",
       text:
-        "Transmission received: pilot@example.com\n\n" +
-        "You are flying object #1.\n" +
-        "We'll signal you when it's time to board.\n",
+        "  object:   #1\n" +
+        "  contact:  pilot@example.com\n" +
+        `  logged:   ${loggedAt.slice(0, 16)} UTC\n` +
+        "  status:   unidentified\n\n" +
+        "We'll signal you when identification opens.\n" +
+        "Your number is permanent.\n",
     },
   ]);
   assert.equal(acknowledged, true);
@@ -251,11 +251,17 @@ test("a first join queues and delivers one confirmation email", async () => {
 });
 
 test("a failed confirmation remains unacknowledged for queue retry", async () => {
-  const database = fakeD1();
+  const database = d1();
+  await database.prepare(EMAIL_LEDGER).run();
   await database
     .prepare("insert into waitlist_email (email) values (?1) on conflict do nothing")
     .bind("pilot@example.com")
     .run();
+  database.database.exec(
+    "create table waitlist (n integer primary key autoincrement," +
+    " email text not null unique, created_at text not null default (datetime('now')))",
+  );
+  database.database.prepare("insert into waitlist (email) values (?)").run("pilot@example.com");
   let acknowledged = false;
   await assert.rejects(
     worker.queue(
@@ -263,7 +269,7 @@ test("a failed confirmation remains unacknowledged for queue retry", async () =>
         queue: "ufo-edge-waitlist-email",
         messages: [
           {
-            body: { email: "pilot@example.com", position: 1 },
+            body: { email: "pilot@example.com" },
             ack() {
               acknowledged = true;
             },
@@ -289,7 +295,7 @@ test("a signup retries an unqueued confirmation", async () => {
   const queued = [];
   let attempt = 0;
   const isolated = {
-    DB: fakeD1(),
+    DB: d1(),
     ORIGIN_BASE: "https://testing.flyingobject.ai",
     WAITLIST_DEAD_LETTER_QUEUE: "ufo-edge-waitlist-email-dead-letters",
     WAITLIST_EMAILS: {
@@ -312,16 +318,14 @@ test("a signup retries an unqueued confirmation", async () => {
   const reply = await fresh.fetch(signup(), isolated);
   assert.equal(reply.status, 200);
   assert.deepEqual(queued, [
-    {
-      message: { email: "pilot@example.com", position: 1 },
-      options: { contentType: "json" },
-    },
+    { message: { email: "pilot@example.com" }, options: { contentType: "json" } },
   ]);
 });
 
 test("an exhausted confirmation is surfaced and consumed", async (context) => {
   const logged = context.mock.method(console, "error", () => {});
-  const database = fakeD1();
+  const database = d1();
+  await database.prepare(EMAIL_LEDGER).run();
   await database
     .prepare("insert into waitlist_email (email) values (?1) on conflict do nothing")
     .bind("pilot@example.com")
@@ -336,7 +340,7 @@ test("an exhausted confirmation is surfaced and consumed", async (context) => {
       queue: "ufo-edge-waitlist-email-dead-letters",
       messages: [
         {
-          body: { email: "pilot@example.com", position: 1 },
+          body: { email: "pilot@example.com" },
           ack() {
             acknowledged = true;
           },
@@ -361,9 +365,9 @@ test("an exhausted confirmation is surfaced and consumed", async (context) => {
   );
 });
 
-test("a join busts the counter cache so the card reflects it", async () => {
+test("a signup busts the counter cache so the card reflects it", async () => {
   const body = await (await request("https://flyingobject.ai/")).text();
-  assert.match(body, /2 crafts on waitlist\./);
+  assert.match(body, /2 objects\. 2 unidentified\./);
 });
 
 test("a malformed email is a 400 and takes no queue slot", async () => {
@@ -377,7 +381,7 @@ test("a malformed email is a 400 and takes no queue slot", async () => {
     method: "POST",
     body: "email=third@co.com",
   });
-  assert.match(await next.text(), /#3\./);
+  assert.match(await next.text(), /object #3 logged/);
 });
 
 test("GET /waitlist answers with usage for the requested host", async () => {
@@ -395,4 +399,72 @@ test("/install and /install.sh proxy the gateway's stamped client script", async
 test("any other path passes through untouched", async () => {
   const reply = await request("https://flyingobject.ai/v1/onboard/ufo", { ua: "Mozilla/5.0" });
   assert.equal(await reply.text(), "origin:https://flyingobject.ai/v1/onboard/ufo");
+});
+
+test("/install serves byte-identical content to every user agent", async () => {
+  const cli = await (await request("https://flyingobject.ai/install")).text();
+  const browser = await (
+    await request("https://flyingobject.ai/install", { ua: "Mozilla/5.0" })
+  ).text();
+  assert.equal(cli, browser);
+});
+
+test("an unnumbered waitlist is renumbered once, in insertion order, permanently", async () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec(
+    "create table waitlist (email text primary key," +
+    " created_at text not null default (datetime('now')))",
+  );
+  const seed = database.prepare("insert into waitlist (email, created_at) values (?, ?)");
+  seed.run("first@co.com", "2026-07-01 00:00:00");
+  seed.run("second@co.com", "2026-07-01 00:00:00");
+  const isolated = {
+    DB: d1(database),
+    ORIGIN_BASE: "https://testing.flyingobject.ai",
+    WAITLIST_DEAD_LETTER_QUEUE: "ufo-edge-waitlist-email-dead-letters",
+    WAITLIST_EMAILS: { async send() {} },
+  };
+  const fresh = await importWorker("waitlist-migrate");
+  const signup = (email) =>
+    fresh.fetch(
+      new Request("https://flyingobject.ai/waitlist", {
+        method: "POST",
+        body: `email=${email}`,
+        headers: { "user-agent": "curl/8.6.0" },
+      }),
+      isolated,
+    );
+
+  const third = await signup("third@co.com");
+  assert.match(await third.text(), /object #3 logged/);
+  const numbers = database
+    .prepare("select email, n from waitlist order by n")
+    .all()
+    .map(({ email, n }) => ({ email, n }));
+  assert.deepEqual(numbers, [
+    { email: "first@co.com", n: 1 },
+    { email: "second@co.com", n: 2 },
+    { email: "third@co.com", n: 3 },
+  ]);
+
+  database.prepare("delete from waitlist where email = 'third@co.com'").run();
+  const fourth = await signup("fourth@co.com");
+  assert.match(await fourth.text(), /object #4 logged/);
+});
+
+const BANNED_LEXICON =
+  /!|\bwelcome\b|\boops\b|\bjust\b|\bsimply\b|\bawesome\b|\bjoin(ing|ed)?\b|\bboard(ing)?\b|\bpassengers?\b|\bshortly\b|\bsoon\b|\brecently\b|you'?re all set/i;
+
+test("plain-text surfaces carry no banned lexicon", async () => {
+  const card = await (await request("https://flyingobject.ai/")).text();
+  const usage = await (await request("https://flyingobject.ai/waitlist")).text();
+  const ack = await (
+    await request("https://flyingobject.ai/waitlist", {
+      method: "POST",
+      body: "email=lexicon@co.com",
+    })
+  ).text();
+  for (const surface of [card, usage, ack]) {
+    assert.doesNotMatch(surface, BANNED_LEXICON);
+  }
 });

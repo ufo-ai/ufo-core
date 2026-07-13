@@ -15,9 +15,10 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import urlsplit
 from xml.etree import ElementTree
 
 import httpx
@@ -67,8 +68,24 @@ DISPOSABLE_EMAIL_DOMAINS = frozenset(
     }
 )
 
+PUBLIC_BASE_URL_ENV = "UFO_PUBLIC_BASE_URL"
+DEFAULT_PUBLIC_BASE_URL = "https://flyingobject.ai"
+
 CODE_SUBJECT = "Your flyingobject.ai verification code"
-CODE_BODY = "Your flyingobject.ai verification code is {code}. It expires shortly."
+CODE_BODY = "Your code: {code}. Expires {expires} UTC ({minutes} minutes)."
+
+INVITE_SUBJECT = "identification granted"
+INVITE_BODY = """\
+  object:   #{object_number} → identified
+  code:     {code}
+  expires:  {expires} UTC
+
+  curl -fsSL https://{apex_host}/install | sh
+
+  Your code identifies one company. You'll receive
+  3 more when your fleet is live.
+"""
+
 SES_SERVICE = "ses"
 SES_PATH = "/v2/email/outbound-emails"
 SES_TIMEOUT_SECONDS = 10.0
@@ -110,8 +127,41 @@ class WorkEmailPolicy:
         return domain
 
 
+def public_apex_host() -> str:
+    """The public front-door host from ``UFO_PUBLIC_BASE_URL``, path and scheme stripped."""
+    base_url = os.environ.get(PUBLIC_BASE_URL_ENV, DEFAULT_PUBLIC_BASE_URL)
+    host = urlsplit(base_url).netloc
+    if not host:
+        raise RuntimeError(
+            f"{PUBLIC_BASE_URL_ENV} must be a base URL like {DEFAULT_PUBLIC_BASE_URL}"
+        )
+    return host
+
+
+def verification_email(code: str, expires_at: datetime, ttl: timedelta) -> tuple[str, str]:
+    """Subject and body for a verification-code delivery."""
+    return CODE_SUBJECT, CODE_BODY.format(
+        code=code,
+        expires=expires_at.strftime("%H:%M"),
+        minutes=int(ttl.total_seconds() // 60),
+    )
+
+
+def invite_email(
+    object_number: int, code: str, expires_at: datetime, apex_host: str
+) -> tuple[str, str]:
+    """Subject and body for an invite-code delivery; ``ufo-control invite`` prints it once for
+    the operator to send by hand."""
+    return INVITE_SUBJECT, INVITE_BODY.format(
+        object_number=object_number,
+        code=code,
+        expires=expires_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M"),
+        apex_host=apex_host,
+    )
+
+
 class EmailSender(Protocol):
-    async def send(self, email: str, code: str) -> None: ...
+    async def send(self, email: str, code: str, expires_at: datetime, ttl: timedelta) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -134,7 +184,8 @@ class SesEmailSender:
     role_arn: str
     token_file: Path
 
-    async def send(self, email: str, code: str) -> None:
+    async def send(self, email: str, code: str, expires_at: datetime, ttl: timedelta) -> None:
+        subject, text = verification_email(code, expires_at, ttl)
         credentials = await self._assume_role()
         body = json.dumps(
             {
@@ -142,8 +193,8 @@ class SesEmailSender:
                 "Destination": {"ToAddresses": [email]},
                 "Content": {
                     "Simple": {
-                        "Subject": {"Data": CODE_SUBJECT},
-                        "Body": {"Text": {"Data": CODE_BODY.format(code=code)}},
+                        "Subject": {"Data": subject},
+                        "Body": {"Text": {"Data": text}},
                     }
                 },
             }

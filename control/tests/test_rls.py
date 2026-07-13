@@ -5,6 +5,7 @@ import os
 import socket
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5
 
 import asyncpg
@@ -30,7 +31,7 @@ from ufo_ext_ufo.surface import verify_token
 from ufo_control.gateway import Onboarding
 from ufo_control.gateway_claim import ClaimWorkflow
 from ufo_control.gateway_email import WorkEmailPolicy
-from ufo_control.gateway_invite import InviteCodes
+from ufo_control.gateway_invite import InviteAccepted, InviteCodes
 from ufo_control.gateway_shared import SharedWorkspaces
 from ufo_control.gateway_store import OnboardStore
 from ufo_control.main import main
@@ -132,7 +133,7 @@ class SharedRoleEnv:
 class RecordingSender:
     sent: dict[str, str] = field(default_factory=dict)
 
-    async def send(self, email: str, code: str) -> None:
+    async def send(self, email: str, code: str, expires_at: datetime, ttl: timedelta) -> None:
         self.sent[email] = code
 
     def last_code(self, email: str) -> str:
@@ -404,7 +405,7 @@ async def test_shared_onboard_creates_then_joins_a_workspace(
         await flow.advance("ufo", "sess", "boss@sharedtwo.io", b"")
         gated = await flow.advance("ufo", "sess", sender.last_code("boss@sharedtwo.io"), b"")
         assert "invite code" in gated.decode()
-        signed_in = await flow.advance("ufo", "sess", await invites.mint(), b"")
+        signed_in = await flow.advance("ufo", "sess", (await invites.mint(1)).code, b"")
         await flow.advance("ufo", "sess2", "", b"")
         await flow.advance("ufo", "sess2", "mate@sharedtwo.io", b"")
         joined = await flow.advance("ufo", "sess2", sender.last_code("mate@sharedtwo.io"), b"")
@@ -430,19 +431,29 @@ async def test_shared_onboard_creates_then_joins_a_workspace(
     assert await _members_in(workspace_id) == ["boss@sharedtwo.io", "mate@sharedtwo.io"]
 
 
+def test_invite_cli_rejects_a_nonpositive_object_number() -> None:
+    result = CliRunner().invoke(main, ["invite", "0"])
+    assert result.exit_code != 0
+    assert "not in the range" in result.output
+
+
 def test_invite_cli_mints_a_redeemable_code(shared_role_env: SharedRoleEnv) -> None:
     previous = os.environ.get(POSTGRES_OWNER_DSN_ENV)
     os.environ[POSTGRES_OWNER_DSN_ENV] = shared_role_env.owner_dsn
     try:
-        result = CliRunner().invoke(main, ["invite"])
+        result = CliRunner().invoke(main, ["invite", "42"])
     finally:
         if previous is None:
             os.environ.pop(POSTGRES_OWNER_DSN_ENV, None)
         else:
             os.environ[POSTGRES_OWNER_DSN_ENV] = previous
     assert result.exit_code == 0, result.output
-    code = result.output.strip()
-    assert code
+    assert "Subject: identification granted" in result.output
+    assert "  object:   #42 → identified" in result.output
+    code_line = next(
+        line for line in result.output.splitlines() if line.strip().startswith("code:")
+    )
+    code = code_line.split()[-1]
     assert asyncio.run(_redeems(shared_role_env.owner_dsn, code))
 
 
@@ -461,7 +472,8 @@ async def _redeems(dsn: str, code: str) -> bool:
             "ufo",
             "cli-mint-proof",
         )
-        return await InviteCodes(pool=pool).redeem(code, claim_id) is not None
+        outcome = await InviteCodes(pool=pool).redeem(code, claim_id)
+        return isinstance(outcome, InviteAccepted)
     finally:
         await pool.close()
 

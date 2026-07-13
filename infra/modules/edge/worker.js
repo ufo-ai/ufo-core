@@ -6,14 +6,27 @@ const FLEET_TTL_MS = 300_000;
 const FLEET_FETCH_TIMEOUT_MS = 3_000;
 const MAX_FLEET = 100;
 const WAITLIST_SENDER = "__WAITLIST_SENDER__";
-const WAITLIST_SUBJECT = "You're on the flyingobject.ai waitlist";
 
 const LANDING_HTML = "__LANDING_HTML__";
 
 const SCHEMA =
   "create table if not exists waitlist (" +
-  "  email text primary key," +
+  "  n integer primary key autoincrement," +
+  "  email text not null unique," +
   "  created_at text not null default (datetime('now')))";
+const NUMBERED =
+  "select count(*) as numbered from sqlite_master" +
+  " where name = 'waitlist' and sql like '%autoincrement%'";
+const RENUMBER = [
+  "create table waitlist_numbered (" +
+  "  n integer primary key autoincrement," +
+  "  email text not null unique," +
+  "  created_at text not null default (datetime('now')))",
+  "insert into waitlist_numbered (email, created_at)" +
+  " select email, created_at from waitlist order by rowid",
+  "drop table waitlist",
+  "alter table waitlist_numbered rename to waitlist",
+];
 const EMAIL_SCHEMA =
   "create table if not exists waitlist_email (" +
   "  email text primary key," +
@@ -23,7 +36,8 @@ const EMAIL_SCHEMA =
 let counted = { count: null, at: 0 };
 let fleet = { count: null, at: 0 };
 
-function card(host, count) {
+function card(host, total, identified) {
+  const unidentified = Math.max(0, total - identified);
   return `
        .  *   .      .
 
@@ -33,9 +47,10 @@ function card(host, count) {
            ˙ ✦ ˙
        .   *  .    .
 
-  ${count} craft${count === 1 ? "" : "s"} on waitlist.
+  ${new Date().toISOString().replace(/\.\d+Z$/, "Z")}
+  ${total} object${total === 1 ? "" : "s"}. ${unidentified} unidentified.
 
-  join the waitlist:
+  request identification:
     curl https://${host}/waitlist -d email=you@yourco.com
 
   have a code?
@@ -46,18 +61,15 @@ function card(host, count) {
 
 function usage(host) {
   return `
-  join the waitlist:
+  request identification:
     curl https://${host}/waitlist -d email=you@yourco.com
 
 `;
 }
 
-function ack(email, position) {
+function ack(position, loggedAt) {
   return `
-  transmission received: ${email}
-
-  you are flying object #${position}.
-  we'll signal you when it's time to board.
+  object #${position} logged ${loggedAt}. status: unidentified. watch your inbox.
 
 `;
 }
@@ -69,9 +81,17 @@ function text(body, status = 200) {
   });
 }
 
+async function ensureWaitlist(db) {
+  await db.prepare(SCHEMA).run();
+  const { numbered } = await db.prepare(NUMBERED).first();
+  if (numbered === 0) {
+    await db.batch(RENUMBER.map((statement) => db.prepare(statement)));
+  }
+}
+
 async function waitlistCount(db) {
   if (counted.count === null || Date.now() - counted.at > COUNT_TTL_MS) {
-    await db.prepare(SCHEMA).run();
+    await ensureWaitlist(db);
     const row = await db.prepare("select count(*) as n from waitlist").first();
     counted = { count: row.n, at: Date.now() };
   }
@@ -87,7 +107,7 @@ async function fleetCount(originBase) {
       signal: AbortSignal.timeout(FLEET_FETCH_TIMEOUT_MS),
     });
     const { craft } = await reply.json();
-    fleet = { count: Math.min(MAX_FLEET, Math.max(0, Number(craft) || 0)), at: Date.now() };
+    fleet = { count: Math.max(0, Number(craft) || 0), at: Date.now() };
   } catch {
     return fleet.count ?? 0;
   }
@@ -101,11 +121,15 @@ async function landing(request, env, url) {
       return Response.redirect(url.href, 301);
     }
     const count = await fleetCount(env.ORIGIN_BASE);
-    return new Response(LANDING_HTML.replace("__FLEET_N__", String(count)), {
+    return new Response(LANDING_HTML.replace("__FLEET_N__", String(Math.min(MAX_FLEET, count))), {
       headers: { "content-type": "text/html; charset=utf-8" },
     });
   }
-  return text(card(url.hostname, await waitlistCount(env.DB)));
+  const [total, identified] = await Promise.all([
+    waitlistCount(env.DB),
+    fleetCount(env.ORIGIN_BASE),
+  ]);
+  return text(card(url.hostname, total, identified));
 }
 
 async function join(request, env, url) {
@@ -114,16 +138,14 @@ async function join(request, env, url) {
   if (!EMAIL.test(email) || email.length > MAX_EMAIL) {
     return text(usage(url.hostname), 400);
   }
-  await env.DB.prepare(SCHEMA).run();
+  await ensureWaitlist(env.DB);
   await env.DB.prepare(
-    "insert into waitlist (email) values (?1) on conflict (email) do nothing",
+    "insert into waitlist (email)" +
+    " select ?1 where not exists (select 1 from waitlist where email = ?1)",
   )
     .bind(email)
     .run();
-  const row = await env.DB.prepare(
-    "select count(*) as n from waitlist" +
-    " where created_at <= (select created_at from waitlist where email = ?1)",
-  )
+  const row = await env.DB.prepare("select n, created_at from waitlist where email = ?1")
     .bind(email)
     .first();
   await env.DB.prepare(EMAIL_SCHEMA).run();
@@ -136,13 +158,13 @@ async function join(request, env, url) {
     .bind(email)
     .first();
   if (delivery.queued_at === null && delivery.sent_at === null) {
-    await env.WAITLIST_EMAILS.send({ email, position: row.n }, { contentType: "json" });
+    await env.WAITLIST_EMAILS.send({ email }, { contentType: "json" });
     await env.DB.prepare("update waitlist_email set queued_at = datetime('now') where email = ?1")
       .bind(email)
       .run();
   }
   counted = { count: null, at: 0 };
-  return text(ack(email, row.n));
+  return text(ack(row.n, `${row.created_at.replace(" ", "T")}Z`));
 }
 
 export default {
@@ -173,9 +195,10 @@ export default {
       );
       return;
     }
+    await ensureWaitlist(env.DB);
     await Promise.all(
       batch.messages.map(async (message) => {
-        const { email, position } = message.body;
+        const { email } = message.body;
         const delivery = await env.DB.prepare(
           "select queued_at, sent_at from waitlist_email where email = ?1",
         )
@@ -185,14 +208,20 @@ export default {
           message.ack();
           return;
         }
+        const entry = await env.DB.prepare("select n, created_at from waitlist where email = ?1")
+          .bind(email)
+          .first();
         await env.EMAIL.send({
           to: email,
           from: WAITLIST_SENDER,
-          subject: WAITLIST_SUBJECT,
+          subject: `object #${entry.n} logged`,
           text:
-            `Transmission received: ${email}\n\n` +
-            `You are flying object #${position}.\n` +
-            "We'll signal you when it's time to board.\n",
+            `  object:   #${entry.n}\n` +
+            `  contact:  ${email}\n` +
+            `  logged:   ${entry.created_at.slice(0, 16)} UTC\n` +
+            "  status:   unidentified\n\n" +
+            "We'll signal you when identification opens.\n" +
+            "Your number is permanent.\n",
         });
         await env.DB.prepare("update waitlist_email set sent_at = datetime('now') where email = ?1")
           .bind(email)

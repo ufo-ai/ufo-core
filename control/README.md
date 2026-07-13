@@ -12,7 +12,7 @@ workspace and default agent, and returns the bearer consumed by the `ufo` surfac
 | Command | Role |
 |---|---|
 | `ufo-control gateway` | Serves `/ufo`, `/fleet`, and `/v1/onboard/{channel}`. |
-| `ufo-control invite` | Mints a one-time new-workspace invite. |
+| `ufo-control invite <object-number>` | Mints a one-time new-workspace invite for a waitlist object and prints its email once. |
 | `ufo-control rls-bootstrap` | Creates the `ufo_serve` role, its DBOS database, grants, and workspace policies. |
 
 ## Source

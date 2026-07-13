@@ -53,7 +53,7 @@ class ClaimWorkflow:
         )
         await self.store.insert_claim(claim)
         try:
-            await self.email_sender.send(claim.email, code)
+            await self.email_sender.send(claim.email, code, claim.expires_at, self.code_ttl)
         except Exception as exc:
             await self.store.delete_claim(claim.claim_id)
             logger.exception("onboard.email.send_failed domain=%s surface=%s", domain, surface)

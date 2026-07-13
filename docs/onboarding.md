@@ -92,12 +92,13 @@ The client is a pure renderer of tab-separated directive lines (`gateway_directi
 `token` and `workspace` land in `~/.ufo/credentials` (chmod 600) and `~/.ufo/workspace` — the
 token is machine-consumed and never printed.
 
-Creating a workspace is invite-gated; joining an existing one never is. `ufo-control invite` prints
-the plaintext once; only its hash lands in the
-`ufo_control.invite_code` ledger, and redeeming burns the code and stamps the claim's `invite_id`
-in one transaction, so one code opens exactly one workspace and a resolution retry never re-asks
-for it. `SharedWorkspaces.exists` decides create versus join. An
-invalid or used code re-asks and points at the waitlist.
+Creating a workspace is invite-gated; joining an existing one never is.
+`ufo-control invite <object-number>` mints a code for a waitlist object and prints the invite
+email once, code included; only the hash lands in the `ufo_control.invite_code` ledger (14-day
+expiry, one live code per object), and redeeming consumes the code and stamps the claim's
+`invite_id` in one transaction, so one code opens exactly one workspace and a resolution retry
+never re-asks for it. `SharedWorkspaces.exists` decides create versus join. An unknown, expired,
+or consumed code re-asks with its exact ledger state; an unknown one points at the waitlist.
 
 ## Connecting Slack
 

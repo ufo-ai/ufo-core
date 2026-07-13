@@ -38,6 +38,9 @@ jobs:
               for entry in entries:
                   entry.load()()
           PY
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
       - run: node --test infra/modules/edge/*.test.mjs
       - run: uv run pytest --collect-only -m integration -q
 

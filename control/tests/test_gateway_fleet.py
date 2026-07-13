@@ -1,8 +1,10 @@
 """The fleet route counts the shared workspaces through the real application lifespan."""
 
 import asyncio
+import re
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -18,6 +20,7 @@ from ufo_control.gateway_email import (
     AWS_WEB_IDENTITY_TOKEN_FILE_ENV,
     SES_SENDER_ENV,
 )
+from ufo_control.gateway_invite import InviteCodes
 from ufo_control.gateway_shared import SERVE_DSN_ENV
 
 TOKEN_SECRET = "test-token-secret"
@@ -28,7 +31,7 @@ WORKSPACE_URL = "https://app.testing.flyingobject.ai"
 class RecordingSender:
     sent: dict[str, str] = field(default_factory=dict)
 
-    async def send(self, email: str, code: str) -> None:
+    async def send(self, email: str, code: str, expires_at: datetime, ttl: timedelta) -> None:
         self.sent[email] = code
 
 
@@ -99,6 +102,64 @@ def test_fleet_answers_the_workspace_count(
         before = client.get("/fleet").json()["craft"]
         asyncio.run(_add_workspaces(gateway_postgres, 2))
         assert client.get("/fleet").json()["craft"] == before + 2
+
+
+def test_http_invite_gate_reports_each_code_state(
+    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _configure(monkeypatch, tmp_path, gateway_postgres)
+    sender = RecordingSender()
+    monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
+    expired_code, live_code = asyncio.run(_mint_invites(gateway_postgres))
+    headers = {"x-ufo-session": "invite-flow", "x-ufo-installed": "1"}
+    with TestClient(gateway_app()) as client:
+        email = "founder@inviteco.io"
+        client.post("/v1/onboard/ufo", headers=headers, content="")
+        client.post("/v1/onboard/ufo", headers=headers, content=email)
+        gate = client.post("/v1/onboard/ufo", headers=headers, content=sender.sent[email])
+        assert "a new workspace needs an invite code." in gate.text
+
+        unknown = client.post("/v1/onboard/ufo", headers=headers, content="zzzz-zzzz-zzzz")
+        assert "code not recognized." in unknown.text
+        assert (
+            "request identification: curl https://flyingobject.ai/waitlist"
+            " -d email=you@yourco.com" in unknown.text
+        )
+
+        expired = client.post("/v1/onboard/ufo", headers=headers, content=expired_code)
+        assert re.search(
+            rf"code {expired_code} expired \d{{4}}-\d{{2}}-\d{{2}} \d{{2}}:\d{{2}} UTC\.",
+            expired.text,
+        )
+        assert "reply to your invite email for a new one." in expired.text
+
+        accepted = client.post("/v1/onboard/ufo", headers=headers, content=live_code)
+        assert re.search(
+            rf"code {live_code} accepted\. object #9 identified\."
+            r" \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z",
+            accepted.text,
+        )
+        assert f"signed in: {email}" in accepted.text
+
+        second = {"x-ufo-session": "invite-flow-2", "x-ufo-installed": "1"}
+        other = "boss@twiceco.io"
+        client.post("/v1/onboard/ufo", headers=second, content="")
+        client.post("/v1/onboard/ufo", headers=second, content=other)
+        client.post("/v1/onboard/ufo", headers=second, content=sender.sent[other])
+        consumed = client.post("/v1/onboard/ufo", headers=second, content=live_code)
+        assert f"code {live_code} already used. contact us if that wasn't your team." in (
+            consumed.text
+        )
+
+
+async def _mint_invites(dsn: str) -> tuple[str, str]:
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=1)
+    try:
+        expired = await InviteCodes(pool=pool, ttl=timedelta(days=-1)).mint(8)
+        live = await InviteCodes(pool=pool).mint(9)
+        return expired.code, live.code
+    finally:
+        await pool.close()
 
 
 def test_health_rejects_a_mismatched_database_role(

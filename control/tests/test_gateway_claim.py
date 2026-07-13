@@ -3,13 +3,22 @@ denylist, hash-only storage, the TTL, the attempt cap, and the recording email s
 a test read the minted code back."""
 
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
+from uuid import uuid4
 
+import asyncpg
 import pytest
 
 from ufo_control.gateway_claim import ClaimError, ClaimWorkflow, hash_code
 from ufo_control.gateway_email import WorkEmailError, WorkEmailPolicy
-from ufo_control.gateway_invite import InviteCodes
+from ufo_control.gateway_invite import (
+    InviteAccepted,
+    InviteCodes,
+    InviteConsumed,
+    InviteError,
+    InviteExpired,
+    InviteUnknown,
+)
 from ufo_control.gateway_store import OnboardStore
 
 
@@ -17,7 +26,7 @@ from ufo_control.gateway_store import OnboardStore
 class RecordingSender:
     sent: dict[str, str] = field(default_factory=dict)
 
-    async def send(self, email: str, code: str) -> None:
+    async def send(self, email: str, code: str, expires_at: datetime, ttl: timedelta) -> None:
         self.sent[email] = code
 
     def last_code(self, email: str) -> str:
@@ -25,7 +34,7 @@ class RecordingSender:
 
 
 class FailingSender:
-    async def send(self, email: str, code: str) -> None:
+    async def send(self, email: str, code: str, expires_at: datetime, ttl: timedelta) -> None:
         raise RuntimeError("mail unavailable")
 
 
@@ -122,9 +131,86 @@ async def test_invite_redeems_once_and_stamps_the_claim(store: OnboardStore) -> 
     claim = await store.live_claim("ufo", "sess-1")
     assert claim is not None
     invites = InviteCodes(pool=store.pool)
-    code = await invites.mint()
-    invite_id = await invites.redeem(code, claim.claim_id)
-    assert invite_id is not None
-    assert await invites.redeem(code, claim.claim_id) is None
+    minted = await invites.mint(7)
+    accepted = await invites.redeem(minted.code, claim.claim_id)
+    assert isinstance(accepted, InviteAccepted)
+    assert accepted.object_number == 7
+    assert accepted.consumed_at.tzinfo is not None
     stamped = await store.live_claim("ufo", "sess-1")
-    assert stamped is not None and stamped.invite_id == invite_id
+    assert stamped is not None and stamped.invite_id == accepted.invite_id
+
+
+async def test_consumed_invite_is_refused_on_second_redeem(store: OnboardStore) -> None:
+    invites = InviteCodes(pool=store.pool)
+    minted = await invites.mint(7)
+    assert isinstance(await invites.redeem(minted.code, uuid4()), InviteAccepted)
+    assert isinstance(await invites.redeem(minted.code, uuid4()), InviteConsumed)
+
+
+async def test_mint_refuses_a_second_live_code_for_an_object(store: OnboardStore) -> None:
+    invites = InviteCodes(pool=store.pool)
+    await invites.mint(7)
+    with pytest.raises(InviteError, match="already holds a live code"):
+        await invites.mint(7)
+
+
+async def test_live_invite_uniqueness_is_database_enforced(store: OnboardStore) -> None:
+    invites = InviteCodes(pool=store.pool)
+    await invites.mint(8)
+    with pytest.raises(asyncpg.UniqueViolationError):
+        await store.pool.execute(
+            "insert into ufo_control.invite_code (id, code_hash, object_number, expires_at)"
+            " values ($1, $2, 8, now() + interval '1 day')",
+            uuid4(),
+            "x" * 64,
+        )
+
+
+async def test_mint_reissues_after_expiry_but_not_after_identification(
+    store: OnboardStore,
+) -> None:
+    await InviteCodes(pool=store.pool, ttl=timedelta(days=-1)).mint(7)
+    invites = InviteCodes(pool=store.pool)
+    minted = await invites.mint(7)
+    assert isinstance(await invites.redeem(minted.code, uuid4()), InviteAccepted)
+    with pytest.raises(InviteError, match="already identified"):
+        await invites.mint(7)
+
+
+async def test_expired_invite_reports_its_expiry(store: OnboardStore) -> None:
+    invites = InviteCodes(pool=store.pool, ttl=timedelta(days=-1))
+    minted = await invites.mint(7)
+    outcome = await invites.redeem(minted.code, uuid4())
+    assert isinstance(outcome, InviteExpired)
+    assert outcome.expires_at == minted.expires_at
+
+
+async def test_unknown_invite_is_not_recognized(store: OnboardStore) -> None:
+    invites = InviteCodes(pool=store.pool)
+    assert isinstance(await invites.redeem("zzzz-zzzz-zzzz", uuid4()), InviteUnknown)
+
+
+async def test_a_consumed_code_reports_consumed_even_after_expiry(store: OnboardStore) -> None:
+    invites = InviteCodes(pool=store.pool)
+    minted = await invites.mint(7)
+    assert isinstance(await invites.redeem(minted.code, uuid4()), InviteAccepted)
+    await store.pool.execute(
+        "update ufo_control.invite_code set expires_at = now() - interval '1 day'"
+    )
+    assert isinstance(await invites.redeem(minted.code, uuid4()), InviteConsumed)
+
+
+async def test_ensure_table_rebuilds_an_unnumbered_ledger(store: OnboardStore) -> None:
+    async with store.pool.acquire() as connection:
+        await connection.execute("drop table ufo_control.invite_code")
+        await connection.execute(
+            "create table ufo_control.invite_code ("
+            "  id uuid primary key,"
+            "  code_hash text not null unique,"
+            "  used_at timestamptz,"
+            "  created_at timestamptz not null default now())"
+        )
+    invites = InviteCodes(pool=store.pool)
+    await invites.ensure_table()
+    minted = await invites.mint(3)
+    assert isinstance(await invites.redeem(minted.code, uuid4()), InviteAccepted)

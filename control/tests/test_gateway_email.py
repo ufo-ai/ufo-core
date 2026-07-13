@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -7,6 +7,7 @@ from ufo_control.gateway_email import (
     AWS_ROLE_ARN_ENV,
     AWS_WEB_IDENTITY_TOKEN_FILE_ENV,
     DEFAULT_SES_REGION,
+    PUBLIC_BASE_URL_ENV,
     SES_REGION_ENV,
     SES_SENDER_ENV,
     SesCredentials,
@@ -14,6 +15,9 @@ from ufo_control.gateway_email import (
     _parse_assume_role_credentials,
     _sigv4_headers,
     email_sender_from_env,
+    invite_email,
+    public_apex_host,
+    verification_email,
 )
 
 STS_RESPONSE = """\
@@ -36,6 +40,49 @@ STS_RESPONSE = """\
   </ResponseMetadata>
 </AssumeRoleWithWebIdentityResponse>
 """
+
+
+def test_public_apex_host_strips_scheme_and_trailing_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(PUBLIC_BASE_URL_ENV, "https://testing.flyingobject.ai/")
+    assert public_apex_host() == "testing.flyingobject.ai"
+    monkeypatch.delenv(PUBLIC_BASE_URL_ENV)
+    assert public_apex_host() == "flyingobject.ai"
+
+
+def test_public_apex_host_rejects_a_schemeless_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(PUBLIC_BASE_URL_ENV, "flyingobject.ai")
+    with pytest.raises(RuntimeError, match=PUBLIC_BASE_URL_ENV):
+        public_apex_host()
+
+
+def test_verification_email_states_the_exact_expiry() -> None:
+    subject, body = verification_email(
+        "042042", datetime(2026, 7, 12, 18, 45, tzinfo=UTC), timedelta(minutes=15)
+    )
+    assert subject == "Your flyingobject.ai verification code"
+    assert body == "Your code: 042042. Expires 18:45 UTC (15 minutes)."
+
+
+def test_invite_email_renders_the_ledger() -> None:
+    subject, body = invite_email(
+        object_number=7,
+        code="abcd-efgh-jkmn",
+        expires_at=datetime(2026, 7, 26, 18, 45, tzinfo=UTC),
+        apex_host="flyingobject.ai",
+    )
+    assert subject == "identification granted"
+    assert body == (
+        "  object:   #7 → identified\n"
+        "  code:     abcd-efgh-jkmn\n"
+        "  expires:  2026-07-26 18:45 UTC\n"
+        "\n"
+        "  curl -fsSL https://flyingobject.ai/install | sh\n"
+        "\n"
+        "  Your code identifies one company. You'll receive\n"
+        "  3 more when your fleet is live.\n"
+    )
 
 
 def test_parse_assume_role_credentials() -> None:

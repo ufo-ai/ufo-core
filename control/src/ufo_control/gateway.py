@@ -5,6 +5,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC
 from pathlib import Path
 
 import asyncpg
@@ -15,8 +16,20 @@ from ufo.db import dispose_db, init_db, workspace_tx
 
 from ufo_control.gateway_claim import ClaimError, ClaimWorkflow
 from ufo_control.gateway_directives import PROMPT, directive, first_run_install, render
-from ufo_control.gateway_email import WorkEmailError, WorkEmailPolicy, email_sender_from_env
-from ufo_control.gateway_invite import InviteCodes
+from ufo_control.gateway_email import (
+    DEFAULT_PUBLIC_BASE_URL,
+    PUBLIC_BASE_URL_ENV,
+    WorkEmailError,
+    WorkEmailPolicy,
+    email_sender_from_env,
+    public_apex_host,
+)
+from ufo_control.gateway_invite import (
+    InviteAccepted,
+    InviteCodes,
+    InviteConsumed,
+    InviteExpired,
+)
 from ufo_control.gateway_shared import SharedWorkspaces, serve_dsn
 from ufo_control.gateway_store import OnboardClaim, OnboardStore
 from ufo_control.gateway_token import TOKEN_SECRET_ENV, mint_token
@@ -24,9 +37,7 @@ from ufo_control.rls import owner_dsn
 
 logger = logging.getLogger(__name__)
 
-PUBLIC_BASE_URL_ENV = "UFO_PUBLIC_BASE_URL"
 WORKSPACE_BASE_URL_ENV = "UFO_WORKSPACE_BASE_URL"
-DEFAULT_PUBLIC_BASE_URL = "https://flyingobject.ai"
 SCRIPT_URL_DEFAULT = 'UFO_URL="${UFO_URL:-https://flyingobject.ai}"'
 SHELLSCRIPT_MEDIA_TYPE = "text/x-shellscript"
 MAX_CHANNEL_BYTES = 64
@@ -72,7 +83,7 @@ class Onboarding:
             return render(
                 install,
                 directive("say", "u f o · flyingobject.ai"),
-                directive("say", "sign in to board"),
+                directive("say", "begin identification"),
                 directive("ask", "enter your work email:"),
             )
         try:
@@ -97,17 +108,25 @@ class Onboarding:
         return await self._resolve(claim, None, install)
 
     async def _resolve(self, claim: OnboardClaim, answer: str | None, install: bytes) -> bytes:
+        accepted = b""
         if not await self.workspaces.exists(claim.email_domain):
             gate = await self._invite_gate(claim, answer, install)
-            if gate is not None:
-                return gate
+            match gate:
+                case bytes():
+                    return gate
+                case InviteAccepted(object_number=number, consumed_at=consumed_at):
+                    stamp = consumed_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    code = (answer or "").strip().lower()
+                    accepted = directive(
+                        "say", f"code {code} accepted. object #{number} identified. {stamp}"
+                    )
         workspace_id = await self.workspaces.ensure(claim.email_domain, claim.email)
         await self.store.complete(claim.claim_id, workspace_id)
-        return self._signed_in(claim.email, workspace_id, install)
+        return self._signed_in(claim.email, workspace_id, install, accepted)
 
     async def _invite_gate(
         self, claim: OnboardClaim, answer: str | None, install: bytes
-    ) -> bytes | None:
+    ) -> bytes | InviteAccepted | None:
         if claim.invite_id is not None:
             return None
         if not answer:
@@ -116,26 +135,46 @@ class Onboarding:
                 directive("say", "a new workspace needs an invite code."),
                 directive("ask", "enter your invite:"),
             )
-        if await self.invites.redeem(answer, claim.claim_id) is None:
-            return render(
-                install,
-                directive("say", "that code isn't valid or was already used."),
-                directive(
-                    "say",
-                    "no code? join the waitlist: "
-                    f"curl https://{self.apex_host}/waitlist -d email=you@yourco.com",
-                ),
-                directive("ask", "enter your invite:"),
-            )
-        return None
+        code = answer.strip().lower()
+        match await self.invites.redeem(code, claim.claim_id):
+            case InviteAccepted() as accepted:
+                return accepted
+            case InviteExpired(expires_at=expires_at):
+                expired = expires_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M")
+                return render(
+                    install,
+                    directive("say", f"code {code} expired {expired} UTC."),
+                    directive("say", "reply to your invite email for a new one."),
+                    directive("ask", "enter your invite:"),
+                )
+            case InviteConsumed():
+                return render(
+                    install,
+                    directive(
+                        "say", f"code {code} already used. contact us if that wasn't your team."
+                    ),
+                    directive("ask", "enter your invite:"),
+                )
+            case _:
+                return render(
+                    install,
+                    directive("say", "code not recognized."),
+                    directive(
+                        "say",
+                        "request identification: "
+                        f"curl https://{self.apex_host}/waitlist -d email=you@yourco.com",
+                    ),
+                    directive("ask", "enter your invite:"),
+                )
 
-    def _signed_in(self, email: str, workspace_id: str, install: bytes) -> bytes:
+    def _signed_in(self, email: str, workspace_id: str, install: bytes, accepted: bytes) -> bytes:
         token = mint_token(self.token_secret, workspace_id, email)
         return render(
             install,
+            accepted,
             directive("token", token),
             directive("workspace", self.workspaces.workspace_url),
-            directive("say", f"✓ signed in as {email}"),
+            directive("say", f"signed in: {email}"),
             directive("ask", PROMPT),
         )
 
@@ -194,7 +233,6 @@ def gateway_app() -> FastAPI:
         await store.ensure_table()
         invites = InviteCodes(pool=pool)
         await invites.ensure_table()
-        base_url = os.environ.get(PUBLIC_BASE_URL_ENV, DEFAULT_PUBLIC_BASE_URL)
         init_db(serve_url)
         state = GatewayState(
             pool=pool,
@@ -210,7 +248,7 @@ def gateway_app() -> FastAPI:
                 ),
                 invites=invites,
                 token_secret=_require_env(TOKEN_SECRET_ENV),
-                apex_host=base_url.removeprefix("https://").removeprefix("http://"),
+                apex_host=public_apex_host(),
             ),
             owner_role=_dsn_role(owner_url),
             serve_role=_dsn_role(serve_url),
