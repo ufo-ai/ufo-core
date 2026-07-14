@@ -1,3 +1,4 @@
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
@@ -1671,3 +1672,72 @@ async def test_untrusted_tool_result_is_walled_for_the_model_and_trusted_is_unto
     )
     assert walled.count(UNTRUSTED_RESULT_CLOSE) == 1
     assert UNTRUSTED_RESULT_CLOSE_ESCAPE in walled
+
+
+@dataclass(frozen=True)
+class TwoToolModel:
+    """Round one calls the rendezvous tool twice; round two, seeing the results, answers — so a
+    test can prove a round's calls execute concurrently and their results keep call order."""
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        answered = any(
+            isinstance(message.content, tuple)
+            and any(isinstance(block, ToolResultBlock) for block in message.content)
+            for message in request.messages
+        )
+        if answered:
+            yield TextDelta(text="done")
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        yield ToolCallStart(id="r1", name="rendezvous")
+        yield ToolCallDelta(id="r1", partial_json='{"slot": "a"}')
+        yield ToolCallStart(id="r2", name="rendezvous")
+        yield ToolCallDelta(id="r2", partial_json='{"slot": "b"}')
+        yield Usage(input_tokens=2, output_tokens=2)
+
+
+class RendezvousInput(BaseModel):
+    slot: str
+
+
+async def test_a_rounds_tool_calls_dispatch_concurrently(db: None, tmp_path: Path) -> None:
+    """Each call returns only after the other has started: serial dispatch would time out, so a
+    passing run proves the round's calls overlapped — and the results keep call order."""
+    turn = await _seed_turn("queued", None)
+    started = {"a": asyncio.Event(), "b": asyncio.Event()}
+
+    async def rendezvous(ctx: ToolContext, args: RendezvousInput) -> ToolResult:
+        started[args.slot].set()
+        async with asyncio.timeout(5):
+            await started["b" if args.slot == "a" else "a"].wait()
+        return ToolResult(content=(TextContent(text=f"met:{args.slot}"),))
+
+    engine = replace(
+        _engine(turn, TwoToolModel(), tmp_path),
+        tools=ToolRegistry(
+            (
+                ToolDef(
+                    name="rendezvous",
+                    description="meet the sibling call",
+                    input_model=RendezvousInput,
+                    handler=rendezvous,
+                ),
+            )
+        ),
+    )
+    with ws(turn.workspace_id):
+        frame = await engine.run()
+    assert frame is not None
+    assert frame.status == "done"
+    stored = await Transcript(
+        blob=FilesystemBlobStore(root=tmp_path), conversation_id=turn.conversation_id
+    ).read()
+    assert stored is not None
+    results = next(
+        tuple(block for block in message.content if isinstance(block, ToolResultBlock))
+        for message in stored.messages
+        if isinstance(message.content, tuple)
+        and any(isinstance(block, ToolResultBlock) for block in message.content)
+    )
+    assert [result.tool_use_id for result in results] == ["r1", "r2"]
+    assert [result.content for result in results] == ["met:a", "met:b"]

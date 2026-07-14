@@ -167,6 +167,7 @@ class OpenAIClient:
                     }
                     for t in request.tools
                 ]
+                create_kwargs["parallel_tool_calls"] = True
             try:
                 stream = await self.client.chat.completions.create(**create_kwargs)
                 async for chunk in stream:

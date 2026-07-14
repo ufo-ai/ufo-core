@@ -624,3 +624,39 @@ def test_registry_resolves_auto_to_the_configured_default(tmp_path: Path) -> Non
 def test_registry_resolves_auto_to_an_overridden_default(tmp_path: Path) -> None:
     registry = model_registry(_config(tmp_path, ModelsConfig(auto_model="claude-sonnet-5")), ())
     assert registry.resolve("auto") == "claude-sonnet-5"
+
+
+async def test_anthropic_enables_parallel_tool_use() -> None:
+    create = CapturingCreate(
+        ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
+    )
+    request = REQUEST.model_copy(
+        update={
+            "tools": (ToolSchema(name="first", description="one", input_schema={"type": "object"}),)
+        }
+    )
+    async for _ in AnthropicClient(client=anthropic_sdk(create)).complete(request):
+        pass
+    assert create.kwargs["tool_choice"] == {"type": "auto", "disable_parallel_tool_use": False}
+    bare = CapturingCreate(
+        ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
+    )
+    async for _ in AnthropicClient(client=anthropic_sdk(bare)).complete(REQUEST):
+        pass
+    assert "tool_choice" not in bare.kwargs
+
+
+async def test_openai_enables_parallel_tool_calls() -> None:
+    create = CapturingCreate(([openai_text("ok"), openai_usage(prompt=1, completion=1)], None))
+    request = REQUEST.model_copy(
+        update={
+            "tools": (ToolSchema(name="first", description="one", input_schema={"type": "object"}),)
+        }
+    )
+    async for _ in OpenAIClient(client=openai_sdk(create)).complete(request):
+        pass
+    assert create.kwargs["parallel_tool_calls"] is True
+    bare = CapturingCreate(([openai_text("ok"), openai_usage(prompt=1, completion=1)], None))
+    async for _ in OpenAIClient(client=openai_sdk(bare)).complete(REQUEST):
+        pass
+    assert "parallel_tool_calls" not in bare.kwargs

@@ -617,7 +617,11 @@ class TurnEngine:
         ConnectRequest | None,
     ]:
         """Call the model until it answers with text and no tool calls; each tool-calling round
-        dispatches the calls in the sandbox and feeds the results back as the next user turn.
+        dispatches its calls concurrently — result order stays call order, the memoized dispatch
+        steps stay replay-deterministic because their tasks start in call order on the one loop,
+        and a failing dispatch raises only after every sibling finishes, so no call is left
+        running while the turn commits its terminal — and feeds all results back as one user
+        turn.
         Every round opens by absorbing queued arrivals — messages admitted while the previous
         round streamed or its tools ran — so the drain always lands between a completed
         (tool_use, tool_result) pair and the next model call, never inside one. Also returns the
@@ -656,7 +660,16 @@ class TurnEngine:
                 messages = (*messages, Message(role="user", content=EMPTY_RESPONSE_NUDGE))
                 continue
             assistant_blocks = (*((TextBlock(text=text),) if text else ()), *tool_calls)
-            results = tuple([await self._dispatch(round_context, call) for call in tool_calls])
+            dispatched = await asyncio.gather(
+                *(self._dispatch(round_context, call) for call in tool_calls),
+                return_exceptions=True,
+            )
+            failures = [outcome for outcome in dispatched if isinstance(outcome, BaseException)]
+            if failures:
+                raise failures[0]
+            results = tuple(
+                outcome for outcome in dispatched if not isinstance(outcome, BaseException)
+            )
             question = _final_act(tool_calls, results, ASK_USER_TOOL, AskUserInput)
             credential_request = _final_act(
                 tool_calls, results, REQUEST_CREDENTIALS_TOOL, CredentialRequest
