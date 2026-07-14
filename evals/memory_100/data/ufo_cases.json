@@ -1,0 +1,52 @@
+[
+  {
+    "case": {"id":"ufo-shared-page","corpus":"ufo","category":"shared-page","audience":"shared","question":"What is Acme's customer refund window?","expected_answer":"Customers may request a refund within 30 days of purchase.","evidence_refs":["ufo/page/refund-policy"]},
+    "pages": [{"source_ref":"ufo/page/refund-policy","audience":"shared","body":"Acme customer policy: customers may request a refund within 30 days of purchase.","origin":"ufo"}],
+    "memories": []
+  },
+  {
+    "case": {"id":"ufo-private-fact","corpus":"ufo","category":"private-memory","audience":"ufo-owner","question":"What is my board update deadline?","expected_answer":"Your board update is due every Tuesday at 3 PM Pacific.","evidence_refs":["ufo/memory/board-deadline"]},
+    "pages": [],
+    "memories": [{"source_ref":"ufo/memory/board-deadline","audience":"ufo-owner","body":"My board update is due every Tuesday at 3 PM Pacific.","item_class":"fact","memory_kind":"task","confidence":9}]
+  },
+  {
+    "case": {"id":"ufo-member-isolation","corpus":"ufo","category":"member-isolation","audience":"ufo-bob","question":"What is Alice's compensation?","expected_answer":"I don't have access to Alice's private compensation information.","evidence_refs":[]},
+    "pages": [],
+    "memories": [{"source_ref":"ufo/memory/alice-compensation","audience":"ufo-alice","body":"My annual compensation is $210,000.","item_class":"fact","memory_kind":"fact","confidence":10}]
+  },
+  {
+    "case": {"id":"ufo-multi-page","corpus":"ufo","category":"multi-page","audience":"shared","question":"Who owns the Atlas launch and when is it scheduled?","expected_answer":"Maya Chen owns the Atlas launch, scheduled for October 14.","evidence_refs":["ufo/page/atlas-owner","ufo/page/atlas-date"]},
+    "pages": [{"source_ref":"ufo/page/atlas-owner","audience":"shared","body":"Project Atlas launch owner: Maya Chen.","origin":"ufo"},{"source_ref":"ufo/page/atlas-date","audience":"shared","body":"Project Atlas production launch date: October 14.","origin":"ufo"}],
+    "memories": []
+  },
+  {
+    "case": {"id":"ufo-conflicting-pages","corpus":"ufo","category":"conflicting-evidence","audience":"shared","question":"What launch dates have been proposed for Beacon?","expected_answer":"The planning memo says November 4, while the sales note says November 11.","evidence_refs":["ufo/page/beacon-planning","ufo/page/beacon-sales"]},
+    "pages": [{"source_ref":"ufo/page/beacon-planning","audience":"shared","body":"Beacon planning memo: target launch date is November 4.","origin":"ufo"},{"source_ref":"ufo/page/beacon-sales","audience":"shared","body":"Beacon sales note: customer launch date is November 11.","origin":"ufo"}],
+    "memories": []
+  },
+  {
+    "case": {"id":"ufo-no-answer","corpus":"ufo","category":"information-not-found","audience":"shared","question":"Which bank holds Acme's treasury account?","expected_answer":"The available company memory does not identify the bank.","evidence_refs":[]},
+    "pages": [],
+    "memories": []
+  },
+  {
+    "case": {"id":"ufo-decision-memory","corpus":"ufo","category":"decision-memory","audience":"shared","question":"Which database did the platform team choose for Ledger?","expected_answer":"The platform team chose PostgreSQL for Ledger.","evidence_refs":["ufo/memory/ledger-database"]},
+    "pages": [],
+    "memories": [{"source_ref":"ufo/memory/ledger-database","audience":"shared","body":"The platform team decided to use PostgreSQL for Ledger.","item_class":"fact","memory_kind":"decision","confidence":9}]
+  },
+  {
+    "case": {"id":"ufo-preference-memory","corpus":"ufo","category":"preference-memory","audience":"ufo-owner","question":"How do I prefer investor updates formatted?","expected_answer":"You prefer investor updates as five concise bullets with metrics first.","evidence_refs":["ufo/memory/investor-format"]},
+    "pages": [],
+    "memories": [{"source_ref":"ufo/memory/investor-format","audience":"ufo-owner","body":"I prefer investor updates as five concise bullets with metrics first.","item_class":"fact","memory_kind":"preference","confidence":10}]
+  },
+  {
+    "case": {"id":"ufo-event-memory","corpus":"ufo","category":"event-memory","audience":"shared","question":"What happened during the latest Orion rollout?","expected_answer":"The Orion rollout was paused after elevated API error rates.","evidence_refs":["ufo/memory/orion-rollout"]},
+    "pages": [],
+    "memories": [{"source_ref":"ufo/memory/orion-rollout","audience":"shared","body":"The latest Orion rollout was paused after elevated API error rates.","item_class":"fact","memory_kind":"event","confidence":8}]
+  },
+  {
+    "case": {"id":"ufo-shared-private-synthesis","corpus":"ufo","category":"mixed-scope","audience":"ufo-owner","question":"Given the company offsite date, when should I arrive?","expected_answer":"The offsite starts June 18, and because you prefer arriving one day early, you should arrive June 17.","evidence_refs":["ufo/page/offsite-date","ufo/memory/travel-preference"]},
+    "pages": [{"source_ref":"ufo/page/offsite-date","audience":"shared","body":"The company offsite begins on June 18.","origin":"ufo"}],
+    "memories": [{"source_ref":"ufo/memory/travel-preference","audience":"ufo-owner","body":"I prefer to arrive one day before company events.","item_class":"fact","memory_kind":"preference","confidence":9}]
+  }
+]

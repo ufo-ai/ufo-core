@@ -1,0 +1,21 @@
+{
+  "enterprise": {
+    "basic": ["qst_0017", "qst_0095", "qst_0118", "qst_0028"],
+    "semantic": ["qst_0242", "qst_0267", "qst_0186", "qst_0222", "qst_0229", "qst_0254", "qst_0212", "qst_0245"],
+    "intra_document_reasoning": ["qst_0307", "qst_0309", "qst_0311", "qst_0321", "qst_0325", "qst_0328"],
+    "project_related": ["qst_0343", "qst_0344", "qst_0346", "qst_0352", "qst_0371", "qst_0373", "qst_0375", "qst_0379"],
+    "constrained": ["qst_0381", "qst_0382", "qst_0390", "qst_0392", "qst_0403", "qst_0408", "qst_0410"],
+    "conflicting_info": ["qst_0411", "qst_0412", "qst_0414", "qst_0416", "qst_0421", "qst_0425", "qst_0427"],
+    "completeness": ["qst_0432", "qst_0435", "qst_0438", "qst_0441", "qst_0442", "qst_0448", "qst_0450"],
+    "miscellaneous": ["qst_0462", "qst_0465", "qst_0467", "qst_0468"],
+    "high_level": ["qst_0471", "qst_0476", "qst_0477", "qst_0478"],
+    "info_not_found": ["qst_0482", "qst_0493", "qst_0494", "qst_0496", "qst_0500"]
+  },
+  "longmem": {
+    "information_extraction": ["118b2229", "caf9ead2", "352ab8bd", "c7cf7dfd", "09d032c9", "d24813b1"],
+    "multi_session": ["9aaed6a3", "gpt4_5501fe77", "ef66a6e5", "gpt4_a56e767c", "73d42213", "a96c20ee"],
+    "knowledge_update": ["b6019101", "184da446", "c4ea545c", "b01defab", "6a1eabeb", "1cea1afa"],
+    "temporal_reasoning": ["0bb5a684", "gpt4_c27434e8", "gpt4_8279ba02", "gpt4_483dd43c", "gpt4_7de946e7", "e4e14d04"],
+    "abstention": ["f4f1d8a4_abs", "29f2956b_abs", "c8090214_abs", "ba358f49_abs", "6aeb4375_abs", "09ba9854_abs"]
+  }
+}

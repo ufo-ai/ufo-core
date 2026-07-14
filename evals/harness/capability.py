@@ -69,7 +69,8 @@ type Grader = Callable[[CapabilityOutput], Awaitable[CapabilityVerdict]]
 class CapabilityCase:
     """A message and its deterministic and semantic criteria. `web_dependent` infra-excludes an
     external outage; `samples` re-runs the case and passes if any sample passes; `digest_tag`
-    stabilizes the suite digest."""
+    stabilizes the suite digest. `member_key`, when set, is the exact email of the workspace member
+    whose private memory the eval conversation may recall."""
 
     name: str
     message: str
@@ -78,6 +79,7 @@ class CapabilityCase:
     web_dependent: bool = False
     digest_tag: str = ""
     rubric: tuple[str, ...] = ()
+    member_key: str | None = None
 
     def payload(self) -> JsonObject:
         payload: JsonObject = {
@@ -90,6 +92,8 @@ class CapabilityCase:
         }
         if self.rubric:
             payload["judgeRevision"] = JUDGE_REVISION
+        if self.member_key is not None:
+            payload["memberKey"] = self.member_key
         return payload
 
 

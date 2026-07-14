@@ -75,16 +75,33 @@ class WorkspaceDriver:
     poll_interval_seconds: float = POLL_INTERVAL_SECONDS
     max_polls: int = MAX_POLLS
 
-    async def open(self, case_name: str) -> UUID:
+    async def open(self, case_name: str, member_key: str | None = None) -> UUID:
+        """Open one isolated eval conversation. A member-bound case names its member by the exact
+        workspace `member.email`; an absent email fails rather than degrading to shared-only
+        recall."""
         conversation_id = uuid4()
         async with workspace_tx() as connection:
+            member_id = None
+            if member_key is not None:
+                member_id = (
+                    await connection.execute(
+                        sa.select(tables.member.c.id).where(
+                            tables.member.c.workspace_id == self.workspace_id,
+                            tables.member.c.email == member_key,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if member_id is None:
+                    raise ValueError(
+                        f"eval member_key {member_key!r} is not a member email in this workspace"
+                    )
             await connection.execute(
                 sa.insert(tables.conversation).values(
                     id=conversation_id,
                     workspace_id=self.workspace_id,
                     surface=EVAL_SURFACE,
                     queue_key=f"{EVAL_SURFACE}:{case_name}:{conversation_id}",
-                    member_id=None,
+                    member_id=member_id,
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )

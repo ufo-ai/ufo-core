@@ -1,0 +1,364 @@
+from collections.abc import AsyncIterator
+from pathlib import Path
+from uuid import uuid4
+
+import pytest
+import sqlalchemy as sa
+from ufo_ext_index_default import DefaultIndex, pack_embedding
+from ufo_ext_memory.store import MemoryStore, memory_item, recall_subjects
+
+from evals.memory_100.materialize import Memory100Materializer
+from evals.memory_100.models import (
+    SnapshotCase,
+    SnapshotMemory,
+    SnapshotPage,
+    UpstreamAsset,
+)
+from evals.memory_100.snapshot import content_digest, load_snapshot, write_snapshot
+from evals.memory_100.state import CorpusAttestor
+from ufo.blob import FilesystemBlobStore
+from ufo.db import apply_migrations, dispose_db, init_db, workspace_tx
+from ufo.schema import tables
+from ufo.sources.sync import page_id_for
+from ufo.workspace import ws
+
+
+class DeterministicEmbed:
+    async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+        return tuple((1.0, 0.0, 0.0) for _ in texts)
+
+
+@pytest.fixture
+def memory_100_database_url(database_url: str, tmp_path: Path) -> str:
+    if database_url.startswith("postgresql"):
+        pytest.skip("memory_100 materialization proof uses SQLite's real default index")
+    url = f"sqlite+aiosqlite:///{tmp_path / 'memory_100.db'}"
+    apply_migrations(url)
+    return url
+
+
+@pytest.fixture
+async def memory_100_db(memory_100_database_url: str) -> AsyncIterator[None]:
+    init_db(memory_100_database_url)
+    yield
+    await dispose_db()
+
+
+def _snapshot(root: Path) -> None:
+    cases = (
+        tuple(
+            SnapshotCase(
+                id=f"enterprise-{index}",
+                corpus="enterprise",
+                category="retrieval",
+                audience="shared",
+                question=f"enterprise question {index}",
+                expected_answer="answer",
+                evidence_refs=("drive/runbook.md",),
+            )
+            for index in range(60)
+        )
+        + tuple(
+            SnapshotCase(
+                id=f"longmem-{index}",
+                corpus="longmem",
+                category="session",
+                audience="alice" if index % 2 == 0 else "bob",
+                question=f"longmem question {index}",
+                expected_answer="answer",
+                evidence_refs=("session/alice",) if index % 2 == 0 else ("session/bob",),
+            )
+            for index in range(30)
+        )
+        + tuple(
+            SnapshotCase(
+                id=f"ufo-{index}",
+                corpus="ufo",
+                category="isolation",
+                audience="alice",
+                question=f"ufo question {index}",
+                expected_answer="answer",
+                evidence_refs=("session/alice",),
+            )
+            for index in range(10)
+        )
+    )
+    pages = (
+        SnapshotPage(
+            source_ref="drive/runbook.md",
+            audience="shared",
+            body="The shared incident commander is Captain Vega.",
+            digest=content_digest("The shared incident commander is Captain Vega."),
+            origin="enterprise",
+        ),
+        SnapshotPage(
+            source_ref="slack/launch.txt",
+            audience="shared",
+            body="Project Aurora launches on Thursday.",
+            digest=content_digest("Project Aurora launches on Thursday."),
+            origin="enterprise",
+        ),
+    )
+    memories = (
+        SnapshotMemory(
+            source_ref="session/alice",
+            audience="alice",
+            body="Alice's private launch phrase is alpha lantern.",
+            digest=content_digest("Alice's private launch phrase is alpha lantern."),
+        ),
+        SnapshotMemory(
+            source_ref="session/bob",
+            audience="bob",
+            body="Bob's private launch phrase is beta harbor.",
+            digest=content_digest("Bob's private launch phrase is beta harbor."),
+        ),
+    )
+    write_snapshot(
+        root,
+        upstreams=(
+            UpstreamAsset(
+                name="fixture",
+                url="https://example.com/fixture",
+                revision="fixture-1",
+                size_bytes=1,
+                sha256="sha256:" + "0" * 64,
+                license="MIT",
+            ),
+        ),
+        builder_digest="sha256:" + "1" * 64,
+        cases=cases,
+        pages=pages,
+        memories=memories,
+    )
+
+
+async def test_failed_database_precheck_leaves_no_stage_and_retry_materializes(
+    memory_100_db: None, tmp_path: Path
+) -> None:
+    snapshot_root = tmp_path / "snapshot"
+    _snapshot(snapshot_root)
+    embed = DeterministicEmbed()
+    materializer = Memory100Materializer.from_snapshot(
+        snapshot_root,
+        tmp_path / "state",
+        blob=FilesystemBlobStore(root=tmp_path / "blobs"),
+        index=DefaultIndex(embed=embed, transaction=workspace_tx),
+        embed=embed,
+    )
+    blocking_workspace_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=blocking_workspace_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+    with pytest.raises(RuntimeError, match="requires a clean dedicated database"):
+        await materializer.run()
+    assert not materializer.pages_root.exists()
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.delete(tables.workspace).where(tables.workspace.c.id == blocking_workspace_id)
+        )
+
+    readiness = await materializer.run()
+    assert readiness.pages_root == materializer.pages_root
+    assert materializer.pages_root.is_dir()
+
+
+async def test_post_stage_database_failure_rolls_back_and_retry_reuses_stage(
+    memory_100_db: None, tmp_path: Path
+) -> None:
+    snapshot_root = tmp_path / "snapshot"
+    _snapshot(snapshot_root)
+    embed = DeterministicEmbed()
+    materializer = Memory100Materializer.from_snapshot(
+        snapshot_root,
+        tmp_path / "state",
+        blob=FilesystemBlobStore(root=tmp_path / "blobs"),
+        index=DefaultIndex(embed=embed, transaction=workspace_tx),
+        embed=embed,
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.text(
+                "create trigger reject_memory_100_agent before insert on agent "
+                "begin select raise(abort, 'injected agent failure'); end"
+            )
+        )
+
+    with pytest.raises(sa.exc.IntegrityError, match="injected agent failure"):
+        await materializer.run()
+    assert materializer.pages_root.is_dir()
+    async with workspace_tx() as connection:
+        workspace_count = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.workspace))
+        ).scalar_one()
+        await connection.execute(sa.text("drop trigger reject_memory_100_agent"))
+    assert workspace_count == 0
+
+    readiness = await materializer.run()
+    assert readiness.pages_root == materializer.pages_root
+    assert readiness.page_count == len(load_snapshot(snapshot_root).pages)
+
+
+async def test_materializes_snapshot_through_real_memory_and_page_pipelines(
+    memory_100_db: None, tmp_path: Path
+) -> None:
+    snapshot_root = tmp_path / "snapshot"
+    _snapshot(snapshot_root)
+    blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    embed = DeterministicEmbed()
+    index = DefaultIndex(embed=embed, transaction=workspace_tx)
+    materializer = Memory100Materializer.from_snapshot(
+        snapshot_root,
+        tmp_path / "state",
+        blob=blob,
+        index=index,
+        embed=embed,
+    )
+
+    readiness = await materializer.run()
+    audience = {binding.alias: binding for binding in readiness.audiences}
+    alice = audience["alice"].member_id
+    bob = audience["bob"].member_id
+    assert alice is not None and bob is not None
+    assert readiness.page_count == 2
+    assert readiness.memory_count == 2
+    assert readiness.chunk_count == 4
+    assert {owner.source_ref for owner in readiness.evidence} == {
+        "drive/runbook.md",
+        "slack/launch.txt",
+        "session/alice",
+        "session/bob",
+    }
+    assert {
+        owner.source_ref: owner.owner_id
+        for owner in readiness.evidence
+        if owner.owner_kind == "page"
+    } == {
+        source_ref: str(page_id_for(readiness.source_id, source_ref))
+        for source_ref in ("drive/runbook.md", "slack/launch.txt")
+    }
+
+    with ws(readiness.workspace_id):
+        store = MemoryStore(index, embed, workspace_tx, readiness.workspace_id)
+        alice_memory = await store.recall("alpha lantern", recall_subjects(alice), 8)
+        bob_memory = await store.recall("alpha lantern", recall_subjects(bob), 8)
+        shared = await store.search_sources("incident commander", recall_subjects(alice), 8)
+        async with workspace_tx() as connection:
+            memory_count = (
+                await connection.execute(sa.select(sa.func.count()).select_from(memory_item))
+            ).scalar_one()
+            agent_count = (
+                await connection.execute(sa.select(sa.func.count()).select_from(tables.agent))
+            ).scalar_one()
+
+    assert [item.source_ref for item in alice_memory] == ["session/alice"]
+    assert [item.source_ref for item in bob_memory] == ["session/bob"]
+    assert shared[0].page_id == page_id_for(readiness.source_id, "drive/runbook.md")
+    assert memory_count == 2
+    assert agent_count == 1
+
+    with ws(readiness.workspace_id):
+        orphan_digest = "sha256:" + "f" * 64
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.text(
+                    "insert into chunk "
+                    "(chunk_digest, owner_kind, owner_id, subject, ordinal, text, embedding) "
+                    "values (:digest, 'page', 'orphan', 'shared', 0, 'orphan text', null)"
+                ),
+                {"digest": orphan_digest},
+            )
+            await connection.execute(
+                sa.text(
+                    "insert into chunk_fts (chunk_digest, text) values (:digest, 'orphan text')"
+                ),
+                {"digest": orphan_digest},
+            )
+        with pytest.raises(RuntimeError, match="default-index chunks are not ready"):
+            await CorpusAttestor(
+                snapshot=load_snapshot(snapshot_root),
+                workspace_id=readiness.workspace_id,
+                source_id=readiness.source_id,
+                pages_root=readiness.pages_root,
+                audiences=readiness.audiences,
+                blob=blob,
+            ).attest()
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.text("delete from chunk_fts where chunk_digest = :digest"),
+                {"digest": orphan_digest},
+            )
+            await connection.execute(
+                sa.text("delete from chunk where chunk_digest = :digest"),
+                {"digest": orphan_digest},
+            )
+
+        async with workspace_tx() as connection:
+            chunk_digest = (
+                await connection.execute(
+                    sa.text("select chunk_digest from chunk order by chunk_digest limit 1")
+                )
+            ).scalar_one()
+            await connection.execute(
+                sa.text("update chunk set embedding = :embedding where chunk_digest = :digest"),
+                {"digest": chunk_digest, "embedding": pack_embedding((0.0, 1.0, 0.0))},
+            )
+        rematerialized = await CorpusAttestor(
+            snapshot=load_snapshot(snapshot_root),
+            workspace_id=readiness.workspace_id,
+            source_id=readiness.source_id,
+            pages_root=readiness.pages_root,
+            audiences=readiness.audiences,
+            blob=blob,
+        ).attest()
+        assert rematerialized.corpus_digest != readiness.corpus_digest
+
+        runbook_id = page_id_for(readiness.source_id, "drive/runbook.md")
+        canonical_body_ref = f"sources/{readiness.source_id}/{runbook_id}"
+        alternate_body_ref = f"eval-corruption/{runbook_id}"
+        await blob.put(alternate_body_ref, await blob.get(canonical_body_ref))
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.page)
+                .values(body_ref=alternate_body_ref)
+                .where(tables.page.c.id == runbook_id)
+            )
+        with pytest.raises(RuntimeError, match=r"page 'drive/runbook\.md' is not ready"):
+            await CorpusAttestor(
+                snapshot=load_snapshot(snapshot_root),
+                workspace_id=readiness.workspace_id,
+                source_id=readiness.source_id,
+                pages_root=readiness.pages_root,
+                audiences=readiness.audiences,
+                blob=blob,
+            ).attest()
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.page)
+                .values(body_ref=canonical_body_ref)
+                .where(tables.page.c.id == runbook_id)
+            )
+            await connection.execute(
+                sa.update(tables.ext_store)
+                .values(value=None)
+                .where(
+                    tables.ext_store.c.workspace_id == readiness.workspace_id,
+                    tables.ext_store.c.extension == "memory",
+                    tables.ext_store.c.key == "page_change_cursor:index_pages",
+                )
+            )
+        with pytest.raises(RuntimeError, match="page consumers have pending changes"):
+            await CorpusAttestor(
+                snapshot=load_snapshot(snapshot_root),
+                workspace_id=readiness.workspace_id,
+                source_id=readiness.source_id,
+                pages_root=readiness.pages_root,
+                audiences=readiness.audiences,
+                blob=blob,
+            ).attest()

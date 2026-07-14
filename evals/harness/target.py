@@ -56,7 +56,7 @@ class CapabilityTarget(Protocol):
 
 
 class EvalConversations(Protocol):
-    async def open(self, case_name: str) -> UUID: ...
+    async def open(self, case_name: str, member_key: str | None = None) -> UUID: ...
 
 
 class TurnOutcome(Protocol):
@@ -73,7 +73,7 @@ class InProcessTarget:
     blob: BlobStore | None = None
 
     async def run(self, case: CapabilityCase) -> TargetResult:
-        conversation_id = await self.conversations.open(case.name)
+        conversation_id = await self.conversations.open(case.name, case.member_key)
         try:
             turn_id = await self.ctx.invoke(
                 conversation_id,

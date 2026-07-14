@@ -211,16 +211,26 @@ class StaticTarget:
 class DbConversations:
     workspace_id: UUID
 
-    async def open(self, case_name: str) -> UUID:
+    async def open(self, case_name: str, member_key: str | None = None) -> UUID:
         conversation_id = uuid4()
         async with workspace_tx() as connection:
+            member_id = None
+            if member_key is not None:
+                member_id = (
+                    await connection.execute(
+                        sa.select(tables.member.c.id).where(
+                            tables.member.c.workspace_id == self.workspace_id,
+                            tables.member.c.email == member_key,
+                        )
+                    )
+                ).scalar_one()
             await connection.execute(
                 sa.insert(tables.conversation).values(
                     id=conversation_id,
                     workspace_id=self.workspace_id,
                     surface="eval",
                     queue_key=str(conversation_id),
-                    member_id=None,
+                    member_id=member_id,
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
@@ -265,6 +275,21 @@ async def _seed_agent(workspace_id: UUID) -> UUID:
             )
         )
     return agent_id
+
+
+async def _seed_member(workspace_id: UUID, email: str) -> UUID:
+    member_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email=email,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return member_id
 
 
 def _context(blob: FilesystemBlobStore, invoker: StubWorker):
@@ -875,6 +900,68 @@ def test_rubric_case_payload_pins_the_judge_revision() -> None:
     assert case.payload()["judgeRevision"] == JUDGE_REVISION
 
 
+def test_capability_case_payload_pins_only_an_explicit_member_key() -> None:
+    unbound = CapabilityCase("unbound", "answer", restraint_scorer(WEB_TOOLS))
+    bound = CapabilityCase(
+        "bound",
+        "answer",
+        restraint_scorer(WEB_TOOLS),
+        member_key="memory-100+case-17@eval.invalid",
+    )
+
+    assert "memberKey" not in unbound.payload()
+    assert bound.payload()["memberKey"] == "memory-100+case-17@eval.invalid"
+
+
+async def test_in_process_target_opens_a_member_bound_eval_conversation(db: None, tmp_path) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    email = "memory-100+case-17@eval.invalid"
+    member_id = await _seed_member(workspace_id, email)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = StubWorker(blob, workspace_id, _research_transcript())
+    ctx = _context(blob, worker)
+    target = InProcessTarget(
+        ctx=ctx,
+        agent_id=agent_id,
+        conversations=WorkspaceDriver(workspace_id, agent_id, PROMPT, blob),
+        outcome=CorpusOutcome(ctx),
+    )
+    case = CapabilityCase(
+        "member-memory",
+        "find the record then remember it",
+        required_tools_scorer(("search_web",)),
+        member_key=email,
+    )
+
+    with ws(workspace_id):
+        result = await target.run(case)
+        async with workspace_tx() as connection:
+            conversation_member_id = (
+                await connection.execute(
+                    sa.select(tables.conversation.c.member_id).where(
+                        tables.conversation.c.workspace_id == workspace_id,
+                        tables.conversation.c.surface == "eval",
+                    )
+                )
+            ).scalar_one()
+
+    assert result.clean
+    assert conversation_member_id == member_id
+
+
+async def test_workspace_driver_rejects_an_unknown_member_key(db: None, tmp_path) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    driver = WorkspaceDriver(workspace_id, agent_id, PROMPT, FilesystemBlobStore(root=tmp_path))
+
+    with (
+        ws(workspace_id),
+        pytest.raises(ValueError, match="is not a member email in this workspace"),
+    ):
+        await driver.open("missing-member", "missing@eval.invalid")
+
+
 async def test_workspace_driver_reads_a_terminal_transcript_once(
     db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -928,7 +1015,12 @@ def test_report_html_renders_pass_fail_and_excluded() -> None:
         "capability",
         "sha256:abc",
         (
-            EvalCaseResult("won", True, "ok", {"response": "hi", "tools": ["search_web"]}),
+            EvalCaseResult(
+                "won",
+                True,
+                "ok",
+                {"response": "hi", "tools": ["search_web"]},
+            ),
             EvalCaseResult("lost", False, "did not call: fetch_url", {"response": "", "tools": []}),
             EvalCaseResult(
                 "web", False, "infra-excluded (web unavailable): 429", {}, excluded=True
