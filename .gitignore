@@ -11,6 +11,7 @@ ufo.toml
 blobs/
 bundle/
 deploy/
+eval-reports/
 *.db
 ufo.db-*
 .coverage

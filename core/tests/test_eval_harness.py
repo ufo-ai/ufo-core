@@ -6,15 +6,24 @@ only stand-in is the turn worker — a StubWorker that plays the DBOS worker by 
 turn row and the transcript the agent would have produced, then returns the turn id. The target's
 real work — invoke, reconstruct, grade — is what the tests assert, read back through the corpus."""
 
+from base64 import urlsafe_b64decode
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from json import loads
+from types import SimpleNamespace
 from typing import cast
+from urllib.parse import parse_qs, urlparse
 from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
+from aiobotocore.session import get_session
+from httpx import AsyncClient
 
+from evals.__main__ import EVAL_SHARE_BUCKET_ENV
+from evals.__main__ import _run as run_evals
+from evals.__main__ import main as eval_main
 from evals.browser_nav import CASES as BROWSER_CASES
 from evals.driver import WorkspaceDriver, resolve_workspace_and_agent
 from evals.harness.capability import (
@@ -34,7 +43,7 @@ from evals.harness.judge import (
     ModelJudge,
     rubric_pass,
 )
-from evals.harness.report_html import render_report_html
+from evals.harness.registry import EvalTask
 from evals.harness.scorers import (
     WEB_TOOLS,
     exact_scorer,
@@ -46,9 +55,21 @@ from evals.harness.scorers import (
     skill_scorer,
 )
 from evals.harness.target import InProcessTarget, TargetResult, capability_output
+from evals.harness.viewer import (
+    AWS_S3_CONFIG,
+    MAX_SHARE_EXPIRY_SECONDS,
+    MAX_SHARE_PAGE_BYTES,
+    SHARE_TOKEN_BYTES,
+    EvalRun,
+    S3ViewerShare,
+    load_runs,
+    record_run,
+    render_viewer,
+)
 from evals.registry import TASKS, selected_run_tasks
 from ufo.accounting import CORE_PRICING, Pricing
-from ufo.blob import FilesystemBlobStore
+from ufo.blob import FilesystemBlobStore, S3BlobStore
+from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, ModelAccess, Trajectory, context_for
 from ufo.loop.transcript import Transcript
@@ -320,8 +341,10 @@ async def test_capability_case_runs_through_invoke_and_scores_the_trajectory(
         result = await run_capability_case(case, target)
 
     assert result.passed
-    assert result.evidence["tools"] == ["search_web", "memory_update"]
-    assert result.evidence["response"] == "Done — found it and remembered it for the team."
+    attempts = cast(list[dict[str, object]], result.evidence["attempts"])
+    calls = cast(list[dict[str, object]], attempts[0]["calls"])
+    assert [call["name"] for call in calls] == ["search_web", "memory_update"]
+    assert attempts[0]["response"] == "Done — found it and remembered it for the team."
 
 
 async def test_capability_case_fails_when_a_required_tool_is_absent(db: None, tmp_path) -> None:
@@ -550,7 +573,8 @@ async def test_web_dependent_case_behind_an_infra_outage_is_excluded_not_passed(
 
     assert result.excluded
     assert not result.passed
-    assert result.evidence["infraExcluded"] is True
+    attempts = cast(list[dict[str, object]], result.evidence["attempts"])
+    assert "429 rate limit" in cast(list[str], attempts[0]["toolErrors"])[0]
     assert "infra-excluded" in result.reason
 
 
@@ -767,7 +791,8 @@ async def test_target_loads_the_successfully_shared_artifact_for_grading(
         )
 
     assert result.passed
-    assert result.evidence["artifacts"] == ["site.tar.gz"]
+    attempts = cast(list[dict[str, object]], result.evidence["attempts"])
+    assert attempts[0]["artifacts"] == ["site.tar.gz"]
 
 
 async def test_restraint_scorer_flags_an_unnecessary_web_call() -> None:
@@ -1009,51 +1034,267 @@ async def test_resolve_workspace_and_agent_accepts_an_explicit_workspace(db: Non
     assert resolved == (workspace_id, agent_id, PROMPT, MODEL)
 
 
-def test_report_html_renders_pass_fail_and_excluded() -> None:
+def _debug_evidence(response: str, tools: tuple[str, ...] = ()) -> dict[str, object]:
+    return {
+        "message": "exercise the capability",
+        "rubric": ["finish the work"],
+        "selectedAttempt": 0,
+        "attempts": [
+            {
+                "passed": True,
+                "reason": "ok",
+                "response": response,
+                "calls": [
+                    {
+                        "name": tool,
+                        "input": {},
+                        "result": "done",
+                        "hasResult": True,
+                        "isError": False,
+                    }
+                    for tool in tools
+                ],
+                "toolErrors": [],
+                "artifacts": [],
+                "artifactError": None,
+            }
+        ],
+    }
+
+
+def test_eval_run_archive_renders_debug_evidence_and_escapes_script_data(tmp_path) -> None:
     report = EvalReport(
-        "tool_calling",
-        "capability",
-        "sha256:abc",
-        (
+        name="tool_calling",
+        suite="capability",
+        digest="sha256:abc",
+        cases=(
             EvalCaseResult(
-                "won",
-                True,
-                "ok",
-                {"response": "hi", "tools": ["search_web"]},
+                name="won",
+                passed=True,
+                reason="ok",
+                evidence=_debug_evidence("</script><script>bad()</script>", ("search_web",)),
             ),
-            EvalCaseResult("lost", False, "did not call: fetch_url", {"response": "", "tools": []}),
             EvalCaseResult(
-                "web", False, "infra-excluded (web unavailable): 429", {}, excluded=True
+                name="lost",
+                passed=False,
+                reason="did not call: fetch_url",
+                evidence=_debug_evidence(""),
+            ),
+            EvalCaseResult(
+                name="web",
+                passed=False,
+                reason="infra-excluded (web unavailable): 429",
+                evidence=_debug_evidence("unavailable"),
+                excluded=True,
             ),
         ),
         target_model=MODEL,
         judge_model="google/gemini-2.5-pro",
         judge_revision=JUDGE_REVISION,
     )
-    html = render_report_html(report).decode()
-    assert "tool_calling" in html
-    assert "did not call: fetch_url" in html
-    assert "PASS" in html and "FAIL" in html
-    assert "EXCLUDED" in html
-    assert "1 excluded" in html
-    assert MODEL in html
-    assert "google/gemini-2.5-pro" in html
-    assert JUDGE_REVISION in html
+    run = EvalRun(
+        id=uuid4(),
+        created_at=datetime(2026, 7, 14, tzinfo=UTC),
+        label="candidate",
+        agent="assistant",
+        ufo_version="0.1.0",
+        revision="abc123",
+        reports=(report,),
+    )
+
+    record = record_run(tmp_path, run)
+
+    assert record.is_file()
+    assert load_runs(tmp_path) == (run,)
+    html = (tmp_path / "index.html").read_text()
+    assert "Comparable delta" in html
+    assert "Regressions" in html
+    assert "Tool trajectory" in html
+    assert str(run.id) in html
+    assert "</script><script>bad()</script>" not in html
+    assert "\\u003c/script\\u003e\\u003cscript\\u003ebad()" in html
+    selected = render_viewer((run,), run.id).decode()
+    assert f'"current":"{run.id}"' in selected
     payload = report.to_json()
     assert payload["targetModel"] == MODEL
     assert payload["judgeModel"] == "google/gemini-2.5-pro"
     assert payload["judgeRevision"] == JUDGE_REVISION
 
 
+@pytest.mark.docker
+async def test_s3_viewer_share_uses_a_192_bit_key_and_expiring_url(
+    s3_store: S3BlobStore,
+) -> None:
+    page = b"<html>report</html>"
+    url = await S3ViewerShare(
+        s3_store.bucket, region=s3_store.region, endpoint_url=s3_store.endpoint_url
+    ).publish(page, 3600)
+
+    parsed = urlparse(url)
+    key = parsed.path.removeprefix(f"/{s3_store.bucket}/")
+    token = key.removeprefix("eval-viewers/").removesuffix(".html")
+    padding = "=" * (-len(token) % 4)
+    assert len(urlsafe_b64decode(token + padding)) == SHARE_TOKEN_BYTES
+    expires_in = int(parse_qs(parsed.query)["X-Amz-Expires"][0])
+    assert expires_in == 3600
+    async with AsyncClient() as client:
+        response = await client.get(url)
+    response.raise_for_status()
+    assert response.content == page
+
+
+async def test_aws_share_config_generates_a_regional_virtual_host() -> None:
+    async with get_session().create_client(
+        "s3",
+        region_name="us-east-2",
+        aws_access_key_id="test",
+        aws_secret_access_key="test",
+        config=AWS_S3_CONFIG,
+    ) as client:
+        url = await client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": "private-evals", "Key": "eval-viewers/probe.html"},
+            ExpiresIn=3600,
+        )
+
+    assert urlparse(url).hostname == "private-evals.s3.us-east-2.amazonaws.com"
+
+
+async def test_s3_viewer_share_rejects_an_oversized_page() -> None:
+    with pytest.raises(ValueError, match="share page"):
+        await S3ViewerShare("private-evals").publish(b"x" * (MAX_SHARE_PAGE_BYTES + 1), 3600)
+
+
+async def test_s3_viewer_share_rejects_an_expiry_beyond_presign_limits() -> None:
+    with pytest.raises(ValueError, match="share expiry"):
+        await S3ViewerShare("private-evals").publish(b"page", MAX_SHARE_EXPIRY_SECONDS + 1)
+
+
+def test_share_bucket_prefers_the_flag_then_environment_then_s3_config(
+    tmp_path, monkeypatch
+) -> None:
+    config = tmp_path / "ufo.toml"
+    config.write_text(
+        """[database]
+url = "sqlite+aiosqlite:///ufo.db"
+[blob]
+backend = "s3"
+bucket = "configured-evals"
+region = "us-west-2"
+endpoint_url = "https://s3.invalid"
+"""
+    )
+    run = EvalRun(
+        id=uuid4(),
+        created_at=datetime(2026, 7, 14, tzinfo=UTC),
+        label="candidate",
+        agent="assistant",
+        ufo_version="0.1.0",
+        revision="abc123",
+        reports=(),
+    )
+    record_run(tmp_path, run)
+    destinations: list[tuple[str, str | None, str | None]] = []
+
+    async def publish(share: S3ViewerShare, _page: bytes, _expiry: int) -> str:
+        destinations.append((share.bucket, share.region, share.endpoint_url))
+        return "https://share.invalid/report"
+
+    monkeypatch.setattr(S3ViewerShare, "publish", publish)
+    monkeypatch.setenv("UFO_CONFIG", str(config))
+    monkeypatch.setenv(EVAL_SHARE_BUCKET_ENV, "environment-evals")
+    command = ["--share", str(run.id), "--out", str(tmp_path)]
+
+    eval_main(command)
+    monkeypatch.delenv(EVAL_SHARE_BUCKET_ENV)
+    eval_main(command)
+    eval_main([*command, "--s3-bucket", "explicit-evals"])
+
+    assert destinations == [
+        ("environment-evals", "us-west-2", "https://s3.invalid"),
+        ("configured-evals", "us-west-2", "https://s3.invalid"),
+        ("explicit-evals", "us-west-2", "https://s3.invalid"),
+    ]
+
+
+def test_eval_run_is_recorded_without_git(tmp_path, monkeypatch) -> None:
+    async def run(*_args) -> tuple[EvalReport, ...]:
+        return ()
+
+    def missing_git(*_args, **_kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr("evals.__main__._run", run)
+    monkeypatch.setattr("evals.__main__.load_config", lambda: object())
+    monkeypatch.setattr("evals.__main__.subprocess.run", missing_git)
+    monkeypatch.setattr("evals.__main__.version", lambda _package: "0.1.0")
+
+    eval_main(["--out", str(tmp_path), "--label", "no-git"])
+
+    recorded = load_runs(tmp_path)
+    assert len(recorded) == 1
+    assert recorded[0].label == "no-git"
+    assert recorded[0].revision == "0.1.0"
+
+
+async def test_eval_run_pins_model_metadata_on_boundary_report(tmp_path, monkeypatch) -> None:
+    workspace_id = uuid4()
+    agent_id = uuid4()
+    report = EvalReport(name="suite", suite="capability", digest="sha256:abc", cases=())
+
+    async def resolve(*_args):
+        return workspace_id, agent_id, "prompt", MODEL
+
+    async def run(_target) -> EvalReport:
+        return report
+
+    async def dispose() -> None:
+        return None
+
+    model = SimpleNamespace(model="judge-model")
+    monkeypatch.delenv("UFO_CREDENTIAL_KEY", raising=False)
+    monkeypatch.setattr("evals.__main__.init_db", lambda _url: None)
+    monkeypatch.setattr("evals.__main__.dispose_db", dispose)
+    monkeypatch.setattr("evals.__main__.init_workspace_credentials", lambda _store: None)
+    monkeypatch.setattr("evals.__main__.resolve_workspace_and_agent", resolve)
+    monkeypatch.setattr("evals.__main__.blob_store_for", lambda _config: object())
+    monkeypatch.setattr("evals.__main__.WorkspaceDriver", lambda *_args: object())
+    monkeypatch.setattr("evals.__main__.eval_context", lambda *_args: SimpleNamespace(model=model))
+    monkeypatch.setattr("evals.__main__.InProcessTarget", lambda **_kwargs: object())
+    config = Config(
+        database=DatabaseConfig(url="sqlite+aiosqlite:///:memory:"),
+        blob=BlobConfig(backend="filesystem", root=tmp_path),
+    )
+    task = EvalTask("suite", "capability", "sha256:abc", (), run)
+
+    reports = await run_evals(config, (task,), "assistant")
+
+    assert reports == (
+        report.model_copy(
+            update={
+                "target_model": MODEL,
+                "judge_model": "judge-model",
+                "judge_revision": JUDGE_REVISION,
+            }
+        ),
+    )
+
+
 def test_report_pass_rate_ignores_excluded_and_suite_fails_on_a_real_failure() -> None:
     report = EvalReport(
-        "s",
-        "capability",
-        "sha256:abc",
-        (
-            EvalCaseResult("won", True, "ok", {}),
-            EvalCaseResult("lost", False, "bad", {}),
-            EvalCaseResult("web", False, "infra-excluded", {"infraExcluded": True}, excluded=True),
+        name="s",
+        suite="capability",
+        digest="sha256:abc",
+        cases=(
+            EvalCaseResult(name="won", passed=True, reason="ok", evidence={}),
+            EvalCaseResult(name="lost", passed=False, reason="bad", evidence={}),
+            EvalCaseResult(
+                name="web",
+                passed=False,
+                reason="infra-excluded",
+                evidence={},
+                excluded=True,
+            ),
         ),
     )
     assert report.pass_rate == 0.5
@@ -1068,12 +1309,18 @@ def test_report_pass_rate_ignores_excluded_and_suite_fails_on_a_real_failure() -
 
 def test_report_of_all_scored_passing_with_an_excluded_case_passes() -> None:
     report = EvalReport(
-        "s",
-        "capability",
-        "sha256:abc",
-        (
-            EvalCaseResult("won", True, "ok", {}),
-            EvalCaseResult("web", False, "infra-excluded", {"infraExcluded": True}, excluded=True),
+        name="s",
+        suite="capability",
+        digest="sha256:abc",
+        cases=(
+            EvalCaseResult(name="won", passed=True, reason="ok", evidence={}),
+            EvalCaseResult(
+                name="web",
+                passed=False,
+                reason="infra-excluded",
+                evidence={},
+                excluded=True,
+            ),
         ),
     )
     assert report.pass_rate == 1.0
@@ -1083,10 +1330,18 @@ def test_report_of_all_scored_passing_with_an_excluded_case_passes() -> None:
 
 def test_report_of_only_excluded_cases_is_not_a_pass() -> None:
     report = EvalReport(
-        "s",
-        "capability",
-        "sha256:abc",
-        (EvalCaseResult("web", False, "infra-excluded", {}, excluded=True),),
+        name="s",
+        suite="capability",
+        digest="sha256:abc",
+        cases=(
+            EvalCaseResult(
+                name="web",
+                passed=False,
+                reason="infra-excluded",
+                evidence={},
+                excluded=True,
+            ),
+        ),
     )
     assert report.pass_rate == 0.0
     assert report.passed is False

@@ -30,7 +30,7 @@ def capability_task(name: str, cases: tuple[CapabilityCase, ...]) -> EvalTask:
 
     async def run(target: CapabilityTarget) -> EvalReport:
         results = tuple([await run_capability_case(case, target) for case in cases])
-        return EvalReport(name, "capability", digest, results)
+        return EvalReport(name=name, suite="capability", digest=digest, cases=results)
 
     return EvalTask(name, "capability", digest, tuple(case.name for case in cases), run)
 

@@ -5,16 +5,18 @@ only against a run of the identical suite — a changed case moves the digest.""
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from hashlib import sha256
 from json import dumps
+
+from pydantic import BaseModel, ConfigDict
 
 type Json = str | int | float | bool | None | list[Json] | dict[str, Json]
 type JsonObject = dict[str, Json]
 
 
-@dataclass(frozen=True)
-class EvalCaseResult:
+class EvalCaseResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     name: str
     passed: bool
     reason: str
@@ -22,8 +24,9 @@ class EvalCaseResult:
     excluded: bool = False
 
 
-@dataclass(frozen=True)
-class EvalReport:
+class EvalReport(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     name: str
     suite: str
     digest: str

@@ -1,20 +1,23 @@
-"""Run the eval suites against the workspace and render a report per task.
+"""Run eval suites, browse recorded runs, or share a two-run comparison.
 
-`python -m evals --list` lists the tasks and their digests. `python -m evals` drives each case as a
-real turn through the agent (a `ufoctl serve` must be running to execute the admitted turns),
-grades the answer + trajectory, writes an HTML report per task under `--out`, prints the pass line,
-and exits non-zero if any suite failed. Cases create durable conversations and may write memory or
-artifacts, so run them in a disposable target workspace selected with `--workspace`."""
+`python -m evals` drives each case as a real turn through the agent, grades its answer and
+trajectory, and records one immutable run under `--out`. `--view` opens the offline archive;
+`--share CURRENT [BASELINE]` publishes only those runs behind an expiring S3 URL. Cases create
+durable conversations and may write memory or artifacts, so target a disposable workspace with
+`--workspace`."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 import os
+import subprocess
 import sys
-from dataclasses import replace
+import webbrowser
+from datetime import UTC, datetime
+from importlib.metadata import version
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from cryptography.fernet import Fernet
 
@@ -22,26 +25,53 @@ from evals.driver import WorkspaceDriver, eval_context, resolve_workspace_and_ag
 from evals.harness.harness import EvalReport
 from evals.harness.judge import JUDGE_REVISION, ModelJudge
 from evals.harness.registry import EvalTask, selected_tasks
-from evals.harness.report_html import render_report_html
 from evals.harness.target import InProcessTarget
+from evals.harness.viewer import (
+    MAX_SHARE_EXPIRY_SECONDS,
+    EvalRun,
+    S3ViewerShare,
+    load_runs,
+    record_run,
+    render_viewer,
+    write_viewer,
+)
 from evals.memory_100.runner import Memory100Run, load_memory_100
 from evals.registry import TASKS, selected_run_tasks
 from ufo.blob import blob_store_for
-from ufo.config import Config, load_config
+from ufo.config import Config, config_path, load_config
 from ufo.credentials import CredentialStore
 from ufo.db import dispose_db, init_db
 from ufo.schema.records import DEFAULT_AGENT_NAME
 from ufo.workspace import init_workspace_credentials, ws
 
 DEFAULT_OUT = Path("eval-reports")
+EVAL_SHARE_BUCKET_ENV = "UFO_EVAL_SHARE_BUCKET"
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="python -m evals")
-    parser.add_argument("--list", action="store_true")
-    parser.add_argument("--only", nargs="*", default=())
-    parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
-    parser.add_argument("--agent", default=DEFAULT_AGENT_NAME)
+    action = parser.add_mutually_exclusive_group()
+    action.add_argument("--list", action="store_true", help="list suites and their digests")
+    action.add_argument("--view", action="store_true", help="open the local run archive")
+    action.add_argument(
+        "--share",
+        nargs="+",
+        metavar="RUN_ID",
+        help="publish CURRENT and an optional BASELINE run",
+    )
+    parser.add_argument("--only", nargs="*", default=(), help="run only the named suites")
+    parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="run archive directory")
+    parser.add_argument("--agent", default=DEFAULT_AGENT_NAME, help="target agent name")
+    parser.add_argument("--label", default="", help="human-readable run label")
+    parser.add_argument("--s3-bucket", help="private bucket override for --share")
+    parser.add_argument("--s3-region", help="S3 region for --share")
+    parser.add_argument("--s3-endpoint-url", help="S3-compatible endpoint for --share")
+    parser.add_argument(
+        "--expires-seconds",
+        type=int,
+        default=MAX_SHARE_EXPIRY_SECONDS,
+        help="shared URL lifetime, at most seven days",
+    )
     parser.add_argument(
         "--workspace",
         type=UUID,
@@ -61,6 +91,51 @@ def main(argv: list[str] | None = None) -> None:
         for task in tasks:
             print(f"{task.name}\t{task.digest}")
         return
+    if args.view:
+        viewer = write_viewer(args.out, load_runs(args.out)).resolve()
+        print(f"viewer {viewer}")
+        if not webbrowser.open(viewer.as_uri()):
+            raise RuntimeError(f"browser did not open; open {viewer}")
+        return
+    if args.share:
+        if len(args.share) > 2:
+            parser.error("--share accepts CURRENT and one optional BASELINE run")
+        configured = load_config() if config_path().is_file() else None
+        configured_blob = (
+            configured.blob if configured is not None and configured.blob.backend == "s3" else None
+        )
+        bucket = (
+            args.s3_bucket
+            or os.environ.get(EVAL_SHARE_BUCKET_ENV)
+            or (configured_blob.bucket if configured_blob is not None else None)
+        )
+        if bucket is None:
+            parser.error(
+                f"--share needs --s3-bucket, {EVAL_SHARE_BUCKET_ENV}, or an S3 [blob] bucket"
+            )
+        runs = load_runs(args.out)
+        selected: list[EvalRun] = []
+        for reference in args.share:
+            matches = [run for run in runs if str(run.id).startswith(reference)]
+            if len(matches) != 1:
+                parser.error(f"run id {reference!r} matched {len(matches)} recorded runs")
+            selected.append(matches[0])
+        current = selected[0]
+        baseline = selected[1] if len(selected) == 2 else None
+        page = render_viewer(
+            tuple(selected), current.id, baseline.id if baseline is not None else None
+        )
+        url = asyncio.run(
+            S3ViewerShare(
+                bucket=bucket,
+                region=args.s3_region
+                or (configured_blob.region if configured_blob is not None else None),
+                endpoint_url=args.s3_endpoint_url
+                or (configured_blob.endpoint_url if configured_blob is not None else None),
+            ).publish(page, args.expires_seconds)
+        )
+        print(url)
+        return
     config = load_config()
     workspace_id = args.workspace
     if memory_run is not None:
@@ -68,16 +143,42 @@ def main(argv: list[str] | None = None) -> None:
             parser.error("--workspace does not match the memory_100 readiness workspace")
         workspace_id = memory_run.readiness.workspace_id
     reports = asyncio.run(_run(config, tasks, args.agent, workspace_id))
-    args.out.mkdir(parents=True, exist_ok=True)
     failed = False
     for report in reports:
-        (args.out / f"{report.name}.html").write_bytes(render_report_html(report))
         passed = sum(1 for case in report.scored if case.passed)
         print(
             f"{report.name} {passed}/{len(report.scored)} passed, "
             f"{report.excluded_count} excluded (rate {report.pass_rate:.0%}) {report.digest}"
         )
         failed = failed or not report.passed
+    try:
+        revision_process = subprocess.run(
+            ["git", "rev-parse", "--short=12", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        revision = revision_process.stdout.strip() or version("ufo")
+        if revision_process.returncode == 0:
+            dirty = subprocess.run(
+                ["git", "status", "--porcelain"], capture_output=True, text=True, check=False
+            )
+            if dirty.stdout:
+                revision += "+dirty"
+    except FileNotFoundError:
+        revision = version("ufo")
+    run = EvalRun(
+        id=uuid4(),
+        created_at=datetime.now(UTC),
+        label=args.label,
+        agent=args.agent,
+        ufo_version=version("ufo"),
+        revision=revision,
+        reports=reports,
+    )
+    record = record_run(args.out, run).resolve()
+    print(f"run {run.id} · {record}")
+    print(f"viewer {(args.out / 'index.html').resolve()}")
     if failed:
         raise SystemExit(1)
 
@@ -112,11 +213,12 @@ async def _run(
         with ws(workspace_id):
             reports = tuple([await task.run(target) for task in tasks])
         return tuple(
-            replace(
-                report,
-                target_model=agent_model,
-                judge_model=ctx.model.model,
-                judge_revision=JUDGE_REVISION,
+            report.model_copy(
+                update={
+                    "target_model": agent_model,
+                    "judge_model": ctx.model.model,
+                    "judge_revision": JUDGE_REVISION,
+                }
             )
             for report in reports
         )

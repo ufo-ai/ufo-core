@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from evals.harness.harness import EvalCaseResult, JsonObject, infra_error
+from evals.harness.harness import EvalCaseResult, Json, JsonObject, infra_error
 from evals.harness.judge import JUDGE_REVISION, rubric_pass
 
 if TYPE_CHECKING:
@@ -99,35 +99,56 @@ class CapabilityCase:
 
 async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) -> EvalCaseResult:
     samples = [await sample_capability(case, target) for _ in range(max(case.samples, 1))]
-    won = [sample for sample in samples if sample[1].passed]
-    output, verdict = won[0] if won else samples[-1]
-    if not won and case.web_dependent:
+    winning_indexes = [index for index, sample in enumerate(samples) if sample[1].passed]
+    selected_index = winning_indexes[0] if winning_indexes else len(samples) - 1
+    _, verdict = samples[selected_index]
+    attempts: list[Json] = []
+    for sample_output, sample_verdict in samples:
+        calls: list[Json] = []
+        for call in sample_output.calls:
+            calls.append(
+                {
+                    "name": call.name,
+                    "input": call.input,
+                    "result": call.result,
+                    "hasResult": call.has_result,
+                    "isError": call.is_error,
+                }
+            )
+        attempts.append(
+            {
+                "passed": sample_verdict.passed,
+                "reason": sample_verdict.reason,
+                "response": sample_output.response,
+                "calls": calls,
+                "toolErrors": list(sample_output.tool_errors),
+                "artifacts": [artifact.name for artifact in sample_output.artifacts],
+                "artifactError": sample_output.artifact_error or None,
+            }
+        )
+    evidence: JsonObject = {
+        "message": case.message,
+        "rubric": list(case.rubric),
+        "selectedAttempt": selected_index,
+        "attempts": attempts,
+    }
+    if not winning_indexes and case.web_dependent:
         broke = infra_error(tuple(error for sample, _ in samples for error in sample.tool_errors))
         if broke:
             return EvalCaseResult(
-                case.name,
-                False,
-                f"infra-excluded (web unavailable): {broke[:120]}",
-                {"response": output.response, "tools": list(output.tools), "infraExcluded": True},
+                name=case.name,
+                passed=False,
+                reason=f"infra-excluded (web unavailable): {broke[:120]}",
+                evidence=evidence,
                 excluded=True,
             )
-    passed = bool(won)
+    passed = bool(winning_indexes)
     reason = (
-        verdict.reason if passed else f"{len(won)}/{len(samples)} samples passed: {verdict.reason}"
+        verdict.reason
+        if passed
+        else f"{len(winning_indexes)}/{len(samples)} samples passed: {verdict.reason}"
     )
-    return EvalCaseResult(
-        case.name,
-        passed,
-        reason,
-        {
-            "response": output.response,
-            "tools": list(output.tools),
-            "artifacts": [artifact.name for artifact in output.artifacts],
-            "artifactError": output.artifact_error or None,
-            "samples": len(samples),
-            "samplesPassed": len(won),
-        },
-    )
+    return EvalCaseResult(name=case.name, passed=passed, reason=reason, evidence=evidence)
 
 
 async def sample_capability(
