@@ -253,6 +253,13 @@ function reportStatus(report) {
   return rows.length && rows.every(item => item.passed)
     ? {label: 'pass', cls: 'pass'} : {label: 'fail', cls: 'fail'};
 }
+function recallMeta(report) {
+  if (!report || report.degradedRecallCount == null || report.unmappedEvidenceCount == null) return '';
+  const coverage = report.meanMappedEvidenceCoverage == null || report.minMappedEvidenceCoverage == null
+    ? 'mapped evidence coverage n/a'
+    : `mapped evidence coverage mean ${pct(report.meanMappedEvidenceCoverage)} · min ${pct(report.minMappedEvidenceCoverage)}`;
+  return `${coverage} · ${report.degradedRecallCount} degraded · ${report.unmappedEvidenceCount} unmapped evidence`;
+}
 function caseStatus(item) {
   if (!item) return {label: 'missing', cls: 'missing'};
   if (item.excluded) return {label: 'excluded', cls: 'excluded'};
@@ -338,9 +345,11 @@ function suiteMarkup(base, current, name) {
   const delta = canCompare ? rate(after.cases) - rate(before.cases) : 0;
   const detail = after ? `${passed(after.cases)}/${scored(after.cases).length}` : '—';
   const deltaText = canCompare ? points(delta) : before && after ? 'digest changed' : '';
+  const recall = recallMeta(after);
   return `<button class="suite-row ${name === state.suite ? 'selected' : ''}" data-suite="${h(name)}">
     <div class="row-top"><span class="row-title">${h(name)}</span><span class="badge ${status.cls}">${status.label}</span></div>
     <div class="row-meta"><span>${detail}</span><span class="delta ${delta < 0 ? 'negative' : delta > 0 ? 'positive' : ''}">${h(deltaText)}</span></div>
+    ${recall ? `<div class="row-meta"><span>${h(recall)}</span></div>` : ''}
   </button>`;
 }
 function matchesFilter(item, movement) {
@@ -445,4 +454,3 @@ render();
 </script>
 </body>
 </html>
-

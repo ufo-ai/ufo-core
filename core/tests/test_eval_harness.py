@@ -29,8 +29,10 @@ from evals.driver import WorkspaceDriver, resolve_workspace_and_agent
 from evals.harness.capability import (
     CapabilityCase,
     CapabilityOutput,
+    CapabilityVerdict,
     SharedArtifact,
     ToolInvocation,
+    TurnLog,
     run_capability_case,
 )
 from evals.harness.harness import EvalCaseResult, EvalReport
@@ -90,6 +92,7 @@ from ufo.workspace import ws
 MODEL = "claude-opus-4-8"
 PROMPT = "You are a helpful assistant."
 EXTENSION = "evals"
+TURN_EVENT = "memory.pre_response_recall"
 
 
 def test_yc_evals_require_explicit_selection() -> None:
@@ -222,10 +225,24 @@ class UncalledJudge:
 
 @dataclass(frozen=True)
 class StaticTarget:
-    judge: None = None
+    judge: RecordingJudge | None = None
 
     async def run(self, case: CapabilityCase) -> TargetResult:
         return TargetResult(CapabilityOutput("evidence", ()), clean=True)
+
+
+@dataclass
+class StaticTurnLogReader:
+    discarded: list[UUID] = field(default_factory=list)
+    missing: bool = False
+
+    async def read(self, turn_id: UUID) -> TurnLog | None:
+        if self.missing:
+            return None
+        return TurnLog(event=TURN_EVENT, turn_id=turn_id, attributes={"memory_ids": []})
+
+    async def discard(self, turn_id: UUID) -> None:
+        self.discarded.append(turn_id)
 
 
 @dataclass
@@ -267,6 +284,12 @@ class CorpusOutcome:
         for trajectory in await self.ctx.trajectories():
             if trajectory.conversation_id == conversation_id:
                 return trajectory
+        return None
+
+
+@dataclass(frozen=True)
+class MissingOutcome:
+    async def settle(self, conversation_id: UUID, turn_id: UUID) -> None:
         return None
 
 
@@ -347,6 +370,58 @@ async def test_capability_case_runs_through_invoke_and_scores_the_trajectory(
     assert attempts[0]["response"] == "Done — found it and remembered it for the team."
 
 
+async def test_in_process_target_attaches_the_turn_logs(db: None, tmp_path) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = StubWorker(blob, workspace_id, _research_transcript())
+    ctx = _context(blob, worker)
+    logs = StaticTurnLogReader()
+    target = InProcessTarget(
+        ctx=ctx,
+        agent_id=agent_id,
+        conversations=DbConversations(workspace_id),
+        outcome=CorpusOutcome(ctx),
+        logs=logs,
+    )
+
+    with ws(workspace_id):
+        result = await target.run(
+            CapabilityCase(
+                "observed",
+                "find the record then remember it",
+                required_tools_scorer(("search_web",)),
+            )
+        )
+
+    assert result.clean
+    assert result.output.log is not None
+    assert result.output.log.event == TURN_EVENT
+    assert logs.discarded == []
+
+
+async def test_in_process_target_raises_when_a_required_turn_log_is_missing(
+    db: None, tmp_path
+) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = StubWorker(blob, workspace_id, _research_transcript())
+    ctx = _context(blob, worker)
+    target = InProcessTarget(
+        ctx=ctx,
+        agent_id=agent_id,
+        conversations=DbConversations(workspace_id),
+        outcome=CorpusOutcome(ctx),
+        logs=StaticTurnLogReader(missing=True),
+    )
+
+    with ws(workspace_id), pytest.raises(RuntimeError, match="turn produced no required log"):
+        await target.run(
+            CapabilityCase("observed", "find the record", required_tools_scorer(("search_web",)))
+        )
+
+
 async def test_capability_case_fails_when_a_required_tool_is_absent(db: None, tmp_path) -> None:
     workspace_id = await _workspace()
     agent_id = await _seed_agent(workspace_id)
@@ -385,11 +460,13 @@ async def test_capability_case_rejects_a_failed_turn_with_a_passing_transcript(
         status="failed",
     )
     ctx = _context(blob, worker)
+    logs = StaticTurnLogReader()
     target = InProcessTarget(
         ctx=ctx,
         agent_id=agent_id,
         conversations=DbConversations(workspace_id),
         outcome=CorpusOutcome(ctx),
+        logs=logs,
     )
     case = CapabilityCase("failed", "answer", exact_scorer("expected"))
 
@@ -398,6 +475,33 @@ async def test_capability_case_rejects_a_failed_turn_with_a_passing_transcript(
 
     assert not result.passed
     assert "turn ended with status failed" in result.reason
+    assert len(logs.discarded) == 1
+
+
+async def test_in_process_target_discards_logs_without_a_terminal_trajectory(
+    db: None, tmp_path
+) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = StubWorker(blob, workspace_id, _research_transcript())
+    logs = StaticTurnLogReader()
+    target = InProcessTarget(
+        ctx=_context(blob, worker),
+        agent_id=agent_id,
+        conversations=DbConversations(workspace_id),
+        outcome=MissingOutcome(),
+        logs=logs,
+    )
+
+    with ws(workspace_id):
+        result = await target.run(
+            CapabilityCase("missing", "answer", required_tools_scorer(("search_web",)))
+        )
+
+    assert not result.clean
+    assert result.failure_reason == "turn produced no terminal transcript"
+    assert len(logs.discarded) == 1
 
 
 async def test_repeated_case_runs_use_conversation_scoped_idempotency_keys(
@@ -856,6 +960,24 @@ async def test_semantic_case_fails_closed_without_a_model_judge() -> None:
 
     assert not result.passed
     assert "semantic rubric requires a model judge" in result.reason
+
+
+async def test_semantic_case_preserves_deterministic_grader_evidence() -> None:
+    async def grader(output: CapabilityOutput) -> CapabilityVerdict:
+        return CapabilityVerdict(True, "observed", {"recallRank": 2})
+
+    case = CapabilityCase(
+        "semantic",
+        "name the evidence",
+        grader,
+        rubric=("The answer names 'evidence'.",),
+    )
+
+    result = await run_capability_case(case, StaticTarget(RecordingJudge()))
+
+    assert result.passed
+    attempts = cast(list[dict[str, object]], result.evidence["attempts"])
+    assert attempts[0]["grader"] == {"recallRank": 2}
 
 
 async def test_rubric_input_is_json_fenced_even_when_the_answer_contains_the_default_fence() -> (

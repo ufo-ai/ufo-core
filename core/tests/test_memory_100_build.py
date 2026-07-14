@@ -159,6 +159,42 @@ def test_snapshot_rejects_missing_evidence(tmp_path: Path) -> None:
         )
 
 
+def test_snapshot_rejects_duplicate_case_evidence(tmp_path: Path) -> None:
+    body = "Company handbook evidence"
+    cases = list(_cases())
+    cases[0] = cases[0].model_copy(update={"evidence_refs": ("memory/handbook", "memory/handbook")})
+    with pytest.raises(ValueError, match="duplicate evidence refs"):
+        write_snapshot(
+            tmp_path,
+            upstreams=(),
+            builder_digest=DIGEST,
+            cases=tuple(cases),
+            pages=(),
+            memories=(
+                SnapshotMemory(
+                    source_ref="memory/handbook",
+                    audience="shared",
+                    body=body,
+                    digest=content_digest(body),
+                ),
+            ),
+        )
+
+
+def test_snapshot_rejects_a_source_ref_shared_by_page_and_memory(tmp_path: Path) -> None:
+    _, pages, memories = _ufo()
+    memory = memories[0].model_copy(update={"source_ref": pages[0].source_ref})
+    with pytest.raises(ValueError, match="source refs overlap"):
+        write_snapshot(
+            tmp_path,
+            upstreams=(),
+            builder_digest=DIGEST,
+            cases=_cases(),
+            pages=(pages[0],),
+            memories=(memory,),
+        )
+
+
 def test_asset_verification_checks_size_and_digest(tmp_path: Path) -> None:
     path = tmp_path / "asset"
     path.write_bytes(b"pinned")

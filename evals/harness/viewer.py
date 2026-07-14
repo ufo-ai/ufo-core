@@ -64,7 +64,7 @@ def write_atomic(path: Path, data: bytes) -> None:
 def record_run(root: Path, run: EvalRun) -> Path:
     """Persist one run and rebuild the archive viewer around every recorded run."""
     path = root / RUNS_DIR / f"{run.id}.json"
-    write_atomic(path, run.model_dump_json(indent=2).encode())
+    write_atomic(path, run.model_dump_json(indent=2, by_alias=True, exclude_none=True).encode())
     write_viewer(root, load_runs(root))
     return path
 
@@ -82,7 +82,7 @@ def render_viewer(
     """Render an offline dashboard whose data and interface live in one shareable HTML asset."""
     payload = json.dumps(
         {
-            "runs": [run.model_dump(mode="json") for run in runs],
+            "runs": [run.model_dump(mode="json", by_alias=True, exclude_none=True) for run in runs],
             "current": str(current) if current is not None else "",
             "baseline": str(baseline) if baseline is not None else "",
         },

@@ -14,12 +14,14 @@ import os
 import subprocess
 import sys
 import webbrowser
+from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 from importlib.metadata import version
 from pathlib import Path
 from uuid import UUID, uuid4
 
 from cryptography.fernet import Fernet
+from ufo_ext_memory.events import MEMORY_RECALL_EVENT
 
 from evals.driver import WorkspaceDriver, eval_context, resolve_workspace_and_agent
 from evals.harness.harness import EvalReport
@@ -37,6 +39,7 @@ from evals.harness.viewer import (
 )
 from evals.memory_100.runner import Memory100Run, load_memory_100
 from evals.registry import TASKS, selected_run_tasks
+from evals.turn_logs import TurnLogCollector
 from ufo.blob import blob_store_for
 from ufo.config import Config, config_path, load_config
 from ufo.credentials import CredentialStore
@@ -142,14 +145,19 @@ def main(argv: list[str] | None = None) -> None:
         if workspace_id is not None and workspace_id != memory_run.readiness.workspace_id:
             parser.error("--workspace does not match the memory_100 readiness workspace")
         workspace_id = memory_run.readiness.workspace_id
-    reports = asyncio.run(_run(config, tasks, args.agent, workspace_id))
+    collector = (
+        None
+        if memory_run is None
+        else TurnLogCollector.from_endpoint(
+            config.o11y.otlp_endpoint,
+            memory_run.readiness.workspace_id,
+            MEMORY_RECALL_EVENT,
+        )
+    )
+    reports = asyncio.run(_run(config, tasks, args.agent, workspace_id, collector))
     failed = False
     for report in reports:
-        passed = sum(1 for case in report.scored if case.passed)
-        print(
-            f"{report.name} {passed}/{len(report.scored)} passed, "
-            f"{report.excluded_count} excluded (rate {report.pass_rate:.0%}) {report.digest}"
-        )
+        print(report.console_summary)
         failed = failed or not report.passed
     try:
         revision_process = subprocess.run(
@@ -188,40 +196,45 @@ async def _run(
     tasks: tuple[EvalTask, ...],
     agent_name: str,
     workspace_id: UUID | None = None,
+    collector: TurnLogCollector | None = None,
 ) -> tuple[EvalReport, ...]:
     init_db(config.database.url)
     key = os.environ.get(config.credentials.key_env)
     credentials = CredentialStore(fernet=Fernet(key.encode())) if key else None
     init_workspace_credentials(credentials)
     try:
-        workspace_id, agent_id, agent_prompt, agent_model = await resolve_workspace_and_agent(
-            agent_name, workspace_id
-        )
-        blob = blob_store_for(config.blob)
-        driver = WorkspaceDriver(workspace_id, agent_id, agent_prompt, blob)
-        ctx = eval_context(config, workspace_id, blob)
-        if ctx.model is None:
-            raise RuntimeError("eval context requires model access")
-        target = InProcessTarget(
-            ctx=ctx,
-            agent_id=agent_id,
-            conversations=driver,
-            outcome=driver,
-            judge=ModelJudge(ctx.model),
-            blob=blob,
-        )
-        with ws(workspace_id):
-            reports = tuple([await task.run(target) for task in tasks])
-        return tuple(
-            report.model_copy(
-                update={
-                    "target_model": agent_model,
-                    "judge_model": ctx.model.model,
-                    "judge_revision": JUDGE_REVISION,
-                }
+        async with AsyncExitStack() as stack:
+            if collector is not None:
+                await stack.enter_async_context(collector.serving())
+            workspace_id, agent_id, agent_prompt, agent_model = await resolve_workspace_and_agent(
+                agent_name, workspace_id
             )
-            for report in reports
-        )
+            blob = blob_store_for(config.blob)
+            driver = WorkspaceDriver(workspace_id, agent_id, agent_prompt, blob)
+            ctx = eval_context(config, workspace_id, blob)
+            if ctx.model is None:
+                raise RuntimeError("eval context requires model access")
+            target = InProcessTarget(
+                ctx=ctx,
+                agent_id=agent_id,
+                conversations=driver,
+                outcome=driver,
+                judge=ModelJudge(ctx.model),
+                blob=blob,
+                logs=collector,
+            )
+            with ws(workspace_id):
+                reports = tuple([await task.run(target) for task in tasks])
+            return tuple(
+                report.model_copy(
+                    update={
+                        "target_model": agent_model,
+                        "judge_model": ctx.model.model,
+                        "judge_revision": JUDGE_REVISION,
+                    }
+                )
+                for report in reports
+            )
     finally:
         init_workspace_credentials(None)
         await dispose_db()

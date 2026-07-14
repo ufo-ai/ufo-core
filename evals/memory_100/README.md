@@ -34,7 +34,14 @@ The command prints the generated `readiness.json`. It contains the snapshot and 
 digests, deterministic workspace/member bindings, row counts, and every evidence ref's durable
 owner. Materialization refuses a database that already contains a workspace or index chunks.
 
-Run `ufoctl serve` against that database, then execute the answer suite:
+Configure the dedicated eval tenant to export OTel to a loopback receiver hosted by the eval run:
+
+```toml
+[o11y]
+otlp_endpoint = "http://127.0.0.1:4318"
+```
+
+Start the answer suite first so its receiver owns the endpoint:
 
 ```bash
 python -m evals \
@@ -42,7 +49,22 @@ python -m evals \
   --memory-100-state .memory-100/state/<snapshot-sha>/readiness.json
 ```
 
-Each case opens a conversation as its materialized member and grades the served answer against the
-pinned reference and answer facts. Evidence refs remain in the snapshot and readiness artifact so
-recall instrumentation can compare later variants against this baseline. The report digest includes
-both the logical snapshot and materialized corpus digests.
+Start `ufoctl serve` against the same config in a second terminal. The cases may queue before its
+worker starts.
+
+The eval command owns the configured OTLP endpoint while it runs. For each turn, the memory
+extension's `user_prompt_submit` hook emits one content-free structured event containing the turn
+id, the ordered memory-item ids actually injected into context, and the error class when recall
+degraded. Episodic topic pointers are excluded from both the injected context and the event. Event
+logging is fail-open and does not alter the recall query, ranking, timeout, or context.
+
+The receiver accepts only the configured event for the materialized workspace and discards traces
+and metrics. The endpoint must be unused, loopback, and dedicated to this disposable eval tenant.
+Runs are recorded as structured JSON and rendered by the offline HTML viewer, including the
+captured event and evidence ranks. Memory reports surface `meanMappedEvidenceCoverage`,
+`minMappedEvidenceCoverage`, `degradedRecallCount`, and `unmappedEvidenceCount` at top level;
+stdout and viewer suite metadata repeat the same aggregate. The report digest includes the logical
+snapshot, materialized corpus, and recall-grading policy.
+
+Evidence coverage maps injected memory-item ids to readiness owners. A source page without a
+materialized memory-item owner is reported as unmapped rather than inferred from page provenance.

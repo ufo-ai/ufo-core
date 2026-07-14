@@ -131,12 +131,20 @@ def _validate_records(
     case_ids = [case.id for case in cases]
     if len(set(case_ids)) != len(case_ids):
         raise ValueError("snapshot contains duplicate case ids")
+    duplicate_evidence = next(
+        (case.id for case in cases if len(set(case.evidence_refs)) != len(case.evidence_refs)),
+        None,
+    )
+    if duplicate_evidence is not None:
+        raise ValueError(f"snapshot case {duplicate_evidence!r} contains duplicate evidence refs")
     page_refs = [page.source_ref for page in pages]
     if len(set(page_refs)) != len(page_refs):
         raise ValueError("snapshot contains duplicate page source refs")
     memory_refs = [memory.source_ref for memory in memories]
     if len(set(memory_refs)) != len(memory_refs):
         raise ValueError("snapshot contains duplicate memory source refs")
+    if set(page_refs) & set(memory_refs):
+        raise ValueError("snapshot page and memory source refs overlap")
     evidence_refs = set(page_refs) | set(memory_refs)
     missing_evidence = sorted(
         {ref for case in cases for ref in case.evidence_refs if ref not in evidence_refs}

@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from hashlib import sha256
 from json import dumps
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 type Json = str | int | float | bool | None | list[Json] | dict[str, Json]
 type JsonObject = dict[str, Json]
@@ -25,7 +25,7 @@ class EvalCaseResult(BaseModel):
 
 
 class EvalReport(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
 
     name: str
     suite: str
@@ -34,6 +34,14 @@ class EvalReport(BaseModel):
     target_model: str | None = None
     judge_model: str | None = None
     judge_revision: str | None = None
+    mean_mapped_evidence_coverage: float | None = Field(
+        default=None, ge=0.0, le=1.0, alias="meanMappedEvidenceCoverage"
+    )
+    min_mapped_evidence_coverage: float | None = Field(
+        default=None, ge=0.0, le=1.0, alias="minMappedEvidenceCoverage"
+    )
+    degraded_recall_count: int | None = Field(default=None, ge=0, alias="degradedRecallCount")
+    unmapped_evidence_count: int | None = Field(default=None, ge=0, alias="unmappedEvidenceCount")
 
     @property
     def scored(self) -> tuple[EvalCaseResult, ...]:
@@ -59,8 +67,31 @@ class EvalReport(BaseModel):
             return 0.0
         return sum(1 for case in scored if case.passed) / len(scored)
 
+    @property
+    def console_summary(self) -> str:
+        passed = sum(1 for case in self.scored if case.passed)
+        summary = (
+            f"{self.name} {passed}/{len(self.scored)} passed, {self.excluded_count} excluded "
+            f"(rate {self.pass_rate:.0%})"
+        )
+        if self.degraded_recall_count is None or self.unmapped_evidence_count is None:
+            return f"{summary} {self.digest}"
+        coverage = "mapped evidence coverage n/a"
+        if (
+            self.mean_mapped_evidence_coverage is not None
+            and self.min_mapped_evidence_coverage is not None
+        ):
+            coverage = (
+                f"mapped evidence coverage mean {self.mean_mapped_evidence_coverage:.0%}, "
+                f"min {self.min_mapped_evidence_coverage:.0%}"
+            )
+        return (
+            f"{summary}, {coverage}, {self.degraded_recall_count} degraded, "
+            f"{self.unmapped_evidence_count} unmapped evidence {self.digest}"
+        )
+
     def to_json(self) -> JsonObject:
-        return {
+        result: JsonObject = {
             "name": self.name,
             "suite": self.suite,
             "digest": self.digest,
@@ -81,6 +112,16 @@ class EvalReport(BaseModel):
                 for case in self.cases
             ],
         }
+        if self.degraded_recall_count is not None and self.unmapped_evidence_count is not None:
+            result.update(
+                {
+                    "meanMappedEvidenceCoverage": self.mean_mapped_evidence_coverage,
+                    "minMappedEvidenceCoverage": self.min_mapped_evidence_coverage,
+                    "degradedRecallCount": self.degraded_recall_count,
+                    "unmappedEvidenceCount": self.unmapped_evidence_count,
+                }
+            )
+        return result
 
 
 def digest_payload(payload: Mapping[str, Json]) -> str:

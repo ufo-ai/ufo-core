@@ -90,6 +90,7 @@ dev = [
     "pytest-xdist>=3.6",
     "ruff>=0.7",
     "types-croniter>=6.2",
+    "types-protobuf>=6.30",
     "types-pyyaml>=6.0",
 ]
 

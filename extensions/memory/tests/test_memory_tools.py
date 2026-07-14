@@ -7,6 +7,7 @@ in a fresh one — both by the search tool and, unprompted, by the user_prompt_s
 `load_sessions` stays a core builtin and keeps its proof here, driven with a memory-free context."""
 
 import json
+import logging
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,6 +18,7 @@ import sqlalchemy as sa
 import ufo_ext_memory.manifest as memory
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
+from ufo_ext_memory.events import MEMORY_RECALL_EVENT
 from ufo_ext_memory.store import MemoryIndexer, memory_item
 
 from ufo.blob import FilesystemBlobStore
@@ -164,7 +166,11 @@ async def test_memory_search_provider_rejects_an_empty_query_set() -> None:
         await provider.search((), None)
 
 
-async def test_user_prompt_submit_hook_injects_a_recalled_fact(clean: None) -> None:
+async def test_user_prompt_submit_hook_injects_and_observes_a_recalled_fact(
+    clean: None,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The headline: a fact committed in one context is auto-injected into a fresh turn by the
     user_prompt_submit recall hook — no tool call, the recall path is the hook itself."""
     workspace_id = await _workspace()
@@ -196,31 +202,110 @@ async def test_user_prompt_submit_hook_injects_a_recalled_fact(clean: None) -> N
             memory.MemoryUpdateInput(body="the vault code is 4821"),
         )
         await _indexer(embed).run()
+        async with workspace_tx() as connection:
+            memory_id = (
+                await connection.execute(
+                    sa.select(memory_item.c.id).where(
+                        memory_item.c.workspace_id == workspace_id,
+                        memory_item.c.body == "the vault code is 4821",
+                    )
+                )
+            ).scalar_one()
 
-        outcome = await memory.recall_hook(
+        turn_id = uuid4()
+        hook = HookContext(
+            ext=ext,
+            turn=Turn(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=uuid4(),
+                agent_id=uuid4(),
+                seq=1,
+                status="running",
+                inbound="what is the vault code",
+                created_at=datetime(2026, 7, 9, tzinfo=UTC),
+            ),
+            agent=Agent(prompt="p", model="claude-opus-4-8"),
+            speaker_member_id=member,
+            audience_member_id=member,
+            payload=UserPromptSubmit(text="what is the vault code"),
+        )
+        with caplog.at_level(logging.INFO, logger="ufo"):
+            outcome = await memory.recall_hook(hook)
+        record = next(record for record in caplog.records if record.message == MEMORY_RECALL_EVENT)
+        assert record.ufo["turn_id"] == str(turn_id)
+        assert record.ufo["memory_ids"] == [str(memory_id)]
+        assert "error_class" not in record.ufo
+        assert "vault code" not in str(record.ufo)
+        assert isinstance(outcome, InjectContext)
+        assert "the vault code is 4821" in outcome.text
+
+        without_turn = await memory.recall_hook(
             HookContext(
                 ext=ext,
-                turn=Turn(
-                    id=uuid4(),
-                    workspace_id=workspace_id,
-                    conversation_id=uuid4(),
-                    agent_id=uuid4(),
-                    seq=1,
-                    status="running",
-                    inbound="what is the vault code",
-                    created_at=datetime(2026, 7, 9, tzinfo=UTC),
-                ),
+                turn=None,
                 agent=Agent(prompt="p", model="claude-opus-4-8"),
                 speaker_member_id=member,
                 audience_member_id=member,
                 payload=UserPromptSubmit(text="what is the vault code"),
             )
         )
+        assert isinstance(without_turn, InjectContext)
+        assert "the vault code is 4821" in without_turn.text
+
+        def fail_log(_event: str, **_fields: object) -> None:
+            raise RuntimeError("collector unavailable")
+
+        monkeypatch.setattr(memory, "log", fail_log)
+        outcome = await memory.recall_hook(hook)
         assert isinstance(outcome, InjectContext)
         assert "the vault code is 4821" in outcome.text
 
 
-async def test_recall_hook_excludes_episodic_topic_pointers(clean: None, tmp_path: Path) -> None:
+async def test_recall_hook_observes_search_failure_without_denial(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error_name = "MemoryUnavailable" * 16
+    memory_unavailable = type(error_name, (RuntimeError,), {})
+
+    class BrokenStore:
+        async def recall(
+            self, query: str, subjects: frozenset[str], limit: int
+        ) -> tuple[object, ...]:
+            raise memory_unavailable("memory unavailable")
+
+    monkeypatch.setattr(memory, "store_for", lambda ext: BrokenStore())
+    workspace_id = uuid4()
+    turn = Turn(
+        id=uuid4(),
+        workspace_id=workspace_id,
+        conversation_id=uuid4(),
+        agent_id=uuid4(),
+        seq=1,
+        status="running",
+        inbound="what is the vault code",
+        created_at=datetime(2026, 7, 9, tzinfo=UTC),
+    )
+    with caplog.at_level(logging.INFO, logger="ufo"), ws(workspace_id):
+        outcome = await memory.recall_hook(
+            HookContext(
+                ext=_ext(object(), object()),
+                turn=turn,
+                agent=Agent(prompt="p", model="claude-opus-4-8"),
+                speaker_member_id=None,
+                audience_member_id=None,
+                payload=UserPromptSubmit(text="what is the vault code"),
+            )
+        )
+    record = next(record for record in caplog.records if record.message == MEMORY_RECALL_EVENT)
+    assert outcome is None
+    assert record.ufo["memory_ids"] == []
+    assert record.ufo["error_class"] == error_name[: memory.MAX_RECALL_ERROR_CLASS_CHARS]
+
+
+async def test_recall_hook_excludes_episodic_topic_pointers(
+    clean: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     """An episodic hit is rewritten to a topic pointer and dropped from the auto-injected context;
     a durable fact is injected verbatim — the episodic→topic exclusion, end to end through the
     user_prompt_submit hook."""
@@ -239,29 +324,43 @@ async def test_recall_hook_excludes_episodic_topic_pointers(clean: None, tmp_pat
             item_class="episodic",
         )
         await _indexer(embed).run()
+        async with workspace_tx() as connection:
+            memory_ids = {
+                row.body: str(row.id)
+                for row in (
+                    await connection.execute(
+                        sa.select(memory_item.c.id, memory_item.c.body).where(
+                            memory_item.c.workspace_id == workspace_id
+                        )
+                    )
+                ).all()
+            }
 
-        outcome = await memory.recall_hook(
-            HookContext(
-                ext=ext,
-                turn=Turn(
-                    id=uuid4(),
-                    workspace_id=workspace_id,
-                    conversation_id=uuid4(),
-                    agent_id=uuid4(),
-                    seq=1,
-                    status="running",
-                    inbound="api key pricing",
-                    created_at=datetime(2026, 7, 9, tzinfo=UTC),
-                ),
-                agent=Agent(prompt="p", model="claude-opus-4-8"),
-                speaker_member_id=member,
-                audience_member_id=member,
-                payload=UserPromptSubmit(text="api key pricing"),
+        with caplog.at_level(logging.INFO, logger="ufo"):
+            outcome = await memory.recall_hook(
+                HookContext(
+                    ext=ext,
+                    turn=Turn(
+                        id=uuid4(),
+                        workspace_id=workspace_id,
+                        conversation_id=uuid4(),
+                        agent_id=uuid4(),
+                        seq=1,
+                        status="running",
+                        inbound="api key pricing",
+                        created_at=datetime(2026, 7, 9, tzinfo=UTC),
+                    ),
+                    agent=Agent(prompt="p", model="claude-opus-4-8"),
+                    speaker_member_id=member,
+                    audience_member_id=member,
+                    payload=UserPromptSubmit(text="api key pricing"),
+                )
             )
-        )
+        record = next(record for record in caplog.records if record.message == MEMORY_RECALL_EVENT)
         assert isinstance(outcome, InjectContext)
         assert "the api key rotates monthly" in outcome.text
         assert "browsed the pricing page once" not in outcome.text
+        assert record.ufo["memory_ids"] == [memory_ids["the api key rotates monthly"]]
 
 
 async def test_recall_hook_ignores_a_non_prompt_payload(clean: None) -> None:

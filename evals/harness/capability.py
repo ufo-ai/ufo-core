@@ -7,8 +7,11 @@ retain text, completion, and error state; the agent's configured tool set remain
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+from uuid import UUID
+
+from pydantic import BaseModel, Field
 
 from evals.harness.harness import EvalCaseResult, Json, JsonObject, infra_error
 from evals.harness.judge import JUDGE_REVISION, rubric_pass
@@ -21,6 +24,7 @@ if TYPE_CHECKING:
 class CapabilityVerdict:
     passed: bool
     reason: str
+    evidence: JsonObject = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -46,16 +50,24 @@ class SharedArtifact:
     content: bytes
 
 
+class TurnLog(BaseModel):
+    """One allowlisted structured log exported by an evaluated turn."""
+
+    event: str = Field(min_length=1)
+    turn_id: UUID
+    attributes: JsonObject
+
+
 @dataclass(frozen=True)
 class CapabilityOutput:
-    """What a grader sees: the agent's final answer, the ordered tool invocations its turn made, and
-    the text of any tool call that errored."""
+    """The answer, tool trajectory, artifacts, and allowlisted log visible to a grader."""
 
     response: str
     calls: tuple[ToolInvocation, ...]
     tool_errors: tuple[str, ...] = ()
     artifacts: tuple[SharedArtifact, ...] = ()
     artifact_error: str = ""
+    log: TurnLog | None = None
 
     @property
     def tools(self) -> tuple[str, ...]:
@@ -124,6 +136,10 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
                 "toolErrors": list(sample_output.tool_errors),
                 "artifacts": [artifact.name for artifact in sample_output.artifacts],
                 "artifactError": sample_output.artifact_error or None,
+                "log": (
+                    None if sample_output.log is None else sample_output.log.model_dump(mode="json")
+                ),
+                "grader": sample_verdict.evidence or None,
             }
         )
     evidence: JsonObject = {
@@ -165,4 +181,6 @@ async def sample_capability(
     passed, reason = await rubric_pass(
         case.message, result.output.response, case.rubric, target.judge
     )
-    return result.output, CapabilityVerdict(passed, f"{deterministic.reason}; {reason}")
+    return result.output, CapabilityVerdict(
+        passed, f"{deterministic.reason}; {reason}", deterministic.evidence
+    )

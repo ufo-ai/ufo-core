@@ -1,16 +1,52 @@
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, replace
 from pathlib import Path
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from ufo_ext_memory.events import (
+    MAX_RECALL_ERROR_CLASS_CHARS,
+    MAX_RECALLED_MEMORY_IDS,
+    MEMORY_RECALL_EVENT,
+)
 
 from evals.harness.capability import (
     CapabilityCase,
     CapabilityOutput,
     CapabilityVerdict,
 )
+from evals.harness.harness import EvalReport, Json, JsonObject
 from evals.harness.judge import MAX_CRITERIA, MAX_CRITERION_CHARS
 from evals.harness.registry import EvalTask, capability_task
+from evals.harness.target import CapabilityTarget
 from evals.memory_100.models import SnapshotCase
 from evals.memory_100.snapshot import load_snapshot
 from evals.memory_100.state import CorpusReadiness
+
+MEMORY_100_GRADER_REVISION = "memory-item-ids-1"
+
+
+class MemoryRecallEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    memory_ids: tuple[UUID, ...] = Field(max_length=MAX_RECALLED_MEMORY_IDS)
+    error_class: str | None = Field(
+        default=None, min_length=1, max_length=MAX_RECALL_ERROR_CLASS_CHARS
+    )
+
+    @model_validator(mode="after")
+    def _valid_outcome(self) -> "MemoryRecallEvent":
+        if len(set(self.memory_ids)) != len(self.memory_ids):
+            raise ValueError("memory recall IDs must be unique")
+        if self.error_class is not None and self.memory_ids:
+            raise ValueError("failed memory recall cannot contain IDs")
+        return self
+
+
+@dataclass(frozen=True)
+class ExpectedEvidence:
+    source_ref: str
+    memory_ids: frozenset[UUID]
 
 
 @dataclass(frozen=True)
@@ -32,18 +68,94 @@ def load_memory_100(snapshot_root: Path, readiness_path: Path) -> Memory100Run:
     unknown = sorted({case.audience for case in snapshot.cases} - audiences.keys())
     if unknown:
         raise ValueError(f"memory_100 readiness is missing audiences: {', '.join(unknown)}")
-    cases = tuple(
-        CapabilityCase(
-            name=case.id,
-            message=case.question,
-            grader=_answer_grader,
-            digest_tag=(f"{snapshot.manifest.digest}:{readiness.corpus_digest}:{case.id}"),
-            rubric=_answer_rubric(case),
-            member_key=audiences[case.audience],
+    cases: list[CapabilityCase] = []
+    for case in snapshot.cases:
+        expected = tuple(
+            ExpectedEvidence(
+                source_ref,
+                frozenset(
+                    owner.owner_id
+                    for owner in readiness.evidence
+                    if owner.source_ref == source_ref and owner.owner_kind == "memory_item"
+                ),
+            )
+            for source_ref in case.evidence_refs
         )
-        for case in snapshot.cases
+        evidence_identity = json.dumps(
+            [
+                [item.source_ref, sorted(str(memory_id) for memory_id in item.memory_ids)]
+                for item in expected
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        cases.append(
+            CapabilityCase(
+                name=case.id,
+                message=case.question,
+                grader=Memory100Grader(expected),
+                digest_tag=(
+                    f"{snapshot.manifest.digest}:{readiness.corpus_digest}:"
+                    f"{MEMORY_100_GRADER_REVISION}:{case.id}:{evidence_identity}"
+                ),
+                rubric=_answer_rubric(case),
+                member_key=audiences[case.audience],
+            )
+        )
+    task = capability_task("memory_100", tuple(cases))
+
+    async def run(target: CapabilityTarget) -> EvalReport:
+        report = await task.run(target)
+        return _with_memory_recall_aggregates(report)
+
+    return Memory100Run(replace(task, run=run), readiness)
+
+
+def _with_memory_recall_aggregates(report: EvalReport) -> EvalReport:
+    coverages: list[float] = []
+    degraded_recall_count = 0
+    unmapped_evidence_count = 0
+    for case in report.cases:
+        selected_attempt = case.evidence.get("selectedAttempt")
+        attempts = case.evidence.get("attempts")
+        if (
+            isinstance(selected_attempt, bool)
+            or not isinstance(selected_attempt, int)
+            or not isinstance(attempts, list)
+            or not 0 <= selected_attempt < len(attempts)
+        ):
+            raise TypeError("memory_100 selected attempt evidence is invalid")
+        attempt = attempts[selected_attempt]
+        if not isinstance(attempt, dict):
+            raise TypeError("memory_100 selected attempt must be an object")
+        grader = attempt.get("grader")
+        if grader is None:
+            continue
+        if not isinstance(grader, dict):
+            raise TypeError("memory_100 grader evidence must be an object")
+        coverage = grader.get("coverage")
+        if coverage is not None:
+            if isinstance(coverage, bool) or not isinstance(coverage, (int, float)):
+                raise TypeError("memory_100 coverage must be a number or null")
+            coverages.append(float(coverage))
+        recall_error = grader.get("recallError")
+        if recall_error is not None:
+            if not isinstance(recall_error, str):
+                raise TypeError("memory_100 recall error must be a string or null")
+            degraded_recall_count += 1
+        unmapped = grader.get("unmappedEvidence")
+        if not isinstance(unmapped, list) or not all(isinstance(item, str) for item in unmapped):
+            raise TypeError("memory_100 unmapped evidence must be a list of source refs")
+        unmapped_evidence_count += len(unmapped)
+    mean_coverage = sum(coverages) / len(coverages) if coverages else None
+    return report.model_copy(
+        update={
+            "mean_mapped_evidence_coverage": mean_coverage,
+            "min_mapped_evidence_coverage": min(coverages) if coverages else None,
+            "degraded_recall_count": degraded_recall_count,
+            "unmapped_evidence_count": unmapped_evidence_count,
+        }
     )
-    return Memory100Run(capability_task("memory_100", cases), readiness)
 
 
 def _answer_rubric(case: SnapshotCase) -> tuple[str, ...]:
@@ -77,7 +189,47 @@ def _answer_rubric(case: SnapshotCase) -> tuple[str, ...]:
     return rubric
 
 
-async def _answer_grader(output: CapabilityOutput) -> CapabilityVerdict:
-    if not output.response.strip():
-        return CapabilityVerdict(False, "answer is empty")
-    return CapabilityVerdict(True, "answer is present")
+@dataclass(frozen=True)
+class Memory100Grader:
+    expected: tuple[ExpectedEvidence, ...]
+
+    async def __call__(self, output: CapabilityOutput) -> CapabilityVerdict:
+        if output.log is None:
+            return CapabilityVerdict(False, "memory recall log is missing")
+        if output.log.event != MEMORY_RECALL_EVENT:
+            return CapabilityVerdict(False, "memory recall log has the wrong event")
+        try:
+            recall = MemoryRecallEvent.model_validate(output.log.attributes)
+        except ValidationError:
+            return CapabilityVerdict(False, "memory recall log is invalid")
+        selected = recall.memory_ids
+        ranks: dict[str, Json] = {
+            owner.source_ref: next(
+                (
+                    rank
+                    for rank, memory_id in enumerate(selected, start=1)
+                    if memory_id in owner.memory_ids
+                ),
+                None,
+            )
+            for owner in self.expected
+        }
+        found = sum(rank is not None for rank in ranks.values())
+        expected = sum(bool(owner.memory_ids) for owner in self.expected)
+        evidence: JsonObject = {
+            "recallError": recall.error_class,
+            "selectedCount": len(selected),
+            "expectedCount": expected,
+            "evidenceRanks": ranks,
+            "unmappedEvidence": [
+                owner.source_ref for owner in self.expected if not owner.memory_ids
+            ],
+            "coverage": found / expected if expected else None,
+        }
+        if not output.response.strip():
+            return CapabilityVerdict(False, "answer is empty", evidence)
+        return CapabilityVerdict(
+            True,
+            f"answer is present; recall found {found}/{expected} mapped evidence",
+            evidence,
+        )

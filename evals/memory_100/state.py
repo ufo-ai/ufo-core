@@ -3,6 +3,7 @@ import json
 from dataclasses import dataclass
 from importlib import import_module
 from pathlib import Path
+from typing import Literal
 from uuid import UUID
 
 import sqlalchemy as sa
@@ -26,8 +27,8 @@ class AudienceBinding(BaseModel):
 
 class EvidenceOwner(BaseModel):
     source_ref: str
-    owner_kind: str
-    owner_id: str
+    owner_kind: Literal["memory_item", "page"]
+    owner_id: UUID
     subject: str
 
 
@@ -214,8 +215,8 @@ class CorpusAttestor:
                     *(
                         EvidenceOwner(
                             source_ref=page_by_id[row.id].source_ref,
-                            owner_kind=OWNER_KIND_PAGE,
-                            owner_id=str(row.id),
+                            owner_kind="page",
+                            owner_id=row.id,
                             subject=row.subject,
                         )
                         for row in page_rows
@@ -223,8 +224,8 @@ class CorpusAttestor:
                     *(
                         EvidenceOwner(
                             source_ref=row.source_ref,
-                            owner_kind=OWNER_KIND_MEMORY_ITEM,
-                            owner_id=str(row.id),
+                            owner_kind="memory_item",
+                            owner_id=row.id,
                             subject=row.subject,
                         )
                         for row in memory_rows

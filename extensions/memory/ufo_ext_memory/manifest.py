@@ -38,6 +38,7 @@ from ufo.sdk.manifest import (
     UserPromptSubmit,
 )
 from ufo.sdk.memory import DEFAULT_MEMORY_SEARCH_PROVIDER, MemoryMatch
+from ufo.sdk.o11y import log
 from ufo.sdk.sources import SHARED_SUBJECT, member_subject
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_memory.condenser import (
@@ -45,6 +46,11 @@ from ufo_ext_memory.condenser import (
     MIN_OLDEST_AGE,
     FactDeriver,
     MemoryConsolidator,
+)
+from ufo_ext_memory.events import (
+    MAX_RECALL_ERROR_CLASS_CHARS,
+    MAX_RECALLED_MEMORY_IDS,
+    MEMORY_RECALL_EVENT,
 )
 from ufo_ext_memory.store import (
     DEFAULT_CONFIDENCE,
@@ -67,7 +73,7 @@ NAME = "memory"
 VERSION = "0.1.0"
 MEMORY_SEARCH_LIMIT = 8
 MAX_MEMORY_QUERIES = 3
-RECALL_LIMIT = 8
+RECALL_LIMIT = MAX_RECALLED_MEMORY_IDS
 RECALL_SOFT_TIMEOUT_SECONDS = 4.0
 RECALL_CONTEXT_PREFIX = "Relevant memory:\n"
 MEMORY_INDEX_JOB = "memory_index"
@@ -248,13 +254,28 @@ async def recall_hook(ctx: HookContext) -> HookOutcome:
     if not isinstance(ctx.payload, UserPromptSubmit):
         return None
     subjects = recall_subjects(ctx.audience_member_id)
+    recalled: tuple[Recalled, ...] = ()
+    error_class: str | None = None
     try:
         async with asyncio.timeout(RECALL_SOFT_TIMEOUT_SECONDS):
             recalled = await store_for(ctx.ext).recall(ctx.payload.text, subjects, RECALL_LIMIT)
-    except Exception:
+    except Exception as error:
+        error_class = type(error).__name__[:MAX_RECALL_ERROR_CLASS_CHARS]
         logger.warning("memory.recall_hook.degraded", exc_info=True)
+    injected = tuple(item for item in recalled if item.recall_mode != "topic")
+    if ctx.turn is not None:
+        try:
+            log(
+                MEMORY_RECALL_EVENT,
+                turn_id=str(ctx.turn.id),
+                memory_ids=[str(item.memory_id) for item in injected],
+                **({"error_class": error_class} if error_class is not None else {}),
+            )
+        except Exception:
+            logger.warning("memory.recall_log_failed", exc_info=True)
+    if error_class is not None:
         return None
-    lines = [f"- {item.body}" for item in recalled if item.recall_mode != "topic"]
+    lines = [f"- {item.body}" for item in injected]
     return InjectContext(RECALL_CONTEXT_PREFIX + "\n".join(lines)) if lines else None
 
 

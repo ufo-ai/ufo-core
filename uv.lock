@@ -2860,6 +2860,15 @@ wheels = [
 ]
 
 [[package]]
+name = "types-protobuf"
+version = "7.34.1.20260518"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/29/59/e2b13b499d15e6720150c4b1a8d91e31fcacf716b432397475b3151ff7e4/types_protobuf-7.34.1.20260518.tar.gz", hash = "sha256:28cfaded25889cb83ebfb63cfb0a43628f0b6f3785767bec17287dc6468795f2", size = 68936, upload-time = "2026-05-18T06:01:47.332Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2a/1f/ec5caf72c2e3b688ca3927e0979a04ddad19e1afc4bf1c199bd743e0f419/types_protobuf-7.34.1.20260518-py3-none-any.whl", hash = "sha256:a0a5337413347166439c0e07cbc26c6164d091401c6f01b1dfd8cdb966c4dd8f", size = 85992, upload-time = "2026-05-18T06:01:45.696Z" },
+]
+
+[[package]]
 name = "types-pyyaml"
 version = "6.0.12.20260518"
 source = { registry = "https://pypi.org/simple" }
@@ -2939,6 +2948,7 @@ dev = [
     { name = "pytest-xdist" },
     { name = "ruff" },
     { name = "types-croniter" },
+    { name = "types-protobuf" },
     { name = "types-pyyaml" },
     { name = "ufo-control" },
 ]
@@ -2981,6 +2991,7 @@ dev = [
     { name = "pytest-xdist", specifier = ">=3.6" },
     { name = "ruff", specifier = ">=0.7" },
     { name = "types-croniter", specifier = ">=6.2" },
+    { name = "types-protobuf", specifier = ">=6.30" },
     { name = "types-pyyaml", specifier = ">=6.0" },
     { name = "ufo-control", editable = "control" },
 ]

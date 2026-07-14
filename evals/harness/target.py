@@ -19,6 +19,7 @@ from evals.harness.capability import (
     CapabilityOutput,
     SharedArtifact,
     ToolInvocation,
+    TurnLog,
 )
 from evals.harness.judge import JudgeLeg
 from ufo.blob import BlobNotFound, BlobStore
@@ -63,6 +64,12 @@ class TurnOutcome(Protocol):
     async def settle(self, conversation_id: UUID, turn_id: UUID) -> Trajectory | None: ...
 
 
+class TurnLogReader(Protocol):
+    async def read(self, turn_id: UUID) -> TurnLog | None: ...
+
+    async def discard(self, turn_id: UUID) -> None: ...
+
+
 @dataclass(frozen=True)
 class InProcessTarget:
     ctx: ExtensionContext
@@ -71,6 +78,7 @@ class InProcessTarget:
     outcome: TurnOutcome
     judge: JudgeLeg | None = None
     blob: BlobStore | None = None
+    logs: TurnLogReader | None = None
 
     async def run(self, case: CapabilityCase) -> TargetResult:
         conversation_id = await self.conversations.open(case.name, case.member_key)
@@ -88,13 +96,22 @@ class InProcessTarget:
             )
         trajectory = await self.outcome.settle(conversation_id, turn_id)
         if trajectory is None:
+            if self.logs is not None:
+                await self.logs.discard(turn_id)
             return TargetResult(
                 CapabilityOutput("", (), ()), False, "turn produced no terminal transcript"
             )
         output = capability_output(trajectory.messages)
         turn_failure = await self._turn_failure(turn_id)
         if turn_failure:
+            if self.logs is not None:
+                await self.logs.discard(turn_id)
             return TargetResult(output, clean=False, failure_reason=turn_failure)
+        if self.logs is not None:
+            log = await self.logs.read(turn_id)
+            if log is None:
+                raise RuntimeError("turn produced no required log")
+            output = replace(output, log=log)
         if self.blob is not None:
             collected = await self._shared_artifacts(turn_id)
             output = replace(output, artifacts=collected.artifacts, artifact_error=collected.error)

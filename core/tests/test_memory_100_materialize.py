@@ -240,7 +240,7 @@ async def test_materializes_snapshot_through_real_memory_and_page_pipelines(
         for owner in readiness.evidence
         if owner.owner_kind == "page"
     } == {
-        source_ref: str(page_id_for(readiness.source_id, source_ref))
+        source_ref: page_id_for(readiness.source_id, source_ref)
         for source_ref in ("drive/runbook.md", "slack/launch.txt")
     }
 
