@@ -536,16 +536,51 @@ async def test_second_turn_continues_the_conversation(surface: AsyncClient) -> N
     assert len(stored.messages) == 4
 
 
-async def test_back_to_back_turns_serialize_per_conversation(surface: AsyncClient) -> None:
+async def test_mid_turn_messages_absorb_into_the_running_turn(surface: AsyncClient) -> None:
+    """Messages sent while a turn runs land on the conversation's inbound queue and the running
+    turn absorbs them: the done-commit refuses to close over pending arrivals, the next round
+    drains each as its own context-tagged user message, and one reply answers everything. The
+    armed gate holds the first turn mid-stream — past its first (empty) drain, before its answer —
+    so both sends land in the guarded window deterministically."""
     headers = await _bootstrap()
     STREAM_GATE.arm()
     first = (await surface.post("/v1/chat", content=b"one", headers=headers)).json()["turn_id"]
+    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+        while True:
+            if first in STREAM_GATE._gates:
+                break
+            await asyncio.sleep(0.01)
     second = (await surface.post("/v1/chat", content=b"two", headers=headers)).json()["turn_id"]
-    _, first_terminal = await _consume(surface, headers, first)
-    streamed, second_terminal = await _consume(surface, headers, second)
-    assert first_terminal["status"] == "done"
-    assert second_terminal["status"] == "done"
-    assert streamed == "echo:3"
+    third = (await surface.post("/v1/chat", content=b"three", headers=headers)).json()["turn_id"]
+    assert second == first
+    assert third == first
+    streamed, terminal = await _consume(surface, headers, first)
+    assert terminal["status"] == "done"
+    assert streamed == "echo:1echo:4"
+    assert terminal["text"] == "echo:4"
+    status, conversation_id = await _turn_row(first)
+    assert status == "done"
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.turn)
+                .where(tables.turn.c.conversation_id == conversation_id)
+            )
+        ).scalar_one()
+        unconsumed = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.inbound_message)
+                .where(tables.inbound_message.c.consumed_turn_id.is_(None))
+            )
+        ).scalar_one()
+    assert turns == 1
+    assert unconsumed == 0
+    _, _, blob = _runtime_parts(surface)
+    stored = await _read_transcript(blob, conversation_id, 1)
+    assert stored.seq == 1
+    assert _bodies(stored) == ["one", "echo:1", "two", "three", "echo:4"]
 
 
 async def test_failure_commits_terminal_bills_nothing_preserves_inbound(
@@ -742,7 +777,10 @@ async def test_empty_response_twice_fails_loud(surface: AsyncClient) -> None:
     assert terminal["tokens"] == 10
 
 
-async def test_concurrent_admissions_allocate_unique_seqs(surface: AsyncClient) -> None:
+async def test_concurrent_admissions_land_every_message_once(surface: AsyncClient) -> None:
+    """A burst of concurrent sends serializes on the conversation lock: each message either opens
+    a turn or lands exactly once on the live turn's inbound queue, and every reply covers what it
+    drained — no message is doubled, none is dropped."""
     headers = await _bootstrap()
     responses = await asyncio.gather(
         *(
@@ -750,18 +788,15 @@ async def test_concurrent_admissions_allocate_unique_seqs(surface: AsyncClient) 
             for n in range(10)
         )
     )
-    turn_ids = [response.json()["turn_id"] for response in responses]
-    assert len(set(turn_ids)) == 10
+    turn_ids = {response.json()["turn_id"] for response in responses}
     async with workspace_tx() as connection:
-        seqs = (
-            await connection.execute(
-                sa.select(tables.turn.c.seq).where(
-                    tables.turn.c.id.in_([UUID(t) for t in turn_ids])
-                )
-            )
-        ).scalars()
-        assert sorted(seqs) == list(range(1, 11))
-    await asyncio.gather(*(_consume(surface, headers, turn_id) for turn_id in turn_ids))
+        foundings = (await connection.execute(sa.select(tables.turn.c.inbound))).scalars().all()
+        queued = (
+            (await connection.execute(sa.select(tables.inbound_message.c.body))).scalars().all()
+        )
+    assert sorted([*foundings, *queued]) == sorted(f"burst {n}" for n in range(10))
+    results = await asyncio.gather(*(_consume(surface, headers, turn_id) for turn_id in turn_ids))
+    assert all(terminal["status"] == "done" for _, terminal in results)
 
 
 async def test_typed_subagent_round_trips_schema(surface: AsyncClient) -> None:

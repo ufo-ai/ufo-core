@@ -13,6 +13,7 @@ DELETE_ORDER = (
     tables.ledger,
     tables.writeback,
     tables.shared_artifact,
+    tables.inbound_message,
     tables.turn,
     tables.conversation,
     tables.surface_identity,

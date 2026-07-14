@@ -433,25 +433,67 @@ async def test_pause_does_not_arm_after_a_newer_member_was_admitted(db: None) ->
         )
         payload = json.loads(result.content[0].text.split("\n", 1)[1])
         async with workspace_tx() as connection:
-            pause = (
+            pauses = (
                 await connection.execute(
-                    sa.select(
-                        tables.scheduled_task.c.resume_turn_id,
-                        tables.scheduled_task.c.next_run_at,
-                    )
+                    sa.select(sa.func.count()).select_from(tables.scheduled_task)
                 )
-            ).one()
-        assert pause.resume_turn_id == member_turn_id
-        assert pause.next_run_at.replace(tzinfo=UTC) <= datetime.now(UTC)
-        assert await _claim_turn(member_turn_id, "newer-member") is True
+            ).scalar_one()
+            queued_bodies = (
+                (await connection.execute(sa.select(tables.inbound_message.c.body))).scalars().all()
+            )
+    assert member_turn_id == origin.id
+    assert queued_bodies == ["new message"]
+    assert payload["awaiting"] == "member"
+    assert pauses == 0
+
+
+async def test_internal_arrivals_do_not_block_the_pause_timer(db: None) -> None:
+    """A pending internal invocation is not a member reply: the pause still arms its timer."""
+    workspace_id, agent_id, conversation_id = await _seed()
+    base = _tool_ctx(workspace_id, conversation_id, agent_id)
+    origin = base.turn.model_copy(update={"id": uuid4(), "seq": 1})
+    ctx = replace(base, turn=origin)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=origin.id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=origin.seq,
+                status="running",
+                inbound=origin.inbound,
+                admission_source="internal",
+                terminal=None,
+                created_at=origin.created_at,
+                updated_at=sa.func.now(),
+            )
+        )
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=StubDbos(), durable_surfaces=frozenset()),
+        workspace_id=workspace_id,
+    )
+    with ws(workspace_id):
+        background_turn_id = await invoker.invoke(conversation_id, agent_id, "background note")
+        result = await pause_and_wait(
+            ctx,
+            PauseAndWaitInput(
+                ai_response="Waiting.",
+                wait_minutes=10,
+                next_steps="Continue.",
+                reason="approval",
+            ),
+        )
+        payload = json.loads(result.content[0].text.split("\n", 1)[1])
         async with workspace_tx() as connection:
             pauses = (
                 await connection.execute(
                     sa.select(sa.func.count()).select_from(tables.scheduled_task)
                 )
             ).scalar_one()
-    assert payload["awaiting"] == "member"
-    assert pauses == 0
+    assert background_turn_id == origin.id
+    assert payload["awaiting"] == "timer"
+    assert pauses == 1
 
 
 async def test_redelivered_terminal_message_does_not_cancel_a_later_pause(db: None) -> None:
@@ -870,7 +912,9 @@ async def test_member_message_takes_over_a_timer_waiting_to_enqueue(db: None) ->
     assert pauses == 0
 
 
-async def test_member_does_not_rewrite_a_timer_with_a_newer_internal_turn(db: None) -> None:
+async def test_member_takes_over_the_timer_while_internal_work_queues(db: None) -> None:
+    """One live turn absorbs everything that arrives around a firing timer: the internal message
+    lands on its inbound queue, and the member's reply still takes the queued timer turn over."""
     workspace_id, agent_id, conversation_id = await _seed()
     now = datetime.now(UTC)
     dbos = _FirstBlockingDbos()
@@ -908,17 +952,27 @@ async def test_member_does_not_rewrite_a_timer_with_a_newer_internal_turn(db: No
             resume_turn_id = (
                 await connection.execute(sa.select(tables.scheduled_task.c.resume_turn_id))
             ).scalar_one()
-        assert [turn["inbound"] for turn in turns] == [
-            "timer resume",
-            "internal work",
-            "member reply",
-        ]
-        assert [turn["status"] for turn in turns] == ["queued", "queued", "queued"]
-        assert internal_turn == turns[1]["id"]
-        assert member_turn == turns[2]["id"]
-        assert resume_turn_id == turns[0]["id"]
-        assert dbos.enqueued == [str(turns[0]["id"])]
-        assert await _claim_turn(turns[0]["id"], "ordered-timer") is True
+            queued_bodies = (
+                (
+                    await connection.execute(
+                        sa.select(tables.inbound_message.c.body).order_by(
+                            tables.inbound_message.c.seq
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        [turn] = turns
+        assert turn["inbound"] == "member reply"
+        assert turn["status"] == "queued"
+        assert turn["admission_source"] == "member"
+        assert internal_turn == turn["id"]
+        assert member_turn == turn["id"]
+        assert queued_bodies == ["internal work"]
+        assert resume_turn_id == turn["id"]
+        assert dbos.enqueued == [str(turn["id"]), str(turn["id"])]
+        assert await _claim_turn(turn["id"], "ordered-timer") is True
         async with workspace_tx() as connection:
             pauses = (
                 await connection.execute(
@@ -928,7 +982,7 @@ async def test_member_does_not_rewrite_a_timer_with_a_newer_internal_turn(db: No
     assert pauses == 0
 
 
-async def test_later_member_waits_behind_the_first_queued_turn(db: None) -> None:
+async def test_later_member_joins_the_first_queued_turn(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     dbos = _FirstBlockingDbos()
     admission = Admission(dbos=dbos, durable_surfaces=frozenset())
@@ -974,9 +1028,15 @@ async def test_later_member_waits_behind_the_first_queued_turn(db: None) -> None
                     sa.select(sa.func.count()).select_from(tables.scheduled_task)
                 )
             ).scalar_one()
-    assert [turn["inbound"] for turn in turns] == ["first", "second"]
-    assert [turn["status"] for turn in turns] == ["queued", "queued"]
-    assert second_turn == turns[1]["id"]
+    assert second_turn == first_turn
+    [turn] = turns
+    assert turn["status"] == "queued"
+    assert turn["inbound"] == "first"
+    async with workspace_tx() as connection:
+        queued_bodies = (
+            (await connection.execute(sa.select(tables.inbound_message.c.body))).scalars().all()
+        )
+    assert queued_bodies == ["second"]
     assert dbos.enqueued == [str(first_turn)]
     assert pauses == 0
 

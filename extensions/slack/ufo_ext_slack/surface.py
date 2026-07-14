@@ -1111,10 +1111,11 @@ async def interactive(ctx: SurfaceContext, request: Request) -> Response:
     """Slack interactivity ingest: verify the signed form payload, decode a click on an ask_user
     answer button, admit the answer as the conversation's next turn — idempotent per question
     message, so a double click or a second member's click joins the turn the first click won — and
-    rewrite the buttons into the winning answer with who answered. Only the click whose body the
-    turn stored rewrites (a losing click must not display an answer the agent never saw), and the
-    rewrite rides its own task so the ack beats Slack's three-second budget — Block Kit allows no
-    message in the direct response, only the ack."""
+    rewrite the buttons into the winning answer with who answered. Only the click whose exact body
+    the answer key stored (`admitted_body` — the turn it opened or the queue row it landed as)
+    rewrites, so a losing click never displays an answer the agent won't see. The rewrite rides
+    its own task so the ack beats Slack's three-second budget — Block Kit allows no message in
+    the direct response, only the ack."""
     try:
         raw = await _slack_request_body(request)
     except SlackBodyTooLarge:
@@ -1162,15 +1163,16 @@ async def interactive(ctx: SurfaceContext, request: Request) -> Response:
                 conversation_id = await ctx.conversation_for(click.queue_key, member_id)
             agent_id = await ctx.default_agent()
             body = f"[Answered by <@{click.slack_user_id}> via button] {click.label}"
+            answer_key = f"{click.queue_key}:{click.message_ts}:answer"
             turn_id = await ctx.admit(
                 conversation_id,
                 agent_id,
                 body,
-                idempotency_key=f"{click.queue_key}:{click.message_ts}:answer",
+                idempotency_key=answer_key,
                 speaker_member_id=member_id,
             )
             _track_status(ctx, turn_id, click.queue_key, click.message_ts)
-            if await ctx.turn_inbound(turn_id) == body:
+            if await ctx.admitted_body(answer_key) == body:
                 _rewrite_in_background(click)
     return JSONResponse({"ok": True})
 

@@ -469,6 +469,111 @@ def _engine(
     )
 
 
+async def _queue_arrival(turn: Turn, body: str, speaker_member_id: UUID | None = None) -> None:
+    async with workspace_tx() as connection:
+        seq = (
+            await connection.execute(
+                sa.select(sa.func.coalesce(sa.func.max(tables.inbound_message.c.seq), 0) + 1).where(
+                    tables.inbound_message.c.conversation_id == turn.conversation_id
+                )
+            )
+        ).scalar_one()
+        await connection.execute(
+            sa.insert(tables.inbound_message).values(
+                id=uuid4(),
+                workspace_id=turn.workspace_id,
+                conversation_id=turn.conversation_id,
+                seq=seq,
+                body=body,
+                admission_source="member",
+                speaker_member_id=speaker_member_id,
+                admitted_turn_id=turn.id,
+                created_at=sa.func.now(),
+            )
+        )
+
+
+async def test_claim_arrivals_reclaims_stamped_rows_until_absorbed(
+    db: None, tmp_path: Path
+) -> None:
+    """The crash window between the claim committing and the DBOS step recording: a re-executed
+    drain recovers exactly the rows it stamped, and rows an execution already absorbed are never
+    re-taken."""
+    turn = await _seed_turn("running", None)
+    with ws(turn.workspace_id):
+        engine = _engine(turn, object(), tmp_path)
+        await _queue_arrival(turn, "one")
+        await _queue_arrival(turn, "two")
+        first = await engine._claim_arrivals(())
+        replayed = await engine._claim_arrivals(())
+        assert [arrival.body for arrival in first] == ["one", "two"]
+        assert [arrival.body for arrival in replayed] == ["one", "two"]
+        absorbed = tuple(arrival.id for arrival in first)
+        assert await engine._claim_arrivals(absorbed) == ()
+        await _queue_arrival(turn, "three")
+        assert [arrival.body for arrival in await engine._claim_arrivals(absorbed)] == ["three"]
+
+
+async def test_park_releases_the_arrivals_this_attempt_claimed(db: None, tmp_path: Path) -> None:
+    """A resumed park is a fresh workflow with an empty step log: rows the parked attempt claimed
+    must return to pending, or the resume would never see them."""
+    turn = await _seed_turn("running", None)
+    with ws(turn.workspace_id):
+        engine = _engine(turn, object(), tmp_path)
+        await _queue_arrival(turn, "one")
+        await _queue_arrival(turn, "two")
+        assert [arrival.body for arrival in await engine._claim_arrivals(())] == ["one", "two"]
+        await engine._park("over a spend cap", [])
+        async with workspace_tx() as connection:
+            pending = (
+                (
+                    await connection.execute(
+                        sa.select(tables.inbound_message.c.body)
+                        .where(tables.inbound_message.c.consumed_turn_id.is_(None))
+                        .order_by(tables.inbound_message.c.seq)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            status = (
+                await connection.execute(
+                    sa.select(tables.turn.c.status).where(tables.turn.c.id == turn.id)
+                )
+            ).scalar_one()
+    assert pending == ["one", "two"]
+    assert status == "parked"
+
+
+async def test_absorbed_arrivals_carry_tags_and_record_their_speakers(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("running", None)
+    foreign_member_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=foreign_member_id,
+                workspace_id=turn.workspace_id,
+                email="other@b.c",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    with ws(turn.workspace_id):
+        engine = _engine(turn, object(), tmp_path)
+        await _queue_arrival(turn, "from someone else", speaker_member_id=foreign_member_id)
+        arrival_log: list[Message] = []
+        arrival_speakers: set[UUID | None] = set()
+        messages = await engine._absorb_arrivals((), arrival_log, arrival_speakers, [])
+    [message] = messages
+    assert isinstance(message.content, str)
+    assert message.content.startswith("<context>\n")
+    assert message.content.endswith("</context>\nfrom someone else")
+    assert arrival_log == [message]
+    assert arrival_speakers == {foreign_member_id}
+
+
 async def test_scheduled_turn_searches_memory_after_claim(db: None, tmp_path: Path) -> None:
     turn = await _seed_turn("queued", None, admission_source=SCHEDULED_ADMISSION)
     with ws(turn.workspace_id):

@@ -208,6 +208,22 @@ class ScheduleStore:
             effective_agent_id = agent_id
             effective_next_run_at = next_run_at
             if origin_seq is not None:
+                reply_pending = (
+                    await connection.execute(
+                        sa.select(
+                            sa.exists(
+                                sa.select(tables.inbound_message.c.id).where(
+                                    tables.inbound_message.c.workspace_id == self.workspace_id,
+                                    tables.inbound_message.c.conversation_id == conversation_id,
+                                    tables.inbound_message.c.admission_source == MEMBER_ADMISSION,
+                                    tables.inbound_message.c.consumed_turn_id.is_(None),
+                                )
+                            )
+                        )
+                    )
+                ).scalar_one()
+                if reply_pending:
+                    return None
                 newer_member = (
                     await connection.execute(
                         sa.select(

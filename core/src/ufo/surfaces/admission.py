@@ -4,6 +4,13 @@ boundary, and no caller can bypass it. A conversation-row lock serializes seq al
 id is the DBOS workflow id, so a re-enqueue is idempotent. When an idempotency key is given, a
 redelivery of the same message joins the turn already admitted for it instead of spawning a second.
 
+A message arriving while the conversation's newest turn is still live — queued, running, or
+parked — lands on the conversation's `inbound_message` queue instead of spawning a turn of its
+own, whoever spoke it and whichever agent it named. The engine drains that queue into the live
+turn at each round boundary as separate <context>-tagged messages, and the terminal commit
+refuses to close over a non-empty queue, so one reply answers everything that arrived. Each
+queue row carries its own idempotency key, so a redelivery joins the turn that consumed it.
+
 Delivery is derived here too: a turn entering a conversation whose surface is durable registers a
 writeback row atomically with its turn row, so the poller delivers the reply no matter who admitted
 it — a surface ingest, a scheduled fire, or an extension invoke. A live surface's conversations
@@ -22,12 +29,12 @@ way."""
 
 import asyncio
 from dataclasses import dataclass
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from dbos import DBOSClient, EnqueueOptions
 
-from ufo.accounting import SpendEvaluator
+from ufo.accounting import ALLOW, SpendEvaluator
 from ufo.db import workspace_tx
 from ufo.o11y import log
 from ufo.scheduling import ONE_TIME_SCHEDULE, ScheduledTask
@@ -36,6 +43,7 @@ from ufo.schema.records import (
     DBOS_APP_VERSION,
     INTERNAL_ADMISSION,
     MEMBER_ADMISSION,
+    NON_TERMINAL_STATUSES,
     PARKED,
     SCHEDULED_ADMISSION,
     TURN_QUEUE_NAME,
@@ -222,6 +230,25 @@ class Admission:
                         .with_for_update()
                     )
                 ).one_or_none()
+                if deduped is None:
+                    queued_message = (
+                        await connection.execute(
+                            sa.select(
+                                tables.inbound_message.c.conversation_id,
+                                tables.inbound_message.c.admitted_turn_id,
+                                tables.inbound_message.c.consumed_turn_id,
+                            ).where(
+                                tables.inbound_message.c.workspace_id == workspace_id,
+                                tables.inbound_message.c.idempotency_key == idempotency_key,
+                            )
+                        )
+                    ).one_or_none()
+                    if queued_message is not None:
+                        if queued_message.conversation_id != conversation_id:
+                            raise RuntimeError("idempotency key reused for a different turn")
+                        if queued_message.consumed_turn_id is not None:
+                            return queued_message.consumed_turn_id
+                        return queued_message.admitted_turn_id
                 if deduped is not None:
                     if deduped.conversation_id != conversation_id or deduped.agent_id != agent_id:
                         raise RuntimeError("idempotency key reused for a different turn")
@@ -292,6 +319,77 @@ class Admission:
                                 .where(tables.scheduled_task.c.id == timer_turn.pause_id)
                             )
                             deduped = timer_turn
+            if deduped is None and scheduled_task is None:
+                live_turn = (
+                    await connection.execute(
+                        sa.select(tables.turn.c.id, tables.turn.c.seq)
+                        .where(
+                            tables.turn.c.workspace_id == workspace_id,
+                            tables.turn.c.conversation_id == conversation_id,
+                            tables.turn.c.status.in_(NON_TERMINAL_STATUSES),
+                        )
+                        .order_by(tables.turn.c.seq)
+                        .limit(1)
+                        .with_for_update()
+                    )
+                ).one_or_none()
+                fold_decision = (
+                    None
+                    if live_turn is None
+                    else await SpendEvaluator(
+                        workspace_id, conversation.member_id, agent_id
+                    ).decide(connection, 0)
+                )
+                if (
+                    live_turn is not None
+                    and fold_decision is not None
+                    and fold_decision.outcome == ALLOW
+                ):
+                    message_seq = (
+                        await connection.execute(
+                            sa.select(
+                                sa.func.coalesce(sa.func.max(tables.inbound_message.c.seq), 0) + 1
+                            ).where(tables.inbound_message.c.conversation_id == conversation_id)
+                        )
+                    ).scalar_one()
+                    await connection.execute(
+                        sa.insert(tables.inbound_message).values(
+                            id=uuid4(),
+                            workspace_id=workspace_id,
+                            conversation_id=conversation_id,
+                            seq=message_seq,
+                            body=body,
+                            admission_source=(
+                                MEMBER_ADMISSION
+                                if pending_pause is not None
+                                else INTERNAL_ADMISSION
+                            ),
+                            context=None if context is None else context.model_dump(mode="json"),
+                            speaker_member_id=speaker_member_id,
+                            idempotency_key=idempotency_key,
+                            admitted_turn_id=live_turn.id,
+                            created_at=sa.func.now(),
+                        )
+                    )
+                    if pending_pause is not None:
+                        await connection.execute(
+                            sa.update(tables.scheduled_task)
+                            .values(
+                                resume_turn_id=live_turn.id,
+                                next_run_at=sa.func.now(),
+                                claimed_by=None,
+                                claim_expires_at=None,
+                                updated_at=sa.func.now(),
+                            )
+                            .where(
+                                tables.scheduled_task.c.workspace_id == workspace_id,
+                                tables.scheduled_task.c.conversation_id == conversation_id,
+                                tables.scheduled_task.c.schedule == ONE_TIME_SCHEDULE,
+                                tables.scheduled_task.c.origin_seq <= live_turn.seq,
+                                tables.scheduled_task.c.resume_turn_id.is_(None),
+                            )
+                        )
+                    return live_turn.id
             if deduped is not None:
                 turn_id = deduped.id
                 turn_seq = deduped.seq

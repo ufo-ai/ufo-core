@@ -211,7 +211,10 @@ privileged (distinct from the scoped extension context): **admit** an inbound me
 durable turn queue through the member-only admission capability, consuming any pending one-time
 pause, with its ambient `TurnContext` — the sender and IANA timezone the
 surface knows, which the engine renders as the `<context>` tag (the admission moment, local when a
-timezone is known; sender) before each member inbound — **identity** resolution (an external id → member + conversation,
+timezone is known; sender) before each member inbound; a message arriving while the conversation's
+newest turn is still live lands on the conversation's inbound queue, which the engine drains into
+that turn at each round boundary as separate `<context>`-tagged messages — the terminal commit
+refuses to close over a non-empty queue, so one reply answers everything pending — **identity** resolution (an external id → member + conversation,
 linking a `surface_identity` on first contact — `join_member` also creates the member when a
 channel-verified email matches the workspace's own domain, the owner's email domain, so only the
 owner onboards through provisioning — and `adopt_identity` to span a member across
@@ -235,7 +238,7 @@ allocation, delivery registration, and enqueue recovery remain one implementatio
   A turn that ended by asking (`ask_user` as its final act) rides the writeback as a structured
   `question`, so the surface can render the options as its own answer
   affordance (Slack buttons) whose use admits the answer as the conversation's next turn — the
-  first answer wins the idempotent admit, and `turn_inbound` is how the surface confirms which
+  first answer wins the idempotent admit, and `admitted_body` is how the surface confirms which
   landed before rewriting the affordance; a durable surface may also `tail` a turn it admitted for
   ephemeral live feedback (Slack's native thread status), never for delivery.
 - **Live** (web; core's CLI is the built-in twin) — the member's connection is held open, so

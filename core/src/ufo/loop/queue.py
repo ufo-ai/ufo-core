@@ -118,10 +118,11 @@ def reset_runtime() -> None:
 
 async def _execute_turn(workspace_id: str, turn_id: str) -> str:
     """The turn body, run directly in the `turn_workflow` DBOS workflow — not wrapped in a step, so
-    the model-round, tool-dispatch, and compaction steps inside `engine.run()` are the workflow's
-    own steps and memoize for crash-recovery replay. Setup (claim, load, sandbox create-or-attach,
-    engine build) re-runs each recovery and is idempotent; claiming before load keeps queued input
-    mutable only until execution can observe it. A fault outside the engine commits the terminal
+    the model-round, tool-dispatch, arrival-drain, and compaction steps inside `engine.run()` are
+    the workflow's own steps and memoize for crash-recovery replay. Setup (claim, load, sandbox
+    create-or-attach, engine build) re-runs each recovery and is idempotent; messages that arrive
+    after the claim land on the conversation's inbound queue, which the engine drains at each round
+    boundary. A fault outside the engine commits the terminal
     through the backstop so the client's wait still ends. The workspace is bound from the workflow
     argument for the whole body via `with ws(...)`: every query, credential read, and model call
     inside runs under it — the RLS scope on the shared RLS-subject role, the workspace's BYOK keys,

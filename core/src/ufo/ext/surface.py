@@ -491,21 +491,32 @@ class SurfaceContext:
             raise ConnectRequestInvalid("connect flow is unavailable") from error
         return await ConnectHandoff(flow).authorize(self.workspace_id, turn_id, member_id)
 
-    async def turn_inbound(self, turn_id: UUID) -> str | None:
-        """The inbound message a turn was admitted with, or None when no such turn exists — how a
-        surface whose answer affordance raced (an idempotent admit joins the turn the first click
-        won) confirms which answer landed: only the click whose body is the stored inbound may
-        rewrite the affordance into its answer."""
+    async def admitted_body(self, idempotency_key: str) -> str | None:
+        """The message body an idempotency key admitted — the founding inbound of the turn the key
+        opened, or the queue row it landed as — or None when the key admitted nothing. How a
+        surface whose answer affordance raced (an idempotent admit joins whatever the first click
+        won) confirms which answer landed: only the click whose body was stored may rewrite the
+        affordance into its answer."""
         async with workspace_tx() as connection:
-            row = (
+            turn_row = (
                 await connection.execute(
                     sa.select(tables.turn.c.inbound).where(
-                        tables.turn.c.id == turn_id,
                         tables.turn.c.workspace_id == self.workspace_id,
+                        tables.turn.c.idempotency_key == idempotency_key,
                     )
                 )
             ).one_or_none()
-        return None if row is None else row.inbound
+            if turn_row is not None:
+                return turn_row.inbound
+            message_row = (
+                await connection.execute(
+                    sa.select(tables.inbound_message.c.body).where(
+                        tables.inbound_message.c.workspace_id == self.workspace_id,
+                        tables.inbound_message.c.idempotency_key == idempotency_key,
+                    )
+                )
+            ).one_or_none()
+        return None if message_row is None else message_row.body
 
     async def turn_owner(self, turn_id: UUID) -> UUID | None:
         """The member whose conversation owns a turn, or None when no such turn exists — the check a

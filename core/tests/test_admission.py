@@ -6,6 +6,7 @@ import sqlalchemy as sa
 from ufo.db import workspace_tx
 from ufo.loop.engine import _claim_turn
 from ufo.schema import tables
+from ufo.schema.records import TerminalFrame, TurnContext
 from ufo.surfaces.admission import Admission
 
 
@@ -33,7 +34,7 @@ class _FailedDbos:
         raise RuntimeError("enqueue failed")
 
 
-async def _seed() -> tuple[UUID, UUID, UUID]:
+async def _seed() -> tuple[UUID, UUID, UUID, UUID]:
     workspace_id, member_id, agent_id, conversation_id = uuid4(), uuid4(), uuid4(), uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -72,7 +73,7 @@ async def _seed() -> tuple[UUID, UUID, UUID]:
                 updated_at=sa.func.now(),
             )
         )
-    return workspace_id, agent_id, conversation_id
+    return workspace_id, member_id, agent_id, conversation_id
 
 
 async def _turn_count(conversation_id: UUID) -> int:
@@ -86,8 +87,37 @@ async def _turn_count(conversation_id: UUID) -> int:
         ).scalar_one()
 
 
+async def _queued_bodies(conversation_id: UUID) -> list[str]:
+    async with workspace_tx() as connection:
+        return list(
+            (
+                await connection.execute(
+                    sa.select(tables.inbound_message.c.body)
+                    .where(
+                        tables.inbound_message.c.conversation_id == conversation_id,
+                        tables.inbound_message.c.consumed_turn_id.is_(None),
+                    )
+                    .order_by(tables.inbound_message.c.seq)
+                )
+            ).scalars()
+        )
+
+
+async def _finish(turn_id: UUID) -> None:
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(
+                status="done",
+                terminal=TerminalFrame(status="done", text="ok").model_dump(mode="json"),
+                updated_at=sa.func.now(),
+            )
+            .where(tables.turn.c.id == turn_id)
+        )
+
+
 async def test_repeated_delivery_dedups_to_one_turn(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
+    workspace_id, _member_id, agent_id, conversation_id = await _seed()
     dbos = StubDbos()
     admission = Admission(dbos=dbos, durable_surfaces=frozenset())
     first = await admission.invoke(workspace_id, conversation_id, agent_id, "hi", "C0000001:1.5")
@@ -99,7 +129,7 @@ async def test_repeated_delivery_dedups_to_one_turn(db: None) -> None:
 
 
 async def test_idempotency_key_keeps_the_first_body(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
+    workspace_id, _member_id, agent_id, conversation_id = await _seed()
     admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
     first = await admission.invoke(workspace_id, conversation_id, agent_id, "hi", "C0000001:1.5")
     second = await admission.invoke(
@@ -115,44 +145,162 @@ async def test_idempotency_key_keeps_the_first_body(db: None) -> None:
     assert inbound == "hi"
 
 
-async def test_distinct_keys_allocate_sequential_turns(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
+async def test_message_while_a_turn_is_queued_joins_its_inbound_queue(db: None) -> None:
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
     dbos = StubDbos()
     admission = Admission(dbos=dbos, durable_surfaces=frozenset())
-    first = await admission.invoke(workspace_id, conversation_id, agent_id, "one", "C:1")
-    second = await admission.invoke(workspace_id, conversation_id, agent_id, "two", "C:2")
-    assert first != second
+    first = await admission.admit_member(
+        workspace_id, conversation_id, agent_id, "first message", member_id, "C:1"
+    )
+    second = await admission.admit_member(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        "second message",
+        member_id,
+        "C:2",
+        TurnContext(sender="Pat Doe", timezone="UTC"),
+    )
+    assert second == first
+    assert await _turn_count(conversation_id) == 1
+    assert await _queued_bodies(conversation_id) == ["second message"]
     async with workspace_tx() as connection:
-        rows = (
+        inbound = (
+            await connection.execute(
+                sa.select(tables.turn.c.inbound).where(tables.turn.c.id == first)
+            )
+        ).scalar_one()
+        queued = (
             await connection.execute(
                 sa.select(
-                    tables.turn.c.seq,
-                    tables.turn.c.status,
-                    tables.turn.c.dispatch_enqueued_at,
-                )
-                .where(tables.turn.c.conversation_id == conversation_id)
-                .order_by(tables.turn.c.seq)
+                    tables.inbound_message.c.context,
+                    tables.inbound_message.c.speaker_member_id,
+                    tables.inbound_message.c.idempotency_key,
+                    tables.inbound_message.c.admission_source,
+                    tables.inbound_message.c.admitted_turn_id,
+                ).where(tables.inbound_message.c.conversation_id == conversation_id)
             )
-        ).all()
-    assert [(row.seq, row.status) for row in rows] == [(1, "queued"), (2, "queued")]
-    assert rows[0].dispatch_enqueued_at is not None
-    assert rows[1].dispatch_enqueued_at is None
+        ).one()
+    assert inbound == "first message"
+    assert TurnContext.model_validate(queued.context).sender == "Pat Doe"
+    assert queued.speaker_member_id == member_id
+    assert queued.idempotency_key == "C:2"
+    assert queued.admission_source == "member"
+    assert queued.admitted_turn_id == first
     assert dbos.enqueued == [str(first)]
 
 
-async def test_keyless_admission_enqueues_each_turn(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
-    dbos = StubDbos()
-    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
-    first = await admission.invoke(workspace_id, conversation_id, agent_id, "one")
-    second = await admission.invoke(workspace_id, conversation_id, agent_id, "two")
-    assert first != second
+async def test_message_while_a_turn_runs_joins_its_inbound_queue(db: None) -> None:
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
+    first = await admission.admit_member(
+        workspace_id, conversation_id, agent_id, "one", member_id, "C:1"
+    )
+    assert await _claim_turn(first, str(first))
+    second = await admission.admit_member(
+        workspace_id, conversation_id, agent_id, "two", member_id, "C:2"
+    )
+    assert second == first
+    assert await _turn_count(conversation_id) == 1
+    assert await _queued_bodies(conversation_id) == ["two"]
+
+
+async def test_message_redelivery_joins_the_queued_row(db: None) -> None:
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
+    first = await admission.admit_member(
+        workspace_id, conversation_id, agent_id, "one", member_id, "C:1"
+    )
+    second = await admission.admit_member(
+        workspace_id, conversation_id, agent_id, "two", member_id, "C:2"
+    )
+    redelivered = await admission.admit_member(
+        workspace_id, conversation_id, agent_id, "two", member_id, "C:2"
+    )
+    assert second == first
+    assert redelivered == first
+    assert await _turn_count(conversation_id) == 1
+    assert await _queued_bodies(conversation_id) == ["two"]
+
+
+async def test_every_admission_source_joins_the_live_turn(db: None) -> None:
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
+    first = await admission.invoke(workspace_id, conversation_id, agent_id, "job prompt", "job:1")
+    second = await admission.admit_member(
+        workspace_id, conversation_id, agent_id, "hello", member_id, "C:2"
+    )
+    third = await admission.invoke(workspace_id, conversation_id, agent_id, "another job")
+    assert second == first
+    assert third == first
+    assert await _turn_count(conversation_id) == 1
+    assert await _queued_bodies(conversation_id) == ["hello", "another job"]
+
+
+async def test_a_reject_cap_stops_arrivals_at_the_boundary(db: None) -> None:
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
+    first = await admission.admit_member(
+        workspace_id, conversation_id, agent_id, "one", member_id, "C:1"
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.spend_cap).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                scope="workspace",
+                subject_id=None,
+                window_seconds=3600,
+                limit_micro_usd=1,
+                on_breach="reject",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.ledger).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                turn_id=first,
+                dimension="tokens",
+                amount=10,
+                priced_micro_usd=100,
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    second = await admission.admit_member(
+        workspace_id, conversation_id, agent_id, "two", member_id, "C:2"
+    )
+    assert second != first
+    assert await _queued_bodies(conversation_id) == []
+    async with workspace_tx() as connection:
+        status = (
+            await connection.execute(
+                sa.select(tables.turn.c.status).where(tables.turn.c.id == second)
+            )
+        ).scalar_one()
+    assert status == "cancelled"
+
+
+async def test_message_after_a_terminal_turn_starts_a_new_turn(db: None) -> None:
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
+    first = await admission.admit_member(
+        workspace_id, conversation_id, agent_id, "one", member_id, "C:1"
+    )
+    await _finish(first)
+    second = await admission.admit_member(
+        workspace_id, conversation_id, agent_id, "two", member_id, "C:2"
+    )
+    assert second != first
     assert await _turn_count(conversation_id) == 2
-    assert dbos.enqueued == [str(first)]
+    assert await _queued_bodies(conversation_id) == []
 
 
 async def test_enqueue_failure_keeps_the_turn_queued_for_dispatch(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
+    workspace_id, _member_id, agent_id, conversation_id = await _seed()
     turn_id = await Admission(dbos=_FailedDbos(), durable_surfaces=frozenset()).invoke(
         workspace_id, conversation_id, agent_id, "hi"
     )
@@ -170,7 +318,7 @@ async def test_enqueue_failure_keeps_the_turn_queued_for_dispatch(db: None) -> N
 
 
 async def test_enqueue_error_does_not_fail_a_turn_already_claimed_by_the_worker(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
+    workspace_id, _member_id, agent_id, conversation_id = await _seed()
     turn_id = await Admission(dbos=_AcceptedThenErroredDbos(), durable_surfaces=frozenset()).invoke(
         workspace_id, conversation_id, agent_id, "hi"
     )

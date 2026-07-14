@@ -1,13 +1,14 @@
-"""One turn, top to bottom: mark running, load context, model round, terminal commit.
+"""One turn, top to bottom: mark running, load context, model rounds absorbing queued arrivals,
+terminal commit.
 
 `run()` is the body of the `turn_workflow` DBOS workflow. Its non-deterministic, side-effecting
-units are DBOS steps — each model round (`_stream_once`), each tool dispatch (`_dispatch`), and each
-compaction (`Compaction._compact`). On a crash the workflow re-dispatches under the same
-`workflow_id`: every recorded step replays from DBOS's `operation_outputs` without re-executing —
-completed rounds are not re-called, completed tools not re-applied — and execution resumes at the
-first unrecorded step. The queue claims before loading; setup then reclaims the same attempt while
-loading context, attaching the sandbox, and re-deciding spend. Each step is idempotent across
-replay."""
+units are DBOS steps — each model round (`_stream_once`), each tool dispatch (`_dispatch`), each
+arrival drain (`_claim_arrivals`), and each compaction (`Compaction._compact`). On a crash the
+workflow re-dispatches under the same `workflow_id`: every recorded step replays from DBOS's
+`operation_outputs` without re-executing — completed rounds are not re-called, completed tools not
+re-applied, drained arrivals not re-consumed — and execution resumes at the first unrecorded step.
+The queue claims before loading; setup then reclaims the same attempt while loading context,
+attaching the sandbox, and re-deciding spend. Each step is idempotent across replay."""
 
 import asyncio
 import json
@@ -21,7 +22,7 @@ from zoneinfo import ZoneInfo
 import sqlalchemy as sa
 from dbos import DBOS
 from dbos._error import DBOSWorkflowCancelledError
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, field_validator
 
 from ufo.accounting import (
     ALLOW,
@@ -255,6 +256,22 @@ class StreamResult(BaseModel):
     error_message: str | None = None
 
 
+class Arrival(BaseModel):
+    """One drained inbound-queue row — the `_claim_arrivals` DBOS step's memoized output, so a
+    crash-recovery replay reads back exactly the batch the first run consumed."""
+
+    id: UUID
+    body: str
+    context: TurnContext | None = None
+    speaker_member_id: UUID | None = None
+    created_at: datetime
+
+    @field_validator("created_at")
+    @classmethod
+    def _aware_utc(cls, value: datetime) -> datetime:
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
 class ImageRef(BaseModel):
     """A tool-result image the `_dispatch` step offloaded to the blob store instead of returning its
     base64 bytes inline. A DBOS step's output is serialized into the system-DB step log, so a
@@ -308,8 +325,9 @@ def _parse_args(partials: list[str]) -> dict[str, object]:
 def _context_tag(context: TurnContext | None, admitted_at: datetime) -> str:
     """The <context> tag rendered before a member inbound: the admission moment (in the sender's
     zone when the surface supplied one, else UTC) and the sender the surface named. The persisted
-    moment — never the wall clock — keeps a queued, parked, or replayed turn's tag at the time the
-    member actually spoke."""
+    moment — the turn row's for the founding message, the queue row's for a drained arrival —
+    never the wall clock, so a queued, parked, or replayed message keeps the time the member
+    actually spoke."""
     zone = ZoneInfo(context.timezone) if context is not None and context.timezone else UTC
     lines = [f"time: {admitted_at.astimezone(zone).strftime(CONTEXT_TIME_FORMAT)}"]
     if context is not None and context.sender:
@@ -397,6 +415,9 @@ class TurnEngine:
                 prompt_digest=self.system_prompt.digest,
             )
             usage_events: list[Usage] = []
+            arrival_log: list[Message] = []
+            arrival_speakers: set[UUID | None] = set()
+            absorbed_ids: list[UUID] = []
 
             async def rank_find(system: str, user: str) -> str:
                 """The browser `find` tool's element ranking: a host-side model call (the engine
@@ -450,48 +471,75 @@ class TurnEngine:
                     self.audience_member_id,
                     self.turn.speaker_member_id,
                 )
+                pending_guard = self.turn.subagent_profile is None
                 if inbound.denied is not None:
-                    frame = await self._commit("done", usage_events, answer=inbound.denied)
-                    await self._persist_transcript(await self._load_messages(), inbound.denied)
-                    return frame
-                if inbound.injected:
-                    system = f"{system}\n\n{inbound.injected}"
-                (
-                    final_messages,
-                    answer,
-                    question,
-                    credential_request,
-                    connect_request,
-                ) = await self._model_round(
-                    context, await self._load_messages(), usage_events, system
-                )
-                await self.hooks.fire(
-                    "stop",
-                    Stop(answer=answer),
-                    self.turn,
-                    self.agent,
-                    self.audience_member_id,
-                    self.turn.speaker_member_id,
-                )
-                frame = await self._commit(
-                    "done",
-                    usage_events,
-                    answer=answer,
-                    question=question,
-                    credential_request=credential_request,
-                    connect_request=connect_request,
-                )
-                if frame.status == "done":
-                    await self._persist_transcript(final_messages, answer)
+                    denial = await self._commit(
+                        "done",
+                        usage_events,
+                        answer=inbound.denied,
+                        unless_arrivals=pending_guard,
+                        absorbed=tuple(absorbed_ids),
+                    )
+                    if denial is not None:
+                        await self._persist_transcript(await self._load_messages(), inbound.denied)
+                        return denial
+                    messages = (
+                        *await self._load_messages(),
+                        Message(role="assistant", content=inbound.denied),
+                    )
                 else:
-                    await self._persist_inbound()
-                return frame
+                    if inbound.injected:
+                        system = f"{system}\n\n{inbound.injected}"
+                    messages = await self._load_messages()
+                while True:
+                    (
+                        final_messages,
+                        answer,
+                        question,
+                        credential_request,
+                        connect_request,
+                    ) = await self._model_round(
+                        context,
+                        messages,
+                        usage_events,
+                        system,
+                        arrival_log,
+                        arrival_speakers,
+                        absorbed_ids,
+                    )
+                    await self.hooks.fire(
+                        "stop",
+                        Stop(answer=answer),
+                        self.turn,
+                        self.agent,
+                        self.audience_member_id,
+                        self.turn.speaker_member_id,
+                    )
+                    frame = await self._commit(
+                        "done",
+                        usage_events,
+                        answer=answer,
+                        question=question,
+                        credential_request=credential_request,
+                        connect_request=connect_request,
+                        unless_arrivals=pending_guard,
+                        absorbed=tuple(absorbed_ids),
+                    )
+                    if frame is None:
+                        messages = (*final_messages, Message(role="assistant", content=answer))
+                        continue
+                    if frame.status == "done":
+                        await self._persist_transcript(final_messages, answer)
+                    else:
+                        await self._persist_inbound(tuple(arrival_log))
+                    return frame
             except TurnParked as parked:
                 await self._park(parked.message, usage_events)
                 raise
             except (asyncio.CancelledError, DBOSWorkflowCancelledError):
                 await self._bill_cancelled(usage_events)
-                await self._persist_inbound()
+                await self._release_unabsorbed(tuple(absorbed_ids))
+                await self._persist_inbound(tuple(arrival_log))
                 raise
             except Exception as error:
                 match error:
@@ -500,7 +548,8 @@ class TurnEngine:
                     case _:
                         error_class = type(error).__name__
                 await self._commit("failed", usage_events, error_class=error_class)
-                await self._persist_inbound()
+                await self._release_unabsorbed(tuple(absorbed_ids))
+                await self._persist_inbound(tuple(arrival_log))
                 raise
             finally:
                 await context.cleanup.drain()
@@ -557,6 +606,9 @@ class TurnEngine:
         messages: tuple[Message, ...],
         usage_events: list[Usage],
         system: str,
+        arrival_log: list[Message],
+        arrival_speakers: set[UUID | None],
+        absorbed_ids: list[UUID],
     ) -> tuple[
         tuple[Message, ...],
         str,
@@ -565,15 +617,29 @@ class TurnEngine:
         ConnectRequest | None,
     ]:
         """Call the model until it answers with text and no tool calls; each tool-calling round
-        dispatches the calls in the sandbox and feeds the results back as the next user turn. Also
-        returns the structured question, credential request, or connect request left pending when
-        its tool was the turn's final act — each round overwrites all three, so a turn that asked
-        and then worked on carries none."""
+        dispatches the calls in the sandbox and feeds the results back as the next user turn.
+        Every round opens by absorbing queued arrivals — messages admitted while the previous
+        round streamed or its tools ran — so the drain always lands between a completed
+        (tool_use, tool_result) pair and the next model call, never inside one. Also returns the
+        structured question, credential request, or connect request left pending when its tool was
+        the turn's final act — each round overwrites all three, so a turn that asked and then
+        worked on carries none."""
         nudged = False
         question: AskUserInput | None = None
         credential_request: CredentialRequest | None = None
         connect_request: ConnectRequest | None = None
         for _round in range(self.max_rounds):
+            absorbed = await self._absorb_arrivals(
+                messages, arrival_log, arrival_speakers, absorbed_ids
+            )
+            if len(absorbed) > len(messages):
+                question = credential_request = connect_request = None
+            messages = absorbed
+            round_context = (
+                replace(context, speaker_member_id=None)
+                if arrival_speakers - {self.turn.speaker_member_id}
+                else context
+            )
             await self._enforce_spend(usage_events)
             messages, compaction_usage = await self.compaction.maybe_compact(messages)
             usage_events.extend(compaction_usage)
@@ -590,7 +656,7 @@ class TurnEngine:
                 messages = (*messages, Message(role="user", content=EMPTY_RESPONSE_NUDGE))
                 continue
             assistant_blocks = (*((TextBlock(text=text),) if text else ()), *tool_calls)
-            results = tuple([await self._dispatch(context, call) for call in tool_calls])
+            results = tuple([await self._dispatch(round_context, call) for call in tool_calls])
             question = _final_act(tool_calls, results, ASK_USER_TOOL, AskUserInput)
             credential_request = _final_act(
                 tool_calls, results, REQUEST_CREDENTIALS_TOOL, CredentialRequest
@@ -603,6 +669,109 @@ class TurnEngine:
             )
         messages, text = await self._force_final(messages, usage_events, system)
         return messages, text, None, None, None
+
+    async def _absorb_arrivals(
+        self,
+        messages: tuple[Message, ...],
+        arrival_log: list[Message],
+        arrival_speakers: set[UUID | None],
+        absorbed_ids: list[UUID],
+    ) -> tuple[Message, ...]:
+        """Fold the conversation's queued arrivals into the window, each as its own
+        <context>-tagged user message firing user_prompt_submit exactly as the founding inbound
+        did — a denied arrival is dropped, an injection rides the message walled in its own
+        delimiter so it never reads as member text. Each arrival's speaker is recorded: once one
+        differs from the turn's, the round's tool context runs speakerless, so a speaker-gated act
+        never executes under another member's identity. A subagent turn takes no arrivals: its
+        conversation is the parent's private channel, never admitted into."""
+        if self.turn.subagent_profile is not None:
+            return messages
+        for arrival in await self._claim_arrivals(tuple(absorbed_ids)):
+            absorbed_ids.append(arrival.id)
+            submitted = await self.hooks.fire(
+                "user_prompt_submit",
+                UserPromptSubmit(text=arrival.body),
+                self.turn,
+                self.agent,
+                self.audience_member_id,
+                arrival.speaker_member_id,
+            )
+            if submitted.denied is not None:
+                continue
+            arrival_speakers.add(arrival.speaker_member_id)
+            content = _context_tag(arrival.context, arrival.created_at) + arrival.body
+            if submitted.injected:
+                content = (
+                    f"{content}\n\n<injected_context>\n{submitted.injected}\n</injected_context>"
+                )
+            message = Message(role="user", content=content)
+            arrival_log.append(message)
+            messages = (*messages, message)
+        return messages
+
+    @DBOS.step(preemptible=True)
+    async def _claim_arrivals(self, absorbed: tuple[UUID, ...]) -> tuple[Arrival, ...]:
+        """Drain the conversation's pending inbound queue, memoized as a DBOS step: rows are
+        stamped consumed by this turn, and the claim re-takes this turn's stamped rows that no
+        recorded drain absorbed — so a crash between the stamp committing and the step recording
+        re-executes the drain and recovers exactly the batch it had claimed, while absorbed rows
+        are never re-taken. An arrival is consumed exactly once and never lost."""
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.update(tables.inbound_message)
+                    .values(consumed_turn_id=self.turn.id)
+                    .where(
+                        tables.inbound_message.c.conversation_id == self.turn.conversation_id,
+                        sa.or_(
+                            tables.inbound_message.c.consumed_turn_id.is_(None),
+                            sa.and_(
+                                tables.inbound_message.c.consumed_turn_id == self.turn.id,
+                                ~tables.inbound_message.c.id.in_(absorbed),
+                            ),
+                        ),
+                    )
+                    .returning(
+                        tables.inbound_message.c.id,
+                        tables.inbound_message.c.seq,
+                        tables.inbound_message.c.body,
+                        tables.inbound_message.c.context,
+                        tables.inbound_message.c.speaker_member_id,
+                        tables.inbound_message.c.created_at,
+                    )
+                )
+            ).all()
+        return tuple(
+            Arrival(
+                id=row.id,
+                body=row.body,
+                context=None if row.context is None else TurnContext.model_validate(row.context),
+                speaker_member_id=row.speaker_member_id,
+                created_at=row.created_at,
+            )
+            for row in sorted(rows, key=lambda row: row.seq)
+        )
+
+    async def _release_unabsorbed(self, absorbed: tuple[UUID, ...]) -> None:
+        """Return stamped-but-unabsorbed arrivals (a drain whose step never recorded) to pending
+        on a failed or cancelled exit, so the next live turn drains them. Best-effort: these exits
+        must not stall, and the next admission's turn re-drains whatever a miss here left."""
+        try:
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.update(tables.inbound_message)
+                    .values(consumed_turn_id=None)
+                    .where(
+                        tables.inbound_message.c.consumed_turn_id == self.turn.id,
+                        ~tables.inbound_message.c.id.in_(absorbed),
+                    )
+                )
+        except Exception as error:
+            log(
+                "turn.arrival_release_failed",
+                turn_id=str(self.turn.id),
+                error_class=type(error).__name__,
+            )
 
     async def _force_final(
         self,
@@ -954,9 +1123,14 @@ class TurnEngine:
         question: AskUserInput | None = None,
         credential_request: CredentialRequest | None = None,
         connect_request: ConnectRequest | None = None,
-    ) -> TerminalFrame:
+        unless_arrivals: bool = False,
+        absorbed: tuple[UUID, ...] = (),
+    ) -> TerminalFrame | None:
         """Retries until the terminal state is durable: a client's wait always ends,
-        so a database outage delays the commit rather than losing it."""
+        so a database outage delays the commit rather than losing it. With unless_arrivals the
+        commit holds the conversation lock admission inserts under and yields None instead of
+        committing while any arrival is unabsorbed — pending in the queue, or stamped by a drain
+        this execution never recorded — so a reply never closes over an unseen message."""
         delay = COMMIT_RETRY_INITIAL_SECONDS
         while True:
             try:
@@ -968,6 +1142,8 @@ class TurnEngine:
                     question,
                     credential_request,
                     connect_request,
+                    unless_arrivals,
+                    absorbed,
                 )
                 break
             except Exception as error:
@@ -978,6 +1154,8 @@ class TurnEngine:
                 )
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, COMMIT_RETRY_MAX_SECONDS)
+        if frame is None:
+            return None
         await self._publish(Terminal(frame=frame))
         emit_metric("turn_terminal_total", status=frame.status)
         log("turn.terminal", turn_id=str(self.turn.id), status=frame.status)
@@ -992,9 +1170,35 @@ class TurnEngine:
         question: AskUserInput | None,
         credential_request: CredentialRequest | None,
         connect_request: ConnectRequest | None,
-    ) -> TerminalFrame:
+        unless_arrivals: bool,
+        absorbed: tuple[UUID, ...],
+    ) -> TerminalFrame | None:
         usage = _total_usage(usage_events)
         async with workspace_tx() as connection:
+            if unless_arrivals:
+                await connection.execute(
+                    sa.select(tables.conversation.c.id)
+                    .where(tables.conversation.c.id == self.turn.conversation_id)
+                    .with_for_update()
+                )
+                pending = (
+                    await connection.execute(
+                        sa.select(sa.func.count())
+                        .select_from(tables.inbound_message)
+                        .where(
+                            tables.inbound_message.c.conversation_id == self.turn.conversation_id,
+                            sa.or_(
+                                tables.inbound_message.c.consumed_turn_id.is_(None),
+                                sa.and_(
+                                    tables.inbound_message.c.consumed_turn_id == self.turn.id,
+                                    ~tables.inbound_message.c.id.in_(absorbed),
+                                ),
+                            ),
+                        )
+                    )
+                ).scalar_one()
+                if pending:
+                    return None
             await record_turn_usage(
                 connection,
                 self.turn.workspace_id,
@@ -1045,8 +1249,10 @@ class TurnEngine:
 
     async def _park(self, message: str, usage_events: list[Usage]) -> None:
         """Hold the turn at a spend cap: bill this attempt's consumed tokens, commit the
-        non-terminal parked state (durable, resumable), and end the surface's stream with the
-        reason — one transaction. Billing at park is what makes a tight cap CONVERGE: the ledger
+        non-terminal parked state (durable, resumable), release the arrivals this attempt claimed
+        (a resume is a fresh workflow with an empty step log, so it must re-drain them), and end
+        the surface's stream with the reason — one transaction.
+        Billing at park is what makes a tight cap CONVERGE: the ledger
         reflects the real burn, so the resume sweep re-decides against actual spend and finds no
         headroom until the cap is raised — never an unbilled runaway re-burning tokens the cap
         can't see. Keyed by this attempt's workflow id, so the aborted partial and the eventual
@@ -1069,6 +1275,11 @@ class TurnEngine:
                     _total_usage(usage_events),
                     self.attempt,
                     pricing=self.pricing,
+                )
+                await connection.execute(
+                    sa.update(tables.inbound_message)
+                    .values(consumed_turn_id=None)
+                    .where(tables.inbound_message.c.consumed_turn_id == self.turn.id)
                 )
         if updated.rowcount == 1:
             await self._publish(Parked(message=message))
@@ -1128,11 +1339,12 @@ class TurnEngine:
     async def _persist_transcript(self, messages: tuple[Message, ...], answer: str) -> None:
         await self._write_conversation((*messages, Message(role="assistant", content=answer)))
 
-    async def _persist_inbound(self) -> None:
-        """Preserve the user's message on a non-done terminal so the next turn still sees it; the
-        assistant's error or partial text is never persisted, and the monotonic guard lets a
-        done turn's fuller transcript win over this at the same seq."""
-        await self._write_conversation(await self._load_messages())
+    async def _persist_inbound(self, arrivals: tuple[Message, ...] = ()) -> None:
+        """Preserve the member's messages on a non-done terminal — the founding inbound plus every
+        arrival this run absorbed — so the next turn still sees them; the assistant's error or
+        partial text is never persisted, and the monotonic guard lets a done turn's fuller
+        transcript win over this at the same seq."""
+        await self._write_conversation((*await self._load_messages(), *arrivals))
 
     async def _write_conversation(self, messages: tuple[Message, ...]) -> None:
         conversation = Conversation(seq=self.turn.seq, messages=messages)

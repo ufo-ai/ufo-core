@@ -1007,8 +1007,9 @@ async def test_participating_thread_admits_unmentioned_replies_on_the_transcript
 ) -> None:
     """The participation gate end to end: the first mention makes the thread a conversation and
     carries the ambient digest; from then on every member reply — un-mentioned, broadcast, or a
-    second mention — is its own turn with its plain body and no refetched digest, while replies in
-    a foreign thread and top-level chatter stay ignored."""
+    second mention — is admitted with its plain body and no refetched digest (each landing on the
+    still-live starting turn's inbound queue here, since no worker claims it), while replies in a
+    foreign thread and top-level chatter stay ignored."""
     workspace_id, _ = await _seed()
     recorder: list[httpx.Request] = []
     replies = [{"user": "U1", "ts": "1700000000.000100", "text": "pre-mention chatter"}]
@@ -1098,21 +1099,29 @@ async def test_participating_thread_admits_unmentioned_replies_on_the_transcript
                 .order_by(tables.turn.c.seq)
             )
         ).all()
+        queued = (
+            await connection.execute(
+                sa.select(
+                    tables.inbound_message.c.body,
+                    tables.inbound_message.c.idempotency_key,
+                )
+                .where(tables.inbound_message.c.workspace_id == workspace_id)
+                .order_by(tables.inbound_message.c.seq)
+            )
+        ).all()
     assert queue_keys == [f"C1:{root}"]
-    assert [turn.idempotency_key for turn in turns] == [
-        "C1:1700000180.000400",
-        "C1:1700000240.000500",
-        "C1:1700000300.000600",
-        "C1:1700000360.000700",
-    ]
-    assert turns[0].inbound == (
+    [turn] = turns
+    assert turn.idempotency_key == "C1:1700000180.000400"
+    assert turn.inbound == (
         f"{slack.AMBIENT_THREAD_HEADER}\n"
         "[2023-11-14 22:13] <@U1>: pre-mention chatter\n\n"
         "<@UBOT00000> take a look"
     )
-    assert turns[1].inbound == "and it happens on retries too"
-    assert turns[2].inbound == "broadcasting the reply"
-    assert turns[3].inbound == "<@UBOT00000> anything yet?"
+    assert [(row.body, row.idempotency_key) for row in queued] == [
+        ("and it happens on retries too", "C1:1700000240.000500"),
+        ("broadcasting the reply", "C1:1700000300.000600"),
+        ("<@UBOT00000> anything yet?", "C1:1700000360.000700"),
+    ]
     assert len(_fetches(recorder, slack.SLACK_CONVERSATIONS_REPLIES_URL)) == 1
     assert not _fetches(recorder, slack.SLACK_CONVERSATIONS_HISTORY_URL)
 
@@ -1365,8 +1374,9 @@ async def test_confirmed_email_claims_the_dm_that_began_unconfirmed(
     db: None, tmp_path, monkeypatch
 ) -> None:
     """An unconfirmed email is a retryable state, not a verdict: the first DM lands memberless,
-    and the DM after Slack confirms the address joins the speaker as a member and claims that same
-    conversation — and its memory subject — as theirs."""
+    and the DM after Slack confirms the address joins the speaker as a member, claims that same
+    conversation — and its memory subject — as theirs, and lands on the live turn's inbound queue
+    carrying them as its speaker."""
     workspace_id, _ = await _seed(member_email="owner@example.com")
     unconfirmed = {"UNEW"}
     _, client, _ = await _mount(
@@ -1403,11 +1413,26 @@ async def test_confirmed_email_claims_the_dm_that_began_unconfirmed(
                 )
             )
         ).one()
-        admitted = (
-            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
-        ).scalar_one()
+        turn_speakers = (
+            (
+                await connection.execute(
+                    sa.select(tables.turn.c.speaker_member_id).order_by(tables.turn.c.seq)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        queued = (
+            await connection.execute(
+                sa.select(
+                    tables.inbound_message.c.body,
+                    tables.inbound_message.c.speaker_member_id,
+                )
+            )
+        ).one()
     assert conversation.member_id == member_id
-    assert admitted == 2
+    assert turn_speakers == [None]
+    assert (queued.body, queued.speaker_member_id) == ("me again", member_id)
 
 
 async def test_unlinked_dm_fails_loud_when_the_sender_read_is_unavailable(
@@ -2323,8 +2348,13 @@ async def test_status_re_stamps_before_slack_drops_it(db: None, tmp_path, monkey
 
 
 async def test_newest_turn_owns_the_thread_status(db: None, tmp_path, monkeypatch) -> None:
+    """The thread has one status writer — the newest turn: the finished first turn's stale clear
+    is skipped once the follow-up turn takes the thread over. The durable terminal poll is slowed
+    so the first turn's tail ends only on the hub Terminal this test publishes, after the writer
+    has moved."""
     workspace_id, _ = await _seed()
     monkeypatch.setattr(slack, "STATUS_UPDATE_MIN_SECONDS", 0.0)
+    monkeypatch.setattr(hub_tail, "TERMINAL_POLL_SECONDS", 60.0)
     recorder: list[httpx.Request] = []
     hub = InProcessHub()
     _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder, hub=hub)
@@ -2339,12 +2369,39 @@ async def test_newest_turn_owns_the_thread_status(db: None, tmp_path, monkeypatc
         thread_ts="100.5",
         text="<@UBOT00000> two",
     )
+    first_terminal = TerminalFrame(status="done", text="one")
     async with client:
-        for body in (first, second):
-            response = await client.post(
-                EVENTS_PATH, content=body, headers=_sign(body, int(time.time()))
+        response = await client.post(
+            EVENTS_PATH, content=first, headers=_sign(first, int(time.time()))
+        )
+        assert response.status_code == 200
+        async with workspace_tx() as connection:
+            first_id = (
+                await connection.execute(
+                    sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
+                )
+            ).scalar_one()
+        first_task = slack._STATUS_TASKS[first_id]
+        deadline = time.monotonic() + 5
+        while not any(
+            json.loads(r.content)["status"] == "Priming the tail"
+            for r in _requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)
+        ):
+            await hub.publish(
+                first_id, ToolCall(tool="bash", preview="{}", description="Priming the tail")
             )
-            assert response.status_code == 200
+            assert time.monotonic() < deadline, "the first turn's tail never started draining"
+            await asyncio.sleep(0.01)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.turn)
+                .values(status="done", terminal=first_terminal.model_dump(mode="json"))
+                .where(tables.turn.c.id == first_id)
+            )
+        response = await client.post(
+            EVENTS_PATH, content=second, headers=_sign(second, int(time.time()))
+        )
+        assert response.status_code == 200
     async with workspace_tx() as connection:
         rows = (
             await connection.execute(
@@ -2355,14 +2412,6 @@ async def test_newest_turn_owns_the_thread_status(db: None, tmp_path, monkeypatc
         ).all()
     turns = {row.idempotency_key: row.id for row in rows}
 
-    first_task = slack._STATUS_TASKS[turns["C1:100.5"]]
-    first_terminal = TerminalFrame(status="done", text="one")
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.turn)
-            .where(tables.turn.c.id == turns["C1:100.5"])
-            .values(status="done", terminal=first_terminal.model_dump(mode="json"))
-        )
     await hub.publish(turns["C1:100.5"], Terminal(frame=first_terminal))
     await first_task
     statuses = [

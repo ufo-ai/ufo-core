@@ -143,6 +143,34 @@ turn = sa.Table(
     ),
 )
 
+inbound_message = sa.Table(
+    "inbound_message",
+    metadata,
+    sa.Column("id", sa.Uuid, primary_key=True),
+    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
+    sa.Column("conversation_id", sa.Uuid, sa.ForeignKey("conversation.id"), nullable=False),
+    sa.Column("seq", sa.Integer, nullable=False),
+    sa.Column("body", sa.Text, nullable=False),
+    sa.Column("admission_source", sa.Text, nullable=False),
+    sa.Column("context", sa.JSON(none_as_null=True), nullable=True),
+    sa.Column("speaker_member_id", sa.Uuid, sa.ForeignKey("member.id"), nullable=True),
+    sa.Column("idempotency_key", sa.Text, nullable=True),
+    sa.Column("admitted_turn_id", sa.Uuid, sa.ForeignKey("turn.id"), nullable=False),
+    sa.Column("consumed_turn_id", sa.Uuid, sa.ForeignKey("turn.id"), nullable=True),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.UniqueConstraint("conversation_id", "seq"),
+    sa.CheckConstraint(
+        "admission_source in ('member', 'internal')", name="inbound_message_admission_source"
+    ),
+    sa.Index("inbound_message_idempotency_key", "workspace_id", "idempotency_key", unique=True),
+    sa.Index(
+        "inbound_message_pending",
+        "conversation_id",
+        postgresql_where=sa.text("consumed_turn_id is null"),
+        sqlite_where=sa.text("consumed_turn_id is null"),
+    ),
+)
+
 ledger = sa.Table(
     "ledger",
     metadata,
