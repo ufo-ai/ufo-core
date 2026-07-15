@@ -490,10 +490,9 @@ async def spawn_subagent_handler(ctx: ToolContext, args: SpawnSubagentInput) -> 
         return ToolResult(
             content=(TextContent(text=f"spawned {args.profile} subagent (turn {result.turn_id})"),)
         )
-    text = json.dumps(
-        {"subagent_id": str(result.turn_id), "output": result.output.model_dump(mode="json")}
+    return ToolResult(
+        content=(TextContent(text=result.output.model_dump_json()),), untrusted=result.untrusted
     )
-    return ToolResult(content=(TextContent(text=text),), untrusted=result.untrusted)
 
 
 async def load_sessions_handler(ctx: ToolContext, args: LoadSessionsInput) -> ToolResult:
@@ -772,8 +771,8 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         name="spawn_subagent",
         description=(
             "Delegate a subtask to a named subagent profile. `payload` must match the profile's "
-            "input schema; foreground (default) returns the subagent id and the profile's "
-            "validated JSON output, background returns the subagent id at once."
+            "input schema; foreground (default) returns the profile's validated JSON output, "
+            "background returns the child turn id at once."
         ),
         input_model=SpawnSubagentInput,
         handler=spawn_subagent_handler,

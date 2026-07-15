@@ -910,9 +910,7 @@ async def test_typed_subagent_round_trips_schema(surface: AsyncClient) -> None:
         for block in message.content
         if isinstance(block, ToolResultBlock)
     )
-    reply = json.loads(tool_result.content)
-    assert reply["subagent_id"] == str(child.id)
-    assert RoundTripOutput.model_validate(reply["output"]).echoed == 21
+    assert RoundTripOutput.model_validate_json(tool_result.content).echoed == 21
     assert tool_result.is_error is False
 
 

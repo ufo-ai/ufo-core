@@ -99,20 +99,15 @@ async def _browser_task(ctx: ToolContext, args: BrowserTaskInput) -> ToolResult:
         return ToolResult(
             content=(
                 TextContent(
-                    text=f"browser task {args.task_name!r} (subagent {spawned.turn_id}) exceeded "
-                    f"its {args.timeout_minutes}-minute timeout and was cancelled"
+                    text=f"browser task {args.task_name!r} exceeded its "
+                    f"{args.timeout_minutes}-minute timeout and was cancelled"
                 ),
             ),
             is_error=True,
         )
     if status.status != "done":
         raise RuntimeError(f"subagent {BROWSER_PROFILE_NAME!r} turn ended {status.status}")
-    text = json.dumps(
-        {
-            "subagent_id": str(spawned.turn_id),
-            "result": BrowserResult.model_validate_json(status.text).result,
-        }
-    )
+    text = BrowserResult.model_validate_json(status.text).model_dump_json()
     return ToolResult(content=(TextContent(text=text),))
 
 
@@ -150,7 +145,6 @@ async def _wide_browse(ctx: ToolContext, args: WideBrowseInput) -> ToolResult:
             )
             return {
                 "entity": entity,
-                "subagent_id": str(result.turn_id),
                 "result": "" if result.output is None else result.output.model_dump_json(),
             }
 

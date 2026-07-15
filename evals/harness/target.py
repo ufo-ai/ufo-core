@@ -45,16 +45,6 @@ CHILD_TRANSCRIPT_POLL_ATTEMPTS = 25
 
 
 @dataclass(frozen=True)
-class _ChildTrajectory:
-    """One delegated child conversation's contribution to the scored output: the id strings that
-    reference it (its conversation id and every turn id in it — follow-up turns included), and its
-    trajectory with its own descendants already merged in."""
-
-    refs: frozenset[str]
-    output: CapabilityOutput
-
-
-@dataclass(frozen=True)
 class ArtifactCollection:
     artifacts: tuple[SharedArtifact, ...] = ()
     error: str = ""
@@ -144,12 +134,11 @@ class InProcessTarget:
         output = capability_output(trajectory.messages)
         status = await self._turn_status(turn_id)
         snapshot = await self._trajectory(conversation_id, turn_id, status, trajectory.messages)
-        children, descendant_ids, missing_child = await self._descendants(turn_id)
+        output, descendant_ids, missing_child = await self._merge_descendants(turn_id, output)
         if missing_child:
             return TargetResult(
                 output, clean=False, failure_reason=missing_child, trajectory=snapshot
             )
-        output = _splice(output, children)
         turn_failure = self._turn_failure(status)
         if turn_failure:
             if self.logs is not None:
@@ -167,20 +156,20 @@ class InProcessTarget:
             output = replace(output, artifacts=collected.artifacts, artifact_error=collected.error)
         return TargetResult(output, clean=True, trajectory=snapshot)
 
-    async def _descendants(
-        self, turn_id: UUID
-    ) -> tuple[tuple[_ChildTrajectory, ...], tuple[UUID, ...], str]:
-        """Every child conversation this turn delegated to, in spawn order, each read once — a
-        follow-up turn (message_subagent) shares its child's conversation and transcript, so the
-        conversation is the merge unit, never the turn. A delegated capability (browser_task,
-        wide_browse, spawn_subagent) proves itself by the raw calls its children actually
-        dispatched, never by the wrapper's summary. A conversation with no terminal turn never
-        informed the parent's answer and is skipped; a terminal one whose transcript never
-        appears or does not decode is an infrastructure failure (third return), never a silently
-        thinner trajectory. Also returns every descendant turn id, so artifact collection sees
-        files a child shared."""
+    async def _merge_descendants(
+        self, turn_id: UUID, output: CapabilityOutput
+    ) -> tuple[CapabilityOutput, tuple[UUID, ...], str]:
+        """Append every terminal child conversation's calls and tool errors to the scored output —
+        a delegated capability (browser_task, wide_browse, spawn_subagent) proves itself by the
+        raw calls its children actually dispatched, never by the wrapper's summary, and a child's
+        errors keep web-infra exclusion truthful. Each conversation reads once (a message_subagent
+        follow-up adds a turn to its child's conversation, not a transcript); a conversation with
+        no terminal turn never informed the parent's answer and is skipped; a terminal one whose
+        transcript never appears or does not decode is an infrastructure failure (third return),
+        never a silently thinner trajectory. Also returns every descendant turn id, so artifact
+        collection sees files a child shared."""
         if self.blob is None:
-            return (), (), ""
+            return output, (), ""
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
@@ -196,31 +185,31 @@ class InProcessTarget:
         conversations: dict[UUID, list[sa.Row]] = {}
         for row in rows:
             conversations.setdefault(row.conversation_id, []).append(row)
-        children: list[_ChildTrajectory] = []
-        turn_ids: list[UUID] = []
+        calls = list(output.calls)
+        errors = list(output.tool_errors)
+        descendant_ids: list[UUID] = []
         for conversation_id, turns in conversations.items():
-            turn_ids.extend(turn.id for turn in turns)
+            descendant_ids.extend(turn.id for turn in turns)
             if not any(turn.status in TERMINAL_CHILD_STATUSES for turn in turns):
                 continue
             body = await self._await_child_transcript(conversation_id)
             if body is None:
                 failure = f"child turn {turns[0].id} is terminal but its transcript never appeared"
-                return (), (), failure
+                return output, (), failure
             try:
                 decoded = decode(body)
             except TranscriptDecodeError:
-                return (), (), f"child conversation {conversation_id} has a corrupt transcript"
-            output = capability_output(decoded.messages)
-            grandchildren: list[_ChildTrajectory] = []
+                return output, (), f"child conversation {conversation_id} has a corrupt transcript"
+            child = capability_output(decoded.messages)
             for turn in turns:
-                sub_children, sub_ids, failure = await self._descendants(turn.id)
+                child, sub_ids, failure = await self._merge_descendants(turn.id, child)
                 if failure:
-                    return (), (), failure
-                grandchildren.extend(sub_children)
-                turn_ids.extend(sub_ids)
-            refs = frozenset({str(conversation_id), *(str(turn.id) for turn in turns)})
-            children.append(_ChildTrajectory(refs=refs, output=_splice(output, grandchildren)))
-        return tuple(children), tuple(turn_ids), ""
+                    return output, (), failure
+                descendant_ids.extend(sub_ids)
+            calls.extend(child.calls)
+            errors.extend(child.tool_errors)
+        merged = replace(output, calls=tuple(calls), tool_errors=tuple(errors))
+        return merged, tuple(descendant_ids), ""
 
     async def _await_child_transcript(self, conversation_id: UUID) -> bytes | None:
         """A terminal turn's transcript lands after its terminal commit, so a child observed
@@ -476,40 +465,6 @@ def _redact_object(value: dict[str, Json], private_values: tuple[str, ...]) -> d
         name: (PRIVATE_HANDOFF_REDACTED if name == "sealed" else _redact_json(item, private_values))
         for name, item in value.items()
     }
-
-
-def _splice(
-    output: CapabilityOutput, children: tuple[_ChildTrajectory, ...] | list[_ChildTrajectory]
-) -> CapabilityOutput:
-    """Fold each child conversation's calls and tool errors into the trajectory at the point its
-    output became visible: after the last call whose result names the child (wrappers surface the
-    subagent id — a background spawn's ack and its later wait both do, so a waited child lands at
-    the wait). A child no call references appends at the end, so membership scoring never loses
-    it."""
-    if not children:
-        return output
-    placed: dict[int, list[_ChildTrajectory]] = {}
-    unreferenced: list[_ChildTrajectory] = []
-    for child in children:
-        anchor_index = None
-        for index, call in enumerate(output.calls):
-            if any(ref in call.result for ref in child.refs):
-                anchor_index = index
-        if anchor_index is None:
-            unreferenced.append(child)
-        else:
-            placed.setdefault(anchor_index, []).append(child)
-    calls: list[ToolInvocation] = []
-    errors = list(output.tool_errors)
-    for index, call in enumerate(output.calls):
-        calls.append(call)
-        for child in placed.get(index, ()):
-            calls.extend(child.output.calls)
-            errors.extend(child.output.tool_errors)
-    for child in unreferenced:
-        calls.extend(child.output.calls)
-        errors.extend(child.output.tool_errors)
-    return replace(output, calls=tuple(calls), tool_errors=tuple(errors))
 
 
 def _final_answer(messages: tuple[Message, ...]) -> str:

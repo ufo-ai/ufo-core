@@ -1860,12 +1860,7 @@ def _delegated_worker(blob: FilesystemBlobStore, workspace_id: UUID, **kwargs) -
         ),
         Message(
             role="user",
-            content=(
-                ToolResultBlock(
-                    tool_use_id="d1",
-                    content=f'{{"subagent_id": "{worker.child_turn_id}", "result": "summary"}}',
-                ),
-            ),
+            content=(ToolResultBlock(tool_use_id="d1", content='{"result": "summary"}'),),
         ),
         Message(
             role="assistant",
@@ -1877,12 +1872,10 @@ def _delegated_worker(blob: FilesystemBlobStore, workspace_id: UUID, **kwargs) -
     return worker
 
 
-async def test_capability_merge_splices_child_calls_where_their_id_surfaces(
-    db: None, tmp_path
-) -> None:
-    """The child's raw calls score at the call whose result names the subagent id — a parent that
-    works on after browser_task returns must not have the child's navigate ordered after that
-    later work — and the child's tool errors join the output so web-infra exclusion sees them."""
+async def test_capability_merge_appends_child_calls_and_errors(db: None, tmp_path) -> None:
+    """A delegated capability proves itself by its child's raw calls: the harness appends every
+    terminal child conversation's trajectory to the scored output, and the child's tool errors
+    join it so web-infra exclusion sees them."""
     workspace_id = await _workspace()
     agent_id = await _seed_agent(workspace_id)
     blob = FilesystemBlobStore(root=tmp_path)
@@ -1896,67 +1889,11 @@ async def test_capability_merge_splices_child_calls_where_their_id_surfaces(
     assert result.clean is True
     assert [call.name for call in result.output.calls] == [
         "browser_task",
+        "memory_update",
         "navigate",
         "read_page",
-        "memory_update",
     ]
     assert "upstream 503 from the page" in result.output.tool_errors
-
-
-async def test_capability_merge_splices_a_waited_child_at_the_wait(db: None, tmp_path) -> None:
-    """A background child is credited where its output became visible: the wait names the
-    subagent id last, so the child's calls land after the wait, never before the parent work
-    that preceded it."""
-    workspace_id = await _workspace()
-    agent_id = await _seed_agent(workspace_id)
-    blob = FilesystemBlobStore(root=tmp_path)
-    worker = _delegated_worker(blob, workspace_id)
-    child_id = worker.child_turn_id
-    worker.transcript = (
-        Message(role="user", content="browse in the background"),
-        Message(
-            role="assistant",
-            content=(ToolUseBlock(id="s1", name="spawn_subagent", input={"profile": "browser"}),),
-        ),
-        Message(
-            role="user",
-            content=(
-                ToolResultBlock(
-                    tool_use_id="s1", content=f"spawned browser subagent (turn {child_id})"
-                ),
-            ),
-        ),
-        Message(
-            role="assistant",
-            content=(ToolUseBlock(id="m1", name="memory_update", input={"content": "seen"}),),
-        ),
-        Message(role="user", content=(ToolResultBlock(tool_use_id="m1", content="saved"),)),
-        Message(
-            role="assistant",
-            content=(ToolUseBlock(id="w1", name="wait_for_subagents", input={}),),
-        ),
-        Message(
-            role="user",
-            content=(
-                ToolResultBlock(
-                    tool_use_id="w1",
-                    content=f'{{"subagents": [{{"subagent_id": "{child_id}", "status": "done"}}]}}',
-                ),
-            ),
-        ),
-        Message(role="assistant", content="done"),
-    )
-    target = _delegating_target(blob, worker, agent_id, workspace_id)
-    case = CapabilityCase("delegated-wait", "browse", required_tools_scorer(("navigate",)))
-    with ws(workspace_id):
-        result = await target.run(case)
-    assert [call.name for call in result.output.calls] == [
-        "spawn_subagent",
-        "memory_update",
-        "wait_for_subagents",
-        "navigate",
-        "read_page",
-    ]
 
 
 async def test_capability_merge_reads_a_followed_up_child_conversation_once(
