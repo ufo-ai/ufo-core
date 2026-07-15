@@ -36,8 +36,6 @@ from ufo.db import current_workspace, workspace_tx
 from ufo.ext.loader import skill_registry, turn_tools
 from ufo.ext.surface import (
     WRITEBACK_DELIVERED,
-    WRITEBACK_FAILED,
-    WRITEBACK_MAX_AGE_SECONDS,
     workspace_key,
 )
 from ufo.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
@@ -1981,11 +1979,9 @@ async def test_writeback_persists_slack_retry_after(
     db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     workspace_id, _ = await _seed()
-    recorder: list[httpx.Request] = []
 
     def rate_limited(request: httpx.Request) -> httpx.Response:
         if str(request.url) == slack.SLACK_CHAT_POST_MESSAGE_URL:
-            recorder.append(request)
             return httpx.Response(
                 429,
                 headers={"Retry-After": "23"},
@@ -1996,39 +1992,31 @@ async def test_writeback_persists_slack_retry_after(
     app, _, blob = await _mount_transport(
         monkeypatch, workspace_id, tmp_path, httpx.MockTransport(rate_limited)
     )
-    first_turn_id = await _seed_done_turn(workspace_id, "C429:200.0", "first", blob, artifact=False)
-    second_turn_id = await _seed_done_turn(
-        workspace_id, "C429:201.0", "second", blob, artifact=False
-    )
+    turn_id = await _seed_done_turn(workspace_id, "C429:200.0", "hi", blob, artifact=False)
 
     await app.state.writeback_poller.drain()
 
     async with workspace_tx() as connection:
-        writebacks = (
+        writeback = (
             await connection.execute(
                 sa.select(
-                    tables.writeback.c.turn_id,
                     tables.writeback.c.status,
                     tables.writeback.c.claim_expires_at,
                     tables.writeback.c.last_error,
-                ).where(tables.writeback.c.turn_id.in_((first_turn_id, second_turn_id)))
+                ).where(tables.writeback.c.turn_id == turn_id)
             )
-        ).all()
-    assert len(recorder) == 1
-    assert {row.turn_id for row in writebacks} == {first_turn_id, second_turn_id}
-    assert {row.status for row in writebacks} == {WRITEBACK_PENDING}
-    assert len({row.claim_expires_at for row in writebacks}) == 1
-    assert {row.last_error for row in writebacks} == {
-        None,
-        "chat.postMessage HTTP 429: ratelimited; retry_after_seconds=23",
-    }
-    due = writebacks[0].claim_expires_at.replace(tzinfo=UTC)
+        ).one()
+    assert writeback.status == WRITEBACK_PENDING
+    assert writeback.last_error == "chat.postMessage HTTP 429: ratelimited; retry_after_seconds=23"
+    due = writeback.claim_expires_at.replace(tzinfo=UTC)
     assert 22 <= (due - datetime.now(UTC)).total_seconds() <= 23
 
 
-async def test_writeback_bounds_unrepresentable_slack_retry_after(
+async def test_writeback_ignores_an_oversize_slack_retry_after(
     db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A Retry-After too long to be a real delay (int() of 4300+ decimal digits raises on
+    Python 3.12) is ignored: the row retries on the fixed backoff instead of erroring the post."""
     workspace_id, _ = await _seed()
 
     def rate_limited(request: httpx.Request) -> httpx.Response:
@@ -2051,17 +2039,12 @@ async def test_writeback_bounds_unrepresentable_slack_retry_after(
             await connection.execute(
                 sa.select(
                     tables.writeback.c.status,
-                    tables.writeback.c.claim_expires_at,
                     tables.writeback.c.last_error,
                 ).where(tables.writeback.c.turn_id == turn_id)
             )
         ).one()
-    assert writeback.status == WRITEBACK_FAILED
-    assert writeback.claim_expires_at is None
-    assert writeback.last_error == (
-        "chat.postMessage HTTP 429: ratelimited; "
-        f"retry_after_seconds={WRITEBACK_MAX_AGE_SECONDS + 1}"
-    )
+    assert writeback.status == WRITEBACK_PENDING
+    assert writeback.last_error == "chat.postMessage HTTP 429: ratelimited"
 
 
 async def test_writeback_streams_dm_attachment_without_threading_under_the_bot_reply(

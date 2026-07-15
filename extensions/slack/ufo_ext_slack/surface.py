@@ -262,7 +262,7 @@ SLACK_INVALID_BLOCKS_ERROR = "invalid_blocks"
 SLACK_OVERSIZE_HEADING = "**Attachments (too large to upload):**"
 
 SLACK_API_TIMEOUT_SECONDS = 20
-SLACK_RETRY_AFTER_MAX_SECONDS = 2_147_483_647
+MAX_RETRY_AFTER_DIGITS = 9
 SLACK_UPLOAD_READ_TIMEOUT_SECONDS = 60
 SLACK_UPLOAD_WRITE_TIMEOUT_SECONDS = 600
 SLACK_DOWNLOAD_TIMEOUT_SECONDS = 600
@@ -1392,17 +1392,18 @@ async def _chat_post(
                     error_code = value
                 case _:
                     error_code = None
-        retry_after_seconds = None
         retry_after = response.headers.get("retry-after")
-        if response.status_code == 429 and retry_after is not None and retry_after.isdecimal():
-            try:
-                retry_after_seconds = min(int(retry_after), SLACK_RETRY_AFTER_MAX_SECONDS)
-            except ValueError:
-                retry_after_seconds = SLACK_RETRY_AFTER_MAX_SECONDS
+        retry_after_seconds = (
+            int(retry_after)
+            if response.status_code == 429
+            and retry_after is not None
+            and retry_after.isdecimal()
+            and len(retry_after) <= MAX_RETRY_AFTER_DIGITS
+            else None
+        )
         error_suffix = f": {error_code}" if error_code is not None else ""
         raise SurfaceDeliveryError(
             f"chat.postMessage HTTP {response.status_code}{error_suffix}",
-            http_status=response.status_code,
             retry_after_seconds=retry_after_seconds,
         ) from error
     return response.json()

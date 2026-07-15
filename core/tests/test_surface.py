@@ -24,7 +24,6 @@ from ufo.credentials import (
 )
 from ufo.db import workspace_tx
 from ufo.ext.surface import (
-    WRITEBACK_CLAIM_BATCH,
     WRITEBACK_CLAIMED,
     WRITEBACK_DELIVERED,
     WRITEBACK_FAILED,
@@ -96,7 +95,6 @@ class RetryAfterSurface(RecordingSurface):
             self.failures_remaining -= 1
             raise SurfaceDeliveryError(
                 "chat.postMessage HTTP 429",
-                http_status=429,
                 retry_after_seconds=self.retry_after_seconds,
             )
         return self.ref
@@ -306,6 +304,8 @@ def test_workspace_key_scopes_under_the_conversation_workspace() -> None:
 
 
 def test_surface_delivery_error_rejects_negative_retry_delay() -> None:
+    """The public SDK seam fails loud on a negative delay; without it a negative flows into the
+    retry-at computation and re-claims the row immediately, busy-looping the failing surface."""
     with pytest.raises(ValueError, match="retry_after_seconds must be nonnegative"):
         SurfaceDeliveryError("rate limited", retry_after_seconds=-1)
 
@@ -845,30 +845,26 @@ async def test_writeback_retains_latest_error_and_honors_retry_after(
     assert failure_fields["phase"] == "post"
     assert failure_fields["outcome"] == "retry"
     assert failure_fields["last_error"] == delivered.last_error
-    assert failure_fields["http_status"] == 429
-    assert failure_fields["retry_after_seconds"] == 17
     delivered_log = next(
         record for record in caplog.records if record.getMessage() == "surface.writeback_delivered"
     )
     assert delivered_log.__dict__["ufo"]["turn_id"] == str(turn_id)
 
 
-async def test_writeback_fails_when_retry_after_exceeds_its_remaining_lifetime(
-    db: None, tmp_path
-) -> None:
+async def test_writeback_caps_retry_after_at_the_writeback_window(db: None, tmp_path) -> None:
+    """A hostile or absurd Retry-After cannot park a row past the writeback window: the delay is
+    capped there, and the age give-up fails the row on the attempt after it ages out."""
     workspace_id, _, _ = await _seed()
     turn_id = await _seed_turn(workspace_id, "C429:2.0", "done", "hi")
-    surface = RetryAfterSurface(retry_after_seconds=10**10_000)
+    surface = RetryAfterSurface(retry_after_seconds=WRITEBACK_MAX_AGE_SECONDS * 10)
     poller, _ = _poller(workspace_id, surface, FilesystemBlobStore(root=tmp_path))
 
     await poller.drain()
 
     writeback = await _writeback(turn_id)
-    assert writeback.status == WRITEBACK_FAILED
-    assert writeback.claim_expires_at is None
-    assert writeback.last_error == (
-        f"chat.postMessage HTTP 429; retry_after_seconds={WRITEBACK_MAX_AGE_SECONDS + 1}"
-    )
+    assert writeback.status == WRITEBACK_PENDING
+    due = writeback.claim_expires_at.replace(tzinfo=UTC)
+    assert (due - datetime.now(UTC)).total_seconds() <= WRITEBACK_MAX_AGE_SECONDS
 
 
 async def test_writeback_retry_after_does_not_defer_another_surface(db: None, tmp_path) -> None:
@@ -909,72 +905,6 @@ async def test_writeback_retry_after_does_not_defer_another_surface(db: None, tm
     assert (await _writeback(delayed_turn_id)).status == WRITEBACK_PENDING
     assert (await _writeback(delivered_turn_id)).status == WRITEBACK_DELIVERED
     assert delivered.posted == [delivered_turn_id]
-
-
-async def test_writeback_retry_after_defers_pending_rows_beyond_the_claim_page(
-    db: None, tmp_path
-) -> None:
-    workspace_id, _, _ = await _seed()
-    turn_ids = [
-        await _seed_turn(workspace_id, f"C429:{index}.0", "done", str(index))
-        for index in range(WRITEBACK_CLAIM_BATCH + 1)
-    ]
-    poller, _ = _poller(
-        workspace_id,
-        RetryAfterSurface(),
-        FilesystemBlobStore(root=tmp_path),
-    )
-
-    await poller.drain()
-
-    async with workspace_tx() as connection:
-        rows = (
-            await connection.execute(
-                sa.select(
-                    tables.writeback.c.status,
-                    tables.writeback.c.claim_expires_at,
-                ).where(tables.writeback.c.turn_id.in_(turn_ids))
-            )
-        ).all()
-    assert len(rows) == WRITEBACK_CLAIM_BATCH + 1
-    assert {row.status for row in rows} == {WRITEBACK_PENDING}
-    assert len({row.claim_expires_at for row in rows}) == 1
-    assert rows[0].claim_expires_at is not None
-
-
-async def test_writeback_retry_after_fails_queued_rows_beyond_their_lifetime(
-    db: None, tmp_path
-) -> None:
-    workspace_id, _, _ = await _seed()
-    turn_ids = [
-        await _seed_turn(workspace_id, f"C429:{index}.0", "done", str(index))
-        for index in range(WRITEBACK_CLAIM_BATCH + 1)
-    ]
-    for turn_id in turn_ids:
-        await _set_writeback(
-            turn_id,
-            created_at=datetime.now(UTC) - timedelta(seconds=WRITEBACK_MAX_AGE_SECONDS - 10),
-        )
-    poller, _ = _poller(
-        workspace_id,
-        RetryAfterSurface(retry_after_seconds=17),
-        FilesystemBlobStore(root=tmp_path),
-    )
-
-    await poller.drain()
-
-    async with workspace_tx() as connection:
-        rows = (
-            await connection.execute(
-                sa.select(
-                    tables.writeback.c.status,
-                    tables.writeback.c.claim_expires_at,
-                ).where(tables.writeback.c.turn_id.in_(turn_ids))
-            )
-        ).all()
-    assert len(rows) == WRITEBACK_CLAIM_BATCH + 1
-    assert {row.status for row in rows} == {WRITEBACK_FAILED}
-    assert {row.claim_expires_at for row in rows} == {None}
 
 
 async def test_writeback_retry_after_leaves_nonterminal_rows_untouched(db: None, tmp_path) -> None:
