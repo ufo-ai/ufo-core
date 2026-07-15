@@ -7,9 +7,6 @@ from ufo.accounting import (
     ModelPrice as ModelPrice,
 )
 from ufo.models.interface import (
-    ContentBlock as ContentBlock,
-)
-from ufo.models.interface import (
     ImageBlock as ImageBlock,
 )
 from ufo.models.interface import (
