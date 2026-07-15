@@ -487,10 +487,13 @@ async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResu
 async def spawn_subagent_handler(ctx: ToolContext, args: SpawnSubagentInput) -> ToolResult:
     result = await ctx.spawn(args.profile, args.payload, args.background)
     if result.output is None:
-        text = f"spawned {args.profile} subagent (turn {result.turn_id})"
-    else:
-        text = result.output.model_dump_json()
-    return ToolResult(content=(TextContent(text=text),))
+        return ToolResult(
+            content=(TextContent(text=f"spawned {args.profile} subagent (turn {result.turn_id})"),)
+        )
+    text = json.dumps(
+        {"subagent_id": str(result.turn_id), "output": result.output.model_dump(mode="json")}
+    )
+    return ToolResult(content=(TextContent(text=text),), untrusted=result.untrusted)
 
 
 async def load_sessions_handler(ctx: ToolContext, args: LoadSessionsInput) -> ToolResult:
@@ -647,7 +650,10 @@ async def wait_for_subagents_handler(ctx: ToolContext, args: WaitForSubagentsInp
         {"subagent_id": str(status.turn_id), "status": status.status, "output": status.text}
         for status in statuses
     ]
-    return ToolResult(content=(TextContent(text=json.dumps({"subagents": done})),))
+    return ToolResult(
+        content=(TextContent(text=json.dumps({"subagents": done})),),
+        untrusted=any(status.untrusted for status in statuses),
+    )
 
 
 async def cancel_subagent_handler(ctx: ToolContext, args: CancelSubagentInput) -> ToolResult:
@@ -766,8 +772,8 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         name="spawn_subagent",
         description=(
             "Delegate a subtask to a named subagent profile. `payload` must match the profile's "
-            "input schema; foreground (default) returns the profile's validated JSON output, "
-            "background returns the child turn id at once."
+            "input schema; foreground (default) returns the subagent id and the profile's "
+            "validated JSON output, background returns the subagent id at once."
         ),
         input_model=SpawnSubagentInput,
         handler=spawn_subagent_handler,

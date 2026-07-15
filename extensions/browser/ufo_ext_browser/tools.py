@@ -10,6 +10,7 @@ and sibling subagents reach them by path."""
 
 import base64
 import json
+from dataclasses import replace
 from typing import Literal
 from weakref import WeakKeyDictionary
 
@@ -213,79 +214,83 @@ async def _wait_for_download(ctx: ToolContext, args: WaitForDownloadInput) -> To
     return _json_result({"file_path": target, "filename": filename, "size": download.get("size")})
 
 
-BROWSER_TOOLS: tuple[ToolDef, ...] = (
-    ToolDef(
-        name="navigate",
-        description="Navigate to a URL, or go forward/back in browser history.",
-        input_model=NavigateInput,
-        handler=_navigate,
-    ),
-    ToolDef(
-        name="tabs_context",
-        description="Get context for all browser tabs.",
-        input_model=TabsContextInput,
-        handler=_tabs_context,
-        untrusted=True,
-    ),
-    ToolDef(
-        name="tabs_create",
-        description="Create a browser tab.",
-        input_model=TabsCreateInput,
-        handler=_tabs_create,
-    ),
-    ToolDef(
-        name="tabs_close",
-        description="Close a browser tab.",
-        input_model=TabsCloseInput,
-        handler=_tabs_close,
-    ),
-    ToolDef(
-        name="upload_file",
-        description="Set a file input from workspace paths.",
-        input_model=UploadFileInput,
-        handler=_upload_file,
-    ),
-    ToolDef(
-        name="read_page",
-        description="Read the browser page accessibility tree.",
-        input_model=ReadPageInput,
-        handler=_read_page,
-        untrusted=True,
-    ),
-    ToolDef(
-        name="get_page_text",
-        description="Extract raw text from the browser page.",
-        input_model=GetPageTextInput,
-        handler=_get_page_text,
-        untrusted=True,
-    ),
-    ToolDef(
-        name="find",
-        description="Find browser page elements by role, text, name, or URL.",
-        input_model=FindInput,
-        handler=_find,
-        untrusted=True,
-    ),
-    ToolDef(
-        name="form_input",
-        description="Set a form value by browser ref.",
-        input_model=FormInputInput,
-        handler=_form_input,
-    ),
-    ToolDef(
-        name="computer",
-        description=(
-            "Interact with the browser using mouse, keyboard, wait, scroll, and screenshot actions."
+BROWSER_TOOLS: tuple[ToolDef, ...] = tuple(
+    replace(tool, profile_only=True)
+    for tool in (
+        ToolDef(
+            name="navigate",
+            description="Navigate to a URL, or go forward/back in browser history.",
+            input_model=NavigateInput,
+            handler=_navigate,
         ),
-        input_model=ComputerInput,
-        handler=_computer,
-    ),
-    ToolDef(
-        name="wait_for_download",
-        description="Wait for a browser download and write it to the workspace.",
-        input_model=WaitForDownloadInput,
-        handler=_wait_for_download,
-    ),
+        ToolDef(
+            name="tabs_context",
+            description="Get context for all browser tabs.",
+            input_model=TabsContextInput,
+            handler=_tabs_context,
+            untrusted=True,
+        ),
+        ToolDef(
+            name="tabs_create",
+            description="Create a browser tab.",
+            input_model=TabsCreateInput,
+            handler=_tabs_create,
+        ),
+        ToolDef(
+            name="tabs_close",
+            description="Close a browser tab.",
+            input_model=TabsCloseInput,
+            handler=_tabs_close,
+        ),
+        ToolDef(
+            name="upload_file",
+            description="Set a file input from workspace paths.",
+            input_model=UploadFileInput,
+            handler=_upload_file,
+        ),
+        ToolDef(
+            name="read_page",
+            description="Read the browser page accessibility tree.",
+            input_model=ReadPageInput,
+            handler=_read_page,
+            untrusted=True,
+        ),
+        ToolDef(
+            name="get_page_text",
+            description="Extract raw text from the browser page.",
+            input_model=GetPageTextInput,
+            handler=_get_page_text,
+            untrusted=True,
+        ),
+        ToolDef(
+            name="find",
+            description="Find browser page elements by role, text, name, or URL.",
+            input_model=FindInput,
+            handler=_find,
+            untrusted=True,
+        ),
+        ToolDef(
+            name="form_input",
+            description="Set a form value by browser ref.",
+            input_model=FormInputInput,
+            handler=_form_input,
+        ),
+        ToolDef(
+            name="computer",
+            description=(
+                "Interact with the browser using mouse, keyboard, wait, scroll, and screenshot "
+                "actions."
+            ),
+            input_model=ComputerInput,
+            handler=_computer,
+        ),
+        ToolDef(
+            name="wait_for_download",
+            description="Wait for a browser download and write it to the workspace.",
+            input_model=WaitForDownloadInput,
+            handler=_wait_for_download,
+        ),
+    )
 )
 
 BROWSER_TOOL_NAMES: tuple[str, ...] = tuple(tool.name for tool in BROWSER_TOOLS)

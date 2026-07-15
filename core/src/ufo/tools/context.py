@@ -63,29 +63,42 @@ class ImageContent(BaseModel):
 ContentBlock = Annotated[TextContent | ImageContent, Field(discriminator="type")]
 
 
+class UntrustedContentError(Exception):
+    """An error whose message embeds untrusted (page-derived, third-party) content — a subagent
+    with `untrusted_output` returning output that fails validation. The engine walls the message
+    exactly as it walls an untrusted result, so the content never reaches the model as
+    instructions."""
+
+
 class ToolResult(BaseModel):
     content: tuple[ContentBlock, ...]
     is_error: bool = False
+    untrusted: bool = False
 
 
 @dataclass(frozen=True)
 class SpawnResult:
     """What a spawn hands back: the child turn's id, plus the validated typed output when the
-    parent awaited it (foreground). A background spawn returns the id and no output yet."""
+    parent awaited it (foreground). A background spawn returns the id and no output yet.
+    `untrusted` carries the profile's `untrusted_output` declaration, so the returning tool result
+    is walled as data."""
 
     turn_id: UUID
     output: BaseModel | None
+    untrusted: bool = False
 
 
 @dataclass(frozen=True)
 class SubagentStatus:
     """The terminal state of one already-spawned child turn as the lifecycle tools report it: its
     turn id, terminal status, and its final answer text (the profile's JSON output when it ended
-    `done`, otherwise the terminal message)."""
+    `done`, otherwise the terminal message). `untrusted` carries the profile's `untrusted_output`
+    declaration."""
 
     turn_id: UUID
     status: str
     text: str
+    untrusted: bool = False
 
 
 class Spawn(Protocol):

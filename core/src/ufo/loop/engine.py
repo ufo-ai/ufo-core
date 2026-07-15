@@ -93,7 +93,14 @@ from ufo.schema.records import (
 )
 from ufo.search import SearchProvider
 from ufo.skills.runtime import CORE_SKILL_REGISTRY, SkillRegistry
-from ufo.tools.context import ImageContent, Spawn, SubagentControl, TextContent, ToolContext
+from ufo.tools.context import (
+    ImageContent,
+    Spawn,
+    SubagentControl,
+    TextContent,
+    ToolContext,
+    UntrustedContentError,
+)
 from ufo.tools.registry import ToolRegistry
 from ufo.transcript import Conversation
 
@@ -1239,7 +1246,8 @@ class TurnEngine:
         with the folded args (a raising handler is an is_error result). A large non-error result is
         offloaded — its full text written to a workspace `.tool-output` file and only a preview plus
         that path kept in context, so the model reads the rest with its file tools; an error result
-        is instead bounded to MAX_TOOL_RESULT_CHARS. An untrusted tool's result is then walled in a
+        is instead bounded to MAX_TOOL_RESULT_CHARS. An untrusted result — the tool declares it,
+        or the result carries a subagent profile's `untrusted_output` — is then walled in a
         data-only span so the model reads it as data, not instructions — the offload/bound and the
         wall both before post_tool_use, so any InjectContext guidance stays trusted outside the wall
         and the wall's close tag survives.
@@ -1292,8 +1300,10 @@ class TurnEngine:
                         )
             content = "".join(text_parts)
             is_error = result.is_error
+            untrusted = tool.untrusted or result.untrusted
         except Exception as error:
             content, is_error = f"{type(error).__name__}: {error}", True
+            untrusted = tool.untrusted or isinstance(error, UntrustedContentError)
         if is_error:
             content = _bounded(content)
         elif len(content) > MAX_TOOL_RESULT_CHARS:
@@ -1302,7 +1312,7 @@ class TurnEngine:
             content = content[:TOOL_RESULT_PREVIEW_CHARS] + OFFLOAD_NOTICE.format(
                 total=len(content), path=path
             )
-        if tool.untrusted:
+        if untrusted:
             walled = content.replace(UNTRUSTED_RESULT_CLOSE, UNTRUSTED_RESULT_CLOSE_ESCAPE)
             content = (
                 UNTRUSTED_RESULT_NOTICE.format(source=tool.name)

@@ -453,7 +453,10 @@ class SubagentProfile:
     rather than failing, so a runaway child never detonates its parent. A deep profile lifts it to
     the main ceiling; the default suits an ordinary focused subagent. `model` runs the child under
     a model distinct from its parent — possibly a different provider — while `None` inherits the
-    parent's; a spawn resolves and bills the child under whichever model answers it."""
+    parent's; a spawn resolves and bills the child under whichever model answers it.
+    `untrusted_output` declares the child's answer derives from untrusted content (web pages, third
+    parties): every path that returns it to a parent — spawn_subagent, wait_for_subagents — walls
+    it as data, exactly as an untrusted tool's own result is walled."""
 
     name: str
     prompt: str
@@ -462,6 +465,7 @@ class SubagentProfile:
     output_model: type[BaseModel]
     max_rounds: int = SUBAGENT_ROUND_LIMIT
     model: str | None = None
+    untrusted_output: bool = False
 
 
 @dataclass(frozen=True)

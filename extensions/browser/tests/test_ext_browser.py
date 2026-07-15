@@ -225,9 +225,20 @@ def test_manifest_declares_the_browser_tools_and_profile() -> None:
     assert {profile.name for profile in manifest.subagents} == {BROWSER_SUBAGENT_NAME}
 
 
-def test_browser_operator_skill_parses_and_indexes() -> None:
-    index = dict(skill_registry((browser_manifest.manifest(),)).index())
-    assert "browser-operator" in index
+def test_raw_browser_tools_are_profile_only_and_delegation_is_not() -> None:
+    """Main agents never hold the raw browser surface: every browser/computer-use tool is
+    profile-only (reachable via the browser profile's tool_names), while the delegation pair a
+    main agent keeps is not."""
+    assert all(tool.profile_only for tool in BROWSER_TOOLS)
+    for tool in browser_manifest.manifest().tools:
+        assert tool.profile_only == (tool.name in BROWSER_TOOL_NAMES)
+
+
+def test_manifest_carries_no_skills() -> None:
+    """The subagent's own prompt teaches the operate-and-capture workflow; nothing indexes into
+    the main agent's prompt."""
+    assert browser_manifest.manifest().skills == ()
+    assert "browser-operator" not in dict(skill_registry((browser_manifest.manifest(),)).index())
 
 
 def test_manifest_requires_the_cdp_providers_seam() -> None:
@@ -242,6 +253,12 @@ def test_page_derived_tools_are_marked_untrusted() -> None:
     assert untrusted == {"read_page", "get_page_text", "find", "tabs_context"}
     tabs_context = next(tool for tool in BROWSER_TOOLS if tool.name == "tabs_context")
     assert tabs_context.untrusted is True
+
+
+def test_browser_profile_declares_its_output_untrusted() -> None:
+    """The child's summary is page-derived, so every spawn path — browser_task, wide_browse, or a
+    generic spawn_subagent over the browser profile — returns it walled, never as instructions."""
+    assert BROWSER_PROFILE.untrusted_output is True
 
 
 def test_tool_descriptions_are_the_ported_verbatim_strings() -> None:
@@ -423,7 +440,7 @@ def test_manifest_contributes_the_browser_prompt_section_into_the_rendered_shell
     rendered = render_system_prompt(
         "You are the assistant.", ((section.name, section.body),), model="claude-opus-4-8"
     )
-    assert "job boards directly with the browser" in rendered.content
+    assert "have browser_task browse the job boards directly" in rendered.content
     assert "no saved sessions or cookies" in rendered.content
     assert "{{" not in rendered.content
 

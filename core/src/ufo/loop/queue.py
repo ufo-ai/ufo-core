@@ -213,7 +213,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
         preload: tuple[RuntimeSkill, ...] = ()
         if turn.subagent_profile is None:
             resolved = agent.model_copy(update={"model": runtime.registry.resolve(agent.model)})
-            tools = ToolRegistry(all_tools)
+            tools = ToolRegistry(tuple(tool for tool in all_tools if not tool.profile_only))
             system_prompt = render_system_prompt(
                 agent.prompt, sections, skills=skills.index(), model=resolved.model
             )

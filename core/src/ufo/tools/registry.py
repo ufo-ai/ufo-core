@@ -32,6 +32,7 @@ class ToolDef[ModelT: BaseModel]:
     side_effecting: bool = False
     subagent_default: bool = False
     parallel_safe: bool = False
+    profile_only: bool = False
 
     def schema(self) -> ToolSchema:
         return ToolSchema(

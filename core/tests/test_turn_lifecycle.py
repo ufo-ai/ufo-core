@@ -43,12 +43,15 @@ from ufo.schema import tables
 from ufo.schema.records import TerminalFrame, Turn, Usage
 from ufo.surfaces import hub_tail
 from ufo.surfaces.cli import router
+from ufo.tools.context import TextContent, ToolContext, ToolResult
+from ufo.tools.registry import ToolDef
 from ufo.transcript import Conversation
 from ufo.workspace import ws
 
 STREAM_TIMEOUT_SECONDS = 30
 STREAM_GATE = StreamGate()
 SEEN_SYSTEM_PROMPTS: list[str] = []
+SEEN_TOOLS: list[tuple[str, ...]] = []
 
 
 @dataclass(frozen=True)
@@ -58,6 +61,18 @@ class StubEmbed:
 
     async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
         return tuple(() for _ in texts)
+
+
+class RoundTripInput(BaseModel):
+    value: int
+
+
+class RoundTripOutput(BaseModel):
+    echoed: int
+
+
+async def _hidden_probe(ctx: ToolContext, args: RoundTripInput) -> ToolResult:
+    return ToolResult(content=(TextContent(text="probed"),))
 
 
 STUB_BACKENDS = Manifest(
@@ -70,21 +85,22 @@ STUB_BACKENDS = Manifest(
             factory=lambda embed, ctx: DefaultIndex(embed=embed, transaction=workspace_tx),
         ),
     ),
+    tools=(
+        ToolDef(
+            name="hidden_probe",
+            description="a profile-only capability no main agent may hold",
+            input_model=RoundTripInput,
+            handler=_hidden_probe,
+            profile_only=True,
+        ),
+    ),
 )
-
-
-class RoundTripInput(BaseModel):
-    value: int
-
-
-class RoundTripOutput(BaseModel):
-    echoed: int
 
 
 ROUNDTRIP_PROFILE = SubagentProfile(
     name="roundtrip",
     prompt="ROUNDTRIP: echo the value back.",
-    tool_names=(),
+    tool_names=("hidden_probe",),
     input_model=RoundTripInput,
     output_model=RoundTripOutput,
 )
@@ -148,6 +164,7 @@ PRELOAD_PROFILE = SubagentProfile(
 class StandInModel:
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         SEEN_SYSTEM_PROMPTS.append(request.system)
+        SEEN_TOOLS.append(tuple(tool.name for tool in request.tools))
         if "ROUNDTRIP" in request.system:
             if request.messages[-1].content == FOLLOWUP_INBOUND:
                 yield TextDelta(text=json.dumps({"echoed": FOLLOWUP_ECHO}))
@@ -872,6 +889,7 @@ async def test_typed_subagent_round_trips_schema(surface: AsyncClient) -> None:
         child = (
             await connection.execute(
                 sa.select(
+                    tables.turn.c.id,
                     tables.turn.c.subagent_profile,
                     tables.turn.c.status,
                     tables.turn.c.terminal,
@@ -892,7 +910,9 @@ async def test_typed_subagent_round_trips_schema(surface: AsyncClient) -> None:
         for block in message.content
         if isinstance(block, ToolResultBlock)
     )
-    assert RoundTripOutput.model_validate_json(tool_result.content).echoed == 21
+    reply = json.loads(tool_result.content)
+    assert reply["subagent_id"] == str(child.id)
+    assert RoundTripOutput.model_validate(reply["output"]).echoed == 21
     assert tool_result.is_error is False
 
 
@@ -1059,3 +1079,21 @@ async def test_subagent_plain_text_followup_runs_without_a_spawn_payload(
     (followup,) = await subagents.wait((queued.turn_id,))
     assert followup.status == "done"
     assert RoundTripOutput.model_validate_json(followup.text).echoed == FOLLOWUP_ECHO
+
+
+async def test_profile_only_tools_stay_out_of_main_agent_turns(surface: AsyncClient) -> None:
+    """Both ends of the profile-only seam through the real turn path: the main agent's registry
+    never offers the tool, and the profile that names it still resolves it for its child turn."""
+    headers = await _bootstrap()
+    SEEN_TOOLS.clear()
+    parent = (await surface.post("/v1/chat", content=b"spawn-subagent", headers=headers)).json()[
+        "turn_id"
+    ]
+    _, terminal = await _consume(surface, headers, parent)
+    assert terminal["status"] == "done"
+    main_offers = [names for names in SEEN_TOOLS if "spawn_subagent" in names]
+    child_offers = [names for names in SEEN_TOOLS if "hidden_probe" in names]
+    assert main_offers
+    assert all("hidden_probe" not in names for names in main_offers)
+    assert child_offers
+    assert all("spawn_subagent" not in names for names in child_offers)

@@ -21,6 +21,7 @@ import sqlalchemy as sa
 from aiobotocore.session import get_session
 from httpx import AsyncClient
 
+import evals.harness.target as harness_target
 from evals.__main__ import EVAL_SHARE_BUCKET_ENV
 from evals.__main__ import _run as run_evals
 from evals.__main__ import main as eval_main
@@ -136,6 +137,12 @@ class StubWorker:
     transcript: tuple[Message, ...]
     status: str = "done"
     artifact: tuple[str, bytes] | None = None
+    child_transcript: tuple[Message, ...] | None = None
+    child_transcript_missing: bool = False
+    child_transcript_corrupt: bool = False
+    child_followup_turns: int = 0
+    child_artifact: tuple[str, bytes] | None = None
+    child_turn_id: UUID = field(default_factory=uuid4)
     idempotency_keys: list[str] = field(default_factory=list)
 
     async def invoke(
@@ -161,6 +168,59 @@ class StubWorker:
         await Transcript(blob=self.blob, conversation_id=conversation_id).write(
             Conversation(seq=2, messages=self.transcript)
         )
+        if self.child_transcript is not None:
+            child_conversation_id = uuid4()
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.insert(tables.conversation).values(
+                        id=child_conversation_id,
+                        workspace_id=self.workspace_id,
+                        surface="cli",
+                        queue_key=uuid4().hex,
+                        created_at=sa.func.now(),
+                        updated_at=sa.func.now(),
+                    )
+                )
+                for seq in range(1, self.child_followup_turns + 2):
+                    await connection.execute(
+                        sa.insert(tables.turn).values(
+                            id=self.child_turn_id if seq == 1 else uuid4(),
+                            workspace_id=self.workspace_id,
+                            conversation_id=child_conversation_id,
+                            agent_id=agent_id,
+                            seq=seq,
+                            status="done",
+                            inbound="delegated task",
+                            parent_turn_id=turn_id,
+                            terminal={"status": "done", "text": "Done.", "model": MODEL},
+                            created_at=sa.func.now(),
+                            updated_at=sa.func.now(),
+                        )
+                    )
+            if self.child_transcript_corrupt:
+                await self.blob.put(transcript_key(child_conversation_id), b"not a transcript")
+            elif not self.child_transcript_missing:
+                await Transcript(blob=self.blob, conversation_id=child_conversation_id).write(
+                    Conversation(seq=1, messages=self.child_transcript)
+                )
+            if self.child_artifact is not None:
+                name, content = self.child_artifact
+                key = f"artifacts/{uuid4()}/{name}"
+                await self.blob.put(key, content)
+                async with workspace_tx() as connection:
+                    await connection.execute(
+                        sa.insert(tables.shared_artifact).values(
+                            turn_id=self.child_turn_id,
+                            blob_key=key,
+                            workspace_id=self.workspace_id,
+                            filename=name,
+                            subject=None,
+                            media_type="application/octet-stream",
+                            size_bytes=len(content),
+                            created_at=sa.func.now(),
+                            updated_at=sa.func.now(),
+                        )
+                    )
         if self.artifact is not None:
             name, content = self.artifact
             key = f"artifacts/{uuid4()}/{name}"
@@ -1472,3 +1532,247 @@ def test_report_of_only_excluded_cases_is_not_a_pass() -> None:
     assert report.pass_rate == 0.0
     assert report.passed is False
     assert report.to_json()["excludedCount"] == 1
+
+
+DELEGATED_CHILD_TRANSCRIPT = (
+    Message(role="user", content="drive the page"),
+    Message(
+        role="assistant",
+        content=(ToolUseBlock(id="n1", name="navigate", input={"url": "https://example.com"}),),
+    ),
+    Message(role="user", content=(ToolResultBlock(tool_use_id="n1", content="ok"),)),
+    Message(
+        role="assistant",
+        content=(ToolUseBlock(id="r1", name="read_page", input={}),),
+    ),
+    Message(
+        role="user",
+        content=(
+            ToolResultBlock(tool_use_id="r1", content="upstream 503 from the page", is_error=True),
+        ),
+    ),
+    Message(role="assistant", content="done"),
+)
+
+
+def _delegating_target(
+    blob: FilesystemBlobStore, worker: StubWorker, agent_id: UUID, workspace_id: UUID
+) -> InProcessTarget:
+    ctx = _context(blob, worker)
+    return InProcessTarget(
+        ctx=ctx,
+        agent_id=agent_id,
+        conversations=DbConversations(workspace_id),
+        outcome=CorpusOutcome(ctx),
+        blob=blob,
+    )
+
+
+def _delegated_worker(blob: FilesystemBlobStore, workspace_id: UUID, **kwargs) -> StubWorker:
+    worker = StubWorker(
+        blob, workspace_id, (), child_transcript=DELEGATED_CHILD_TRANSCRIPT, **kwargs
+    )
+    worker.transcript = (
+        Message(role="user", content="browse the page then remember it"),
+        Message(
+            role="assistant",
+            content=(
+                ToolUseBlock(id="d1", name="browser_task", input={"url": "https://example.com"}),
+            ),
+        ),
+        Message(
+            role="user",
+            content=(
+                ToolResultBlock(
+                    tool_use_id="d1",
+                    content=f'{{"subagent_id": "{worker.child_turn_id}", "result": "summary"}}',
+                ),
+            ),
+        ),
+        Message(
+            role="assistant",
+            content=(ToolUseBlock(id="m1", name="memory_update", input={"content": "seen"}),),
+        ),
+        Message(role="user", content=(ToolResultBlock(tool_use_id="m1", content="saved"),)),
+        Message(role="assistant", content="done"),
+    )
+    return worker
+
+
+async def test_capability_merge_splices_child_calls_where_their_id_surfaces(
+    db: None, tmp_path
+) -> None:
+    """The child's raw calls score at the call whose result names the subagent id — a parent that
+    works on after browser_task returns must not have the child's navigate ordered after that
+    later work — and the child's tool errors join the output so web-infra exclusion sees them."""
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = _delegated_worker(blob, workspace_id)
+    target = _delegating_target(blob, worker, agent_id, workspace_id)
+    case = CapabilityCase(
+        "delegated-order", "browse then remember", required_tools_scorer(("navigate",))
+    )
+    with ws(workspace_id):
+        result = await target.run(case)
+    assert result.clean is True
+    assert [call.name for call in result.output.calls] == [
+        "browser_task",
+        "navigate",
+        "read_page",
+        "memory_update",
+    ]
+    assert "upstream 503 from the page" in result.output.tool_errors
+
+
+async def test_capability_merge_splices_a_waited_child_at_the_wait(db: None, tmp_path) -> None:
+    """A background child is credited where its output became visible: the wait names the
+    subagent id last, so the child's calls land after the wait, never before the parent work
+    that preceded it."""
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = _delegated_worker(blob, workspace_id)
+    child_id = worker.child_turn_id
+    worker.transcript = (
+        Message(role="user", content="browse in the background"),
+        Message(
+            role="assistant",
+            content=(ToolUseBlock(id="s1", name="spawn_subagent", input={"profile": "browser"}),),
+        ),
+        Message(
+            role="user",
+            content=(
+                ToolResultBlock(
+                    tool_use_id="s1", content=f"spawned browser subagent (turn {child_id})"
+                ),
+            ),
+        ),
+        Message(
+            role="assistant",
+            content=(ToolUseBlock(id="m1", name="memory_update", input={"content": "seen"}),),
+        ),
+        Message(role="user", content=(ToolResultBlock(tool_use_id="m1", content="saved"),)),
+        Message(
+            role="assistant",
+            content=(ToolUseBlock(id="w1", name="wait_for_subagents", input={}),),
+        ),
+        Message(
+            role="user",
+            content=(
+                ToolResultBlock(
+                    tool_use_id="w1",
+                    content=f'{{"subagents": [{{"subagent_id": "{child_id}", "status": "done"}}]}}',
+                ),
+            ),
+        ),
+        Message(role="assistant", content="done"),
+    )
+    target = _delegating_target(blob, worker, agent_id, workspace_id)
+    case = CapabilityCase("delegated-wait", "browse", required_tools_scorer(("navigate",)))
+    with ws(workspace_id):
+        result = await target.run(case)
+    assert [call.name for call in result.output.calls] == [
+        "spawn_subagent",
+        "memory_update",
+        "wait_for_subagents",
+        "navigate",
+        "read_page",
+    ]
+
+
+async def test_capability_merge_reads_a_followed_up_child_conversation_once(
+    db: None, tmp_path
+) -> None:
+    """message_subagent follow-ups add turns to the same child conversation; the conversation is
+    the merge unit, so its trajectory counts once, never once per turn."""
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = _delegated_worker(blob, workspace_id, child_followup_turns=2)
+    target = _delegating_target(blob, worker, agent_id, workspace_id)
+    case = CapabilityCase("delegated-followup", "browse", required_tools_scorer(("navigate",)))
+    with ws(workspace_id):
+        result = await target.run(case)
+    assert [call.name for call in result.output.calls].count("navigate") == 1
+
+
+async def test_capability_merge_collects_a_childs_shared_artifacts(db: None, tmp_path) -> None:
+    """A delegated child's share_file records against the child turn; its file must be as visible
+    to a scorer as the call that shared it."""
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = _delegated_worker(blob, workspace_id, child_artifact=("site.zip", b"zipbytes"))
+    target = _delegating_target(blob, worker, agent_id, workspace_id)
+    case = CapabilityCase("delegated-artifact", "build", required_tools_scorer(("navigate",)))
+    with ws(workspace_id):
+        result = await target.run(case)
+    assert [artifact.name for artifact in result.output.artifacts] == ["site.zip"]
+    assert result.output.artifacts[0].content == b"zipbytes"
+
+
+async def test_capability_merge_fails_unclean_when_a_terminal_childs_transcript_never_lands(
+    db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A terminal child whose transcript never appears is an infra failure that excludes the case,
+    never a silently thinner trajectory scored as a capability miss; a corrupt one is the same
+    failure, never a crashed suite."""
+    monkeypatch.setattr(harness_target, "CHILD_TRANSCRIPT_POLL_ATTEMPTS", 2)
+    monkeypatch.setattr(harness_target, "CHILD_TRANSCRIPT_POLL_SECONDS", 0.0)
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = _delegated_worker(blob, workspace_id, child_transcript_missing=True)
+    target = _delegating_target(blob, worker, agent_id, workspace_id)
+    case = CapabilityCase(
+        "delegated-missing", "browse then remember", required_tools_scorer(("navigate",))
+    )
+    with ws(workspace_id):
+        result = await target.run(case)
+    assert result.clean is False
+    assert "transcript never appeared" in result.failure_reason
+
+    corrupt_worker = _delegated_worker(blob, workspace_id, child_transcript_corrupt=True)
+    corrupt_target = _delegating_target(blob, corrupt_worker, agent_id, workspace_id)
+    with ws(workspace_id):
+        corrupt_result = await corrupt_target.run(
+            CapabilityCase("delegated-corrupt", "browse", required_tools_scorer(("navigate",)))
+        )
+    assert corrupt_result.clean is False
+    assert "corrupt transcript" in corrupt_result.failure_reason
+
+
+async def test_capability_scoring_merges_child_turn_trajectories(db: None, tmp_path) -> None:
+    """A delegated capability proves itself by its child's raw calls: the harness folds every
+    descendant turn's trajectory into the scored output, so a wrapper's summary alone can never
+    satisfy a scorer that demands the real tool ran."""
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    child_transcript = (
+        Message(role="user", content="drive the page"),
+        Message(
+            role="assistant",
+            content=(ToolUseBlock(id="n1", name="navigate", input={"url": "https://example.com"}),),
+        ),
+        Message(role="user", content=(ToolResultBlock(tool_use_id="n1", content="ok"),)),
+        Message(role="assistant", content="done"),
+    )
+    worker = StubWorker(
+        blob, workspace_id, _research_transcript(), child_transcript=child_transcript
+    )
+    ctx = _context(blob, worker)
+    target = InProcessTarget(
+        ctx=ctx,
+        agent_id=agent_id,
+        conversations=DbConversations(workspace_id),
+        outcome=CorpusOutcome(ctx),
+        blob=blob,
+    )
+    case = CapabilityCase(
+        "delegated-browse", "browse the page", required_tools_scorer(("navigate",))
+    )
+    with ws(workspace_id):
+        result = await run_capability_case(case, target)
+    assert result.passed

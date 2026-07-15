@@ -1,7 +1,9 @@
 """The research subagent profiles: a focused `research` child and a long-budget `deep_research` one.
 
-Both run scoped to the research tool set — the web tools plus the browser, external-tool, file, and
-memory tools a research child reaches for — and their prompts are the ported instructions verbatim.
+Both run scoped to the research tool set — the web tools plus `browser_task` (the raw browser
+surface belongs to the browser subagent alone, and `wide_browse` stays with the main agent, whose
+ask_user gates a 20+ entity fan-out), the external-tool, file, and memory tools a research child
+reaches for — and their prompts are the ported instructions verbatim.
 `deep_research` lifts the round budget to the main ceiling for multi-source work; `wide_research`
 (in delegation.py) fans the same `research` profile over a list of entities."""
 
@@ -19,13 +21,7 @@ RESEARCH_TOOL_NAMES = (
     SEARCH_WEB_TOOL,
     FETCH_URL_TOOL,
     SEARCH_VERTICAL_TOOL,
-    "navigate",
-    "read_page",
-    "get_page_text",
-    "find",
-    "tabs_context",
-    "tabs_create",
-    "tabs_close",
+    "browser_task",
     "list_external_tools",
     "describe_external_tools",
     "call_external_tool",

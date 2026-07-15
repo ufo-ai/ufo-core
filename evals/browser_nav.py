@@ -1,8 +1,10 @@
-"""Browser navigation cases: score the agent's answer AND that it drove the real browser tools to
-get there — `navigate` plus a page-reading tool (`get_page_text`/`read_page`/`find`) — against a
-STABLE, well-known page whose content will not drift. A restraint case checks the agent does not
-reach for the browser on a question it can answer from its own knowledge. `web_dependent` marks the
-navigation cases: a real outage infra-excludes them rather than counting a capability failure."""
+"""Browser navigation cases: score the agent's answer AND that a real browse ran — `navigate`
+plus a page-reading tool, dispatched by the browser child the main agent delegates to (the
+harness merges child-turn trajectories into the scored calls, so wrapper success alone never
+passes) — against a STABLE, well-known page whose content will not drift. A restraint case checks
+the agent does not reach for the browser, delegated or raw, on a question it can answer from its
+own knowledge. `web_dependent` marks the navigation cases: a real outage infra-excludes them
+rather than counting a capability failure."""
 
 from evals.harness.capability import (
     CapabilityCase,
@@ -13,6 +15,8 @@ from evals.harness.capability import (
 from evals.harness.scorers import combine, exact_scorer, restraint_scorer
 
 BROWSER_TOOLS = (
+    "browser_task",
+    "wide_browse",
     "navigate",
     "tabs_context",
     "tabs_create",

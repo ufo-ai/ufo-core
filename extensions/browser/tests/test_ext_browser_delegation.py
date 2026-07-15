@@ -34,6 +34,7 @@ class _Result(BaseModel):
 @dataclass
 class RecordingSpawn:
     spawned: list[tuple[str, dict[str, object], bool, str | None]] = field(default_factory=list)
+    turn_ids: list[UUID] = field(default_factory=list)
 
     async def __call__(
         self,
@@ -43,9 +44,10 @@ class RecordingSpawn:
         dedup_key: str | None = None,
     ) -> SpawnResult:
         self.spawned.append((profile, payload, background, dedup_key))
+        self.turn_ids.append(uuid4())
         name = payload.get("task_name")
         output = None if background else _Result(result=f"did {name}")
-        return SpawnResult(turn_id=uuid4(), output=output)
+        return SpawnResult(turn_id=self.turn_ids[-1], output=output)
 
 
 @dataclass
@@ -146,7 +148,10 @@ async def test_browser_task_spawns_the_browser_profile_and_awaits_its_terminal(
         )
     ]
     assert control.cancelled == []
-    assert json.loads(result.content[0].text) == {"result": "did jobs"}
+    assert json.loads(result.content[0].text) == {
+        "subagent_id": str(spawn.turn_ids[0]),
+        "result": "did jobs",
+    }
 
 
 async def test_browser_task_cancels_a_child_that_outlives_its_timeout(tmp_path: Path) -> None:
@@ -211,6 +216,7 @@ async def test_wide_browse_fans_over_deduped_entities_and_writes_the_json(tmp_pa
     assert "wide_browse.json" in sandbox.writes
     rows = json.loads(sandbox.writes["wide_browse.json"])
     assert [row["entity"] for row in rows] == ["acme.com", "beta.io"]
+    assert [row["subagent_id"] for row in rows] == [str(turn) for turn in spawn.turn_ids]
     assert json.loads(result.content[0].text)["output_file"] == "wide_browse.json"
 
 

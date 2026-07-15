@@ -16,6 +16,7 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import sqlalchemy as sa
 from dbos import DBOSClient, EnqueueOptions
+from pydantic import ValidationError
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -40,7 +41,7 @@ from ufo.schema.records import (
     turn_id_for,
 )
 from ufo.skills.runtime import CORE_SKILLS, RuntimeSkill
-from ufo.tools.context import SpawnResult, SubagentStatus
+from ufo.tools.context import SpawnResult, SubagentStatus, UntrustedContentError
 
 SUBAGENT_SURFACE = "subagent"
 SUBAGENT_POLL_SECONDS = 0.1
@@ -150,21 +151,34 @@ class Subagents:
         terminal = await self._await_terminal(turn_id)
         if terminal.status != "done":
             raise RuntimeError(f"subagent {profile!r} turn ended {terminal.status}")
-        output = resolved.output_model.model_validate_json(terminal.text)
-        return SpawnResult(turn_id=turn_id, output=output)
+        try:
+            output = resolved.output_model.model_validate_json(terminal.text)
+        except ValidationError as error:
+            if resolved.untrusted_output:
+                raise UntrustedContentError(
+                    f"subagent {profile!r} returned output that failed validation: {error}"
+                ) from error
+            raise
+        return SpawnResult(turn_id=turn_id, output=output, untrusted=resolved.untrusted_output)
 
     async def wait(self, turn_ids: tuple[UUID, ...]) -> tuple[SubagentStatus, ...]:
         """Await each background child's terminal and report its status and final text — the parent
         ends its own turn and calls this when it has no other independent work, completing the
         background-spawn loop. Each id is polled through the same terminal read a foreground spawn
         awaits, so a child that has already finished returns at once."""
+        profiles: dict[UUID, str] = {}
         for turn_id in turn_ids:
-            await self._require_child(turn_id)
-        statuses = []
+            profiles[turn_id] = await self._require_child(turn_id)
+        statuses: list[SubagentStatus] = []
         for turn_id in turn_ids:
             terminal = await self._await_terminal(turn_id)
             statuses.append(
-                SubagentStatus(turn_id=turn_id, status=terminal.status, text=terminal.text)
+                SubagentStatus(
+                    turn_id=turn_id,
+                    status=terminal.status,
+                    text=terminal.text,
+                    untrusted=self._untrusted_output(profiles[turn_id]),
+                )
             )
         return tuple(statuses)
 
@@ -258,15 +272,26 @@ class Subagents:
             await self._enqueue(followup_id, child.conversation_id)
         return SubagentStatus(turn_id=followup_id, status="queued", text="")
 
-    async def _require_child(self, turn_id: UUID) -> None:
+    def _untrusted_output(self, profile: str) -> bool:
+        """Trust fails closed: a child whose profile is no longer registered walls as
+        untrusted rather than passing its output through as instructions."""
+        try:
+            return self.registry.get(profile).untrusted_output
+        except KeyError:
+            return True
+
+    async def _require_child(self, turn_id: UUID) -> str:
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
-                    sa.select(tables.turn.c.parent_turn_id).where(tables.turn.c.id == turn_id)
+                    sa.select(tables.turn.c.parent_turn_id, tables.turn.c.subagent_profile).where(
+                        tables.turn.c.id == turn_id
+                    )
                 )
             ).one_or_none()
         if row is None or row.parent_turn_id != self.parent.id:
             raise ValueError(f"{turn_id} is not a subagent this turn spawned")
+        return row.subagent_profile
 
     async def _admit(
         self, conversation_id: UUID, turn_id: UUID, profile: str, inbound: str

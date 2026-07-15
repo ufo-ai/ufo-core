@@ -134,7 +134,7 @@ Manifest registers (each optional):
 
 | Point | Contract |
 |---|---|
-| `tools` | Typed tool defs + handlers; appear in agents' granted tool sets. |
+| `tools` | Typed tool defs + handlers; appear in agents' granted tool sets. A `profile_only` tool never reaches a main agent — only the subagent profiles that name it (the raw browser surface reaches main agents solely through `browser_task`/`wide_browse`). |
 | `subagents` | Typed subagent profiles. |
 | `prompt_sections` | Capability sections a pack contributes to the agent's system prompt, rendered into the shell's `{{sections}}` slot ordered by name — a pack's rules (web search, browsing, office docs) reach the agent without core naming the capability. |
 | `skills` | Skill folders (SKILL.md + bundled scripts/assets) contributed to the loadable set; the loader parses each into the registry `load_skill` and the `{{skill_index}}` consult, mounted into the sandbox under `.skills/<name>/` beside core's own three. A skill script imports nothing from ufo (it runs in the sandbox) — a CI gate holds that boundary. |

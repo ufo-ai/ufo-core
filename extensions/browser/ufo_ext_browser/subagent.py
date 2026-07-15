@@ -33,4 +33,5 @@ BROWSER_PROFILE = SubagentProfile(
     tool_names=BROWSER_SUBAGENT_TOOL_NAMES,
     input_model=BrowserTask,
     output_model=BrowserResult,
+    untrusted_output=True,
 )
