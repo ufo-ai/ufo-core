@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Publish an AI-review gate status on PR head commits from Claude's review verdict."""
+"""Publish an AI-review gate status on PR head commits from Claude's review verdict.
+
+Claude verdicts anchored to superseded commits are dismissed, so a PR carries at
+most one live Claude review — the one for the current head."""
 
 from __future__ import annotations
 
@@ -13,6 +16,7 @@ from pathlib import Path
 
 CLAUDE_REVIEWERS = frozenset({"claude", "claude[bot]", "claude-code[bot]"})
 DECISIVE_STATES = frozenset({"APPROVED", "CHANGES_REQUESTED", "DISMISSED"})
+DISMISSIBLE_STATES = frozenset({"APPROVED", "CHANGES_REQUESTED"})
 STATUS_CONTEXT = "AI Review Gate"
 
 JsonObject = Mapping[str, object]
@@ -20,6 +24,7 @@ JsonObject = Mapping[str, object]
 
 @dataclass(frozen=True)
 class Review:
+    id: int
     reviewer: str
     state: str
     commit_oid: str | None
@@ -36,12 +41,15 @@ def main() -> int:
     saw_blocking = False
     for number in numbers:
         head_oid = pull_request_head(owner, repo, number)
-        verdict = claude_verdict(pull_request_reviews(owner, repo, number), head_oid)
+        reviews = pull_request_reviews(owner, repo, number)
+        verdict = claude_verdict(reviews, head_oid)
         state, description = gate_state(verdict)
         saw_blocking = saw_blocking or state != "success"
         print(f"PR #{number}: {description}.")
         if dry_run:
             continue
+        for stale in stale_claude_reviews(reviews, head_oid):
+            dismiss_review(owner, repo, number, stale, head_oid)
         publish_status(owner, repo, head_oid, state, description)
 
     return 1 if dry_run and saw_blocking else 0
@@ -58,6 +66,16 @@ def claude_verdict(reviews: tuple[Review, ...], head_oid: str) -> str | None:
     if not decisive or decisive[-1] == "DISMISSED":
         return None
     return decisive[-1]
+
+
+def stale_claude_reviews(reviews: tuple[Review, ...], head_oid: str) -> tuple[Review, ...]:
+    return tuple(
+        item
+        for item in reviews
+        if item.reviewer.lower() in CLAUDE_REVIEWERS
+        and item.state in DISMISSIBLE_STATES
+        and item.commit_oid != head_oid
+    )
 
 
 def gate_state(verdict: str | None) -> tuple[str, str]:
@@ -166,6 +184,7 @@ def pull_request_reviews(owner: str, repo: str, number: int) -> tuple[Review, ..
 def review(node: JsonObject) -> Review:
     user = node.get("user")
     return Review(
+        id=json_int(node.get("id"), "review.id"),
         reviewer=(
             ""
             if user is None
@@ -173,6 +192,21 @@ def review(node: JsonObject) -> Review:
         ),
         state=json_str(node.get("state"), "review.state"),
         commit_oid=json_optional_str(node.get("commit_id"), "review.commit_id"),
+    )
+
+
+def dismiss_review(owner: str, repo: str, number: int, stale: Review, head_oid: str) -> None:
+    reviewed = "unknown" if stale.commit_oid is None else stale.commit_oid[:7]
+    run(
+        [
+            "gh",
+            "api",
+            "--method",
+            "PUT",
+            f"repos/{owner}/{repo}/pulls/{number}/reviews/{stale.id}/dismissals",
+            "-f",
+            f"message=Stale: reviewed {reviewed}, head is {head_oid[:7]}",
+        ]
     )
 
 

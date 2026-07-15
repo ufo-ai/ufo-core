@@ -11,8 +11,8 @@ _SPEC.loader.exec_module(gate)
 HEAD = "9426a25a359f1f74eacc63f94637e92ece667a21"
 
 
-def claude_review(state, commit_oid=HEAD):
-    return gate.Review(reviewer="claude[bot]", state=state, commit_oid=commit_oid)
+def claude_review(state, commit_oid=HEAD, id=1):
+    return gate.Review(id=id, reviewer="claude[bot]", state=state, commit_oid=commit_oid)
 
 
 def test_verdict_requires_head_anchored_claude_verdict_review():
@@ -20,7 +20,7 @@ def test_verdict_requires_head_anchored_claude_verdict_review():
     assert gate.claude_verdict((claude_review("APPROVED", commit_oid="0" * 40),), HEAD) is None
     assert gate.claude_verdict((claude_review("COMMENTED"),), HEAD) is None
     assert gate.claude_verdict((claude_review("DISMISSED"),), HEAD) is None
-    codex = gate.Review(reviewer="chatgpt-codex-connector", state="APPROVED", commit_oid=HEAD)
+    codex = gate.Review(id=2, reviewer="chatgpt-codex-connector", state="APPROVED", commit_oid=HEAD)
     assert gate.claude_verdict((codex,), HEAD) is None
     assert gate.claude_verdict((claude_review("APPROVED"),), HEAD) == "APPROVED"
 
@@ -41,9 +41,24 @@ def test_dismissing_the_latest_verdict_voids_it():
 
 
 def test_deleted_account_author_is_no_reviewer():
-    ghost = gate.review({"user": None, "state": "APPROVED", "commit_id": HEAD})
+    ghost = gate.review({"id": 7, "user": None, "state": "APPROVED", "commit_id": HEAD})
     assert ghost.reviewer == ""
     assert gate.claude_verdict((ghost,), HEAD) is None
+
+
+def test_stale_reviews_are_claude_verdicts_off_head():
+    old = "0" * 40
+    stale_approval = claude_review("APPROVED", commit_oid=old, id=11)
+    stale_changes = claude_review("CHANGES_REQUESTED", commit_oid=old, id=12)
+    reviews = (
+        stale_approval,
+        stale_changes,
+        claude_review("DISMISSED", commit_oid=old, id=13),
+        claude_review("COMMENTED", commit_oid=old, id=14),
+        claude_review("APPROVED", id=15),
+        gate.Review(id=16, reviewer="chatgpt-codex-connector", state="APPROVED", commit_oid=old),
+    )
+    assert gate.stale_claude_reviews(reviews, HEAD) == (stale_approval, stale_changes)
 
 
 def test_gate_state_maps_verdicts():
