@@ -7,6 +7,7 @@ from evals import (
     browser_nav,
     coding_subagent,
     pdf_build,
+    scenario_env,
     scenario_smoke,
     semantic_quality,
     site_build,
@@ -32,6 +33,7 @@ DEFAULT_TASKS: tuple[EvalTask, ...] = (
 )
 TASKS: tuple[EvalTask, ...] = (
     *DEFAULT_TASKS,
+    scenario_task("scenario_env", scenario_env.CASES),
     capability_task("yc_recall", yc_recall.CASES),
     capability_task("yc_workflows", yc_workflows.CASES),
 )

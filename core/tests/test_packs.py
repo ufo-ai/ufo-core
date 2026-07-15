@@ -10,6 +10,7 @@ collision cases stub discovery — the real dependency — to drive the real nar
 
 import pytest
 import ufo_pack_assistant as assistant
+import ufo_pack_assistant_eval as assistant_eval
 import ufo_pack_assistant_hosted as assistant_hosted
 import ufo_pack_chief_of_staff as chief_of_staff
 import ufo_pack_yc.manifest as yc
@@ -31,6 +32,23 @@ def test_activating_the_assistant_pack_makes_exactly_its_bundle_active() -> None
     followed by the pack's own (here empty) manifest — the coherent config a serve brings up."""
     names = [manifest.name for manifest in load_manifests(assistant.NAME)]
     assert names == [*assistant.EXTENSIONS, assistant.NAME]
+
+
+def test_assistant_eval_pack_is_discovered_with_its_bundle() -> None:
+    packs = discovered_packs()
+    assert assistant_eval.NAME in packs
+    assert packs[assistant_eval.NAME].extensions == assistant_eval.EXTENSIONS
+
+
+def test_activating_the_assistant_eval_pack_swaps_real_brokers_for_the_environment() -> None:
+    """The eval variant is the assistant bundle with the deterministic environment added and the
+    real broker extensions removed — in an eval deploy they are unkeyed decoys the agent burns
+    turns failing against instead of finding the environment."""
+    names = [manifest.name for manifest in load_manifests(assistant_eval.NAME)]
+    assert names == [*assistant_eval.EXTENSIONS, assistant_eval.NAME]
+    assert "eval_env" in names
+    assert "connectors" in names
+    assert not assistant_eval.REAL_BROKERS & set(names)
 
 
 def test_assistant_hosted_pack_is_discovered_with_its_bundle() -> None:

@@ -347,3 +347,48 @@ async def test_user_simulator_flips_roles_and_bounds_replies() -> None:
     assert history[1].content == "first ask"
     assert history[2].content == "short answer"
     assert cast(str, history[4].content).endswith("[reply truncated for the simulator]")
+
+
+async def _seed_a(workspace_id: UUID, agent_id: UUID) -> None:
+    return None
+
+
+async def _seed_b(workspace_id: UUID, agent_id: UUID) -> None:
+    _ = "different fixture"
+
+
+def test_scenario_digest_moves_with_the_seed_source() -> None:
+    def case(seed) -> ScenarioCase:
+        return ScenarioCase("seeded", _SUM_USER, _sum_grader, seed=seed)
+
+    assert case(_seed_a).payload() == case(_seed_a).payload()
+    assert case(_seed_a).payload() != case(_seed_b).payload()
+    assert case(None).payload()["seed"] is None
+
+
+async def test_scenario_seed_runs_before_the_first_turn(db: None, tmp_path) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = ScriptedWorker(
+        blob, workspace_id, replies=((Message(role="assistant", content="Done."),),)
+    )
+    member = ScriptedMember(("go ahead", STOP_TOKEN))
+    seeded: list[tuple[UUID, UUID]] = []
+
+    async def seed(seed_workspace_id: UUID, seed_agent_id: UUID) -> None:
+        assert worker.invoked == 0
+        seeded.append((seed_workspace_id, seed_agent_id))
+
+    async def grade(outcome: ScenarioOutcome) -> CapabilityVerdict:
+        return CapabilityVerdict(len(outcome.turns) == 1, f"{len(outcome.turns)} exchange(s)")
+
+    case = ScenarioCase("seeded", _SUM_USER, grade, max_turns=2, seed=seed)
+
+    with ws(workspace_id):
+        result = await run_scenario_case(
+            case, _target(workspace_id, agent_id, blob, worker, member)
+        )
+
+    assert result.passed, result.reason
+    assert seeded == [(workspace_id, agent_id)]

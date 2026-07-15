@@ -8,12 +8,16 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from hashlib import sha256
+from inspect import getmodule, getsource
+from uuid import UUID
 
 from evals.harness.capability import CapabilityOutput, CapabilityVerdict
 from evals.harness.harness import EvalCaseResult, Json, JsonObject
 from evals.harness.judge import JudgeLeg
 from evals.harness.target import CapabilityTarget, TargetResult
 from ufo.sdk.models import Message
+from ufo.workspace import ws_current
 
 STOP_TOKEN = "###STOP###"
 OPENING_NUDGE = "[The conversation is starting. Send your first message.]"
@@ -85,13 +89,25 @@ class ScenarioOutcome:
 
 
 type ScenarioGrader = Callable[[ScenarioOutcome], Awaitable[CapabilityVerdict]]
+type ScenarioSeed = Callable[[UUID, UUID], Awaitable[None]]
+
+
+def _seed_digest(seed: ScenarioSeed) -> str:
+    module = getmodule(seed)
+    if module is None:
+        raise RuntimeError(f"seed {seed!r} has no source module to digest")
+    return sha256(f"{getsource(seed)}\n{getsource(module)}".encode()).hexdigest()
 
 
 @dataclass(frozen=True)
 class ScenarioCase:
     """`max_turns` caps the member's messages; hitting the cap is not itself a failure — the
     grader decides what a finished conversation must show. `member_key`, when set, is the exact
-    email of the workspace member the simulator speaks as."""
+    email of the workspace member the simulator speaks as. `seed`, when set, receives
+    (workspace_id, agent_id) before the conversation opens and establishes the case's starting
+    state — resetting whatever it owns, so a rerun never inherits a prior run's rows. The payload
+    hashes the seed's qualified name plus its defining module's source, so editing a fixture — or
+    a helper the fixtures share — moves the suite digest by itself."""
 
     name: str
     user: ScenarioUser
@@ -99,6 +115,7 @@ class ScenarioCase:
     max_turns: int = 8
     member_key: str | None = None
     digest_tag: str = ""
+    seed: ScenarioSeed | None = None
 
     def payload(self) -> JsonObject:
         payload: JsonObject = {
@@ -106,6 +123,7 @@ class ScenarioCase:
             "user": self.user.payload(),
             "maxTurns": self.max_turns,
             "grader": self.digest_tag or self.name,
+            "seed": None if self.seed is None else _seed_digest(self.seed),
             "simulatorRevision": SIMULATOR_REVISION,
         }
         if self.member_key is not None:
@@ -140,6 +158,8 @@ def _bounded(reply: str) -> str:
 async def run_scenario_case(case: ScenarioCase, target: CapabilityTarget) -> EvalCaseResult:
     if target.judge is None:
         raise RuntimeError("a scenario case requires the target's model leg to simulate its member")
+    if case.seed is not None:
+        await case.seed(ws_current().workspace_id, target.agent_id)
     simulator = UserSimulator(target.judge, case.user)
     conversation_id = await target.conversations.open(case.name, case.member_key)
     turns: list[ScenarioTurn] = []
