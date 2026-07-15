@@ -39,7 +39,7 @@ plt.rcParams.update({
     'font.size': 11, 'axes.titlesize': 14, 'axes.titleweight': 'bold',
 })
 
-PALETTE_CATEGORICAL = ['#20808D', '#A84B2F', '#1B474D', '#BCE2E7', '#944454', '#FFC553', '#848456', '#6E522B']
+PALETTE_CATEGORICAL = ['#F59E0B', '#3F3F3F', '#A3A3A3', '#92400E', '#FDE68A', '#006494', '#944454', '#6E6E6E']
 ```
 
 ## Number Formatting

@@ -166,16 +166,18 @@ shadcn/ui uses its own CSS variable naming convention. Map your palette to shadc
 ```css
 :root {
   /* Nexus light → shadcn variables (H S% L% format) */
-  --background: 45 24% 96%; /* --color-bg #F7F6F2 */
-  --foreground: 44 23% 14%; /* --color-text #28251D */
-  --card: 45 25% 97%; /* --color-surface #F9F8F5 */
-  --card-foreground: 44 23% 14%;
-  --primary: 183 98% 22%; /* --color-primary #01696F */
+  --background: 0 0% 97%; /* --color-bg #F7F7F7 */
+  --foreground: 0 0% 14%; /* --color-text #232323 */
+  --card: 0 0% 98%; /* --color-surface #F9F9F9 */
+  --card-foreground: 0 0% 14%;
+  --primary: 26 90% 37%; /* --color-primary #B45309 */
   --primary-foreground: 0 0% 98%;
-  --muted-foreground: 50 3% 47%; /* --color-text-muted #7A7974 */
+  --accent: 43 96% 56%; /* --color-accent #FBBF24 — amber highlight, dark text on it */
+  --accent-foreground: 0 0% 9%;
+  --muted-foreground: 0 0% 44%; /* --color-text-muted #6F6F6F */
   --destructive: 320 57% 40%; /* --color-error #A12C7B */
-  --border: 36 8% 81%; /* --color-border #D4D1CA */
-  --ring: 183 98% 22%;
+  --border: 0 0% 82%; /* --color-border #D1D1D1 */
+  --ring: 26 90% 37%;
 }
 ```
 

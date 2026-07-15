@@ -155,7 +155,7 @@ Every site should have a visual identity derived from its content. **Do not skip
 When inference yielded no clear direction AND the user was asked but gave no style guidance, use defaults from `shared/01-design-tokens.md` with:
 
 - **Typography:** Satoshi or General Sans body (Fontshare — preferred), or Inter/DM Sans. Weight contrast over font contrast. 3-4 sizes max. Keep text compact — `--text-3xl`/`--text-hero` are for informational site heroes only.
-- **Color:** Nexus palette. Neutral surfaces + one teal accent for CTAs only.
+- **Color:** Nexus palette. Mono gray/black surfaces + one amber accent for CTAs only.
 - **Layout:** Grid-aligned. Generous margins. Asymmetric where interesting.
 - **Motion:** Minimal, functional. Smooth state transitions only.
 - **Imagery:** Author clean, relevant visuals with SVG, CSS gradients, and considered layout. No stock photos, no placeholders.

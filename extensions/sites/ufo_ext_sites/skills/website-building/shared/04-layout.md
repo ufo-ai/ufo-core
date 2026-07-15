@@ -132,7 +132,7 @@ Borders, border-radius, and shadows are detail work — the difference between "
 
 ### Shadows
 
-- **Tone-match shadows to the surface.** The Nexus palette's `--shadow-sm`, `--shadow-md`, and `--shadow-lg` variables use a warm-tinted shadow color. Reference them directly:
+- **Tone-match shadows to the surface.** The Nexus palette's `--shadow-sm`, `--shadow-md`, and `--shadow-lg` variables use a neutral shadow color. Reference them directly:
   ```css
   .card {
     box-shadow: var(--shadow-sm);
@@ -144,7 +144,7 @@ Borders, border-radius, and shadows are detail work — the difference between "
     box-shadow: var(--shadow-lg);
   }
   ```
-  In Tailwind: use `shadow-sm`, `shadow-md`, `shadow-lg` and customize the color via `tailwind.config.ts` or `shadow-[0_4px_12px_oklch(0.2_0.01_80/0.08)]`.
+  In Tailwind: use `shadow-sm`, `shadow-md`, `shadow-lg` and customize the color via `tailwind.config.ts` or `shadow-[0_4px_12px_oklch(0_0_0/0.08)]`.
 - **Layered shadows feel more natural.** Two or three stacked shadows — a tight, sharp one for contact shadow + a wide, diffuse one for depth — creates realistic elevation:
   ```css
   .card {

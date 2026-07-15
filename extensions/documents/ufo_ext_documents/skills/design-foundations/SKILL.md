@@ -27,43 +27,45 @@ Color is emphasis — every non-neutral color must answer: **what does this help
 
 ## Default Palette — Nexus
 
-**Use when the user gives no color direction.** Flying Object-aligned — warm, professional, accessible.
+**Use when the user gives no color direction.** Flying Object-aligned — monochrome gray/black with a single amber highlight, professional, accessible.
 
 **These are roles, not a mandate.** A typical output uses Background + Text + Primary. Add semantic colors (error, warning, success) only when the content requires them. Do not introduce color for decoration.
 
 ### Light Mode
 
-| Role          | Hex       | Usage                    |
-| ------------- | --------- | ------------------------ |
-| Background    | `#F7F6F2` | Primary background       |
-| Surface       | `#F9F8F5` | Cards, containers        |
-| Surface alt   | `#FBFBF9` | Secondary surface layer  |
-| Border        | `#D4D1CA` | Dividers, card borders   |
-| Text          | `#28251D` | Primary body text        |
-| Text muted    | `#7A7974` | Secondary text           |
-| Text faint    | `#BAB9B4` | Placeholders, tertiary   |
-| Primary       | `#01696F` | Links, CTAs (Hydra Teal) |
-| Primary hover | `#0C4E54` | Hover state              |
-| Error         | `#A12C7B` | Destructive states       |
-| Warning       | `#964219` | Caution states           |
-| Success       | `#437A22` | Confirmation states      |
+| Role          | Hex       | Usage                                                          |
+| ------------- | --------- | -------------------------------------------------------------- |
+| Background    | `#F7F7F7` | Primary background                                             |
+| Surface       | `#F9F9F9` | Cards, containers                                              |
+| Surface alt   | `#FBFBFB` | Secondary surface layer                                        |
+| Border        | `#D1D1D1` | Dividers, card borders                                         |
+| Text          | `#232323` | Primary body text                                              |
+| Text muted    | `#6F6F6F` | Secondary text                                                 |
+| Text faint    | `#B8B8B8` | Placeholders, tertiary                                         |
+| Accent        | `#FBBF24` | Signature amber — fills, marks, selected states (dark text on it, never text on light) |
+| Primary       | `#B45309` | Links, CTAs (Deep Amber — AA on light surfaces)                |
+| Primary hover | `#92400E` | Hover state                                                    |
+| Error         | `#A12C7B` | Destructive states                                             |
+| Warning       | `#C2410C` | Caution states                                                 |
+| Success       | `#437A22` | Confirmation states                                            |
 
 ### Dark Mode
 
-| Role          | Hex       | Usage                   |
-| ------------- | --------- | ----------------------- |
-| Background    | `#171614` | Primary background      |
-| Surface       | `#1C1B19` | Cards, containers       |
-| Surface alt   | `#201F1D` | Secondary surface layer |
-| Border        | `#393836` | Dividers, card borders  |
-| Text          | `#CDCCCA` | Primary body text       |
-| Text muted    | `#797876` | Secondary text          |
-| Text faint    | `#5A5957` | Tertiary text           |
-| Primary       | `#4F98A3` | Links, CTAs             |
-| Primary hover | `#227F8B` | Hover state             |
-| Error         | `#D163A7` | Destructive states      |
-| Warning       | `#BB653B` | Caution states          |
-| Success       | `#6DAA45` | Confirmation states     |
+| Role          | Hex       | Usage                                            |
+| ------------- | --------- | ------------------------------------------------ |
+| Background    | `#141414` | Primary background                               |
+| Surface       | `#191919` | Cards, containers                                |
+| Surface alt   | `#1D1D1D` | Secondary surface layer                          |
+| Border        | `#383838` | Dividers, card borders                           |
+| Text          | `#CCCCCC` | Primary body text                                |
+| Text muted    | `#8C8C8C` | Secondary text                                   |
+| Text faint    | `#595959` | Tertiary text                                    |
+| Accent        | `#FBBF24` | Signature amber — fills, marks, selected states  |
+| Primary       | `#FBBF24` | Links, CTAs                                      |
+| Primary hover | `#F59E0B` | Hover state                                      |
+| Error         | `#D163A7` | Destructive states                               |
+| Warning       | `#FB923C` | Caution states                                   |
+| Success       | `#6DAA45` | Confirmation states                              |
 
 ### Extended Palette (data visualization only)
 
@@ -225,20 +227,20 @@ Principles for charts, graphs, and data visualizations across all formats.
 
 Use in order for data series (bar, pie, line, scatter):
 
-| #   | Hex       | Name                                                         |
-| --- | --------- | ------------------------------------------------------------ |
-| 1   | `#20808D` | Teal (chart primary — distinct from Nexus UI teal `#01696F`) |
-| 2   | `#A84B2F` | Terra/rust                                                   |
-| 3   | `#1B474D` | Dark teal                                                    |
-| 4   | `#BCE2E7` | Light cyan                                                   |
-| 5   | `#944454` | Mauve                                                        |
-| 6   | `#FFC553` | Gold                                                         |
-| 7   | `#848456` | Olive                                                        |
-| 8   | `#6E522B` | Brown                                                        |
+| #   | Hex       | Name                                                                          |
+| --- | --------- | ----------------------------------------------------------------------------- |
+| 1   | `#F59E0B` | Amber (chart primary — deeper than the UI accent `#FBBF24` for light surfaces) |
+| 2   | `#3F3F3F` | Charcoal                                                                      |
+| 3   | `#A3A3A3` | Silver                                                                        |
+| 4   | `#92400E` | Umber                                                                         |
+| 5   | `#FDE68A` | Pale amber                                                                    |
+| 6   | `#006494` | Blue                                                                          |
+| 7   | `#944454` | Mauve                                                                         |
+| 8   | `#6E6E6E` | Graphite                                                                      |
 
 **Fit chart colors to the art direction.** Data viz naturally needs multiple colors to communicate — that's fine. But choose them thoughtfully: for sequential data, use monochromatic shades of the primary accent. For categorical data that needs distinct hues, use the curated sequence above — it's designed to be harmonious. When the project has a custom palette, derive chart colors from it rather than defaulting to unrelated hues. The chart colors should feel like part of the same design system as the rest of the page.
 
-**Rules:** ≤5 series per chart (use small multiples beyond that). Sequential data: single hue, varying lightness. Diverging data: teal `#20808D` positive, red `#A13544` negative. Highlight key series at full opacity, dim others to 40-60%.
+**Rules:** ≤5 series per chart (use small multiples beyond that). Sequential data: single hue, varying lightness — pale amber `#FDE68A` to umber `#92400E` reads naturally here. Diverging data: amber `#F59E0B` positive, blue `#006494` negative. Highlight key series at full opacity, dim others to 40-60% or gray them out.
 
 **Colorblind safety:** Never color alone — add labels/patterns/markers. Avoid red/green only. Blue+orange is safer.
 
@@ -284,6 +286,6 @@ Use in order for data series (bar, pie, line, scatter):
 
 - **Value:** Large, bold — dominant element
 - **Label:** Small, muted
-- **Delta:** Colored arrow + %. Teal/green up, red down, gray flat
+- **Delta:** Colored arrow + %. Green up, red down, gray flat
 - **Sparkline (optional):** Tiny trend line, no axes
 - **Animate** value on change/appear

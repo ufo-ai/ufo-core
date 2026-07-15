@@ -113,40 +113,45 @@ When building a custom palette (steps 1-2), maintain the same variable structure
 
 ### Nexus Design System (Fallback Palette)
 
-The Nexus palette is a neutral, warm-beige/teal system designed as a safe fallback — not the default for every site. For the format-agnostic hex palette and full rationale, see `skills/design-foundations/SKILL.md`. Below is the CSS variable implementation.
+The Nexus palette is a monochrome gray/black system with a single amber highlight, designed as a safe fallback — not the default for every site. For the format-agnostic hex palette and full rationale, see `skills/design-foundations/SKILL.md`. Below is the CSS variable implementation.
 
 ```css
-/* NEXUS DESIGN SYSTEM — warm beige surfaces, teal primary accent */
+/* NEXUS DESIGN SYSTEM — monochrome gray/black surfaces, amber accent */
 
 :root,
 [data-theme='light'] {
-  /* Surfaces (Nexus Beige) */
-  --color-bg: #f7f6f2;
-  --color-surface: #f9f8f5;
-  --color-surface-2: #fbfbf9;
-  --color-surface-offset: #f3f0ec;
-  --color-surface-offset-2: #edeae5;
-  --color-surface-dynamic: #e6e4df;
-  --color-divider: #dcd9d5;
-  --color-border: #d4d1ca;
+  /* Surfaces (Mono Gray) */
+  --color-bg: #f7f7f7;
+  --color-surface: #f9f9f9;
+  --color-surface-2: #fbfbfb;
+  --color-surface-offset: #f1f1f1;
+  --color-surface-offset-2: #eaeaea;
+  --color-surface-dynamic: #e3e3e3;
+  --color-divider: #d9d9d9;
+  --color-border: #d1d1d1;
 
-  /* Text (Sylph Gray) */
-  --color-text: #28251d;
-  --color-text-muted: #7a7974;
-  --color-text-faint: #bab9b4;
-  --color-text-inverse: #f9f8f4;
+  /* Text (Ink) */
+  --color-text: #232323;
+  --color-text-muted: #6f6f6f;
+  --color-text-faint: #b8b8b8;
+  --color-text-inverse: #f9f9f9;
 
-  /* Primary Accent (Hydra Teal) */
-  --color-primary: #01696f;
-  --color-primary-hover: #0c4e54;
-  --color-primary-active: #0f3638;
-  --color-primary-highlight: #cedcd8;
+  /* Accent (Amber) — the signature highlight: solid fills, highlight marks,
+     selected states, active indicators. Always near-black text/icons on it;
+     never a text color on light surfaces (fails contrast — use primary). */
+  --color-accent: #fbbf24;
 
-  /* Warning (Terra Brown) */
-  --color-warning: #964219;
-  --color-warning-hover: #713417;
-  --color-warning-active: #4b2614;
-  --color-warning-highlight: #ddcfc6;
+  /* Primary (Deep Amber) — links, CTAs, interactive text; AA on light surfaces */
+  --color-primary: #b45309;
+  --color-primary-hover: #92400e;
+  --color-primary-active: #78350f;
+  --color-primary-highlight: #fef3c7;
+
+  /* Warning (Signal Orange) */
+  --color-warning: #c2410c;
+  --color-warning-hover: #9a3412;
+  --color-warning-active: #7c2d12;
+  --color-warning-highlight: #ffedd5;
 
   /* Error (Jenova Maroon) */
   --color-error: #a12c7b;
@@ -206,10 +211,10 @@ The Nexus palette is a neutral, warm-beige/teal system designed as a safe fallba
   /* Transitions */
   --transition-interactive: 180ms cubic-bezier(0.16, 1, 0.3, 1);
 
-  /* Shadows (tone-matched to warm surfaces) */
-  --shadow-sm: 0 1px 2px oklch(0.2 0.01 80 / 0.06);
-  --shadow-md: 0 4px 12px oklch(0.2 0.01 80 / 0.08);
-  --shadow-lg: 0 12px 32px oklch(0.2 0.01 80 / 0.12);
+  /* Shadows (neutral, tone-matched to mono surfaces) */
+  --shadow-sm: 0 1px 2px oklch(0 0 0 / 0.06);
+  --shadow-md: 0 4px 12px oklch(0 0 0 / 0.08);
+  --shadow-lg: 0 12px 32px oklch(0 0 0 / 0.12);
 
   /* Content widths */
   --content-narrow: 640px;
@@ -227,26 +232,27 @@ The Nexus palette is a neutral, warm-beige/teal system designed as a safe fallba
 
 /* DARK MODE */
 [data-theme='dark'] {
-  --color-bg: #171614;
-  --color-surface: #1c1b19;
-  --color-surface-2: #201f1d;
-  --color-surface-offset: #1d1c1a;
-  --color-surface-offset-2: #22211f;
-  --color-surface-dynamic: #2d2c2a;
-  --color-divider: #262523;
-  --color-border: #393836;
-  --color-text: #cdccca;
-  --color-text-muted: #797876;
-  --color-text-faint: #5a5957;
-  --color-text-inverse: #2b2a28;
-  --color-primary: #4f98a3;
-  --color-primary-hover: #227f8b;
-  --color-primary-active: #1a626b;
-  --color-primary-highlight: #313b3b;
-  --color-warning: #bb653b;
-  --color-warning-hover: #b95525;
-  --color-warning-active: #993d10;
-  --color-warning-highlight: #564942;
+  --color-bg: #141414;
+  --color-surface: #191919;
+  --color-surface-2: #1d1d1d;
+  --color-surface-offset: #1a1a1a;
+  --color-surface-offset-2: #1f1f1f;
+  --color-surface-dynamic: #2a2a2a;
+  --color-divider: #242424;
+  --color-border: #383838;
+  --color-text: #cccccc;
+  --color-text-muted: #8c8c8c;
+  --color-text-faint: #595959;
+  --color-text-inverse: #1a1a1a;
+  --color-accent: #fbbf24;
+  --color-primary: #fbbf24;
+  --color-primary-hover: #f59e0b;
+  --color-primary-active: #d97706;
+  --color-primary-highlight: #3d3522;
+  --color-warning: #fb923c;
+  --color-warning-hover: #f97316;
+  --color-warning-active: #ea580c;
+  --color-warning-highlight: #46311d;
   --color-error: #d163a7;
   --color-error-hover: #b9478f;
   --color-error-active: #9b2f76;
@@ -316,7 +322,8 @@ The Nexus palette is a neutral, warm-beige/teal system designed as a safe fallba
 
 - **Three text levels**: primary, muted, faint. **Surface layers**: bg → surface → surface-2 → surface-offset.
 - `color-mix(in oklab, ...)` for opacity adjustments. Custom palettes: replace Nexus defaults but keep variable names + both modes.
-- **Better gradients**: `linear-gradient(in oklab, var(--color-primary), var(--color-blue))`. **P3 wide-gamut**: `@media (color-gamut: p3) { :root { --color-primary: oklch(0.48 0.14 192); } }`
+- **Better gradients**: `linear-gradient(in oklab, var(--color-primary), var(--color-orange))`. **P3 wide-gamut**: `@media (color-gamut: p3) { :root { --color-primary: oklch(0.55 0.15 55); } }`
+- **Amber is the only pop.** In Nexus, `--color-accent` (#FBBF24) carries all emphasis — a highlight mark, a selected state, a solid CTA fill with near-black text. Everything else stays gray/black. If a page squints to more than gray + one amber moment per view, it has drifted.
 
 ### Nexus HSL Equivalents (for Tailwind / shadcn projects)
 
@@ -324,37 +331,39 @@ When using the fullstack webapp template (Tailwind + shadcn), `index.css` uses H
 
 **Light mode:**
 
-| Role            | Hex       | HSL (`H S% L%`) |
-| --------------- | --------- | --------------- |
-| Background      | `#F7F6F2` | `45 24% 96%`    |
-| Surface / Card  | `#F9F8F5` | `45 25% 97%`    |
-| Surface-2       | `#FBFBF9` | `45 20% 98%`    |
-| Surface-offset  | `#F3F0EC` | `36 18% 94%`    |
-| Border          | `#D4D1CA` | `36 8% 81%`     |
-| Divider         | `#DCD9D5` | `34 8% 85%`     |
-| Text            | `#28251D` | `44 23% 14%`    |
-| Text muted      | `#7A7974` | `50 3% 47%`     |
-| Text faint      | `#BAB9B4` | `50 3% 72%`     |
-| Primary (Teal)  | `#01696F` | `183 98% 22%`   |
-| Primary hover   | `#0C4E54` | `185 75% 19%`   |
-| Error (Maroon)  | `#A12C7B` | `320 57% 40%`   |
-| Warning (Brown) | `#964219` | `20 73% 34%`    |
-| Success (Green) | `#437A22` | `103 56% 31%`   |
+| Role                 | Hex       | HSL (`H S% L%`) |
+| -------------------- | --------- | --------------- |
+| Background           | `#F7F7F7` | `0 0% 97%`      |
+| Surface / Card       | `#F9F9F9` | `0 0% 98%`      |
+| Surface-2            | `#FBFBFB` | `0 0% 98%`      |
+| Surface-offset       | `#F1F1F1` | `0 0% 95%`      |
+| Border               | `#D1D1D1` | `0 0% 82%`      |
+| Divider              | `#D9D9D9` | `0 0% 85%`      |
+| Text                 | `#232323` | `0 0% 14%`      |
+| Text muted           | `#6F6F6F` | `0 0% 44%`      |
+| Text faint           | `#B8B8B8` | `0 0% 72%`      |
+| Accent (Amber)       | `#FBBF24` | `43 96% 56%`    |
+| Primary (Deep Amber) | `#B45309` | `26 90% 37%`    |
+| Primary hover        | `#92400E` | `23 83% 31%`    |
+| Error (Maroon)       | `#A12C7B` | `320 57% 40%`   |
+| Warning (Orange)     | `#C2410C` | `17 88% 40%`    |
+| Success (Green)      | `#437A22` | `103 56% 31%`   |
 
 **Dark mode:**
 
-| Role           | Hex       | HSL (`H S% L%`) |
-| -------------- | --------- | --------------- |
-| Background     | `#171614` | `40 10% 8%`     |
-| Surface / Card | `#1C1B19` | `40 9% 10%`     |
-| Surface-2      | `#201F1D` | `40 8% 12%`     |
-| Border         | `#393836` | `40 3% 22%`     |
-| Text           | `#CDCCCA` | `40 3% 80%`     |
-| Text muted     | `#797876` | `40 2% 47%`     |
-| Primary (Teal) | `#4F98A3` | `188 35% 47%`   |
-| Error          | `#D163A7` | `320 47% 60%`   |
-| Warning        | `#BB653B` | `20 53% 48%`    |
-| Success        | `#6DAA45` | `97 43% 47%`    |
+| Role            | Hex       | HSL (`H S% L%`) |
+| --------------- | --------- | --------------- |
+| Background      | `#141414` | `0 0% 8%`       |
+| Surface / Card  | `#191919` | `0 0% 10%`      |
+| Surface-2       | `#1D1D1D` | `0 0% 11%`      |
+| Border          | `#383838` | `0 0% 22%`      |
+| Text            | `#CCCCCC` | `0 0% 80%`      |
+| Text muted      | `#8C8C8C` | `0 0% 55%`      |
+| Accent (Amber)  | `#FBBF24` | `43 96% 56%`    |
+| Primary (Amber) | `#FBBF24` | `43 96% 56%`    |
+| Error           | `#D163A7` | `320 47% 60%`   |
+| Warning         | `#FB923C` | `27 96% 61%`    |
+| Success         | `#6DAA45` | `97 43% 47%`    |
 
 These are the Nexus fallback values. **Always try to derive a concept-driven palette first** (see "Art Direction First" above). Use Nexus only when the request is truly generic with no topic to infer from. When deriving a custom palette, convert your chosen colors to the same `H S% L%` format and role structure with both light and dark modes.
 
@@ -433,7 +442,7 @@ figcaption {
 }
 
 ::selection {
-  background: oklch(from var(--color-primary) l c h / 0.25);
+  background: oklch(from var(--color-accent) l c h / 0.4);
   color: var(--color-text);
 }
 
