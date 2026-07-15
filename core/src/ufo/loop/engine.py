@@ -276,11 +276,10 @@ class Arrival(BaseModel):
     """One drained inbound-queue row — the `_claim_arrivals` DBOS step's memoized output, so a
     crash-recovery replay reads back exactly the batch the first run consumed. `rendered` is the
     message text exactly as the model sees it — user_prompt_submit fired once inside the step,
-    None when it denied — persisted on the row as well, so neither a workflow replay nor a
-    transcript repair ever re-fires hooks or diverges from what the model saw."""
+    None when it denied — so a workflow replay reuses the recorded rendering instead of
+    re-firing hooks."""
 
     id: UUID
-    speaker_member_id: UUID | None = None
     rendered: str | None = None
 
 
@@ -415,89 +414,22 @@ def _total_usage(usage_events: list[Usage]) -> Usage:
 
 @dataclass(frozen=True)
 class TranscriptRepair:
-    """The durable-exchange writer: the founding inbound, absorbed arrivals, and a finished turn's
-    answer, persisted to the conversation transcript with bounded retries. `resolve` republishes a
-    committed terminal when an execution holds no running claim — a redelivery of a finished turn,
-    or a crash between the terminal commit and the transcript write — and is reachable from the
-    worker before any engine exists. It reads only durable state (the terminal row, each consumed
-    arrival's persisted rendering), so no hook re-fires and the repaired transcript is exactly
-    what the model saw."""
+    """The turn's durable-transcript writer, split from the engine so the worker can republish a
+    committed terminal without building one. `resolve` ends a redelivered client's wait — a
+    duplicate whose original run committed the terminal but may have crashed before publishing it —
+    by republishing that terminal; the monotonic transcript guard lets the original run's fuller
+    write stand."""
 
     turn: Turn
     transcript: Transcript
     hub: Hub
 
     async def resolve(self) -> TerminalFrame | None:
-        """Republish the committed terminal after reconstructing the exchange durably — the
-        founding inbound, every arrival the turn consumed, and a done turn's answer — so an
-        absorbed message never vanishes from history; the monotonic transcript guard lets the
-        original, fuller write win when it did land. Predecessors heal first, so the rebuild
-        never reads a gapped history. No-op (None) while the turn is still running so the live
-        execution stays the sole authority."""
-        await self.heal_preceding()
-        return await self._resolve_own(publish=True)
-
-    async def heal_preceding(self) -> None:
-        """Repair every earlier turn that committed its terminal but never wrote its transcript (a
-        crash inside the write window), in seq order, before this turn's context is read — a later
-        turn advancing the transcript would otherwise make the older exchange unrepairable, its
-        absorbed arrivals gone from history. The conversation partition serializes turns, so every
-        predecessor is terminal; a no-gap conversation returns after one read."""
-        stored = await self.transcript.read()
-        floor = 0 if stored is None else stored.seq
-        if floor >= self.turn.seq - 1:
-            return
-        async with workspace_tx() as connection:
-            rows = (
-                await connection.execute(
-                    sa.select(
-                        tables.turn.c.id,
-                        tables.turn.c.workspace_id,
-                        tables.turn.c.conversation_id,
-                        tables.turn.c.agent_id,
-                        tables.turn.c.seq,
-                        tables.turn.c.status,
-                        tables.turn.c.inbound,
-                        tables.turn.c.admission_source,
-                        tables.turn.c.speaker_member_id,
-                        tables.turn.c.created_at,
-                        tables.turn.c.context,
-                        tables.turn.c.terminal,
-                        tables.turn.c.parent_turn_id,
-                        tables.turn.c.subagent_profile,
-                        tables.turn.c.traceparent,
-                    )
-                    .where(
-                        tables.turn.c.conversation_id == self.turn.conversation_id,
-                        tables.turn.c.seq > floor,
-                        tables.turn.c.seq < self.turn.seq,
-                    )
-                    .order_by(tables.turn.c.seq)
-                )
-            ).all()
-        for row in rows:
-            predecessor = Turn(
-                id=row.id,
-                workspace_id=row.workspace_id,
-                conversation_id=row.conversation_id,
-                agent_id=row.agent_id,
-                seq=row.seq,
-                status=row.status,
-                inbound=row.inbound,
-                admission_source=row.admission_source,
-                speaker_member_id=row.speaker_member_id,
-                created_at=row.created_at,
-                context=None if row.context is None else TurnContext.model_validate(row.context),
-                terminal=(
-                    None if row.terminal is None else TerminalFrame.model_validate(row.terminal)
-                ),
-                parent_turn_id=row.parent_turn_id,
-                subagent_profile=row.subagent_profile,
-                traceparent=row.traceparent,
-            )
-            await replace(self, turn=predecessor)._resolve_own(publish=False)
-
-    async def _resolve_own(self, publish: bool) -> TerminalFrame | None:
+        """Republish the committed terminal for an execution that holds no running claim — a
+        redelivery of a finished turn — so the client's wait ends even if the original run crashed
+        before publishing. Persist the founding inbound in case that run never wrote its transcript;
+        the monotonic guard yields to the fuller write when it landed. No-op (None) while the turn
+        is still running so the live execution stays the sole authority."""
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
@@ -507,19 +439,7 @@ class TranscriptRepair:
         if row.terminal is None:
             return None
         frame = TerminalFrame.model_validate(row.terminal)
-        arrivals = await self._consumed_arrival_messages()
-        if frame.status == "done" and frame.text:
-            await self.write_conversation(
-                (
-                    *await self.load_messages(),
-                    *arrivals,
-                    Message(role="assistant", content=frame.text),
-                )
-            )
-        else:
-            await self.persist_inbound(arrivals)
-        if not publish:
-            return frame
+        await self.persist_inbound()
         try:
             await self.hub.publish(self.turn.id, Terminal(frame=frame))
         except Exception as error:
@@ -529,20 +449,6 @@ class TranscriptRepair:
                 error_class=type(error).__name__,
             )
         return frame
-
-    async def _consumed_arrival_messages(self) -> tuple[Message, ...]:
-        """The arrivals this turn consumed, read back in admission order from the rendering each
-        drain persisted — the durable source for a transcript the crashed run never wrote. An
-        empty rendering was denied by user_prompt_submit; the model never saw it."""
-        async with workspace_tx() as connection:
-            rows = (
-                await connection.execute(
-                    sa.select(tables.inbound_message.c.rendered)
-                    .where(tables.inbound_message.c.consumed_turn_id == self.turn.id)
-                    .order_by(tables.inbound_message.c.seq)
-                )
-            ).all()
-        return tuple(Message(role="user", content=row.rendered) for row in rows if row.rendered)
 
     async def persist_transcript(self, messages: tuple[Message, ...], answer: str) -> None:
         await self.write_conversation((*messages, Message(role="assistant", content=answer)))
@@ -630,7 +536,6 @@ class TurnEngine:
             )
             usage_events: list[Usage] = []
             arrival_log: list[Message] = []
-            arrival_speakers: set[UUID | None] = set()
             absorbed_ids: list[UUID] = []
 
             async def rank_find(system: str, user: str) -> str:
@@ -674,7 +579,6 @@ class TurnEngine:
             try:
                 if not await self._mark_running():
                     return await self._resolve_unclaimed()
-                await self._repair().heal_preceding()
                 system = self.system_prompt.content
                 if self.turn.admission_source == SCHEDULED_ADMISSION:
                     system = await self._scheduled_system(system)
@@ -719,7 +623,6 @@ class TurnEngine:
                         usage_events,
                         system,
                         arrival_log,
-                        arrival_speakers,
                         absorbed_ids,
                     )
                     await self.hooks.fire(
@@ -810,7 +713,6 @@ class TurnEngine:
         usage_events: list[Usage],
         system: str,
         arrival_log: list[Message],
-        arrival_speakers: set[UUID | None],
         absorbed_ids: list[UUID],
     ) -> tuple[
         tuple[Message, ...],
@@ -836,17 +738,10 @@ class TurnEngine:
         credential_request: CredentialRequest | None = None
         connect_request: ConnectRequest | None = None
         for _round in range(self.max_rounds):
-            absorbed = await self._absorb_arrivals(
-                messages, arrival_log, arrival_speakers, absorbed_ids
-            )
+            absorbed = await self._absorb_arrivals(messages, arrival_log, absorbed_ids)
             if len(absorbed) > len(messages):
                 question = credential_request = connect_request = None
             messages = absorbed
-            round_context = (
-                replace(context, speaker_member_id=None)
-                if arrival_speakers - {self.turn.speaker_member_id}
-                else context
-            )
             await self._enforce_spend(usage_events)
             messages, compaction_usage = await self.compaction.maybe_compact(messages)
             usage_events.extend(compaction_usage)
@@ -866,7 +761,7 @@ class TurnEngine:
             results: tuple[ToolResultBlock, ...] = ()
             for segment in _dispatch_segments(self.tools, tool_calls):
                 dispatched = await asyncio.gather(
-                    *(self._dispatch(round_context, call) for call in segment),
+                    *(self._dispatch(context, call) for call in segment),
                     return_exceptions=True,
                 )
                 failures = [outcome for outcome in dispatched if isinstance(outcome, BaseException)]
@@ -893,23 +788,21 @@ class TurnEngine:
         self,
         messages: tuple[Message, ...],
         arrival_log: list[Message],
-        arrival_speakers: set[UUID | None],
         absorbed_ids: list[UUID],
     ) -> tuple[Message, ...]:
         """Fold the conversation's queued arrivals into the window, each as its own
         <context>-tagged user message firing user_prompt_submit exactly as the founding inbound
         did — a denied arrival is dropped, an injection rides the message walled in its own
-        delimiter so it never reads as member text. Each arrival's speaker is recorded: once one
-        differs from the turn's, the round's tool context runs speakerless, so a speaker-gated act
-        never executes under another member's identity. A subagent turn takes no arrivals: its
-        conversation is the parent's private channel, never admitted into."""
+        delimiter so it never reads as member text. Whoever spoke each arrival and whichever agent
+        it named, it joins this one turn: multiple members talking to a running bot is one turn,
+        and the model handles the mixed voices. A subagent turn takes no arrivals: its conversation
+        is the parent's private channel, never admitted into."""
         if self.turn.subagent_profile is not None:
             return messages
         for arrival in await self._claim_arrivals(tuple(absorbed_ids)):
             absorbed_ids.append(arrival.id)
             if arrival.rendered is None:
                 continue
-            arrival_speakers.add(arrival.speaker_member_id)
             message = Message(role="user", content=arrival.rendered)
             arrival_log.append(message)
             messages = (*messages, message)
@@ -946,13 +839,9 @@ class TurnEngine:
         stamped consumed by this turn, and the claim re-takes this turn's stamped rows that no
         recorded drain absorbed — so a crash between the stamp committing and the step recording
         re-executes the drain and recovers exactly the batch it had claimed, while absorbed rows
-        are never re-taken. Each claimed row is rendered here — hooks fire once per consumed
-        arrival, outside any transaction — and the rendering persists on the row before the step
-        records, so a transcript repair reads back the text the model actually saw without ever
-        re-firing a hook. A replayed drain (a crash after the rendering persisted but before the
-        step recorded) reuses the stored rendering for the same reason — the row keeps '' for a
-        denied arrival so the denial itself is never re-decided. An arrival is consumed exactly
-        once and never lost."""
+        are never re-taken. Each claimed row is rendered here — user_prompt_submit fires inside
+        the step, so a replay of a recorded drain reuses the memoized rendering instead of
+        re-firing hooks. An arrival is consumed exactly once and never lost."""
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
@@ -975,40 +864,18 @@ class TurnEngine:
                         tables.inbound_message.c.context,
                         tables.inbound_message.c.speaker_member_id,
                         tables.inbound_message.c.created_at,
-                        tables.inbound_message.c.rendered,
                     )
                 )
             ).all()
         arrivals: list[Arrival] = []
-        unrendered: list[tuple[UUID, str]] = []
         for row in sorted(rows, key=lambda row: row.seq):
-            if row.rendered is not None:
-                arrivals.append(
-                    Arrival(
-                        id=row.id,
-                        speaker_member_id=row.speaker_member_id,
-                        rendered=row.rendered or None,
-                    )
-                )
-                continue
             rendered = await self._render_arrival(
                 row.body,
                 None if row.context is None else TurnContext.model_validate(row.context),
                 row.speaker_member_id,
                 row.created_at if row.created_at.tzinfo else row.created_at.replace(tzinfo=UTC),
             )
-            arrivals.append(
-                Arrival(id=row.id, speaker_member_id=row.speaker_member_id, rendered=rendered)
-            )
-            unrendered.append((row.id, rendered if rendered is not None else ""))
-        if unrendered:
-            async with workspace_tx() as connection:
-                for arrival_id, rendered_value in unrendered:
-                    await connection.execute(
-                        sa.update(tables.inbound_message)
-                        .values(rendered=rendered_value)
-                        .where(tables.inbound_message.c.id == arrival_id)
-                    )
+            arrivals.append(Arrival(id=row.id, rendered=rendered))
         return tuple(arrivals)
 
     async def _release_unabsorbed(self, absorbed: tuple[UUID, ...]) -> None:
@@ -1582,10 +1449,9 @@ class TurnEngine:
 
     async def _resolve_unclaimed(self) -> TerminalFrame | None:
         """This execution lost the running claim — the turn is owned by another live execution (a
-        duplicate resume enqueue) or already finished (a re-delivery, or a crash between the
-        terminal commit and the transcript write). The repair flow republishes its committed
-        terminal, or no-ops (None) while it is still running so the live execution stays the sole
-        authority and this duplicate never clobbers it with a spurious terminal."""
+        duplicate resume enqueue) or already finished (a re-delivery). The repair flow republishes
+        its committed terminal, or no-ops (None) while it is still running so the live execution
+        stays the sole authority and this duplicate never clobbers it with a spurious terminal."""
         return await self._repair().resolve()
 
     async def _persist_transcript(self, messages: tuple[Message, ...], answer: str) -> None:

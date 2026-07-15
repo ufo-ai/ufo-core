@@ -9,9 +9,7 @@ parked — lands on the conversation's `inbound_message` queue instead of spawni
 own, whoever spoke it and whichever agent it named. The engine drains that queue into the live
 turn at each round boundary as separate <context>-tagged messages, and the terminal commit
 refuses to close over a non-empty queue, so one reply answers everything that arrived. Each
-queue row carries its own idempotency key, so a redelivery joins the turn that consumed it — and
-re-drives its dispatch: a redelivery that finds its folded turn parked resumes it (caps allowing),
-and one that finds it queued but unoffered retries the enqueue.
+queue row carries its own idempotency key, so a redelivery joins the turn that consumed it.
 
 Delivery is derived here too: a turn entering a conversation whose surface is durable registers a
 writeback row atomically with its turn row, so the poller delivers the reply no matter who admitted
@@ -154,7 +152,6 @@ class Admission:
         dispatch_now = False
         folded_parked_turn: UUID | None = None
         redispatch_workflow_id: str | None = None
-        redelivered_fold = False
         admitted_at = None
         async with workspace_tx() as connection:
             conversation = (
@@ -261,55 +258,20 @@ class Admission:
                             raise RuntimeError("idempotency key reused for a different turn")
                         if queued_message.consumed_turn_id is not None:
                             return queued_message.consumed_turn_id
-                        target = (
+                        target_live = (
                             await connection.execute(
-                                sa.select(
-                                    tables.turn.c.id,
-                                    tables.turn.c.seq,
-                                    tables.turn.c.status,
-                                    tables.turn.c.running_attempt,
-                                    tables.turn.c.dispatch_enqueued_at,
-                                )
-                                .where(tables.turn.c.id == queued_message.admitted_turn_id)
-                                .with_for_update()
-                            )
-                        ).one()
-                        if target.status in NON_TERMINAL_STATUSES:
-                            if target.status == PARKED:
-                                resume_decision = await SpendEvaluator(
-                                    workspace_id, conversation.member_id, agent_id
-                                ).decide(connection, 0)
-                                if resume_decision.outcome != ALLOW:
-                                    return target.id
-                                await connection.execute(
-                                    sa.update(tables.turn)
-                                    .values(
-                                        status=QUEUED,
-                                        dispatch_enqueued_at=sa.func.now(),
-                                        updated_at=sa.func.now(),
-                                    )
-                                    .where(
-                                        tables.turn.c.id == target.id,
-                                        tables.turn.c.status == PARKED,
-                                    )
-                                )
-                                folded_parked_turn = target.id
-                                redelivered_fold = True
-                            elif target.status == QUEUED and target.dispatch_enqueued_at is None:
-                                turn_id = target.id
-                                turn_seq = target.seq
-                                status = QUEUED
-                                redelivered_fold = True
-                                if target.running_attempt is not None:
-                                    redispatch_workflow_id = uuid4().hex
-                            else:
-                                return target.id
-                        else:
-                            await connection.execute(
-                                sa.delete(tables.inbound_message).where(
-                                    tables.inbound_message.c.id == queued_message.id
+                                sa.select(tables.turn.c.status.in_(NON_TERMINAL_STATUSES)).where(
+                                    tables.turn.c.id == queued_message.admitted_turn_id
                                 )
                             )
+                        ).scalar_one()
+                        if target_live:
+                            return queued_message.admitted_turn_id
+                        await connection.execute(
+                            sa.delete(tables.inbound_message).where(
+                                tables.inbound_message.c.id == queued_message.id
+                            )
+                        )
                         body = queued_message.body
                         context = (
                             None
@@ -321,7 +283,7 @@ class Admission:
                 if deduped is not None:
                     if deduped.conversation_id != conversation_id or deduped.agent_id != agent_id:
                         raise RuntimeError("idempotency key reused for a different turn")
-            if deduped is None and pending_pause is not None and not redelivered_fold:
+            if deduped is None and pending_pause is not None:
                 later_turn = tables.turn.alias("later_turn")
                 timer_turn = (
                     await connection.execute(
@@ -389,7 +351,7 @@ class Admission:
                                 .where(tables.scheduled_task.c.id == timer_turn.pause_id)
                             )
                             deduped = timer_turn
-            if deduped is None and scheduled_task is None and not redelivered_fold:
+            if deduped is None and scheduled_task is None:
                 live_turn = (
                     await connection.execute(
                         sa.select(tables.turn.c.id, tables.turn.c.seq, tables.turn.c.status)
@@ -499,7 +461,7 @@ class Admission:
                         )
                     return turn_id
                 status = QUEUED
-            if deduped is None and folded_parked_turn is None and not redelivered_fold:
+            if deduped is None and folded_parked_turn is None:
                 seq = (
                     await connection.execute(
                         sa.select(sa.func.coalesce(sa.func.max(tables.turn.c.seq), 0) + 1).where(

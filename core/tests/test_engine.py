@@ -527,97 +527,6 @@ async def test_claim_arrivals_reclaims_stamped_rows_until_absorbed(
         ]
 
 
-async def test_claim_replay_reuses_the_persisted_rendering(db: None, tmp_path: Path) -> None:
-    """A crash after the rendering persisted but before the step recorded: the replayed drain
-    returns the stored rendering — hooks never re-fire, a denial is never re-decided."""
-    turn = await _seed_turn("running", None)
-    with ws(turn.workspace_id):
-        engine = _engine(turn, object(), tmp_path)
-        await _queue_arrival(turn, "one")
-        await _queue_arrival(turn, "two")
-        (first, second) = await engine._claim_arrivals(())
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.update(tables.inbound_message)
-                .values(rendered="the original rendering")
-                .where(tables.inbound_message.c.id == first.id)
-            )
-            await connection.execute(
-                sa.update(tables.inbound_message)
-                .values(rendered="")
-                .where(tables.inbound_message.c.id == second.id)
-            )
-        replayed = await engine._claim_arrivals(())
-    assert [arrival.rendered for arrival in replayed] == ["the original rendering", None]
-    async with workspace_tx() as connection:
-        stored = (
-            (
-                await connection.execute(
-                    sa.select(tables.inbound_message.c.rendered).order_by(
-                        tables.inbound_message.c.seq
-                    )
-                )
-            )
-            .scalars()
-            .all()
-        )
-    assert stored == ["the original rendering", ""]
-
-
-async def test_turn_start_heals_a_predecessors_unwritten_transcript(
-    db: None, tmp_path: Path
-) -> None:
-    """A predecessor committed its terminal but crashed before the transcript write, and the
-    member already sent this next turn: the gap heals before this turn reads its context, so the
-    older exchange — founding inbound, absorbed arrival, answer — never vanishes under the
-    monotonic guard."""
-    turn = await _seed_turn("done", TerminalFrame(status="done", text="the lost answer"))
-    with ws(turn.workspace_id):
-        await _queue_arrival(turn, "mid-turn message")
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.update(tables.inbound_message).values(
-                    consumed_turn_id=turn.id, rendered="mid-turn message"
-                )
-            )
-        successor = Turn(
-            id=uuid4(),
-            workspace_id=turn.workspace_id,
-            conversation_id=turn.conversation_id,
-            agent_id=turn.agent_id,
-            seq=2,
-            status="queued",
-            inbound="next question",
-            created_at=ADMITTED_AT,
-        )
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.insert(tables.turn).values(
-                    id=successor.id,
-                    workspace_id=successor.workspace_id,
-                    conversation_id=successor.conversation_id,
-                    agent_id=successor.agent_id,
-                    seq=2,
-                    status="queued",
-                    inbound="next question",
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
-        engine = _engine(successor, EchoModel(), tmp_path)
-        frame = await engine.run()
-    assert frame is not None and frame.status == "done"
-    stored = await Transcript(
-        blob=FilesystemBlobStore(root=tmp_path), conversation_id=turn.conversation_id
-    ).read()
-    assert stored is not None
-    assert stored.seq == 2
-    texts = [message.content for message in stored.messages if isinstance(message.content, str)]
-    assert "mid-turn message" in texts
-    assert "the lost answer" in texts
-    assert any(text.endswith("next question") for text in texts)
-
-
 async def test_park_releases_the_arrivals_this_attempt_claimed(db: None, tmp_path: Path) -> None:
     """A resumed park is a fresh workflow with an empty step log: rows the parked attempt claimed
     must return to pending, or the resume would never see them."""
@@ -650,9 +559,11 @@ async def test_park_releases_the_arrivals_this_attempt_claimed(db: None, tmp_pat
     assert status == "parked"
 
 
-async def test_absorbed_arrivals_carry_tags_and_record_their_speakers(
+async def test_absorbed_arrivals_from_any_speaker_fold_into_the_one_turn(
     db: None, tmp_path: Path
 ) -> None:
+    """Whoever spoke each mid-turn arrival, it joins the running turn as its own context-tagged
+    message — multiple members talking to a running bot is one turn, no speaker restriction."""
     turn = await _seed_turn("running", None)
     foreign_member_id = uuid4()
     async with workspace_tx() as connection:
@@ -667,16 +578,16 @@ async def test_absorbed_arrivals_carry_tags_and_record_their_speakers(
         )
     with ws(turn.workspace_id):
         engine = _engine(turn, object(), tmp_path)
+        await _queue_arrival(turn, "from the founder")
         await _queue_arrival(turn, "from someone else", speaker_member_id=foreign_member_id)
         arrival_log: list[Message] = []
-        arrival_speakers: set[UUID | None] = set()
-        messages = await engine._absorb_arrivals((), arrival_log, arrival_speakers, [])
-    [message] = messages
-    assert isinstance(message.content, str)
-    assert message.content.startswith("<context>\n")
-    assert message.content.endswith("</context>\nfrom someone else")
-    assert arrival_log == [message]
-    assert arrival_speakers == {foreign_member_id}
+        messages = await engine._absorb_arrivals((), arrival_log, [])
+    assert [
+        message.content.split("</context>\n", 1)[-1]
+        for message in messages
+        if isinstance(message.content, str)
+    ] == ["from the founder", "from someone else"]
+    assert arrival_log == list(messages)
 
 
 async def test_scheduled_turn_searches_memory_after_claim(db: None, tmp_path: Path) -> None:
@@ -2052,34 +1963,23 @@ async def test_default_tools_dispatch_in_order_without_overlap(db: None, tmp_pat
     assert trace == ["start:a", "end:a", "start:b", "end:b"]
 
 
-async def test_resolve_unclaimed_reconstructs_absorbed_arrivals(db: None, tmp_path: Path) -> None:
-    """A crash between the done-commit and the transcript write must not lose absorbed arrivals:
-    the replay rebuilds the exchange from the consumed rows and the committed answer."""
-    turn = await _seed_turn("done", TerminalFrame(status="done", text="covers both messages"))
+async def test_resolve_unclaimed_republishes_the_committed_terminal(
+    db: None, tmp_path: Path
+) -> None:
+    """A redelivery of a finished turn ends the client's wait: the lost-claim path republishes the
+    committed terminal and persists the founding inbound (the durable member message), so a run
+    that crashed before publishing still answers."""
+    turn = await _seed_turn("done", TerminalFrame(status="done", text="the answer"))
     with ws(turn.workspace_id):
-        engine = _engine(turn, object(), tmp_path)
-        await _queue_arrival(turn, "mid-turn message")
-        claimed = await engine._claim_arrivals(())
-        assert [_arrival_body(arrival) for arrival in claimed] == ["mid-turn message"]
-        async with workspace_tx() as connection:
-            persisted = (
-                await connection.execute(
-                    sa.select(tables.inbound_message.c.rendered).where(
-                        tables.inbound_message.c.consumed_turn_id == turn.id
-                    )
-                )
-            ).scalar_one()
-        assert persisted == claimed[0].rendered
-        frame = await engine._resolve_unclaimed()
+        frame = await _engine(turn, object(), tmp_path)._resolve_unclaimed()
     assert frame is not None
-    assert frame.text == "covers both messages"
+    assert frame.text == "the answer"
     stored = await Transcript(
         blob=FilesystemBlobStore(root=tmp_path), conversation_id=turn.conversation_id
     ).read()
     assert stored is not None
-    bodies = [
+    assert [
         message.content.split("</context>\n", 1)[-1]
         for message in stored.messages
         if isinstance(message.content, str)
-    ]
-    assert bodies == ["hi", "mid-turn message", "covers both messages"]
+    ] == ["hi"]

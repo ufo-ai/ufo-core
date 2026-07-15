@@ -157,7 +157,6 @@ inbound_message = sa.Table(
     sa.Column("idempotency_key", sa.Text, nullable=True),
     sa.Column("admitted_turn_id", sa.Uuid, sa.ForeignKey("turn.id"), nullable=False),
     sa.Column("consumed_turn_id", sa.Uuid, sa.ForeignKey("turn.id"), nullable=True),
-    sa.Column("rendered", sa.Text, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint("conversation_id", "seq"),
     sa.CheckConstraint(

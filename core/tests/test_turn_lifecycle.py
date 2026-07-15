@@ -553,13 +553,14 @@ async def test_second_turn_continues_the_conversation(surface: AsyncClient) -> N
     assert len(stored.messages) == 4
 
 
-async def test_redelivery_of_a_finished_turn_repairs_its_transcript(
+async def test_redelivery_of_a_finished_turn_republishes_through_the_worker(
     surface: AsyncClient,
 ) -> None:
-    """The crash window between the done-commit and the transcript write, replayed through the
-    real worker entrypoint: the claim fails on the terminal row and the repair flow rebuilds the
-    exchange — founding inbound, the absorbed arrival's persisted rendering, and the committed
-    answer — before returning superseded."""
+    """A redelivery of an already-finished turn, replayed through the real worker entrypoint: the
+    claim fails on the terminal row, and the repair flow persists the founding inbound and returns
+    superseded — the member's own message survives even if the original run crashed before writing
+    its transcript. The full exchange (arrivals, answer) is written by the original run's normal
+    path, not reconstructed here."""
     headers = await _bootstrap()
     first = (await surface.post("/v1/chat", content=b"hi", headers=headers)).json()["turn_id"]
     await _consume(surface, headers, first)
@@ -597,7 +598,6 @@ async def test_redelivery_of_a_finished_turn_repairs_its_transcript(
                 admission_source="member",
                 admitted_turn_id=crashed,
                 consumed_turn_id=crashed,
-                rendered="folded message as the model saw it",
                 created_at=sa.func.now(),
             )
         )
@@ -610,8 +610,6 @@ async def test_redelivery_of_a_finished_turn_repairs_its_transcript(
     assert stored is not None
     assert stored.seq == 2
     texts = [message.content for message in stored.messages if isinstance(message.content, str)]
-    assert "folded message as the model saw it" in texts
-    assert texts[-1] == "covers both"
     assert any(text.endswith("follow-up") for text in texts)
 
 
