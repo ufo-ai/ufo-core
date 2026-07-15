@@ -1186,7 +1186,7 @@ def _debug_evidence(response: str, tools: tuple[str, ...] = ()) -> dict[str, obj
 
 def test_eval_run_archive_renders_debug_evidence_and_escapes_script_data(tmp_path) -> None:
     report = EvalReport(
-        name="tool_calling",
+        name="memory_100.enterprise.semantic",
         suite="capability",
         digest="sha256:abc",
         cases=(
@@ -1231,6 +1231,10 @@ def test_eval_run_archive_renders_debug_evidence_and_escapes_script_data(tmp_pat
     html = (tmp_path / "index.html").read_text()
     assert "Comparable delta" in html
     assert "Regressions" in html
+    assert "Suite scores" in html
+    assert "data-score" in html
+    assert 'class="leaf-label"' in html
+    assert "memory_100.enterprise.semantic" in html
     assert "Tool trajectory" in html
     assert str(run.id) in html
     assert "</script><script>bad()</script>" not in html

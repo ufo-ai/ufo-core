@@ -243,7 +243,9 @@ async def _run(
 def _tasks(names: tuple[str, ...], memory_run: Memory100Run | None) -> tuple[EvalTask, ...]:
     if memory_run is None:
         return selected_run_tasks(names)
-    return selected_tasks((*TASKS, memory_run.task), names or (memory_run.task.name,))
+    return selected_tasks(
+        (*TASKS, *memory_run.tasks), names or tuple(task.name for task in memory_run.tasks)
+    )
 
 
 if __name__ == "__main__":

@@ -8,6 +8,16 @@
 | LongMemEval | 30 | member-private recallable memories |
 | UFO | 10 | shared/private, synthesis, conflict, isolation, and no-answer fixtures |
 
+One snapshot and materialized workspace serve 18 disjoint report leaves:
+
+| Prefix | Labels | Cases |
+|---|---|---:|
+| `memory_100.enterprise.` | `basic`, `semantic`, `intra_document_reasoning`, `project_related`, `constrained`, `conflicting_info`, `completeness`, `miscellaneous`, `high_level`, `info_not_found` | 4–8 each |
+| `memory_100.longmem.` | `information_extraction`, `multi_session`, `knowledge_update`, `temporal_reasoning`, `abstention` | 6 each |
+| `memory_100.ufo.pages` | shared, multi-page, conflicting evidence | 3 |
+| `memory_100.ufo.memories` | private, decision, preference, event memory | 4 |
+| `memory_100.ufo.boundaries` | member isolation, no answer, mixed scope | 3 |
+
 The builder verifies every upstream byte against `assets.py`; `snapshot.json` pins the canonical
 gzip JSONL files. It never snapshots database files.
 
@@ -50,7 +60,14 @@ python -m evals \
 ```
 
 Start `ufoctl serve` against the same config in a second terminal. The cases may queue before its
-worker starts.
+worker starts. The default run executes every leaf once. Pass `--only` to rerun one failure class:
+
+```bash
+python -m evals \
+  --memory-100 .memory-100/snapshot \
+  --memory-100-state .memory-100/state/<snapshot-sha>/readiness.json \
+  --only memory_100.longmem.multi_session
+```
 
 The eval command owns the configured OTLP endpoint while it runs. For each turn, the memory
 extension's `user_prompt_submit` hook emits one content-free structured event containing the turn

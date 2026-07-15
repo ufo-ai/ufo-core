@@ -19,11 +19,66 @@ from evals.harness.harness import EvalReport, Json, JsonObject
 from evals.harness.judge import MAX_CRITERIA, MAX_CRITERION_CHARS
 from evals.harness.registry import EvalTask, capability_task
 from evals.harness.target import CapabilityTarget
-from evals.memory_100.models import SnapshotCase
+from evals.memory_100.models import Corpus, SnapshotCase
 from evals.memory_100.snapshot import load_snapshot
 from evals.memory_100.state import CorpusReadiness
 
 MEMORY_100_GRADER_REVISION = "memory-item-ids-1"
+
+
+@dataclass(frozen=True)
+class Memory100Leaf:
+    name: str
+    corpus: Corpus
+    categories: tuple[str, ...]
+    expected_cases: int
+
+
+MEMORY_100_LEAVES = (
+    Memory100Leaf("memory_100.enterprise.basic", "enterprise", ("basic",), 4),
+    Memory100Leaf("memory_100.enterprise.semantic", "enterprise", ("semantic",), 8),
+    Memory100Leaf(
+        "memory_100.enterprise.intra_document_reasoning",
+        "enterprise",
+        ("intra_document_reasoning",),
+        6,
+    ),
+    Memory100Leaf("memory_100.enterprise.project_related", "enterprise", ("project_related",), 8),
+    Memory100Leaf("memory_100.enterprise.constrained", "enterprise", ("constrained",), 7),
+    Memory100Leaf("memory_100.enterprise.conflicting_info", "enterprise", ("conflicting_info",), 7),
+    Memory100Leaf("memory_100.enterprise.completeness", "enterprise", ("completeness",), 7),
+    Memory100Leaf("memory_100.enterprise.miscellaneous", "enterprise", ("miscellaneous",), 4),
+    Memory100Leaf("memory_100.enterprise.high_level", "enterprise", ("high_level",), 4),
+    Memory100Leaf("memory_100.enterprise.info_not_found", "enterprise", ("info_not_found",), 5),
+    Memory100Leaf(
+        "memory_100.longmem.information_extraction",
+        "longmem",
+        ("information_extraction",),
+        6,
+    ),
+    Memory100Leaf("memory_100.longmem.multi_session", "longmem", ("multi_session",), 6),
+    Memory100Leaf("memory_100.longmem.knowledge_update", "longmem", ("knowledge_update",), 6),
+    Memory100Leaf("memory_100.longmem.temporal_reasoning", "longmem", ("temporal_reasoning",), 6),
+    Memory100Leaf("memory_100.longmem.abstention", "longmem", ("abstention",), 6),
+    Memory100Leaf(
+        "memory_100.ufo.pages",
+        "ufo",
+        ("shared-page", "multi-page", "conflicting-evidence"),
+        3,
+    ),
+    Memory100Leaf(
+        "memory_100.ufo.memories",
+        "ufo",
+        ("private-memory", "decision-memory", "preference-memory", "event-memory"),
+        4,
+    ),
+    Memory100Leaf(
+        "memory_100.ufo.boundaries",
+        "ufo",
+        ("member-isolation", "information-not-found", "mixed-scope"),
+        3,
+    ),
+)
 
 
 class MemoryRecallEvent(BaseModel):
@@ -51,7 +106,7 @@ class ExpectedEvidence:
 
 @dataclass(frozen=True)
 class Memory100Run:
-    task: EvalTask
+    tasks: tuple[EvalTask, ...]
     readiness: CorpusReadiness
 
 
@@ -68,7 +123,7 @@ def load_memory_100(snapshot_root: Path, readiness_path: Path) -> Memory100Run:
     unknown = sorted({case.audience for case in snapshot.cases} - audiences.keys())
     if unknown:
         raise ValueError(f"memory_100 readiness is missing audiences: {', '.join(unknown)}")
-    cases: list[CapabilityCase] = []
+    cases: dict[str, CapabilityCase] = {}
     for case in snapshot.cases:
         expected = tuple(
             ExpectedEvidence(
@@ -89,26 +144,53 @@ def load_memory_100(snapshot_root: Path, readiness_path: Path) -> Memory100Run:
             ensure_ascii=False,
             separators=(",", ":"),
         )
-        cases.append(
-            CapabilityCase(
-                name=case.id,
-                message=case.question,
-                grader=Memory100Grader(expected),
-                digest_tag=(
-                    f"{snapshot.manifest.digest}:{readiness.corpus_digest}:"
-                    f"{MEMORY_100_GRADER_REVISION}:{case.id}:{evidence_identity}"
-                ),
-                rubric=_answer_rubric(case),
-                member_key=audiences[case.audience],
-            )
+        cases[case.id] = CapabilityCase(
+            name=case.id,
+            message=case.question,
+            grader=Memory100Grader(expected),
+            digest_tag=(
+                f"{snapshot.manifest.digest}:{readiness.corpus_digest}:"
+                f"{MEMORY_100_GRADER_REVISION}:{case.id}:{evidence_identity}"
+            ),
+            rubric=_answer_rubric(case),
+            member_key=audiences[case.audience],
         )
-    task = capability_task("memory_100", tuple(cases))
+    memberships = {
+        case.id: tuple(
+            leaf
+            for leaf in MEMORY_100_LEAVES
+            if leaf.corpus == case.corpus and case.category in leaf.categories
+        )
+        for case in snapshot.cases
+    }
+    unlabeled = sorted(case_id for case_id, leaves in memberships.items() if not leaves)
+    if unlabeled:
+        raise ValueError(f"memory_100 cases have no leaf: {', '.join(unlabeled)}")
+    repeated = sorted(case_id for case_id, leaves in memberships.items() if len(leaves) > 1)
+    if repeated:
+        raise ValueError(f"memory_100 cases belong to multiple leaves: {', '.join(repeated)}")
+    tasks: list[EvalTask] = []
+    for leaf in MEMORY_100_LEAVES:
+        leaf_cases = tuple(
+            cases[case.id] for case in snapshot.cases if memberships[case.id] == (leaf,)
+        )
+        if len(leaf_cases) != leaf.expected_cases:
+            raise ValueError(
+                f"memory_100 leaf {leaf.name!r} requires {leaf.expected_cases} cases, "
+                f"found {len(leaf_cases)}"
+            )
+        tasks.append(_memory_task(leaf.name, leaf_cases))
+    return Memory100Run(tuple(tasks), readiness)
+
+
+def _memory_task(name: str, cases: tuple[CapabilityCase, ...]) -> EvalTask:
+    task = capability_task(name, cases)
 
     async def run(target: CapabilityTarget) -> EvalReport:
         report = await task.run(target)
         return _with_memory_recall_aggregates(report)
 
-    return Memory100Run(replace(task, run=run), readiness)
+    return replace(task, run=run)
 
 
 def _with_memory_recall_aggregates(report: EvalReport) -> EvalReport:

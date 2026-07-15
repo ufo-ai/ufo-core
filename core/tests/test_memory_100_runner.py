@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -7,6 +7,8 @@ import pytest
 from pydantic import ValidationError
 from ufo_ext_memory.events import MEMORY_RECALL_EVENT
 
+import evals.memory_100.runner as memory_100_runner
+from evals.__main__ import _tasks as selected_eval_tasks
 from evals.harness.capability import CapabilityCase, CapabilityOutput, TurnLog
 from evals.harness.harness import EvalCaseResult, EvalReport
 from evals.harness.judge import MAX_CRITERIA, MAX_CRITERION_CHARS
@@ -25,6 +27,53 @@ from evals.memory_100.snapshot import content_digest, write_snapshot
 from evals.memory_100.state import AudienceBinding, CorpusReadiness, EvidenceOwner
 
 DIGEST = "sha256:" + "0" * 64
+MEMORY_100_CASE_GROUPS = (
+    ("enterprise", "basic", 4),
+    ("enterprise", "semantic", 8),
+    ("enterprise", "intra_document_reasoning", 6),
+    ("enterprise", "project_related", 8),
+    ("enterprise", "constrained", 7),
+    ("enterprise", "conflicting_info", 7),
+    ("enterprise", "completeness", 7),
+    ("enterprise", "miscellaneous", 4),
+    ("enterprise", "high_level", 4),
+    ("enterprise", "info_not_found", 5),
+    ("longmem", "information_extraction", 6),
+    ("longmem", "multi_session", 6),
+    ("longmem", "knowledge_update", 6),
+    ("longmem", "temporal_reasoning", 6),
+    ("longmem", "abstention", 6),
+    ("ufo", "shared-page", 1),
+    ("ufo", "multi-page", 1),
+    ("ufo", "conflicting-evidence", 1),
+    ("ufo", "private-memory", 1),
+    ("ufo", "decision-memory", 1),
+    ("ufo", "preference-memory", 1),
+    ("ufo", "event-memory", 1),
+    ("ufo", "member-isolation", 1),
+    ("ufo", "information-not-found", 1),
+    ("ufo", "mixed-scope", 1),
+)
+MEMORY_100_LEAF_COUNTS = (
+    ("memory_100.enterprise.basic", 4),
+    ("memory_100.enterprise.semantic", 8),
+    ("memory_100.enterprise.intra_document_reasoning", 6),
+    ("memory_100.enterprise.project_related", 8),
+    ("memory_100.enterprise.constrained", 7),
+    ("memory_100.enterprise.conflicting_info", 7),
+    ("memory_100.enterprise.completeness", 7),
+    ("memory_100.enterprise.miscellaneous", 4),
+    ("memory_100.enterprise.high_level", 4),
+    ("memory_100.enterprise.info_not_found", 5),
+    ("memory_100.longmem.information_extraction", 6),
+    ("memory_100.longmem.multi_session", 6),
+    ("memory_100.longmem.knowledge_update", 6),
+    ("memory_100.longmem.temporal_reasoning", 6),
+    ("memory_100.longmem.abstention", 6),
+    ("memory_100.ufo.pages", 3),
+    ("memory_100.ufo.memories", 4),
+    ("memory_100.ufo.boundaries", 3),
+)
 
 
 @dataclass(frozen=True)
@@ -70,20 +119,49 @@ def test_memory_recall_event_rejects_invalid_attributes(attributes: object) -> N
 
 
 def _cases() -> tuple[SnapshotCase, ...]:
-    counts = (("enterprise", 60), ("longmem", 30), ("ufo", 10))
     return tuple(
         SnapshotCase(
-            id=f"{corpus}/{index}",
+            id=f"{corpus}/{category}/{index}",
             corpus=corpus,
-            category="recall",
+            category=category,
             audience="shared" if corpus == "enterprise" else "owner",
-            question=f"question {corpus} {index}",
+            question=f"question {corpus} {category} {index}",
             expected_answer="The answer is forty two.",
             evidence_refs=("memory/answer",),
         )
-        for corpus, count in counts
+        for corpus, category, count in MEMORY_100_CASE_GROUPS
         for index in range(count)
     )
+
+
+def _memory_100_paths(tmp_path: Path) -> tuple[Path, Path]:
+    snapshot_root = tmp_path / "snapshot"
+    manifest = write_snapshot(
+        snapshot_root,
+        upstreams=(),
+        builder_digest=DIGEST,
+        cases=tuple(case.model_copy(update={"evidence_refs": ()}) for case in _cases()),
+        pages=(),
+        memories=(),
+    )
+    readiness = CorpusReadiness(
+        snapshot_digest=manifest.digest,
+        corpus_digest=DIGEST,
+        workspace_id=uuid4(),
+        source_id=uuid4(),
+        pages_root=tmp_path / "pages",
+        page_count=0,
+        memory_count=0,
+        chunk_count=0,
+        audiences=(
+            AudienceBinding(alias="shared", email=None, member_id=None),
+            AudienceBinding(alias="owner", email="owner@eval.invalid", member_id=uuid4()),
+        ),
+        evidence=(),
+    )
+    readiness_path = tmp_path / "readiness.json"
+    readiness_path.write_text(readiness.model_dump_json())
+    return snapshot_root, readiness_path
 
 
 async def test_memory_100_grader_reports_observed_evidence_without_gating_the_answer() -> None:
@@ -261,7 +339,7 @@ def test_non_memory_report_omits_recall_observations() -> None:
     assert "meanMappedEvidenceCoverage" not in recorded_report
 
 
-async def test_memory_100_task_pins_all_memory_owners_and_binds_member(
+async def test_memory_100_leaves_pin_all_memory_owners_and_bind_member(
     tmp_path: Path,
 ) -> None:
     snapshot_root = tmp_path / "snapshot"
@@ -334,17 +412,78 @@ async def test_memory_100_task_pins_all_memory_owners_and_binds_member(
         readiness.model_copy(update={"evidence": tuple(changed_evidence)}).model_dump_json()
     )
     changed = load_memory_100(snapshot_root, readiness_path)
-    report = await run.task.run(RecallTarget(first_memory_id))
+    reports = tuple([await task.run(RecallTarget(first_memory_id)) for task in run.tasks])
 
-    assert run.task.name == "memory_100"
-    assert len(run.task.cases) == 100
+    assert tuple((task.name, len(task.cases)) for task in run.tasks) == MEMORY_100_LEAF_COUNTS
+    leaf_cases = tuple(case for task in run.tasks for case in task.cases)
+    assert len(leaf_cases) == len(set(leaf_cases)) == 100
+    assert set(leaf_cases) == {case.id for case in _cases()}
     assert run.readiness.workspace_id == workspace_id
-    assert reordered.task.digest == run.task.digest
-    assert changed.task.digest != run.task.digest
-    assert report.mean_mapped_evidence_coverage == 1.0
-    assert report.min_mapped_evidence_coverage == 1.0
-    assert report.degraded_recall_count == 0
-    assert report.unmapped_evidence_count == 0
+    assert tuple(task.digest for task in reordered.tasks) == tuple(
+        task.digest for task in run.tasks
+    )
+    assert all(
+        changed_task.digest != task.digest
+        for changed_task, task in zip(changed.tasks, run.tasks, strict=True)
+    )
+    assert selected_eval_tasks((), run) == run.tasks
+    assert tuple(task.name for task in selected_eval_tasks((run.tasks[0].name,), run)) == (
+        run.tasks[0].name,
+    )
+    assert all(report.mean_mapped_evidence_coverage == 1.0 for report in reports)
+    assert all(report.min_mapped_evidence_coverage == 1.0 for report in reports)
+    assert all(report.degraded_recall_count == 0 for report in reports)
+    assert all(report.unmapped_evidence_count == 0 for report in reports)
+
+
+def test_memory_100_rejects_unlabeled_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    snapshot_root, readiness_path = _memory_100_paths(tmp_path)
+    leaves = memory_100_runner.MEMORY_100_LEAVES
+    monkeypatch.setattr(
+        memory_100_runner,
+        "MEMORY_100_LEAVES",
+        (replace(leaves[0], categories=("unknown",)), *leaves[1:]),
+    )
+
+    with pytest.raises(ValueError, match="cases have no leaf: enterprise/basic/0"):
+        load_memory_100(snapshot_root, readiness_path)
+
+
+def test_memory_100_rejects_overlapping_leaves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot_root, readiness_path = _memory_100_paths(tmp_path)
+    leaves = memory_100_runner.MEMORY_100_LEAVES
+    monkeypatch.setattr(
+        memory_100_runner,
+        "MEMORY_100_LEAVES",
+        (
+            leaves[0],
+            replace(leaves[1], categories=(*leaves[1].categories, "basic")),
+            *leaves[2:],
+        ),
+    )
+
+    with pytest.raises(ValueError, match="cases belong to multiple leaves: enterprise/basic/0"):
+        load_memory_100(snapshot_root, readiness_path)
+
+
+def test_memory_100_rejects_incorrect_leaf_case_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot_root, readiness_path = _memory_100_paths(tmp_path)
+    leaves = memory_100_runner.MEMORY_100_LEAVES
+    monkeypatch.setattr(
+        memory_100_runner,
+        "MEMORY_100_LEAVES",
+        (replace(leaves[0], expected_cases=5), *leaves[1:]),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"leaf 'memory_100\.enterprise\.basic' requires 5 cases, found 4",
+    ):
+        load_memory_100(snapshot_root, readiness_path)
 
 
 def test_memory_100_task_groups_long_enterprise_answer_rubric(tmp_path: Path) -> None:

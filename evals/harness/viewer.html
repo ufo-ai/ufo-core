@@ -94,6 +94,41 @@ select {
 .positive { color: var(--green); }
 .negative { color: var(--red); }
 .neutral { color: var(--muted); }
+.scoreboard { border-bottom: 1px solid var(--line); background: #131713; }
+.scoreboard > summary {
+  min-height: 47px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 11px 22px;
+  cursor: pointer;
+  list-style: none;
+}
+.scoreboard > summary::-webkit-details-marker { display: none; }
+.scoreboard-title { display: flex; align-items: center; gap: 9px; font-weight: 650; }
+.disclosure { color: var(--muted); font: 18px/1 var(--mono); transition: transform .12s ease; }
+.scoreboard[open] .disclosure { transform: rotate(90deg); }
+.score-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 7px;
+  padding: 0 15px 15px;
+}
+.score-card {
+  min-width: 0;
+  padding: 11px;
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel);
+  cursor: pointer;
+}
+.score-card:hover { border-color: var(--line-strong); background: var(--panel-2); }
+.score-card.selected { border-color: var(--green); }
+.score-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 11px var(--mono); }
+.score-value { margin-top: 9px; font: 600 18px/1 var(--mono); }
+.score-rate { margin-left: 7px; color: var(--muted); font-size: 11px; }
 .workspace { display: grid; grid-template-columns: 300px 350px minmax(480px, 1fr); flex: 1; min-height: 0; }
 .column { min-width: 0; border-right: 1px solid var(--line); }
 .column:last-child { border-right: 0; }
@@ -129,6 +164,18 @@ select {
 .row-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .row-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .row-meta { display: flex; align-items: center; gap: 7px; margin-top: 6px; color: var(--muted); font: 11px var(--mono); }
+.leaf-label {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 5px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--blue);
+  background: var(--blue-deep);
+  font: 9px var(--mono);
+}
 .delta { margin-left: auto; }
 .badge {
   display: inline-flex;
@@ -158,6 +205,7 @@ select {
 .filter.active { color: var(--text); border-color: var(--line-strong); background: var(--panel-2); }
 .detail { min-width: 0; }
 .detail-head { padding: 18px 20px; border-bottom: 1px solid var(--line); }
+.detail-leaf { margin-bottom: 7px; color: var(--blue); font: 10px var(--mono); }
 .detail-head h2 { margin: 0; font-size: 19px; }
 .prompt { max-width: 110ch; color: var(--muted); margin: 8px 0 0; white-space: pre-wrap; }
 .compare-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -199,6 +247,7 @@ pre {
 @media (max-width: 820px) {
   .topbar { position: static; grid-template-columns: 1fr; }
   .summary { grid-template-columns: repeat(2, 1fr); }
+  .score-grid { grid-template-columns: 1fr; }
   .metric:nth-child(2) { border-right: 0; }
   .metric:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
   .workspace { display: block; }
@@ -215,13 +264,15 @@ pre {
 <script>
 const data = JSON.parse(document.getElementById('eval-data').textContent);
 const runs = data.runs;
+const MEMORY_LEAF_PREFIX = 'memory_100.';
 const hash = new URLSearchParams(location.hash.slice(1));
 const state = {
   current: hash.get('current') || data.current || (runs[0] && runs[0].id) || '',
   baseline: hash.get('baseline') || data.baseline || (runs[1] && runs[1].id) || '',
   suite: hash.get('suite') || '',
   caseName: hash.get('case') || '',
-  filter: hash.get('filter') || 'all'
+  filter: hash.get('filter') || 'all',
+  scoresOpen: hash.get('scores') === 'open'
 };
 const app = document.getElementById('app');
 
@@ -234,6 +285,7 @@ function h(value) {
 function runById(id) { return runs.find(run => run.id === id); }
 function reportByName(run, name) { return run && run.reports.find(report => report.name === name); }
 function caseByName(report, name) { return report && report.cases.find(item => item.name === name); }
+function leafLabel(name) { return name && name.startsWith(MEMORY_LEAF_PREFIX) ? name.slice(MEMORY_LEAF_PREFIX.length) : name; }
 function scored(cases) { return (cases || []).filter(item => !item.excluded); }
 function passed(cases) { return scored(cases).filter(item => item.passed).length; }
 function rate(cases) { const rows = scored(cases); return rows.length ? passed(rows) / rows.length : 0; }
@@ -282,7 +334,7 @@ function persist() {
   const next = new URLSearchParams();
   for (const [key, value] of Object.entries({
     current: state.current, baseline: state.baseline, suite: state.suite,
-    case: state.caseName, filter: state.filter
+    case: state.caseName, filter: state.filter, scores: state.scoresOpen ? 'open' : ''
   })) if (value) next.set(key, value);
   history.replaceState(null, '', '#' + next.toString());
 }
@@ -325,6 +377,29 @@ function summaryMarkup(base, current) {
       <div class="metric-note">external infrastructure failures</div></div>
   </section>`;
 }
+function scoreMarkup(base, current, name) {
+  const before = reportByName(base, name);
+  const after = reportByName(current, name);
+  const status = reportStatus(after);
+  const canCompare = compatible(before, after);
+  const delta = canCompare ? rate(after.cases) - rate(before.cases) : 0;
+  const detail = after ? `${passed(after.cases)}/${scored(after.cases).length}` : '—';
+  const deltaText = canCompare ? points(delta) : before && after ? 'digest changed' : before ? 'missing current' : 'no baseline';
+  return `<button type="button" class="score-card ${name === state.suite ? 'selected' : ''}" data-suite="${h(name)}" data-score>
+    <div class="row-top"><span class="score-name" title="${h(name)}">${h(leafLabel(name))}</span><span class="badge ${status.cls}">${status.label}</span></div>
+    <div class="score-value">${detail}<span class="score-rate">${after ? pct(rate(after.cases)) : ''}</span></div>
+    <div class="row-meta ${delta < 0 ? 'negative' : delta > 0 ? 'positive' : ''}">${h(deltaText)}</div>
+  </button>`;
+}
+function scoresMarkup(base, current, names) {
+  const reports = current ? current.reports.filter(report => scored(report.cases).length) : [];
+  const passing = reports.filter(report => reportStatus(report).cls === 'pass').length;
+  return `<details class="scoreboard" id="scoreboard" ${state.scoresOpen ? 'open' : ''}>
+    <summary><span class="scoreboard-title"><span class="disclosure">›</span>Suite scores</span>
+      <span class="count">${passing}/${reports.length} passing · ${reports.length - passing} failing</span></summary>
+    <div class="score-grid">${names.map(name => scoreMarkup(base, current, name)).join('')}</div>
+  </details>`;
+}
 function runOptions(selected, allowEmpty) {
   const none = allowEmpty ? '<option value="">No baseline</option>' : '';
   return none + runs.map(run => `<option value="${h(run.id)}" ${run.id === selected ? 'selected' : ''}>${h(runName(run))} · ${h(shortId(run))}</option>`).join('');
@@ -359,15 +434,15 @@ function matchesFilter(item, movement) {
   if (state.filter === 'excluded') return item && item.excluded;
   return true;
 }
-function caseMarkup(before, after, canCompare, name) {
+function caseMarkup(before, after, canCompare, name, leaf) {
   const prior = caseByName(before, name);
   const current = caseByName(after, name);
   const movement = trend(prior, current, canCompare);
   if (!matchesFilter(current, movement)) return '';
   const status = caseStatus(current);
-  return `<button class="case-row ${name === state.caseName ? 'selected' : ''}" data-case="${h(name)}">
+  return `<button type="button" class="case-row ${name === state.caseName ? 'selected' : ''}" data-case="${h(name)}">
     <div class="row-top"><span class="row-title">${h(name)}</span><span class="badge ${movement.cls}">${movement.label}</span></div>
-    <div class="row-meta"><span>B ${caseStatus(prior).label}</span><span>→</span><span>C ${status.label}</span></div>
+    <div class="row-meta"><span class="leaf-label" title="${h(leaf)}">${h(leafLabel(leaf))}</span><span>B ${caseStatus(prior).label}</span><span>→</span><span>C ${status.label}</span></div>
   </button>`;
 }
 function callMarkup(call, index) {
@@ -409,7 +484,7 @@ function detailMarkup(base, current, before, after) {
   const evidence = (item || prior || {}).evidence || {};
   const rubric = evidence.rubric || [];
   return `<section class="detail">
-    <div class="detail-head"><h2>${h(state.caseName || 'Choose a case')}</h2>
+    <div class="detail-head"><div class="detail-leaf">${h(leafLabel(state.suite))}</div><h2>${h(state.caseName || 'Choose a case')}</h2>
       <div class="prompt">${h(evidence.message || '')}${rubric.length ? '\n\nRubric\n' + h(rubric.map(value => '• ' + value).join('\n')) : ''}</div></div>
     <div class="compare-grid">${paneMarkup('Baseline', base, before, prior)}${paneMarkup('Current', current, after, item)}</div>
   </section>`;
@@ -429,12 +504,12 @@ function render() {
   const caseNames = unionNames(after && after.cases, before && before.cases, 'name');
   const visibleCases = caseNames.filter(name => matchesFilter(caseByName(after, name), trend(caseByName(before, name), caseByName(after, name), compatible(before, after))));
   if (!visibleCases.includes(state.caseName)) state.caseName = visibleCases[0] || '';
-  app.innerHTML = `<div class="shell">${topbarMarkup(base, current)}${summaryMarkup(base, current)}
+  app.innerHTML = `<div class="shell">${topbarMarkup(base, current)}${summaryMarkup(base, current)}${scoresMarkup(base, current, suiteNames)}
     <div class="workspace">
       <section class="column"><div class="column-head"><h2>Suites</h2><span class="count">${suiteNames.length}</span></div><div class="list">${suiteNames.map(name => suiteMarkup(base, current, name)).join('')}</div></section>
       <section class="column"><div class="column-head"><h2>Cases</h2><span class="count">${visibleCases.length}/${caseNames.length}</span></div>
         <div class="filters">${['all','regressions','failures','fixed','excluded'].map(name => `<button class="filter ${name === state.filter ? 'active' : ''}" data-filter="${name}">${name}</button>`).join('')}</div>
-        <div class="list">${caseNames.map(name => caseMarkup(before, after, compatible(before, after), name)).join('') || '<div class="empty">No cases match this filter.</div>'}</div></section>
+        <div class="list">${caseNames.map(name => caseMarkup(before, after, compatible(before, after), name, state.suite)).join('') || '<div class="empty">No cases match this filter.</div>'}</div></section>
       ${detailMarkup(base, current, before, after)}
     </div></div>`;
   persist();
@@ -443,6 +518,7 @@ function render() {
   document.querySelectorAll('[data-suite]').forEach(node => node.addEventListener('click', () => { state.suite = node.dataset.suite; state.caseName = ''; render(); }));
   document.querySelectorAll('[data-case]').forEach(node => node.addEventListener('click', () => { state.caseName = node.dataset.case; render(); }));
   document.querySelectorAll('[data-filter]').forEach(node => node.addEventListener('click', () => { state.filter = node.dataset.filter; state.caseName = ''; render(); }));
+  document.getElementById('scoreboard').addEventListener('toggle', event => { state.scoresOpen = event.target.open; persist(); });
   document.getElementById('copy-link').addEventListener('click', async () => copyText(location.href, 'Link copied'));
   document.getElementById('copy-runs').addEventListener('click', async () => copyText([state.current, state.baseline].filter(Boolean).join(' '), 'Run IDs copied'));
 }
