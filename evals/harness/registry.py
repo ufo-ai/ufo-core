@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from evals.harness.capability import CapabilityCase, run_capability_case
 from evals.harness.harness import EvalReport, digest_payload
+from evals.harness.scenario import ScenarioCase, run_scenario_case
 from evals.harness.target import CapabilityTarget
 
 type EvalRunner = Callable[[CapabilityTarget], Awaitable[EvalReport]]
@@ -33,6 +34,18 @@ def capability_task(name: str, cases: tuple[CapabilityCase, ...]) -> EvalTask:
         return EvalReport(name=name, suite="capability", digest=digest, cases=results)
 
     return EvalTask(name, "capability", digest, tuple(case.name for case in cases), run)
+
+
+def scenario_task(name: str, cases: tuple[ScenarioCase, ...]) -> EvalTask:
+    digest = digest_payload(
+        {"runner": "scenario-case", "task": name, "cases": [case.payload() for case in cases]}
+    )
+
+    async def run(target: CapabilityTarget) -> EvalReport:
+        results = tuple([await run_scenario_case(case, target) for case in cases])
+        return EvalReport(name=name, suite="scenario", digest=digest, cases=results)
+
+    return EvalTask(name, "scenario", digest, tuple(case.name for case in cases), run)
 
 
 def selected_tasks(

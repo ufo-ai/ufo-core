@@ -7,6 +7,7 @@ from evals import (
     browser_nav,
     coding_subagent,
     pdf_build,
+    scenario_smoke,
     semantic_quality,
     site_build,
     skill_routing,
@@ -15,7 +16,7 @@ from evals import (
     yc_recall,
     yc_workflows,
 )
-from evals.harness.registry import EvalTask, capability_task, selected_tasks
+from evals.harness.registry import EvalTask, capability_task, scenario_task, selected_tasks
 
 DEFAULT_TASKS: tuple[EvalTask, ...] = (
     capability_task("basics", basics.CASES),
@@ -27,6 +28,7 @@ DEFAULT_TASKS: tuple[EvalTask, ...] = (
     capability_task("pdf_build", pdf_build.CASES),
     capability_task("site_build", site_build.CASES),
     capability_task("web_research", web_research.CASES),
+    scenario_task("scenario_smoke", scenario_smoke.CASES),
 )
 TASKS: tuple[EvalTask, ...] = (
     *DEFAULT_TASKS,

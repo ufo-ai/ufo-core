@@ -61,11 +61,43 @@ class TargetResult:
     trajectory: EvalTrajectory | None = None
 
 
+@dataclass(frozen=True)
+class _Settled:
+    """One settled turn's result plus every descendant turn id, which only `run`'s artifact
+    collection consumes."""
+
+    result: TargetResult
+    descendant_ids: tuple[UUID, ...] = ()
+
+
+def _invoke_failure(conversation_id: UUID, error: Exception) -> TargetResult:
+    message = f"{type(error).__name__}: {error}"
+    return TargetResult(
+        CapabilityOutput("", (), (message,)),
+        False,
+        f"invoke raised: {message}",
+        EvalTrajectory(
+            conversation_id=conversation_id,
+            turn_id=None,
+            status=None,
+            messages=(),
+            error=f"invoke raised: {message}",
+        ),
+    )
+
+
 class CapabilityTarget(Protocol):
     @property
     def judge(self) -> JudgeLeg | None: ...
 
+    @property
+    def conversations(self) -> EvalConversations: ...
+
     async def run(self, case: CapabilityCase) -> TargetResult: ...
+
+    async def step(
+        self, conversation_id: UUID, message: str, idempotency_key: str
+    ) -> TargetResult: ...
 
 
 class EvalConversations(Protocol):
@@ -102,59 +134,71 @@ class InProcessTarget:
                 f"{case.name}:{conversation_id}",
             )
         except Exception as error:
-            message = f"{type(error).__name__}: {error}"
-            return TargetResult(
-                CapabilityOutput("", (), (message,)),
-                False,
-                f"invoke raised: {message}",
-                EvalTrajectory(
-                    conversation_id=conversation_id,
-                    turn_id=None,
-                    status=None,
-                    messages=(),
-                    error=f"invoke raised: {message}",
-                ),
-            )
-        trajectory = await self.outcome.settle(conversation_id, turn_id)
-        if trajectory is None:
+            return _invoke_failure(conversation_id, error)
+        settled = await self._settled(conversation_id, turn_id)
+        result = settled.result
+        if not result.clean:
             if self.logs is not None:
                 await self.logs.discard(turn_id)
-            return TargetResult(
-                CapabilityOutput("", (), ()),
-                False,
-                "turn produced no terminal transcript",
-                EvalTrajectory(
-                    conversation_id=conversation_id,
-                    turn_id=turn_id,
-                    status=await self._turn_status(turn_id),
-                    messages=(),
-                    error="turn produced no terminal transcript",
-                ),
-            )
-        output = capability_output(trajectory.messages)
-        status = await self._turn_status(turn_id)
-        snapshot = await self._trajectory(conversation_id, turn_id, status, trajectory.messages)
-        output, descendant_ids, missing_child = await self._merge_descendants(turn_id, output)
-        if missing_child:
-            return TargetResult(
-                output, clean=False, failure_reason=missing_child, trajectory=snapshot
-            )
-        turn_failure = self._turn_failure(status)
-        if turn_failure:
-            if self.logs is not None:
-                await self.logs.discard(turn_id)
-            return TargetResult(
-                output, clean=False, failure_reason=turn_failure, trajectory=snapshot
-            )
+            return result
+        output = result.output
         if self.logs is not None:
             log = await self.logs.read(turn_id)
             if log is None:
                 raise RuntimeError("turn produced no required log")
             output = replace(output, log=log)
         if self.blob is not None:
-            collected = await self._shared_artifacts((turn_id, *descendant_ids))
+            collected = await self._shared_artifacts((turn_id, *settled.descendant_ids))
             output = replace(output, artifacts=collected.artifacts, artifact_error=collected.error)
-        return TargetResult(output, clean=True, trajectory=snapshot)
+        return replace(result, output=output)
+
+    async def step(self, conversation_id: UUID, message: str, idempotency_key: str) -> TargetResult:
+        """Drive one member turn on an existing conversation and reconstruct its result — the
+        scenario runner's per-exchange seam. Log and artifact enrichment stay with `run`; a
+        scenario grader reads durable state itself."""
+        try:
+            turn_id = await self.ctx.invoke(
+                conversation_id, self.agent_id, message, idempotency_key
+            )
+        except Exception as error:
+            return _invoke_failure(conversation_id, error)
+        return (await self._settled(conversation_id, turn_id)).result
+
+    async def _settled(self, conversation_id: UUID, turn_id: UUID) -> _Settled:
+        trajectory = await self.outcome.settle(conversation_id, turn_id)
+        if trajectory is None:
+            return _Settled(
+                TargetResult(
+                    CapabilityOutput("", (), ()),
+                    False,
+                    "turn produced no terminal transcript",
+                    EvalTrajectory(
+                        conversation_id=conversation_id,
+                        turn_id=turn_id,
+                        status=await self._turn_status(turn_id),
+                        messages=(),
+                        error="turn produced no terminal transcript",
+                    ),
+                )
+            )
+        output = capability_output(trajectory.messages)
+        status = await self._turn_status(turn_id)
+        snapshot = await self._trajectory(conversation_id, turn_id, status, trajectory.messages)
+        output, descendant_ids, missing_child = await self._merge_descendants(turn_id, output)
+        if missing_child:
+            return _Settled(
+                TargetResult(
+                    output, clean=False, failure_reason=missing_child, trajectory=snapshot
+                ),
+                descendant_ids,
+            )
+        turn_failure = self._turn_failure(status)
+        if turn_failure:
+            return _Settled(
+                TargetResult(output, clean=False, failure_reason=turn_failure, trajectory=snapshot),
+                descendant_ids,
+            )
+        return _Settled(TargetResult(output, clean=True, trajectory=snapshot), descendant_ids)
 
     async def _merge_descendants(
         self, turn_id: UUID, output: CapabilityOutput
