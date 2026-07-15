@@ -87,6 +87,7 @@ from ufo.models.interface import (
     ModelClient,
     ModelEvent,
     ModelRequest,
+    ModelResponseTruncated,
     TextDelta,
     ToolResultBlock,
     ToolUseBlock,
@@ -291,6 +292,18 @@ class MissingDbos:
 class FencedJudge:
     async def complete(self, system: str, messages: tuple[Message, ...]) -> str:
         return '```json\n{"items":[{"passed":true,"reason":"ok"}]}\n```'
+
+
+@dataclass
+class ProseJudge:
+    async def complete(self, system: str, messages: tuple[Message, ...]) -> str:
+        return 'Here is my verdict:\n```json\n{"items":[{"passed":true,"reason":"ok"}]}\n```'
+
+
+@dataclass
+class TruncatedJudge:
+    async def complete(self, system: str, messages: tuple[Message, ...]) -> str:
+        raise ModelResponseTruncated("judge hit max_tokens")
 
 
 @dataclass
@@ -1128,10 +1141,22 @@ async def test_restraint_scorer_flags_an_unnecessary_web_call() -> None:
     assert (await restraint_scorer(WEB_TOOLS)(clean)).passed
 
 
-async def test_rubric_parser_rejects_markdown_wrapped_json() -> None:
+async def test_rubric_parser_accepts_an_exactly_fenced_verdict() -> None:
     passed, reason = await rubric_pass("instruction", "answer", ("criterion",), FencedJudge())
+    assert passed
+    assert reason == "1/1 semantic criteria met"
+
+
+async def test_rubric_parser_rejects_prose_around_the_verdict() -> None:
+    passed, reason = await rubric_pass("instruction", "answer", ("criterion",), ProseJudge())
     assert not passed
     assert reason == "judge returned an invalid structured verdict"
+
+
+async def test_truncated_judge_response_fails_the_case_not_the_run() -> None:
+    passed, reason = await rubric_pass("instruction", "answer", ("criterion",), TruncatedJudge())
+    assert not passed
+    assert reason == "judge response truncated"
 
 
 async def test_rubric_boundaries_reject_every_invalid_shape_before_the_model_call() -> None:

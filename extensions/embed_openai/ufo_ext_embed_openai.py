@@ -26,6 +26,7 @@ EMBED_BATCH_MAX_ITEMS = 2048
 EMBED_BATCH_MAX_CHARS = 600_000
 EMBED_MAX_ITEM_CHARS = 24_000
 PROVIDER_TIMEOUT_SECONDS = 60.0
+PROVIDER_MAX_RETRIES = 2
 
 
 def plan_embed_batches(texts: tuple[str, ...]) -> tuple[tuple[str, ...], ...]:
@@ -52,7 +53,8 @@ class OpenAIEmbedClient:
     """text-embedding-3-large over the async OpenAI SDK. The deploy `OPENAI_API_KEY` is read from
     the environment on each embed call, not at boot: a zero-config dev serve with no key boots, and
     an embed call without one fails loud — the OpenAI SDK raises on an empty key at construction, so
-    the client is built here on use (retries disabled; embedding runs off the write path)."""
+    the client is built here on use. The SDK retries transient transport and provider failures
+    with bounded backoff; embedding runs off the write path."""
 
     model: str = EMBED_MODEL
 
@@ -60,7 +62,9 @@ class OpenAIEmbedClient:
         key = os.environ.get(API_KEY_ENV, "")
         if not key:
             raise RuntimeError(f"{API_KEY_ENV} required to embed")
-        client = openai.AsyncOpenAI(api_key=key, max_retries=0, timeout=PROVIDER_TIMEOUT_SECONDS)
+        client = openai.AsyncOpenAI(
+            api_key=key, max_retries=PROVIDER_MAX_RETRIES, timeout=PROVIDER_TIMEOUT_SECONDS
+        )
         vectors: list[tuple[float, ...]] = []
         for batch in plan_embed_batches(texts):
             response = await client.embeddings.create(model=self.model, input=list(batch))
