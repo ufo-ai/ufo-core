@@ -20,6 +20,7 @@ CASES_FILE = "cases.jsonl.gz"
 PAGES_FILE = "pages.jsonl.gz"
 MEMORIES_FILE = "memory_items.jsonl.gz"
 MANIFEST_FILE = "snapshot.json"
+NULL_CHARACTER = "\x00"
 
 
 def canonical_json(model: BaseModel) -> bytes:
@@ -128,6 +129,25 @@ def _validate_records(
     }
     if counts != {"enterprise": 60, "longmem": 30, "ufo": 10}:
         raise ValueError(f"memory_100 corpus counts are invalid: {counts}")
+    nonportable = next(
+        (
+            label
+            for label, value in (
+                *((f"case {case.id!r} question", case.question) for case in cases),
+                *((f"page {page.source_ref!r} source ref", page.source_ref) for page in pages),
+                *((f"page {page.source_ref!r} body", page.body) for page in pages),
+                *(
+                    (f"memory {memory.source_ref!r} source ref", memory.source_ref)
+                    for memory in memories
+                ),
+                *((f"memory {memory.source_ref!r} body", memory.body) for memory in memories),
+            )
+            if NULL_CHARACTER in value
+        ),
+        None,
+    )
+    if nonportable is not None:
+        raise ValueError(f"snapshot {nonportable} contains a database-incompatible NUL character")
     case_ids = [case.id for case in cases]
     if len(set(case_ids)) != len(case_ids):
         raise ValueError("snapshot contains duplicate case ids")

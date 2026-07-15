@@ -145,6 +145,51 @@ def test_snapshot_rejects_invalid_corpus_counts(tmp_path: Path) -> None:
         )
 
 
+def test_snapshot_rejects_a_database_incompatible_nul(tmp_path: Path) -> None:
+    body = "Company\x00handbook evidence"
+    with pytest.raises(ValueError, match="database-incompatible NUL"):
+        write_snapshot(
+            tmp_path,
+            upstreams=(),
+            builder_digest=DIGEST,
+            cases=_cases(),
+            pages=(
+                SnapshotPage(
+                    source_ref="enterprise/handbook",
+                    audience="shared",
+                    body=body,
+                    digest=content_digest(body),
+                    origin="enterprise:confluence",
+                ),
+            ),
+            memories=(),
+        )
+
+
+def test_snapshot_rejects_database_incompatible_nul_refs(tmp_path: Path) -> None:
+    _, pages, memories = _ufo()
+    records = (
+        (
+            (pages[0].model_copy(update={"source_ref": f"{pages[0].source_ref}\x00"}),),
+            (),
+        ),
+        (
+            (),
+            (memories[0].model_copy(update={"source_ref": f"{memories[0].source_ref}\x00"}),),
+        ),
+    )
+    for pages, memories in records:
+        with pytest.raises(ValueError, match="database-incompatible NUL"):
+            write_snapshot(
+                tmp_path,
+                upstreams=(),
+                builder_digest=DIGEST,
+                cases=_cases(),
+                pages=pages,
+                memories=memories,
+            )
+
+
 def test_snapshot_rejects_missing_evidence(tmp_path: Path) -> None:
     cases = list(_cases())
     cases[0] = cases[0].model_copy(update={"evidence_refs": ("missing/page",)})
@@ -238,7 +283,9 @@ def test_enterprise_corpus_selects_evidence_and_deterministic_negatives(
         "dsid_00000000000000000000000000000003",
     )
     with ZipFile(archive, "w") as output:
-        output.writestr(f"confluence/team/{identifiers[0]}-policy.txt", "refund window thirty days")
+        output.writestr(
+            f"confluence/team/{identifiers[0]}-policy.txt", "refund window\x00thirty days"
+        )
         output.writestr(f"confluence/team/{identifiers[1]}-notes.txt", "refund workflow notes")
         output.writestr(f"confluence/other/{identifiers[2]}-roadmap.txt", "unrelated roadmap")
     question = EnterpriseQuestion(
@@ -268,13 +315,72 @@ def test_enterprise_corpus_selects_evidence_and_deterministic_negatives(
         (question, high_level), lexical_per_case=1, metadata_per_case=1, background_per_source=0
     )
     assert first == second
-    assert f"enterprise/{identifiers[0]}" in {page.source_ref for page in first}
-    assert _enterprise_evidence_refs(high_level) == (ENTERPRISE_OVERVIEW_SOURCE_REF,)
+    assert f"enterprise/confluence/team/{identifiers[0]}-policy.txt" in {
+        page.source_ref for page in first
+    }
+    assert _enterprise_evidence_refs(high_level, first) == (ENTERPRISE_OVERVIEW_SOURCE_REF,)
     overview_page = next(
         page for page in first if page.source_ref == ENTERPRISE_OVERVIEW_SOURCE_REF
     )
     assert overview_page.body == "The company mission is reliable inference."
+    evidence_page = next(page for page in first if identifiers[0] in page.source_ref)
+    assert evidence_page.body.endswith("refund window\ufffdthirty days")
     assert len(first) >= 2
+
+
+def test_enterprise_corpus_preserves_documents_with_the_same_upstream_id(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "documents.zip"
+    document_id = "dsid_00000000000000000000000000000001"
+    first = f"jira/internal-support/{document_id}__INT-1-stale.txt"
+    second = f"jira/misc-requests/{document_id}__INT-1-old.txt"
+    with ZipFile(archive, "w") as output:
+        output.writestr(first, "Infra manager approval is required.")
+        output.writestr(second, "Cost-ops approval is sufficient.")
+    question = EnterpriseQuestion(
+        question_id="qst_conflict",
+        question_type="conflicting_info",
+        source_types=("jira",),
+        question="Who approves cleanup?",
+        expected_doc_ids=(document_id, document_id),
+        gold_answer="Cost-ops approves cleanup.",
+        answer_facts=(),
+    )
+
+    pages = EnterpriseCorpus(archive, tmp_path / "overview.md", tmp_path).pages(
+        (question,),
+        lexical_per_case=0,
+        metadata_per_case=0,
+        background_per_source=0,
+    )
+
+    assert {page.source_ref: page.body for page in pages} == {
+        f"enterprise/{first}": (
+            f"source: jira\npath: {first}\n\nInfra manager approval is required."
+        ),
+        f"enterprise/{second}": (
+            f"source: jira\npath: {second}\n\nCost-ops approval is sufficient."
+        ),
+    }
+    assert _enterprise_evidence_refs(question, pages) == (
+        f"enterprise/{first}",
+        f"enterprise/{second}",
+    )
+
+
+def test_enterprise_corpus_rejects_duplicate_archive_paths(tmp_path: Path) -> None:
+    archive = tmp_path / "documents.zip"
+    path = "jira/internal-support/dsid_00000000000000000000000000000001__INT-1.txt"
+    with ZipFile(archive, "w") as output:
+        output.writestr(path, "Infra manager approval is required.")
+        with pytest.warns(UserWarning, match="Duplicate name"):
+            output.writestr(path, "Cost-ops approval is sufficient.")
+
+    with pytest.raises(ValueError, match="duplicate document paths"):
+        EnterpriseCorpus(archive, tmp_path / "overview.md", tmp_path).pages(
+            (), lexical_per_case=0, metadata_per_case=0, background_per_source=0
+        )
 
 
 def test_longmem_cases_keep_dates_and_recallable_session_bodies(tmp_path: Path) -> None:

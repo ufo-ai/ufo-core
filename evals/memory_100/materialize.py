@@ -7,6 +7,7 @@ import shutil
 import sys
 from dataclasses import dataclass
 from importlib import import_module
+from itertools import pairwise
 from pathlib import Path, PurePosixPath
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -21,6 +22,7 @@ from ufo.config import Config, SourceConfig, SourceEntry, load_config
 from ufo.credentials import CredentialStore
 from ufo.db import dispose_db, init_db, workspace_tx
 from ufo.ext.loader import embed_backend, index_backend, load_manifests
+from ufo.ext.manifest import Manifest
 from ufo.indexing import EmbedClient, IndexBackend, TextChunker
 from ufo.jobs import PageChangeRunner
 from ufo.onboarding import DEFAULT_AGENT_MODEL, DEFAULT_AGENT_PROMPT
@@ -49,6 +51,7 @@ class Memory100Materializer:
     blob: BlobStore
     index: IndexBackend
     embed: EmbedClient
+    manifests: tuple[Manifest, ...]
     postgres: bool = False
 
     @classmethod
@@ -60,12 +63,14 @@ class Memory100Materializer:
         blob: BlobStore,
         index: IndexBackend,
         embed: EmbedClient,
+        manifests: tuple[Manifest, ...] | None = None,
         postgres: bool = False,
     ) -> "Memory100Materializer":
         """Load a snapshot and locate its deterministic staging directory."""
         snapshot = load_snapshot(root)
         pages_root = state_root / snapshot.manifest.digest.removeprefix("sha256:") / "pages"
-        return cls(snapshot, pages_root.resolve(), blob, index, embed, postgres)
+        active = (memory_manifest.manifest(),) if manifests is None else manifests
+        return cls(snapshot, pages_root.resolve(), blob, index, embed, active, postgres)
 
     async def run(self) -> CorpusReadiness:
         if not isinstance(self.index, index_default.DefaultIndex):
@@ -180,7 +185,7 @@ class Memory100Materializer:
             for page, ref in zip(snapshot.pages, refs, strict=True):
                 target = temporary_root.joinpath(*ref.parts)
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(page.body, encoding="utf-8")
+                target.write_bytes(page.body.encode("utf-8"))
             try:
                 temporary_root.rename(pages_root)
             except OSError:
@@ -196,9 +201,9 @@ class Memory100Materializer:
         refs = tuple(PurePosixPath(page.source_ref) for page in snapshot.pages)
         if any(ref.is_absolute() or ".." in ref.parts or "." in ref.parts for ref in refs):
             raise ValueError("memory_100 page source_ref must be a safe relative path")
-        for left in refs:
-            if any(left != right and left in right.parents for right in refs):
-                raise ValueError("memory_100 page source_refs contain a file/directory collision")
+        ordered = sorted(refs, key=lambda ref: ref.parts)
+        if any(left == right or left in right.parents for left, right in pairwise(ordered)):
+            raise ValueError("memory_100 page source_refs contain a file/directory collision")
         return refs
 
     @staticmethod
@@ -217,7 +222,7 @@ class Memory100Materializer:
             raise RuntimeError(f"memory_100 stage does not match snapshot: {pages_root}")
         for page, ref in zip(snapshot.pages, refs, strict=True):
             target = pages_root.joinpath(*ref.parts)
-            if target.read_text(encoding="utf-8") != page.body:
+            if target.read_bytes().decode("utf-8") != page.body:
                 raise RuntimeError(f"memory_100 stage does not match snapshot: {pages_root}")
 
     async def _commit_memories(
@@ -275,7 +280,7 @@ class Memory100Materializer:
 
     async def _drain_page_consumers(self) -> None:
         runner = PageChangeRunner(
-            manifests=(memory_manifest.manifest(),),
+            manifests=self.manifests,
             pages=CorePageFeed(blob=self.blob),
             index=self.index,
             embed=self.embed,
@@ -283,7 +288,9 @@ class Memory100Materializer:
             registry=None,
         )
         consumers = runner.consumers()
-        if {consumer.discriminator for consumer in consumers} != {"index_pages", "derive_facts"}:
+        required = {("memory", "index_pages"), ("memory", "derive_facts")}
+        available = {(consumer.extension, consumer.discriminator) for consumer in consumers}
+        if not required <= available:
             raise RuntimeError("memory_100 expected both memory page-change consumers")
         for consumer in consumers:
             await runner.drive(consumer)
@@ -304,6 +311,7 @@ async def _run(config: Config, snapshot: Path, state_root: Path) -> CorpusReadin
             blob=blob_store_for(config.blob),
             index=index,
             embed=embed,
+            manifests=manifests,
             postgres=config.database.url.startswith("postgresql"),
         ).run()
     finally:

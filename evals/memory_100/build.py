@@ -24,7 +24,7 @@ from evals.memory_100.models import (
     SnapshotPage,
     UpstreamAsset,
 )
-from evals.memory_100.snapshot import canonical_json, content_digest, write_snapshot
+from evals.memory_100.snapshot import NULL_CHARACTER, canonical_json, content_digest, write_snapshot
 
 DATA_DIR = Path(__file__).parent / "data"
 SELECTION_FILE = DATA_DIR / "selection.json"
@@ -72,6 +72,7 @@ METADATA_NEGATIVES_PER_CASE = 75
 BACKGROUND_PER_SOURCE = 500
 HASH_CHUNK_BYTES = 1024 * 1024
 ENTERPRISE_OVERVIEW_SOURCE_REF = "enterprise/company_overview.md"
+NULL_REPLACEMENT = "\ufffd"
 
 
 class EnterpriseQuestion(BaseModel):
@@ -151,8 +152,8 @@ class UfoCaseSeed(BaseModel):
 
 @dataclass(frozen=True)
 class Document:
+    document_id: str
     source_ref: str
-    member: str
     source_type: str
     parent: str
 
@@ -174,24 +175,34 @@ class EnterpriseCorpus:
         database = self.scratch / "enterprise.sqlite3"
         documents = self._index(database)
         by_ref = {document.source_ref: document for document in documents}
-        evidence = {
+        by_id: dict[str, list[Document]] = {}
+        for document in documents:
+            by_id.setdefault(document.document_id, []).append(document)
+        evidence_ids = {
             source_ref for question in questions for source_ref in question.expected_doc_ids
         }
-        missing = sorted(evidence - by_ref.keys())
+        missing = sorted(evidence_ids - by_id.keys())
         if missing:
             raise ValueError(f"enterprise evidence is missing from archive: {', '.join(missing)}")
-        selected = set(evidence)
+        selected = {
+            document.source_ref for document_id in evidence_ids for document in by_id[document_id]
+        }
         with sqlite3.connect(database) as connection:
             for question in questions:
+                evidence = {
+                    document.source_ref
+                    for document_id in question.expected_doc_ids
+                    for document in by_id[document_id]
+                }
                 selected.update(
                     self._lexical(
                         connection,
                         question,
                         lexical_per_case,
-                        set(question.expected_doc_ids),
+                        evidence,
                     )
                 )
-                selected.update(self._metadata(documents, by_ref, question, metadata_per_case))
+                selected.update(self._metadata(documents, by_id, question, metadata_per_case))
         for source_type in SOURCE_TYPES:
             candidates = (document for document in documents if document.source_type == source_type)
             selected.update(
@@ -203,11 +214,8 @@ class EnterpriseCorpus:
                 )
             )
         pages = list(self._read_pages(tuple(by_ref[source_ref] for source_ref in sorted(selected))))
-        if any(
-            ENTERPRISE_OVERVIEW_SOURCE_REF in _enterprise_evidence_refs(question)
-            for question in questions
-        ):
-            body = self.overview.read_text(encoding="utf-8")
+        if any(question.question_type == "high_level" for question in questions):
+            body = _portable_text(self.overview.read_text(encoding="utf-8"))
             pages.append(
                 SnapshotPage(
                     source_ref=ENTERPRISE_OVERVIEW_SOURCE_REF,
@@ -234,12 +242,12 @@ class EnterpriseCorpus:
                 document = _document(member.filename)
                 if document is None:
                     continue
-                body = archive.read(member).decode("utf-8")
+                body = _portable_text(archive.read(member).decode("utf-8"))
                 connection.execute("insert into search values (?, ?)", (document.source_ref, body))
                 documents.append(document)
         refs = [document.source_ref for document in documents]
         if len(set(refs)) != len(refs):
-            raise ValueError("enterprise archive contains duplicate document ids")
+            raise ValueError("enterprise archive contains duplicate document paths")
         return tuple(documents)
 
     @staticmethod
@@ -263,12 +271,20 @@ class EnterpriseCorpus:
     @staticmethod
     def _metadata(
         documents: tuple[Document, ...],
-        by_ref: dict[str, Document],
+        by_id: dict[str, list[Document]],
         question: EnterpriseQuestion,
         limit: int,
     ) -> tuple[str, ...]:
-        evidence = set(question.expected_doc_ids)
-        parents = {by_ref[source_ref].parent for source_ref in evidence}
+        evidence = {
+            document.source_ref
+            for document_id in question.expected_doc_ids
+            for document in by_id[document_id]
+        }
+        parents = {
+            document.parent
+            for document_id in question.expected_doc_ids
+            for document in by_id[document_id]
+        }
         candidates = (
             document
             for document in documents
@@ -290,8 +306,8 @@ class EnterpriseCorpus:
         with ZipFile(self.archive) as archive:
             pages = []
             for document in documents:
-                content = archive.read(document.member).decode("utf-8")
-                body = f"source: {document.source_type}\npath: {document.member}\n\n{content}"
+                content = _portable_text(archive.read(document.source_ref).decode("utf-8"))
+                body = f"source: {document.source_type}\npath: {document.source_ref}\n\n{content}"
                 pages.append(
                     SnapshotPage(
                         source_ref=f"enterprise/{document.source_ref}",
@@ -322,6 +338,9 @@ class Memory100Builder:
         enterprise = _enterprise_questions(self.enterprise_questions, selection.enterprise)
         longmem_cases, longmem_memories = _longmem(self.longmem, selection.longmem)
         ufo_cases, ufo_pages, ufo_memories = _ufo()
+        enterprise_pages = EnterpriseCorpus(
+            self.enterprise_documents, self.enterprise_overview, self.scratch
+        ).pages(enterprise)
         enterprise_cases = tuple(
             SnapshotCase(
                 id=f"enterprise/{question.question_id}",
@@ -330,14 +349,11 @@ class Memory100Builder:
                 audience="shared",
                 question=question.question,
                 expected_answer=question.gold_answer,
-                evidence_refs=_enterprise_evidence_refs(question),
+                evidence_refs=_enterprise_evidence_refs(question, enterprise_pages),
                 answer_facts=question.answer_facts,
             )
             for question in enterprise
         )
-        enterprise_pages = EnterpriseCorpus(
-            self.enterprise_documents, self.enterprise_overview, self.scratch
-        ).pages(enterprise)
         builder_digest = _builder_digest(selection)
         write_snapshot(
             self.output,
@@ -509,10 +525,24 @@ def _ranked_ids(questions: tuple[LongMemQuestion, ...], limit: int) -> tuple[str
     )
 
 
-def _enterprise_evidence_refs(question: EnterpriseQuestion) -> tuple[str, ...]:
+def _enterprise_evidence_refs(
+    question: EnterpriseQuestion, pages: tuple[SnapshotPage, ...]
+) -> tuple[str, ...]:
     if question.question_type == "high_level":
         return (ENTERPRISE_OVERVIEW_SOURCE_REF,)
-    return tuple(f"enterprise/{source_ref}" for source_ref in question.expected_doc_ids)
+    by_id: dict[str, list[str]] = {}
+    for page in pages:
+        matched = DOCUMENT_ID.search(PurePosixPath(page.source_ref).name)
+        if matched is not None:
+            by_id.setdefault(matched.group(1), []).append(page.source_ref)
+    missing = sorted(set(question.expected_doc_ids) - by_id.keys())
+    if missing:
+        raise ValueError(f"enterprise evidence is missing from pages: {', '.join(missing)}")
+    return tuple(
+        source_ref
+        for document_id in dict.fromkeys(question.expected_doc_ids)
+        for source_ref in by_id[document_id]
+    )
 
 
 def _ufo() -> tuple[tuple[SnapshotCase, ...], tuple[SnapshotPage, ...], tuple[SnapshotMemory, ...]]:
@@ -555,6 +585,10 @@ def _document(member: str) -> Document | None:
 
 def _rank(namespace: str, value: str) -> str:
     return hashlib.sha256(f"{namespace}/{value}".encode()).hexdigest()
+
+
+def _portable_text(value: str) -> str:
+    return value.replace(NULL_CHARACTER, NULL_REPLACEMENT)
 
 
 def _builder_digest(selection: Selection) -> str:

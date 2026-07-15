@@ -1,10 +1,13 @@
 from collections.abc import AsyncIterator
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
 import pytest
 import sqlalchemy as sa
+import ufo_ext_sample as sample
+from pydantic import BaseModel
 from ufo_ext_index_default import DefaultIndex, pack_embedding
+from ufo_ext_memory import manifest as memory_manifest
 from ufo_ext_memory.store import MemoryStore, memory_item, recall_subjects
 
 from evals.memory_100.materialize import Memory100Materializer
@@ -18,14 +21,22 @@ from evals.memory_100.snapshot import content_digest, load_snapshot, write_snaps
 from evals.memory_100.state import CorpusAttestor
 from ufo.blob import FilesystemBlobStore
 from ufo.db import apply_migrations, dispose_db, init_db, workspace_tx
+from ufo.ext.context import ScopedStore
 from ufo.schema import tables
 from ufo.sources.sync import page_id_for
 from ufo.workspace import ws
+
+PAGE_REF_SCALE = 12_500
 
 
 class DeterministicEmbed:
     async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
         return tuple((1.0, 0.0, 0.0) for _ in texts)
+
+
+class SamplePageChangeRecord(BaseModel):
+    page_ids: tuple[str, ...]
+    model_wired: bool
 
 
 @pytest.fixture
@@ -132,6 +143,35 @@ def _snapshot(root: Path) -> None:
     )
 
 
+def test_page_ref_validation_scales_and_rejects_file_directory_collisions(
+    tmp_path: Path,
+) -> None:
+    snapshot_root = tmp_path / "snapshot"
+    _snapshot(snapshot_root)
+    snapshot = load_snapshot(snapshot_root)
+    page = snapshot.pages[0]
+    pages = tuple(
+        page.model_copy(update={"source_ref": f"enterprise/{index:05}.txt"})
+        for index in range(PAGE_REF_SCALE)
+    )
+    scaled = snapshot.model_copy(update={"pages": pages})
+
+    refs = Memory100Materializer._page_refs(scaled)
+
+    assert refs[0] == PurePosixPath("enterprise/00000.txt")
+    assert refs[-1] == PurePosixPath(f"enterprise/{PAGE_REF_SCALE - 1:05}.txt")
+    collision = scaled.model_copy(
+        update={
+            "pages": (
+                page.model_copy(update={"source_ref": "enterprise/report"}),
+                page.model_copy(update={"source_ref": "enterprise/report/part.txt"}),
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="file/directory collision"):
+        Memory100Materializer._page_refs(collision)
+
+
 async def test_failed_database_precheck_leaves_no_stage_and_retry_materializes(
     memory_100_db: None, tmp_path: Path
 ) -> None:
@@ -219,6 +259,7 @@ async def test_materializes_snapshot_through_real_memory_and_page_pipelines(
         blob=blob,
         index=index,
         embed=embed,
+        manifests=(memory_manifest.manifest(), sample.manifest()),
     )
 
     readiness = await materializer.run()
@@ -256,12 +297,20 @@ async def test_materializes_snapshot_through_real_memory_and_page_pipelines(
             agent_count = (
                 await connection.execute(sa.select(sa.func.count()).select_from(tables.agent))
             ).scalar_one()
+        sample_delivery = SamplePageChangeRecord.model_validate(
+            await ScopedStore(extension=sample.NAME).get(sample.HOOK_PAGE_CHANGE_KEY)
+        )
 
     assert [item.source_ref for item in alice_memory] == ["session/alice"]
     assert [item.source_ref for item in bob_memory] == ["session/bob"]
     assert shared[0].page_id == page_id_for(readiness.source_id, "drive/runbook.md")
     assert memory_count == 2
     assert agent_count == 1
+    assert sample_delivery.model_wired is False
+    assert set(sample_delivery.page_ids) == {
+        str(page_id_for(readiness.source_id, "drive/runbook.md")),
+        str(page_id_for(readiness.source_id, "slack/launch.txt")),
+    }
 
     with ws(readiness.workspace_id):
         orphan_digest = "sha256:" + "f" * 64
