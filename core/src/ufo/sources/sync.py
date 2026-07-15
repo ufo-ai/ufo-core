@@ -156,7 +156,7 @@ class FolderSource:
         if not root.is_dir():
             raise FileNotFoundError(f"source folder not found: {root}")
         return tuple(
-            (str(path.relative_to(root)), path.read_text(encoding="utf-8"))
+            (str(path.relative_to(root)), path.read_bytes().decode("utf-8"))
             for path in sorted(root.rglob("*"))
             if path.is_file()
         )

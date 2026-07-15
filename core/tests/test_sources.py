@@ -1,3 +1,4 @@
+import hashlib
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -284,6 +285,25 @@ async def test_folder_syncs_a_page_body_to_blob_no_chunk_until_indexed(
 
     await index_pages()
     assert await _chunk_count() >= 1
+
+
+async def test_folder_sync_preserves_bare_carriage_returns(
+    clean: None, database_url: str, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    root = tmp_path / "src"
+    root.mkdir()
+    body = b"first line\rsecond line"
+    (root / "transcript.txt").write_bytes(body)
+    driver, _, _ = _wire(database_url, vec((7, 1.0)), tmp_path / "blobs", workspace_id)
+    await _register_folder(root)
+
+    await _sync(driver)
+
+    page = (await _pages())[0]
+    stored = await FilesystemBlobStore(root=tmp_path / "blobs").get(page["body_ref"])
+    assert stored == body
+    assert page["digest"] == "sha256:" + hashlib.sha256(body).hexdigest()
 
 
 async def test_synced_page_content_is_found_via_memory_search(
