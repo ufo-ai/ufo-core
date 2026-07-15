@@ -1,3 +1,4 @@
+import logging
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -181,6 +182,15 @@ def provider_error(
         request=httpx.Request("POST", "https://provider.invalid/v1"),
     )
     return error_type("provider error", response=response, body=None)
+
+
+def provider_timeout(timeout_type: type[Exception]) -> Exception:
+    return timeout_type(request=httpx.Request("POST", "https://provider.invalid/v1"))
+
+
+def zero_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("ufo.models.anthropic.INITIAL_RETRY_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr("ufo.models.openai.INITIAL_RETRY_DELAY_SECONDS", 0.0)
 
 
 async def collect(client: AnthropicClient | OpenAIClient) -> list[ModelEvent]:
@@ -393,6 +403,7 @@ async def test_openai_stream_without_usage_raises() -> None:
 class ProviderHarness:
     build: Callable[[ScriptedCreate], AnthropicClient | OpenAIClient]
     error_type: type[Exception]
+    timeout_type: type[Exception]
     max_retries: int
     ok_events: Callable[[], list[object]]
     partial_events: Callable[[], list[object]]
@@ -403,6 +414,7 @@ PROVIDERS = [
         ProviderHarness(
             build=lambda create: AnthropicClient(client=anthropic_sdk(create)),
             error_type=anthropic.APIStatusError,
+            timeout_type=anthropic.APITimeoutError,
             max_retries=ANTHROPIC_MAX_RETRIES,
             ok_events=lambda: [
                 anthropic_message_start(input_tokens=1),
@@ -420,6 +432,7 @@ PROVIDERS = [
         ProviderHarness(
             build=lambda create: OpenAIClient(client=openai_sdk(create)),
             error_type=openai.APIStatusError,
+            timeout_type=openai.APITimeoutError,
             max_retries=OPENAI_MAX_RETRIES,
             ok_events=lambda: [openai_text("ok"), openai_usage(prompt=1, completion=1)],
             partial_events=lambda: [openai_text("partial")],
@@ -466,6 +479,53 @@ async def test_no_retry_after_first_yield(harness: ProviderHarness) -> None:
     )
     received = []
     with pytest.raises(harness.error_type):
+        async for event in harness.build(create).complete(REQUEST):
+            received.append(event)
+    assert received == [TextDelta(text="partial")]
+    assert create.calls == 1
+
+
+@pytest.mark.parametrize("harness", PROVIDERS)
+async def test_timeout_retries_then_succeeds(
+    harness: ProviderHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    zero_backoff(monkeypatch)
+    create = ScriptedCreate(provider_timeout(harness.timeout_type), (harness.ok_events(), None))
+    events = await collect(harness.build(create))
+    assert create.calls == 2
+    assert events[0] == TextDelta(text="ok")
+    assert isinstance(events[-1], Usage)
+
+
+@pytest.mark.parametrize("harness", PROVIDERS)
+async def test_timeout_exhaustion_logs_and_reraises(
+    harness: ProviderHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    zero_backoff(monkeypatch)
+    first = provider_timeout(harness.timeout_type)
+    create = ScriptedCreate(
+        first, *(provider_timeout(harness.timeout_type) for _ in range(harness.max_retries))
+    )
+    with caplog.at_level(logging.INFO), pytest.raises(harness.timeout_type) as raised:
+        await collect(harness.build(create))
+    assert create.calls == harness.max_retries + 1
+    assert type(raised.value) is type(first)
+    assert str(raised.value) == str(first)
+    assert any(record.getMessage() == "model.provider_timeout" for record in caplog.records)
+    retry_logs = [r for r in caplog.records if r.getMessage() == "model.provider_timeout_retry"]
+    assert len(retry_logs) == harness.max_retries
+
+
+@pytest.mark.parametrize("harness", PROVIDERS)
+async def test_timeout_after_first_yield_does_not_retry(harness: ProviderHarness) -> None:
+    create = ScriptedCreate(
+        (harness.partial_events(), provider_timeout(harness.timeout_type)),
+        (harness.ok_events(), None),
+    )
+    received = []
+    with pytest.raises(harness.timeout_type):
         async for event in harness.build(create).complete(REQUEST):
             received.append(event)
     assert received == [TextDelta(text="partial")]

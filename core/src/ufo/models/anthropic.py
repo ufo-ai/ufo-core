@@ -23,6 +23,7 @@ from ufo.models.interface import (
     ToolUseBlock,
     trim_images,
 )
+from ufo.o11y import log
 from ufo.schema.records import Usage
 
 PROVIDER_TIMEOUT_SECONDS = 60.0
@@ -91,8 +92,10 @@ class AnthropicClient:
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         """Yield text and tool-call events then exactly one Usage as the final event.
 
-        429/5xx responses retry with retry-after-aware exponential backoff, but only until the
-        first event is yielded; any failure after that raises immediately. stop_reason=max_tokens
+        429/5xx responses retry with retry-after-aware exponential backoff, and request timeouts
+        retry on the same backoff and shared attempt budget (each retry logged, exhaustion logged
+        and re-raising the provider's APITimeoutError) — both only until the first event is
+        yielded; any failure after that raises immediately. stop_reason=max_tokens
         is a truncated completion and raises ModelResponseTruncated. stop_reason=tool_use is a
         normal stop. An empty completion (no event, stop_reason=end_turn) is a retryable provider
         failure, re-issued up to MAX_EMPTY_PROVIDER_RETRIES before degrading to the empty result
@@ -168,6 +171,25 @@ class AnthropicClient:
                         case anthropic.types.RawMessageDeltaEvent(delta=delta, usage=usage):
                             output_tokens = usage.output_tokens
                             stop_reason = delta.stop_reason
+            except anthropic.APITimeoutError:
+                attempt += 1
+                if yielded or attempt > MAX_PROVIDER_RETRIES:
+                    log(
+                        "model.provider_timeout",
+                        provider="anthropic",
+                        model=request.model,
+                        attempts=attempt,
+                    )
+                    raise
+                log(
+                    "model.provider_timeout_retry",
+                    provider="anthropic",
+                    model=request.model,
+                    attempt=attempt,
+                )
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
+                continue
             except anthropic.APIStatusError as error:
                 attempt += 1
                 retryable = error.status_code == 429 or error.status_code >= 500
