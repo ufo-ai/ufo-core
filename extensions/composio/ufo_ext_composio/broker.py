@@ -9,7 +9,13 @@ predates it, or a broker org rotation) tells the agent to have the member reconn
 answering with tool slugs; `search` rides the Tool Router; `credential` confirms
 the account is owned by this workspace's broker user (metadata, never a token — the confused-deputy
 guard) and returns a `Credential` whose transport proxies provider HTTP through Composio's
-proxy-execute, so a feed-sync source holds no secret."""
+proxy-execute, so a feed-sync source holds no secret.
+
+Files cross as references: `file_outputs` finds the `{name, mimetype, s3url}` objects an execute
+response carries (presigned URLs on Composio's file store), and `stage_upload` mints an upload slot
+there for a tool's file input — `schema` rewrites each `file_uploadable` parameter to the
+`workspace_file` vocabulary the dynamic connector tools stage. The sandbox moves the bytes both
+ways through the declared transfer hosts."""
 
 import re
 from collections.abc import Mapping
@@ -20,8 +26,10 @@ import httpx
 
 from ufo.sdk.authproxy import Credential
 from ufo.sdk.connectors import (
+    BrokerFile,
     BrokerSearch,
     BrokerTool,
+    StagedUpload,
     UnknownBrokerTool,
     stale_grant_guidance,
 )
@@ -49,7 +57,7 @@ class ComposioBroker:
                 raise
             raise UnknownBrokerTool(slug) from error
         description = payload.get("description")
-        input_schema = payload.get("input_schema")
+        input_schema = composio.workspace_file_schema(payload.get("input_schema"))
         return BrokerTool(
             slug=slug,
             description=description if isinstance(description, str) else "",
@@ -80,6 +88,31 @@ class ComposioBroker:
             if error.status != NOT_FOUND:
                 raise
             raise await self._slug_miss(client, provider, slug, error) from error
+
+    def file_outputs(self, response: dict[str, object]) -> tuple[BrokerFile, ...]:
+        """Every file the tool produced, wherever it sits in the response: Composio marks one as a
+        `{name, mimetype, s3url}` object, `s3url` a presigned URL on its file store."""
+        found: list[BrokerFile] = []
+        _collect_files(response, found)
+        return tuple(found)
+
+    async def stage_upload(
+        self,
+        workspace_id: UUID,
+        provider: str,
+        slug: str,
+        filename: str,
+        mimetype: str,
+        md5: str,
+    ) -> StagedUpload:
+        upload = await composio.composio_client().create_upload(
+            _toolkit(provider), slug, filename, mimetype, md5
+        )
+        return StagedUpload(
+            put_url=upload.put_url,
+            content_type=mimetype,
+            argument={"name": filename, "mimetype": mimetype, "s3key": upload.key},
+        )
 
     async def search(self, workspace_id: UUID, provider: str, query: str) -> BrokerSearch:
         return await composio.search_connector_tools(
@@ -127,6 +160,18 @@ class ComposioBroker:
         return composio.ComposioError(
             error.status, f"{error.body} — tools available on {toolkit}: {names}"
         )
+
+
+def _collect_files(value: object, found: list[BrokerFile]) -> None:
+    match value:
+        case {"s3url": str() as url, "mimetype": str(), "name": str() as name} if url:
+            found.append(BrokerFile(name=name, url=url))
+        case dict():
+            for item in value.values():
+                _collect_files(item, found)
+        case list():
+            for item in value:
+                _collect_files(item, found)
 
 
 def _stale_account(error: composio.ComposioError, account_id: str) -> bool:

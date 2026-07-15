@@ -11,7 +11,7 @@ no secret ever reaches this deploy."""
 from ufo.sdk.connectors import connect_bridge_workspace
 from ufo.sdk.manifest import ConnectorProvider, Manifest, RouteSpec
 from ufo_ext_pipedream.broker import PipedreamBroker
-from ufo_ext_pipedream.client import CONNECTORS
+from ufo_ext_pipedream.client import CONNECTORS, PIPEDREAM_TRANSFER_HOSTS
 from ufo_ext_pipedream.provider import OAUTH_ROUTE_PATH, PipedreamOAuthProvider, oauth_route
 
 NAME = "pipedream"
@@ -28,6 +28,7 @@ def manifest() -> Manifest:
                 oauth=PipedreamOAuthProvider(provider=provider, host=spec.host, app=spec.app),
                 label=spec.label,
                 broker=broker,
+                transfer_hosts=PIPEDREAM_TRANSFER_HOSTS,
             )
             for provider, spec in CONNECTORS.items()
         ),

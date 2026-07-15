@@ -8,6 +8,12 @@ never knowing any broker's mechanics. The concrete shapes live in `ufo.grants` a
 `ufo.connectors`, reached only through here."""
 
 from ufo.connectors import (
+    WORKSPACE_FILE_KEY as WORKSPACE_FILE_KEY,
+)
+from ufo.connectors import (
+    BrokerFile as BrokerFile,
+)
+from ufo.connectors import (
     BrokerSearch as BrokerSearch,
 )
 from ufo.connectors import (
@@ -21,6 +27,9 @@ from ufo.connectors import (
 )
 from ufo.connectors import (
     ConnectorRegistry as ConnectorRegistry,
+)
+from ufo.connectors import (
+    StagedUpload as StagedUpload,
 )
 from ufo.connectors import (
     UnknownBrokerTool as UnknownBrokerTool,

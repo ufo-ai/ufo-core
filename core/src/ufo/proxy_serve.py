@@ -20,7 +20,12 @@ from ufo.ext.manifest import Manifest
 from ufo.grants import GrantStore
 from ufo.models.registry import model_registry
 from ufo.o11y import init_o11y, log
-from ufo.sandbox.proxy.rules import Rule, ScopeRule, derive_model_rules
+from ufo.sandbox.proxy.rules import (
+    Rule,
+    ScopeRule,
+    connector_transfer_hosts,
+    derive_model_rules,
+)
 from ufo.sandbox.proxy.server import EgressProxy, PerAgentRules
 from ufo.sandbox.session import EGRESS_CA_CERT_ENV, EGRESS_CA_KEY_ENV
 
@@ -116,7 +121,11 @@ class ProxyServe:
 
     async def serve(self) -> None:
         init_db(self.owner_dsn)
-        resolver = PerAgentRules(base=self._base(), grants=GrantStore())
+        resolver = PerAgentRules(
+            base=self._base(),
+            grants=GrantStore(),
+            transfer_hosts=connector_transfer_hosts(self.manifests),
+        )
         proxy = EgressProxy(
             resolve=resolver.resolve,
             authorize=resolver.turn_live,

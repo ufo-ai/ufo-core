@@ -44,6 +44,7 @@ from ufo.db import workspace_tx
 from ufo.ext.context import context_for
 from ufo.ext.loader import turn_tools
 from ufo.grants import ConnectHandoff, GrantStore, install_connect_flow
+from ufo.sandbox.proxy.rules import connector_transfer_hosts
 from ufo.schema import tables
 from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
 from ufo.serve import _connect_flow, _connector_registry, _mount_ext_routes
@@ -241,6 +242,185 @@ async def test_composio_client_refuses_an_oversized_execute_payload() -> None:
             COMPOSIO_USER,
             COMPOSIO_ACCOUNT,
         )
+
+
+UPLOAD_KEY = "455236/googledrive/GOOGLEDRIVE_UPLOAD_FILE/request/abc123"
+UPLOAD_PUT_URL = "https://temp.example.r2.test/put?X-Amz-Signature=sig"
+
+
+async def test_composio_client_mints_an_upload_slot() -> None:
+    posted: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith(composio.FILES_UPLOAD_PATH)
+        posted.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "f1",
+                "key": UPLOAD_KEY,
+                "type": "new",
+                "new_presigned_url": UPLOAD_PUT_URL,
+            },
+        )
+
+    client = composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handler))
+    upload = await client.create_upload(
+        "googledrive", "GOOGLEDRIVE_UPLOAD_FILE", "form.pdf", "application/pdf", "abc123"
+    )
+    assert (upload.key, upload.put_url) == (UPLOAD_KEY, UPLOAD_PUT_URL)
+    assert posted == [
+        {
+            "md5": "abc123",
+            "filename": "form.pdf",
+            "mimetype": "application/pdf",
+            "tool_slug": "GOOGLEDRIVE_UPLOAD_FILE",
+            "toolkit_slug": "googledrive",
+        }
+    ]
+
+
+async def test_composio_client_reuses_a_deduped_upload_slot() -> None:
+    """Composio dedups by MD5 and answers `type: "exists"` with a usable key and no
+    `new_presigned_url` — the key already holds the bytes, so the slot carries no put_url and the
+    sandbox reuses it rather than failing before the tool can run."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"id": "f1", "key": UPLOAD_KEY, "type": "exists"})
+
+    client = composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handler))
+    upload = await client.create_upload(
+        "googledrive", "SLUG", "form.pdf", "application/pdf", "abc123"
+    )
+    assert (upload.key, upload.put_url) == (UPLOAD_KEY, None)
+
+
+async def test_composio_client_fails_loud_on_an_upload_slot_without_a_key() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"id": "f1", "type": "new"})
+
+    client = composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handler))
+    with pytest.raises(composio.ComposioError, match="no key"):
+        await client.create_upload("googledrive", "SLUG", "form.pdf", "application/pdf", "abc123")
+
+
+async def test_stage_upload_names_the_staged_object_for_the_tool_argument(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "f1",
+                "key": UPLOAD_KEY,
+                "type": "new",
+                "new_presigned_url": UPLOAD_PUT_URL,
+            },
+        )
+
+    monkeypatch.setattr(
+        composio,
+        "composio_client",
+        lambda: composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handler)),
+    )
+    staged = await ComposioBroker().stage_upload(
+        uuid4(), "google_drive", "GOOGLEDRIVE_UPLOAD_FILE", "form.pdf", "application/pdf", "abc123"
+    )
+    assert staged.put_url == UPLOAD_PUT_URL
+    assert staged.content_type == "application/pdf"
+    assert staged.argument == {
+        "name": "form.pdf",
+        "mimetype": "application/pdf",
+        "s3key": UPLOAD_KEY,
+    }
+
+
+def test_file_outputs_finds_only_full_file_objects() -> None:
+    """A produced file is Composio's `{name, mimetype, s3url}` object. A nested `s3url` string
+    without that shape — a provider payload that merely carries a URL field, possibly pointing at
+    a host outside `transfer_hosts` — is returned as data, never fetched as a file."""
+    response = {
+        "successful": True,
+        "data": {
+            "file": {"name": "probe.txt", "mimetype": "text/plain", "s3url": "https://t.test/one"},
+            "pages": [{"attachment": {"s3url": "https://t.test/two"}}],
+            "record": {"s3url": "https://external.test/incidental", "id": 42},
+        },
+    }
+    outputs = ComposioBroker().file_outputs(response)
+    assert [(file.name, file.url) for file in outputs] == [("probe.txt", "https://t.test/one")]
+
+
+async def test_stage_upload_reuses_a_deduped_slot_without_a_put_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dedup hit propagates put_url=None through the broker, so the tool layer skips the PUT."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"id": "f1", "key": UPLOAD_KEY, "type": "exists"})
+
+    monkeypatch.setattr(
+        composio,
+        "composio_client",
+        lambda: composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handler)),
+    )
+    staged = await ComposioBroker().stage_upload(
+        uuid4(), "google_drive", "GOOGLEDRIVE_UPLOAD_FILE", "form.pdf", "application/pdf", "abc123"
+    )
+    assert staged.put_url is None
+    assert staged.argument == {
+        "name": "form.pdf",
+        "mimetype": "application/pdf",
+        "s3key": UPLOAD_KEY,
+    }
+
+
+async def test_schema_rewrites_file_params_to_the_workspace_vocabulary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "slug": GITHUB_SLUG,
+        "description": TOOL_DESCRIPTION,
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "media": {
+                    "type": "object",
+                    "description": "The file to attach.",
+                    "file_uploadable": True,
+                },
+            },
+        },
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    monkeypatch.setattr(
+        composio,
+        "composio_client",
+        lambda: composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handler)),
+    )
+    described = await ComposioBroker().schema(uuid4(), PROVIDER, GITHUB_SLUG)
+    properties = described.input_schema["properties"]
+    assert properties["title"] == {"type": "string"}
+    assert properties["media"] == {
+        "type": "object",
+        "properties": {
+            "workspace_file": {
+                "type": "string",
+                "description": "Absolute /workspace path of the file to send.",
+            }
+        },
+        "required": ["workspace_file"],
+        "description": "The file to attach.",
+    }
+
+
+def test_manifest_declares_the_broker_file_transfer_hosts() -> None:
+    hosts = connector_transfer_hosts((composio_manifest.manifest(),))
+    assert hosts[PROVIDER] == composio.COMPOSIO_TRANSFER_HOSTS
 
 
 def test_authorize_url_points_the_browser_at_the_oauth_bridge() -> None:

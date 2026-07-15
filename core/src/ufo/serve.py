@@ -72,7 +72,7 @@ from ufo.proxy_serve import OWNER_DSN_ENV, model_rule_base
 from ufo.runtime_instance import BootGuard, ExecutorRecovery, Heartbeat, record_fleet_seat
 from ufo.sandbox.fs_creds import DEFAULT_S3_REGION, AwsStsClient, SandboxFsCredentialMinter
 from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.proxy.rules import Rule, derive_credential_rules
+from ufo.sandbox.proxy.rules import Rule, connector_transfer_hosts, derive_credential_rules
 from ufo.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
 from ufo.sandbox.session import EGRESS_CA_CERT_ENV, Carrier, ProxyEndpoint
 from ufo.schema import tables
@@ -947,6 +947,7 @@ def _local_egress_proxy(
     resolver = PerAgentRules(
         base=asyncio.run(_local_rule_base(config, manifests, credentials)),
         grants=GrantStore() if credentials is not None else None,
+        transfer_hosts=connector_transfer_hosts(manifests),
     )
     loop = asyncio.new_event_loop()
     threading.Thread(target=loop.run_forever, daemon=True).start()

@@ -41,6 +41,7 @@ from ufo.db import workspace_tx
 from ufo.ext.context import context_for
 from ufo.ext.loader import turn_tools
 from ufo.grants import ConnectHandoff, GrantStore, install_connect_flow
+from ufo.sandbox.proxy.rules import connector_transfer_hosts
 from ufo.schema import tables
 from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
 from ufo.serve import _connect_flow, _connector_registry
@@ -492,6 +493,7 @@ async def test_connect_binds_a_grant_and_call_external_tool_executes_via_pipedre
                 "to": "a@b.test",
                 "gmail": {"authProvisionId": PIPEDREAM_ACCOUNT},
             },
+            "stash_id": pipedream.STASH_NEW,
         }
     ]
 
@@ -533,8 +535,46 @@ async def test_call_external_tool_executes_a_workspace_owned_grant(
                 "to": "a@b.test",
                 "gmail": {"authProvisionId": PIPEDREAM_ACCOUNT},
             },
+            "stash_id": pipedream.STASH_NEW,
         }
     ]
+
+
+def test_file_outputs_projects_the_stash_uploads_to_presigned_urls() -> None:
+    response = {
+        "exports": {
+            "$summary": "downloaded",
+            pipedream.FILESTASH_UPLOADS_EXPORT: [
+                {
+                    "localPath": "/tmp/Order_Form.pdf",
+                    "s3Key": "1day/proj_x/exu_y/Order_Form.pdf",
+                    "get_url": "https://stash.test/Order_Form.pdf?sig=x",
+                },
+                {"localPath": "/tmp/broken", "s3Key": "k"},
+            ],
+        },
+        "ret": {"filename": "Order_Form.pdf"},
+    }
+    outputs = PipedreamBroker().file_outputs(response)
+    assert [(file.name, file.url) for file in outputs] == [
+        ("Order_Form.pdf", "https://stash.test/Order_Form.pdf?sig=x")
+    ]
+
+
+def test_file_outputs_is_empty_without_a_stash() -> None:
+    assert PipedreamBroker().file_outputs({"exports": {"$summary": "sent"}, "ret": None}) == ()
+
+
+async def test_stage_upload_routes_the_agent_to_share_file() -> None:
+    with pytest.raises(ValueError, match="share_file"):
+        await PipedreamBroker().stage_upload(
+            uuid4(), PROVIDER, GMAIL_ACTION, "form.pdf", "application/pdf", "abc123"
+        )
+
+
+def test_manifest_declares_the_broker_file_transfer_hosts() -> None:
+    hosts = connector_transfer_hosts((pipedream_manifest.manifest(),))
+    assert hosts[PROVIDER] == pipedream.PIPEDREAM_TRANSFER_HOSTS
 
 
 async def test_call_external_tool_augments_an_unknown_key_with_the_real_actions(

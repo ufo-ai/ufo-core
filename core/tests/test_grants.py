@@ -128,6 +128,50 @@ def test_no_grants_derive_no_rules() -> None:
     assert derive_grant_rules(()) == ()
 
 
+TRANSFER_HOST = "stash.broker.test"
+
+
+def test_derive_admits_the_providers_transfer_hosts_with_the_grant() -> None:
+    """A grant also admits and meters its broker's declared file-store hosts — where the sandbox
+    fetches a tool's presigned file outputs and stages its file inputs — still injecting nothing."""
+    grant = Grant(provider="stub", account_id="acct-42", host=GRANTED_HOST)
+    rules = derive_grant_rules((grant,), {"stub": (TRANSFER_HOST,)})
+    scope = next(r for r in rules if isinstance(r, ScopeRule))
+    assert scope.allowed_hosts == frozenset({GRANTED_HOST, TRANSFER_HOST})
+    assert MeterRule(host=TRANSFER_HOST, dimension=GRANT_METER_DIMENSION) in rules
+    assert not any(isinstance(r, InjectionRule) for r in rules)
+
+
+def test_derive_ignores_another_providers_transfer_hosts() -> None:
+    grant = Grant(provider="stub", account_id="acct-42", host=GRANTED_HOST)
+    rules = derive_grant_rules((grant,), {"other": (TRANSFER_HOST,)})
+    scope = next(r for r in rules if isinstance(r, ScopeRule))
+    assert scope.allowed_hosts == frozenset({GRANTED_HOST})
+
+
+async def test_resolver_folds_the_transfer_hosts_into_the_turns_rules(db: None) -> None:
+    """The per-turn resolver carries the manifests' provider→transfer-hosts map, so a granted
+    provider's broker file store is reachable for exactly the turns its grant covers."""
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    turn_id = await _turn(workspace_id, agent_id, conversation_id)
+    store = GrantStore()
+    await store.record(
+        workspace_id=workspace_id,
+        agent_id=agent_id,
+        provider="stub",
+        account_id="acct-42",
+        host=GRANTED_HOST,
+        grantor_member_id=member_id,
+        conversation_id=conversation_id,
+    )
+    resolver = PerAgentRules(base=(), grants=store, transfer_hosts={"stub": (TRANSFER_HOST,)})
+    rules = await resolver.resolve(RunToken(workspace_id, turn_id))
+    assert any(isinstance(r, ScopeRule) and TRANSFER_HOST in r.allowed_hosts for r in rules)
+    assert not any(isinstance(r, InjectionRule) for r in rules)
+
+
 async def test_grant_round_trips_carrying_only_the_account_id(db: None) -> None:
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)

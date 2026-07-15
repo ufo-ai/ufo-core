@@ -9,15 +9,21 @@ proved here is the orchestration: listing filters the registry, describe folds a
 loud. The grant-resolving execute path keeps its end-to-end proof in the composio extension's
 tests."""
 
+import hashlib
 import json
+import shlex
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
 import ufo_ext_connectors.manifest as connectors
+import ufo_ext_connectors.tools as connector_tools
 import ufo_ext_sample as sample
 from ufo_ext_connectors.tools import (
+    CONNECTOR_FILES_DIR,
     CallExternalToolInput,
     DescribeExternalToolsInput,
     ListExternalToolsInput,
@@ -28,9 +34,18 @@ from ufo_ext_connectors.tools import (
     search_connector_tools,
 )
 
-from ufo.connectors import ConnectorEntry, ConnectorRegistry
+from ufo.connectors import BrokerFile, ConnectorEntry, ConnectorRegistry, StagedUpload
 from ufo.ext.loader import turn_tools
 from ufo.grants import Grant, GrantStore
+from ufo.sandbox.local import LocalCarrier
+from ufo.sandbox.session import (
+    WORKSPACE_DIR,
+    ExecResult,
+    MountSpec,
+    ProxyEndpoint,
+    SandboxSession,
+    SandboxSpec,
+)
 from ufo.schema.records import Agent, Turn
 from ufo.tools.context import ToolContext
 
@@ -67,9 +82,13 @@ def _registry() -> ConnectorRegistry:
     )
 
 
-def _ctx(registry: ConnectorRegistry | None, accounts: tuple[str, ...] = ()) -> ToolContext:
+def _ctx(
+    registry: ConnectorRegistry | None,
+    accounts: tuple[str, ...] = (),
+    sandbox: SandboxSession | None = None,
+) -> ToolContext:
     return ToolContext(
-        sandbox=None,
+        sandbox=sandbox,
         blob=None,
         turn=Turn(
             id=uuid4(),
@@ -221,3 +240,221 @@ async def test_tools_fail_loud_without_the_registry_or_the_provider() -> None:
             _ctx(_registry()),
             CallExternalToolInput(tool_name="X", source_id="unregistered", arguments={}),
         )
+
+
+async def _sandbox(workspace_root: Path) -> SandboxSession:
+    """A real session over the local carrier: the file bridge's bash, curl, and md5 preflight run
+    for real against a host-directory workspace — nothing here asserts a fake."""
+    carrier = LocalCarrier()
+    handle = await carrier.create(
+        SandboxSpec(
+            conversation_id=uuid4(),
+            image_ref="unused",
+            mount=MountSpec(kind="filesystem", host_path=str(workspace_root)),
+            proxy=ProxyEndpoint(port=1, ca_cert="test-ca"),
+            run_token="run-token",
+        )
+    )
+    return SandboxSession(carrier=carrier, handle=handle)
+
+
+@dataclass(frozen=True)
+class _FileBroker:
+    """Stands in for a broker whose file store mints what the sample broker cannot — a hostile
+    output name, a dash-leading URL. It only supplies those references; the assertions read the
+    real workspace files and the commands the tool builds, never this stub."""
+
+    outputs: tuple[BrokerFile, ...] = ()
+    put_url: str | None = None
+
+    async def execute(
+        self,
+        workspace_id: UUID,
+        provider: str,
+        slug: str,
+        arguments: Mapping[str, object],
+        account_id: str,
+        idempotency_key: str | None,
+    ) -> dict[str, object]:
+        return {"successful": True, "arguments": dict(arguments)}
+
+    def file_outputs(self, response: dict[str, object]) -> tuple[BrokerFile, ...]:
+        return self.outputs
+
+    async def stage_upload(
+        self,
+        workspace_id: UUID,
+        provider: str,
+        slug: str,
+        filename: str,
+        mimetype: str,
+        md5: str,
+    ) -> StagedUpload:
+        return StagedUpload(
+            put_url=self.put_url,
+            content_type=mimetype,
+            argument={"name": filename, "mimetype": mimetype, "s3key": "store/key/1"},
+        )
+
+
+def _file_registry(broker: _FileBroker) -> ConnectorRegistry:
+    return ConnectorRegistry(
+        entries={
+            sample.CONNECTOR_PROVIDER: ConnectorEntry(
+                provider=sample.CONNECTOR_PROVIDER, label=sample.CONNECTOR_LABEL, broker=broker
+            )
+        }
+    )
+
+
+async def test_call_external_tool_fetches_produced_files_into_the_workspace(
+    tmp_path: Path,
+) -> None:
+    """The download leg over the real seam: the sample broker reports produced files as URLs, and
+    the sandbox itself fetches each into `connector_files/` — the result names workspace paths the
+    agent can read, and the bytes are really there."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = tmp_path / "store" / "Order_Form.pdf"
+    source.parent.mkdir()
+    source.write_bytes(b"%PDF-1.4 attachment bytes")
+    result = await call_external_tool(
+        _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
+        CallExternalToolInput(
+            tool_name=sample.BROKER_TOOL_SLUG,
+            source_id=sample.CONNECTOR_PROVIDER,
+            arguments={"file_output_urls": [f"file://{source}"]},
+        ),
+    )
+    files = _payload(result)["workspace_files"]
+    assert [file["name"] for file in files] == ["Order_Form.pdf"]
+    fetched = files[0]["workspace_path"]
+    assert fetched.startswith(f"{WORKSPACE_DIR}/{CONNECTOR_FILES_DIR}/")
+    on_disk = workspace / Path(fetched).relative_to(WORKSPACE_DIR)
+    assert on_disk.read_bytes() == source.read_bytes()
+
+
+async def test_call_external_tool_stages_a_workspace_file_argument(tmp_path: Path) -> None:
+    """The upload leg through the real sample broker: a `workspace_file` argument is hashed in the
+    sandbox, PUT to the slot the broker minted in its workspace store, and replaced by the broker's
+    own argument — the executed call carries the store reference and the staged bytes are there."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "report.csv").write_bytes(b"a,b\n1,2\n")
+    digest = hashlib.md5(b"a,b\n1,2\n", usedforsecurity=False).hexdigest()
+    key = f"{sample.BROKER_UPLOAD_PREFIX}-{digest}-report.csv"
+    result = await call_external_tool(
+        _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
+        CallExternalToolInput(
+            tool_name=sample.BROKER_TOOL_SLUG,
+            source_id=sample.CONNECTOR_PROVIDER,
+            arguments={"media": {"workspace_file": "/workspace/report.csv"}},
+        ),
+    )
+    echoed = _payload(result)["arguments"]
+    assert echoed["media"] == {"name": "report.csv", "mimetype": "text/csv", "s3key": key}
+    assert (workspace / key).read_bytes() == b"a,b\n1,2\n"
+
+
+async def test_a_produced_files_name_cannot_escape_its_workspace_dir(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = tmp_path / "store" / "legit.txt"
+    source.parent.mkdir()
+    source.write_bytes(b"payload")
+    broker = _FileBroker(outputs=(BrokerFile(name="../../evil.txt", url=f"file://{source}"),))
+    result = await call_external_tool(
+        _ctx(_file_registry(broker), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
+        CallExternalToolInput(tool_name="ANY", source_id=sample.CONNECTOR_PROVIDER, arguments={}),
+    )
+    files = _payload(result)["workspace_files"]
+    assert files[0]["name"] == "evil.txt"
+    on_disk = workspace / Path(files[0]["workspace_path"]).relative_to(WORKSPACE_DIR)
+    assert on_disk.read_bytes() == b"payload"
+    assert not (tmp_path / "evil.txt").exists()
+
+
+async def test_a_missing_workspace_file_argument_fails_loud(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    with pytest.raises(ValueError, match=r"cannot read workspace file|No such file"):
+        await call_external_tool(
+            _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
+            CallExternalToolInput(
+                tool_name=sample.BROKER_TOOL_SLUG,
+                source_id=sample.CONNECTOR_PROVIDER,
+                arguments={"media": {"workspace_file": "/workspace/absent.pdf"}},
+            ),
+        )
+
+
+async def test_an_over_cap_workspace_file_is_rejected_before_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The upload leg bounds bytes at the call: routed through the real sample broker, a file over
+    the cap fails loud before a slot is minted or the sandbox PUTs anything — no store object."""
+    monkeypatch.setattr(connector_tools, "TRANSFER_MAX_BYTES", 8)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "big.csv").write_bytes(b"0123456789abcdef")
+    with pytest.raises(ValueError, match=r"over the 8-byte limit"):
+        await call_external_tool(
+            _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
+            CallExternalToolInput(
+                tool_name=sample.BROKER_TOOL_SLUG,
+                source_id=sample.CONNECTOR_PROVIDER,
+                arguments={"media": {"workspace_file": "/workspace/big.csv"}},
+            ),
+        )
+    assert not any(p.name.startswith(sample.BROKER_UPLOAD_PREFIX) for p in workspace.iterdir())
+
+
+async def test_a_deduped_upload_slot_skips_the_put(tmp_path: Path) -> None:
+    """A content-addressed dedup hit through the real sample broker: re-staging content the store
+    already indexed answers no put_url, so the sandbox transfers nothing — proven by removing the
+    store object between calls and reading it back absent, while the executed argument still names
+    the same key. All read off the workspace and result payloads, never a call log."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "report.csv").write_bytes(b"a,b\n1,2\n")
+    digest = hashlib.md5(b"a,b\n1,2\n", usedforsecurity=False).hexdigest()
+    key = f"{sample.BROKER_UPLOAD_PREFIX}-{digest}-report.csv"
+    ctx = _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace))
+    call = CallExternalToolInput(
+        tool_name=sample.BROKER_TOOL_SLUG,
+        source_id=sample.CONNECTOR_PROVIDER,
+        arguments={"media": {"workspace_file": "/workspace/report.csv"}},
+    )
+    first = await call_external_tool(ctx, call)
+    assert (workspace / key).read_bytes() == b"a,b\n1,2\n"
+    (workspace / key).unlink()
+    second = await call_external_tool(ctx, call)
+    assert _payload(second)["arguments"]["media"] == _payload(first)["arguments"]["media"]
+    assert not (workspace / key).exists()
+
+
+async def test_transfer_urls_are_passed_as_curl_url_operands() -> None:
+    """Finding: a broker-reported URL starting with `-` must never be parsed as a curl flag. Both
+    legs pass the URL as the `--url` operand, so a dash-leading URL is a URL, never an option."""
+    commands: list[str] = []
+
+    class _RecordingSandbox:
+        async def bash(self, command: str, timeout_s: int | None = None) -> ExecResult:
+            commands.append(command)
+            if "hashlib" in command:
+                return ExecResult(stdout="deadbeef\n7\n", stderr="", exit_code=0)
+            return ExecResult(stdout="", stderr="", exit_code=0)
+
+    broker = _FileBroker(outputs=(BrokerFile(name="out.txt", url="-oPWNED"),), put_url="-oPWNED")
+    await call_external_tool(
+        _ctx(_file_registry(broker), accounts=("acct-one",), sandbox=_RecordingSandbox()),
+        CallExternalToolInput(
+            tool_name="UPLOAD_FILE",
+            source_id=sample.CONNECTOR_PROVIDER,
+            arguments={"media": {"workspace_file": "/workspace/report.csv"}},
+        ),
+    )
+    curls = [command for command in commands if command.startswith("curl")]
+    assert curls, "expected upload and download curl commands"
+    assert all(f"--url {shlex.quote('-oPWNED')}" in command for command in curls)
+    assert not any(command.split("curl", 1)[1].strip().startswith("-oPWNED") for command in curls)

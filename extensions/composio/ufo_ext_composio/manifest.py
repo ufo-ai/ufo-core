@@ -9,7 +9,7 @@ no secret ever reaches this deploy."""
 from ufo.sdk.connectors import connect_bridge_workspace
 from ufo.sdk.manifest import ConnectorProvider, Manifest, RouteSpec
 from ufo_ext_composio.broker import ComposioBroker
-from ufo_ext_composio.client import CONNECTORS
+from ufo_ext_composio.client import COMPOSIO_TRANSFER_HOSTS, CONNECTORS
 from ufo_ext_composio.provider import OAUTH_ROUTE_PATH, ComposioOAuthProvider, oauth_route
 
 NAME = "composio"
@@ -28,6 +28,7 @@ def manifest() -> Manifest:
                 ),
                 label=spec.label,
                 broker=broker,
+                transfer_hosts=COMPOSIO_TRANSFER_HOSTS,
             )
             for provider, spec in CONNECTORS.items()
         ),

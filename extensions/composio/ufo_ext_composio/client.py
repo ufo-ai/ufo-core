@@ -19,7 +19,7 @@ from uuid import UUID
 
 import httpx
 
-from ufo.sdk.connectors import BrokerSearch, BrokerTool, OAuthAccount
+from ufo.sdk.connectors import WORKSPACE_FILE_KEY, BrokerSearch, BrokerTool, OAuthAccount
 from ufo_ext_composio import mcp_session
 
 COMPOSIO_API_BASE = "https://backend.composio.dev/api/v3.1"
@@ -33,6 +33,9 @@ IDEMPOTENCY_HEADER = "x-idempotency-key"
 TOOL_ROUTER_TIMEOUT_SECONDS = 30.0
 TOOL_ROUTER_SESSION_PATH = "/tool_router/session"
 COMPOSIO_SEARCH_TOOL = "COMPOSIO_SEARCH_TOOLS"
+FILES_UPLOAD_PATH = "/files/upload/request"
+COMPOSIO_TRANSFER_HOSTS = ("temp.4d4f16c61d89ec64e760039c4ec50717.r2.cloudflarestorage.com",)
+FILE_UPLOADABLE_KEY = "file_uploadable"
 
 
 @dataclass(frozen=True)
@@ -54,6 +57,17 @@ class ToolRouterSession:
 
     id: str
     url: str
+
+
+@dataclass(frozen=True)
+class ComposioUpload:
+    """One minted upload slot on Composio's file store: the store `key` the tool argument names
+    and the presigned `put_url` the sandbox PUTs the bytes to. `put_url` is None when Composio
+    deduplicates by MD5 and answers `type: "exists"` — the key already holds the bytes, so the
+    sandbox reuses it without re-PUTing."""
+
+    key: str
+    put_url: str | None
 
 
 CONNECTORS: dict[str, ConnectorSpec] = {
@@ -185,6 +199,32 @@ class ComposioClient:
         headers = {IDEMPOTENCY_HEADER: idempotency_key} if idempotency_key else None
         return await self._post(f"/tools/execute/{slug}", body, headers=headers)
 
+    async def create_upload(
+        self, toolkit: str, slug: str, filename: str, mimetype: str, md5: str
+    ) -> "ComposioUpload":
+        """Mint where a file for `slug` is staged: Composio's upload-request API answers the store
+        key the tool argument names and the presigned PUT URL the sandbox sends the bytes to — this
+        client never carries them."""
+        payload = await self._post(
+            FILES_UPLOAD_PATH,
+            {
+                "md5": md5,
+                "filename": filename,
+                "mimetype": mimetype,
+                "tool_slug": slug,
+                "toolkit_slug": toolkit,
+            },
+        )
+        key = payload.get("key")
+        if not isinstance(key, str) or not key:
+            raise ComposioError(502, f"upload request carried no key: {payload!r}")
+        put_url = payload.get("new_presigned_url")
+        if put_url is None:
+            return ComposioUpload(key=key, put_url=None)
+        if not isinstance(put_url, str) or not put_url:
+            raise ComposioError(502, f"upload request carried a malformed url: {payload!r}")
+        return ComposioUpload(key=key, put_url=put_url)
+
     async def tool_router_session(self, user_id: str, toolkits: list[str]) -> ToolRouterSession:
         """Open a Tool Router session scoped to `toolkits` for `user_id`, returning its id and MCP
         endpoint. The endpoint hosts the `COMPOSIO_SEARCH_TOOLS` tool that semantic search calls."""
@@ -248,6 +288,35 @@ def _body(response: httpx.Response) -> dict[str, object]:
     return payload
 
 
+def workspace_file_schema(value: object) -> object:
+    """Project a tool input schema for the agent: every `file_uploadable` parameter becomes an
+    object taking a `workspace_file` path — the one file vocabulary the dynamic connector tools
+    stage. The raw `{name, mimetype, s3key}` store reference is the broker's to build from the
+    staged upload, never the model's."""
+    match value:
+        case dict() if value.get(FILE_UPLOADABLE_KEY):
+            replacement: dict[str, object] = {
+                "type": "object",
+                "properties": {
+                    WORKSPACE_FILE_KEY: {
+                        "type": "string",
+                        "description": "Absolute /workspace path of the file to send.",
+                    }
+                },
+                "required": [WORKSPACE_FILE_KEY],
+            }
+            description = value.get("description")
+            if isinstance(description, str) and description:
+                replacement["description"] = description
+            return replacement
+        case dict():
+            return {key: workspace_file_schema(item) for key, item in value.items()}
+        case list():
+            return [workspace_file_schema(item) for item in value]
+        case _:
+            return value
+
+
 def _auth_config_id(payload: dict[str, object]) -> str | None:
     items = payload.get("items")
     if not isinstance(items, list):
@@ -308,7 +377,7 @@ def _search_result(result: dict[str, object]) -> BrokerSearch:
                 BrokerTool(
                     slug=slug,
                     description=str(schema.get("description") or ""),
-                    input_schema=_dict(schema.get("input_schema")),
+                    input_schema=_dict(workspace_file_schema(_dict(schema.get("input_schema")))),
                 )
             )
         plan.extend(_str_tuple(item.get("recommended_plan_steps")))

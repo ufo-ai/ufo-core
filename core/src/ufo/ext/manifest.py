@@ -96,13 +96,17 @@ class ConnectorProvider:
     catalog, server-side execution, and feed-sync credential, and any fixed agent tools of its own.
     The descriptor's `provider` keys both the connect-flow registry and the `ConnectorRegistry`
     `serve` builds; its `host` is the one the derived grant admits, injects, and meters at the
-    egress proxy. The tools join the turn's tool set scoped to the extension, so a connector call
+    egress proxy. `transfer_hosts` are the broker's own file-store hosts a grant for this provider
+    additionally admits and meters (tunnelled, never injected), so the sandbox itself fetches a
+    tool's presigned file outputs and stages its file inputs — bytes never cross the serve
+    process. The tools join the turn's tool set scoped to the extension, so a connector call
     reaches the provider host only for an agent the grant covers."""
 
     oauth: OAuthProvider
     label: str
     broker: ConnectorBroker
     tools: tuple[ToolDef, ...] = ()
+    transfer_hosts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

@@ -97,6 +97,36 @@ class BrokerTool:
     input_schema: Mapping[str, object] = field(default_factory=dict)
 
 
+WORKSPACE_FILE_KEY = "workspace_file"
+"""The one file-argument vocabulary across the connector seam: a broker whose tools take file
+inputs rewrites each file parameter's schema to an object holding this key (a `/workspace` path),
+and the dynamic connector tools stage exactly the argument values carrying it."""
+
+
+@dataclass(frozen=True)
+class BrokerFile:
+    """One file a connector tool produced, as its broker surfaces it: the download filename and the
+    short-lived presigned URL on the broker's file store. The sandbox fetches the bytes from `url`
+    itself, through the egress proxy — they never cross the serve process."""
+
+    name: str
+    url: str
+
+
+@dataclass(frozen=True)
+class StagedUpload:
+    """Where the sandbox PUTs a workspace file so a broker tool can read it: the presigned
+    `put_url` on the broker's file store, the `content_type` the PUT must carry, and the
+    `argument` value that names the staged object in the tool call. The broker mints only these
+    references — the bytes go sandbox → broker store directly. `put_url` is None when the store
+    already holds the bytes (a content-addressed dedup hit): the argument names the existing
+    object and the sandbox skips the PUT."""
+
+    put_url: str | None
+    content_type: str
+    argument: dict[str, object]
+
+
 @dataclass(frozen=True)
 class BrokerSearch:
     """A semantic tool-search answer: the matching tools (schemas included) plus whatever execution
@@ -115,7 +145,13 @@ class ConnectorBroker(Protocol):
     the provider does not have); `execute` runs one tool against the granted account on the broker's
     execute API — the broker holds the account's token and injects it itself, so no secret crosses
     this seam; `search` is semantic discovery; `credential` resolves the provider `Credential` a
-    feed-sync source authenticates with, confirming the account belongs to the workspace first."""
+    feed-sync source authenticates with, confirming the account belongs to the workspace first.
+
+    Files cross the seam as references, never bytes: `file_outputs` projects an execute response's
+    produced files to their presigned URLs, and `stage_upload` mints where a workspace file is PUT
+    before a tool call consumes it (raising ValueError for a broker whose tools take URL inputs
+    instead). The sandbox runs both transfers itself, through the egress proxy — the declared
+    `transfer_hosts` a grant admits."""
 
     async def tools(
         self, workspace_id: UUID, provider: str, query: str
@@ -132,6 +168,18 @@ class ConnectorBroker(Protocol):
         account_id: str,
         idempotency_key: str | None,
     ) -> dict[str, object]: ...
+
+    def file_outputs(self, response: dict[str, object]) -> tuple[BrokerFile, ...]: ...
+
+    async def stage_upload(
+        self,
+        workspace_id: UUID,
+        provider: str,
+        slug: str,
+        filename: str,
+        mimetype: str,
+        md5: str,
+    ) -> StagedUpload: ...
 
     async def search(self, workspace_id: UUID, provider: str, query: str) -> BrokerSearch: ...
 

@@ -7,17 +7,55 @@ the broker that registered the provider: `list_external_tools` filters the regis
 `describe_external_tools` and `search_connector_tools` read the broker's catalog;
 `call_external_tool` executes on the broker's server-side API, authenticated by the turn-agent's
 connected account (bound through `/connect`). The broker holds the account's token and injects it
-itself, so a dynamic tool never touches the sandbox egress proxy — it reaches only the broker's own
-API."""
+itself, so an execute reaches only the broker's own API.
+
+Files cross through the workspace, moved by the sandbox itself: an argument carrying the
+`workspace_file` vocabulary is hashed in the container, staged to where the broker mints
+(`stage_upload`, a presigned PUT), and replaced by the broker's own argument value; every file a
+tool produces (`file_outputs`, presigned URLs on the broker's file store) is fetched into
+`/workspace/connector_files/` and listed in the result. Both transfers ride the egress proxy under
+the grant's declared transfer hosts — the bytes never cross the serve process."""
 
 import json
+import mimetypes
 import re
+import shlex
+from dataclasses import dataclass
+from pathlib import PurePosixPath
+from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
-from ufo.sdk.connectors import BrokerTool, ConnectorRegistry, UnknownBrokerTool
+from ufo.sdk.connectors import (
+    WORKSPACE_FILE_KEY,
+    BrokerFile,
+    BrokerTool,
+    ConnectorEntry,
+    ConnectorRegistry,
+    UnknownBrokerTool,
+)
 from ufo.sdk.context import JsonValue
+from ufo.sdk.sandbox import WORKSPACE_DIR, workspace_path
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
+
+CONNECTOR_FILES_DIR = "connector_files"
+FALLBACK_FILENAME = "download"
+FALLBACK_MIMETYPE = "application/octet-stream"
+TRANSFER_TIMEOUT_SECONDS = 600
+TRANSFER_MAX_BYTES = 100 * 1024 * 1024
+WORKSPACE_FILES_RESULT_KEY = "workspace_files"
+
+MD5_PREFLIGHT_PROG = """
+import hashlib, sys
+h = hashlib.md5(usedforsecurity=False)
+size = 0
+with open(sys.argv[1], "rb") as f:
+    while chunk := f.read(1048576):
+        h.update(chunk)
+        size += len(chunk)
+print(h.hexdigest())
+print(size)
+"""
 
 
 class ListExternalToolsInput(BaseModel):
@@ -110,15 +148,104 @@ async def describe_external_tools(ctx: ToolContext, args: DescribeExternalToolsI
 async def call_external_tool(ctx: ToolContext, args: CallExternalToolInput) -> ToolResult:
     entry = _registry(ctx).entry(args.source_id)
     account_id = await ctx.connector_account(args.source_id, args.account_id)
-    response = await entry.broker.execute(
-        ctx.turn.workspace_id,
-        entry.provider,
-        args.tool_name,
-        args.arguments,
-        account_id,
-        ctx.idempotency_key,
-    )
-    return _json_result(response)
+    call = _ConnectorCall(ctx=ctx, entry=entry, slug=args.tool_name)
+    return _json_result(await call.run(args.arguments, account_id))
+
+
+@dataclass(frozen=True)
+class _ConnectorCall:
+    """One connector tool execution, top to bottom: stage every `workspace_file` argument to the
+    broker's file store, execute server-side with the granted account, and fetch the produced
+    files back into the workspace — the private steps below in execution order. Both transfers run
+    inside the sandbox, so the bytes never cross the serve process."""
+
+    ctx: ToolContext
+    entry: ConnectorEntry
+    slug: str
+
+    async def run(self, arguments: dict[str, JsonValue], account_id: str) -> dict[str, object]:
+        staged = {key: await self._staged_value(item) for key, item in arguments.items()}
+        response = await self.entry.broker.execute(
+            self.ctx.turn.workspace_id,
+            self.entry.provider,
+            self.slug,
+            staged,
+            account_id,
+            self.ctx.idempotency_key,
+        )
+        files = await self._fetched_files(self.entry.broker.file_outputs(response))
+        return {**response, WORKSPACE_FILES_RESULT_KEY: files} if files else response
+
+    async def _staged_value(self, value: object) -> object:
+        """An argument value with every `{"workspace_file": path}` staged to the broker's file
+        store and replaced by the broker's own argument naming the staged object — a file crosses
+        as that reference, its bytes PUT by the sandbox."""
+        match value:
+            case dict() if set(value) == {WORKSPACE_FILE_KEY}:
+                path = value[WORKSPACE_FILE_KEY]
+                if not isinstance(path, str) or not path:
+                    raise ValueError(f"{WORKSPACE_FILE_KEY} must be a workspace path string")
+                return await self._stage_file(path)
+            case dict():
+                return {key: await self._staged_value(item) for key, item in value.items()}
+            case list():
+                return [await self._staged_value(item) for item in value]
+            case _:
+                return value
+
+    async def _stage_file(self, path: str) -> dict[str, object]:
+        """Stage one workspace file: hash it in the container, ask the broker where it goes, PUT
+        the bytes there from inside the sandbox, and return the argument value that names it. A
+        broker answering a dedup hit (no put_url) already holds the bytes, so the PUT is skipped."""
+        scoped = workspace_path(path)
+        preflight = await self.ctx.sandbox.bash(
+            f"python3 -c {shlex.quote(MD5_PREFLIGHT_PROG)} {shlex.quote(scoped)}",
+            timeout_s=TRANSFER_TIMEOUT_SECONDS,
+        )
+        if preflight.exit_code != 0:
+            raise ValueError(preflight.stderr.strip() or f"cannot read workspace file {path!r}")
+        digest, _, size = preflight.stdout.strip().partition("\n")
+        if int(size) > TRANSFER_MAX_BYTES:
+            raise ValueError(
+                f"workspace file {path!r} is {size} bytes, over the {TRANSFER_MAX_BYTES}-byte limit"
+            )
+        filename = PurePosixPath(scoped).name
+        mimetype = mimetypes.guess_type(filename)[0] or FALLBACK_MIMETYPE
+        staged = await self.entry.broker.stage_upload(
+            self.ctx.turn.workspace_id, self.entry.provider, self.slug, filename, mimetype, digest
+        )
+        if staged.put_url is None:
+            return staged.argument
+        content_type = shlex.quote(f"Content-Type: {staged.content_type}")
+        put = await self.ctx.sandbox.bash(
+            f"curl -fsS -T {shlex.quote(scoped)} -H {content_type} "
+            f"--url {shlex.quote(staged.put_url)}",
+            timeout_s=TRANSFER_TIMEOUT_SECONDS,
+        )
+        if put.exit_code != 0:
+            raise RuntimeError(put.stderr.strip() or f"staging workspace file {path!r} failed")
+        return staged.argument
+
+    async def _fetched_files(self, files: tuple[BrokerFile, ...]) -> list[dict[str, str]]:
+        """Fetch each produced file from its presigned URL into the workspace, from inside the
+        sandbox — under a fresh `connector_files/<uuid>/` so no fetch clobbers another file."""
+        saved: list[dict[str, str]] = []
+        for file in files:
+            basename = PurePosixPath(file.name.replace("\\", "/")).name
+            safe = basename if basename not in ("", ".", "..") else FALLBACK_FILENAME
+            target = f"{WORKSPACE_DIR}/{CONNECTOR_FILES_DIR}/{uuid4()}/{safe}"
+            fetched = await self.ctx.sandbox.bash(
+                f"curl -fsSL --create-dirs --max-filesize {TRANSFER_MAX_BYTES} "
+                f"-o {shlex.quote(target)} --url {shlex.quote(file.url)}",
+                timeout_s=TRANSFER_TIMEOUT_SECONDS,
+            )
+            if fetched.exit_code != 0:
+                raise RuntimeError(
+                    fetched.stderr.strip()
+                    or f"fetching produced file {safe!r} into the workspace failed"
+                )
+            saved.append({"name": safe, "workspace_path": target})
+        return saved
 
 
 async def search_connector_tools(ctx: ToolContext, args: SearchConnectorToolsInput) -> ToolResult:
@@ -206,7 +333,11 @@ CONNECTOR_TOOLS: tuple[ToolDef, ...] = (
             "first to get the input schema. The tool's own parameters go nested under 'arguments', "
             "never at the top level — e.g. {tool_name: 'GITHUB_LIST_PULL_REQUESTS', source_id: "
             "'github', arguments: {owner: 'acme', repo: 'widgets', state: 'open'}}. Pass "
-            "account_id when this agent has more than one connected account for the source."
+            "account_id when this agent has more than one connected account for the source. A "
+            "parameter whose schema asks for 'workspace_file' takes a file from the workspace — "
+            'pass {"workspace_file": "/workspace/<path>"} and the file is staged to the '
+            "connector automatically. Files a tool returns are saved into the workspace and "
+            "listed under 'workspace_files' in the result with their paths."
         ),
         input_model=CallExternalToolInput,
         handler=call_external_tool,

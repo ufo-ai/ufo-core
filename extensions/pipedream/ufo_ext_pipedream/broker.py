@@ -10,19 +10,27 @@ attempt is informed, an action-level error raises loud, and a failure naming an 
 broker does not hold (a grant that predates it) tells the agent to have the member reconnect;
 `search` is the same catalog search (Pipedream has no router, so plan/guidance stay empty);
 `credential` verifies the state-scoped account owner and app before returning a Connect Proxy
-transport."""
+transport.
+
+Files cross as references: every run rides a fresh File Stash, so `file_outputs` projects the
+response's `$filestash_uploads` to presigned URLs the sandbox fetches itself. `stage_upload`
+refuses — Pipedream actions take file inputs as URLs, so a workspace file travels as its
+share_file download URL."""
 
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from uuid import UUID
 
 import httpx
 
 from ufo.sdk.authproxy import Credential
 from ufo.sdk.connectors import (
+    BrokerFile,
     BrokerSearch,
     BrokerTool,
+    StagedUpload,
     UnknownBrokerTool,
     stale_grant_guidance,
 )
@@ -102,6 +110,40 @@ class PipedreamBroker:
                 _reconnect_error(failed, provider) if _stale_account(failed, account_id) else failed
             )
         return response
+
+    def file_outputs(self, response: dict[str, object]) -> tuple[BrokerFile, ...]:
+        """Every file the action saved to its `/tmp`, as the File Stash synced it: each
+        `exports.$filestash_uploads` entry names the container-local path and the presigned
+        `get_url` the sandbox fetches the bytes from."""
+        exports = response.get("exports")
+        uploads = (
+            exports.get(pipedream.FILESTASH_UPLOADS_EXPORT) if isinstance(exports, dict) else None
+        )
+        files: list[BrokerFile] = []
+        for upload in uploads if isinstance(uploads, list) else []:
+            if not isinstance(upload, dict):
+                continue
+            url = upload.get("get_url")
+            if not isinstance(url, str) or not url:
+                continue
+            local_path = upload.get("localPath")
+            name = PurePosixPath(local_path).name if isinstance(local_path, str) else ""
+            files.append(BrokerFile(name=name, url=url))
+        return tuple(files)
+
+    async def stage_upload(
+        self,
+        workspace_id: UUID,
+        provider: str,
+        slug: str,
+        filename: str,
+        mimetype: str,
+        md5: str,
+    ) -> StagedUpload:
+        raise ValueError(
+            f"{provider!r} actions take file inputs as URLs, not staged uploads — share the "
+            "workspace file with share_file and pass its download URL"
+        )
 
     async def search(self, workspace_id: UUID, provider: str, query: str) -> BrokerSearch:
         return BrokerSearch(tools=await self.tools(workspace_id, provider, query))

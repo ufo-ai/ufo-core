@@ -7,6 +7,7 @@ slot from its stored secret, and each OAuth grant from its host — and derivati
 in. A grant injects nothing: the broker holds the account's token and executes server-side, so a
 grant only admits and meters its host."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -88,16 +89,33 @@ def derive_model_rules(model: str, real_key: str) -> tuple[Rule, ...]:
     )
 
 
-def derive_grant_rules(grants: tuple[Grant, ...]) -> tuple[Rule, ...]:
-    """Each active grant admits its provider's own host and meters every request to it under
-    `requests`, so any egress to a granted host shows in `ufoctl spend`. A grant injects nothing —
-    the broker holds the account's token and runs connector tools server-side, so no secret is on
-    the wire. An ungranted host derives no ScopeRule, so the proxy refuses it at CONNECT."""
+def derive_grant_rules(
+    grants: tuple[Grant, ...], transfer_hosts: Mapping[str, tuple[str, ...]] | None = None
+) -> tuple[Rule, ...]:
+    """Each active grant admits its provider's own host — plus the broker file-store hosts its
+    connector declares as `transfer_hosts`, where the sandbox fetches a tool's presigned file
+    outputs and stages its file inputs — and meters every request to each under `requests`, so any
+    egress to a granted host shows in `ufoctl spend`. A grant injects nothing — the broker holds
+    the account's token and runs connector tools server-side, so no secret is on the wire. An
+    ungranted host derives no ScopeRule, so the proxy refuses it at CONNECT."""
     rules: list[Rule] = []
     for grant in grants:
-        rules.append(ScopeRule(allowed_hosts=frozenset({grant.host})))
-        rules.append(MeterRule(host=grant.host, dimension=GRANT_METER_DIMENSION))
+        hosts = (grant.host, *(transfer_hosts or {}).get(grant.provider, ()))
+        rules.append(ScopeRule(allowed_hosts=frozenset(hosts)))
+        rules.extend(MeterRule(host=host, dimension=GRANT_METER_DIMENSION) for host in hosts)
     return tuple(rules)
+
+
+def connector_transfer_hosts(manifests: tuple[Manifest, ...]) -> dict[str, tuple[str, ...]]:
+    """Each installed connector's declared broker file-store hosts, keyed by provider — the map the
+    per-turn resolver folds into `derive_grant_rules` so a grant admits them live from the current
+    deploy's manifests, never a persisted copy a broker-side store move would strand."""
+    return {
+        connector.oauth.provider: connector.transfer_hosts
+        for manifest in manifests
+        for connector in manifest.connectors
+        if connector.transfer_hosts
+    }
 
 
 async def derive_credential_rules(

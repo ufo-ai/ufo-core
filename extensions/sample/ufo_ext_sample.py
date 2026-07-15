@@ -13,7 +13,7 @@ import hashlib
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import ClassVar
 from uuid import UUID
 
@@ -22,7 +22,14 @@ from pydantic import BaseModel
 
 from ufo.sdk.authproxy import AuthProxySpec, Credential
 from ufo.sdk.browser import CdpEndpoint, CdpLease
-from ufo.sdk.connectors import BrokerSearch, BrokerTool, OAuthAccount, UnknownBrokerTool
+from ufo.sdk.connectors import (
+    BrokerFile,
+    BrokerSearch,
+    BrokerTool,
+    OAuthAccount,
+    StagedUpload,
+    UnknownBrokerTool,
+)
 from ufo.sdk.context import AgentChange, ExtensionContext
 from ufo.sdk.http import (
     JSONResponse,
@@ -67,6 +74,7 @@ from ufo.sdk.manifest import (
 from ufo.sdk.memory import MemoryMatch
 from ufo.sdk.models import ModelEvent, ModelPrice, ModelRequest, TextDelta, Usage
 from ufo.sdk.sandbox import (
+    WORKSPACE_DIR,
     BlobStore,
     CarrierSpec,
     ExecResult,
@@ -108,6 +116,7 @@ CONNECTOR_EXECUTE_TOOL_NAME = "sample_connector_execute"
 BROKER_TOOL_SLUG = "SAMPLE_LIST_WIDGETS"
 BROKER_TOOL_DESCRIPTION = "List the sample provider's widgets."
 BROKER_SEARCH_PLAN = "call SAMPLE_LIST_WIDGETS first"
+BROKER_UPLOAD_PREFIX = "connector_upload"
 BROKER_BEARER_PREFIX = "sample-broker-token:"
 HUB_BACKEND = "sample_hub"
 TOOL_KEY = "tool:echo"
@@ -476,9 +485,12 @@ class _SampleConnectorOAuth:
 @dataclass(frozen=True)
 class _SampleBroker:
     """The stub broker: a one-tool canned catalog, an execute that echoes its whole call back as
-    the provider response, and a bearer credential naming the account — so a test asserting the
-    dynamic connector tools or feed-sync routing reads exactly what core dispatched through the
+    the provider response, a workspace-backed file store staging uploads and projecting produced
+    files, and a bearer credential naming the account — so a test asserting the dynamic connector
+    tools, the file bridge, or feed-sync routing reads exactly what core dispatched through the
     seam, off public surfaces, with no live broker."""
+
+    _minted_uploads: set[str] = field(default_factory=set)
 
     async def tools(self, workspace_id: UUID, provider: str, query: str) -> tuple[BrokerTool, ...]:
         return (BrokerTool(slug=BROKER_TOOL_SLUG, description=BROKER_TOOL_DESCRIPTION),)
@@ -510,6 +522,47 @@ class _SampleBroker:
             "account": account_id,
             "idempotency_key": idempotency_key,
         }
+
+    def file_outputs(self, response: dict[str, object]) -> tuple[BrokerFile, ...]:
+        """The echoed `file_output_urls` argument, projected as produced files — a test drives the
+        dynamic tools' workspace fetch with URLs it controls, through the seam's own vocabulary."""
+        arguments = response.get("arguments")
+        urls = arguments.get("file_output_urls") if isinstance(arguments, dict) else None
+        if not isinstance(urls, list):
+            return ()
+        return tuple(
+            BrokerFile(name=PurePosixPath(url).name, url=url)
+            for url in urls
+            if isinstance(url, str)
+        )
+
+    async def stage_upload(
+        self,
+        workspace_id: UUID,
+        provider: str,
+        slug: str,
+        filename: str,
+        mimetype: str,
+        md5: str,
+    ) -> StagedUpload:
+        """The sample file store: a content-addressed object in the workspace the sandbox PUTs the
+        bytes to, echoed back through `execute` as the tool argument — so a test drives the whole
+        upload leg (mint slot, sandbox PUT, argument naming the object) through the real seam, off
+        the workspace, with no live store. Re-staging an already-minted key answers a dedup hit
+        (no put_url), the store-index behavior behind Composio's `type: "exists"`."""
+        key = f"{BROKER_UPLOAD_PREFIX}-{md5}-{filename}"
+        if key in self._minted_uploads:
+            return StagedUpload(
+                put_url=None,
+                content_type=mimetype,
+                argument={"name": filename, "mimetype": mimetype, "s3key": key},
+            )
+        self._minted_uploads.add(key)
+        return StagedUpload(
+            put_url=f"file://{WORKSPACE_DIR}/{key}",
+            content_type=mimetype,
+            argument={"name": filename, "mimetype": mimetype, "s3key": key},
+        )
 
     async def search(self, workspace_id: UUID, provider: str, query: str) -> BrokerSearch:
         return BrokerSearch(

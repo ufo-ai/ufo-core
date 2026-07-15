@@ -42,6 +42,9 @@ TOKEN_EXPIRY_MARGIN_SECONDS = 60.0
 ACTION_SEARCH_LIMIT = 10
 MAX_RUN_ARGUMENTS_BYTES = 1024 * 1024
 APP_PROP_TYPE = "app"
+STASH_NEW = "NEW"
+FILESTASH_UPLOADS_EXPORT = "$filestash_uploads"
+PIPEDREAM_TRANSFER_HOSTS = ("pipedream-file-stash-production.s3.us-east-1.amazonaws.com",)
 
 
 @dataclass(frozen=True)
@@ -205,10 +208,15 @@ class PipedreamClient:
         external_user_id: str,
         configured_props: dict[str, object],
     ) -> dict[str, object]:
+        """Run one action server-side, always under a fresh File Stash (`stash_id`): any file the
+        action writes to its own `/tmp` syncs to the stash and comes back as a presigned URL in
+        `exports.$filestash_uploads` — without it the response names container-local paths nothing
+        outside Pipedream can read."""
         body: dict[str, object] = {
             "id": key,
             "external_user_id": external_user_id,
             "configured_props": configured_props,
+            "stash_id": STASH_NEW,
         }
         if len(json.dumps(body).encode()) > MAX_RUN_ARGUMENTS_BYTES:
             raise ValueError("connector tool arguments exceed the Pipedream run payload bound")

@@ -27,7 +27,7 @@ import asyncio
 import json
 import ssl
 import tempfile
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import UUID
@@ -119,6 +119,7 @@ class PerAgentRules:
 
     base: tuple[Rule, ...]
     grants: GrantStore | None
+    transfer_hosts: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
     async def resolve(self, run: RunToken | None) -> tuple[Rule, ...]:
         if run is None or self.grants is None:
@@ -127,7 +128,7 @@ class PerAgentRules:
         if agent_id is None:
             return self.base
         granted = await self.grants.active_grants(run.workspace_id, agent_id)
-        return (*self.base, *derive_grant_rules(granted))
+        return (*self.base, *derive_grant_rules(granted, self.transfer_hosts))
 
     async def _agent_of(self, run: RunToken) -> UUID | None:
         async with workspace_tx() as connection:
