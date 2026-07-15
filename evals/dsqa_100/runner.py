@@ -114,7 +114,7 @@ class DSQAGrader:
         except ValidationError:
             return CapabilityVerdict(
                 False,
-                "DeepSearchQA judge returned an invalid structured rating",
+                f"DeepSearchQA judge returned an invalid structured rating: {raw.strip()[:200]}",
                 {**metadata, "judgeStatus": "invalid"},
             )
         score = self._score(response.answer_correctness)

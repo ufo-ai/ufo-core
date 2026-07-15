@@ -254,6 +254,9 @@ async def test_scenario_drives_multiple_turns_on_one_conversation(db: None, tmp_
     trajectory = cast(dict[str, object], attempts[0]["trajectory"])
     assert len(cast(list[object], trajectory["messages"])) == 6
     assert attempts[0]["stopped"] is True
+    assert result.evidence["user"] == _SUM_USER.payload()
+    assert result.evidence["memberKey"] is None
+    assert result.evidence["maxTurns"] == 4
 
 
 async def test_scenario_shows_the_member_only_its_scenario_and_the_replies(

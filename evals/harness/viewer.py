@@ -26,7 +26,9 @@ S3_COMPAT_CONFIG = Config(signature_version="s3v4", s3={"addressing_style": "pat
 
 
 class EvalRun(BaseModel):
-    """One immutable runner invocation persisted for later comparison."""
+    """One immutable runner invocation persisted for later comparison. `agent_prompt` is the
+    target agent's configured base prompt — the fixed half of every case's system prompt — so a
+    reviewer reads the setup the agent answered under without reaching for the workspace."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -34,6 +36,7 @@ class EvalRun(BaseModel):
     created_at: datetime
     label: str
     agent: str
+    agent_prompt: str = ""
     ufo_version: str
     revision: str
     reports: tuple[EvalReport, ...]

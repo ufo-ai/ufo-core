@@ -97,7 +97,9 @@ class ClaimCoverageJudge:
         try:
             return ClaimJudgeItem.model_validate_json(raw)
         except ValidationError as error:
-            raise ValueError("claim judge returned an invalid structured verdict") from error
+            raise ValueError(
+                f"claim judge returned an invalid structured verdict: {raw.strip()[:200]}"
+            ) from error
 
 
 class McpAtlasRunTarget(Protocol):
@@ -202,33 +204,27 @@ class McpAtlasSuite:
         target_result = await target.run_mcp_atlas(
             case.prompt, case.enabled_tools, case.tool_servers
         )
-        evidence = self._case_evidence(case, target_result.output, catalog)
         if not target_result.clean:
-            return EvalCaseResult(
-                name=case.task,
-                passed=False,
-                reason=target_result.failure_reason,
-                evidence=evidence,
+            return self._case_result(
+                case, target_result.output, catalog, False, target_result.failure_reason
             )
         if target.judge is None:
-            return EvalCaseResult(
-                name=case.task,
-                passed=False,
-                reason="MCP-Atlas claim grading requires a model judge",
-                evidence=evidence,
+            return self._case_result(
+                case,
+                target_result.output,
+                catalog,
+                False,
+                "MCP-Atlas claim grading requires a model judge",
             )
         try:
             coverage = await ClaimCoverageJudge(target.judge).grade(
                 case, target_result.output.response
             )
         except Exception as error:
-            return EvalCaseResult(
-                name=case.task,
-                passed=False,
-                reason=f"{type(error).__name__}: {error}",
-                evidence=evidence,
+            return self._case_result(
+                case, target_result.output, catalog, False, f"{type(error).__name__}: {error}"
             )
-        evidence["claimVerdicts"] = [
+        claim_verdicts: list[Json] = [
             {
                 "claim": claim,
                 "status": item.status,
@@ -237,18 +233,30 @@ class McpAtlasSuite:
             }
             for claim, item in zip(case.claims, coverage.items, strict=True)
         ]
-        evidence["claimCoverage"] = coverage.score
         passed = coverage.score >= CLAIM_COVERAGE_THRESHOLD
-        return EvalCaseResult(
-            name=case.task,
-            passed=passed,
-            reason=f"claim coverage {coverage.score:.0%} ({'pass' if passed else 'fail'})",
-            evidence=evidence,
+        return self._case_result(
+            case,
+            target_result.output,
+            catalog,
+            passed,
+            f"claim coverage {coverage.score:.0%} ({'pass' if passed else 'fail'})",
+            claim_verdicts=claim_verdicts,
+            claim_coverage=coverage.score,
         )
 
-    def _case_evidence(
-        self, case: McpAtlasCase, output: CapabilityOutput, catalog: frozenset[str]
-    ) -> JsonObject:
+    def _case_result(
+        self,
+        case: McpAtlasCase,
+        output: CapabilityOutput,
+        catalog: frozenset[str],
+        passed: bool,
+        reason: str,
+        claim_verdicts: list[Json] | None = None,
+        claim_coverage: float | None = None,
+    ) -> EvalCaseResult:
+        """Evidence lands in the same `message` + `attempts` shape every other suite records, so
+        one viewer renders every suite; the claim and tool-exposure keys carry the Atlas-specific
+        grading context beside it."""
         calls: list[Json] = [
             {
                 "name": call.name,
@@ -272,9 +280,8 @@ class McpAtlasSuite:
         enabled_catalog_servers: list[Json] = [
             cast(Json, server) for server in sorted(case.enabled_catalog_servers)
         ]
-        tool_errors: list[Json] = list(output.tool_errors)
-        return {
-            "prompt": case.prompt,
+        evidence: JsonObject = {
+            "message": case.prompt,
             "claims": claims,
             "enabledTools": enabled_tools,
             "exposedTools": exposed_tools,
@@ -282,10 +289,21 @@ class McpAtlasSuite:
             "referenceTools": reference_tools,
             "referenceServers": reference_servers,
             "enabledCatalogServers": enabled_catalog_servers,
-            "response": output.response,
-            "calls": calls,
-            "toolErrors": tool_errors,
+            "selectedAttempt": 0,
+            "attempts": [
+                {
+                    "passed": passed,
+                    "reason": reason,
+                    "response": output.response,
+                    "calls": calls,
+                    "toolErrors": list(output.tool_errors),
+                }
+            ],
         }
+        if claim_verdicts is not None:
+            evidence["claimVerdicts"] = claim_verdicts
+            evidence["claimCoverage"] = claim_coverage
+        return EvalCaseResult(name=case.task, passed=passed, reason=reason, evidence=evidence)
 
 
 def performance_tier(pass_rate: float) -> str:

@@ -360,6 +360,16 @@ async def test_suite_reports_threshold_tier_and_catalog_coverage() -> None:
     assert coverage["referenceServerCount"] == 1
     assert coverage["enabledCatalogServerCount"] == 2
     assert "Top tier, mean claim coverage 100% at 75% task threshold" in report.console_summary
+    evidence = report.cases[0].evidence
+    assert evidence["message"] == dataset.cases[0].prompt
+    assert evidence["selectedAttempt"] == 0
+    attempts = cast(list[dict[str, object]], evidence["attempts"])
+    assert len(attempts) == 1
+    assert attempts[0]["passed"] is True
+    assert attempts[0]["response"] == f"answer to {dataset.cases[0].prompt}"
+    assert attempts[0]["reason"] == report.cases[0].reason
+    verdicts = cast(list[dict[str, object]], evidence["claimVerdicts"])
+    assert {verdict["status"] for verdict in verdicts} == {"fulfilled"}
 
 
 @pytest.mark.parametrize(

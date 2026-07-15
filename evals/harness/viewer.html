@@ -329,6 +329,11 @@ function recallMeta(report) {
 function metricMeta(report) {
   return (report && report.metrics || []).map(metric => `${metric.name.replaceAll('_', ' ')} ${pct(metric.value)}`).join(' · ');
 }
+function benchmarkMeta(report) {
+  const performance = report && report.benchmark && report.benchmark.performance;
+  if (!performance) return '';
+  return `${performance.tier} tier · mean claim coverage ${pct(performance.meanClaimCoverage)} at ${pct(report.benchmark.claimCoverageThreshold)} task threshold`;
+}
 function caseStatus(item) {
   if (!item) return {label: 'missing', cls: 'missing'};
   if (item.excluded) return {label: 'excluded', cls: 'excluded'};
@@ -448,11 +453,13 @@ function suiteMarkup(base, current, name) {
   const deltaText = canCompare ? points(delta) : before && after ? 'digest changed' : '';
   const recall = recallMeta(after);
   const metrics = metricMeta(after);
+  const benchmark = benchmarkMeta(after);
   return `<button class="suite-row ${name === state.suite ? 'selected' : ''}" data-suite="${h(name)}">
     <div class="row-top"><span class="row-title">${h(name)}</span><span class="badge ${status.cls}">${status.label}</span></div>
     <div class="row-meta"><span>${detail}</span><span class="delta ${delta < 0 ? 'negative' : delta > 0 ? 'positive' : ''}">${h(deltaText)}</span></div>
     ${metrics ? `<div class="row-meta"><span>${h(metrics)}</span></div>` : ''}
     ${recall ? `<div class="row-meta"><span>${h(recall)}</span></div>` : ''}
+    ${benchmark ? `<div class="row-meta"><span>${h(benchmark)}</span></div>` : ''}
   </button>`;
 }
 function matchesFilter(item, movement) {
@@ -481,6 +488,67 @@ function callMarkup(call, index) {
       <div><div class="section-title">Result</div><pre>${h(call.hasResult ? call.result : 'No tool result was recorded.')}</pre></div>
     </div></div></details>`;
 }
+const ATTEMPT_KEYS = new Set(['passed', 'reason', 'response', 'calls', 'toolErrors', 'artifacts',
+  'artifactError', 'tokens', 'costMicroUsd', 'compactions', 'log', 'grader', 'judge', 'turns',
+  'stopped', 'trajectory']);
+const CASE_EVIDENCE_KEYS = new Set(['message', 'rubric', 'memberKey', 'webDependent',
+  'selectedAttempt', 'attempts', 'user', 'maxTurns', 'claims', 'claimVerdicts',
+  'claimCoverage', 'enabledTools', 'exposedTools', 'omittedEnabledTools', 'referenceTools',
+  'referenceServers', 'enabledCatalogServers']);
+function unrendered(source, known) {
+  const extra = {};
+  for (const [key, value] of Object.entries(source || {})) {
+    if (!known.has(key) && value != null) extra[key] = value;
+  }
+  return Object.keys(extra).length ? extra : null;
+}
+function jsonSection(title, value) {
+  if (value == null) return '';
+  return `<div class="section"><div class="section-title">${h(title)}</div><pre>${h(JSON.stringify(value, null, 2))}</pre></div>`;
+}
+function verdictRow(cls, label, text, reason) {
+  return `<details class="call"><summary><span class="badge ${cls}">${h(label)}</span> ${h(text)}</summary>
+    <div class="call-body"><pre>${h(reason)}</pre></div></details>`;
+}
+function judgeMarkup(items) {
+  if (!items || !items.length) return '';
+  const rows = items.map(item => verdictRow(item.passed ? 'pass' : 'fail', item.passed ? 'met' : 'unmet', item.criterion, item.reason)).join('');
+  return `<div class="section"><div class="section-title">Judge verdicts · ${items.length}</div>${rows}</div>`;
+}
+function toolErrorsMarkup(errors) {
+  if (!errors || !errors.length) return '';
+  return `<div class="section"><div class="section-title">Tool errors · ${errors.length}</div><pre>${h(errors.map((error, index) => `${index + 1}. ${error}`).join('\n'))}</pre></div>`;
+}
+function claimsMarkup(evidence) {
+  const verdicts = evidence.claimVerdicts;
+  if (verdicts && verdicts.length) {
+    const coverage = typeof evidence.claimCoverage === 'number' ? ` · coverage ${pct(evidence.claimCoverage)}` : '';
+    const cls = {fulfilled: 'pass', partial: 'excluded', unfulfilled: 'fail'};
+    const rows = verdicts.map(item => verdictRow(cls[item.status] || 'missing', item.status, item.claim, item.reason)).join('');
+    return `<div class="section"><div class="section-title">Claim verdicts · ${verdicts.length}${coverage}</div>${rows}</div>`;
+  }
+  const claims = evidence.claims;
+  if (!claims || !claims.length) return '';
+  return `<div class="section"><div class="section-title">Claims · ${claims.length} (not judged)</div><pre>${h(claims.map((claim, index) => `${index + 1}. ${claim}`).join('\n'))}</pre></div>`;
+}
+function toolExposureMarkup(evidence) {
+  const fields = [['enabledTools', 'enabled'], ['exposedTools', 'exposed'],
+    ['omittedEnabledTools', 'omitted from catalog'], ['referenceTools', 'reference trajectory'],
+    ['referenceServers', 'reference servers'], ['enabledCatalogServers', 'enabled catalog servers']];
+  const lines = fields
+    .filter(([key]) => Array.isArray(evidence[key]) && evidence[key].length)
+    .map(([key, label]) => `${label}: ${evidence[key].join(', ')}`);
+  if (!lines.length) return '';
+  return `<div class="section"><div class="section-title">Tool exposure</div><pre>${h(lines.join('\n'))}</pre></div>`;
+}
+function scenarioMarkup(attempt) {
+  if (!Array.isArray(attempt.turns)) return '';
+  const outcome = attempt.stopped ? 'member ended satisfied' : 'member never signalled satisfaction';
+  const rows = attempt.turns.map((turn, index) => `
+    <article class="message"><div class="message-head">exchange ${index + 1} · member</div><div class="message-body"><pre>${h(turn.userMessage)}</pre></div></article>
+    <article class="message"><div class="message-head">exchange ${index + 1} · agent</div><div class="message-body"><pre>${h(turn.reply || 'No reply.')}</pre></div></article>`).join('');
+  return `<div class="section"><div class="section-title">Conversation · ${attempt.turns.length} exchanges · ${h(outcome)}</div>${rows || '<div class="empty">No exchanges.</div>'}</div>`;
+}
 function attemptMarkup(attempt, index, selected, kind) {
   const calls = attempt.calls || [];
   const artifacts = attempt.artifacts || [];
@@ -492,10 +560,16 @@ function attemptMarkup(attempt, index, selected, kind) {
     <div class="attempt-body">
       <div class="reason">${h(attempt.reason)}</div>
       ${trajectory}
-      <div class="section"><div class="section-title">Resources</div><pre>${h(attempt.tokens || 0)} tokens\n${h(attempt.costMicroUsd || 0)} micro-USD</pre></div>
+      <div class="section"><div class="section-title">Resources</div><pre>${attempt.tokens == null && attempt.costMicroUsd == null ? 'not recorded' : `${h(attempt.tokens || 0)} tokens\n${h(attempt.costMicroUsd || 0)} micro-USD${attempt.compactions ? `\n${h(attempt.compactions)} compactions` : ''}`}</pre></div>
+      ${scenarioMarkup(attempt)}
       <div class="section"><div class="section-title">Agent response</div><pre>${h(attempt.response || 'No final response.')}</pre></div>
+      ${judgeMarkup(attempt.judge)}
       <div class="section"><div class="section-title">Tool trajectory · ${calls.length}</div>${calls.length ? calls.map(callMarkup).join('') : '<div class="empty">No tool calls.</div>'}</div>
+      ${toolErrorsMarkup(attempt.toolErrors)}
+      ${jsonSection('Grader evidence', attempt.grader)}
+      ${jsonSection('Turn log', attempt.log)}
       <div class="section"><div class="section-title">Artifacts</div><pre>${h(artifacts.length ? artifacts.join('\n') : 'None')}${attempt.artifactError ? '\n' + h(attempt.artifactError) : ''}</pre></div>
+      ${jsonSection('Other attempt evidence', unrendered(attempt, ATTEMPT_KEYS))}
     </div></details>`;
 }
 function paneMarkup(kind, run, report, item) {
@@ -504,11 +578,28 @@ function paneMarkup(kind, run, report, item) {
   const evidence = item.evidence || {};
   const attempts = evidence.attempts || [];
   const status = caseStatus(item);
+  const setup = [
+    `${h(formatDate(run.created_at))}`,
+    `revision ${h(run.revision)}`,
+    `agent ${h(run.agent)}`,
+    `ufo ${h(run.ufo_version)}`,
+    report.target_model ? `target model ${h(report.target_model)}` : '',
+    report.judge_model ? `judge model ${h(report.judge_model)}` : '',
+    report.judge_revision ? `judge revision ${h(report.judge_revision)}` : '',
+    `suite ${h(report.digest)}`
+  ].filter(Boolean).join('\n');
+  const agentPrompt = run.agent_prompt
+    ? `<details class="attempt"><summary>Agent base prompt · ${h(run.agent)}</summary><div class="attempt-body"><pre>${h(run.agent_prompt)}</pre></div></details>`
+    : '';
   return `<section class="run-pane">
     <div class="pane-head"><div><div class="pane-kicker">${kind} · ${h(shortId(run))}</div><div class="pane-title">${h(runName(run))}</div></div><span class="badge ${status.cls}">${status.label}</span></div>
     <div class="reason">${h(item.reason)}</div>
-    <div class="section"><div class="section-title">Run</div><pre>${h(formatDate(run.created_at))}\nrevision ${h(run.revision)}\nagent ${h(run.agent)}\nufo ${h(run.ufo_version)}\nsuite ${h(report.digest)}</pre></div>
+    <div class="section"><div class="section-title">Run</div><pre>${setup}</pre>${agentPrompt}</div>
+    ${claimsMarkup(evidence)}
+    ${toolExposureMarkup(evidence)}
     <div class="section"><div class="section-title">Attempts · ${attempts.length}</div>${attempts.length ? attempts.map((attempt, index) => attemptMarkup(attempt, index, evidence.selectedAttempt, kind.toLowerCase())).join('') : '<div class="empty">No attempt evidence was recorded.</div>'}</div>
+    ${jsonSection('Suite benchmark', report.benchmark)}
+    ${jsonSection('Other evidence', unrendered(evidence, CASE_EVIDENCE_KEYS))}
   </section>`;
 }
 function blockMarkup(block) {
@@ -536,6 +627,9 @@ function messagesMarkup(messages) {
 }
 function trajectoryMarkup(kind, run, report, item, attempt, index) {
   const trajectory = attempt.trajectory;
+  const agentPrompt = run.agent_prompt
+    ? `<details class="attempt"><summary>Agent base prompt · ${h(run.agent)}</summary><div class="attempt-body"><pre>${h(run.agent_prompt)}</pre></div></details>`
+    : '';
   return `<section class="detail">
     <div class="trajectory-head"><a class="trajectory-link" href="${h(stateHash({trajectory: ''}))}">← Back to report</a>
       <h2>${h(item.name)} · attempt ${index + 1}</h2>
@@ -543,6 +637,7 @@ function trajectoryMarkup(kind, run, report, item, attempt, index) {
     </div>
     <div class="trajectory-body">
       ${trajectory.error ? `<div class="reason negative">${h(trajectory.error)}</div>` : ''}
+      ${agentPrompt}
       <div class="section"><div class="section-title">Stored transcript snapshot · ${(trajectory.messages || []).length} messages</div>${messagesMarkup(trajectory.messages || [])}</div>
     </div>
   </section>`;
@@ -562,6 +657,20 @@ function selectedTrajectory(base, current, before, after) {
   }
   return trajectoryMarkup(kind, run, report, item, attempt, index);
 }
+function scenarioUserBlock(user) {
+  if (!user) return '';
+  const fields = [['reasonForCall', 'Reason for contact'], ['knownInfo', 'Knows'],
+    ['unknownInfo', 'Does not know'], ['taskInstructions', 'Behavior'], ['persona', 'Persona']];
+  return fields.filter(([key]) => user[key]).map(([key, label]) => `${label}: ${user[key]}`).join('\n');
+}
+function setupMeta(evidence) {
+  const parts = [];
+  if (evidence.memberKey) parts.push(`member ${evidence.memberKey}`);
+  if (evidence.webDependent) parts.push('web-dependent');
+  if (evidence.maxTurns) parts.push(`max ${evidence.maxTurns} member turns`);
+  if ((evidence.attempts || []).length > 1) parts.push(`${evidence.attempts.length} attempts`);
+  return parts.join(' · ');
+}
 function detailMarkup(base, current, before, after) {
   const trajectory = selectedTrajectory(base, current, before, after);
   if (trajectory) return trajectory;
@@ -569,9 +678,12 @@ function detailMarkup(base, current, before, after) {
   const item = caseByName(after, state.caseName);
   const evidence = (item || prior || {}).evidence || {};
   const rubric = evidence.rubric || [];
+  const setup = setupMeta(evidence);
+  const prompt = evidence.message || scenarioUserBlock(evidence.user);
   return `<section class="detail">
     <div class="detail-head"><div class="detail-leaf">${h(leafLabel(state.suite))}</div><h2>${h(state.caseName || 'Choose a case')}</h2>
-      <div class="prompt">${h(evidence.message || '')}${rubric.length ? '\n\nRubric\n' + h(rubric.map(value => '• ' + value).join('\n')) : ''}</div></div>
+      ${setup ? `<div class="row-meta"><span>${h(setup)}</span></div>` : ''}
+      <div class="prompt">${h(prompt)}${rubric.length ? '\n\nRubric\n' + h(rubric.map(value => '• ' + value).join('\n')) : ''}</div></div>
     <div class="compare-grid">${paneMarkup('Baseline', base, before, prior)}${paneMarkup('Current', current, after, item)}</div>
   </section>`;
 }

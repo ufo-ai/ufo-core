@@ -248,7 +248,7 @@ def main(argv: list[str] | None = None) -> None:
             MEMORY_RECALL_EVENT,
         )
     )
-    reports = asyncio.run(
+    reports, agent_prompt = asyncio.run(
         _run(
             config,
             tasks,
@@ -284,6 +284,7 @@ def main(argv: list[str] | None = None) -> None:
         created_at=datetime.now(UTC),
         label=args.label,
         agent=args.agent,
+        agent_prompt=agent_prompt,
         ufo_version=version("ufo"),
         revision=revision,
         reports=reports,
@@ -303,7 +304,7 @@ async def _run(
     collector: TurnLogCollector | None = None,
     mcp_atlas_url: str | None = None,
     mcp_atlas_external_url: str | None = None,
-) -> tuple[EvalReport, ...]:
+) -> tuple[tuple[EvalReport, ...], str]:
     init_db(config.database.url)
     key = os.environ.get(config.credentials.key_env)
     credentials = CredentialStore(fernet=Fernet(key.encode())) if key else None
@@ -387,7 +388,7 @@ async def _run(
                         }
                     )
                 )
-            return tuple(completed)
+            return tuple(completed), agent_prompt
     finally:
         init_workspace_credentials(None)
         await dispose_db()

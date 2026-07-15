@@ -50,6 +50,23 @@ class JudgeLeg(Protocol):
 
 
 @dataclass(frozen=True)
+class CriterionVerdict:
+    """One rubric criterion's judged outcome, kept for the run archive so a reviewer sees every
+    criterion's evidence, not only the failing ones folded into the reason string."""
+
+    criterion: str
+    passed: bool
+    reason: str
+
+
+@dataclass(frozen=True)
+class RubricVerdict:
+    passed: bool
+    reason: str
+    criteria: tuple[CriterionVerdict, ...] = ()
+
+
+@dataclass(frozen=True)
 class ModelJudge:
     model: ModelAccess
     max_tokens: int = JUDGE_MAX_TOKENS
@@ -69,10 +86,10 @@ class ModelJudge:
 
 async def rubric_pass(
     instruction: str, answer: str, rubric: Sequence[str], judge: JudgeLeg
-) -> tuple[bool, str]:
+) -> RubricVerdict:
     boundary_error = _boundary_error(instruction, answer, rubric)
     if boundary_error:
-        return False, boundary_error
+        return RubricVerdict(False, boundary_error)
     payload = dumps(
         {"instruction": instruction, "candidateAnswer": answer, "rubric": list(rubric)},
         ensure_ascii=False,
@@ -85,7 +102,7 @@ async def rubric_pass(
     try:
         raw = await judge.complete(JUDGE_SYSTEM, (Message(role="user", content=prompt),))
     except ModelResponseTruncated:
-        return False, "judge response truncated"
+        return RubricVerdict(False, "judge response truncated")
     verdict = raw.strip()
     opener, newline, fenced = verdict.partition("\n")
     if opener in {"```json", "```"} and newline and fenced.rstrip().endswith("```"):
@@ -93,17 +110,25 @@ async def rubric_pass(
     try:
         response = JudgeResponse.model_validate_json(verdict)
     except ValidationError:
-        return False, "judge returned an invalid structured verdict"
+        return RubricVerdict(
+            False, f"judge returned an invalid structured verdict: {verdict[:200]}"
+        )
     if len(response.items) != len(rubric):
-        return False, f"judge returned {len(response.items)} items for {len(rubric)} criteria"
+        return RubricVerdict(
+            False, f"judge returned {len(response.items)} items for {len(rubric)} criteria"
+        )
+    criteria = tuple(
+        CriterionVerdict(criterion, item.passed, item.reason)
+        for criterion, item in zip(rubric, response.items, strict=True)
+    )
     failures = [
-        f"{index + 1}. {criterion} ({item.reason})"
-        for index, (criterion, item) in enumerate(zip(rubric, response.items, strict=True))
+        f"{index}. {item.criterion} ({item.reason})"
+        for index, item in enumerate(criteria, 1)
         if not item.passed
     ]
     if failures:
-        return False, "unmet: " + "; ".join(failures)
-    return True, f"{len(rubric)}/{len(rubric)} semantic criteria met"
+        return RubricVerdict(False, "unmet: " + "; ".join(failures), criteria)
+    return RubricVerdict(True, f"{len(rubric)}/{len(rubric)} semantic criteria met", criteria)
 
 
 def _boundary_error(instruction: str, answer: str, rubric: Sequence[str]) -> str:

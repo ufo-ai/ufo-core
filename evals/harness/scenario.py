@@ -172,6 +172,8 @@ class _Trial:
     last: TargetResult | None
     passed: bool
     reason: str
+    tokens: int = 0
+    cost_micro_usd: int = 0
     grader_evidence: JsonObject | None = None
 
 
@@ -205,6 +207,8 @@ class _ScenarioRun:
             reason = f"{passes}/{len(trials)} trials passed; first failure: {first_failure.reason}"
         evidence: JsonObject = {
             "user": self.case.user.payload(),
+            "memberKey": self.case.member_key,
+            "maxTurns": self.case.max_turns,
             "selectedAttempt": trials.index(first_failure) if first_failure is not None else 0,
             "attempts": [self._attempt(trial) for trial in trials],
         }
@@ -220,20 +224,40 @@ class _ScenarioRun:
         turns: list[ScenarioTurn] = []
         last: TargetResult | None = None
         stopped = False
+        tokens = 0
+        cost_micro_usd = 0
         for index in range(case.max_turns):
             message = await self.simulator.next_message(tuple(turns))
             if STOP_TOKEN in message:
                 stopped = True
                 break
             if not message:
-                return _Trial(tuple(turns), stopped, last, False, "simulator sent an empty message")
+                return _Trial(
+                    tuple(turns),
+                    stopped,
+                    last,
+                    False,
+                    "simulator sent an empty message",
+                    tokens,
+                    cost_micro_usd,
+                )
             result = await self.target.step(
                 conversation_id, message, f"{case.name}:{conversation_id}:{index}"
             )
             turns.append(ScenarioTurn(message, result.output.response))
             last = result
+            tokens += result.output.tokens
+            cost_micro_usd += result.output.cost_micro_usd
             if not result.clean:
-                return _Trial(tuple(turns), stopped, last, False, result.failure_reason)
+                return _Trial(
+                    tuple(turns),
+                    stopped,
+                    last,
+                    False,
+                    result.failure_reason,
+                    tokens,
+                    cost_micro_usd,
+                )
         if last is None:
             return _Trial(
                 tuple(turns),
@@ -241,9 +265,20 @@ class _ScenarioRun:
                 last,
                 False,
                 "simulator ended the conversation before it began",
+                tokens,
+                cost_micro_usd,
             )
         verdict = await case.grader(ScenarioOutcome(tuple(turns), last.output, stopped))
-        return _Trial(tuple(turns), stopped, last, verdict.passed, verdict.reason, verdict.evidence)
+        return _Trial(
+            tuple(turns),
+            stopped,
+            last,
+            verdict.passed,
+            verdict.reason,
+            tokens,
+            cost_micro_usd,
+            verdict.evidence,
+        )
 
     def _attempt(self, trial: _Trial) -> Json:
         output = trial.last.output if trial.last is not None else CapabilityOutput("", ())
@@ -268,6 +303,8 @@ class _ScenarioRun:
                 {"userMessage": turn.user_message, "reply": turn.reply} for turn in trial.turns
             ],
             "stopped": trial.stopped,
+            "tokens": trial.tokens,
+            "costMicroUsd": trial.cost_micro_usd,
             "grader": trial.grader_evidence or None,
             "trajectory": None if trajectory is None else trajectory.model_dump(mode="json"),
         }

@@ -15,7 +15,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from evals.harness.harness import EvalCaseResult, Json, JsonObject, infra_error
-from evals.harness.judge import JUDGE_REVISION, rubric_pass
+from evals.harness.judge import JUDGE_REVISION, CriterionVerdict, rubric_pass
 from ufo.schema.records import TurnStatus
 from ufo.sdk.models import Message
 
@@ -104,6 +104,7 @@ class CapabilitySample:
     output: CapabilityOutput
     verdict: CapabilityVerdict
     trajectory: EvalTrajectory | None
+    judge: tuple[CriterionVerdict, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -193,6 +194,14 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
                 ),
                 "compactions": sample_output.compactions,
                 "grader": sample_verdict.evidence or None,
+                "judge": (
+                    [
+                        {"criterion": item.criterion, "passed": item.passed, "reason": item.reason}
+                        for item in sample.judge
+                    ]
+                    if sample.judge
+                    else None
+                ),
                 "trajectory": (
                     None if sample.trajectory is None else sample.trajectory.model_dump(mode="json")
                 ),
@@ -201,6 +210,8 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
     evidence: JsonObject = {
         "message": case.message,
         "rubric": list(case.rubric),
+        "memberKey": case.member_key,
+        "webDependent": case.web_dependent,
         "selectedAttempt": selected_index,
         "attempts": attempts,
     }
@@ -247,13 +258,16 @@ async def sample_capability(case: CapabilityCase, target: CapabilityTarget) -> C
             CapabilityVerdict(False, "semantic rubric requires a model judge"),
             result.trajectory,
         )
-    passed, reason = await rubric_pass(
-        case.message, result.output.response, case.rubric, target.judge
-    )
+    verdict = await rubric_pass(case.message, result.output.response, case.rubric, target.judge)
     return CapabilitySample(
         result.output,
-        CapabilityVerdict(passed, f"{deterministic.reason}; {reason}", deterministic.evidence),
+        CapabilityVerdict(
+            verdict.passed,
+            f"{deterministic.reason}; {verdict.reason}",
+            deterministic.evidence,
+        ),
         result.trajectory,
+        judge=verdict.criteria,
     )
 
 
