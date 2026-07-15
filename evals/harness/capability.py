@@ -11,10 +11,12 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from evals.harness.harness import EvalCaseResult, Json, JsonObject, infra_error
 from evals.harness.judge import JUDGE_REVISION, rubric_pass
+from ufo.schema.records import TurnStatus
+from ufo.sdk.models import Message
 
 if TYPE_CHECKING:
     from evals.harness.target import CapabilityTarget
@@ -58,6 +60,16 @@ class TurnLog(BaseModel):
     attributes: JsonObject
 
 
+class EvalTrajectory(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    conversation_id: UUID
+    turn_id: UUID | None
+    status: TurnStatus | None
+    messages: tuple[Message, ...]
+    error: str = ""
+
+
 @dataclass(frozen=True)
 class CapabilityOutput:
     """The answer, tool trajectory, artifacts, and allowlisted log visible to a grader."""
@@ -75,6 +87,13 @@ class CapabilityOutput:
 
 
 type Grader = Callable[[CapabilityOutput], Awaitable[CapabilityVerdict]]
+
+
+@dataclass(frozen=True)
+class CapabilitySample:
+    output: CapabilityOutput
+    verdict: CapabilityVerdict
+    trajectory: EvalTrajectory | None
 
 
 @dataclass(frozen=True)
@@ -111,11 +130,13 @@ class CapabilityCase:
 
 async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) -> EvalCaseResult:
     samples = [await sample_capability(case, target) for _ in range(max(case.samples, 1))]
-    winning_indexes = [index for index, sample in enumerate(samples) if sample[1].passed]
+    winning_indexes = [index for index, sample in enumerate(samples) if sample.verdict.passed]
     selected_index = winning_indexes[0] if winning_indexes else len(samples) - 1
-    _, verdict = samples[selected_index]
+    verdict = samples[selected_index].verdict
     attempts: list[Json] = []
-    for sample_output, sample_verdict in samples:
+    for sample in samples:
+        sample_output = sample.output
+        sample_verdict = sample.verdict
         calls: list[Json] = []
         for call in sample_output.calls:
             calls.append(
@@ -140,6 +161,9 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
                     None if sample_output.log is None else sample_output.log.model_dump(mode="json")
                 ),
                 "grader": sample_verdict.evidence or None,
+                "trajectory": (
+                    None if sample.trajectory is None else sample.trajectory.model_dump(mode="json")
+                ),
             }
         )
     evidence: JsonObject = {
@@ -149,7 +173,9 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
         "attempts": attempts,
     }
     if not winning_indexes and case.web_dependent:
-        broke = infra_error(tuple(error for sample, _ in samples for error in sample.tool_errors))
+        broke = infra_error(
+            tuple(error for sample in samples for error in sample.output.tool_errors)
+        )
         if broke:
             return EvalCaseResult(
                 name=case.name,
@@ -167,20 +193,26 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
     return EvalCaseResult(name=case.name, passed=passed, reason=reason, evidence=evidence)
 
 
-async def sample_capability(
-    case: CapabilityCase, target: CapabilityTarget
-) -> tuple[CapabilityOutput, CapabilityVerdict]:
+async def sample_capability(case: CapabilityCase, target: CapabilityTarget) -> CapabilitySample:
     result = await target.run(case)
     if not result.clean:
-        return result.output, CapabilityVerdict(False, result.failure_reason)
+        return CapabilitySample(
+            result.output, CapabilityVerdict(False, result.failure_reason), result.trajectory
+        )
     deterministic = await case.grader(result.output)
     if not deterministic.passed or not case.rubric:
-        return result.output, deterministic
+        return CapabilitySample(result.output, deterministic, result.trajectory)
     if target.judge is None:
-        return result.output, CapabilityVerdict(False, "semantic rubric requires a model judge")
+        return CapabilitySample(
+            result.output,
+            CapabilityVerdict(False, "semantic rubric requires a model judge"),
+            result.trajectory,
+        )
     passed, reason = await rubric_pass(
         case.message, result.output.response, case.rubric, target.judge
     )
-    return result.output, CapabilityVerdict(
-        passed, f"{deterministic.reason}; {reason}", deterministic.evidence
+    return CapabilitySample(
+        result.output,
+        CapabilityVerdict(passed, f"{deterministic.reason}; {reason}", deterministic.evidence),
+        result.trajectory,
     )

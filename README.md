@@ -31,7 +31,8 @@ uv run python -m evals --share <current-run> <baseline-run>
 ```
 
 Each invocation records an immutable JSON run under `eval-reports/runs/` and rebuilds the offline
-`eval-reports/index.html` viewer. Comparisons show deltas only for digest-identical suites. Shared
-viewers contain only the named runs; their S3 object key has 192 random bits and the presigned URL
-expires after seven days by default. Sharing uses `--s3-bucket`, then `UFO_EVAL_SHARE_BUCKET`, then
-the configured S3 `[blob]` bucket.
+`eval-reports/index.html` viewer. Every attempt links to its stored transcript snapshot; inline
+images and private credential handoffs are omitted. Comparisons show deltas only for
+digest-identical suites. Shared viewers contain only the named runs; their S3 object key has 192
+random bits and the presigned URL expires after seven days by default. Sharing uses `--s3-bucket`,
+then `UFO_EVAL_SHARE_BUCKET`, then the configured S3 `[blob]` bucket.

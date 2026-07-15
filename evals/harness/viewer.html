@@ -234,6 +234,16 @@ pre {
 .attempt > summary, .call > summary { padding: 9px 10px; cursor: pointer; font-family: var(--mono); font-size: 11px; }
 .attempt-body, .call-body { padding: 0 10px 11px; }
 .call-grid { display: grid; gap: 9px; }
+.trajectory-link { color: var(--blue); font: 11px var(--mono); text-decoration: none; }
+.trajectory-link:hover { text-decoration: underline; }
+.trajectory-head { padding: 18px 20px; border-bottom: 1px solid var(--line); }
+.trajectory-head h2 { margin: 12px 0 3px; font-size: 19px; }
+.trajectory-meta { color: var(--muted); font: 11px/1.6 var(--mono); overflow-wrap: anywhere; }
+.trajectory-body { padding: 20px; max-width: 1200px; }
+.message { margin: 9px 0; border: 1px solid var(--line); border-radius: 5px; background: var(--panel); }
+.message-head { padding: 7px 10px; border-bottom: 1px solid var(--line); color: var(--muted); font: 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+.message-body { padding: 10px; }
+.message-body pre + pre { margin-top: 8px; }
 .empty { padding: 32px 20px; color: var(--muted); }
 .archive-empty { max-width: 680px; margin: 15vh auto; padding: 36px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
 .archive-empty h1 { margin-top: 0; }
@@ -272,7 +282,8 @@ const state = {
   suite: hash.get('suite') || '',
   caseName: hash.get('case') || '',
   filter: hash.get('filter') || 'all',
-  scoresOpen: hash.get('scores') === 'open'
+  scoresOpen: hash.get('scores') === 'open',
+  trajectory: hash.get('trajectory') || ''
 };
 const app = document.getElementById('app');
 
@@ -331,12 +342,17 @@ function unionNames(left, right, field) {
   return [...new Set([...(left || []).map(item => item[field]), ...(right || []).map(item => item[field])])];
 }
 function persist() {
+  history.replaceState(null, '', stateHash());
+}
+function stateHash(overrides = {}) {
   const next = new URLSearchParams();
-  for (const [key, value] of Object.entries({
+  const values = {...{
     current: state.current, baseline: state.baseline, suite: state.suite,
-    case: state.caseName, filter: state.filter, scores: state.scoresOpen ? 'open' : ''
-  })) if (value) next.set(key, value);
-  history.replaceState(null, '', '#' + next.toString());
+    case: state.caseName, filter: state.filter, scores: state.scoresOpen ? 'open' : '',
+    trajectory: state.trajectory
+  }, ...overrides};
+  for (const [key, value] of Object.entries(values)) if (value) next.set(key, value);
+  return '#' + next.toString();
 }
 function comparableTotals(base, current) {
   const totals = {basePassed: 0, currentPassed: 0, scored: 0, regressions: 0, fixes: 0};
@@ -453,13 +469,17 @@ function callMarkup(call, index) {
       <div><div class="section-title">Result</div><pre>${h(call.hasResult ? call.result : 'No tool result was recorded.')}</pre></div>
     </div></div></details>`;
 }
-function attemptMarkup(attempt, index, selected) {
+function attemptMarkup(attempt, index, selected, kind) {
   const calls = attempt.calls || [];
   const artifacts = attempt.artifacts || [];
+  const trajectory = attempt.trajectory
+    ? `<a class="trajectory-link" href="${h(stateHash({trajectory: kind + ':' + index}))}">View trajectory →</a>`
+    : '';
   return `<details class="attempt" ${index === selected ? 'open' : ''}>
     <summary>Attempt ${index + 1} · <span class="${attempt.passed ? 'positive' : 'negative'}">${attempt.passed ? 'pass' : 'fail'}</span>${index === selected ? ' · selected' : ''}</summary>
     <div class="attempt-body">
       <div class="reason">${h(attempt.reason)}</div>
+      ${trajectory}
       <div class="section"><div class="section-title">Agent response</div><pre>${h(attempt.response || 'No final response.')}</pre></div>
       <div class="section"><div class="section-title">Tool trajectory · ${calls.length}</div>${calls.length ? calls.map(callMarkup).join('') : '<div class="empty">No tool calls.</div>'}</div>
       <div class="section"><div class="section-title">Artifacts</div><pre>${h(artifacts.length ? artifacts.join('\n') : 'None')}${attempt.artifactError ? '\n' + h(attempt.artifactError) : ''}</pre></div>
@@ -475,10 +495,63 @@ function paneMarkup(kind, run, report, item) {
     <div class="pane-head"><div><div class="pane-kicker">${kind} · ${h(shortId(run))}</div><div class="pane-title">${h(runName(run))}</div></div><span class="badge ${status.cls}">${status.label}</span></div>
     <div class="reason">${h(item.reason)}</div>
     <div class="section"><div class="section-title">Run</div><pre>${h(formatDate(run.created_at))}\nrevision ${h(run.revision)}\nagent ${h(run.agent)}\nufo ${h(run.ufo_version)}\nsuite ${h(report.digest)}</pre></div>
-    <div class="section"><div class="section-title">Attempts · ${attempts.length}</div>${attempts.length ? attempts.map((attempt, index) => attemptMarkup(attempt, index, evidence.selectedAttempt)).join('') : '<div class="empty">No attempt evidence was recorded.</div>'}</div>
+    <div class="section"><div class="section-title">Attempts · ${attempts.length}</div>${attempts.length ? attempts.map((attempt, index) => attemptMarkup(attempt, index, evidence.selectedAttempt, kind.toLowerCase())).join('') : '<div class="empty">No attempt evidence was recorded.</div>'}</div>
   </section>`;
 }
+function blockMarkup(block) {
+  if (block.type === 'tool_use') {
+    return `<details class="call"><summary>Tool call · ${h(block.name)}</summary><div class="call-body"><pre>${h(JSON.stringify(block.input, null, 2))}</pre></div></details>`;
+  }
+  if (block.type === 'tool_result') {
+    const content = typeof block.content === 'string'
+      ? block.content : (block.content || []).map(item => item.text || `[${item.type}]`).join('\n');
+    return `<details class="call"><summary>Tool result · ${h(block.tool_use_id)}${block.is_error ? ' · error' : ''}</summary><div class="call-body"><pre>${h(content)}</pre></div></details>`;
+  }
+  if (block.type === 'image') {
+    return `<pre>${h(`[image · ${block.source && block.source.media_type || 'unknown'}]`)}</pre>`;
+  }
+  return `<pre>${h(block.text || '')}</pre>`;
+}
+function messageMarkup(message, index) {
+  const content = typeof message.content === 'string'
+    ? `<pre>${h(message.content)}</pre>`
+    : (message.content || []).map(blockMarkup).join('');
+  return `<article class="message"><div class="message-head">${index + 1} · ${h(message.role)}</div><div class="message-body">${content}</div></article>`;
+}
+function messagesMarkup(messages) {
+  return messages.length ? messages.map(messageMarkup).join('') : '<div class="empty">No messages.</div>';
+}
+function trajectoryMarkup(kind, run, report, item, attempt, index) {
+  const trajectory = attempt.trajectory;
+  return `<section class="detail">
+    <div class="trajectory-head"><a class="trajectory-link" href="${h(stateHash({trajectory: ''}))}">← Back to report</a>
+      <h2>${h(item.name)} · attempt ${index + 1}</h2>
+      <div class="trajectory-meta">${h(kind)} · run ${h(shortId(run))}<br>conversation ${h(trajectory.conversation_id)}<br>turn ${h(trajectory.turn_id || 'not admitted')} · status ${h(trajectory.status || 'not admitted')}</div>
+    </div>
+    <div class="trajectory-body">
+      ${trajectory.error ? `<div class="reason negative">${h(trajectory.error)}</div>` : ''}
+      <div class="section"><div class="section-title">Stored transcript snapshot · ${(trajectory.messages || []).length} messages</div>${messagesMarkup(trajectory.messages || [])}</div>
+    </div>
+  </section>`;
+}
+function selectedTrajectory(base, current, before, after) {
+  if (!state.trajectory) return '';
+  const [kind, rawIndex] = state.trajectory.split(':', 2);
+  const index = Number(rawIndex);
+  const run = kind === 'baseline' ? base : current;
+  const report = kind === 'baseline' ? before : after;
+  const item = caseByName(report, state.caseName);
+  const attempts = item && item.evidence && item.evidence.attempts || [];
+  const attempt = attempts[index];
+  if (!run || !report || !item || !attempt || !attempt.trajectory) {
+    state.trajectory = '';
+    return '';
+  }
+  return trajectoryMarkup(kind, run, report, item, attempt, index);
+}
 function detailMarkup(base, current, before, after) {
+  const trajectory = selectedTrajectory(base, current, before, after);
+  if (trajectory) return trajectory;
   const prior = caseByName(before, state.caseName);
   const item = caseByName(after, state.caseName);
   const evidence = (item || prior || {}).evidence || {};
@@ -513,15 +586,26 @@ function render() {
       ${detailMarkup(base, current, before, after)}
     </div></div>`;
   persist();
-  document.getElementById('current-run').addEventListener('change', event => { state.current = event.target.value; render(); });
-  document.getElementById('baseline-run').addEventListener('change', event => { state.baseline = event.target.value; render(); });
-  document.querySelectorAll('[data-suite]').forEach(node => node.addEventListener('click', () => { state.suite = node.dataset.suite; state.caseName = ''; render(); }));
-  document.querySelectorAll('[data-case]').forEach(node => node.addEventListener('click', () => { state.caseName = node.dataset.case; render(); }));
-  document.querySelectorAll('[data-filter]').forEach(node => node.addEventListener('click', () => { state.filter = node.dataset.filter; state.caseName = ''; render(); }));
+  document.getElementById('current-run').addEventListener('change', event => { state.current = event.target.value; state.trajectory = ''; render(); });
+  document.getElementById('baseline-run').addEventListener('change', event => { state.baseline = event.target.value; state.trajectory = ''; render(); });
+  document.querySelectorAll('[data-suite]').forEach(node => node.addEventListener('click', () => { state.suite = node.dataset.suite; state.caseName = ''; state.trajectory = ''; render(); }));
+  document.querySelectorAll('[data-case]').forEach(node => node.addEventListener('click', () => { state.caseName = node.dataset.case; state.trajectory = ''; render(); }));
+  document.querySelectorAll('[data-filter]').forEach(node => node.addEventListener('click', () => { state.filter = node.dataset.filter; state.caseName = ''; state.trajectory = ''; render(); }));
   document.getElementById('scoreboard').addEventListener('toggle', event => { state.scoresOpen = event.target.open; persist(); });
   document.getElementById('copy-link').addEventListener('click', async () => copyText(location.href, 'Link copied'));
   document.getElementById('copy-runs').addEventListener('click', async () => copyText([state.current, state.baseline].filter(Boolean).join(' '), 'Run IDs copied'));
 }
+window.addEventListener('hashchange', () => {
+  const next = new URLSearchParams(location.hash.slice(1));
+  state.current = next.get('current') || state.current;
+  state.baseline = next.get('baseline') || '';
+  state.suite = next.get('suite') || '';
+  state.caseName = next.get('case') || '';
+  state.filter = next.get('filter') || 'all';
+  state.scoresOpen = next.get('scores') === 'open';
+  state.trajectory = next.get('trajectory') || '';
+  render();
+});
 async function copyText(value, message) {
   try { await navigator.clipboard.writeText(value); document.getElementById('toast').textContent = message; }
   catch (_) { window.prompt('Copy to clipboard', value); }

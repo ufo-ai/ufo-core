@@ -18,21 +18,27 @@ import sqlalchemy as sa
 from evals.harness.capability import (
     CapabilityCase,
     CapabilityOutput,
+    EvalTrajectory,
     SharedArtifact,
     ToolInvocation,
     TurnLog,
 )
+from evals.harness.harness import Json
 from evals.harness.judge import JudgeLeg
 from ufo.blob import BlobNotFound, BlobStore
 from ufo.db import workspace_tx
 from ufo.schema import tables
+from ufo.schema.records import CredentialRequest, TurnStatus
 from ufo.sdk.context import ExtensionContext, Trajectory
-from ufo.sdk.models import Message, TextBlock, ToolResultBlock, ToolUseBlock
+from ufo.sdk.models import ImageBlock, Message, TextBlock, ToolResultBlock, ToolUseBlock
 from ufo.transcript import TranscriptDecodeError, decode, transcript_key
 
 MAX_EVAL_ARTIFACTS = 8
 MAX_EVAL_ARTIFACT_BYTES = 16 * 1024 * 1024
 MAX_EVAL_ARTIFACT_TOTAL_BYTES = 32 * 1024 * 1024
+MAX_EVAL_TRAJECTORY_BYTES = 8 * 1024 * 1024
+PRIVATE_HANDOFF_TOOL = "request_credentials"
+PRIVATE_HANDOFF_REDACTED = "[private handoff redacted]"
 TERMINAL_CHILD_STATUSES = frozenset({"done", "failed", "cancelled"})
 CHILD_TRANSCRIPT_POLL_SECONDS = 0.2
 CHILD_TRANSCRIPT_POLL_ATTEMPTS = 25
@@ -62,6 +68,7 @@ class TargetResult:
     output: CapabilityOutput
     clean: bool
     failure_reason: str = ""
+    trajectory: EvalTrajectory | None = None
 
 
 class CapabilityTarget(Protocol):
@@ -107,25 +114,49 @@ class InProcessTarget:
         except Exception as error:
             message = f"{type(error).__name__}: {error}"
             return TargetResult(
-                CapabilityOutput("", (), (message,)), False, f"invoke raised: {message}"
+                CapabilityOutput("", (), (message,)),
+                False,
+                f"invoke raised: {message}",
+                EvalTrajectory(
+                    conversation_id=conversation_id,
+                    turn_id=None,
+                    status=None,
+                    messages=(),
+                    error=f"invoke raised: {message}",
+                ),
             )
         trajectory = await self.outcome.settle(conversation_id, turn_id)
         if trajectory is None:
             if self.logs is not None:
                 await self.logs.discard(turn_id)
             return TargetResult(
-                CapabilityOutput("", (), ()), False, "turn produced no terminal transcript"
+                CapabilityOutput("", (), ()),
+                False,
+                "turn produced no terminal transcript",
+                EvalTrajectory(
+                    conversation_id=conversation_id,
+                    turn_id=turn_id,
+                    status=await self._turn_status(turn_id),
+                    messages=(),
+                    error="turn produced no terminal transcript",
+                ),
             )
         output = capability_output(trajectory.messages)
+        status = await self._turn_status(turn_id)
+        snapshot = await self._trajectory(conversation_id, turn_id, status, trajectory.messages)
         children, descendant_ids, missing_child = await self._descendants(turn_id)
         if missing_child:
-            return TargetResult(output, clean=False, failure_reason=missing_child)
+            return TargetResult(
+                output, clean=False, failure_reason=missing_child, trajectory=snapshot
+            )
         output = _splice(output, children)
-        turn_failure = await self._turn_failure(turn_id)
+        turn_failure = self._turn_failure(status)
         if turn_failure:
             if self.logs is not None:
                 await self.logs.discard(turn_id)
-            return TargetResult(output, clean=False, failure_reason=turn_failure)
+            return TargetResult(
+                output, clean=False, failure_reason=turn_failure, trajectory=snapshot
+            )
         if self.logs is not None:
             log = await self.logs.read(turn_id)
             if log is None:
@@ -134,7 +165,7 @@ class InProcessTarget:
         if self.blob is not None:
             collected = await self._shared_artifacts((turn_id, *descendant_ids))
             output = replace(output, artifacts=collected.artifacts, artifact_error=collected.error)
-        return TargetResult(output, clean=True)
+        return TargetResult(output, clean=True, trajectory=snapshot)
 
     async def _descendants(
         self, turn_id: UUID
@@ -204,18 +235,48 @@ class InProcessTarget:
                 await asyncio.sleep(CHILD_TRANSCRIPT_POLL_SECONDS)
         return None
 
-    async def _turn_failure(self, turn_id: UUID) -> str:
+    async def _turn_status(self, turn_id: UUID) -> TurnStatus | None:
         async with workspace_tx() as connection:
             status = (
                 await connection.execute(
                     sa.select(tables.turn.c.status).where(tables.turn.c.id == turn_id)
                 )
             ).scalar_one_or_none()
+        return status
+
+    def _turn_failure(self, status: TurnStatus | None) -> str:
         if status is None:
             return "turn row disappeared before grading"
         if status != "done":
             return f"turn ended with status {status}"
         return ""
+
+    async def _trajectory(
+        self,
+        conversation_id: UUID,
+        turn_id: UUID,
+        status: TurnStatus | None,
+        messages: tuple[Message, ...],
+    ) -> EvalTrajectory:
+        private_results, private_values = _private_handoffs(messages)
+        snapshot = EvalTrajectory(
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            status=status,
+            messages=_safe_messages(messages, private_results, private_values),
+        )
+        if len(snapshot.model_dump_json().encode()) <= MAX_EVAL_TRAJECTORY_BYTES:
+            return snapshot
+        return EvalTrajectory(
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            status=status,
+            messages=(),
+            error=(
+                f"stored transcript snapshot exceeds {MAX_EVAL_TRAJECTORY_BYTES} bytes and was "
+                "omitted"
+            ),
+        )
 
     async def _shared_artifacts(self, turn_ids: tuple[UUID, ...]) -> ArtifactCollection:
         """Artifacts the run shared, from the evaluated turn and every delegated descendant — a
@@ -267,6 +328,7 @@ def capability_output(messages: tuple[Message, ...]) -> CapabilityOutput:
     """Rebuild the grader-visible output from the transcript: the final answer (the last assistant
     text), the ordered tool calls (each tool_use joined to its tool_result by id), and the error
     text of any call that failed."""
+    private_results, private_values = _private_handoffs(messages)
     result_by_id: dict[str, ToolResultBlock] = {}
     for message in messages:
         if isinstance(message.content, str):
@@ -282,18 +344,138 @@ def capability_output(messages: tuple[Message, ...]) -> CapabilityOutput:
         for block in message.content:
             if isinstance(block, ToolUseBlock):
                 result = result_by_id.get(block.id)
+                result_text = (
+                    PRIVATE_HANDOFF_REDACTED
+                    if block.id in private_results and result is not None
+                    else _redact_text(_result_text(result), private_values)
+                )
                 calls.append(
                     ToolInvocation(
                         block.name,
-                        dict(block.input),
-                        _result_text(result),
+                        _redact_object(block.input, private_values),
+                        result_text,
                         has_result=result is not None,
                         is_error=result.is_error if result is not None else False,
                     )
                 )
                 if result is not None and result.is_error:
-                    errors.append(_result_text(result))
-    return CapabilityOutput(_final_answer(messages), tuple(calls), tuple(errors))
+                    errors.append(result_text)
+    return CapabilityOutput(
+        _redact_text(_final_answer(messages), private_values), tuple(calls), tuple(errors)
+    )
+
+
+def _private_handoffs(messages: tuple[Message, ...]) -> tuple[frozenset[str], tuple[str, ...]]:
+    private_results = frozenset(
+        block.id
+        for message in messages
+        if not isinstance(message.content, str)
+        for block in message.content
+        if isinstance(block, ToolUseBlock) and block.name == PRIVATE_HANDOFF_TOOL
+    )
+    values: list[str] = []
+    for message in messages:
+        if isinstance(message.content, str):
+            continue
+        for block in message.content:
+            if not isinstance(block, ToolResultBlock) or block.tool_use_id not in private_results:
+                continue
+            _, _, payload = _result_text(block).partition("\n")
+            try:
+                request = CredentialRequest.model_validate_json(payload.split("\n", 1)[0])
+                values.append(request.sealed)
+            except ValueError:
+                continue
+    return private_results, tuple(values)
+
+
+def _safe_messages(
+    messages: tuple[Message, ...],
+    private_results: frozenset[str],
+    private_values: tuple[str, ...],
+) -> tuple[Message, ...]:
+    safe: list[Message] = []
+    for message in messages:
+        if isinstance(message.content, str):
+            safe.append(
+                Message(role=message.role, content=_redact_text(message.content, private_values))
+            )
+            continue
+        blocks: list[TextBlock | ToolUseBlock | ToolResultBlock] = []
+        for block in message.content:
+            match block:
+                case TextBlock():
+                    blocks.append(TextBlock(text=_redact_text(block.text, private_values)))
+                case ImageBlock():
+                    blocks.append(
+                        TextBlock(
+                            text=(
+                                f"[image omitted: {block.source.media_type}, "
+                                f"{len(block.source.data)} encoded characters]"
+                            )
+                        )
+                    )
+                case ToolUseBlock():
+                    blocks.append(
+                        ToolUseBlock(
+                            id=block.id,
+                            name=block.name,
+                            input=_redact_object(block.input, private_values),
+                        )
+                    )
+                case ToolResultBlock():
+                    if block.tool_use_id in private_results:
+                        content: str | tuple[TextBlock, ...] = PRIVATE_HANDOFF_REDACTED
+                    elif isinstance(block.content, str):
+                        content = _redact_text(block.content, private_values)
+                    else:
+                        content = tuple(
+                            TextBlock(
+                                text=(
+                                    _redact_text(item.text, private_values)
+                                    if isinstance(item, TextBlock)
+                                    else (
+                                        f"[image omitted: {item.source.media_type}, "
+                                        f"{len(item.source.data)} encoded characters]"
+                                    )
+                                )
+                            )
+                            for item in block.content
+                        )
+                    blocks.append(
+                        ToolResultBlock(
+                            tool_use_id=block.tool_use_id,
+                            content=content,
+                            is_error=block.is_error,
+                        )
+                    )
+        safe.append(Message(role=message.role, content=tuple(blocks)))
+    return tuple(safe)
+
+
+def _redact_text(text: str, private_values: tuple[str, ...]) -> str:
+    for value in private_values:
+        text = text.replace(value, PRIVATE_HANDOFF_REDACTED)
+    return text
+
+
+def _redact_json(value: Json, private_values: tuple[str, ...]) -> Json:
+    match value:
+        case str():
+            return _redact_text(value, private_values)
+        case list():
+            return [_redact_json(item, private_values) for item in value]
+        case dict():
+            return _redact_object(value, private_values)
+        case _:
+            return value
+
+
+def _redact_object(value: dict[str, Json], private_values: tuple[str, ...]) -> dict[str, Json]:
+    return {
+        name: (PRIVATE_HANDOFF_REDACTED if name == "sealed" else _redact_json(item, private_values))
+        for name, item in value.items()
+    }
 
 
 def _splice(

@@ -3,7 +3,8 @@ turn against a running `ufoctl serve`. It fills the two steps the scoped Extensi
 opening a fresh conversation per case and awaiting an admitted turn's terminal transcript — by
 reaching the workspace's own rows and blob store, and it builds the ExtensionContext bound to the
 shared admission invoker (the same producer every surface and job admits through). Enqueuing needs a
-running serve to drain the turn queue; the driver polls the turn row until it settles."""
+running serve to drain the turn queue; the driver awaits a queued or running durable workflow, then
+reads the terminal row and its exact-sequence transcript."""
 
 from __future__ import annotations
 
@@ -12,24 +13,23 @@ from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
-from dbos import DBOSClient
+from dbos import DBOSClient, WorkflowHandleAsync
+from dbos import error as dbos_error
 
 from ufo.blob import BlobNotFound, BlobStore
-from ufo.config import Config
 from ufo.db import workspace_tx
-from ufo.ext.context import ExtensionContext, Trajectory, context_for
-from ufo.ext.loader import load_manifests
+from ufo.ext.context import Trajectory
 from ufo.governance import prompt_digest
-from ufo.models.registry import model_registry
 from ufo.schema import tables
-from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.transcript import TranscriptDecodeError, decode, transcript_key
 from ufo.workspace import ws
 
 EVAL_SURFACE = "eval"
 POLL_INTERVAL_SECONDS = 1.0
-MAX_POLLS = 300
+WORKFLOW_WAIT_SECONDS = 300.0
 TERMINAL_STATUSES = frozenset({"done", "cancelled", "failed"})
+WORKFLOW_STATUSES = frozenset({"queued", "running"})
+FAILED_WORKFLOW_STATUSES = frozenset({"ERROR", "MAX_RECOVERY_ATTEMPTS_EXCEEDED", "CANCELLED"})
 
 
 async def resolve_workspace_and_agent(
@@ -52,28 +52,15 @@ async def resolve_workspace_and_agent(
     return workspace_id, agent.id, agent.prompt, agent.model
 
 
-def eval_context(config: Config, workspace_id: UUID, blob: BlobStore) -> ExtensionContext:
-    dbos = DBOSClient(system_database_url=config.database.system_url)
-    return context_for(
-        "evals",
-        frozenset(),
-        blob=blob,
-        invoker=AdmissionInvoker(
-            admission=Admission(dbos=dbos, durable_surfaces=frozenset()),
-            workspace_id=workspace_id,
-        ),
-        model_resolver=model_registry(config, load_manifests(config.pack.name)),
-    )
-
-
 @dataclass(frozen=True)
 class WorkspaceDriver:
     workspace_id: UUID
     agent_id: UUID
     agent_prompt: str
     blob: BlobStore
+    dbos: DBOSClient
     poll_interval_seconds: float = POLL_INTERVAL_SECONDS
-    max_polls: int = MAX_POLLS
+    workflow_wait_seconds: float = WORKFLOW_WAIT_SECONDS
 
     async def open(self, case_name: str, member_key: str | None = None) -> UUID:
         """Open one isolated eval conversation. A member-bound case names its member by the exact
@@ -109,19 +96,66 @@ class WorkspaceDriver:
         return conversation_id
 
     async def settle(self, conversation_id: UUID, turn_id: UUID) -> Trajectory | None:
-        for _ in range(self.max_polls):
-            async with workspace_tx() as connection:
-                status = (
-                    await connection.execute(
-                        sa.select(tables.turn.c.status).where(tables.turn.c.id == turn_id)
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(tables.turn.c.status, tables.turn.c.seq).where(
+                        tables.turn.c.id == turn_id
                     )
-                ).scalar_one_or_none()
-            if status in TERMINAL_STATUSES:
-                return await self._trajectory(conversation_id)
-            await asyncio.sleep(self.poll_interval_seconds)
-        return None
+                )
+            ).one_or_none()
+        if row is None:
+            return None
+        if row.status in TERMINAL_STATUSES:
+            return await self._trajectory(conversation_id, row.seq)
+        if row.status not in WORKFLOW_STATUSES:
+            return None
+        try:
+            async with asyncio.timeout(self.workflow_wait_seconds):
+                handle: WorkflowHandleAsync[object]
+                while True:
+                    try:
+                        handle = await self.dbos.retrieve_workflow_async(str(turn_id))
+                        break
+                    except dbos_error.DBOSNonExistentWorkflowError:
+                        async with workspace_tx() as connection:
+                            row = (
+                                await connection.execute(
+                                    sa.select(tables.turn.c.status, tables.turn.c.seq).where(
+                                        tables.turn.c.id == turn_id
+                                    )
+                                )
+                            ).one_or_none()
+                        if row is None:
+                            return None
+                        if row.status in TERMINAL_STATUSES:
+                            return await self._trajectory(conversation_id, row.seq)
+                        if row.status not in WORKFLOW_STATUSES:
+                            return None
+                        if row.status == "running":
+                            raise
+                        await asyncio.sleep(self.poll_interval_seconds)
+                try:
+                    await handle.get_result(polling_interval_sec=self.poll_interval_seconds)
+                except Exception:
+                    workflow = await handle.get_status()
+                    if workflow.status not in FAILED_WORKFLOW_STATUSES:
+                        raise
+        except TimeoutError:
+            return None
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(tables.turn.c.status, tables.turn.c.seq).where(
+                        tables.turn.c.id == turn_id
+                    )
+                )
+            ).one_or_none()
+        if row is None or row.status not in TERMINAL_STATUSES:
+            return None
+        return await self._trajectory(conversation_id, row.seq)
 
-    async def _trajectory(self, conversation_id: UUID) -> Trajectory | None:
+    async def _trajectory(self, conversation_id: UUID, turn_seq: int) -> Trajectory | None:
         try:
             body = await self.blob.get(transcript_key(conversation_id))
         except BlobNotFound:
@@ -129,6 +163,8 @@ class WorkspaceDriver:
         try:
             conversation = decode(body)
         except TranscriptDecodeError:
+            return None
+        if conversation.seq != turn_seq:
             return None
         return Trajectory(
             conversation_id=conversation_id,

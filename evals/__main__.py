@@ -21,9 +21,10 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 from cryptography.fernet import Fernet
+from dbos import DBOSClient
 from ufo_ext_memory.events import MEMORY_RECALL_EVENT
 
-from evals.driver import WorkspaceDriver, eval_context, resolve_workspace_and_agent
+from evals.driver import WorkspaceDriver, resolve_workspace_and_agent
 from evals.harness.harness import EvalReport
 from evals.harness.judge import JUDGE_REVISION, ModelJudge
 from evals.harness.registry import EvalTask, selected_tasks
@@ -44,7 +45,11 @@ from ufo.blob import blob_store_for
 from ufo.config import Config, config_path, load_config
 from ufo.credentials import CredentialStore
 from ufo.db import dispose_db, init_db
+from ufo.ext.context import context_for
+from ufo.ext.loader import load_manifests
+from ufo.models.registry import model_registry
 from ufo.schema.records import DEFAULT_AGENT_NAME
+from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.workspace import init_workspace_credentials, ws
 
 DEFAULT_OUT = Path("eval-reports")
@@ -210,8 +215,18 @@ async def _run(
                 agent_name, workspace_id
             )
             blob = blob_store_for(config.blob)
-            driver = WorkspaceDriver(workspace_id, agent_id, agent_prompt, blob)
-            ctx = eval_context(config, workspace_id, blob)
+            dbos = DBOSClient(system_database_url=config.database.system_url)
+            driver = WorkspaceDriver(workspace_id, agent_id, agent_prompt, blob, dbos)
+            ctx = context_for(
+                "evals",
+                frozenset(),
+                blob=blob,
+                invoker=AdmissionInvoker(
+                    admission=Admission(dbos=dbos, durable_surfaces=frozenset()),
+                    workspace_id=workspace_id,
+                ),
+                model_resolver=model_registry(config, load_manifests(config.pack.name)),
+            )
             if ctx.model is None:
                 raise RuntimeError("eval context requires model access")
             target = InProcessTarget(

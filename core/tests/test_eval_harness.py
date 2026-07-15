@@ -6,6 +6,7 @@ only stand-in is the turn worker — a StubWorker that plays the DBOS worker by 
 turn row and the transcript the agent would have produced, then returns the turn id. The target's
 real work — invoke, reconstruct, grade — is what the tests assert, read back through the corpus."""
 
+import asyncio
 from base64 import urlsafe_b64decode
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -19,6 +20,8 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 from aiobotocore.session import get_session
+from dbos import DBOSClient
+from dbos import error as dbos_error
 from httpx import AsyncClient
 
 import evals.harness.target as harness_target
@@ -31,6 +34,7 @@ from evals.harness.capability import (
     CapabilityCase,
     CapabilityOutput,
     CapabilityVerdict,
+    EvalTrajectory,
     SharedArtifact,
     ToolInvocation,
     TurnLog,
@@ -77,6 +81,8 @@ from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, ModelAccess, Trajectory, context_for
 from ufo.loop.transcript import Transcript
 from ufo.models.interface import (
+    ImageBlock,
+    ImageSource,
     Message,
     ModelClient,
     ModelEvent,
@@ -87,7 +93,7 @@ from ufo.models.interface import (
 )
 from ufo.schema import tables
 from ufo.schema.records import Usage
-from ufo.transcript import Conversation, transcript_key
+from ufo.transcript import Conversation, encode, transcript_key
 from ufo.workspace import ws
 
 MODEL = "claude-opus-4-8"
@@ -134,7 +140,7 @@ def _research_transcript() -> tuple[Message, ...]:
 class StubWorker:
     blob: FilesystemBlobStore
     workspace_id: UUID
-    transcript: tuple[Message, ...]
+    transcript: tuple[Message, ...] | None
     status: str = "done"
     artifact: tuple[str, bytes] | None = None
     child_transcript: tuple[Message, ...] | None = None
@@ -165,9 +171,10 @@ class StubWorker:
                     updated_at=sa.func.now(),
                 )
             )
-        await Transcript(blob=self.blob, conversation_id=conversation_id).write(
-            Conversation(seq=2, messages=self.transcript)
-        )
+        if self.transcript is not None:
+            await Transcript(blob=self.blob, conversation_id=conversation_id).write(
+                Conversation(seq=1, messages=self.transcript)
+            )
         if self.child_transcript is not None:
             child_conversation_id = uuid4()
             async with workspace_tx() as connection:
@@ -260,6 +267,24 @@ class StubResolver:
 
     async def client_for(self, model: str) -> ModelClient:
         return self.client
+
+
+@dataclass(frozen=True)
+class UncalledDbos:
+    async def retrieve_workflow_async(self, workflow_id: str) -> object:
+        raise AssertionError("terminal turns have no workflow to retrieve")
+
+
+UNCALLED_DBOS = cast(DBOSClient, UncalledDbos())
+
+
+@dataclass(frozen=True)
+class MissingDbos:
+    requested: asyncio.Event
+
+    async def retrieve_workflow_async(self, workflow_id: str) -> object:
+        self.requested.set()
+        raise dbos_error.DBOSNonExistentWorkflowError("target", workflow_id)
 
 
 @dataclass
@@ -413,6 +438,7 @@ async def test_capability_case_runs_through_invoke_and_scores_the_trajectory(
         agent_id=agent_id,
         conversations=DbConversations(workspace_id),
         outcome=CorpusOutcome(ctx),
+        blob=blob,
     )
     case = CapabilityCase(
         "research-then-save",
@@ -428,6 +454,106 @@ async def test_capability_case_runs_through_invoke_and_scores_the_trajectory(
     calls = cast(list[dict[str, object]], attempts[0]["calls"])
     assert [call["name"] for call in calls] == ["search_web", "memory_update"]
     assert attempts[0]["response"] == "Done — found it and remembered it for the team."
+    trajectory = cast(dict[str, object], attempts[0]["trajectory"])
+    assert trajectory["conversation_id"]
+    assert trajectory["turn_id"]
+    assert trajectory["status"] == "done"
+    assert len(cast(list[object], trajectory["messages"])) == len(_research_transcript())
+
+
+async def test_eval_trajectory_omits_images_and_private_handoffs(db: None, tmp_path) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    seal = "sealed-eval-secret"
+    transcript = (
+        Message(
+            role="assistant",
+            content=(
+                ToolUseBlock(
+                    id="credential",
+                    name="request_credentials",
+                    input={"reason": "test", "prompts": []},
+                ),
+            ),
+        ),
+        Message(
+            role="user",
+            content=(
+                ToolResultBlock(
+                    tool_use_id="credential",
+                    content=(
+                        "Collect privately\n"
+                        '{"reason":"test","prompts":[],"sealed":"sealed-eval-secret"}'
+                    ),
+                ),
+            ),
+        ),
+        Message(
+            role="assistant",
+            content=(
+                ImageBlock(source=ImageSource(media_type="image/png", data="base64-image-secret")),
+            ),
+        ),
+        Message(role="assistant", content=f"handoff {seal}"),
+    )
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = StubWorker(blob, workspace_id, transcript)
+    ctx = _context(blob, worker)
+    target = InProcessTarget(
+        ctx=ctx,
+        agent_id=agent_id,
+        conversations=DbConversations(workspace_id),
+        outcome=CorpusOutcome(ctx),
+        blob=blob,
+    )
+
+    with ws(workspace_id):
+        result = await target.run(CapabilityCase("private", "collect", restraint_scorer(WEB_TOOLS)))
+
+    assert result.clean
+    assert result.trajectory is not None
+    serialized = result.trajectory.model_dump_json()
+    assert seal not in serialized
+    assert "base64-image-secret" not in serialized
+    assert "[private handoff redacted]" in serialized
+    assert "[image omitted: image/png" in serialized
+    assert result.output.calls[0].result == "[private handoff redacted]"
+
+
+async def test_oversized_eval_trajectory_is_omitted_without_aborting_the_case(
+    db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = StubWorker(
+        blob,
+        workspace_id,
+        (
+            Message(role="user", content="x" * 200),
+            Message(role="assistant", content="expected"),
+        ),
+    )
+    ctx = _context(blob, worker)
+    target = InProcessTarget(
+        ctx=ctx,
+        agent_id=agent_id,
+        conversations=DbConversations(workspace_id),
+        outcome=CorpusOutcome(ctx),
+        blob=blob,
+    )
+    monkeypatch.setattr("evals.harness.target.MAX_EVAL_TRAJECTORY_BYTES", 200)
+
+    with ws(workspace_id):
+        result = await run_capability_case(
+            CapabilityCase("oversized", "answer", exact_scorer("expected")), target
+        )
+
+    attempts = cast(list[dict[str, object]], result.evidence["attempts"])
+    trajectory = cast(dict[str, object], attempts[0]["trajectory"])
+    assert result.passed
+    assert trajectory["messages"] == []
+    assert trajectory["error"] == "stored transcript snapshot exceeds 200 bytes and was omitted"
 
 
 async def test_in_process_target_attaches_the_turn_logs(db: None, tmp_path) -> None:
@@ -591,6 +717,42 @@ async def test_repeated_case_runs_use_conversation_scoped_idempotency_keys(
     assert first.clean and second.clean
     assert len(set(worker.idempotency_keys)) == 2
     assert all(key.startswith("repeatable:") for key in worker.idempotency_keys)
+
+
+async def test_multi_sample_case_retains_each_trajectory() -> None:
+    conversation_ids = (uuid4(), uuid4())
+
+    @dataclass
+    class SampleTarget:
+        judge: None = None
+        sample_index: int = 0
+
+        async def run(self, case: CapabilityCase) -> TargetResult:
+            conversation_id = conversation_ids[self.sample_index]
+            self.sample_index += 1
+            turn_id = uuid4()
+            return TargetResult(
+                CapabilityOutput("evidence", ()),
+                clean=True,
+                trajectory=EvalTrajectory(
+                    conversation_id=conversation_id,
+                    turn_id=turn_id,
+                    status="done",
+                    messages=(Message(role="assistant", content="evidence"),),
+                ),
+            )
+
+    target = SampleTarget()
+    result = await run_capability_case(
+        CapabilityCase("sampled", "answer", exact_scorer("evidence"), samples=2), target
+    )
+
+    attempts = cast(list[dict[str, object]], result.evidence["attempts"])
+    trajectory_ids = {
+        cast(dict[str, object], attempt["trajectory"])["conversation_id"] for attempt in attempts
+    }
+    assert len(attempts) == 2
+    assert trajectory_ids == {str(conversation_id) for conversation_id in conversation_ids}
 
 
 async def test_model_judge_runs_through_case_runner_and_bills_workspace(db: None, tmp_path) -> None:
@@ -1131,7 +1293,7 @@ async def test_in_process_target_opens_a_member_bound_eval_conversation(db: None
     target = InProcessTarget(
         ctx=ctx,
         agent_id=agent_id,
-        conversations=WorkspaceDriver(workspace_id, agent_id, PROMPT, blob),
+        conversations=WorkspaceDriver(workspace_id, agent_id, PROMPT, blob, UNCALLED_DBOS),
         outcome=CorpusOutcome(ctx),
     )
     case = CapabilityCase(
@@ -1157,10 +1319,98 @@ async def test_in_process_target_opens_a_member_bound_eval_conversation(db: None
     assert conversation_member_id == member_id
 
 
+async def test_in_process_target_records_a_terminal_turn_without_a_workflow(
+    db: None, tmp_path
+) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = StubWorker(blob, workspace_id, None, status="cancelled")
+    driver = WorkspaceDriver(workspace_id, agent_id, PROMPT, blob, UNCALLED_DBOS)
+    target = InProcessTarget(
+        ctx=_context(blob, worker),
+        agent_id=agent_id,
+        conversations=driver,
+        outcome=driver,
+    )
+
+    with ws(workspace_id):
+        result = await target.run(CapabilityCase("rejected", "answer", restraint_scorer(WEB_TOOLS)))
+
+    assert not result.clean
+    assert result.failure_reason == "turn produced no terminal transcript"
+    assert result.trajectory is not None
+    assert result.trajectory.status == "cancelled"
+
+
+async def test_workspace_driver_waits_when_a_queued_workflow_does_not_exist(
+    db: None, tmp_path
+) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    conversation_id = await DbConversations(workspace_id).open("deferred-workflow")
+    turn_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="queued",
+                inbound="test",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    requested = asyncio.Event()
+    blob = FilesystemBlobStore(root=tmp_path)
+    driver = WorkspaceDriver(
+        workspace_id,
+        agent_id,
+        PROMPT,
+        blob,
+        cast(DBOSClient, MissingDbos(requested)),
+        poll_interval_seconds=0.001,
+        workflow_wait_seconds=1,
+    )
+
+    async def finish_turn() -> None:
+        await requested.wait()
+        await Transcript(blob=blob, conversation_id=conversation_id).write(
+            Conversation(seq=1, messages=_research_transcript())
+        )
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.turn)
+                .values(
+                    status="done",
+                    terminal={"status": "done", "text": "Done.", "model": MODEL},
+                    updated_at=sa.func.now(),
+                )
+                .where(tables.turn.c.id == turn_id)
+            )
+
+    with ws(workspace_id):
+        finishing = asyncio.create_task(finish_turn())
+        trajectory = await driver.settle(conversation_id, turn_id)
+        await finishing
+
+    assert trajectory is not None
+    assert trajectory.messages == _research_transcript()
+
+
 async def test_workspace_driver_rejects_an_unknown_member_key(db: None, tmp_path) -> None:
     workspace_id = await _workspace()
     agent_id = await _seed_agent(workspace_id)
-    driver = WorkspaceDriver(workspace_id, agent_id, PROMPT, FilesystemBlobStore(root=tmp_path))
+    driver = WorkspaceDriver(
+        workspace_id,
+        agent_id,
+        PROMPT,
+        FilesystemBlobStore(root=tmp_path),
+        UNCALLED_DBOS,
+    )
 
     with (
         ws(workspace_id),
@@ -1169,8 +1419,8 @@ async def test_workspace_driver_rejects_an_unknown_member_key(db: None, tmp_path
         await driver.open("missing-member", "missing@eval.invalid")
 
 
-async def test_workspace_driver_reads_a_terminal_transcript_once(
-    db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
+async def test_workspace_driver_reads_a_terminal_transcript_at_the_turn_sequence(
+    db: None, tmp_path
 ) -> None:
     workspace_id = await _workspace()
     agent_id = await _seed_agent(workspace_id)
@@ -1192,19 +1442,29 @@ async def test_workspace_driver_reads_a_terminal_transcript_once(
             )
         )
     blob = FilesystemBlobStore(root=tmp_path)
-    driver = WorkspaceDriver(workspace_id, agent_id, PROMPT, blob, poll_interval_seconds=10)
-
-    async def unexpected_sleep(_: float) -> None:
-        raise AssertionError("terminal transcript reads do not poll")
-
-    monkeypatch.setattr("evals.driver.asyncio.sleep", unexpected_sleep)
+    driver = WorkspaceDriver(
+        workspace_id, agent_id, PROMPT, blob, UNCALLED_DBOS, poll_interval_seconds=10
+    )
     with ws(workspace_id):
         missing = await driver.settle(conversation_id, turn_id)
         await blob.put(transcript_key(conversation_id), b"not a transcript")
         corrupt = await driver.settle(conversation_id, turn_id)
+        await blob.put(
+            transcript_key(conversation_id),
+            encode(Conversation(seq=2, messages=_research_transcript())),
+        )
+        stale = await driver.settle(conversation_id, turn_id)
+        await blob.put(
+            transcript_key(conversation_id),
+            encode(Conversation(seq=1, messages=_research_transcript())),
+        )
+        ready = await driver.settle(conversation_id, turn_id)
 
     assert missing is None
     assert corrupt is None
+    assert stale is None
+    assert ready is not None
+    assert ready.messages == _research_transcript()
 
 
 async def test_resolve_workspace_and_agent_accepts_an_explicit_workspace(db: None) -> None:
@@ -1239,6 +1499,16 @@ def _debug_evidence(response: str, tools: tuple[str, ...] = ()) -> dict[str, obj
                 "toolErrors": [],
                 "artifacts": [],
                 "artifactError": None,
+                "trajectory": {
+                    "conversation_id": "11111111-1111-1111-1111-111111111111",
+                    "turn_id": "22222222-2222-2222-2222-222222222222",
+                    "status": "done",
+                    "messages": [
+                        {"role": "user", "content": "exercise the capability"},
+                        {"role": "assistant", "content": response},
+                    ],
+                    "error": "",
+                },
             }
         ],
     }
@@ -1296,6 +1566,9 @@ def test_eval_run_archive_renders_debug_evidence_and_escapes_script_data(tmp_pat
     assert 'class="leaf-label"' in html
     assert "memory_100.enterprise.semantic" in html
     assert "Tool trajectory" in html
+    assert "View trajectory" in html
+    assert "Stored transcript snapshot" in html
+    assert "11111111-1111-1111-1111-111111111111" in html
     assert str(run.id) in html
     assert "</script><script>bad()</script>" not in html
     assert "\\u003c/script\\u003e\\u003cscript\\u003ebad()" in html
@@ -1444,8 +1717,13 @@ async def test_eval_run_pins_model_metadata_on_boundary_report(tmp_path, monkeyp
     monkeypatch.setattr("evals.__main__.init_workspace_credentials", lambda _store: None)
     monkeypatch.setattr("evals.__main__.resolve_workspace_and_agent", resolve)
     monkeypatch.setattr("evals.__main__.blob_store_for", lambda _config: object())
+    monkeypatch.setattr("evals.__main__.DBOSClient", lambda **_kwargs: object())
     monkeypatch.setattr("evals.__main__.WorkspaceDriver", lambda *_args: object())
-    monkeypatch.setattr("evals.__main__.eval_context", lambda *_args: SimpleNamespace(model=model))
+    monkeypatch.setattr("evals.__main__.load_manifests", lambda *_args: ())
+    monkeypatch.setattr("evals.__main__.model_registry", lambda *_args: object())
+    monkeypatch.setattr(
+        "evals.__main__.context_for", lambda *_args, **_kwargs: SimpleNamespace(model=model)
+    )
     monkeypatch.setattr("evals.__main__.InProcessTarget", lambda **_kwargs: object())
     config = Config(
         database=DatabaseConfig(url="sqlite+aiosqlite:///:memory:"),
