@@ -215,6 +215,7 @@ SLACK_USERS_INFO_URL = "https://slack.com/api/users.info"
 SLACK_CONVERSATIONS_REPLIES_URL = "https://slack.com/api/conversations.replies"
 SLACK_CONVERSATIONS_HISTORY_URL = "https://slack.com/api/conversations.history"
 SLACK_CHAT_POST_MESSAGE_URL = "https://slack.com/api/chat.postMessage"
+SLACK_CHAT_POST_EPHEMERAL_URL = "https://slack.com/api/chat.postEphemeral"
 SLACK_ASSISTANT_STATUS_URL = "https://slack.com/api/assistant.threads.setStatus"
 SLACK_FILES_GET_UPLOAD_URL = "https://slack.com/api/files.getUploadURLExternal"
 SLACK_FILES_COMPLETE_UPLOAD = "https://slack.com/api/files.completeUploadExternal"
@@ -1100,11 +1101,13 @@ class AnswerClick:
 
 @dataclass(frozen=True)
 class ConnectClick:
-    """A verified click on a terminal connect handoff."""
+    """A verified click on a terminal connect handoff: who clicked, which turn's request they
+    invoke, and where the button message lives — the private link posts into that thread."""
 
     slack_user_id: str
     turn_id: UUID
-    response_url: str
+    channel: str
+    thread_ts: str | None
 
 
 async def interactive(ctx: SurfaceContext, request: Request) -> Response:
@@ -1150,7 +1153,7 @@ async def interactive(ctx: SurfaceContext, request: Request) -> Response:
                     )
                 else:
                     text = f"Complete the connection privately: <{url}|Open authorization>"
-            _ephemeral_in_background(click.response_url, text)
+            _ephemeral_in_background(ctx, click, text)
         case AnswerClick():
             if member_id is None:
                 bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
@@ -1193,22 +1196,36 @@ async def _run_rewrite(click: AnswerClick) -> None:
         _LOG.warning("slack answer rewrite failed for %s: %s", click.message_ts, error)
 
 
-def _ephemeral_in_background(response_url: str, text: str) -> None:
-    task = asyncio.create_task(_post_ephemeral(response_url, text))
+def _ephemeral_in_background(ctx: SurfaceContext, click: ConnectClick, text: str) -> None:
+    task = asyncio.create_task(_post_ephemeral(ctx, click, text))
     _REWRITE_TASKS.add(task)
     task.add_done_callback(_REWRITE_TASKS.discard)
 
 
-async def _post_ephemeral(response_url: str, text: str) -> None:
+async def _post_ephemeral(ctx: SurfaceContext, click: ConnectClick, text: str) -> None:
+    """Answer a connect click with `chat.postEphemeral` in the button message's own thread —
+    a `response_url` ephemeral renders at channel level, where a threaded conversation never
+    looks — visible only to the member who clicked."""
     try:
-        if not _slack_download_host_ok(response_url):
-            raise ValueError("refusing to answer a non-Slack response_url")
+        bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
         async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
-            response = await client.post(
-                response_url,
-                json={"response_type": "ephemeral", "replace_original": False, "text": text},
+            await _slack_ok(
+                client.post(
+                    SLACK_CHAT_POST_EPHEMERAL_URL,
+                    headers={
+                        "Authorization": f"Bearer {bot_token}",
+                        "Content-Type": "application/json; charset=utf-8",
+                    },
+                    content=json.dumps(
+                        {
+                            "channel": click.channel,
+                            "user": click.slack_user_id,
+                            "text": text,
+                            **({"thread_ts": click.thread_ts} if click.thread_ts else {}),
+                        }
+                    ),
+                )
             )
-        response.raise_for_status()
     except Exception as error:
         _LOG.warning("slack private connect response failed: %s", error)
 
@@ -1234,26 +1251,28 @@ def _to_click(raw: bytes, identity: SlackIdentity) -> AnswerClick | ConnectClick
     if not isinstance(action_id, str) or not isinstance(value, str) or not value:
         return None
     user_id = _string_field(_dict_field(payload, "user"), "id")
-    response_url = _string_field(payload, "response_url")
+    channel_id = _string_field(_dict_field(payload, "channel"), "id")
+    message = _dict_field(payload, "message")
+    thread = message.get("thread_ts")
+    thread_ts = thread if isinstance(thread, str) and thread else None
     if action_id == CONNECT_ACTION_ID:
         try:
             turn_id = UUID(value)
         except ValueError:
             return None
-        return ConnectClick(slack_user_id=user_id, turn_id=turn_id, response_url=response_url)
+        return ConnectClick(
+            slack_user_id=user_id, turn_id=turn_id, channel=channel_id, thread_ts=thread_ts
+        )
     if not action_id.startswith(ASK_ACTION_ID_PREFIX):
         return None
-    channel_id = _string_field(_dict_field(payload, "channel"), "id")
-    message = _dict_field(payload, "message")
-    thread = message.get("thread_ts")
     return AnswerClick(
         slack_user_id=user_id,
-        queue_key=(f"{channel_id}:{thread}" if isinstance(thread, str) and thread else channel_id),
+        queue_key=f"{channel_id}:{thread_ts}" if thread_ts else channel_id,
         is_dm=channel_id.startswith("D"),
         message_ts=_string_field(message, "ts"),
         message_text=str(message.get("text") or ""),
         label=value,
-        response_url=response_url,
+        response_url=_string_field(payload, "response_url"),
     )
 
 

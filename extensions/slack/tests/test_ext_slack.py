@@ -148,6 +148,8 @@ def _mock_transport(
             return httpx.Response(200, json={"ok": True, "messages": []})
         if url == slack.SLACK_CHAT_POST_MESSAGE_URL:
             return httpx.Response(200, json={"ok": True, "channel": "C5", "ts": "999.100"})
+        if url == slack.SLACK_CHAT_POST_EPHEMERAL_URL:
+            return httpx.Response(200, json={"ok": True})
         if url == slack.SLACK_ASSISTANT_STATUS_URL:
             return httpx.Response(200, json={"ok": True})
         if url == RESPONSE_URL:
@@ -2563,10 +2565,67 @@ async def test_connect_writeback_keeps_oauth_private_and_checks_the_requester(
             await asyncio.gather(*slack._REWRITE_TASKS)
     finally:
         install_connect_flow(None)
-    private = [json.loads(request.content) for request in _requests_to(recorder, RESPONSE_URL)]
+    private = [
+        json.loads(request.content)
+        for request in _requests_to(recorder, slack.SLACK_CHAT_POST_EPHEMERAL_URL)
+    ]
     assert private[0]["text"] == "This connection request is not available to you."
     assert "https://oauth.example.test/authorize" in private[1]["text"]
     assert private[2]["text"] == private[1]["text"]
+    assert [(p["channel"], p["thread_ts"]) for p in private] == [("C5", "200.0")] * 3
+    assert [p["user"] for p in private] == ["U8", "U9", "U9"]
+
+
+async def test_dm_connect_click_posts_the_link_unthreaded(db: None, tmp_path, monkeypatch) -> None:
+    workspace_id, member_id = await _seed(member_email="bee@example.com")
+    assert member_id is not None
+    recorder: list[httpx.Request] = []
+    _, client, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    flow = ConnectFlow(
+        providers={"google_calendar": _ConnectProvider()},
+        fernet=Fernet(Fernet.generate_key()),
+        store=GrantStore(),
+        redirect_uri="https://ufo.example.test/v1/connect/callback",
+    )
+    install_connect_flow(flow)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.surface_identity).values(
+                workspace_id=workspace_id,
+                member_id=member_id,
+                surface=slack.SURFACE_SLACK,
+                external_id="U9",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    turn_id = await _seed_done_turn(
+        workspace_id,
+        "D5",
+        "Use the private connection control.",
+        blob,
+        artifact=False,
+        connect_request=ConnectRequest(provider="google_calendar"),
+        speaker_member_id=member_id,
+    )
+    click = _click_body(
+        action_id=slack.CONNECT_ACTION_ID, value=str(turn_id), user="U9", channel="D5", thread=None
+    )
+    try:
+        async with client:
+            await client.post(INTERACTIVE_PATH, content=click, headers=_signed_form(click))
+            await asyncio.gather(*slack._REWRITE_TASKS)
+    finally:
+        install_connect_flow(None)
+    private = [
+        json.loads(request.content)
+        for request in _requests_to(recorder, slack.SLACK_CHAT_POST_EPHEMERAL_URL)
+    ]
+    assert len(private) == 1
+    assert "https://oauth.example.test/authorize" in private[0]["text"]
+    assert private[0]["channel"] == "D5"
+    assert private[0]["user"] == "U9"
+    assert "thread_ts" not in private[0]
 
 
 def _click_body(
