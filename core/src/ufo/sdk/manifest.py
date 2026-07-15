@@ -82,9 +82,6 @@ from ufo.ext.manifest import (
     PreCompact as PreCompact,
 )
 from ufo.ext.manifest import (
-    PreToolUse as PreToolUse,
-)
-from ufo.ext.manifest import (
     PromptSection as PromptSection,
 )
 from ufo.ext.manifest import (
