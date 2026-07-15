@@ -28,7 +28,7 @@ from evals.harness.judge import JudgeLeg
 from ufo.blob import BlobNotFound, BlobStore
 from ufo.db import workspace_tx
 from ufo.schema import tables
-from ufo.schema.records import CredentialRequest, TurnStatus
+from ufo.schema.records import CredentialRequest, TerminalFrame, TurnStatus
 from ufo.sdk.context import ExtensionContext, Trajectory
 from ufo.sdk.models import ImageBlock, Message, TextBlock, ToolResultBlock, ToolUseBlock
 from ufo.transcript import TranscriptDecodeError, decode, transcript_key
@@ -170,9 +170,10 @@ class InProcessTarget:
     async def _settled(self, conversation_id: UUID, turn_id: UUID) -> _Settled:
         trajectory = await self.outcome.settle(conversation_id, turn_id)
         if trajectory is None:
+            tokens, cost_micro_usd = await self._turn_resources((turn_id,))
             return _Settled(
                 TargetResult(
-                    CapabilityOutput("", (), ()),
+                    CapabilityOutput("", (), (), tokens=tokens, cost_micro_usd=cost_micro_usd),
                     False,
                     "turn produced no terminal transcript",
                     EvalTrajectory(
@@ -188,6 +189,8 @@ class InProcessTarget:
         status = await self._turn_status(turn_id)
         snapshot = await self._trajectory(conversation_id, turn_id, status, trajectory.messages)
         output, descendant_ids, missing_child = await self._merge_descendants(turn_id, output)
+        tokens, cost_micro_usd = await self._turn_resources((turn_id, *descendant_ids))
+        output = replace(output, tokens=tokens, cost_micro_usd=cost_micro_usd)
         if missing_child:
             return _Settled(
                 TargetResult(
@@ -202,6 +205,18 @@ class InProcessTarget:
                 descendant_ids,
             )
         return _Settled(TargetResult(output, clean=True, trajectory=snapshot), descendant_ids)
+
+    async def _turn_resources(self, turn_ids: tuple[UUID, ...]) -> tuple[int, int]:
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(tables.turn.c.terminal).where(tables.turn.c.id.in_(list(turn_ids)))
+                )
+            ).all()
+        frames = tuple(
+            TerminalFrame.model_validate(row.terminal) for row in rows if row.terminal is not None
+        )
+        return sum(frame.tokens for frame in frames), sum(frame.cost_micro_usd for frame in frames)
 
     async def _merge_descendants(
         self, turn_id: UUID, output: CapabilityOutput
@@ -242,17 +257,21 @@ class InProcessTarget:
             body = await self._await_child_transcript(conversation_id)
             if body is None:
                 failure = f"child turn {turns[0].id} is terminal but its transcript never appeared"
-                return output, (), failure
+                return output, tuple(descendant_ids), failure
             try:
                 decoded = decode(body)
             except TranscriptDecodeError:
-                return output, (), f"child conversation {conversation_id} has a corrupt transcript"
+                return (
+                    output,
+                    tuple(descendant_ids),
+                    f"child conversation {conversation_id} has a corrupt transcript",
+                )
             child = capability_output(decoded.messages)
             for turn in turns:
                 child, sub_ids, failure = await self._merge_descendants(turn.id, child)
-                if failure:
-                    return output, (), failure
                 descendant_ids.extend(sub_ids)
+                if failure:
+                    return output, tuple(descendant_ids), failure
             calls.extend(child.calls)
             errors.extend(child.tool_errors)
         merged = replace(output, calls=tuple(calls), tool_errors=tuple(errors))

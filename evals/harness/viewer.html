@@ -296,7 +296,10 @@ function h(value) {
 function runById(id) { return runs.find(run => run.id === id); }
 function reportByName(run, name) { return run && run.reports.find(report => report.name === name); }
 function caseByName(report, name) { return report && report.cases.find(item => item.name === name); }
-function leafLabel(name) { return name && name.startsWith(MEMORY_LEAF_PREFIX) ? name.slice(MEMORY_LEAF_PREFIX.length) : name; }
+function leafLabel(name) {
+  for (const prefix of [MEMORY_LEAF_PREFIX, 'dsqa_100.']) if (name && name.startsWith(prefix)) return name.slice(prefix.length);
+  return name;
+}
 function scored(cases) { return (cases || []).filter(item => !item.excluded); }
 function passed(cases) { return scored(cases).filter(item => item.passed).length; }
 function rate(cases) { const rows = scored(cases); return rows.length ? passed(rows) / rows.length : 0; }
@@ -322,6 +325,9 @@ function recallMeta(report) {
     ? 'mapped evidence coverage n/a'
     : `mapped evidence coverage mean ${pct(report.meanMappedEvidenceCoverage)} · min ${pct(report.minMappedEvidenceCoverage)}`;
   return `${coverage} · ${report.degradedRecallCount} degraded · ${report.unmappedEvidenceCount} unmapped evidence`;
+}
+function metricMeta(report) {
+  return (report && report.metrics || []).map(metric => `${metric.name.replaceAll('_', ' ')} ${pct(metric.value)}`).join(' · ');
 }
 function caseStatus(item) {
   if (!item) return {label: 'missing', cls: 'missing'};
@@ -398,12 +404,16 @@ function scoreMarkup(base, current, name) {
   const after = reportByName(current, name);
   const status = reportStatus(after);
   const canCompare = compatible(before, after);
-  const delta = canCompare ? rate(after.cases) - rate(before.cases) : 0;
-  const detail = after ? `${passed(after.cases)}/${scored(after.cases).length}` : '—';
+  const primary = after && after.metrics && after.metrics[0];
+  const priorPrimary = before && before.metrics && before.metrics.find(metric => primary && metric.name === primary.name);
+  const currentScore = primary ? primary.value : after ? rate(after.cases) : 0;
+  const priorScore = priorPrimary ? priorPrimary.value : before ? rate(before.cases) : 0;
+  const delta = canCompare ? currentScore - priorScore : 0;
+  const detail = after ? primary ? `${primary.name.replaceAll('_', ' ')} ${pct(primary.value)}` : `${passed(after.cases)}/${scored(after.cases).length}` : '—';
   const deltaText = canCompare ? points(delta) : before && after ? 'digest changed' : before ? 'missing current' : 'no baseline';
   return `<button type="button" class="score-card ${name === state.suite ? 'selected' : ''}" data-suite="${h(name)}" data-score>
     <div class="row-top"><span class="score-name" title="${h(name)}">${h(leafLabel(name))}</span><span class="badge ${status.cls}">${status.label}</span></div>
-    <div class="score-value">${detail}<span class="score-rate">${after ? pct(rate(after.cases)) : ''}</span></div>
+    <div class="score-value">${detail}<span class="score-rate">${after && primary ? `${passed(after.cases)}/${scored(after.cases).length} strict` : after ? pct(rate(after.cases)) : ''}</span></div>
     <div class="row-meta ${delta < 0 ? 'negative' : delta > 0 ? 'positive' : ''}">${h(deltaText)}</div>
   </button>`;
 }
@@ -437,10 +447,12 @@ function suiteMarkup(base, current, name) {
   const detail = after ? `${passed(after.cases)}/${scored(after.cases).length}` : '—';
   const deltaText = canCompare ? points(delta) : before && after ? 'digest changed' : '';
   const recall = recallMeta(after);
+  const metrics = metricMeta(after);
   return `<button class="suite-row ${name === state.suite ? 'selected' : ''}" data-suite="${h(name)}">
     <div class="row-top"><span class="row-title">${h(name)}</span><span class="badge ${status.cls}">${status.label}</span></div>
     <div class="row-meta"><span>${detail}</span><span class="delta ${delta < 0 ? 'negative' : delta > 0 ? 'positive' : ''}">${h(deltaText)}</span></div>
     ${recall ? `<div class="row-meta"><span>${h(recall)}</span></div>` : ''}
+    ${metrics ? `<div class="row-meta"><span>${h(metrics)}</span></div>` : ''}
   </button>`;
 }
 function matchesFilter(item, movement) {
@@ -480,6 +492,7 @@ function attemptMarkup(attempt, index, selected, kind) {
     <div class="attempt-body">
       <div class="reason">${h(attempt.reason)}</div>
       ${trajectory}
+      <div class="section"><div class="section-title">Resources</div><pre>${h(attempt.tokens || 0)} tokens\n${h(attempt.costMicroUsd || 0)} micro-USD</pre></div>
       <div class="section"><div class="section-title">Agent response</div><pre>${h(attempt.response || 'No final response.')}</pre></div>
       <div class="section"><div class="section-title">Tool trajectory · ${calls.length}</div>${calls.length ? calls.map(callMarkup).join('') : '<div class="empty">No tool calls.</div>'}</div>
       <div class="section"><div class="section-title">Artifacts</div><pre>${h(artifacts.length ? artifacts.join('\n') : 'None')}${attempt.artifactError ? '\n' + h(attempt.artifactError) : ''}</pre></div>

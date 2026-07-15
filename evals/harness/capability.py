@@ -80,6 +80,8 @@ class CapabilityOutput:
     artifacts: tuple[SharedArtifact, ...] = ()
     artifact_error: str = ""
     log: TurnLog | None = None
+    tokens: int = 0
+    cost_micro_usd: int = 0
 
     @property
     def tools(self) -> tuple[str, ...]:
@@ -157,6 +159,8 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
                 "toolErrors": list(sample_output.tool_errors),
                 "artifacts": [artifact.name for artifact in sample_output.artifacts],
                 "artifactError": sample_output.artifact_error or None,
+                "tokens": sample_output.tokens,
+                "costMicroUsd": sample_output.cost_micro_usd,
                 "log": (
                     None if sample_output.log is None else sample_output.log.model_dump(mode="json")
                 ),

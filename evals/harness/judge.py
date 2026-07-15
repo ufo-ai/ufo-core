@@ -9,6 +9,7 @@ from typing import Annotated, Protocol
 
 from pydantic import BaseModel, ConfigDict, StrictBool, StringConstraints, ValidationError
 
+from ufo.schema.records import ReasoningEffort
 from ufo.sdk.context import ModelAccess
 from ufo.sdk.models import Message, ModelRequest, ModelResponseTruncated
 
@@ -51,6 +52,8 @@ class JudgeLeg(Protocol):
 @dataclass(frozen=True)
 class ModelJudge:
     model: ModelAccess
+    max_tokens: int = JUDGE_MAX_TOKENS
+    reasoning: ReasoningEffort = "low"
 
     async def complete(self, system: str, messages: tuple[Message, ...]) -> str:
         return await self.model.complete(
@@ -58,8 +61,8 @@ class ModelJudge:
                 model=self.model.model,
                 system=system,
                 messages=messages,
-                max_tokens=JUDGE_MAX_TOKENS,
-                reasoning="low",
+                max_tokens=self.max_tokens,
+                reasoning=self.reasoning,
             )
         )
 

@@ -1,0 +1,1805 @@
+{
+  "algorithm": "dsqa_prompt_visible_contrast",
+  "items": [
+    {
+      "example_id": 17,
+      "pressure_band": "higher",
+      "category": "Sports",
+      "problem_sha256": "sha256:e90d0f51db57246d2c8fffd45fbb0fde10ba82756549944d5f3d377d90d1c290",
+      "tool_pressure_score": 9,
+      "prompt_word_count": 159,
+      "signals": {
+        "enumeration_signal_count": 13,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 2,
+        "numeric_signal_count": 9,
+        "ranking_signal_count": 8,
+        "source_anchor_count": 0,
+        "stage_marker_count": 1,
+        "temporal_anchor_count": 9
+      }
+    },
+    {
+      "example_id": 22,
+      "pressure_band": "higher",
+      "category": "Other",
+      "problem_sha256": "sha256:14a0ffcc4af0c3cf296f43946cdad60c3dd96ed46f48dbb1a026b9a2e9f6500b",
+      "tool_pressure_score": 13,
+      "prompt_word_count": 86,
+      "signals": {
+        "enumeration_signal_count": 4,
+        "exclusion_signal_count": 1,
+        "format_signal_count": 0,
+        "numeric_signal_count": 9,
+        "ranking_signal_count": 3,
+        "source_anchor_count": 4,
+        "stage_marker_count": 1,
+        "temporal_anchor_count": 7
+      }
+    },
+    {
+      "example_id": 24,
+      "pressure_band": "lower",
+      "category": "Geography",
+      "problem_sha256": "sha256:3b9b921e96f1a28dbe26af6ea2f4e8f04c61a33002bfd40aec184fbabd999f3d",
+      "tool_pressure_score": 2,
+      "prompt_word_count": 28,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 1,
+        "format_signal_count": 0,
+        "numeric_signal_count": 2,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 0
+      }
+    },
+    {
+      "example_id": 25,
+      "pressure_band": "higher",
+      "category": "Politics & Government",
+      "problem_sha256": "sha256:1194163b6ae412c38af62be082aac341614ac06a20d2ab07f41d7357b0734c80",
+      "tool_pressure_score": 12,
+      "prompt_word_count": 97,
+      "signals": {
+        "enumeration_signal_count": 1,
+        "exclusion_signal_count": 1,
+        "format_signal_count": 0,
+        "numeric_signal_count": 6,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 3,
+        "temporal_anchor_count": 3
+      }
+    },
+    {
+      "example_id": 29,
+      "pressure_band": "lower",
+      "category": "Health",
+      "problem_sha256": "sha256:3cf5dbb4365133e1dfd9770cd11b34656c262055f7f8d949f8947a5ea753880b",
+      "tool_pressure_score": 0,
+      "prompt_word_count": 23,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 0,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 0
+      }
+    },
+    {
+      "example_id": 35,
+      "pressure_band": "higher",
+      "category": "Current Events",
+      "problem_sha256": "sha256:06ec37c0f422c63c971b51b1a5435a8c496d227a780a95a6b84a0813dc388cba",
+      "tool_pressure_score": 6,
+      "prompt_word_count": 57,
+      "signals": {
+        "enumeration_signal_count": 2,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 3,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 1,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 2
+      }
+    },
+    {
+      "example_id": 45,
+      "pressure_band": "lower",
+      "category": "Science",
+      "problem_sha256": "sha256:8bca0b76480dc2c7b2ec82ace2c0b2c7ab8a889f7d818e1d7e62c5d71f549743",
+      "tool_pressure_score": 1,
+      "prompt_word_count": 30,
+      "signals": {
+        "enumeration_signal_count": 4,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 0,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 0
+      }
+    },
+    {
+      "example_id": 55,
+      "pressure_band": "lower",
+      "category": "Finance & Economics",
+      "problem_sha256": "sha256:dd39bccbc6ceee8dd36e1b27f8c81cc795f3fc55be1417bb634e8734d095e5e8",
+      "tool_pressure_score": 3,
+      "prompt_word_count": 31,
+      "signals": {
+        "enumeration_signal_count": 1,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 2,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 1
+      }
+    },
+    {
+      "example_id": 56,
+      "pressure_band": "higher",
+      "category": "Education",
+      "problem_sha256": "sha256:978e0b1f0a5cc417993e2529abd55438b3fb44456cf5765274dedf725a9927a9",
+      "tool_pressure_score": 10,
+      "prompt_word_count": 84,
+      "signals": {
+        "enumeration_signal_count": 2,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 10,
+        "ranking_signal_count": 1,
+        "source_anchor_count": 2,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 3
+      }
+    },
+    {
+      "example_id": 57,
+      "pressure_band": "lower",
+      "category": "Politics & Government",
+      "problem_sha256": "sha256:d8c6bd46e078542f6b91c0f9a741285101e6290adc2e8f3b24522bdc73d9c9d4",
+      "tool_pressure_score": 1,
+      "prompt_word_count": 34,
+      "signals": {
+        "enumeration_signal_count": 1,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 0,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 0
+      }
+    },
+    {
+      "example_id": 80,
+      "pressure_band": "lower",
+      "category": "Linguistics",
+      "problem_sha256": "sha256:8b4846b667c33b226199ada3bab4de143cc51a4d0e0b294c1d410f7f8e5d69e3",
+      "tool_pressure_score": 2,
+      "prompt_word_count": 43,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 1,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 1
+      }
+    },
+    {
+      "example_id": 82,
+      "pressure_band": "higher",
+      "category": "Technology",
+      "problem_sha256": "sha256:78b5d6974b4396f6ad95512e04163a604bc3967b0703f4591e141f980b8e0742",
+      "tool_pressure_score": 17,
+      "prompt_word_count": 115,
+      "signals": {
+        "enumeration_signal_count": 4,
+        "exclusion_signal_count": 1,
+        "format_signal_count": 0,
+        "numeric_signal_count": 8,
+        "ranking_signal_count": 2,
+        "source_anchor_count": 2,
+        "stage_marker_count": 4,
+        "temporal_anchor_count": 4
+      }
+    },
+    {
+      "example_id": 88,
+      "pressure_band": "lower",
+      "category": "Politics & Government",
+      "problem_sha256": "sha256:030d6e50df7e37630e4adde96a9775d4ce3bf5d281263d13dfa8bde982c1f0ad",
+      "tool_pressure_score": 0,
+      "prompt_word_count": 9,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 0,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 0
+      }
+    },
+    {
+      "example_id": 95,
+      "pressure_band": "higher",
+      "category": "Education",
+      "problem_sha256": "sha256:e2e6ac5b436ccb67c8fe471922165e611634e519a0ec415bd2072afb0cf279f8",
+      "tool_pressure_score": 11,
+      "prompt_word_count": 56,
+      "signals": {
+        "enumeration_signal_count": 3,
+        "exclusion_signal_count": 1,
+        "format_signal_count": 2,
+        "numeric_signal_count": 3,
+        "ranking_signal_count": 1,
+        "source_anchor_count": 2,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 1
+      }
+    },
+    {
+      "example_id": 114,
+      "pressure_band": "lower",
+      "category": "Geography",
+      "problem_sha256": "sha256:3e7de595766b0d4c5365d2c3011fe974d1e8b2547ba50eb7ffcc3c559c4d9815",
+      "tool_pressure_score": 2,
+      "prompt_word_count": 34,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 5,
+        "ranking_signal_count": 1,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 0
+      }
+    },
+    {
+      "example_id": 126,
+      "pressure_band": "higher",
+      "category": "Education",
+      "problem_sha256": "sha256:94c7333a52286f3a19e1fe063a46564f3e0ca3ab76129235f46cca647b9a791d",
+      "tool_pressure_score": 11,
+      "prompt_word_count": 60,
+      "signals": {
+        "enumeration_signal_count": 4,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 6,
+        "ranking_signal_count": 2,
+        "source_anchor_count": 1,
+        "stage_marker_count": 2,
+        "temporal_anchor_count": 3
+      }
+    },
+    {
+      "example_id": 131,
+      "pressure_band": "higher",
+      "category": "Politics & Government",
+      "problem_sha256": "sha256:62f8642b98525fc51399ab0fa06953f2515e09024c3f427952fb979e88009200",
+      "tool_pressure_score": 12,
+      "prompt_word_count": 91,
+      "signals": {
+        "enumeration_signal_count": 1,
+        "exclusion_signal_count": 1,
+        "format_signal_count": 0,
+        "numeric_signal_count": 10,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 2,
+        "stage_marker_count": 1,
+        "temporal_anchor_count": 5
+      }
+    },
+    {
+      "example_id": 138,
+      "pressure_band": "lower",
+      "category": "Sports",
+      "problem_sha256": "sha256:ab68638b01a097ddc3c7baccb46df13916142bc5939818ef3dff31b580271f3e",
+      "tool_pressure_score": 2,
+      "prompt_word_count": 15,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 1,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 1
+      }
+    },
+    {
+      "example_id": 140,
+      "pressure_band": "lower",
+      "category": "Politics & Government",
+      "problem_sha256": "sha256:ae01c65c1dd70e4c12c2baa8d9e160bfaddf53f2d8ce9fd3d6d47e1160734bc4",
+      "tool_pressure_score": 1,
+      "prompt_word_count": 53,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 0,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 0
+      }
+    },
+    {
+      "example_id": 142,
+      "pressure_band": "lower",
+      "category": "Travel",
+      "problem_sha256": "sha256:7d24fb1f8359749b5d1b25434ab3c36ef8c2387be50d0a4e569e72675eb95a64",
+      "tool_pressure_score": 0,
+      "prompt_word_count": 21,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 0,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 0
+      }
+    },
+    {
+      "example_id": 150,
+      "pressure_band": "higher",
+      "category": "Health",
+      "problem_sha256": "sha256:8aa332f7cae9875540042dbfeceb9b6634e6d20f11f57f0e34547e23fa37f075",
+      "tool_pressure_score": 14,
+      "prompt_word_count": 82,
+      "signals": {
+        "enumeration_signal_count": 8,
+        "exclusion_signal_count": 1,
+        "format_signal_count": 3,
+        "numeric_signal_count": 6,
+        "ranking_signal_count": 1,
+        "source_anchor_count": 2,
+        "stage_marker_count": 1,
+        "temporal_anchor_count": 2
+      }
+    },
+    {
+      "example_id": 163,
+      "pressure_band": "lower",
+      "category": "Finance & Economics",
+      "problem_sha256": "sha256:ac83f92916f9b84414faa0f5314cb8a599f58a44b66eb267a739c0bf4916c964",
+      "tool_pressure_score": 2,
+      "prompt_word_count": 29,
+      "signals": {
+        "enumeration_signal_count": 1,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 5,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 0
+      }
+    },
+    {
+      "example_id": 187,
+      "pressure_band": "higher",
+      "category": "Arts & Entertainment",
+      "problem_sha256": "sha256:ee4c04078ef712a76dd4a21e59f890845fc277b753c7aa5098835d5679b968d6",
+      "tool_pressure_score": 3,
+      "prompt_word_count": 30,
+      "signals": {
+        "enumeration_signal_count": 2,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 1,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 1
+      }
+    },
+    {
+      "example_id": 200,
+      "pressure_band": "higher",
+      "category": "Travel",
+      "problem_sha256": "sha256:043c45ecba4531d889b65ff1ceb8c54cadceb42d02168bbea927789ee198f805",
+      "tool_pressure_score": 17,
+      "prompt_word_count": 83,
+      "signals": {
+        "enumeration_signal_count": 2,
+        "exclusion_signal_count": 2,
+        "format_signal_count": 0,
+        "numeric_signal_count": 6,
+        "ranking_signal_count": 1,
+        "source_anchor_count": 3,
+        "stage_marker_count": 3,
+        "temporal_anchor_count": 5
+      }
+    },
+    {
+      "example_id": 206,
+      "pressure_band": "lower",
+      "category": "Other",
+      "problem_sha256": "sha256:fbaee9e71f215b2760de732661fe2fde15b18517bac4630fa17407a5d271c664",
+      "tool_pressure_score": 2,
+      "prompt_word_count": 27,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 1,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 1
+      }
+    },
+    {
+      "example_id": 216,
+      "pressure_band": "lower",
+      "category": "Health",
+      "problem_sha256": "sha256:ffb4b4c1ed612460797d8a4d791adcf6507ab949aa85c887b29faba2ee59acfd",
+      "tool_pressure_score": 2,
+      "prompt_word_count": 26,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 3,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 1
+      }
+    },
+    {
+      "example_id": 219,
+      "pressure_band": "higher",
+      "category": "History",
+      "problem_sha256": "sha256:613d222650587318f3bfcd7cfb129c956ac98daf0883db721d2a3e05e99c0b97",
+      "tool_pressure_score": 9,
+      "prompt_word_count": 56,
+      "signals": {
+        "enumeration_signal_count": 4,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 1,
+        "ranking_signal_count": 1,
+        "source_anchor_count": 1,
+        "stage_marker_count": 1,
+        "temporal_anchor_count": 2
+      }
+    },
+    {
+      "example_id": 225,
+      "pressure_band": "higher",
+      "category": "Politics & Government",
+      "problem_sha256": "sha256:c30baf7a94bf28081caa1dcf89759cb0571a39842d257be143eec8470ddfc09f",
+      "tool_pressure_score": 10,
+      "prompt_word_count": 104,
+      "signals": {
+        "enumeration_signal_count": 3,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 15,
+        "ranking_signal_count": 1,
+        "source_anchor_count": 3,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 4
+      }
+    },
+    {
+      "example_id": 235,
+      "pressure_band": "lower",
+      "category": "Finance & Economics",
+      "problem_sha256": "sha256:1f37535199b2fed8ec9571a50bb4c35a6575d23fee9f4f9a7ab0e365d97af3c9",
+      "tool_pressure_score": 2,
+      "prompt_word_count": 24,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 4,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 3
+      }
+    },
+    {
+      "example_id": 239,
+      "pressure_band": "lower",
+      "category": "Arts",
+      "problem_sha256": "sha256:64021ab46325fe20c43f37321f7c918e5b0d9476b0b61d35351a77f8e4f4ae0b",
+      "tool_pressure_score": 0,
+      "prompt_word_count": 14,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 0,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 0
+      }
+    },
+    {
+      "example_id": 248,
+      "pressure_band": "lower",
+      "category": "Finance & Economics",
+      "problem_sha256": "sha256:cb55abad627546dd59d124c42726b382a7910cd9e5f06e0aa1f66684eb655770",
+      "tool_pressure_score": 3,
+      "prompt_word_count": 25,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 2,
+        "ranking_signal_count": 1,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 1
+      }
+    },
+    {
+      "example_id": 254,
+      "pressure_band": "higher",
+      "category": "Science",
+      "problem_sha256": "sha256:a92f61a06bd22b7340925e21f7e0d53cf50daa82f4d0fe935f537d9c4e0e2221",
+      "tool_pressure_score": 10,
+      "prompt_word_count": 76,
+      "signals": {
+        "enumeration_signal_count": 2,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 4,
+        "ranking_signal_count": 2,
+        "source_anchor_count": 0,
+        "stage_marker_count": 2,
+        "temporal_anchor_count": 2
+      }
+    },
+    {
+      "example_id": 256,
+      "pressure_band": "higher",
+      "category": "Finance & Economics",
+      "problem_sha256": "sha256:8a63fee6685e0232f425bfda0ee5dc5dade77cc2e06195e61c17c763cea224e1",
+      "tool_pressure_score": 13,
+      "prompt_word_count": 80,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 5,
+        "ranking_signal_count": 3,
+        "source_anchor_count": 1,
+        "stage_marker_count": 3,
+        "temporal_anchor_count": 1
+      }
+    },
+    {
+      "example_id": 267,
+      "pressure_band": "higher",
+      "category": "Media & Entertainment",
+      "problem_sha256": "sha256:6d0aac8ae8c9eae368c470d4c96dde2a5e6fb3c2247dbbbd64ed575f1f25a22d",
+      "tool_pressure_score": 7,
+      "prompt_word_count": 80,
+      "signals": {
+        "enumeration_signal_count": 1,
+        "exclusion_signal_count": 1,
+        "format_signal_count": 0,
+        "numeric_signal_count": 3,
+        "ranking_signal_count": 1,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 1
+      }
+    },
+    {
+      "example_id": 268,
+      "pressure_band": "higher",
+      "category": "Geography",
+      "problem_sha256": "sha256:c51488d606e206f39400c054ac99b18ae2d7ab98d8f2cb156af3c09ba45b846e",
+      "tool_pressure_score": 11,
+      "prompt_word_count": 66,
+      "signals": {
+        "enumeration_signal_count": 2,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 7,
+        "ranking_signal_count": 3,
+        "source_anchor_count": 2,
+        "stage_marker_count": 1,
+        "temporal_anchor_count": 4
+      }
+    },
+    {
+      "example_id": 273,
+      "pressure_band": "lower",
+      "category": "Science",
+      "problem_sha256": "sha256:e614dd0fbec76c0893f63a55ba15cb59755c5f1544125029c6a2e3b270a9317a",
+      "tool_pressure_score": 1,
+      "prompt_word_count": 38,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 0,
+        "ranking_signal_count": 1,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 0
+      }
+    },
+    {
+      "example_id": 284,
+      "pressure_band": "higher",
+      "category": "Education",
+      "problem_sha256": "sha256:100e4cfc02f53b6be683d15f9d4c097b3a384fb4ff00e940c89970547f46efb1",
+      "tool_pressure_score": 13,
+      "prompt_word_count": 82,
+      "signals": {
+        "enumeration_signal_count": 6,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 1,
+        "numeric_signal_count": 9,
+        "ranking_signal_count": 1,
+        "source_anchor_count": 0,
+        "stage_marker_count": 3,
+        "temporal_anchor_count": 2
+      }
+    },
+    {
+      "example_id": 292,
+      "pressure_band": "lower",
+      "category": "Arts",
+      "problem_sha256": "sha256:6ec13ef58eaa3334704c58c3a1b72232a261a6069e00b011f48ee367199a5f6f",
+      "tool_pressure_score": 1,
+      "prompt_word_count": 13,
+      "signals": {
+        "enumeration_signal_count": 2,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 0,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 0
+      }
+    },
+    {
+      "example_id": 295,
+      "pressure_band": "higher",
+      "category": "Finance & Economics",
+      "problem_sha256": "sha256:f438c93be74481b89ad9b3464ff77c5b1d654c2489a28ccebc1bba202e7edc94",
+      "tool_pressure_score": 10,
+      "prompt_word_count": 64,
+      "signals": {
+        "enumeration_signal_count": 3,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 8,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 1,
+        "stage_marker_count": 2,
+        "temporal_anchor_count": 2
+      }
+    },
+    {
+      "example_id": 311,
+      "pressure_band": "lower",
+      "category": "Science",
+      "problem_sha256": "sha256:2f68b4a2eadb0af57464f2b2d1a80c36b863f5f729d3e86d63b931449c7e6f87",
+      "tool_pressure_score": 1,
+      "prompt_word_count": 28,
+      "signals": {
+        "enumeration_signal_count": 1,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 0,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 0
+      }
+    },
+    {
+      "example_id": 312,
+      "pressure_band": "lower",
+      "category": "Health",
+      "problem_sha256": "sha256:0413e030a7f2a34c9e8a818b20c8c35662ffa243621896389840840798c321c3",
+      "tool_pressure_score": 2,
+      "prompt_word_count": 24,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 0,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 1,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 0
+      }
+    },
+    {
+      "example_id": 315,
+      "pressure_band": "higher",
+      "category": "Health",
+      "problem_sha256": "sha256:484cc53e54f769b09870694ae2fb16b8ab55c951d94a8b1b6bfbb7dd241a8253",
+      "tool_pressure_score": 11,
+      "prompt_word_count": 52,
+      "signals": {
+        "enumeration_signal_count": 1,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 2,
+        "ranking_signal_count": 2,
+        "source_anchor_count": 2,
+        "stage_marker_count": 1,
+        "temporal_anchor_count": 1
+      }
+    },
+    {
+      "example_id": 316,
+      "pressure_band": "higher",
+      "category": "Finance & Economics",
+      "problem_sha256": "sha256:53a739dc1e809acf84ed8112bcf45a30527534565c33d449309d6dc3ac6f77aa",
+      "tool_pressure_score": 15,
+      "prompt_word_count": 87,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 3,
+        "ranking_signal_count": 1,
+        "source_anchor_count": 3,
+        "stage_marker_count": 3,
+        "temporal_anchor_count": 3
+      }
+    },
+    {
+      "example_id": 325,
+      "pressure_band": "higher",
+      "category": "Science",
+      "problem_sha256": "sha256:460ddfb92459c3fa4c58296a2a133230617df1fd36043f3452ba87185b434531",
+      "tool_pressure_score": 11,
+      "prompt_word_count": 110,
+      "signals": {
+        "enumeration_signal_count": 1,
+        "exclusion_signal_count": 1,
+        "format_signal_count": 0,
+        "numeric_signal_count": 3,
+        "ranking_signal_count": 1,
+        "source_anchor_count": 2,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 2
+      }
+    },
+    {
+      "example_id": 335,
+      "pressure_band": "higher",
+      "category": "Finance & Economics",
+      "problem_sha256": "sha256:87497d5e5e161abf032c4112b255746229f0b1820aa5be11420aa4c15fd878b7",
+      "tool_pressure_score": 9,
+      "prompt_word_count": 111,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 15,
+        "ranking_signal_count": 1,
+        "source_anchor_count": 2,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 10
+      }
+    },
+    {
+      "example_id": 354,
+      "pressure_band": "lower",
+      "category": "Politics & Government",
+      "problem_sha256": "sha256:af3a61bf68444db0169912cc1689815ea5e77670f1cb6b33368e0db7a2a0b7cb",
+      "tool_pressure_score": 1,
+      "prompt_word_count": 28,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 2,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 0
+      }
+    },
+    {
+      "example_id": 355,
+      "pressure_band": "higher",
+      "category": "Geography",
+      "problem_sha256": "sha256:40968cfb8f907f009d20dbed7fbc2290e78aa929838c333162dd81f8427c3c86",
+      "tool_pressure_score": 17,
+      "prompt_word_count": 121,
+      "signals": {
+        "enumeration_signal_count": 2,
+        "exclusion_signal_count": 1,
+        "format_signal_count": 0,
+        "numeric_signal_count": 10,
+        "ranking_signal_count": 4,
+        "source_anchor_count": 3,
+        "stage_marker_count": 4,
+        "temporal_anchor_count": 5
+      }
+    },
+    {
+      "example_id": 386,
+      "pressure_band": "higher",
+      "category": "Other",
+      "problem_sha256": "sha256:d0ff5e54a794890c93f424627c8035313187a6131e17cfad8a52c87daa94dbe6",
+      "tool_pressure_score": 12,
+      "prompt_word_count": 82,
+      "signals": {
+        "enumeration_signal_count": 2,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 5,
+        "ranking_signal_count": 2,
+        "source_anchor_count": 2,
+        "stage_marker_count": 1,
+        "temporal_anchor_count": 3
+      }
+    },
+    {
+      "example_id": 403,
+      "pressure_band": "higher",
+      "category": "Science",
+      "problem_sha256": "sha256:4b16d9a4ad0524d8e5eefccc0b7f48543b780e79b4cda637118a6163bc0b181f",
+      "tool_pressure_score": 13,
+      "prompt_word_count": 68,
+      "signals": {
+        "enumeration_signal_count": 2,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 4,
+        "ranking_signal_count": 1,
+        "source_anchor_count": 1,
+        "stage_marker_count": 3,
+        "temporal_anchor_count": 6
+      }
+    },
+    {
+      "example_id": 435,
+      "pressure_band": "lower",
+      "category": "Media & Entertainment",
+      "problem_sha256": "sha256:7241e8da71453aa67b4d90cb2c20f85617413ed3af456bcf6e1b139cdd8d9723",
+      "tool_pressure_score": 0,
+      "prompt_word_count": 10,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 0,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 0
+      }
+    },
+    {
+      "example_id": 444,
+      "pressure_band": "lower",
+      "category": "Education",
+      "problem_sha256": "sha256:6c090fbcff11fcef3ca5c84a707778f9ed451d721441cb370f47d8ed5d21591f",
+      "tool_pressure_score": 3,
+      "prompt_word_count": 23,
+      "signals": {
+        "enumeration_signal_count": 1,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 2,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 2
+      }
+    },
+    {
+      "example_id": 458,
+      "pressure_band": "higher",
+      "category": "Travel",
+      "problem_sha256": "sha256:26fabb4c8f1a2763f1f5a3d372e6e67fcc53aec17161c3825781af0c38c84d7e",
+      "tool_pressure_score": 12,
+      "prompt_word_count": 83,
+      "signals": {
+        "enumeration_signal_count": 8,
+        "exclusion_signal_count": 2,
+        "format_signal_count": 0,
+        "numeric_signal_count": 7,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 5,
+        "temporal_anchor_count": 5
+      }
+    },
+    {
+      "example_id": 464,
+      "pressure_band": "lower",
+      "category": "Education",
+      "problem_sha256": "sha256:106a2a92a83ed8873cf3afdeaab384343ff566f16909ba6244af463ace0f6ed0",
+      "tool_pressure_score": 1,
+      "prompt_word_count": 16,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 1,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 0
+      }
+    },
+    {
+      "example_id": 471,
+      "pressure_band": "higher",
+      "category": "Finance & Economics",
+      "problem_sha256": "sha256:972ac50449654876dab61daadc54533890055d901708d73fa76ee71b87be82e9",
+      "tool_pressure_score": 13,
+      "prompt_word_count": 60,
+      "signals": {
+        "enumeration_signal_count": 3,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 6,
+        "ranking_signal_count": 1,
+        "source_anchor_count": 1,
+        "stage_marker_count": 3,
+        "temporal_anchor_count": 4
+      }
+    },
+    {
+      "example_id": 478,
+      "pressure_band": "higher",
+      "category": "Politics & Government",
+      "problem_sha256": "sha256:657501a2b98f6033c7b323ce91459368cfc62855c6bb0e450d8b8798af4942a5",
+      "tool_pressure_score": 12,
+      "prompt_word_count": 97,
+      "signals": {
+        "enumeration_signal_count": 2,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 8,
+        "ranking_signal_count": 3,
+        "source_anchor_count": 1,
+        "stage_marker_count": 2,
+        "temporal_anchor_count": 7
+      }
+    },
+    {
+      "example_id": 489,
+      "pressure_band": "higher",
+      "category": "Finance & Economics",
+      "problem_sha256": "sha256:2700816f69f2c38910c615033dde689375412178c94b4c6ec07b51d15422ed89",
+      "tool_pressure_score": 11,
+      "prompt_word_count": 59,
+      "signals": {
+        "enumeration_signal_count": 2,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 11,
+        "ranking_signal_count": 2,
+        "source_anchor_count": 2,
+        "stage_marker_count": 1,
+        "temporal_anchor_count": 3
+      }
+    },
+    {
+      "example_id": 499,
+      "pressure_band": "lower",
+      "category": "Health",
+      "problem_sha256": "sha256:5cf4883ebbd4725315cd48e256d04740f02ef48677fe5530eac8d21d600269db",
+      "tool_pressure_score": 2,
+      "prompt_word_count": 24,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 3,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 1
+      }
+    },
+    {
+      "example_id": 513,
+      "pressure_band": "lower",
+      "category": "Finance & Economics",
+      "problem_sha256": "sha256:27791bdfb58bb42ca2e60b374d5eda43e8339f8e25e2cda0989ec1cdc557d807",
+      "tool_pressure_score": 3,
+      "prompt_word_count": 28,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 1,
+        "ranking_signal_count": 1,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 1
+      }
+    },
+    {
+      "example_id": 517,
+      "pressure_band": "lower",
+      "category": "Other",
+      "problem_sha256": "sha256:9e49574f5fe9f2eae9e8aca583bd512aa23af56ca040ff71f22982b968e5783a",
+      "tool_pressure_score": 2,
+      "prompt_word_count": 18,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 4,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 2
+      }
+    },
+    {
+      "example_id": 520,
+      "pressure_band": "lower",
+      "category": "Technology",
+      "problem_sha256": "sha256:85e7256e9ba25c116cfa7dbe57146c2ce5938e36f95496cf07e1ec3ba1510b0c",
+      "tool_pressure_score": 0,
+      "prompt_word_count": 43,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 0,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 0
+      }
+    },
+    {
+      "example_id": 527,
+      "pressure_band": "lower",
+      "category": "Travel",
+      "problem_sha256": "sha256:becf9aef0cc5753858132f497fed2e013d42d52b499f45912b8c3e13cfc7903b",
+      "tool_pressure_score": 1,
+      "prompt_word_count": 34,
+      "signals": {
+        "enumeration_signal_count": 1,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 0,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 0
+      }
+    },
+    {
+      "example_id": 536,
+      "pressure_band": "higher",
+      "category": "Health",
+      "problem_sha256": "sha256:a0325f7ed828c91bd470d2e0ca0189e970856b7af3c1bc53f49b55d7c2ce4651",
+      "tool_pressure_score": 14,
+      "prompt_word_count": 82,
+      "signals": {
+        "enumeration_signal_count": 5,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 6,
+        "ranking_signal_count": 1,
+        "source_anchor_count": 1,
+        "stage_marker_count": 4,
+        "temporal_anchor_count": 3
+      }
+    },
+    {
+      "example_id": 552,
+      "pressure_band": "lower",
+      "category": "Finance & Economics",
+      "problem_sha256": "sha256:18fd1b3342a4123be8b7b6c9d5762a1bef3d4afd8d28fd269373762cca67658c",
+      "tool_pressure_score": 3,
+      "prompt_word_count": 29,
+      "signals": {
+        "enumeration_signal_count": 2,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 2,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 1
+      }
+    },
+    {
+      "example_id": 553,
+      "pressure_band": "higher",
+      "category": "Politics & Government",
+      "problem_sha256": "sha256:e483747d2956a6d2b63ea22786cecf26dcfeab9e4b17bc380c1dfa7bd4bb62ff",
+      "tool_pressure_score": 10,
+      "prompt_word_count": 117,
+      "signals": {
+        "enumeration_signal_count": 3,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 6,
+        "ranking_signal_count": 3,
+        "source_anchor_count": 4,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 3
+      }
+    },
+    {
+      "example_id": 556,
+      "pressure_band": "lower",
+      "category": "History",
+      "problem_sha256": "sha256:1d09a374ec082cd2ba42b8c1e2c3d850540fea2b68fa04b9fd33c65c2fe855d0",
+      "tool_pressure_score": 1,
+      "prompt_word_count": 29,
+      "signals": {
+        "enumeration_signal_count": 1,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 0,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 0
+      }
+    },
+    {
+      "example_id": 570,
+      "pressure_band": "lower",
+      "category": "Geography",
+      "problem_sha256": "sha256:7d0702b72dc87d1306c0a6861c4ba857a51b3fa4a830856419b41fbdbb3e9eb7",
+      "tool_pressure_score": 2,
+      "prompt_word_count": 21,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 2,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 1
+      }
+    },
+    {
+      "example_id": 584,
+      "pressure_band": "lower",
+      "category": "Education",
+      "problem_sha256": "sha256:f088ba31d751bfc44667839fa85ef7bbc01762648c0604bfba2233cb620b9194",
+      "tool_pressure_score": 3,
+      "prompt_word_count": 28,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 2,
+        "ranking_signal_count": 1,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 1
+      }
+    },
+    {
+      "example_id": 592,
+      "pressure_band": "lower",
+      "category": "Education",
+      "problem_sha256": "sha256:558bf22b5d7bf053ed60eca7379072be09a611b05a9a8cc65db6c403d47f3863",
+      "tool_pressure_score": 1,
+      "prompt_word_count": 30,
+      "signals": {
+        "enumeration_signal_count": 2,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 0,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 0
+      }
+    },
+    {
+      "example_id": 600,
+      "pressure_band": "higher",
+      "category": "Politics & Government",
+      "problem_sha256": "sha256:72457c25e581ce3ae4e4afac5ebc00a080d47e07536b68ef87e2dc0ecc6ac978",
+      "tool_pressure_score": 11,
+      "prompt_word_count": 59,
+      "signals": {
+        "enumeration_signal_count": 3,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 9,
+        "ranking_signal_count": 1,
+        "source_anchor_count": 2,
+        "stage_marker_count": 1,
+        "temporal_anchor_count": 6
+      }
+    },
+    {
+      "example_id": 601,
+      "pressure_band": "lower",
+      "category": "Politics & Government",
+      "problem_sha256": "sha256:ff61b905d0cf8c99346ca14bfcf8d5bdbd84591736d18bb1c736cf94b37bcecd",
+      "tool_pressure_score": 1,
+      "prompt_word_count": 36,
+      "signals": {
+        "enumeration_signal_count": 3,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 0,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 0
+      }
+    },
+    {
+      "example_id": 616,
+      "pressure_band": "higher",
+      "category": "Health",
+      "problem_sha256": "sha256:4b5c2ae5ed516424ad44691f9255f7fde44e01f8d1827c7ff22594f642eb778f",
+      "tool_pressure_score": 13,
+      "prompt_word_count": 91,
+      "signals": {
+        "enumeration_signal_count": 1,
+        "exclusion_signal_count": 1,
+        "format_signal_count": 0,
+        "numeric_signal_count": 9,
+        "ranking_signal_count": 2,
+        "source_anchor_count": 4,
+        "stage_marker_count": 1,
+        "temporal_anchor_count": 4
+      }
+    },
+    {
+      "example_id": 620,
+      "pressure_band": "lower",
+      "category": "Science",
+      "problem_sha256": "sha256:d0d6d077e3dec015d73766b362045927e5d37406dd82cf245e120deee63c876c",
+      "tool_pressure_score": 1,
+      "prompt_word_count": 15,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 0,
+        "ranking_signal_count": 1,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 0
+      }
+    },
+    {
+      "example_id": 645,
+      "pressure_band": "higher",
+      "category": "Geography",
+      "problem_sha256": "sha256:1973482c57ed4b15a2d3937536888c25fce5310977c54855c10abc38cf96b0af",
+      "tool_pressure_score": 11,
+      "prompt_word_count": 69,
+      "signals": {
+        "enumeration_signal_count": 8,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 5,
+        "ranking_signal_count": 1,
+        "source_anchor_count": 1,
+        "stage_marker_count": 2,
+        "temporal_anchor_count": 3
+      }
+    },
+    {
+      "example_id": 658,
+      "pressure_band": "higher",
+      "category": "Other",
+      "problem_sha256": "sha256:04acae2d9018eea842f8768820196704943a878148d4507047df7dccb7cb44a2",
+      "tool_pressure_score": 11,
+      "prompt_word_count": 65,
+      "signals": {
+        "enumeration_signal_count": 4,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 5,
+        "ranking_signal_count": 4,
+        "source_anchor_count": 1,
+        "stage_marker_count": 2,
+        "temporal_anchor_count": 4
+      }
+    },
+    {
+      "example_id": 665,
+      "pressure_band": "higher",
+      "category": "History",
+      "problem_sha256": "sha256:b72862109450877900bce49ea96e9d5f76ff3fc70f57fdfa03f99a9befed5519",
+      "tool_pressure_score": 9,
+      "prompt_word_count": 78,
+      "signals": {
+        "enumeration_signal_count": 3,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 8,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 2,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 5
+      }
+    },
+    {
+      "example_id": 666,
+      "pressure_band": "lower",
+      "category": "Politics & Government",
+      "problem_sha256": "sha256:806eef61dddc24cb800a941121af794b8fc76092da05e3db7350701b066c6360",
+      "tool_pressure_score": 1,
+      "prompt_word_count": 15,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 2,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 0
+      }
+    },
+    {
+      "example_id": 672,
+      "pressure_band": "lower",
+      "category": "Education",
+      "problem_sha256": "sha256:753499bc10fd1da60d72adf550a130ffcb6e17832cb12ced09cda5d119ab0421",
+      "tool_pressure_score": 2,
+      "prompt_word_count": 23,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 2,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 1
+      }
+    },
+    {
+      "example_id": 676,
+      "pressure_band": "lower",
+      "category": "Geography",
+      "problem_sha256": "sha256:42de9efac119256ece62d9748d3830986a28d10f67e4c7b99a39b692b8ac270f",
+      "tool_pressure_score": 2,
+      "prompt_word_count": 30,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 0,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 1,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 0
+      }
+    },
+    {
+      "example_id": 691,
+      "pressure_band": "lower",
+      "category": "Science",
+      "problem_sha256": "sha256:68a8b21c605008786df08cff09a1cc7cf96d54f5c9baeb653501115859a0f2de",
+      "tool_pressure_score": 1,
+      "prompt_word_count": 10,
+      "signals": {
+        "enumeration_signal_count": 3,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 0,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 0
+      }
+    },
+    {
+      "example_id": 692,
+      "pressure_band": "lower",
+      "category": "History",
+      "problem_sha256": "sha256:02422d696d81d7674d207e195afa5cefa65078971f8b29a03c01d43c34e1c6c6",
+      "tool_pressure_score": 1,
+      "prompt_word_count": 35,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 1,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 0
+      }
+    },
+    {
+      "example_id": 699,
+      "pressure_band": "lower",
+      "category": "Biology",
+      "problem_sha256": "sha256:460fe3d4b396002e8e56012c5283fb9c9387883b6bdc6613039c30e5664a07d5",
+      "tool_pressure_score": 3,
+      "prompt_word_count": 22,
+      "signals": {
+        "enumeration_signal_count": 1,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 1,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 1
+      }
+    },
+    {
+      "example_id": 702,
+      "pressure_band": "higher",
+      "category": "Other",
+      "problem_sha256": "sha256:810270031b4797695a61947c49141dbf90d581132284a6b520be55e0e422775f",
+      "tool_pressure_score": 10,
+      "prompt_word_count": 58,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 9,
+        "ranking_signal_count": 2,
+        "source_anchor_count": 4,
+        "stage_marker_count": 1,
+        "temporal_anchor_count": 7
+      }
+    },
+    {
+      "example_id": 704,
+      "pressure_band": "higher",
+      "category": "Politics & Government",
+      "problem_sha256": "sha256:1d756a86eab2993793ccdda6d1ef0375bd9eb574cc1ec448d22fe1a23a0627ec",
+      "tool_pressure_score": 15,
+      "prompt_word_count": 113,
+      "signals": {
+        "enumeration_signal_count": 3,
+        "exclusion_signal_count": 1,
+        "format_signal_count": 0,
+        "numeric_signal_count": 9,
+        "ranking_signal_count": 2,
+        "source_anchor_count": 2,
+        "stage_marker_count": 2,
+        "temporal_anchor_count": 5
+      }
+    },
+    {
+      "example_id": 707,
+      "pressure_band": "higher",
+      "category": "Media & Entertainment",
+      "problem_sha256": "sha256:66909c8794457d3fa02fcfd57637592faa8a0c6cc076d800d43410cfb99dbd59",
+      "tool_pressure_score": 9,
+      "prompt_word_count": 76,
+      "signals": {
+        "enumeration_signal_count": 2,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 8,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 2,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 5
+      }
+    },
+    {
+      "example_id": 708,
+      "pressure_band": "higher",
+      "category": "Arts",
+      "problem_sha256": "sha256:95f620b382d14983b24d07dc42e36b254ad612420827b887e228eac0357e953e",
+      "tool_pressure_score": 10,
+      "prompt_word_count": 50,
+      "signals": {
+        "enumeration_signal_count": 4,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 2,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 1,
+        "stage_marker_count": 2,
+        "temporal_anchor_count": 2
+      }
+    },
+    {
+      "example_id": 720,
+      "pressure_band": "higher",
+      "category": "Health",
+      "problem_sha256": "sha256:14059e5d6e3c409db70b5402aefc5a86f25db8ba41ff0be5f476f0c9bc8eb405",
+      "tool_pressure_score": 13,
+      "prompt_word_count": 72,
+      "signals": {
+        "enumeration_signal_count": 2,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 6,
+        "ranking_signal_count": 1,
+        "source_anchor_count": 2,
+        "stage_marker_count": 2,
+        "temporal_anchor_count": 3
+      }
+    },
+    {
+      "example_id": 721,
+      "pressure_band": "lower",
+      "category": "Politics & Government",
+      "problem_sha256": "sha256:c4c393330c9337ce43d91c8b8d208c62dff2819629a5c7d713052cd35289a813",
+      "tool_pressure_score": 1,
+      "prompt_word_count": 58,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 0,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 0
+      }
+    },
+    {
+      "example_id": 723,
+      "pressure_band": "higher",
+      "category": "Finance & Economics",
+      "problem_sha256": "sha256:4ba408b787d666cf84630a18ec22da6280efb6dee310363bd997e1d4042074b2",
+      "tool_pressure_score": 9,
+      "prompt_word_count": 109,
+      "signals": {
+        "enumeration_signal_count": 1,
+        "exclusion_signal_count": 1,
+        "format_signal_count": 0,
+        "numeric_signal_count": 8,
+        "ranking_signal_count": 5,
+        "source_anchor_count": 1,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 6
+      }
+    },
+    {
+      "example_id": 737,
+      "pressure_band": "lower",
+      "category": "Other",
+      "problem_sha256": "sha256:c8b32c826ba06f346a5a2ec2e8e31f5ac654b288566c9cd1bb51277b838de3d0",
+      "tool_pressure_score": 2,
+      "prompt_word_count": 69,
+      "signals": {
+        "enumeration_signal_count": 1,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 0,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 0
+      }
+    },
+    {
+      "example_id": 741,
+      "pressure_band": "lower",
+      "category": "History",
+      "problem_sha256": "sha256:2ab61631f21cf978cc0be11172f72959c5bcaf21b112b666bec3129dd0ae9ec5",
+      "tool_pressure_score": 2,
+      "prompt_word_count": 30,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 2,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 1
+      }
+    },
+    {
+      "example_id": 743,
+      "pressure_band": "lower",
+      "category": "Geography",
+      "problem_sha256": "sha256:23cefdbb41045beba292d31bd031faee958d3ab1ac0c29ddd17ad27626e2fe9c",
+      "tool_pressure_score": 2,
+      "prompt_word_count": 22,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 0,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 1,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 0
+      }
+    },
+    {
+      "example_id": 769,
+      "pressure_band": "higher",
+      "category": "Science",
+      "problem_sha256": "sha256:db5c77b177e43159746012adb8d3291b1e18f39f9d6d21c0ca76279e6759dd58",
+      "tool_pressure_score": 10,
+      "prompt_word_count": 45,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 5,
+        "ranking_signal_count": 1,
+        "source_anchor_count": 2,
+        "stage_marker_count": 1,
+        "temporal_anchor_count": 3
+      }
+    },
+    {
+      "example_id": 780,
+      "pressure_band": "higher",
+      "category": "Science",
+      "problem_sha256": "sha256:cc457c1a567fd084f4167261883207e00252c801451834a55211023a648b49b1",
+      "tool_pressure_score": 10,
+      "prompt_word_count": 76,
+      "signals": {
+        "enumeration_signal_count": 2,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 7,
+        "ranking_signal_count": 1,
+        "source_anchor_count": 2,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 6
+      }
+    },
+    {
+      "example_id": 786,
+      "pressure_band": "higher",
+      "category": "Geography",
+      "problem_sha256": "sha256:62b4dc5cdf6a35c1214d43b88675ca908d959345ae366e27dcf28714da4c09c6",
+      "tool_pressure_score": 11,
+      "prompt_word_count": 71,
+      "signals": {
+        "enumeration_signal_count": 4,
+        "exclusion_signal_count": 1,
+        "format_signal_count": 0,
+        "numeric_signal_count": 2,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 2,
+        "stage_marker_count": 1,
+        "temporal_anchor_count": 3
+      }
+    },
+    {
+      "example_id": 814,
+      "pressure_band": "higher",
+      "category": "Politics & Government",
+      "problem_sha256": "sha256:95528b7bda9db9e5f19b931445d292d39856366193c1a4d0d1a0d78bb8c15d68",
+      "tool_pressure_score": 12,
+      "prompt_word_count": 101,
+      "signals": {
+        "enumeration_signal_count": 3,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 8,
+        "ranking_signal_count": 2,
+        "source_anchor_count": 3,
+        "stage_marker_count": 1,
+        "temporal_anchor_count": 5
+      }
+    },
+    {
+      "example_id": 853,
+      "pressure_band": "lower",
+      "category": "Finance & Economics",
+      "problem_sha256": "sha256:7ee5545ea9c0c981035a4d4c8f50cb6bc5e3e50a94c13ffb4d5763faa04ba2d6",
+      "tool_pressure_score": 3,
+      "prompt_word_count": 35,
+      "signals": {
+        "enumeration_signal_count": 2,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 3,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 2
+      }
+    },
+    {
+      "example_id": 875,
+      "pressure_band": "higher",
+      "category": "Geography",
+      "problem_sha256": "sha256:f0aecb95cba532c4c0f024e605559440f05ce02430d8d67295fc895c8e7ea616",
+      "tool_pressure_score": 13,
+      "prompt_word_count": 107,
+      "signals": {
+        "enumeration_signal_count": 1,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 14,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 2,
+        "stage_marker_count": 2,
+        "temporal_anchor_count": 3
+      }
+    },
+    {
+      "example_id": 879,
+      "pressure_band": "higher",
+      "category": "Education",
+      "problem_sha256": "sha256:7a920551069dccc92afce3e175f27630c2394156e86313d5e875950d1cac4d2e",
+      "tool_pressure_score": 10,
+      "prompt_word_count": 104,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 1,
+        "format_signal_count": 0,
+        "numeric_signal_count": 7,
+        "ranking_signal_count": 5,
+        "source_anchor_count": 3,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 3
+      }
+    },
+    {
+      "example_id": 882,
+      "pressure_band": "lower",
+      "category": "Politics & Government",
+      "problem_sha256": "sha256:fc2429ccc931af75a95fd540300d450803cbf3482565c3073918184da9e5e5c2",
+      "tool_pressure_score": 1,
+      "prompt_word_count": 37,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 0,
+        "format_signal_count": 0,
+        "numeric_signal_count": 0,
+        "ranking_signal_count": 1,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 0
+      }
+    },
+    {
+      "example_id": 891,
+      "pressure_band": "lower",
+      "category": "Health",
+      "problem_sha256": "sha256:eb744756b98f797d7fb0e4dee9a9f27513d2ec73ea98c24f23e4a6ee940578d9",
+      "tool_pressure_score": 2,
+      "prompt_word_count": 21,
+      "signals": {
+        "enumeration_signal_count": 0,
+        "exclusion_signal_count": 1,
+        "format_signal_count": 0,
+        "numeric_signal_count": 1,
+        "ranking_signal_count": 0,
+        "source_anchor_count": 0,
+        "stage_marker_count": 0,
+        "temporal_anchor_count": 0
+      }
+    }
+  ]
+}

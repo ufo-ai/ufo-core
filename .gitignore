@@ -12,6 +12,7 @@ blobs/
 bundle/
 deploy/
 eval-reports/
+.dsqa-100/
 *.db
 ufo.db-*
 .coverage

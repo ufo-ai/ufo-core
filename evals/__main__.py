@@ -25,8 +25,13 @@ from dbos import DBOSClient
 from ufo_ext_memory.events import MEMORY_RECALL_EVENT
 
 from evals.driver import WorkspaceDriver, resolve_workspace_and_agent
-from evals.harness.harness import EvalReport
-from evals.harness.judge import JUDGE_REVISION, ModelJudge
+from evals.dsqa_100.runner import (
+    DSQA_JUDGE_MODEL,
+    DSQA100Run,
+    load_dsqa_100,
+)
+from evals.harness.harness import EvalReport, digest_payload
+from evals.harness.judge import ModelJudge
 from evals.harness.registry import EvalTask, selected_tasks
 from evals.harness.target import InProcessTarget
 from evals.harness.viewer import (
@@ -47,8 +52,9 @@ from ufo.credentials import CredentialStore
 from ufo.db import dispose_db, init_db
 from ufo.ext.context import context_for
 from ufo.ext.loader import load_manifests
+from ufo.governance import prompt_digest
 from ufo.models.registry import model_registry
-from ufo.schema.records import DEFAULT_AGENT_NAME
+from ufo.schema.records import DEFAULT_AGENT_NAME, ReasoningEffort
 from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.workspace import init_workspace_credentials, ws
 
@@ -87,14 +93,18 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--memory-100", type=Path, metavar="SNAPSHOT")
     parser.add_argument("--memory-100-state", type=Path, metavar="READINESS")
+    parser.add_argument("--dsqa-100", type=Path, metavar="SNAPSHOT")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     names = tuple(args.only)
     if (args.memory_100 is None) != (args.memory_100_state is None):
         parser.error("--memory-100 and --memory-100-state must be provided together")
+    if args.dsqa_100 is not None and args.memory_100 is not None:
+        parser.error("--dsqa-100 and --memory-100 are separate eval runs")
     memory_run: Memory100Run | None = None
     if args.memory_100 is not None and args.memory_100_state is not None:
         memory_run = load_memory_100(args.memory_100, args.memory_100_state)
-    tasks = _tasks(names, memory_run)
+    dsqa_run = load_dsqa_100(args.dsqa_100) if args.dsqa_100 is not None else None
+    tasks = _tasks(names, memory_run, dsqa_run)
     if args.list:
         for task in tasks:
             print(f"{task.name}\t{task.digest}")
@@ -145,6 +155,20 @@ def main(argv: list[str] | None = None) -> None:
         print(url)
         return
     config = load_config()
+    if dsqa_run is not None:
+        dsqa_tasks = tuple(task for task in tasks if task.suite == "dsqa_100")
+        if not names:
+            tasks = dsqa_run.tasks_for_pack(config.pack.name)
+            dsqa_tasks = tasks
+        if dsqa_tasks:
+            try:
+                dsqa_run.validate_pack(dsqa_tasks, config.pack.name)
+            except ValueError as error:
+                parser.error(str(error))
+            if config.models.auto_model != DSQA_JUDGE_MODEL:
+                parser.error(
+                    f"dsqa_100 requires [models] auto_model = {DSQA_JUDGE_MODEL!r} for its judge"
+                )
     workspace_id = args.workspace
     if memory_run is not None:
         if workspace_id is not None and workspace_id != memory_run.readiness.workspace_id:
@@ -234,30 +258,81 @@ async def _run(
                 agent_id=agent_id,
                 conversations=driver,
                 outcome=driver,
-                judge=ModelJudge(ctx.model),
+                judge=ModelJudge(
+                    ctx.model,
+                    _judge_max_tokens(tasks),
+                    _judge_reasoning(tasks),
+                ),
                 blob=blob,
                 logs=collector,
             )
             with ws(workspace_id):
                 reports = tuple([await task.run(target) for task in tasks])
-            return tuple(
-                report.model_copy(
-                    update={
-                        "target_model": agent_model,
-                        "judge_model": ctx.model.model,
-                        "judge_revision": JUDGE_REVISION,
-                    }
+            manifests = load_manifests(config.pack.name)
+            completed: list[EvalReport] = []
+            for report, task in zip(reports, tasks, strict=True):
+                digest = report.digest
+                if task.pin_runtime:
+                    digest = digest_payload(
+                        {
+                            "taskDigest": task.digest,
+                            "pack": config.pack.name,
+                            "manifests": [
+                                {"name": manifest.name, "version": manifest.version}
+                                for manifest in manifests
+                            ],
+                            "agentPromptDigest": prompt_digest(agent_prompt),
+                            "agentModel": agent_model,
+                            "judgeModel": ctx.model.model,
+                            "judgeMaxTokens": task.judge_max_tokens,
+                            "judgeReasoning": task.judge_reasoning,
+                            "reasoning": config.models.reasoning_effort,
+                            "searchProvider": config.research.search_provider,
+                            "cdpProvider": config.browser.cdp_provider,
+                        }
+                    )
+                completed.append(
+                    report.model_copy(
+                        update={
+                            "digest": digest,
+                            "target_model": agent_model,
+                            "judge_model": ctx.model.model,
+                            "judge_revision": task.judge_revision,
+                        }
+                    )
                 )
-                for report in reports
-            )
+            return tuple(completed)
     finally:
         init_workspace_credentials(None)
         await dispose_db()
 
 
-def _tasks(names: tuple[str, ...], memory_run: Memory100Run | None) -> tuple[EvalTask, ...]:
-    if memory_run is None:
+def _judge_max_tokens(tasks: tuple[EvalTask, ...]) -> int:
+    limits = {task.judge_max_tokens for task in tasks}
+    if len(limits) != 1:
+        raise ValueError("selected eval tasks require different judge token bounds")
+    return next(iter(limits))
+
+
+def _judge_reasoning(tasks: tuple[EvalTask, ...]) -> ReasoningEffort:
+    settings = {task.judge_reasoning for task in tasks}
+    if len(settings) != 1:
+        raise ValueError("selected eval tasks require different judge reasoning settings")
+    return next(iter(settings))
+
+
+def _tasks(
+    names: tuple[str, ...],
+    memory_run: Memory100Run | None,
+    dsqa_run: DSQA100Run | None = None,
+) -> tuple[EvalTask, ...]:
+    if memory_run is None and dsqa_run is None:
         return selected_run_tasks(names)
+    if dsqa_run is not None:
+        return selected_tasks(
+            (*TASKS, *dsqa_run.tasks), names or tuple(task.name for task in dsqa_run.tasks)
+        )
+    assert memory_run is not None
     return selected_tasks(
         (*TASKS, *memory_run.tasks), names or tuple(task.name for task in memory_run.tasks)
     )

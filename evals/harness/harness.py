@@ -14,6 +14,13 @@ type Json = str | int | float | bool | None | list[Json] | dict[str, Json]
 type JsonObject = dict[str, Json]
 
 
+class EvalMetric(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    name: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
+    value: float = Field(ge=0.0, le=1.0)
+
+
 class EvalCaseResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -42,6 +49,7 @@ class EvalReport(BaseModel):
     )
     degraded_recall_count: int | None = Field(default=None, ge=0, alias="degradedRecallCount")
     unmapped_evidence_count: int | None = Field(default=None, ge=0, alias="unmappedEvidenceCount")
+    metrics: tuple[EvalMetric, ...] = ()
 
     @property
     def scored(self) -> tuple[EvalCaseResult, ...]:
@@ -74,8 +82,12 @@ class EvalReport(BaseModel):
             f"{self.name} {passed}/{len(self.scored)} passed, {self.excluded_count} excluded "
             f"(rate {self.pass_rate:.0%})"
         )
+        metric_summary = ", ".join(
+            f"{metric.name.replace('_', ' ')} {metric.value:.1%}" for metric in self.metrics
+        )
         if self.degraded_recall_count is None or self.unmapped_evidence_count is None:
-            return f"{summary} {self.digest}"
+            detail = f", {metric_summary}" if metric_summary else ""
+            return f"{summary}{detail} {self.digest}"
         coverage = "mapped evidence coverage n/a"
         if (
             self.mean_mapped_evidence_coverage is not None
@@ -101,6 +113,7 @@ class EvalReport(BaseModel):
             "passed": self.passed,
             "passRate": self.pass_rate,
             "excludedCount": self.excluded_count,
+            "metrics": [metric.model_dump(mode="json") for metric in self.metrics],
             "cases": [
                 {
                     "name": case.name,

@@ -9,7 +9,7 @@ real work — invoke, reconstruct, grade — is what the tests assert, read back
 import asyncio
 from base64 import urlsafe_b64decode
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from json import loads
 from types import SimpleNamespace
@@ -25,7 +25,7 @@ from dbos import error as dbos_error
 from httpx import AsyncClient
 
 import evals.harness.target as harness_target
-from evals.__main__ import EVAL_SHARE_BUCKET_ENV
+from evals.__main__ import EVAL_SHARE_BUCKET_ENV, _judge_max_tokens, _judge_reasoning
 from evals.__main__ import _run as run_evals
 from evals.__main__ import main as eval_main
 from evals.browser_nav import CASES as BROWSER_CASES
@@ -40,7 +40,7 @@ from evals.harness.capability import (
     TurnLog,
     run_capability_case,
 )
-from evals.harness.harness import EvalCaseResult, EvalReport
+from evals.harness.harness import EvalCaseResult, EvalMetric, EvalReport
 from evals.harness.judge import (
     JUDGE_REVISION,
     MAX_ANSWER_CHARS,
@@ -112,6 +112,17 @@ def test_yc_evals_require_explicit_selection() -> None:
     assert {task.name for task in TASKS} >= {"yc_recall", "yc_workflows"}
 
 
+def test_eval_tasks_require_one_judge_configuration() -> None:
+    task = TASKS[0]
+
+    assert _judge_max_tokens((task,)) == task.judge_max_tokens
+    assert _judge_reasoning((task,)) == task.judge_reasoning
+    with pytest.raises(ValueError, match="different judge token bounds"):
+        _judge_max_tokens((task, replace(task, judge_max_tokens=task.judge_max_tokens + 1)))
+    with pytest.raises(ValueError, match="different judge reasoning settings"):
+        _judge_reasoning((task, replace(task, judge_reasoning="off")))
+
+
 def _research_transcript() -> tuple[Message, ...]:
     return (
         Message(role="user", content="find the record then remember it"),
@@ -151,6 +162,10 @@ class StubWorker:
     child_artifact: tuple[str, bytes] | None = None
     child_turn_id: UUID = field(default_factory=uuid4)
     idempotency_keys: list[str] = field(default_factory=list)
+    tokens: int = 0
+    cost_micro_usd: int = 0
+    child_tokens: int = 0
+    child_cost_micro_usd: int = 0
 
     async def invoke(
         self, conversation_id: UUID, agent_id: UUID, message: str, idempotency_key: str
@@ -167,7 +182,13 @@ class StubWorker:
                     seq=1,
                     status=self.status,
                     inbound=message,
-                    terminal={"status": self.status, "text": "Done.", "model": MODEL},
+                    terminal={
+                        "status": self.status,
+                        "text": "Done.",
+                        "model": MODEL,
+                        "tokens": self.tokens,
+                        "cost_micro_usd": self.cost_micro_usd,
+                    },
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
@@ -200,7 +221,13 @@ class StubWorker:
                             status="done",
                             inbound="delegated task",
                             parent_turn_id=turn_id,
-                            terminal={"status": "done", "text": "Done.", "model": MODEL},
+                            terminal={
+                                "status": "done",
+                                "text": "Done.",
+                                "model": MODEL,
+                                "tokens": self.child_tokens,
+                                "cost_micro_usd": self.child_cost_micro_usd,
+                            },
                             created_at=sa.func.now(),
                             updated_at=sa.func.now(),
                         )
@@ -657,6 +684,8 @@ async def test_capability_case_rejects_a_failed_turn_with_a_passing_transcript(
         workspace_id,
         (Message(role="assistant", content="ANSWER: expected"),),
         status="failed",
+        tokens=140,
+        cost_micro_usd=9,
     )
     ctx = _context(blob, worker)
     logs = StaticTurnLogReader()
@@ -674,6 +703,9 @@ async def test_capability_case_rejects_a_failed_turn_with_a_passing_transcript(
 
     assert not result.passed
     assert "turn ended with status failed" in result.reason
+    attempt = cast(list[dict[str, object]], result.evidence["attempts"])[0]
+    assert attempt["tokens"] == 140
+    assert attempt["costMicroUsd"] == 9
     assert len(logs.discarded) == 1
 
 
@@ -683,7 +715,7 @@ async def test_in_process_target_discards_logs_without_a_terminal_trajectory(
     workspace_id = await _workspace()
     agent_id = await _seed_agent(workspace_id)
     blob = FilesystemBlobStore(root=tmp_path)
-    worker = StubWorker(blob, workspace_id, _research_transcript())
+    worker = StubWorker(blob, workspace_id, _research_transcript(), tokens=140, cost_micro_usd=9)
     logs = StaticTurnLogReader()
     target = InProcessTarget(
         ctx=_context(blob, worker),
@@ -700,6 +732,8 @@ async def test_in_process_target_discards_logs_without_a_terminal_trajectory(
 
     assert not result.clean
     assert result.failure_reason == "turn produced no terminal transcript"
+    assert result.output.tokens == 140
+    assert result.output.cost_micro_usd == 9
     assert len(logs.discarded) == 1
 
 
@@ -1524,6 +1558,8 @@ def _debug_evidence(response: str, tools: tuple[str, ...] = ()) -> dict[str, obj
                 "toolErrors": [],
                 "artifacts": [],
                 "artifactError": None,
+                "tokens": 140,
+                "costMicroUsd": 9,
                 "trajectory": {
                     "conversation_id": "11111111-1111-1111-1111-111111111111",
                     "turn_id": "22222222-2222-2222-2222-222222222222",
@@ -1568,6 +1604,7 @@ def test_eval_run_archive_renders_debug_evidence_and_escapes_script_data(tmp_pat
         target_model=MODEL,
         judge_model="google/gemini-2.5-pro",
         judge_revision=JUDGE_REVISION,
+        metrics=(EvalMetric(name="f1", value=0.75),),
     )
     run = EvalRun(
         id=uuid4(),
@@ -1592,6 +1629,9 @@ def test_eval_run_archive_renders_debug_evidence_and_escapes_script_data(tmp_pat
     assert "memory_100.enterprise.semantic" in html
     assert "Tool trajectory" in html
     assert "View trajectory" in html
+    assert '"tokens":140,"costMicroUsd":9' in html
+    assert "${h(attempt.tokens || 0)} tokens" in html
+    assert "${h(attempt.costMicroUsd || 0)} micro-USD" in html
     assert "Stored transcript snapshot" in html
     assert "11111111-1111-1111-1111-111111111111" in html
     assert str(run.id) in html
@@ -1603,6 +1643,8 @@ def test_eval_run_archive_renders_debug_evidence_and_escapes_script_data(tmp_pat
     assert payload["targetModel"] == MODEL
     assert payload["judgeModel"] == "google/gemini-2.5-pro"
     assert payload["judgeRevision"] == JUDGE_REVISION
+    assert payload["metrics"] == [{"name": "f1", "value": 0.75}]
+    assert "f1 75.0%" in report.console_summary
 
 
 @pytest.mark.docker
@@ -1963,7 +2005,15 @@ async def test_capability_merge_fails_unclean_when_a_terminal_childs_transcript_
     workspace_id = await _workspace()
     agent_id = await _seed_agent(workspace_id)
     blob = FilesystemBlobStore(root=tmp_path)
-    worker = _delegated_worker(blob, workspace_id, child_transcript_missing=True)
+    worker = _delegated_worker(
+        blob,
+        workspace_id,
+        child_transcript_missing=True,
+        tokens=120,
+        cost_micro_usd=8,
+        child_tokens=30,
+        child_cost_micro_usd=2,
+    )
     target = _delegating_target(blob, worker, agent_id, workspace_id)
     case = CapabilityCase(
         "delegated-missing", "browse then remember", required_tools_scorer(("navigate",))
@@ -1972,8 +2022,18 @@ async def test_capability_merge_fails_unclean_when_a_terminal_childs_transcript_
         result = await target.run(case)
     assert result.clean is False
     assert "transcript never appeared" in result.failure_reason
+    assert result.output.tokens == 150
+    assert result.output.cost_micro_usd == 10
 
-    corrupt_worker = _delegated_worker(blob, workspace_id, child_transcript_corrupt=True)
+    corrupt_worker = _delegated_worker(
+        blob,
+        workspace_id,
+        child_transcript_corrupt=True,
+        tokens=120,
+        cost_micro_usd=8,
+        child_tokens=30,
+        child_cost_micro_usd=2,
+    )
     corrupt_target = _delegating_target(blob, corrupt_worker, agent_id, workspace_id)
     with ws(workspace_id):
         corrupt_result = await corrupt_target.run(
@@ -1981,6 +2041,8 @@ async def test_capability_merge_fails_unclean_when_a_terminal_childs_transcript_
         )
     assert corrupt_result.clean is False
     assert "corrupt transcript" in corrupt_result.failure_reason
+    assert corrupt_result.output.tokens == 150
+    assert corrupt_result.output.cost_micro_usd == 10
 
 
 async def test_capability_scoring_merges_child_turn_trajectories(db: None, tmp_path) -> None:
@@ -2000,7 +2062,14 @@ async def test_capability_scoring_merges_child_turn_trajectories(db: None, tmp_p
         Message(role="assistant", content="done"),
     )
     worker = StubWorker(
-        blob, workspace_id, _research_transcript(), child_transcript=child_transcript
+        blob,
+        workspace_id,
+        _research_transcript(),
+        child_transcript=child_transcript,
+        tokens=120,
+        cost_micro_usd=8,
+        child_tokens=30,
+        child_cost_micro_usd=2,
     )
     ctx = _context(blob, worker)
     target = InProcessTarget(
@@ -2016,3 +2085,6 @@ async def test_capability_scoring_merges_child_turn_trajectories(db: None, tmp_p
     with ws(workspace_id):
         result = await run_capability_case(case, target)
     assert result.passed
+    attempt = cast(list[dict[str, object]], result.evidence["attempts"])[0]
+    assert attempt["tokens"] == 150
+    assert attempt["costMicroUsd"] == 10

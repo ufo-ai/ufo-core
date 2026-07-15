@@ -9,8 +9,10 @@ from dataclasses import dataclass
 
 from evals.harness.capability import CapabilityCase, run_capability_case
 from evals.harness.harness import EvalReport, digest_payload
+from evals.harness.judge import JUDGE_MAX_TOKENS, JUDGE_REVISION
 from evals.harness.scenario import ScenarioCase, run_scenario_case
 from evals.harness.target import CapabilityTarget
+from ufo.schema.records import ReasoningEffort
 
 type EvalRunner = Callable[[CapabilityTarget], Awaitable[EvalReport]]
 
@@ -22,6 +24,10 @@ class EvalTask:
     digest: str
     cases: tuple[str, ...]
     run: EvalRunner
+    judge_revision: str = JUDGE_REVISION
+    judge_max_tokens: int = JUDGE_MAX_TOKENS
+    judge_reasoning: ReasoningEffort = "low"
+    pin_runtime: bool = False
 
 
 def capability_task(name: str, cases: tuple[CapabilityCase, ...]) -> EvalTask:
