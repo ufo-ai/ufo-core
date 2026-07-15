@@ -217,6 +217,7 @@ async def _insert_queued(
     agent_id: UUID,
     seq: int,
     dispatch_enqueued_at: datetime | None = None,
+    running_attempt: str | None = None,
 ) -> UUID:
     turn_id = uuid4()
     await connection.execute(
@@ -230,6 +231,7 @@ async def _insert_queued(
             inbound="waiting",
             terminal=None,
             dispatch_enqueued_at=dispatch_enqueued_at,
+            running_attempt=running_attempt,
             created_at=sa.func.now(),
             updated_at=sa.func.now(),
         )
@@ -489,6 +491,21 @@ async def test_dispatch_recovers_an_unstamped_queued_turn(db: None) -> None:
     assert dbos.enqueued == [str(queued)]
     assert dbos.workflow_ids == [str(queued)]
     assert await _dispatch_stamp(queued) is not None
+
+
+async def test_dispatch_offers_an_ever_claimed_queued_turn_a_fresh_workflow_id(db: None) -> None:
+    """A fold resumed this parked turn but its enqueue was deferred: the run that parked it
+    consumed the turn's own workflow id, so a sweep offer riding that id would dedup against the
+    completed workflow and the resume would never run."""
+    async with workspace_tx() as connection:
+        workspace_id, _, agent_id, conversation_id = await _seed(connection)
+        queued = await _insert_queued(
+            connection, workspace_id, conversation_id, agent_id, seq=1, running_attempt=uuid4().hex
+        )
+    dbos = StubDbos()
+    await _dispatch(dbos)
+    assert dbos.enqueued == [str(queued)]
+    assert dbos.workflow_ids != [str(queued)]
 
 
 async def test_dispatch_waits_for_the_earlier_queued_turn_to_start(db: None) -> None:

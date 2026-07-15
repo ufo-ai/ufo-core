@@ -28,6 +28,7 @@ from ufo.loop.compaction import (
 from ufo.loop.engine import (
     ASK_USER_TOOL,
     FORCE_FINAL_PROMPT,
+    MAX_PARALLEL_TOOL_CALLS,
     MAX_TOOL_RESULT_CHARS,
     OFFLOAD_NOTICE,
     REQUEST_CREDENTIALS_TOOL,
@@ -38,9 +39,12 @@ from ufo.loop.engine import (
     UNTRUSTED_RESULT_CLOSE_ESCAPE,
     UNTRUSTED_RESULT_NOTICE,
     UNTRUSTED_RESULT_OPEN,
+    Arrival,
     TurnEngine,
     TurnParked,
     _bounded,
+    _claim_turn_with_handoff,
+    _dispatch_segments,
     _final_act,
 )
 from ufo.loop.prompts.render import COMPACTION_SYSTEM_PROMPT, rendered_prompt
@@ -470,6 +474,11 @@ def _engine(
     )
 
 
+def _arrival_body(arrival: Arrival) -> str:
+    assert arrival.rendered is not None
+    return arrival.rendered.split("</context>\n", 1)[-1]
+
+
 async def _queue_arrival(turn: Turn, body: str, speaker_member_id: UUID | None = None) -> None:
     async with workspace_tx() as connection:
         seq = (
@@ -507,12 +516,105 @@ async def test_claim_arrivals_reclaims_stamped_rows_until_absorbed(
         await _queue_arrival(turn, "two")
         first = await engine._claim_arrivals(())
         replayed = await engine._claim_arrivals(())
-        assert [arrival.body for arrival in first] == ["one", "two"]
-        assert [arrival.body for arrival in replayed] == ["one", "two"]
+        assert [_arrival_body(arrival) for arrival in first] == ["one", "two"]
+        assert [_arrival_body(arrival) for arrival in replayed] == ["one", "two"]
         absorbed = tuple(arrival.id for arrival in first)
         assert await engine._claim_arrivals(absorbed) == ()
         await _queue_arrival(turn, "three")
-        assert [arrival.body for arrival in await engine._claim_arrivals(absorbed)] == ["three"]
+        assert [_arrival_body(arrival) for arrival in await engine._claim_arrivals(absorbed)] == [
+            "three"
+        ]
+
+
+async def test_claim_replay_reuses_the_persisted_rendering(db: None, tmp_path: Path) -> None:
+    """A crash after the rendering persisted but before the step recorded: the replayed drain
+    returns the stored rendering — hooks never re-fire, a denial is never re-decided."""
+    turn = await _seed_turn("running", None)
+    with ws(turn.workspace_id):
+        engine = _engine(turn, object(), tmp_path)
+        await _queue_arrival(turn, "one")
+        await _queue_arrival(turn, "two")
+        (first, second) = await engine._claim_arrivals(())
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.inbound_message)
+                .values(rendered="the original rendering")
+                .where(tables.inbound_message.c.id == first.id)
+            )
+            await connection.execute(
+                sa.update(tables.inbound_message)
+                .values(rendered="")
+                .where(tables.inbound_message.c.id == second.id)
+            )
+        replayed = await engine._claim_arrivals(())
+    assert [arrival.rendered for arrival in replayed] == ["the original rendering", None]
+    async with workspace_tx() as connection:
+        stored = (
+            (
+                await connection.execute(
+                    sa.select(tables.inbound_message.c.rendered).order_by(
+                        tables.inbound_message.c.seq
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert stored == ["the original rendering", ""]
+
+
+async def test_turn_start_heals_a_predecessors_unwritten_transcript(
+    db: None, tmp_path: Path
+) -> None:
+    """A predecessor committed its terminal but crashed before the transcript write, and the
+    member already sent this next turn: the gap heals before this turn reads its context, so the
+    older exchange — founding inbound, absorbed arrival, answer — never vanishes under the
+    monotonic guard."""
+    turn = await _seed_turn("done", TerminalFrame(status="done", text="the lost answer"))
+    with ws(turn.workspace_id):
+        await _queue_arrival(turn, "mid-turn message")
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.inbound_message).values(
+                    consumed_turn_id=turn.id, rendered="mid-turn message"
+                )
+            )
+        successor = Turn(
+            id=uuid4(),
+            workspace_id=turn.workspace_id,
+            conversation_id=turn.conversation_id,
+            agent_id=turn.agent_id,
+            seq=2,
+            status="queued",
+            inbound="next question",
+            created_at=ADMITTED_AT,
+        )
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.turn).values(
+                    id=successor.id,
+                    workspace_id=successor.workspace_id,
+                    conversation_id=successor.conversation_id,
+                    agent_id=successor.agent_id,
+                    seq=2,
+                    status="queued",
+                    inbound="next question",
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        engine = _engine(successor, EchoModel(), tmp_path)
+        frame = await engine.run()
+    assert frame is not None and frame.status == "done"
+    stored = await Transcript(
+        blob=FilesystemBlobStore(root=tmp_path), conversation_id=turn.conversation_id
+    ).read()
+    assert stored is not None
+    assert stored.seq == 2
+    texts = [message.content for message in stored.messages if isinstance(message.content, str)]
+    assert "mid-turn message" in texts
+    assert "the lost answer" in texts
+    assert any(text.endswith("next question") for text in texts)
 
 
 async def test_park_releases_the_arrivals_this_attempt_claimed(db: None, tmp_path: Path) -> None:
@@ -523,7 +625,8 @@ async def test_park_releases_the_arrivals_this_attempt_claimed(db: None, tmp_pat
         engine = _engine(turn, object(), tmp_path)
         await _queue_arrival(turn, "one")
         await _queue_arrival(turn, "two")
-        assert [arrival.body for arrival in await engine._claim_arrivals(())] == ["one", "two"]
+        claimed = await engine._claim_arrivals(())
+        assert [_arrival_body(arrival) for arrival in claimed] == ["one", "two"]
         await engine._park("over a spend cap", [])
         async with workspace_tx() as connection:
             pending = (
@@ -665,6 +768,56 @@ async def test_running_turn_is_claimed_only_by_its_own_workflow_id(
             )
         ).scalar_one()
     assert stamp is None
+
+
+async def test_handoff_offers_an_ever_claimed_next_turn_a_fresh_workflow_id(db: None) -> None:
+    """The next queued turn is a fold-resumed park whose enqueue was deferred: its own workflow
+    id was consumed by the run that parked it, so a handoff riding it would dedup into a no-op
+    while stamping the offer."""
+    turn = await _seed_turn("queued", None)
+    next_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=next_id,
+                workspace_id=turn.workspace_id,
+                conversation_id=turn.conversation_id,
+                agent_id=turn.agent_id,
+                seq=2,
+                status="queued",
+                inbound="resumed",
+                running_attempt=uuid4().hex,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    claimed, handoff = await _claim_turn_with_handoff(turn.id, str(turn.id))
+    assert claimed is True
+    assert handoff is not None
+    assert handoff.id == next_id
+    assert handoff.workflow_id != str(next_id)
+
+
+async def test_handoff_offers_a_never_claimed_next_turn_its_own_workflow_id(db: None) -> None:
+    turn = await _seed_turn("queued", None)
+    next_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=next_id,
+                workspace_id=turn.workspace_id,
+                conversation_id=turn.conversation_id,
+                agent_id=turn.agent_id,
+                seq=2,
+                status="queued",
+                inbound="waiting",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    _, handoff = await _claim_turn_with_handoff(turn.id, str(turn.id))
+    assert handoff is not None
+    assert handoff.workflow_id == str(next_id)
 
 
 async def test_tool_call_round_dispatches_in_sandbox_then_answers(db: None, tmp_path: Path) -> None:
@@ -1721,6 +1874,7 @@ async def test_a_rounds_tool_calls_dispatch_concurrently(db: None, tmp_path: Pat
                     description="meet the sibling call",
                     input_model=RendezvousInput,
                     handler=rendezvous,
+                    parallel_safe=True,
                 ),
             )
         ),
@@ -1741,3 +1895,128 @@ async def test_a_rounds_tool_calls_dispatch_concurrently(db: None, tmp_path: Pat
     )
     assert [result.tool_use_id for result in results] == ["r1", "r2"]
     assert [result.content for result in results] == ["met:a", "met:b"]
+
+
+def test_dispatch_segments_batch_safe_runs_and_barrier_the_rest() -> None:
+    def call(call_id: str, name: str) -> ToolUseBlock:
+        return ToolUseBlock(id=call_id, name=name, input={})
+
+    tools = ToolRegistry(
+        (
+            ToolDef(
+                name="safe",
+                description="s",
+                input_model=RendezvousInput,
+                handler=_unavailable_tool,
+                parallel_safe=True,
+            ),
+            ToolDef(
+                name="unsafe",
+                description="u",
+                input_model=RendezvousInput,
+                handler=_unavailable_tool,
+            ),
+        )
+    )
+    calls = (
+        call("s1", "safe"),
+        call("s2", "safe"),
+        call("u1", "unsafe"),
+        call("s3", "safe"),
+        call("x1", "unknown"),
+    )
+    segments = [
+        tuple(block.id for block in segment) for segment in _dispatch_segments(tools, calls)
+    ]
+    assert segments == [("s1", "s2"), ("u1",), ("s3",), ("x1",)]
+    burst = tuple(call(f"s{n}", "safe") for n in range(MAX_PARALLEL_TOOL_CALLS + 3))
+    sizes = [len(segment) for segment in _dispatch_segments(tools, burst)]
+    assert sizes == [MAX_PARALLEL_TOOL_CALLS, 3]
+
+
+async def _unavailable_tool(ctx: ToolContext, args: object) -> ToolResult:
+    raise RuntimeError("never dispatched in the segmentation test")
+
+
+class TwoUnsafeToolModel:
+    """Round one calls the probe tool twice; round two answers — so a test can prove default
+    (not parallel-safe) calls never overlap and still run in call order."""
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        answered = any(
+            isinstance(message.content, tuple)
+            and any(isinstance(block, ToolResultBlock) for block in message.content)
+            for message in request.messages
+        )
+        if answered:
+            yield TextDelta(text="done")
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        yield ToolCallStart(id="p1", name="probe")
+        yield ToolCallDelta(id="p1", partial_json='{"slot": "a"}')
+        yield ToolCallStart(id="p2", name="probe")
+        yield ToolCallDelta(id="p2", partial_json='{"slot": "b"}')
+        yield Usage(input_tokens=2, output_tokens=2)
+
+
+async def test_default_tools_dispatch_in_order_without_overlap(db: None, tmp_path: Path) -> None:
+    turn = await _seed_turn("queued", None)
+    trace: list[str] = []
+
+    async def probe(ctx: ToolContext, args: RendezvousInput) -> ToolResult:
+        trace.append(f"start:{args.slot}")
+        await asyncio.sleep(0)
+        trace.append(f"end:{args.slot}")
+        return ToolResult(content=(TextContent(text=args.slot),))
+
+    engine = replace(
+        _engine(turn, TwoUnsafeToolModel(), tmp_path),
+        tools=ToolRegistry(
+            (
+                ToolDef(
+                    name="probe",
+                    description="record dispatch order",
+                    input_model=RendezvousInput,
+                    handler=probe,
+                ),
+            )
+        ),
+    )
+    with ws(turn.workspace_id):
+        frame = await engine.run()
+    assert frame is not None
+    assert frame.status == "done"
+    assert trace == ["start:a", "end:a", "start:b", "end:b"]
+
+
+async def test_resolve_unclaimed_reconstructs_absorbed_arrivals(db: None, tmp_path: Path) -> None:
+    """A crash between the done-commit and the transcript write must not lose absorbed arrivals:
+    the replay rebuilds the exchange from the consumed rows and the committed answer."""
+    turn = await _seed_turn("done", TerminalFrame(status="done", text="covers both messages"))
+    with ws(turn.workspace_id):
+        engine = _engine(turn, object(), tmp_path)
+        await _queue_arrival(turn, "mid-turn message")
+        claimed = await engine._claim_arrivals(())
+        assert [_arrival_body(arrival) for arrival in claimed] == ["mid-turn message"]
+        async with workspace_tx() as connection:
+            persisted = (
+                await connection.execute(
+                    sa.select(tables.inbound_message.c.rendered).where(
+                        tables.inbound_message.c.consumed_turn_id == turn.id
+                    )
+                )
+            ).scalar_one()
+        assert persisted == claimed[0].rendered
+        frame = await engine._resolve_unclaimed()
+    assert frame is not None
+    assert frame.text == "covers both messages"
+    stored = await Transcript(
+        blob=FilesystemBlobStore(root=tmp_path), conversation_id=turn.conversation_id
+    ).read()
+    assert stored is not None
+    bodies = [
+        message.content.split("</context>\n", 1)[-1]
+        for message in stored.messages
+        if isinstance(message.content, str)
+    ]
+    assert bodies == ["hi", "mid-turn message", "covers both messages"]

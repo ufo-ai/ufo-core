@@ -85,13 +85,17 @@ class TurnDispatcher:
     """Dispatch durable turn rows onto the conversation-partitioned worker queue. QUEUED is an
     outbox state: admission stamps and offers the first turn immediately, while this bounded sweep
     recovers an unstamped or stale offer. Only the lowest-sequence QUEUED turn in a conversation is
-    eligible, so a later turn cannot overtake an earlier offer that has not started. Its DBOS
-    workflow id is the turn id, making an ambiguous duplicate offer safe.
+    eligible, so a later turn cannot overtake an earlier offer that has not started. A never-claimed
+    QUEUED turn's DBOS workflow id is the turn id, making an ambiguous duplicate offer safe.
 
-    PARKED rows share the same scanner and advisory dispatch stamp, but remain spend-gated. A
-    resumed PARKED row needs a fresh DBOS workflow id because the run that parked it consumed its
-    original id. The worker claim clears the stamp for either state. A stamp set before an external
-    enqueue and left behind by a process failure becomes eligible again after the grace window.
+    PARKED rows share the same scanner and advisory dispatch stamp, but remain spend-gated. A row
+    that has ever been claimed — a PARKED one, or a QUEUED one a fold resumed from park — needs a
+    fresh DBOS workflow id because the run that claimed it consumed its original id; the choice
+    reads `running_attempt` from the stamping update itself, so a claim-park-requeue racing the
+    sweep's scan cannot ride a spent id. The worker claim keeps a duplicate fresh-id offer safe,
+    and clears the stamp for either state. A stamp
+    set before an external enqueue and left behind by a process failure becomes eligible again
+    after the grace window.
 
     `candidate_workspaces` is the only fleet-wide owner read. `run` executes inside each returned
     workspace through RLS, claims at most `dispatch_batch` rows, and offers only rows whose stale
@@ -170,15 +174,19 @@ class TurnDispatcher:
                         self._stale(cutoff),
                         order_guard,
                     )
-                    .returning(tables.turn.c.id)
+                    .returning(tables.turn.c.id, tables.turn.c.running_attempt)
                 )
-            ).scalar_one_or_none()
+            ).one_or_none()
         if claimed is None:
             return
         options: EnqueueOptions = {
             "queue_name": TURN_QUEUE_NAME,
             "workflow_name": TURN_WORKFLOW_NAME,
-            "workflow_id": str(turn.id) if turn.status == QUEUED else uuid4().hex,
+            "workflow_id": (
+                str(turn.id)
+                if turn.status == QUEUED and claimed.running_attempt is None
+                else uuid4().hex
+            ),
             "queue_partition_key": str(turn.conversation_id),
             "app_version": DBOS_APP_VERSION,
         }

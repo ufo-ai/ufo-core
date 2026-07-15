@@ -31,6 +31,7 @@ class ToolDef[ModelT: BaseModel]:
     untrusted: bool = False
     side_effecting: bool = False
     subagent_default: bool = False
+    parallel_safe: bool = False
 
     def schema(self) -> ToolSchema:
         return ToolSchema(

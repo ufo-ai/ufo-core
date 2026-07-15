@@ -23,6 +23,7 @@ from ufo.indexing import EmbedClient, IndexBackend
 from ufo.loop.compaction import Compaction
 from ufo.loop.engine import (
     MAIN_ROUND_LIMIT,
+    TranscriptRepair,
     TurnEngine,
     TurnParked,
     _claim_turn_with_handoff,
@@ -140,11 +141,12 @@ async def _enqueue_handoff(
     workspace_id: UUID,
     turn_id: UUID,
     conversation_id: UUID,
+    workflow_id: str,
 ) -> None:
     options: EnqueueOptions = {
         "queue_name": TURN_QUEUE_NAME,
         "workflow_name": TURN_WORKFLOW_NAME,
-        "workflow_id": str(turn_id),
+        "workflow_id": workflow_id,
         "queue_partition_key": str(conversation_id),
         "app_version": DBOS_APP_VERSION,
     }
@@ -177,6 +179,12 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
         attempt = DBOS.workflow_id or turn_id
         claimed, handoff = await _claim_turn_with_handoff(UUID(turn_id), attempt)
         if not claimed:
+            turn, _, _ = await _load_turn(UUID(turn_id))
+            await TranscriptRepair(
+                turn=turn,
+                transcript=Transcript(blob=runtime.blob, conversation_id=turn.conversation_id),
+                hub=runtime.hub,
+            ).resolve()
             return "superseded"
         if handoff is not None:
             await _enqueue_handoff(
@@ -184,6 +192,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 handoff.workspace_id,
                 handoff.id,
                 handoff.conversation_id,
+                handoff.workflow_id,
             )
         turn, agent, audience_member_id = await _load_turn(UUID(turn_id))
         subagents = Subagents(client=runtime.dbos, registry=runtime.subagents, parent=turn)

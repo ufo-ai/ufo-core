@@ -536,6 +536,68 @@ async def test_second_turn_continues_the_conversation(surface: AsyncClient) -> N
     assert len(stored.messages) == 4
 
 
+async def test_redelivery_of_a_finished_turn_repairs_its_transcript(
+    surface: AsyncClient,
+) -> None:
+    """The crash window between the done-commit and the transcript write, replayed through the
+    real worker entrypoint: the claim fails on the terminal row and the repair flow rebuilds the
+    exchange — founding inbound, the absorbed arrival's persisted rendering, and the committed
+    answer — before returning superseded."""
+    headers = await _bootstrap()
+    first = (await surface.post("/v1/chat", content=b"hi", headers=headers)).json()["turn_id"]
+    await _consume(surface, headers, first)
+    _, conversation_id = await _turn_row(first)
+    crashed = uuid4()
+    async with workspace_tx() as connection:
+        scope = (
+            await connection.execute(
+                sa.select(tables.turn.c.workspace_id, tables.turn.c.agent_id).where(
+                    tables.turn.c.id == UUID(first)
+                )
+            )
+        ).one()
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=crashed,
+                workspace_id=scope.workspace_id,
+                conversation_id=conversation_id,
+                agent_id=scope.agent_id,
+                seq=2,
+                status="done",
+                inbound="follow-up",
+                terminal={"status": "done", "text": "covers both"},
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.inbound_message).values(
+                id=uuid4(),
+                workspace_id=scope.workspace_id,
+                conversation_id=conversation_id,
+                seq=1,
+                body="folded message",
+                admission_source="member",
+                admitted_turn_id=crashed,
+                consumed_turn_id=crashed,
+                rendered="folded message as the model saw it",
+                created_at=sa.func.now(),
+            )
+        )
+    runtime = loop_queue._runtime
+    assert runtime is not None
+    with ws(scope.workspace_id):
+        outcome = await loop_queue._run_turn(runtime, str(crashed))
+    assert outcome == "superseded"
+    stored = await Transcript(blob=runtime.blob, conversation_id=conversation_id).read()
+    assert stored is not None
+    assert stored.seq == 2
+    texts = [message.content for message in stored.messages if isinstance(message.content, str)]
+    assert "folded message as the model saw it" in texts
+    assert texts[-1] == "covers both"
+    assert any(text.endswith("follow-up") for text in texts)
+
+
 async def test_mid_turn_messages_absorb_into_the_running_turn(surface: AsyncClient) -> None:
     """Messages sent while a turn runs land on the conversation's inbound queue and the running
     turn absorbs them: the done-commit refuses to close over pending arrivals, the next round

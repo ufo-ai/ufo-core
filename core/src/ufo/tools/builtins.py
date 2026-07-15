@@ -704,6 +704,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=ReadInput,
         handler=read_handler,
+        parallel_safe=True,
     ),
     ToolDef(
         name="write",
@@ -733,6 +734,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=GlobInput,
         handler=glob_handler,
+        parallel_safe=True,
     ),
     ToolDef(
         name="grep",
@@ -744,6 +746,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=GrepInput,
         handler=grep_handler,
+        parallel_safe=True,
     ),
     ToolDef(
         name="share_file",

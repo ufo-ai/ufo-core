@@ -13,16 +13,17 @@ attaching the sandbox, and re-deciding spend. Each step is idempotent across rep
 import asyncio
 import json
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from html import escape
-from uuid import UUID
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 import sqlalchemy as sa
 from dbos import DBOS
 from dbos._error import DBOSWorkflowCancelledError
-from pydantic import BaseModel, ValidationError, field_validator
+from pydantic import BaseModel, ValidationError
 
 from ufo.accounting import (
     ALLOW,
@@ -99,6 +100,7 @@ from ufo.transcript import Conversation
 MAX_OUTPUT_TOKENS = 16_384
 FIND_MAX_TOKENS = 2_000
 MAIN_ROUND_LIMIT = 200
+MAX_PARALLEL_TOOL_CALLS = 8
 DELTA_FLUSH_BYTES = 2048
 DELTA_FLUSH_SECONDS = 0.2
 EMPTY_RESPONSE_NUDGE = "Previous model response was empty. Answer now."
@@ -169,6 +171,7 @@ class _TurnHandoff:
     id: UUID
     workspace_id: UUID
     conversation_id: UUID
+    workflow_id: str
 
 
 async def _claim_turn_with_handoff(turn_id: UUID, attempt: str) -> tuple[bool, _TurnHandoff | None]:
@@ -193,6 +196,7 @@ async def _claim_turn_with_handoff(turn_id: UUID, attempt: str) -> tuple[bool, _
                 sa.select(
                     tables.turn.c.id,
                     tables.turn.c.dispatch_enqueued_at,
+                    tables.turn.c.running_attempt,
                 )
                 .where(
                     tables.turn.c.conversation_id == turn_scope.conversation_id,
@@ -221,7 +225,12 @@ async def _claim_turn_with_handoff(turn_id: UUID, attempt: str) -> tuple[bool, _
         True,
         None
         if stamped is None
-        else _TurnHandoff(stamped, turn_scope.workspace_id, turn_scope.conversation_id),
+        else _TurnHandoff(
+            stamped,
+            turn_scope.workspace_id,
+            turn_scope.conversation_id,
+            str(stamped) if next_turn.running_attempt is None else uuid4().hex,
+        ),
     )
 
 
@@ -258,18 +267,14 @@ class StreamResult(BaseModel):
 
 class Arrival(BaseModel):
     """One drained inbound-queue row — the `_claim_arrivals` DBOS step's memoized output, so a
-    crash-recovery replay reads back exactly the batch the first run consumed."""
+    crash-recovery replay reads back exactly the batch the first run consumed. `rendered` is the
+    message text exactly as the model sees it — user_prompt_submit fired once inside the step,
+    None when it denied — persisted on the row as well, so neither a workflow replay nor a
+    transcript repair ever re-fires hooks or diverges from what the model saw."""
 
     id: UUID
-    body: str
-    context: TurnContext | None = None
     speaker_member_id: UUID | None = None
-    created_at: datetime
-
-    @field_validator("created_at")
-    @classmethod
-    def _aware_utc(cls, value: datetime) -> datetime:
-        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    rendered: str | None = None
 
 
 class ImageRef(BaseModel):
@@ -315,6 +320,33 @@ class TurnParked(Exception):
     def __init__(self, message: str) -> None:
         super().__init__(message)
         self.message = message
+
+
+def _dispatch_segments(
+    tools: ToolRegistry, tool_calls: tuple[ToolUseBlock, ...]
+) -> Iterator[tuple[ToolUseBlock, ...]]:
+    """Split a round's calls into dispatch groups that preserve the model's call order: a run of
+    consecutive parallel-safe calls executes concurrently (bounded by MAX_PARALLEL_TOOL_CALLS),
+    and every other call — a mutation, an unknown name, anything with cross-call dependencies —
+    is its own in-order barrier, so an edit never races the read it depends on."""
+    segment: list[ToolUseBlock] = []
+    for call in tool_calls:
+        try:
+            safe = tools.get(call.name).parallel_safe
+        except KeyError:
+            safe = False
+        if safe:
+            if len(segment) == MAX_PARALLEL_TOOL_CALLS:
+                yield tuple(segment)
+                segment = []
+            segment.append(call)
+            continue
+        if segment:
+            yield tuple(segment)
+            segment = []
+        yield (call,)
+    if segment:
+        yield tuple(segment)
 
 
 def _parse_args(partials: list[str]) -> dict[str, object]:
@@ -372,6 +404,181 @@ def _total_usage(usage_events: list[Usage]) -> Usage:
         cache_read_tokens=sum(u.cache_read_tokens for u in usage_events),
         cache_write_tokens=sum(u.cache_write_tokens for u in usage_events),
     )
+
+
+@dataclass(frozen=True)
+class TranscriptRepair:
+    """The durable-exchange writer: the founding inbound, absorbed arrivals, and a finished turn's
+    answer, persisted to the conversation transcript with bounded retries. `resolve` republishes a
+    committed terminal when an execution holds no running claim — a redelivery of a finished turn,
+    or a crash between the terminal commit and the transcript write — and is reachable from the
+    worker before any engine exists. It reads only durable state (the terminal row, each consumed
+    arrival's persisted rendering), so no hook re-fires and the repaired transcript is exactly
+    what the model saw."""
+
+    turn: Turn
+    transcript: Transcript
+    hub: Hub
+
+    async def resolve(self) -> TerminalFrame | None:
+        """Republish the committed terminal after reconstructing the exchange durably — the
+        founding inbound, every arrival the turn consumed, and a done turn's answer — so an
+        absorbed message never vanishes from history; the monotonic transcript guard lets the
+        original, fuller write win when it did land. Predecessors heal first, so the rebuild
+        never reads a gapped history. No-op (None) while the turn is still running so the live
+        execution stays the sole authority."""
+        await self.heal_preceding()
+        return await self._resolve_own(publish=True)
+
+    async def heal_preceding(self) -> None:
+        """Repair every earlier turn that committed its terminal but never wrote its transcript (a
+        crash inside the write window), in seq order, before this turn's context is read — a later
+        turn advancing the transcript would otherwise make the older exchange unrepairable, its
+        absorbed arrivals gone from history. The conversation partition serializes turns, so every
+        predecessor is terminal; a no-gap conversation returns after one read."""
+        stored = await self.transcript.read()
+        floor = 0 if stored is None else stored.seq
+        if floor >= self.turn.seq - 1:
+            return
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(
+                        tables.turn.c.id,
+                        tables.turn.c.workspace_id,
+                        tables.turn.c.conversation_id,
+                        tables.turn.c.agent_id,
+                        tables.turn.c.seq,
+                        tables.turn.c.status,
+                        tables.turn.c.inbound,
+                        tables.turn.c.admission_source,
+                        tables.turn.c.speaker_member_id,
+                        tables.turn.c.created_at,
+                        tables.turn.c.context,
+                        tables.turn.c.terminal,
+                        tables.turn.c.parent_turn_id,
+                        tables.turn.c.subagent_profile,
+                        tables.turn.c.traceparent,
+                    )
+                    .where(
+                        tables.turn.c.conversation_id == self.turn.conversation_id,
+                        tables.turn.c.seq > floor,
+                        tables.turn.c.seq < self.turn.seq,
+                    )
+                    .order_by(tables.turn.c.seq)
+                )
+            ).all()
+        for row in rows:
+            predecessor = Turn(
+                id=row.id,
+                workspace_id=row.workspace_id,
+                conversation_id=row.conversation_id,
+                agent_id=row.agent_id,
+                seq=row.seq,
+                status=row.status,
+                inbound=row.inbound,
+                admission_source=row.admission_source,
+                speaker_member_id=row.speaker_member_id,
+                created_at=row.created_at,
+                context=None if row.context is None else TurnContext.model_validate(row.context),
+                terminal=(
+                    None if row.terminal is None else TerminalFrame.model_validate(row.terminal)
+                ),
+                parent_turn_id=row.parent_turn_id,
+                subagent_profile=row.subagent_profile,
+                traceparent=row.traceparent,
+            )
+            await replace(self, turn=predecessor)._resolve_own(publish=False)
+
+    async def _resolve_own(self, publish: bool) -> TerminalFrame | None:
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(tables.turn.c.terminal).where(tables.turn.c.id == self.turn.id)
+                )
+            ).one()
+        if row.terminal is None:
+            return None
+        frame = TerminalFrame.model_validate(row.terminal)
+        arrivals = await self._consumed_arrival_messages()
+        if frame.status == "done" and frame.text:
+            await self.write_conversation(
+                (
+                    *await self.load_messages(),
+                    *arrivals,
+                    Message(role="assistant", content=frame.text),
+                )
+            )
+        else:
+            await self.persist_inbound(arrivals)
+        if not publish:
+            return frame
+        try:
+            await self.hub.publish(self.turn.id, Terminal(frame=frame))
+        except Exception as error:
+            log(
+                "hub.publish_failed",
+                turn_id=str(self.turn.id),
+                error_class=type(error).__name__,
+            )
+        return frame
+
+    async def _consumed_arrival_messages(self) -> tuple[Message, ...]:
+        """The arrivals this turn consumed, read back in admission order from the rendering each
+        drain persisted — the durable source for a transcript the crashed run never wrote. An
+        empty rendering was denied by user_prompt_submit; the model never saw it."""
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(tables.inbound_message.c.rendered)
+                    .where(tables.inbound_message.c.consumed_turn_id == self.turn.id)
+                    .order_by(tables.inbound_message.c.seq)
+                )
+            ).all()
+        return tuple(Message(role="user", content=row.rendered) for row in rows if row.rendered)
+
+    async def persist_transcript(self, messages: tuple[Message, ...], answer: str) -> None:
+        await self.write_conversation((*messages, Message(role="assistant", content=answer)))
+
+    async def persist_inbound(self, arrivals: tuple[Message, ...] = ()) -> None:
+        """Preserve the member's messages on a non-done terminal — the founding inbound plus every
+        arrival this run absorbed — so the next turn still sees them; the assistant's error or
+        partial text is never persisted, and the monotonic guard lets a done turn's fuller
+        transcript win over this at the same seq."""
+        await self.write_conversation((*await self.load_messages(), *arrivals))
+
+    async def load_messages(self) -> tuple[Message, ...]:
+        """Prior transcript plus this turn's inbound, prefixed with the <context> tag on a member
+        turn — the model has no clock, so the tag carries the admission moment and the sender, and
+        it persists into the transcript so each past exchange keeps its moment. A subagent's
+        inbound stays the bare schema payload its profile contract promises."""
+        inbound = self.turn.inbound
+        if self.turn.subagent_profile is None:
+            inbound = _context_tag(self.turn.context, self.turn.created_at) + inbound
+        return (*await self._prior_messages(), Message(role="user", content=inbound))
+
+    async def _prior_messages(self) -> tuple[Message, ...]:
+        """The conversation before this turn; self-exclusion keeps a replay from reading its own
+        write (seq >= this turn's) back as prior context."""
+        stored = await self.transcript.read()
+        if stored is None or stored.seq >= self.turn.seq:
+            return ()
+        return stored.messages
+
+    async def write_conversation(self, messages: tuple[Message, ...]) -> None:
+        conversation = Conversation(seq=self.turn.seq, messages=messages)
+        for attempt in range(TRANSCRIPT_WRITE_ATTEMPTS):
+            try:
+                await self.transcript.write(conversation)
+                return
+            except Exception as error:
+                log(
+                    "transcript.write_failed",
+                    turn_id=str(self.turn.id),
+                    attempt=attempt + 1,
+                    error_class=type(error).__name__,
+                )
+                await asyncio.sleep(TRANSCRIPT_WRITE_RETRY_SECONDS)
 
 
 @dataclass(frozen=True)
@@ -460,6 +667,7 @@ class TurnEngine:
             try:
                 if not await self._mark_running():
                     return await self._resolve_unclaimed()
+                await self._repair().heal_preceding()
                 system = self.system_prompt.content
                 if self.turn.admission_source == SCHEDULED_ADMISSION:
                     system = await self._scheduled_system(system)
@@ -582,23 +790,11 @@ class TurnEngine:
         the turn is live; a crash before this leaves the turn re-enqueueable."""
         return await _claim_turn(self.turn.id, self.attempt)
 
-    async def _load_messages(self) -> tuple[Message, ...]:
-        """Prior transcript plus this turn's inbound, prefixed with the <context> tag on a member
-        turn — the model has no clock, so the tag carries the admission moment and the sender, and
-        it persists into the transcript so each past exchange keeps its moment. A subagent's
-        inbound stays the bare schema payload its profile contract promises."""
-        inbound = self.turn.inbound
-        if self.turn.subagent_profile is None:
-            inbound = _context_tag(self.turn.context, self.turn.created_at) + inbound
-        return (*await self._prior_messages(), Message(role="user", content=inbound))
+    def _repair(self) -> TranscriptRepair:
+        return TranscriptRepair(turn=self.turn, transcript=self.transcript, hub=self.hub)
 
-    async def _prior_messages(self) -> tuple[Message, ...]:
-        """The conversation before this turn; self-exclusion keeps a replay from reading its own
-        write (seq >= this turn's) back as prior context."""
-        stored = await self.transcript.read()
-        if stored is None or stored.seq >= self.turn.seq:
-            return ()
-        return stored.messages
+    async def _load_messages(self) -> tuple[Message, ...]:
+        return await self._repair().load_messages()
 
     async def _model_round(
         self,
@@ -617,11 +813,11 @@ class TurnEngine:
         ConnectRequest | None,
     ]:
         """Call the model until it answers with text and no tool calls; each tool-calling round
-        dispatches its calls concurrently — result order stays call order, the memoized dispatch
-        steps stay replay-deterministic because their tasks start in call order on the one loop,
-        and a failing dispatch raises only after every sibling finishes, so no call is left
-        running while the turn commits its terminal — and feeds all results back as one user
-        turn.
+        dispatches consecutive parallel-safe calls concurrently and everything else as an
+        in-order barrier — result order stays call order, the memoized dispatch steps stay
+        replay-deterministic because tasks start in call order on the one loop, and a failing
+        dispatch raises only after its segment's siblings finish, so no call is left running
+        while the turn commits its terminal — and feeds all results back as one user turn.
         Every round opens by absorbing queued arrivals — messages admitted while the previous
         round streamed or its tools ran — so the drain always lands between a completed
         (tool_use, tool_result) pair and the next model call, never inside one. Also returns the
@@ -660,16 +856,19 @@ class TurnEngine:
                 messages = (*messages, Message(role="user", content=EMPTY_RESPONSE_NUDGE))
                 continue
             assistant_blocks = (*((TextBlock(text=text),) if text else ()), *tool_calls)
-            dispatched = await asyncio.gather(
-                *(self._dispatch(round_context, call) for call in tool_calls),
-                return_exceptions=True,
-            )
-            failures = [outcome for outcome in dispatched if isinstance(outcome, BaseException)]
-            if failures:
-                raise failures[0]
-            results = tuple(
-                outcome for outcome in dispatched if not isinstance(outcome, BaseException)
-            )
+            results: tuple[ToolResultBlock, ...] = ()
+            for segment in _dispatch_segments(self.tools, tool_calls):
+                dispatched = await asyncio.gather(
+                    *(self._dispatch(round_context, call) for call in segment),
+                    return_exceptions=True,
+                )
+                failures = [outcome for outcome in dispatched if isinstance(outcome, BaseException)]
+                if failures:
+                    raise failures[0]
+                results = (
+                    *results,
+                    *(o for o in dispatched if not isinstance(o, BaseException)),
+                )
             question = _final_act(tool_calls, results, ASK_USER_TOOL, AskUserInput)
             credential_request = _final_act(
                 tool_calls, results, REQUEST_CREDENTIALS_TOOL, CredentialRequest
@@ -701,26 +900,38 @@ class TurnEngine:
             return messages
         for arrival in await self._claim_arrivals(tuple(absorbed_ids)):
             absorbed_ids.append(arrival.id)
-            submitted = await self.hooks.fire(
-                "user_prompt_submit",
-                UserPromptSubmit(text=arrival.body),
-                self.turn,
-                self.agent,
-                self.audience_member_id,
-                arrival.speaker_member_id,
-            )
-            if submitted.denied is not None:
+            if arrival.rendered is None:
                 continue
             arrival_speakers.add(arrival.speaker_member_id)
-            content = _context_tag(arrival.context, arrival.created_at) + arrival.body
-            if submitted.injected:
-                content = (
-                    f"{content}\n\n<injected_context>\n{submitted.injected}\n</injected_context>"
-                )
-            message = Message(role="user", content=content)
+            message = Message(role="user", content=arrival.rendered)
             arrival_log.append(message)
             messages = (*messages, message)
         return messages
+
+    async def _render_arrival(
+        self,
+        body: str,
+        context: TurnContext | None,
+        speaker_member_id: UUID | None,
+        created_at: datetime,
+    ) -> str | None:
+        """One arrival as the model sees it — user_prompt_submit fired exactly as for the founding
+        inbound (None when denied), the <context> tag from the persisted moment, any injection
+        walled in its own delimiter."""
+        submitted = await self.hooks.fire(
+            "user_prompt_submit",
+            UserPromptSubmit(text=body),
+            self.turn,
+            self.agent,
+            self.audience_member_id,
+            speaker_member_id,
+        )
+        if submitted.denied is not None:
+            return None
+        content = _context_tag(context, created_at) + body
+        if submitted.injected:
+            content = f"{content}\n\n<injected_context>\n{submitted.injected}\n</injected_context>"
+        return content
 
     @DBOS.step(preemptible=True)
     async def _claim_arrivals(self, absorbed: tuple[UUID, ...]) -> tuple[Arrival, ...]:
@@ -728,7 +939,13 @@ class TurnEngine:
         stamped consumed by this turn, and the claim re-takes this turn's stamped rows that no
         recorded drain absorbed — so a crash between the stamp committing and the step recording
         re-executes the drain and recovers exactly the batch it had claimed, while absorbed rows
-        are never re-taken. An arrival is consumed exactly once and never lost."""
+        are never re-taken. Each claimed row is rendered here — hooks fire once per consumed
+        arrival, outside any transaction — and the rendering persists on the row before the step
+        records, so a transcript repair reads back the text the model actually saw without ever
+        re-firing a hook. A replayed drain (a crash after the rendering persisted but before the
+        step recorded) reuses the stored rendering for the same reason — the row keeps '' for a
+        denied arrival so the denial itself is never re-decided. An arrival is consumed exactly
+        once and never lost."""
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
@@ -751,19 +968,41 @@ class TurnEngine:
                         tables.inbound_message.c.context,
                         tables.inbound_message.c.speaker_member_id,
                         tables.inbound_message.c.created_at,
+                        tables.inbound_message.c.rendered,
                     )
                 )
             ).all()
-        return tuple(
-            Arrival(
-                id=row.id,
-                body=row.body,
-                context=None if row.context is None else TurnContext.model_validate(row.context),
-                speaker_member_id=row.speaker_member_id,
-                created_at=row.created_at,
+        arrivals: list[Arrival] = []
+        unrendered: list[tuple[UUID, str]] = []
+        for row in sorted(rows, key=lambda row: row.seq):
+            if row.rendered is not None:
+                arrivals.append(
+                    Arrival(
+                        id=row.id,
+                        speaker_member_id=row.speaker_member_id,
+                        rendered=row.rendered or None,
+                    )
+                )
+                continue
+            rendered = await self._render_arrival(
+                row.body,
+                None if row.context is None else TurnContext.model_validate(row.context),
+                row.speaker_member_id,
+                row.created_at if row.created_at.tzinfo else row.created_at.replace(tzinfo=UTC),
             )
-            for row in sorted(rows, key=lambda row: row.seq)
-        )
+            arrivals.append(
+                Arrival(id=row.id, speaker_member_id=row.speaker_member_id, rendered=rendered)
+            )
+            unrendered.append((row.id, rendered if rendered is not None else ""))
+        if unrendered:
+            async with workspace_tx() as connection:
+                for arrival_id, rendered_value in unrendered:
+                    await connection.execute(
+                        sa.update(tables.inbound_message)
+                        .values(rendered=rendered_value)
+                        .where(tables.inbound_message.c.id == arrival_id)
+                    )
+        return tuple(arrivals)
 
     async def _release_unabsorbed(self, absorbed: tuple[UUID, ...]) -> None:
         """Return stamped-but-unabsorbed arrivals (a drain whose step never recorded) to pending
@@ -1333,43 +1572,14 @@ class TurnEngine:
 
     async def _resolve_unclaimed(self) -> TerminalFrame | None:
         """This execution lost the running claim — the turn is owned by another live execution (a
-        duplicate resume enqueue) or already finished (a re-delivery). Republish its committed
-        terminal, or no-op (None) while it is still running so the live execution stays the sole
+        duplicate resume enqueue) or already finished (a re-delivery, or a crash between the
+        terminal commit and the transcript write). The repair flow republishes its committed
+        terminal, or no-ops (None) while it is still running so the live execution stays the sole
         authority and this duplicate never clobbers it with a spurious terminal."""
-        async with workspace_tx() as connection:
-            row = (
-                await connection.execute(
-                    sa.select(tables.turn.c.terminal).where(tables.turn.c.id == self.turn.id)
-                )
-            ).one()
-        if row.terminal is None:
-            return None
-        await self._persist_inbound()
-        frame = TerminalFrame.model_validate(row.terminal)
-        await self._publish(Terminal(frame=frame))
-        return frame
+        return await self._repair().resolve()
 
     async def _persist_transcript(self, messages: tuple[Message, ...], answer: str) -> None:
-        await self._write_conversation((*messages, Message(role="assistant", content=answer)))
+        await self._repair().persist_transcript(messages, answer)
 
     async def _persist_inbound(self, arrivals: tuple[Message, ...] = ()) -> None:
-        """Preserve the member's messages on a non-done terminal — the founding inbound plus every
-        arrival this run absorbed — so the next turn still sees them; the assistant's error or
-        partial text is never persisted, and the monotonic guard lets a done turn's fuller
-        transcript win over this at the same seq."""
-        await self._write_conversation((*await self._load_messages(), *arrivals))
-
-    async def _write_conversation(self, messages: tuple[Message, ...]) -> None:
-        conversation = Conversation(seq=self.turn.seq, messages=messages)
-        for attempt in range(TRANSCRIPT_WRITE_ATTEMPTS):
-            try:
-                await self.transcript.write(conversation)
-                return
-            except Exception as error:
-                log(
-                    "transcript.write_failed",
-                    turn_id=str(self.turn.id),
-                    attempt=attempt + 1,
-                    error_class=type(error).__name__,
-                )
-                await asyncio.sleep(TRANSCRIPT_WRITE_RETRY_SECONDS)
+        await self._repair().persist_inbound(arrivals)
