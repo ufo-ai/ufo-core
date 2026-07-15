@@ -7,7 +7,6 @@ from evals import (
     browser_nav,
     coding_subagent,
     pdf_build,
-    scenario_env,
     scenario_smoke,
     semantic_quality,
     site_build,
@@ -18,6 +17,7 @@ from evals import (
     yc_workflows,
 )
 from evals.harness.registry import EvalTask, capability_task, scenario_task, selected_tasks
+from evals.scenario_env import lookups, multistep, restraint, writes
 
 DEFAULT_TASKS: tuple[EvalTask, ...] = (
     capability_task("basics", basics.CASES),
@@ -33,7 +33,10 @@ DEFAULT_TASKS: tuple[EvalTask, ...] = (
 )
 TASKS: tuple[EvalTask, ...] = (
     *DEFAULT_TASKS,
-    scenario_task("scenario_env", scenario_env.CASES),
+    scenario_task(
+        "scenario_env",
+        (*lookups.CASES, *writes.CASES, *multistep.CASES, *restraint.CASES),
+    ),
     capability_task("yc_recall", yc_recall.CASES),
     capability_task("yc_workflows", yc_workflows.CASES),
 )

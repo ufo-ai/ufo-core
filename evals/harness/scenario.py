@@ -104,10 +104,12 @@ class ScenarioCase:
     """`max_turns` caps the member's messages; hitting the cap is not itself a failure — the
     grader decides what a finished conversation must show. `member_key`, when set, is the exact
     email of the workspace member the simulator speaks as. `seed`, when set, receives
-    (workspace_id, agent_id) before the conversation opens and establishes the case's starting
-    state — resetting whatever it owns, so a rerun never inherits a prior run's rows. The payload
+    (workspace_id, agent_id) before each trial's conversation opens and establishes the trial's
+    starting state — resetting whatever it owns, so no trial inherits another's rows. The payload
     hashes the seed's qualified name plus its defining module's source, so editing a fixture — or
-    a helper the fixtures share — moves the suite digest by itself."""
+    a helper the fixtures share — moves the suite digest by itself. `trials` reruns the whole
+    conversation independently; the case passes only if every trial passes (tau2-bench's pass^k
+    consistency bar, with k = trials)."""
 
     name: str
     user: ScenarioUser
@@ -116,6 +118,11 @@ class ScenarioCase:
     member_key: str | None = None
     digest_tag: str = ""
     seed: ScenarioSeed | None = None
+    trials: int = 1
+
+    def __post_init__(self) -> None:
+        if self.trials < 1:
+            raise ValueError(f"case {self.name!r} needs at least one trial, got {self.trials}")
 
     def payload(self) -> JsonObject:
         payload: JsonObject = {
@@ -124,6 +131,7 @@ class ScenarioCase:
             "maxTurns": self.max_turns,
             "grader": self.digest_tag or self.name,
             "seed": None if self.seed is None else _seed_digest(self.seed),
+            "trials": self.trials,
             "simulatorRevision": SIMULATOR_REVISION,
         }
         if self.member_key is not None:
@@ -155,78 +163,111 @@ def _bounded(reply: str) -> str:
     return reply[:MAX_SIMULATOR_REPLY_CHARS] + "\n[reply truncated for the simulator]"
 
 
+@dataclass(frozen=True)
+class _Trial:
+    """One independent run of the case's conversation and its verdict."""
+
+    turns: tuple[ScenarioTurn, ...]
+    stopped: bool
+    last: TargetResult | None
+    passed: bool
+    reason: str
+    grader_evidence: JsonObject | None = None
+
+
 async def run_scenario_case(case: ScenarioCase, target: CapabilityTarget) -> EvalCaseResult:
     if target.judge is None:
         raise RuntimeError("a scenario case requires the target's model leg to simulate its member")
-    if case.seed is not None:
-        await case.seed(ws_current().workspace_id, target.agent_id)
-    simulator = UserSimulator(target.judge, case.user)
-    conversation_id = await target.conversations.open(case.name, case.member_key)
-    turns: list[ScenarioTurn] = []
-    last: TargetResult | None = None
-    stopped = False
-    for index in range(case.max_turns):
-        message = await simulator.next_message(tuple(turns))
-        if STOP_TOKEN in message:
-            stopped = True
-            break
-        if not message:
-            return _case_result(
-                case, turns, stopped, last, False, "simulator sent an empty message"
-            )
-        result = await target.step(
-            conversation_id, message, f"{case.name}:{conversation_id}:{index}"
-        )
-        turns.append(ScenarioTurn(message, result.output.response))
-        last = result
-        if not result.clean:
-            return _case_result(case, turns, stopped, last, False, result.failure_reason)
-    if last is None:
-        return _case_result(
-            case, turns, stopped, last, False, "simulator ended the conversation before it began"
-        )
-    verdict = await case.grader(ScenarioOutcome(tuple(turns), last.output, stopped))
-    return _case_result(
-        case, turns, stopped, last, verdict.passed, verdict.reason, verdict.evidence
-    )
+    run = _ScenarioRun(case, target, UserSimulator(target.judge, case.user))
+    return await run.result()
 
 
-def _case_result(
-    case: ScenarioCase,
-    turns: list[ScenarioTurn],
-    stopped: bool,
-    last: TargetResult | None,
-    passed: bool,
-    reason: str,
-    grader_evidence: JsonObject | None = None,
-) -> EvalCaseResult:
-    output = last.output if last is not None else CapabilityOutput("", ())
-    calls: list[Json] = [
-        {
-            "name": call.name,
-            "input": call.input,
-            "result": call.result,
-            "hasResult": call.has_result,
-            "isError": call.is_error,
+@dataclass(frozen=True)
+class _ScenarioRun:
+    """One case's execution against a target: every trial in order — each a freshly seeded
+    conversation the simulator drives to its stop — folded into one all-trials-must-pass
+    result."""
+
+    case: ScenarioCase
+    target: CapabilityTarget
+    simulator: UserSimulator
+
+    async def result(self) -> EvalCaseResult:
+        trials = [await self._trial(index) for index in range(self.case.trials)]
+        passes = sum(1 for trial in trials if trial.passed)
+        passed = passes == len(trials)
+        first_failure = next((trial for trial in trials if not trial.passed), None)
+        if len(trials) == 1:
+            reason = trials[0].reason
+        elif first_failure is None:
+            reason = f"{passes}/{len(trials)} trials passed"
+        else:
+            reason = f"{passes}/{len(trials)} trials passed; first failure: {first_failure.reason}"
+        evidence: JsonObject = {
+            "user": self.case.user.payload(),
+            "selectedAttempt": trials.index(first_failure) if first_failure is not None else 0,
+            "attempts": [self._attempt(trial) for trial in trials],
         }
-        for call in output.calls
-    ]
-    trajectory = last.trajectory if last is not None else None
-    evidence: JsonObject = {
-        "user": case.user.payload(),
-        "stopped": stopped,
-        "turns": [{"userMessage": turn.user_message, "reply": turn.reply} for turn in turns],
-        "selectedAttempt": 0,
-        "attempts": [
+        return EvalCaseResult(name=self.case.name, passed=passed, reason=reason, evidence=evidence)
+
+    async def _trial(self, trial: int) -> _Trial:
+        case = self.case
+        if case.seed is not None:
+            await case.seed(ws_current().workspace_id, self.target.agent_id)
+        conversation_id = await self.target.conversations.open(
+            f"{case.name}:{trial}", case.member_key
+        )
+        turns: list[ScenarioTurn] = []
+        last: TargetResult | None = None
+        stopped = False
+        for index in range(case.max_turns):
+            message = await self.simulator.next_message(tuple(turns))
+            if STOP_TOKEN in message:
+                stopped = True
+                break
+            if not message:
+                return _Trial(tuple(turns), stopped, last, False, "simulator sent an empty message")
+            result = await self.target.step(
+                conversation_id, message, f"{case.name}:{conversation_id}:{index}"
+            )
+            turns.append(ScenarioTurn(message, result.output.response))
+            last = result
+            if not result.clean:
+                return _Trial(tuple(turns), stopped, last, False, result.failure_reason)
+        if last is None:
+            return _Trial(
+                tuple(turns),
+                stopped,
+                last,
+                False,
+                "simulator ended the conversation before it began",
+            )
+        verdict = await case.grader(ScenarioOutcome(tuple(turns), last.output, stopped))
+        return _Trial(tuple(turns), stopped, last, verdict.passed, verdict.reason, verdict.evidence)
+
+    def _attempt(self, trial: _Trial) -> Json:
+        output = trial.last.output if trial.last is not None else CapabilityOutput("", ())
+        calls: list[Json] = [
             {
-                "passed": passed,
-                "reason": reason,
-                "response": output.response,
-                "calls": calls,
-                "toolErrors": list(output.tool_errors),
-                "grader": grader_evidence or None,
-                "trajectory": (None if trajectory is None else trajectory.model_dump(mode="json")),
+                "name": call.name,
+                "input": call.input,
+                "result": call.result,
+                "hasResult": call.has_result,
+                "isError": call.is_error,
             }
-        ],
-    }
-    return EvalCaseResult(name=case.name, passed=passed, reason=reason, evidence=evidence)
+            for call in output.calls
+        ]
+        trajectory = trial.last.trajectory if trial.last is not None else None
+        return {
+            "passed": trial.passed,
+            "reason": trial.reason,
+            "response": output.response,
+            "calls": calls,
+            "toolErrors": list(output.tool_errors),
+            "turns": [
+                {"userMessage": turn.user_message, "reply": turn.reply} for turn in trial.turns
+            ],
+            "stopped": trial.stopped,
+            "grader": trial.grader_evidence or None,
+            "trajectory": None if trajectory is None else trajectory.model_dump(mode="json"),
+        }

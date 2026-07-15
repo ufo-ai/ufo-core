@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import cast
 from uuid import UUID, uuid4
 
+import pytest
 import sqlalchemy as sa
 
 from evals.harness.capability import CapabilityVerdict
@@ -242,17 +243,17 @@ async def test_scenario_drives_multiple_turns_on_one_conversation(db: None, tmp_
             )
         ).scalar_one()
     assert conversations == 1
-    turns = cast(list[dict[str, str]], result.evidence["turns"])
+    attempts = cast(list[dict[str, object]], result.evidence["attempts"])
+    turns = cast(list[dict[str, str]], attempts[0]["turns"])
     assert [turn["reply"] for turn in turns] == [
         "Happy to help — what was the second amount?",
         "Your total is $223.",
     ]
-    attempts = cast(list[dict[str, object]], result.evidence["attempts"])
     calls = cast(list[dict[str, object]], attempts[0]["calls"])
     assert [call["name"] for call in calls] == ["js_repl"]
     trajectory = cast(dict[str, object], attempts[0]["trajectory"])
     assert len(cast(list[object], trajectory["messages"])) == 6
-    assert result.evidence["stopped"] is True
+    assert attempts[0]["stopped"] is True
 
 
 async def test_scenario_shows_the_member_only_its_scenario_and_the_replies(
@@ -308,7 +309,8 @@ async def test_scenario_fails_on_an_unclean_turn(db: None, tmp_path) -> None:
 
     assert not result.passed
     assert result.reason == "turn ended with status failed"
-    assert len(cast(list[object], result.evidence["turns"])) == 2
+    attempts = cast(list[dict[str, object]], result.evidence["attempts"])
+    assert len(cast(list[object], attempts[0]["turns"])) == 2
 
 
 async def test_scenario_fails_when_the_member_never_speaks(db: None, tmp_path) -> None:
@@ -392,3 +394,56 @@ async def test_scenario_seed_runs_before_the_first_turn(db: None, tmp_path) -> N
 
     assert result.passed, result.reason
     assert seeded == [(workspace_id, agent_id)]
+
+
+async def test_multi_trial_case_reseeds_and_requires_every_trial(db: None, tmp_path) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = ScriptedWorker(
+        blob,
+        workspace_id,
+        replies=(
+            (Message(role="assistant", content="Your total is $223."),),
+            (Message(role="assistant", content="I cannot help with that."),),
+        ),
+    )
+    member = ScriptedMember(
+        ("Total: first $137, second $86?", STOP_TOKEN, "Total: first $137, second $86?", STOP_TOKEN)
+    )
+    seeds: list[int] = []
+
+    async def seed(seed_workspace_id: UUID, seed_agent_id: UUID) -> None:
+        seeds.append(worker.invoked)
+
+    async def grade(outcome: ScenarioOutcome) -> CapabilityVerdict:
+        communicated = "223" in outcome.replies[-1]
+        return CapabilityVerdict(communicated, "total" if communicated else "no total")
+
+    case = ScenarioCase("consistency", _SUM_USER, grade, max_turns=2, seed=seed, trials=2)
+
+    with ws(workspace_id):
+        result = await run_scenario_case(
+            case, _target(workspace_id, agent_id, blob, worker, member)
+        )
+
+    assert not result.passed
+    assert result.reason == "1/2 trials passed; first failure: no total"
+    assert seeds == [0, 1]
+    assert result.evidence["selectedAttempt"] == 1
+    attempts = cast(list[dict[str, object]], result.evidence["attempts"])
+    assert [attempt["passed"] for attempt in attempts] == [True, False]
+    async with workspace_tx() as connection:
+        conversations = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.conversation)
+                .where(tables.conversation.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    assert conversations == 2
+
+
+def test_zero_trials_fails_loud() -> None:
+    with pytest.raises(ValueError, match="at least one trial"):
+        ScenarioCase("typo", _SUM_USER, _sum_grader, trials=0)
