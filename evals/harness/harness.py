@@ -29,6 +29,7 @@ class EvalCaseResult(BaseModel):
     reason: str
     evidence: JsonObject
     excluded: bool = False
+    redact_evidence: bool = False
 
 
 class EvalReport(BaseModel):

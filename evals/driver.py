@@ -16,12 +16,15 @@ import sqlalchemy as sa
 from dbos import DBOSClient, WorkflowHandleAsync
 from dbos import error as dbos_error
 
+from evals.harness.capability import WorkspaceFile
 from ufo.blob import BlobNotFound, BlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import Trajectory
+from ufo.ext.surface import workspace_key
 from ufo.governance import prompt_digest
 from ufo.schema import tables
-from ufo.transcript import TranscriptDecodeError, decode, transcript_key
+from ufo.sdk.models import Message
+from ufo.transcript import Conversation, TranscriptDecodeError, decode, encode, transcript_key
 from ufo.workspace import ws
 
 EVAL_SURFACE = "eval"
@@ -59,10 +62,17 @@ class WorkspaceDriver:
     agent_prompt: str
     blob: BlobStore
     dbos: DBOSClient
+    agent_model: str = "eval"
     poll_interval_seconds: float = POLL_INTERVAL_SECONDS
     workflow_wait_seconds: float = WORKFLOW_WAIT_SECONDS
 
-    async def open(self, case_name: str, member_key: str | None = None) -> UUID:
+    async def open(
+        self,
+        case_name: str,
+        member_key: str | None = None,
+        workspace_files: tuple[WorkspaceFile, ...] = (),
+        prior_messages: tuple[str, ...] = (),
+    ) -> UUID:
         """Open one isolated eval conversation. A member-bound case names its member by the exact
         workspace `member.email`; an absent email fails rather than degrading to shared-only
         recall."""
@@ -79,9 +89,10 @@ class WorkspaceDriver:
                     )
                 ).scalar_one_or_none()
                 if member_id is None:
-                    raise ValueError(
+                    message = (
                         f"eval member_key {member_key!r} is not a member email in this workspace"
                     )
+                    raise ValueError(message)
             await connection.execute(
                 sa.insert(tables.conversation).values(
                     id=conversation_id,
@@ -93,6 +104,31 @@ class WorkspaceDriver:
                     updated_at=sa.func.now(),
                 )
             )
+            if prior_messages:
+                await connection.execute(
+                    sa.insert(tables.turn).values(
+                        id=uuid4(),
+                        workspace_id=self.workspace_id,
+                        conversation_id=conversation_id,
+                        agent_id=self.agent_id,
+                        seq=1,
+                        status="done",
+                        inbound=prior_messages[0],
+                        terminal={"status": "done", "text": "Done.", "model": self.agent_model},
+                        created_at=sa.func.now(),
+                        updated_at=sa.func.now(),
+                    )
+                )
+        if prior_messages:
+            messages = tuple(
+                Message(role="user" if index % 2 == 0 else "assistant", content=content)
+                for index, content in enumerate(prior_messages)
+            )
+            await self.blob.put(
+                transcript_key(conversation_id), encode(Conversation(seq=1, messages=messages))
+            )
+        for item in workspace_files:
+            await self.blob.put(workspace_key(conversation_id, item.path), item.content)
         return conversation_id
 
     async def settle(self, conversation_id: UUID, turn_id: UUID) -> Trajectory | None:

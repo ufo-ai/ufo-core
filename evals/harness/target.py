@@ -22,6 +22,7 @@ from evals.harness.capability import (
     SharedArtifact,
     ToolInvocation,
     TurnLog,
+    WorkspaceFile,
 )
 from evals.harness.harness import Json
 from evals.harness.judge import JudgeLeg
@@ -45,6 +46,10 @@ PRIVATE_HANDOFF_REDACTED = "[private handoff redacted]"
 TERMINAL_CHILD_STATUSES = frozenset({"done", "failed", "cancelled"})
 CHILD_TRANSCRIPT_POLL_SECONDS = 0.2
 CHILD_TRANSCRIPT_POLL_ATTEMPTS = 25
+FIRST_COMPACTION_INDEX = 1
+COMPACTION_SUMMARY_KEY_TEMPLATE = (
+    "conversations/{conversation_id}/compactions/{index}/summary.json.lz4"
+)
 
 
 @dataclass(frozen=True)
@@ -107,7 +112,13 @@ class CapabilityTarget(Protocol):
 
 
 class EvalConversations(Protocol):
-    async def open(self, case_name: str, member_key: str | None = None) -> UUID: ...
+    async def open(
+        self,
+        case_name: str,
+        member_key: str | None = None,
+        workspace_files: tuple[WorkspaceFile, ...] = (),
+        prior_messages: tuple[str, ...] = (),
+    ) -> UUID: ...
 
 
 class TurnOutcome(Protocol):
@@ -147,7 +158,9 @@ class InProcessTarget:
         return await self.mcp_atlas.run(prompt, enabled_tools, tool_servers)
 
     async def run(self, case: CapabilityCase) -> TargetResult:
-        conversation_id = await self.conversations.open(case.name, case.member_key)
+        conversation_id = await self.conversations.open(
+            case.name, case.member_key, case.workspace_files, case.prior_messages
+        )
         try:
             turn_id = await self.ctx.invoke(
                 conversation_id,
@@ -171,7 +184,20 @@ class InProcessTarget:
             output = replace(output, log=log)
         if self.blob is not None:
             collected = await self._shared_artifacts((turn_id, *settled.descendant_ids))
-            output = replace(output, artifacts=collected.artifacts, artifact_error=collected.error)
+            compactions = int(
+                await self.blob.exists(
+                    COMPACTION_SUMMARY_KEY_TEMPLATE.format(
+                        conversation_id=conversation_id,
+                        index=FIRST_COMPACTION_INDEX,
+                    )
+                )
+            )
+            output = replace(
+                output,
+                artifacts=collected.artifacts,
+                artifact_error=collected.error,
+                compactions=compactions,
+            )
         return replace(result, output=output)
 
     async def step(self, conversation_id: UUID, message: str, idempotency_key: str) -> TargetResult:

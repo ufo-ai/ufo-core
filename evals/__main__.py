@@ -33,6 +33,7 @@ from evals.dsqa_100.runner import (
     DSQA100Run,
     load_dsqa_100,
 )
+from evals.harness.capability import redacted_case
 from evals.harness.harness import EvalReport, digest_payload
 from evals.harness.judge import ModelJudge
 from evals.harness.registry import EvalTask, selected_tasks
@@ -46,6 +47,7 @@ from evals.harness.viewer import (
     render_viewer,
     write_viewer,
 )
+from evals.hle_gold.runner import HLEGoldRun, load_hle_gold
 from evals.mcp_atlas_100.runner import load_mcp_atlas_task
 from evals.mcp_atlas_100.target import McpAtlasTarget
 from evals.memory_100.runner import Memory100Run, load_memory_100
@@ -102,6 +104,8 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--memory-100", type=Path, metavar="SNAPSHOT")
     parser.add_argument("--memory-100-state", type=Path, metavar="READINESS")
+    parser.add_argument("--hle-gold", type=Path, metavar="GOLD_JSONL")
+    parser.add_argument("--hle-gold-smoke", action="store_true")
     parser.add_argument("--dsqa-100", type=Path, metavar="SNAPSHOT")
     parser.add_argument(
         "--mcp-atlas-data",
@@ -127,6 +131,14 @@ def main(argv: list[str] | None = None) -> None:
     names = tuple(args.only)
     if (args.memory_100 is None) != (args.memory_100_state is None):
         parser.error("--memory-100 and --memory-100-state must be provided together")
+    if args.hle_gold is not None and args.memory_100 is not None:
+        parser.error("--hle-gold and --memory-100 are mutually exclusive")
+    if args.hle_gold is not None and args.dsqa_100 is not None:
+        parser.error("--hle-gold and --dsqa-100 are separate eval runs")
+    if args.hle_gold_smoke and args.hle_gold is None:
+        parser.error("--hle-gold-smoke requires --hle-gold")
+    if args.hle_gold is not None and not args.list and args.workspace is None:
+        parser.error("--hle-gold requires an explicit disposable --workspace")
     if args.dsqa_100 is not None and args.memory_100 is not None:
         parser.error("--dsqa-100 and --memory-100 are separate eval runs")
     memory_run: Memory100Run | None = None
@@ -137,6 +149,7 @@ def main(argv: list[str] | None = None) -> None:
         "mcp_atlas_100" not in names
     ):
         parser.error("MCP-Atlas options require --only mcp_atlas_100")
+    hle_run = load_hle_gold(args.hle_gold, args.hle_gold_smoke) if args.hle_gold else None
     try:
         tasks = _tasks(
             names,
@@ -144,6 +157,7 @@ def main(argv: list[str] | None = None) -> None:
             dsqa_run,
             args.mcp_atlas_data,
             args.mcp_atlas_samples,
+            hle_run,
         )
     except (OSError, ValueError, ValidationError) as error:
         parser.error(str(error))
@@ -182,8 +196,17 @@ def main(argv: list[str] | None = None) -> None:
             selected.append(matches[0])
         current = selected[0]
         baseline = selected[1] if len(selected) == 2 else None
+        shared: list[EvalRun] = []
+        for run in selected:
+            reports = tuple(
+                report.model_copy(
+                    update={"cases": tuple(redacted_case(case) for case in report.cases)}
+                )
+                for report in run.reports
+            )
+            shared.append(run.model_copy(update={"reports": reports}))
         page = render_viewer(
-            tuple(selected), current.id, baseline.id if baseline is not None else None
+            tuple(shared), current.id, baseline.id if baseline is not None else None
         )
         url = asyncio.run(
             S3ViewerShare(
@@ -294,7 +317,7 @@ async def _run(
             )
             blob = blob_store_for(config.blob)
             dbos = DBOSClient(system_database_url=config.database.system_url)
-            driver = WorkspaceDriver(workspace_id, agent_id, agent_prompt, blob, dbos)
+            driver = WorkspaceDriver(workspace_id, agent_id, agent_prompt, blob, dbos, agent_model)
             ctx = context_for(
                 "evals",
                 frozenset(),
@@ -450,7 +473,10 @@ def _tasks(
     dsqa_run: DSQA100Run | None = None,
     mcp_atlas_data: Path | None = None,
     mcp_atlas_samples: int | None = None,
+    hle_run: HLEGoldRun | None = None,
 ) -> tuple[EvalTask, ...]:
+    if hle_run is not None:
+        return selected_tasks(hle_run.tasks, names)
     mcp_atlas = (
         (load_mcp_atlas_task(mcp_atlas_data, mcp_atlas_samples),)
         if mcp_atlas_data is not None

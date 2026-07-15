@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from hashlib import sha256
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -80,6 +81,7 @@ class CapabilityOutput:
     artifacts: tuple[SharedArtifact, ...] = ()
     artifact_error: str = ""
     log: TurnLog | None = None
+    compactions: int = 0
     tokens: int = 0
     cost_micro_usd: int = 0
 
@@ -89,6 +91,12 @@ class CapabilityOutput:
 
 
 type Grader = Callable[[CapabilityOutput], Awaitable[CapabilityVerdict]]
+
+
+@dataclass(frozen=True)
+class WorkspaceFile:
+    path: str
+    content: bytes
 
 
 @dataclass(frozen=True)
@@ -103,7 +111,9 @@ class CapabilityCase:
     """A message and its deterministic and semantic criteria. `web_dependent` infra-excludes an
     external outage; `samples` re-runs the case and passes if any sample passes; `digest_tag`
     stabilizes the suite digest. `member_key`, when set, is the exact email of the workspace member
-    whose private memory the eval conversation may recall."""
+    whose private memory the eval conversation may recall. `redact_evidence` marks the recorded
+    result so `redacted_case` scrubs its source and candidate content before publication; the
+    local run archive keeps everything."""
 
     name: str
     message: str
@@ -113,6 +123,9 @@ class CapabilityCase:
     digest_tag: str = ""
     rubric: tuple[str, ...] = ()
     member_key: str | None = None
+    workspace_files: tuple[WorkspaceFile, ...] = ()
+    prior_messages: tuple[str, ...] = ()
+    redact_evidence: bool = False
 
     def payload(self) -> JsonObject:
         payload: JsonObject = {
@@ -127,6 +140,20 @@ class CapabilityCase:
             payload["judgeRevision"] = JUDGE_REVISION
         if self.member_key is not None:
             payload["memberKey"] = self.member_key
+        if self.workspace_files:
+            payload["workspaceFiles"] = [
+                {
+                    "path": item.path,
+                    "sha256": sha256(item.content).hexdigest(),
+                }
+                for item in self.workspace_files
+            ]
+        if self.prior_messages:
+            payload["priorMessages"] = [
+                sha256(message.encode()).hexdigest() for message in self.prior_messages
+            ]
+        if self.redact_evidence:
+            payload["redactEvidence"] = True
         return payload
 
 
@@ -164,6 +191,7 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
                 "log": (
                     None if sample_output.log is None else sample_output.log.model_dump(mode="json")
                 ),
+                "compactions": sample_output.compactions,
                 "grader": sample_verdict.evidence or None,
                 "trajectory": (
                     None if sample.trajectory is None else sample.trajectory.model_dump(mode="json")
@@ -187,6 +215,7 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
                 reason=f"infra-excluded (web unavailable): {broke[:120]}",
                 evidence=evidence,
                 excluded=True,
+                redact_evidence=case.redact_evidence,
             )
     passed = bool(winning_indexes)
     reason = (
@@ -194,7 +223,13 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
         if passed
         else f"{len(winning_indexes)}/{len(samples)} samples passed: {verdict.reason}"
     )
-    return EvalCaseResult(name=case.name, passed=passed, reason=reason, evidence=evidence)
+    return EvalCaseResult(
+        name=case.name,
+        passed=passed,
+        reason=reason,
+        evidence=evidence,
+        redact_evidence=case.redact_evidence,
+    )
 
 
 async def sample_capability(case: CapabilityCase, target: CapabilityTarget) -> CapabilitySample:
@@ -220,3 +255,80 @@ async def sample_capability(case: CapabilityCase, target: CapabilityTarget) -> C
         CapabilityVerdict(passed, f"{deterministic.reason}; {reason}", deterministic.evidence),
         result.trajectory,
     )
+
+
+class _RecordedCall(BaseModel):
+    name: str
+    has_result: bool = Field(alias="hasResult")
+    is_error: bool = Field(alias="isError")
+
+
+class _RecordedAttempt(BaseModel):
+    passed: bool
+    calls: tuple[_RecordedCall, ...]
+    tool_errors: tuple[str, ...] = Field(alias="toolErrors")
+    artifact_error: str | None = Field(default=None, alias="artifactError")
+    tokens: int = 0
+    cost_micro_usd: int = Field(default=0, alias="costMicroUsd")
+    compactions: int = 0
+    grader: JsonObject | None = None
+
+
+class _RecordedEvidence(BaseModel):
+    selected_attempt: int = Field(alias="selectedAttempt")
+    attempts: tuple[_RecordedAttempt, ...]
+
+
+def redacted_case(result: EvalCaseResult) -> EvalCaseResult:
+    """The publishable form of one case. A flagged case keeps verdicts, tool names, counts,
+    usage, and boolean or numeric grader evidence; its benchmark source, candidate output, grader
+    text, and trajectory do not leave the machine. An unflagged case passes through whole."""
+    if not result.redact_evidence:
+        return result
+    recorded = _RecordedEvidence.model_validate(result.evidence)
+    attempts: list[Json] = [
+        {
+            "passed": attempt.passed,
+            "reason": "passed" if attempt.passed else "failed",
+            "response": None,
+            "calls": [
+                {
+                    "name": call.name,
+                    "input": {},
+                    "result": "",
+                    "hasResult": call.has_result,
+                    "isError": call.is_error,
+                }
+                for call in attempt.calls
+            ],
+            "toolErrors": ["tool error"] * len(attempt.tool_errors),
+            "artifacts": [],
+            "artifactError": "artifact error" if attempt.artifact_error else None,
+            "tokens": attempt.tokens,
+            "costMicroUsd": attempt.cost_micro_usd,
+            "log": None,
+            "compactions": attempt.compactions,
+            "grader": (
+                {
+                    key: value
+                    for key, value in attempt.grader.items()
+                    if isinstance(value, bool | int | float)
+                }
+                if attempt.grader
+                else None
+            ),
+            "trajectory": None,
+        }
+        for attempt in recorded.attempts
+    ]
+    if result.excluded:
+        reason = "infra-excluded (web unavailable)"
+    else:
+        reason = "passed" if result.passed else "failed"
+    evidence: JsonObject = {
+        "message": None,
+        "rubric": [],
+        "selectedAttempt": recorded.selected_attempt,
+        "attempts": attempts,
+    }
+    return result.model_copy(update={"reason": reason, "evidence": evidence})

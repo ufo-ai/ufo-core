@@ -38,6 +38,7 @@ from evals.harness.capability import (
     SharedArtifact,
     ToolInvocation,
     TurnLog,
+    WorkspaceFile,
     run_capability_case,
 )
 from evals.harness.harness import EvalCaseResult, EvalMetric, EvalReport
@@ -79,6 +80,7 @@ from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, ModelAccess, Trajectory, context_for
+from ufo.ext.surface import workspace_key
 from ufo.loop.transcript import Transcript
 from ufo.models.interface import (
     ImageBlock,
@@ -94,7 +96,7 @@ from ufo.models.interface import (
 )
 from ufo.schema import tables
 from ufo.schema.records import Usage
-from ufo.transcript import Conversation, encode, transcript_key
+from ufo.transcript import Conversation, decode, encode, transcript_key
 from ufo.workspace import ws
 
 MODEL = "claude-opus-4-8"
@@ -374,7 +376,13 @@ class StaticTurnLogReader:
 class DbConversations:
     workspace_id: UUID
 
-    async def open(self, case_name: str, member_key: str | None = None) -> UUID:
+    async def open(
+        self,
+        case_name: str,
+        member_key: str | None = None,
+        workspace_files: tuple[WorkspaceFile, ...] = (),
+        prior_messages: tuple[str, ...] = (),
+    ) -> UUID:
         conversation_id = uuid4()
         async with workspace_tx() as connection:
             member_id = None
@@ -499,6 +507,54 @@ async def test_capability_case_runs_through_invoke_and_scores_the_trajectory(
     assert trajectory["turn_id"]
     assert trajectory["status"] == "done"
     assert len(cast(list[object], trajectory["messages"])) == len(_research_transcript())
+
+
+@pytest.mark.parametrize(("compacted", "expected"), ((False, 0), (True, 1)))
+async def test_in_process_target_reads_durable_compaction_state(
+    db: None, tmp_path, compacted: bool, expected: int
+) -> None:
+    @dataclass(frozen=True)
+    class ExistingConversation:
+        conversation_id: UUID
+
+        async def open(
+            self,
+            case_name: str,
+            member_key: str | None = None,
+            workspace_files: tuple[WorkspaceFile, ...] = (),
+            prior_messages: tuple[str, ...] = (),
+        ) -> UUID:
+            return self.conversation_id
+
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    conversation_id = await DbConversations(workspace_id).open("compaction-state")
+    if compacted:
+        await blob.put(
+            harness_target.COMPACTION_SUMMARY_KEY_TEMPLATE.format(
+                conversation_id=conversation_id,
+                index=harness_target.FIRST_COMPACTION_INDEX,
+            ),
+            b"summary",
+        )
+    worker = StubWorker(blob, workspace_id, _research_transcript())
+    ctx = _context(blob, worker)
+    target = InProcessTarget(
+        ctx=ctx,
+        agent_id=agent_id,
+        conversations=ExistingConversation(conversation_id),
+        outcome=CorpusOutcome(ctx),
+        blob=blob,
+    )
+
+    with ws(workspace_id):
+        result = await target.run(
+            CapabilityCase("compaction-state", "answer", restraint_scorer(WEB_TOOLS))
+        )
+
+    assert result.clean
+    assert result.output.compactions == expected
 
 
 async def test_eval_trajectory_omits_images_and_private_handoffs(db: None, tmp_path) -> None:
@@ -1478,6 +1534,49 @@ async def test_workspace_driver_rejects_an_unknown_member_key(db: None, tmp_path
         await driver.open("missing-member", "missing@eval.invalid")
 
 
+async def test_workspace_driver_seeds_case_history_and_files(db: None, tmp_path) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    driver = WorkspaceDriver(workspace_id, agent_id, PROMPT, blob, UNCALLED_DBOS)
+    case = CapabilityCase(
+        "seeded",
+        "continue",
+        exact_scorer("done"),
+        prior_messages=("remember token", "acknowledged"),
+        workspace_files=(WorkspaceFile("hle/image.png", b"image"),),
+    )
+
+    with ws(workspace_id):
+        conversation_id = await driver.open(
+            case.name, case.member_key, case.workspace_files, case.prior_messages
+        )
+        transcript = decode(await blob.get(transcript_key(conversation_id)))
+        image = await blob.get(workspace_key(conversation_id, "hle/image.png"))
+        async with workspace_tx() as connection:
+            seqs = (
+                (
+                    await connection.execute(
+                        sa.select(tables.turn.c.seq).where(
+                            tables.turn.c.conversation_id == conversation_id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+    assert transcript == Conversation(
+        seq=1,
+        messages=(
+            Message(role="user", content="remember token"),
+            Message(role="assistant", content="acknowledged"),
+        ),
+    )
+    assert image == b"image"
+    assert seqs == [1]
+
+
 async def test_workspace_driver_reads_a_terminal_transcript_at_the_turn_sequence(
     db: None, tmp_path
 ) -> None:
@@ -1741,6 +1840,105 @@ endpoint_url = "https://s3.invalid"
         ("configured-evals", "us-west-2", "https://s3.invalid"),
         ("explicit-evals", "us-west-2", "https://s3.invalid"),
     ]
+
+
+def test_share_publishes_flagged_cases_redacted_while_the_local_record_keeps_them(
+    tmp_path, monkeypatch
+) -> None:
+    flagged = EvalCaseResult(
+        name="hle_gold.tool_restraint.abc",
+        passed=True,
+        reason="matched the private gold answer",
+        evidence={
+            "message": "private question",
+            "rubric": [],
+            "selectedAttempt": 0,
+            "attempts": [
+                {
+                    "passed": True,
+                    "reason": "matched the private gold answer",
+                    "response": "private answer",
+                    "calls": [
+                        {
+                            "name": "read",
+                            "input": {"file_path": "private path"},
+                            "result": "private result",
+                            "hasResult": True,
+                            "isError": False,
+                        }
+                    ],
+                    "toolErrors": ["private tool error"],
+                    "artifacts": ["private artifact"],
+                    "artifactError": None,
+                    "tokens": 12,
+                    "costMicroUsd": 3,
+                    "log": None,
+                    "compactions": 1,
+                    "grader": {"answer": True, "confidence": 80, "rawSubject": "private subject"},
+                    "trajectory": None,
+                }
+            ],
+        },
+        redact_evidence=True,
+    )
+    open_case = EvalCaseResult(
+        name="capability.open",
+        passed=True,
+        reason="public reason",
+        evidence={"message": "public question", "rubric": [], "selectedAttempt": 0, "attempts": []},
+    )
+    run = EvalRun(
+        id=uuid4(),
+        created_at=datetime(2026, 7, 15, tzinfo=UTC),
+        label="candidate",
+        agent="assistant",
+        ufo_version="0.1.0",
+        revision="abc123",
+        reports=(
+            EvalReport(
+                name="hle_gold.tool_restraint",
+                suite="hle_gold",
+                digest="sha256:a",
+                cases=(flagged,),
+            ),
+            EvalReport(
+                name="capability", suite="capability", digest="sha256:b", cases=(open_case,)
+            ),
+        ),
+    )
+    record_run(tmp_path, run)
+    pages: list[bytes] = []
+
+    async def publish(_share: S3ViewerShare, page: bytes, _expiry: int) -> str:
+        pages.append(page)
+        return "https://share.invalid/report"
+
+    monkeypatch.setattr(S3ViewerShare, "publish", publish)
+    monkeypatch.setenv("UFO_CONFIG", str(tmp_path / "missing.toml"))
+
+    eval_main(["--share", str(run.id), "--out", str(tmp_path), "--s3-bucket", "bucket"])
+
+    local = (tmp_path / "runs" / f"{run.id}.json").read_text()
+    for private in ("private question", "private answer", "private result", "private gold answer"):
+        assert private in local
+    published = pages[0].decode()
+    for private in (
+        "private question",
+        "private answer",
+        "private result",
+        "private path",
+        "private tool error",
+        "private artifact",
+        "private gold answer",
+        "private subject",
+    ):
+        assert private not in published
+    assert "public question" in published
+    assert '"tokens":12' in published
+    assert '"compactions":1' in published
+    assert '"confidence":80' in published
+    assert "tool error" in published
+    assert load_runs(tmp_path)[0].reports[0].cases[0].redact_evidence
 
 
 def test_eval_run_is_recorded_without_git(tmp_path, monkeypatch) -> None:

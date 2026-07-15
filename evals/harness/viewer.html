@@ -274,7 +274,7 @@ pre {
 <script>
 const data = JSON.parse(document.getElementById('eval-data').textContent);
 const runs = data.runs;
-const MEMORY_LEAF_PREFIX = 'memory_100.';
+const LEAF_PREFIXES = ['memory_100.', 'hle_gold.', 'dsqa_100.'];
 const hash = new URLSearchParams(location.hash.slice(1));
 const state = {
   current: hash.get('current') || data.current || (runs[0] && runs[0].id) || '',
@@ -297,8 +297,8 @@ function runById(id) { return runs.find(run => run.id === id); }
 function reportByName(run, name) { return run && run.reports.find(report => report.name === name); }
 function caseByName(report, name) { return report && report.cases.find(item => item.name === name); }
 function leafLabel(name) {
-  for (const prefix of [MEMORY_LEAF_PREFIX, 'dsqa_100.']) if (name && name.startsWith(prefix)) return name.slice(prefix.length);
-  return name;
+  const prefix = LEAF_PREFIXES.find(value => name && name.startsWith(value));
+  return prefix ? name.slice(prefix.length) : name;
 }
 function scored(cases) { return (cases || []).filter(item => !item.excluded); }
 function passed(cases) { return scored(cases).filter(item => item.passed).length; }
@@ -451,8 +451,8 @@ function suiteMarkup(base, current, name) {
   return `<button class="suite-row ${name === state.suite ? 'selected' : ''}" data-suite="${h(name)}">
     <div class="row-top"><span class="row-title">${h(name)}</span><span class="badge ${status.cls}">${status.label}</span></div>
     <div class="row-meta"><span>${detail}</span><span class="delta ${delta < 0 ? 'negative' : delta > 0 ? 'positive' : ''}">${h(deltaText)}</span></div>
-    ${recall ? `<div class="row-meta"><span>${h(recall)}</span></div>` : ''}
     ${metrics ? `<div class="row-meta"><span>${h(metrics)}</span></div>` : ''}
+    ${recall ? `<div class="row-meta"><span>${h(recall)}</span></div>` : ''}
   </button>`;
 }
 function matchesFilter(item, movement) {
