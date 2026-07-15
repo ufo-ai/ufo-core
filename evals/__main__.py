@@ -1,10 +1,10 @@
 """Run eval suites, browse recorded runs, or share a two-run comparison.
 
-`python -m evals` drives each case as a real turn through the agent, grades its answer and
-trajectory, and records one immutable run under `--out`. `--view` opens the offline archive;
-`--share CURRENT [BASELINE]` publishes only those runs behind an expiring S3 URL. Cases create
-durable conversations and may write memory or artifacts, so target a disposable workspace with
-`--workspace`."""
+`python -m evals` drives capability cases as real turns and MCP-Atlas cases through their pinned
+sandbox, grades each answer and trajectory, and records one immutable run under `--out`. `--view`
+opens the offline archive; `--share CURRENT [BASELINE]` publishes only those runs behind an
+expiring S3 URL. Capability cases create durable conversations and may write memory or artifacts,
+so target a disposable workspace with `--workspace`."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ import subprocess
 import sys
 import webbrowser
 from contextlib import AsyncExitStack
+from dataclasses import replace
 from datetime import UTC, datetime
 from importlib.metadata import version
 from pathlib import Path
@@ -22,6 +23,8 @@ from uuid import UUID, uuid4
 
 from cryptography.fernet import Fernet
 from dbos import DBOSClient
+from httpx import AsyncClient, Timeout
+from pydantic import ValidationError
 from ufo_ext_memory.events import MEMORY_RECALL_EVENT
 
 from evals.driver import WorkspaceDriver, resolve_workspace_and_agent
@@ -43,6 +46,8 @@ from evals.harness.viewer import (
     render_viewer,
     write_viewer,
 )
+from evals.mcp_atlas_100.runner import load_mcp_atlas_task
+from evals.mcp_atlas_100.target import McpAtlasTarget
 from evals.memory_100.runner import Memory100Run, load_memory_100
 from evals.registry import TASKS, selected_run_tasks
 from evals.turn_logs import TurnLogCollector
@@ -51,8 +56,9 @@ from ufo.config import Config, config_path, load_config
 from ufo.credentials import CredentialStore
 from ufo.db import dispose_db, init_db
 from ufo.ext.context import context_for
-from ufo.ext.loader import load_manifests
+from ufo.ext.loader import load_manifests, skill_registry
 from ufo.governance import prompt_digest
+from ufo.loop.prompts.render import render_system_prompt
 from ufo.models.registry import model_registry
 from ufo.schema.records import DEFAULT_AGENT_NAME, ReasoningEffort
 from ufo.surfaces.admission import Admission, AdmissionInvoker
@@ -60,6 +66,9 @@ from ufo.workspace import init_workspace_credentials, ws
 
 DEFAULT_OUT = Path("eval-reports")
 EVAL_SHARE_BUCKET_ENV = "UFO_EVAL_SHARE_BUCKET"
+MCP_ATLAS_URL_ENV = "MCP_ATLAS_URL"
+MCP_ATLAS_EXTERNAL_URL_ENV = "MCP_ATLAS_EXTERNAL_URL"
+MCP_ATLAS_TIMEOUT_SECONDS = 1_800.0
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -94,6 +103,26 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--memory-100", type=Path, metavar="SNAPSHOT")
     parser.add_argument("--memory-100-state", type=Path, metavar="READINESS")
     parser.add_argument("--dsqa-100", type=Path, metavar="SNAPSHOT")
+    parser.add_argument(
+        "--mcp-atlas-data",
+        type=Path,
+        help="MCP-Atlas 100 JSON override; used only when mcp_atlas_100 is selected",
+    )
+    parser.add_argument(
+        "--mcp-atlas-samples",
+        type=int,
+        help="run the first N digest-pinned MCP-Atlas cases for a deterministic smoke test",
+    )
+    parser.add_argument(
+        "--mcp-atlas-url",
+        default=os.environ.get(MCP_ATLAS_URL_ENV),
+        help=f"secretless MCP-Atlas sandbox URL (or {MCP_ATLAS_URL_ENV})",
+    )
+    parser.add_argument(
+        "--mcp-atlas-external-url",
+        default=os.environ.get(MCP_ATLAS_EXTERNAL_URL_ENV),
+        help=f"credentialed MCP-Atlas sandbox URL (or {MCP_ATLAS_EXTERNAL_URL_ENV})",
+    )
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     names = tuple(args.only)
     if (args.memory_100 is None) != (args.memory_100_state is None):
@@ -104,7 +133,20 @@ def main(argv: list[str] | None = None) -> None:
     if args.memory_100 is not None and args.memory_100_state is not None:
         memory_run = load_memory_100(args.memory_100, args.memory_100_state)
     dsqa_run = load_dsqa_100(args.dsqa_100) if args.dsqa_100 is not None else None
-    tasks = _tasks(names, memory_run, dsqa_run)
+    if (args.mcp_atlas_data is not None or args.mcp_atlas_samples is not None) and (
+        "mcp_atlas_100" not in names
+    ):
+        parser.error("MCP-Atlas options require --only mcp_atlas_100")
+    try:
+        tasks = _tasks(
+            names,
+            memory_run,
+            dsqa_run,
+            args.mcp_atlas_data,
+            args.mcp_atlas_samples,
+        )
+    except (OSError, ValueError, ValidationError) as error:
+        parser.error(str(error))
     if args.list:
         for task in tasks:
             print(f"{task.name}\t{task.digest}")
@@ -183,7 +225,17 @@ def main(argv: list[str] | None = None) -> None:
             MEMORY_RECALL_EVENT,
         )
     )
-    reports = asyncio.run(_run(config, tasks, args.agent, workspace_id, collector))
+    reports = asyncio.run(
+        _run(
+            config,
+            tasks,
+            args.agent,
+            workspace_id,
+            collector,
+            args.mcp_atlas_url,
+            args.mcp_atlas_external_url,
+        )
+    )
     failed = False
     for report in reports:
         print(report.console_summary)
@@ -226,6 +278,8 @@ async def _run(
     agent_name: str,
     workspace_id: UUID | None = None,
     collector: TurnLogCollector | None = None,
+    mcp_atlas_url: str | None = None,
+    mcp_atlas_external_url: str | None = None,
 ) -> tuple[EvalReport, ...]:
     init_db(config.database.url)
     key = os.environ.get(config.credentials.key_env)
@@ -265,6 +319,15 @@ async def _run(
                 ),
                 blob=blob,
                 logs=collector,
+                mcp_atlas=await _mcp_atlas_target(
+                    stack,
+                    config,
+                    tasks,
+                    agent_prompt,
+                    agent_model,
+                    mcp_atlas_url,
+                    mcp_atlas_external_url,
+                ),
             )
             with ws(workspace_id):
                 reports = tuple([await task.run(target) for task in tasks])
@@ -307,6 +370,66 @@ async def _run(
         await dispose_db()
 
 
+async def _mcp_atlas_target(
+    stack: AsyncExitStack,
+    config: Config,
+    tasks: tuple[EvalTask, ...],
+    agent_prompt: str,
+    agent_model: str,
+    url: str | None,
+    external_url: str | None,
+) -> McpAtlasTarget | None:
+    if not any(task.suite == "mcp_atlas" for task in tasks):
+        return None
+    if url is None:
+        raise RuntimeError(f"mcp_atlas_100 requires --mcp-atlas-url or {MCP_ATLAS_URL_ENV}")
+    manifests = load_manifests(config.pack.name)
+    registry = model_registry(config, manifests)
+    resolved_model = registry.resolve(agent_model)
+    target_context = context_for(
+        "evals",
+        frozenset(),
+        model_resolver=replace(registry, auto_model=resolved_model),
+    )
+    if target_context.model is None:
+        raise RuntimeError("MCP-Atlas target requires model access")
+    sections = tuple(
+        (section.name, section.body)
+        for manifest in manifests
+        for section in manifest.prompt_sections
+    )
+    system = render_system_prompt(
+        agent_prompt,
+        sections,
+        skills=skill_registry(manifests).index(),
+        model=resolved_model,
+    ).content
+    public_client = await stack.enter_async_context(
+        AsyncClient(
+            base_url=url,
+            timeout=Timeout(MCP_ATLAS_TIMEOUT_SECONDS),
+        )
+    )
+    external_client = (
+        None
+        if external_url is None
+        else await stack.enter_async_context(
+            AsyncClient(
+                base_url=external_url,
+                timeout=Timeout(MCP_ATLAS_TIMEOUT_SECONDS),
+            )
+        )
+    )
+    return McpAtlasTarget(
+        public_client,
+        target_context.model,
+        resolved_model,
+        system,
+        config.models.reasoning_effort,
+        external_client,
+    )
+
+
 def _judge_max_tokens(tasks: tuple[EvalTask, ...]) -> int:
     limits = {task.judge_max_tokens for task in tasks}
     if len(limits) != 1:
@@ -325,16 +448,25 @@ def _tasks(
     names: tuple[str, ...],
     memory_run: Memory100Run | None,
     dsqa_run: DSQA100Run | None = None,
+    mcp_atlas_data: Path | None = None,
+    mcp_atlas_samples: int | None = None,
 ) -> tuple[EvalTask, ...]:
+    mcp_atlas = (
+        (load_mcp_atlas_task(mcp_atlas_data, mcp_atlas_samples),)
+        if mcp_atlas_data is not None
+        else ((load_mcp_atlas_task(limit=mcp_atlas_samples),) if "mcp_atlas_100" in names else ())
+    )
     if memory_run is None and dsqa_run is None:
-        return selected_run_tasks(names)
+        return selected_tasks((*TASKS, *mcp_atlas), names) if names else selected_run_tasks()
     if dsqa_run is not None:
         return selected_tasks(
-            (*TASKS, *dsqa_run.tasks), names or tuple(task.name for task in dsqa_run.tasks)
+            (*TASKS, *dsqa_run.tasks, *mcp_atlas),
+            names or tuple(task.name for task in dsqa_run.tasks),
         )
     assert memory_run is not None
     return selected_tasks(
-        (*TASKS, *memory_run.tasks), names or tuple(task.name for task in memory_run.tasks)
+        (*TASKS, *memory_run.tasks, *mcp_atlas),
+        names or tuple(task.name for task in memory_run.tasks),
     )
 
 

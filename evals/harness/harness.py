@@ -49,6 +49,7 @@ class EvalReport(BaseModel):
     )
     degraded_recall_count: int | None = Field(default=None, ge=0, alias="degradedRecallCount")
     unmapped_evidence_count: int | None = Field(default=None, ge=0, alias="unmappedEvidenceCount")
+    benchmark: JsonObject | None = None
     metrics: tuple[EvalMetric, ...] = ()
 
     @property
@@ -78,9 +79,22 @@ class EvalReport(BaseModel):
     @property
     def console_summary(self) -> str:
         passed = sum(1 for case in self.scored if case.passed)
+        benchmark = ""
+        match self.benchmark:
+            case {
+                "claimCoverageThreshold": float(threshold),
+                "performance": {
+                    "tier": str(tier),
+                    "meanClaimCoverage": float(mean_claim_coverage),
+                },
+            }:
+                benchmark = (
+                    f", {tier} tier, mean claim coverage {mean_claim_coverage:.0%} "
+                    f"at {threshold:.0%} task threshold"
+                )
         summary = (
             f"{self.name} {passed}/{len(self.scored)} passed, {self.excluded_count} excluded "
-            f"(rate {self.pass_rate:.0%})"
+            f"(rate {self.pass_rate:.0%}){benchmark}"
         )
         metric_summary = ", ".join(
             f"{metric.name.replace('_', ' ')} {metric.value:.1%}" for metric in self.metrics
@@ -134,6 +148,8 @@ class EvalReport(BaseModel):
                     "unmappedEvidenceCount": self.unmapped_evidence_count,
                 }
             )
+        if self.benchmark is not None:
+            result["benchmark"] = self.benchmark
         return result
 
 

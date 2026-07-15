@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
 
 import sqlalchemy as sa
@@ -32,6 +32,9 @@ from ufo.schema.records import CredentialRequest, TerminalFrame, TurnStatus
 from ufo.sdk.context import ExtensionContext, Trajectory
 from ufo.sdk.models import ImageBlock, Message, TextBlock, ToolResultBlock, ToolUseBlock
 from ufo.transcript import TranscriptDecodeError, decode, transcript_key
+
+if TYPE_CHECKING:
+    from evals.mcp_atlas_100.target import McpAtlasTarget
 
 MAX_EVAL_ARTIFACTS = 8
 MAX_EVAL_ARTIFACT_BYTES = 16 * 1024 * 1024
@@ -126,6 +129,22 @@ class InProcessTarget:
     judge: JudgeLeg | None = None
     blob: BlobStore | None = None
     logs: TurnLogReader | None = None
+    mcp_atlas: McpAtlasTarget | None = None
+
+    async def preflight_mcp_atlas(self, required_tool_servers: dict[str, str]) -> frozenset[str]:
+        if self.mcp_atlas is None:
+            raise RuntimeError("MCP-Atlas suite requires --mcp-atlas-url")
+        return await self.mcp_atlas.preflight(required_tool_servers)
+
+    async def run_mcp_atlas(
+        self,
+        prompt: str,
+        enabled_tools: tuple[str, ...],
+        tool_servers: dict[str, str],
+    ) -> TargetResult:
+        if self.mcp_atlas is None:
+            raise RuntimeError("MCP-Atlas suite requires --mcp-atlas-url")
+        return await self.mcp_atlas.run(prompt, enabled_tools, tool_servers)
 
     async def run(self, case: CapabilityCase) -> TargetResult:
         conversation_id = await self.conversations.open(case.name, case.member_key)
