@@ -23,6 +23,7 @@ with its status set — nothing is deleted, so the reasoning survives. Start fro
 | [0011](0011-ufo-hosted-service.md) | ufo — the merged hosted service: one repo, one database, RLS | accepted |
 | [0012](0012-turn-speaker-and-private-handoffs.md) | Turn speaker and private handoffs | proposed |
 | [0013](0013-workspace-resources.md) | Workspace resources — governed CRUD, revisions, settings, pack agents, agent messaging | proposed |
+| [0015](0015-extension-host.md) | Extension host — a sandboxed, JS-only channel for third-party extensions | accepted |
 
 Note: `0006` is `implemented` for its deterministic tier + graph substrate (the extension is on
 `main`); its LLM prose tier lands with the metered extension model client. `0010` is an audit, not a

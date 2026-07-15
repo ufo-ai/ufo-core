@@ -203,6 +203,28 @@ URL and code in chat, approves in the browser, then the encrypted credential is 
 CLI, tools, and sources without entering the transcript. One owner-authorized YC identity serves
 the workspace, and every provider operation exposed by the extension is read-only.
 
+## Third-party extensions
+
+A third-party extension is JS, declared by a static `ufo.manifest.json` core reads without
+executing any code — contribution points plus lazy activation, never a top-level import — and runs
+isolated from core in **`runner`**, a standalone service alongside `control/`, never part of
+`ufoctl serve`'s one process. First-party (bundled) extensions are unaffected: they keep the
+in-process Python mechanism above, unchanged. The line is provenance (reviewed-and-pinned vs.
+store-installed-or-locally-loaded), not a rewrite of what already works. RFC 0015 carries the
+rationale, alternatives, and open questions; this section is the settled model.
+
+| Concern | Mechanism |
+|---|---|
+| Manifest points | `tools`, `subagent_tool_grants` (scoped to the manifest's own declared tools), and credential slot declaration — no other Manifest point. `surfaces` (identity-asserting) and every backend/SPI point (`indexes`, `embeds`, `models`, `carriers`, …) stay first-party-only. A third-party extension reaches an external API either uncredentialed (any public host, never a brokered connector call) or via a declared, injected credential (below). |
+| Manifest safety | `untrusted` and `side_effecting` are forced `true` for every third-party tool, never author-controlled. `args_schema` is raw JSON Schema, validated through a dynamically-built `BaseModel` wrapper — no JSON-Schema-to-pydantic translation. Publish/install validation, re-run at every boot/upgrade, rejects a tool or extension name colliding with a built-in or another installed extension's, a `subagent_tool_grants` entry naming a tool the manifest doesn't declare, and a duplicate credential name; a credential slot key contains no colon, so the composite key below stays unambiguous. |
+| Isolation | `wasmtime`, embedded directly: `Config.consume_fuel` (50,000,000 units) and `epoch_interruption` (~5s) bound CPU; `Store.set_limits` bounds memory (64MiB) and every other resource it takes a limit for, each fixed to one call's single instantiation. One `Store` per call, discarded after. The guest declares no import except the two `runner` defines (HTTP; a `ctx.store`/`ctx.model` callback), everything else trapped. A dispatch request may ask only for *less* than these defaults, and its payload is length-capped in `runner`'s own memory before reaching the guest. |
+| Egress / credentials | `runner` defines one HTTP host import; core resolves the call's declared credential slots at dispatch and sends `runner` a short-lived, call-scoped list of injection rules (host, header, sentinel, real value), resolved by a composite `f"{extension_name}:{slot_name}"` key into the existing `credential` table's `slot` column (no schema change) so two extensions never collide on a slot name. `runner` substitutes the real value only when a request's target host, scheme (`https://` only), and header all match a declared rule; anything else is sent with the sentinel unsubstituted. A guest reaches no loopback, link-local, private, reserved, multicast, or shared (CGNAT-style `100.64.0.0/10`) address regardless of its rules, and the validated address is pinned through the connection (no DNS rebinding). Public egress is otherwise unrestricted by design. The response is redacted (every injected value stripped) and read under a byte cap and wall-clock timeout outside the WASM limits, off `runner`'s event loop. Every call is metered as it completes — matched rule or not, success or error — under the `egress` dimension by default. |
+| State scope | `ctx.store` and other durable state key on the extension's stable **name**, never the compiled digest — a digest says which code to run, not whose state it is. `ctx.store` writes are size- and count-bounded per call; `ctx.model` calls are spend-checked before the call (the same `SpendEvaluator` turn admission uses), not only metered after. |
+| Scope integrity | `runner` authenticates to core as the fleet, so a callback's claimed `(workspace_id, extension_name, extension_digest)` isn't taken on faith. Core mints an opaque dispatch capability at `dispatch_tool` time, scoped to that call and valid for its whole duration (one call makes several callbacks); every callback must present it, and core accepts one only while that dispatch is open. |
+| Module distribution | Compiled at `ufoctl ext publish` (JS → WASM); content-addressed like `ExtensionPin.digest` and stored in the existing S3-compatible blob store. `runner` fetches and caches by digest on first use. |
+| Deployment | Plain stateless processes behind a load balancer — an autoscaling group, VM scale set, on-prem pool, or a container scheduler if one is already in play. No Kubernetes requirement, matching core's own. |
+| Local dev / test mode | `ufoctl ext dev [--remote <url>]` runs the extension as a plain local Node process (WASM only enters at `ext publish`) against a disposable workspace with real grants. Every credentialed call routes over the channel through the same host/header-checked injection `runner` uses; no live workspace's data is ever reachable. |
+
 ## Surfaces
 
 Core owns **one surface seam**, not every surface. A surface is trusted infrastructure — it asserts
