@@ -14,6 +14,7 @@ import ufo_pack_assistant_eval as assistant_eval
 import ufo_pack_assistant_hosted as assistant_hosted
 import ufo_pack_chief_of_staff as chief_of_staff
 import ufo_pack_dsqa_eval as dsqa_eval
+import ufo_pack_gdpval_eval as gdpval
 import ufo_pack_yc.manifest as yc
 
 import ufo.ext.loader as loader
@@ -108,6 +109,23 @@ def test_activating_the_yc_pack_makes_exactly_its_bundle_active() -> None:
 def test_dsqa_eval_packs_enforce_the_capability_tiers(
     name: str, extensions: tuple[str, ...]
 ) -> None:
+    assert discovered_packs()[name].extensions == extensions
+    assert [manifest.name for manifest in load_manifests(name)] == [*extensions, name]
+
+
+@pytest.mark.parametrize(
+    ("name", "extensions"),
+    (
+        (gdpval.CORE_NAME, gdpval.BASE_EXTENSIONS),
+        (gdpval.DOCUMENTS_NAME, (*gdpval.BASE_EXTENSIONS, *gdpval.DOCUMENT_EXTENSIONS)),
+        (gdpval.RESEARCH_NAME, (*gdpval.BASE_EXTENSIONS, *gdpval.RESEARCH_EXTENSIONS)),
+        (
+            gdpval.FULL_NAME,
+            (*gdpval.BASE_EXTENSIONS, *gdpval.DOCUMENT_EXTENSIONS, *gdpval.RESEARCH_EXTENSIONS),
+        ),
+    ),
+)
+def test_gdpval_treatment_pack_is_discovered(name: str, extensions: tuple[str, ...]) -> None:
     assert discovered_packs()[name].extensions == extensions
     assert [manifest.name for manifest in load_manifests(name)] == [*extensions, name]
 

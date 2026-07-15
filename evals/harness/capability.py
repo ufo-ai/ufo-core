@@ -6,9 +6,11 @@ retain text, completion, and error state; the agent's configured tool set remain
 
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from hashlib import sha256
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -53,6 +55,35 @@ class SharedArtifact:
     content: bytes
 
 
+@dataclass(frozen=True)
+class SharedArtifactReference:
+    """Durable identity of one artifact attached to the evaluated turn."""
+
+    name: str
+    blob_key: str
+    digest: str
+    size_bytes: int
+
+
+@dataclass(frozen=True)
+class CapabilityReference:
+    """One upstream reference staged under the evaluated conversation's `references/` folder."""
+
+    path: str
+    source: Path
+    digest: str
+    size_bytes: int
+
+    def __post_init__(self) -> None:
+        parts = PurePosixPath(self.path).parts
+        if not parts or self.path.startswith("/") or ".." in parts:
+            raise ValueError(f"capability reference path is unsafe: {self.path!r}")
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", self.digest) is None:
+            raise ValueError("capability reference digest must be a SHA-256")
+        if self.size_bytes < 0:
+            raise ValueError("capability reference size must not be negative")
+
+
 class TurnLog(BaseModel):
     """One allowlisted structured log exported by an evaluated turn."""
 
@@ -79,6 +110,7 @@ class CapabilityOutput:
     calls: tuple[ToolInvocation, ...]
     tool_errors: tuple[str, ...] = ()
     artifacts: tuple[SharedArtifact, ...] = ()
+    artifact_references: tuple[SharedArtifactReference, ...] = ()
     artifact_error: str = ""
     log: TurnLog | None = None
     compactions: int = 0
@@ -127,6 +159,12 @@ class CapabilityCase:
     workspace_files: tuple[WorkspaceFile, ...] = ()
     prior_messages: tuple[str, ...] = ()
     redact_evidence: bool = False
+    references: tuple[CapabilityReference, ...] = ()
+
+    def __post_init__(self) -> None:
+        paths = tuple(reference.path for reference in self.references)
+        if len(paths) != len(set(paths)):
+            raise ValueError("capability reference paths must be unique")
 
     def payload(self) -> JsonObject:
         payload: JsonObject = {
@@ -155,6 +193,15 @@ class CapabilityCase:
             ]
         if self.redact_evidence:
             payload["redactEvidence"] = True
+        if self.references:
+            payload["references"] = [
+                {
+                    "path": reference.path,
+                    "digest": reference.digest,
+                    "sizeBytes": reference.size_bytes,
+                }
+                for reference in self.references
+            ]
         return payload
 
 
@@ -186,6 +233,15 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
                 "calls": calls,
                 "toolErrors": list(sample_output.tool_errors),
                 "artifacts": [artifact.name for artifact in sample_output.artifacts],
+                "artifactReferences": [
+                    {
+                        "name": artifact.name,
+                        "blobKey": artifact.blob_key,
+                        "digest": artifact.digest,
+                        "sizeBytes": artifact.size_bytes,
+                    }
+                    for artifact in sample_output.artifact_references
+                ],
                 "artifactError": sample_output.artifact_error or None,
                 "tokens": sample_output.tokens,
                 "costMicroUsd": sample_output.cost_micro_usd,

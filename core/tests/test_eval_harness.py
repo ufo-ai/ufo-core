@@ -33,6 +33,7 @@ from evals.driver import WorkspaceDriver, resolve_workspace_and_agent
 from evals.harness.capability import (
     CapabilityCase,
     CapabilityOutput,
+    CapabilityReference,
     CapabilityVerdict,
     EvalTrajectory,
     SharedArtifact,
@@ -164,6 +165,7 @@ class StubWorker:
     child_followup_turns: int = 0
     child_artifact: tuple[str, bytes] | None = None
     child_turn_id: UUID = field(default_factory=uuid4)
+    expected_reference: tuple[str, bytes] | None = None
     idempotency_keys: list[str] = field(default_factory=list)
     tokens: int = 0
     cost_micro_usd: int = 0
@@ -174,6 +176,9 @@ class StubWorker:
         self, conversation_id: UUID, agent_id: UUID, message: str, idempotency_key: str
     ) -> UUID:
         self.idempotency_keys.append(idempotency_key)
+        if self.expected_reference is not None:
+            path, content = self.expected_reference
+            assert await self.blob.get(workspace_key(conversation_id, path)) == content
         turn_id = uuid4()
         async with workspace_tx() as connection:
             await connection.execute(
@@ -1184,7 +1189,7 @@ async def test_lane_scorer_requires_a_successful_completed_spawn() -> None:
 
 
 async def test_target_loads_the_successfully_shared_artifact_for_grading(
-    db: None, tmp_path
+    db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     workspace_id = await _workspace()
     agent_id = await _seed_agent(workspace_id)
@@ -1223,6 +1228,94 @@ async def test_target_loads_the_successfully_shared_artifact_for_grading(
     assert result.passed
     attempts = cast(list[dict[str, object]], result.evidence["attempts"])
     assert attempts[0]["artifacts"] == ["site.tar.gz"]
+    artifact_references = cast(list[dict[str, object]], attempts[0]["artifactReferences"])
+    assert attempts[0]["artifactReferences"] == [
+        {
+            "name": "site.tar.gz",
+            "blobKey": artifact_references[0]["blobKey"],
+            "digest": "sha256:0eb3e36bfb24dcd9bb1d1bece1531216b59539a8fde17ee80224af0653c92aa3",
+            "sizeBytes": 7,
+        }
+    ]
+    monkeypatch.setattr(harness_target, "MAX_EVAL_ARTIFACT_BYTES", 1)
+    with ws(workspace_id):
+        oversized = await target.run(
+            CapabilityCase("durable-reference", "share", shared_artifact_scorer(".tar.gz"))
+        )
+    assert oversized.output.artifacts == ()
+    assert oversized.output.artifact_references[0].digest == artifact_references[0]["digest"]
+    assert oversized.output.artifact_error == "artifact 'site.tar.gz' exceeds 1 bytes"
+
+
+async def test_target_stages_case_references_before_admission(db: None, tmp_path) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    source = tmp_path / "forecast.csv"
+    source.write_bytes(b"month,revenue\nJan,100\n")
+    reference = CapabilityReference(
+        "inputs/forecast.csv",
+        source,
+        "sha256:7a8901474271e803b66e0dfc219e40a1b01025ef8b881fed03d9963230f55570",
+        source.stat().st_size,
+    )
+    worker = StubWorker(
+        blob,
+        workspace_id,
+        _research_transcript(),
+        expected_reference=("references/inputs/forecast.csv", source.read_bytes()),
+    )
+    ctx = _context(blob, worker)
+    target = InProcessTarget(
+        ctx=ctx,
+        agent_id=agent_id,
+        conversations=WorkspaceDriver(workspace_id, agent_id, PROMPT, blob, UNCALLED_DBOS),
+        outcome=CorpusOutcome(ctx),
+    )
+
+    with ws(workspace_id):
+        result = await target.run(
+            CapabilityCase(
+                "reference",
+                "use the reference",
+                restraint_scorer(WEB_TOOLS),
+                references=(reference,),
+            )
+        )
+
+    assert result.clean
+
+
+@pytest.mark.parametrize(
+    ("path", "digest", "size_bytes", "message"),
+    (
+        ("../forecast.csv", "sha256:" + "0" * 64, 1, "path is unsafe"),
+        ("forecast.csv", "not-a-digest", 1, "digest must be a SHA-256"),
+        ("forecast.csv", "sha256:" + "0" * 64, -1, "size must not be negative"),
+    ),
+)
+def test_capability_reference_rejects_invalid_boundaries(
+    tmp_path, path: str, digest: str, size_bytes: int, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        CapabilityReference(path, tmp_path / "forecast.csv", digest, size_bytes)
+
+
+def test_capability_case_rejects_duplicate_reference_paths(tmp_path) -> None:
+    reference = CapabilityReference(
+        "forecast.csv",
+        tmp_path / "forecast.csv",
+        "sha256:" + "0" * 64,
+        1,
+    )
+
+    with pytest.raises(ValueError, match="reference paths must be unique"):
+        CapabilityCase(
+            "duplicate-references",
+            "use the references",
+            restraint_scorer(WEB_TOOLS),
+            references=(reference, reference),
+        )
 
 
 async def test_restraint_scorer_flags_an_unnecessary_web_call() -> None:
@@ -2021,7 +2114,7 @@ async def test_eval_run_pins_model_metadata_on_boundary_report(tmp_path, monkeyp
     monkeypatch.setattr("evals.__main__.resolve_workspace_and_agent", resolve)
     monkeypatch.setattr("evals.__main__.blob_store_for", lambda _config: object())
     monkeypatch.setattr("evals.__main__.DBOSClient", lambda **_kwargs: object())
-    monkeypatch.setattr("evals.__main__.WorkspaceDriver", lambda *_args: object())
+    monkeypatch.setattr("evals.__main__.WorkspaceDriver", lambda *_args, **_kwargs: object())
     monkeypatch.setattr("evals.__main__.load_manifests", lambda *_args: ())
     monkeypatch.setattr("evals.__main__.model_registry", lambda *_args: object())
     monkeypatch.setattr(

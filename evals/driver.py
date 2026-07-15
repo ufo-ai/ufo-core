@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -130,6 +131,9 @@ class WorkspaceDriver:
         for item in workspace_files:
             await self.blob.put(workspace_key(conversation_id, item.path), item.content)
         return conversation_id
+
+    async def stage(self, conversation_id: UUID, path: str, source: Path) -> None:
+        await self.blob.put_file(workspace_key(conversation_id, path), source)
 
     async def settle(self, conversation_id: UUID, turn_id: UUID) -> Trajectory | None:
         async with workspace_tx() as connection:

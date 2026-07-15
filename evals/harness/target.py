@@ -9,7 +9,10 @@ conversation per case, and `outcome` awaits the admitted turn's terminal transcr
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from hashlib import sha256
+from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
 
@@ -20,6 +23,7 @@ from evals.harness.capability import (
     CapabilityOutput,
     EvalTrajectory,
     SharedArtifact,
+    SharedArtifactReference,
     ToolInvocation,
     TurnLog,
     WorkspaceFile,
@@ -55,6 +59,7 @@ COMPACTION_SUMMARY_KEY_TEMPLATE = (
 @dataclass(frozen=True)
 class ArtifactCollection:
     artifacts: tuple[SharedArtifact, ...] = ()
+    references: tuple[SharedArtifactReference, ...] = ()
     error: str = ""
 
 
@@ -120,6 +125,8 @@ class EvalConversations(Protocol):
         prior_messages: tuple[str, ...] = (),
     ) -> UUID: ...
 
+    async def stage(self, conversation_id: UUID, path: str, source: Path) -> None: ...
+
 
 class TurnOutcome(Protocol):
     async def settle(self, conversation_id: UUID, turn_id: UUID) -> Trajectory | None: ...
@@ -161,6 +168,10 @@ class InProcessTarget:
         conversation_id = await self.conversations.open(
             case.name, case.member_key, case.workspace_files, case.prior_messages
         )
+        for reference in case.references:
+            await self.conversations.stage(
+                conversation_id, f"references/{reference.path}", reference.source
+            )
         try:
             turn_id = await self.ctx.invoke(
                 conversation_id,
@@ -195,6 +206,7 @@ class InProcessTarget:
             output = replace(
                 output,
                 artifacts=collected.artifacts,
+                artifact_references=collected.references,
                 artifact_error=collected.error,
                 compactions=compactions,
             )
@@ -398,15 +410,24 @@ class InProcessTarget:
                 )
             ).all()
         if len(rows) > MAX_EVAL_ARTIFACTS:
-            return ArtifactCollection(error=f"turn shared more than {MAX_EVAL_ARTIFACTS} artifacts")
+            references, reference_error = await self._artifact_references(rows)
+            return ArtifactCollection(
+                references=references,
+                error=reference_error or f"turn shared more than {MAX_EVAL_ARTIFACTS} artifacts",
+            )
+        references, reference_error = await self._artifact_references(rows)
+        if reference_error:
+            return ArtifactCollection(references=references, error=reference_error)
         oversized = next((row for row in rows if row.size_bytes > MAX_EVAL_ARTIFACT_BYTES), None)
         if oversized is not None:
             return ArtifactCollection(
-                error=f"artifact {oversized.filename!r} exceeds {MAX_EVAL_ARTIFACT_BYTES} bytes"
+                references=references,
+                error=f"artifact {oversized.filename!r} exceeds {MAX_EVAL_ARTIFACT_BYTES} bytes",
             )
         if sum(row.size_bytes for row in rows) > MAX_EVAL_ARTIFACT_TOTAL_BYTES:
             return ArtifactCollection(
-                error=f"shared artifacts exceed {MAX_EVAL_ARTIFACT_TOTAL_BYTES} total bytes"
+                references=references,
+                error=f"shared artifacts exceed {MAX_EVAL_ARTIFACT_TOTAL_BYTES} total bytes",
             )
         artifacts: list[SharedArtifact] = []
         for row in rows:
@@ -414,14 +435,47 @@ class InProcessTarget:
                 content = await blob.get(row.blob_key)
             except BlobNotFound:
                 return ArtifactCollection(
-                    error=f"artifact {row.filename!r} is missing from storage"
+                    references=references,
+                    error=f"artifact {row.filename!r} is missing from storage",
                 )
             if len(content) != row.size_bytes:
                 return ArtifactCollection(
-                    error=f"artifact {row.filename!r} size does not match its row"
+                    references=references,
+                    error=f"artifact {row.filename!r} size does not match its row",
                 )
             artifacts.append(SharedArtifact(row.filename, content))
-        return ArtifactCollection(tuple(artifacts))
+        return ArtifactCollection(tuple(artifacts), references)
+
+    async def _artifact_references(
+        self, rows: Sequence[sa.Row]
+    ) -> tuple[tuple[SharedArtifactReference, ...], str]:
+        blob = self.blob
+        if blob is None:
+            raise RuntimeError("artifact collection requires a blob store")
+        references: list[SharedArtifactReference] = []
+        for row in rows:
+            digest = sha256()
+            size_bytes = 0
+            try:
+                async for chunk in blob.get_stream(row.blob_key):
+                    digest.update(chunk)
+                    size_bytes += len(chunk)
+            except BlobNotFound:
+                return tuple(references), f"artifact {row.filename!r} is missing from storage"
+            if size_bytes != row.size_bytes:
+                return (
+                    tuple(references),
+                    f"artifact {row.filename!r} size does not match its row",
+                )
+            references.append(
+                SharedArtifactReference(
+                    name=row.filename,
+                    blob_key=row.blob_key,
+                    digest=f"sha256:{digest.hexdigest()}",
+                    size_bytes=size_bytes,
+                )
+            )
+        return tuple(references), ""
 
 
 def capability_output(messages: tuple[Message, ...]) -> CapabilityOutput:

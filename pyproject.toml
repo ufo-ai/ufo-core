@@ -79,6 +79,10 @@ chief_of_staff = "ufo_pack_chief_of_staff:pack"
 dsqa_browser = "ufo_pack_dsqa_eval:browser_pack"
 dsqa_core = "ufo_pack_dsqa_eval:core_pack"
 dsqa_search = "ufo_pack_dsqa_eval:search_pack"
+gdpval_core = "ufo_pack_gdpval_eval:core_pack"
+gdpval_documents = "ufo_pack_gdpval_eval:documents_pack"
+gdpval_full = "ufo_pack_gdpval_eval:full_pack"
+gdpval_research = "ufo_pack_gdpval_eval:research_pack"
 sample_pack = "ufo_pack_sample:pack"
 yc = "ufo_pack_yc.manifest:pack"
 
@@ -165,6 +169,7 @@ exclude = ["**/__pycache__", "**/*.pyc"]
 "packs/chief_of_staff/ufo_pack_chief_of_staff.py" = "ufo_pack_chief_of_staff/__init__.py"
 "packs/chief_of_staff/skills" = "ufo_pack_chief_of_staff/skills"
 "packs/dsqa_eval/ufo_pack_dsqa_eval.py" = "ufo_pack_dsqa_eval.py"
+"packs/gdpval_eval/ufo_pack_gdpval_eval.py" = "ufo_pack_gdpval_eval.py"
 "packs/sample_pack/ufo_pack_sample.py" = "ufo_pack_sample/__init__.py"
 "packs/sample_pack/skills" = "ufo_pack_sample/skills"
 
@@ -194,7 +199,7 @@ files = ["core/src/ufo", "extensions", "evals", "gates.py"]
 exclude = ["extensions/.*/skills/", "extensions/.*/tests/"]
 
 [[tool.mypy.overrides]]
-module = ["asyncpg", "aiobotocore.*", "botocore.*", "lz4.*"]
+module = ["asyncpg", "aiobotocore.*", "botocore.*", "lz4.*", "pyarrow", "pyarrow.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

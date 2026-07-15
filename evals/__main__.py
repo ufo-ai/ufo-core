@@ -27,11 +27,19 @@ from httpx import AsyncClient, Timeout
 from pydantic import ValidationError
 from ufo_ext_memory.events import MEMORY_RECALL_EVENT
 
-from evals.driver import WorkspaceDriver, resolve_workspace_and_agent
+from evals.driver import WORKFLOW_WAIT_SECONDS, WorkspaceDriver, resolve_workspace_and_agent
 from evals.dsqa_100.runner import (
     DSQA_JUDGE_MODEL,
     DSQA100Run,
     load_dsqa_100,
+)
+from evals.gdpval_100.runner import (
+    TREATMENTS,
+    GDPvalCalibration,
+    load_calibration,
+)
+from evals.gdpval_100.runner import (
+    WORKFLOW_WAIT_SECONDS as GDPVAL_WORKFLOW_WAIT_SECONDS,
 )
 from evals.harness.capability import redacted_case
 from evals.harness.harness import EvalReport, digest_payload
@@ -107,6 +115,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--hle-gold", type=Path, metavar="GOLD_JSONL")
     parser.add_argument("--hle-gold-smoke", action="store_true")
     parser.add_argument("--dsqa-100", type=Path, metavar="SNAPSHOT")
+    parser.add_argument("--gdpval-100", type=Path, metavar="SNAPSHOT")
+    parser.add_argument("--gdpval-treatment", choices=TREATMENTS)
+    parser.add_argument("--gdpval-task", action="append", default=[], metavar="TASK_ID")
     parser.add_argument(
         "--mcp-atlas-data",
         type=Path,
@@ -131,16 +142,20 @@ def main(argv: list[str] | None = None) -> None:
     names = tuple(args.only)
     if (args.memory_100 is None) != (args.memory_100_state is None):
         parser.error("--memory-100 and --memory-100-state must be provided together")
-    if args.hle_gold is not None and args.memory_100 is not None:
-        parser.error("--hle-gold and --memory-100 are mutually exclusive")
-    if args.hle_gold is not None and args.dsqa_100 is not None:
-        parser.error("--hle-gold and --dsqa-100 are separate eval runs")
     if args.hle_gold_smoke and args.hle_gold is None:
         parser.error("--hle-gold-smoke requires --hle-gold")
     if args.hle_gold is not None and not args.list and args.workspace is None:
         parser.error("--hle-gold requires an explicit disposable --workspace")
-    if args.dsqa_100 is not None and args.memory_100 is not None:
-        parser.error("--dsqa-100 and --memory-100 are separate eval runs")
+    if (args.gdpval_100 is None) != (args.gdpval_treatment is None):
+        parser.error("--gdpval-100 and --gdpval-treatment must be provided together")
+    if args.gdpval_task and args.gdpval_100 is None:
+        parser.error("--gdpval-task requires --gdpval-100")
+    requested_runs = sum(
+        source is not None
+        for source in (args.memory_100, args.dsqa_100, args.gdpval_100, args.hle_gold)
+    )
+    if requested_runs > 1:
+        parser.error("corpus-backed evals are separate eval runs")
     memory_run: Memory100Run | None = None
     if args.memory_100 is not None and args.memory_100_state is not None:
         memory_run = load_memory_100(args.memory_100, args.memory_100_state)
@@ -151,10 +166,20 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("MCP-Atlas options require --only mcp_atlas_100")
     hle_run = load_hle_gold(args.hle_gold, args.hle_gold_smoke) if args.hle_gold else None
     try:
+        gdpval_run = (
+            load_calibration(
+                args.gdpval_100,
+                args.gdpval_treatment,
+                tuple(args.gdpval_task),
+            )
+            if args.gdpval_100 is not None and args.gdpval_treatment is not None
+            else None
+        )
         tasks = _tasks(
             names,
             memory_run,
             dsqa_run,
+            gdpval_run,
             args.mcp_atlas_data,
             args.mcp_atlas_samples,
             hle_run,
@@ -234,6 +259,11 @@ def main(argv: list[str] | None = None) -> None:
                 parser.error(
                     f"dsqa_100 requires [models] auto_model = {DSQA_JUDGE_MODEL!r} for its judge"
                 )
+    if gdpval_run is not None and config.pack.name != gdpval_run.treatment:
+        parser.error(
+            f"GDPval treatment {gdpval_run.treatment!r} requires [pack] name = "
+            f"{gdpval_run.treatment!r}, found {config.pack.name!r}"
+        )
     workspace_id = args.workspace
     if memory_run is not None:
         if workspace_id is not None and workspace_id != memory_run.readiness.workspace_id:
@@ -255,6 +285,7 @@ def main(argv: list[str] | None = None) -> None:
             args.agent,
             workspace_id,
             collector,
+            GDPVAL_WORKFLOW_WAIT_SECONDS if gdpval_run is not None else WORKFLOW_WAIT_SECONDS,
             args.mcp_atlas_url,
             args.mcp_atlas_external_url,
         )
@@ -302,6 +333,7 @@ async def _run(
     agent_name: str,
     workspace_id: UUID | None = None,
     collector: TurnLogCollector | None = None,
+    workflow_wait_seconds: float = WORKFLOW_WAIT_SECONDS,
     mcp_atlas_url: str | None = None,
     mcp_atlas_external_url: str | None = None,
 ) -> tuple[tuple[EvalReport, ...], str]:
@@ -318,7 +350,15 @@ async def _run(
             )
             blob = blob_store_for(config.blob)
             dbos = DBOSClient(system_database_url=config.database.system_url)
-            driver = WorkspaceDriver(workspace_id, agent_id, agent_prompt, blob, dbos, agent_model)
+            driver = WorkspaceDriver(
+                workspace_id,
+                agent_id,
+                agent_prompt,
+                blob,
+                dbos,
+                agent_model,
+                workflow_wait_seconds=workflow_wait_seconds,
+            )
             ctx = context_for(
                 "evals",
                 frozenset(),
@@ -472,12 +512,15 @@ def _tasks(
     names: tuple[str, ...],
     memory_run: Memory100Run | None,
     dsqa_run: DSQA100Run | None = None,
+    gdpval_run: GDPvalCalibration | None = None,
     mcp_atlas_data: Path | None = None,
     mcp_atlas_samples: int | None = None,
     hle_run: HLEGoldRun | None = None,
 ) -> tuple[EvalTask, ...]:
     if hle_run is not None:
         return selected_tasks(hle_run.tasks, names)
+    if gdpval_run is not None:
+        return selected_tasks(gdpval_run.tasks, names)
     mcp_atlas = (
         (load_mcp_atlas_task(mcp_atlas_data, mcp_atlas_samples),)
         if mcp_atlas_data is not None
