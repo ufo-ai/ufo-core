@@ -40,6 +40,7 @@ class EvalReport(BaseModel):
     cases: tuple[EvalCaseResult, ...]
     target_model: str | None = None
     judge_model: str | None = None
+    simulator_model: str | None = None
     judge_revision: str | None = None
     mean_mapped_evidence_coverage: float | None = Field(
         default=None, ge=0.0, le=1.0, alias="meanMappedEvidenceCoverage"
@@ -123,6 +124,7 @@ class EvalReport(BaseModel):
             "digest": self.digest,
             "targetModel": self.target_model,
             "judgeModel": self.judge_model,
+            "simulatorModel": self.simulator_model,
             "judgeRevision": self.judge_revision,
             "passed": self.passed,
             "passRate": self.pass_rate,

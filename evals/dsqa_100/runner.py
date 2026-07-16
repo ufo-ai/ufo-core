@@ -298,6 +298,7 @@ def _task(cases: tuple[SnapshotCase, ...], snapshot_digest: str, leaf: DSQA100Le
         digest=digest,
         cases=tuple(f"dsqa/{case.example_id}" for case in cases),
         run=run,
+        judge_model=DSQA_JUDGE_MODEL,
         judge_revision=DSQA_JUDGE_REVISION,
         judge_max_tokens=DSQA_JUDGE_MAX_TOKENS,
         judge_reasoning=DSQA_JUDGE_REASONING,

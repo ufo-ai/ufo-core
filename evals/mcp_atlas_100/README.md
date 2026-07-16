@@ -2,6 +2,7 @@
 
 This suite runs 100 tasks from the MCP-Atlas public dataset. It grades each final answer claim as
 `fulfilled=1`, `partial=0.5`, or `unfulfilled=0`; a task passes at mean claim coverage `>=0.75`.
+The claim judge is pinned to `gpt-5.4-mini`.
 The report assigns Top `[78%, 100%]`, Mid `[65%, 78%)`, or Tail `[0%, 65%)` performance from the
 task pass rate.
 

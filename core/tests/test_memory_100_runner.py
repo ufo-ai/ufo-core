@@ -16,6 +16,7 @@ from evals.harness.target import TargetResult
 from evals.harness.viewer import EvalRun, render_viewer
 from evals.memory_100.models import SnapshotCase, SnapshotMemory
 from evals.memory_100.runner import (
+    MEMORY_JUDGE_MODEL,
     ExpectedEvidence,
     Memory100Grader,
     MemoryRecallEvent,
@@ -417,6 +418,7 @@ async def test_memory_100_leaves_pin_all_memory_owners_and_bind_member(
     reports = tuple([await task.run(RecallTarget(first_memory_id)) for task in run.tasks])
 
     assert tuple((task.name, len(task.cases)) for task in run.tasks) == MEMORY_100_LEAF_COUNTS
+    assert {task.judge_model for task in run.tasks} == {MEMORY_JUDGE_MODEL}
     leaf_cases = tuple(case for task in run.tasks for case in task.cases)
     assert len(leaf_cases) == len(set(leaf_cases)) == 100
     assert set(leaf_cases) == {case.id for case in _cases()}

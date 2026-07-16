@@ -10,6 +10,7 @@ from evals.dsqa_100 import runner as dsqa_runner
 from evals.dsqa_100.models import AnswerType, Selection, SnapshotCase
 from evals.dsqa_100.runner import (
     DSQA_100_LEAVES,
+    DSQA_JUDGE_MODEL,
     DSQA_JUDGE_REASONING,
     MAX_CANDIDATE_ANSWER_CHARS,
     AnswerCorrectness,
@@ -203,6 +204,7 @@ async def test_dsqa_six_leaves_share_cases_and_emit_macro_metrics(tmp_path: Path
     assert len(run.tasks[0].cases) == 100
     assert len({task.digest for task in run.tasks}) == 6
     assert {task.judge_reasoning for task in run.tasks} == {DSQA_JUDGE_REASONING}
+    assert {task.judge_model for task in run.tasks} == {DSQA_JUDGE_MODEL}
     report = await run.tasks[0].run(FixedTarget(FixedJudge(response)))
     metrics = {metric.name: metric.value for metric in report.metrics}
     assert metrics["precision"] == 1.0

@@ -173,7 +173,7 @@ def _target(
         agent_id=agent_id,
         conversations=DbConversations(workspace_id),
         outcome=CorpusOutcome(ctx),
-        judge=member,
+        simulator=member,
         blob=blob,
     )
 

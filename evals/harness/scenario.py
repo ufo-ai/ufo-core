@@ -178,9 +178,9 @@ class _Trial:
 
 
 async def run_scenario_case(case: ScenarioCase, target: CapabilityTarget) -> EvalCaseResult:
-    if target.judge is None:
-        raise RuntimeError("a scenario case requires the target's model leg to simulate its member")
-    run = _ScenarioRun(case, target, UserSimulator(target.judge, case.user))
+    if target.simulator is None:
+        raise RuntimeError("a scenario case requires a model leg to simulate its member")
+    run = _ScenarioRun(case, target, UserSimulator(target.simulator, case.user))
     return await run.result()
 
 

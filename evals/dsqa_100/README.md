@@ -63,12 +63,9 @@ leaf and pack fails before the first turn.
 
 The three configurations share the same target model, reasoning setting, workspace shape, search
 provider, browser provider, and agent prompt. The target agent uses a concrete model id. The
-background judge is fixed independently:
+runner pins the background judge to `google/gemini-2.5-flash` independently:
 
 ```toml
-[models]
-auto_model = "google/gemini-2.5-flash"
-
 [research]
 search_provider = "exa"
 

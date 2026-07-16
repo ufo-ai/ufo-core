@@ -32,11 +32,7 @@ from ufo_ext_memory.events import MEMORY_RECALL_EVENT
 from evals.compaction.runner import CompactionRun, load_compaction
 from evals.compaction.target import CompactionTarget
 from evals.driver import WORKFLOW_WAIT_SECONDS, WorkspaceDriver, resolve_workspace_and_agent
-from evals.dsqa_100.runner import (
-    DSQA_JUDGE_MODEL,
-    DSQA100Run,
-    load_dsqa_100,
-)
+from evals.dsqa_100.runner import DSQA100Run, load_dsqa_100
 from evals.gdpval_100.runner import (
     TREATMENTS,
     GDPvalCalibration,
@@ -81,7 +77,7 @@ from ufo.ext.context import context_for
 from ufo.ext.loader import load_manifests, skill_registry
 from ufo.governance import prompt_digest
 from ufo.loop.prompts.render import render_system_prompt
-from ufo.models.registry import model_registry
+from ufo.models.registry import ModelRegistry, model_registry
 from ufo.schema.records import DEFAULT_AGENT_NAME, ReasoningEffort
 from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.workspace import init_workspace_credentials, ws
@@ -300,10 +296,6 @@ def main(argv: list[str] | None = None) -> None:
                 dsqa_run.validate_pack(dsqa_tasks, config.pack.name)
             except ValueError as error:
                 parser.error(str(error))
-            if config.models.auto_model != DSQA_JUDGE_MODEL:
-                parser.error(
-                    f"dsqa_100 requires [models] auto_model = {DSQA_JUDGE_MODEL!r} for its judge"
-                )
     if gdpval_run is not None and config.pack.name != gdpval_run.treatment:
         parser.error(
             f"GDPval treatment {gdpval_run.treatment!r} requires [pack] name = "
@@ -439,11 +431,6 @@ async def _run(
                 agent_id=agent_id,
                 conversations=driver,
                 outcome=driver,
-                judge=ModelJudge(
-                    ctx.model,
-                    _judge_max_tokens(tasks),
-                    _judge_reasoning(tasks),
-                ),
                 blob=blob,
                 logs=collector,
                 mcp_atlas=await _mcp_atlas_target(
@@ -458,7 +445,28 @@ async def _run(
                 compaction=compaction,
             )
             with ws(workspace_id):
-                reports = tuple([await task.run(target) for task in tasks])
+                reports = tuple(
+                    [
+                        await task.run(
+                            replace(
+                                target,
+                                judge=_model_leg(
+                                    registry,
+                                    task.judge_model,
+                                    task.judge_max_tokens,
+                                    task.judge_reasoning,
+                                ),
+                                simulator=_model_leg(
+                                    registry,
+                                    task.simulator_model,
+                                    task.simulator_max_tokens,
+                                    task.simulator_reasoning,
+                                ),
+                            )
+                        )
+                        for task in tasks
+                    ]
+                )
             manifests = load_manifests(config.pack.name)
             completed: list[EvalReport] = []
             for report, task in zip(reports, tasks, strict=True):
@@ -474,9 +482,24 @@ async def _run(
                             ],
                             "agentPromptDigest": prompt_digest(agent_prompt),
                             "agentModel": agent_model,
-                            "judgeModel": ctx.model.model,
-                            "judgeMaxTokens": task.judge_max_tokens,
-                            "judgeReasoning": task.judge_reasoning,
+                            **(
+                                {
+                                    "judgeModel": task.judge_model,
+                                    "judgeMaxTokens": task.judge_max_tokens,
+                                    "judgeReasoning": task.judge_reasoning,
+                                }
+                                if task.judge_model is not None
+                                else {}
+                            ),
+                            **(
+                                {
+                                    "simulatorModel": task.simulator_model,
+                                    "simulatorMaxTokens": task.simulator_max_tokens,
+                                    "simulatorReasoning": task.simulator_reasoning,
+                                }
+                                if task.simulator_model is not None
+                                else {}
+                            ),
                             "reasoning": config.models.reasoning_effort,
                             "searchProvider": config.research.search_provider,
                             "cdpProvider": config.browser.cdp_provider,
@@ -487,7 +510,8 @@ async def _run(
                         update={
                             "digest": digest,
                             "target_model": agent_model,
-                            "judge_model": ctx.model.model,
+                            "judge_model": task.judge_model,
+                            "simulator_model": task.simulator_model,
                             "judge_revision": task.judge_revision,
                         }
                     )
@@ -571,18 +595,22 @@ async def _mcp_atlas_target(
     )
 
 
-def _judge_max_tokens(tasks: tuple[EvalTask, ...]) -> int:
-    limits = {task.judge_max_tokens for task in tasks}
-    if len(limits) != 1:
-        raise ValueError("selected eval tasks require different judge token bounds")
-    return next(iter(limits))
-
-
-def _judge_reasoning(tasks: tuple[EvalTask, ...]) -> ReasoningEffort:
-    settings = {task.judge_reasoning for task in tasks}
-    if len(settings) != 1:
-        raise ValueError("selected eval tasks require different judge reasoning settings")
-    return next(iter(settings))
+def _model_leg(
+    registry: ModelRegistry,
+    model: str | None,
+    max_tokens: int,
+    reasoning: ReasoningEffort,
+) -> ModelJudge | None:
+    if model is None:
+        return None
+    context = context_for(
+        "evals",
+        frozenset(),
+        model_resolver=replace(registry, auto_model=model),
+    )
+    if context.model is None:
+        raise RuntimeError(f"eval model leg {model!r} requires model access")
+    return ModelJudge(context.model, max_tokens, reasoning)
 
 
 def _tasks(

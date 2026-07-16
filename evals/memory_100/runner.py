@@ -24,6 +24,7 @@ from evals.memory_100.snapshot import load_snapshot
 from evals.memory_100.state import CorpusReadiness
 
 MEMORY_100_GRADER_REVISION = "memory-item-ids-1"
+MEMORY_JUDGE_MODEL = "gpt-5.4"
 
 
 @dataclass(frozen=True)
@@ -184,7 +185,7 @@ def load_memory_100(snapshot_root: Path, readiness_path: Path) -> Memory100Run:
 
 
 def _memory_task(name: str, cases: tuple[CapabilityCase, ...]) -> EvalTask:
-    task = capability_task(name, cases)
+    task = capability_task(name, cases, judge_model=MEMORY_JUDGE_MODEL)
 
     async def run(target: CapabilityTarget) -> EvalReport:
         report = await task.run(target)

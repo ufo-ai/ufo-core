@@ -22,6 +22,7 @@ from evals.mcp_atlas_100.models import McpAtlasCase, McpAtlasDataset
 from ufo.sdk.models import Message
 
 CLAIM_COVERAGE_THRESHOLD = 0.75
+MCP_ATLAS_JUDGE_MODEL = "gpt-5.4-mini"
 TOP_TIER_MIN = 0.78
 MID_TIER_MIN = 0.65
 MAX_CLAIMS = 32
@@ -329,6 +330,7 @@ def load_mcp_atlas_task(path: Path = DEFAULT_DATASET, limit: int | None = None) 
     digest = digest_payload(
         {
             "runner": MCP_ATLAS_JUDGE_REVISION,
+            "judgeModel": MCP_ATLAS_JUDGE_MODEL,
             "threshold": CLAIM_COVERAGE_THRESHOLD,
             "cases": [case.model_dump(mode="json") for case in cases],
         }
@@ -340,4 +342,6 @@ def load_mcp_atlas_task(path: Path = DEFAULT_DATASET, limit: int | None = None) 
         digest=digest,
         cases=tuple(case.task for case in cases),
         run=suite.run,
+        judge_model=MCP_ATLAS_JUDGE_MODEL,
+        judge_revision=MCP_ATLAS_JUDGE_REVISION,
     )

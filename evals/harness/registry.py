@@ -24,34 +24,96 @@ class EvalTask:
     digest: str
     cases: tuple[str, ...]
     run: EvalRunner
-    judge_revision: str = JUDGE_REVISION
+    judge_model: str | None = None
+    simulator_model: str | None = None
+    judge_revision: str | None = None
     judge_max_tokens: int = JUDGE_MAX_TOKENS
     judge_reasoning: ReasoningEffort = "low"
+    simulator_max_tokens: int = JUDGE_MAX_TOKENS
+    simulator_reasoning: ReasoningEffort = "off"
     pin_runtime: bool = False
 
 
-def capability_task(name: str, cases: tuple[CapabilityCase, ...]) -> EvalTask:
+def capability_task(
+    name: str,
+    cases: tuple[CapabilityCase, ...],
+    judge_model: str | None = None,
+    judge_max_tokens: int = JUDGE_MAX_TOKENS,
+    judge_reasoning: ReasoningEffort = "low",
+) -> EvalTask:
+    needs_judge = any(case.rubric for case in cases)
+    if needs_judge and judge_model is None:
+        raise ValueError(f"capability task {name!r} has semantic rubrics but no judge model")
+    if judge_model is not None and not needs_judge:
+        raise ValueError(
+            f"capability task {name!r} declares a judge model without semantic rubrics"
+        )
     digest = digest_payload(
-        {"runner": "capability-case", "task": name, "cases": [case.payload() for case in cases]}
+        {
+            "runner": "capability-case",
+            "task": name,
+            "cases": [case.payload() for case in cases],
+            **(
+                {
+                    "judgeModel": judge_model,
+                    "judgeMaxTokens": judge_max_tokens,
+                    "judgeReasoning": judge_reasoning,
+                }
+                if judge_model is not None
+                else {}
+            ),
+        }
     )
 
     async def run(target: CapabilityTarget) -> EvalReport:
         results = tuple([await run_capability_case(case, target) for case in cases])
         return EvalReport(name=name, suite="capability", digest=digest, cases=results)
 
-    return EvalTask(name, "capability", digest, tuple(case.name for case in cases), run)
+    return EvalTask(
+        name,
+        "capability",
+        digest,
+        tuple(case.name for case in cases),
+        run,
+        judge_model=judge_model,
+        judge_revision=JUDGE_REVISION if judge_model is not None else None,
+        judge_max_tokens=judge_max_tokens,
+        judge_reasoning=judge_reasoning,
+    )
 
 
-def scenario_task(name: str, cases: tuple[ScenarioCase, ...]) -> EvalTask:
+def scenario_task(
+    name: str,
+    cases: tuple[ScenarioCase, ...],
+    simulator_model: str,
+    simulator_max_tokens: int = JUDGE_MAX_TOKENS,
+    simulator_reasoning: ReasoningEffort = "off",
+) -> EvalTask:
     digest = digest_payload(
-        {"runner": "scenario-case", "task": name, "cases": [case.payload() for case in cases]}
+        {
+            "runner": "scenario-case",
+            "task": name,
+            "cases": [case.payload() for case in cases],
+            "simulatorModel": simulator_model,
+            "simulatorMaxTokens": simulator_max_tokens,
+            "simulatorReasoning": simulator_reasoning,
+        }
     )
 
     async def run(target: CapabilityTarget) -> EvalReport:
         results = tuple([await run_scenario_case(case, target) for case in cases])
         return EvalReport(name=name, suite="scenario", digest=digest, cases=results)
 
-    return EvalTask(name, "scenario", digest, tuple(case.name for case in cases), run)
+    return EvalTask(
+        name,
+        "scenario",
+        digest,
+        tuple(case.name for case in cases),
+        run,
+        simulator_model=simulator_model,
+        simulator_max_tokens=simulator_max_tokens,
+        simulator_reasoning=simulator_reasoning,
+    )
 
 
 def selected_tasks(

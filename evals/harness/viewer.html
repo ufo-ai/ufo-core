@@ -613,6 +613,7 @@ function paneMarkup(kind, run, report, item) {
     `ufo ${h(run.ufo_version)}`,
     report.target_model ? `target model ${h(report.target_model)}` : '',
     report.judge_model ? `judge model ${h(report.judge_model)}` : '',
+    report.simulator_model ? `simulator model ${h(report.simulator_model)}` : '',
     report.judge_revision ? `judge revision ${h(report.judge_revision)}` : '',
     `suite ${h(report.digest)}`
   ].filter(Boolean).join('\n');

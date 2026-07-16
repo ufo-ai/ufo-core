@@ -2,6 +2,8 @@
 
 `memory_100` fixes 100 questions and their evidence into a portable logical snapshot:
 
+The runner pins semantic answer grading to `gpt-5.4`; retrieval coverage remains deterministic.
+
 | Corpus | Cases | Stored as |
 |---|---:|---|
 | EnterpriseRAG-Bench | 60 | shared source pages plus deterministic hard negatives |

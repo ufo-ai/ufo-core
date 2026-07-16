@@ -15,6 +15,7 @@ from evals.mcp_atlas_100.profile import APPROVED_SERVERS, APPROVED_TOOLS
 from evals.mcp_atlas_100.runner import (
     CLAIM_COVERAGE_THRESHOLD,
     DEFAULT_DATASET,
+    MCP_ATLAS_JUDGE_MODEL,
     ClaimCoverageJudge,
     McpAtlasSuite,
     load_mcp_atlas_task,
@@ -291,6 +292,8 @@ def test_loader_takes_a_deterministic_prefix(tmp_path: Path) -> None:
 
     first = load_mcp_atlas_task(path, limit=3)
     second = load_mcp_atlas_task(path, limit=3)
+
+    assert first.judge_model == MCP_ATLAS_JUDGE_MODEL
 
     assert first.cases == ("task-000", "task-001", "task-002")
     assert first.digest == second.digest

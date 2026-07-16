@@ -9,7 +9,7 @@ real work — invoke, reconstruct, grade — is what the tests assert, read back
 import asyncio
 from base64 import urlsafe_b64decode
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from json import loads
 from types import SimpleNamespace
@@ -25,7 +25,7 @@ from dbos import error as dbos_error
 from httpx import AsyncClient
 
 import evals.harness.target as harness_target
-from evals.__main__ import EVAL_SHARE_BUCKET_ENV, _judge_max_tokens, _judge_reasoning
+from evals.__main__ import EVAL_SHARE_BUCKET_ENV
 from evals.__main__ import _run as run_evals
 from evals.__main__ import main as eval_main
 from evals.browser_nav import CASES as BROWSER_CASES
@@ -77,7 +77,12 @@ from evals.harness.viewer import (
     record_run,
     render_viewer,
 )
-from evals.registry import TASKS, selected_run_tasks
+from evals.registry import (
+    SCENARIO_SIMULATOR_MODEL,
+    SEMANTIC_JUDGE_MODEL,
+    TASKS,
+    selected_run_tasks,
+)
 from ufo.accounting import CORE_PRICING, Pricing
 from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig
@@ -97,6 +102,7 @@ from ufo.models.interface import (
     ToolResultBlock,
     ToolUseBlock,
 )
+from ufo.models.registry import ModelRegistry
 from ufo.schema import tables
 from ufo.schema.records import Usage
 from ufo.transcript import Conversation, decode, encode, transcript_key
@@ -117,15 +123,20 @@ def test_yc_evals_require_explicit_selection() -> None:
     assert {task.name for task in TASKS} >= {"yc_recall", "yc_workflows"}
 
 
-def test_eval_tasks_require_one_judge_configuration() -> None:
-    task = TASKS[0]
+def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
+    tasks = {task.name: task for task in TASKS}
 
-    assert _judge_max_tokens((task,)) == task.judge_max_tokens
-    assert _judge_reasoning((task,)) == task.judge_reasoning
-    with pytest.raises(ValueError, match="different judge token bounds"):
-        _judge_max_tokens((task, replace(task, judge_max_tokens=task.judge_max_tokens + 1)))
-    with pytest.raises(ValueError, match="different judge reasoning settings"):
-        _judge_reasoning((task, replace(task, judge_reasoning="off")))
+    assert tasks["semantic_quality"].judge_model == SEMANTIC_JUDGE_MODEL
+    assert tasks["semantic_quality"].simulator_model is None
+    assert tasks["scenario_smoke"].judge_model is None
+    assert tasks["scenario_smoke"].simulator_model == SCENARIO_SIMULATOR_MODEL
+    assert tasks["scenario_smoke"].simulator_reasoning == "off"
+    assert tasks["scenario_env"].simulator_model == SCENARIO_SIMULATOR_MODEL
+    assert all(
+        task.judge_model is None and task.simulator_model is None
+        for name, task in tasks.items()
+        if name not in {"semantic_quality", "scenario_smoke", "scenario_env"}
+    )
 
 
 def _research_transcript() -> tuple[Message, ...]:
@@ -1974,6 +1985,7 @@ def test_eval_run_archive_renders_debug_evidence_and_escapes_script_data(tmp_pat
         ),
         target_model=MODEL,
         judge_model="google/gemini-2.5-pro",
+        simulator_model="claude-haiku-4-5",
         judge_revision=JUDGE_REVISION,
         metrics=(EvalMetric(name="f1", value=0.75),),
     )
@@ -2025,6 +2037,7 @@ def test_eval_run_archive_renders_debug_evidence_and_escapes_script_data(tmp_pat
     assert "Other attempt evidence" in html
     assert "report.target_model" in html
     assert "report.judge_model" in html
+    assert "report.simulator_model" in html
     assert "Suite benchmark" in html
     assert '"agent_prompt":"be helpful and honest"' in html
     assert "Agent base prompt" in html
@@ -2036,6 +2049,7 @@ def test_eval_run_archive_renders_debug_evidence_and_escapes_script_data(tmp_pat
     payload = report.to_json()
     assert payload["targetModel"] == MODEL
     assert payload["judgeModel"] == "google/gemini-2.5-pro"
+    assert payload["simulatorModel"] == "claude-haiku-4-5"
     assert payload["judgeRevision"] == JUDGE_REVISION
     assert payload["metrics"] == [{"name": "f1", "value": 0.75}]
     assert "f1 75.0%" in report.console_summary
@@ -2518,13 +2532,14 @@ async def test_eval_run_pins_model_metadata_on_boundary_report(tmp_path, monkeyp
     async def resolve(*_args):
         return workspace_id, agent_id, "prompt", MODEL
 
-    async def run(_target) -> EvalReport:
+    async def run(target) -> EvalReport:
+        assert target.judge.model.model == "gpt-5.4-mini"
+        assert target.simulator.model.model == "claude-haiku-4-5"
         return report
 
     async def dispose() -> None:
         return None
 
-    model = SimpleNamespace(model="judge-model")
     monkeypatch.delenv("UFO_CREDENTIAL_KEY", raising=False)
     monkeypatch.setattr("evals.__main__.init_db", lambda _url: None)
     monkeypatch.setattr("evals.__main__.dispose_db", dispose)
@@ -2534,16 +2549,28 @@ async def test_eval_run_pins_model_metadata_on_boundary_report(tmp_path, monkeyp
     monkeypatch.setattr("evals.__main__.DBOSClient", lambda **_kwargs: object())
     monkeypatch.setattr("evals.__main__.WorkspaceDriver", lambda *_args, **_kwargs: object())
     monkeypatch.setattr("evals.__main__.load_manifests", lambda *_args: ())
-    monkeypatch.setattr("evals.__main__.model_registry", lambda *_args: object())
+    registry = ModelRegistry((), CORE_PRICING, MODEL)
+    monkeypatch.setattr("evals.__main__.model_registry", lambda *_args: registry)
     monkeypatch.setattr(
-        "evals.__main__.context_for", lambda *_args, **_kwargs: SimpleNamespace(model=model)
+        "evals.__main__.context_for",
+        lambda *_args, **kwargs: SimpleNamespace(
+            model=SimpleNamespace(model=kwargs["model_resolver"].auto_model)
+        ),
     )
-    monkeypatch.setattr("evals.__main__.InProcessTarget", lambda **_kwargs: object())
     config = Config(
         database=DatabaseConfig(url="sqlite+aiosqlite:///:memory:"),
         blob=BlobConfig(backend="filesystem", root=tmp_path),
     )
-    task = EvalTask("suite", "capability", "sha256:abc", (), run)
+    task = EvalTask(
+        "suite",
+        "capability",
+        "sha256:abc",
+        (),
+        run,
+        judge_model="gpt-5.4-mini",
+        simulator_model="claude-haiku-4-5",
+        judge_revision=JUDGE_REVISION,
+    )
 
     reports, agent_prompt = await run_evals(config, (task,), "assistant")
 
@@ -2552,7 +2579,8 @@ async def test_eval_run_pins_model_metadata_on_boundary_report(tmp_path, monkeyp
         report.model_copy(
             update={
                 "target_model": MODEL,
-                "judge_model": "judge-model",
+                "judge_model": "gpt-5.4-mini",
+                "simulator_model": "claude-haiku-4-5",
                 "judge_revision": JUDGE_REVISION,
             }
         ),

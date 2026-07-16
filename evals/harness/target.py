@@ -105,6 +105,9 @@ class CapabilityTarget(Protocol):
     def judge(self) -> JudgeLeg | None: ...
 
     @property
+    def simulator(self) -> JudgeLeg | None: ...
+
+    @property
     def agent_id(self) -> UUID: ...
 
     @property
@@ -146,6 +149,7 @@ class InProcessTarget:
     conversations: EvalConversations
     outcome: TurnOutcome
     judge: JudgeLeg | None = None
+    simulator: JudgeLeg | None = None
     blob: BlobStore | None = None
     logs: TurnLogReader | None = None
     mcp_atlas: McpAtlasTarget | None = None
