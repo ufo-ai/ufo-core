@@ -61,6 +61,16 @@ RESPONSE_URL = "https://hooks.slack.com/actions/T0000001/123/abc"
 ARTIFACT_SECRET = "artifact-token-secret"
 PUBLIC_BASE_URL = "https://ufo.example.test"
 
+ASK_QUESTION = AskUserInput(
+    title="Need a decision",
+    questions=(
+        AskQuestion(
+            question="Ship it?",
+            options=(QuestionOption(label="Ship"), QuestionOption(label="Hold")),
+        ),
+    ),
+)
+
 REAL_ASYNC_CLIENT = httpx.AsyncClient
 
 
@@ -152,8 +162,8 @@ def _mock_transport(
             return httpx.Response(200, json={"ok": True})
         if url == slack.SLACK_ASSISTANT_STATUS_URL:
             return httpx.Response(200, json={"ok": True})
-        if url == RESPONSE_URL:
-            return httpx.Response(200, text="ok")
+        if url == slack.SLACK_CHAT_UPDATE_URL:
+            return httpx.Response(200, json={"ok": True, "channel": "C5", "ts": "999.100"})
         if url == slack.SLACK_FILES_GET_UPLOAD_URL:
             return httpx.Response(200, json={"ok": True, "upload_url": UPLOAD_URL, "file_id": "F1"})
         if url == UPLOAD_URL:
@@ -462,10 +472,11 @@ def test_block_kit_reply_body_renders_markdown_and_degrades() -> None:
     degraded = json.loads(slack.slack_reply_body("C5", None, big, metadata))
     assert "blocks" not in degraded
     assert degraded["text"] == f"{big}\n\n{metadata}"
-    connect = slack.slack_connect_actions(ConnectRequest(provider="github"), uuid4())
+    connect = slack.slack_connect_blocks(ConnectRequest(provider="github"), uuid4())
+    assert connect is not None
     preserved = json.loads(slack.slack_reply_body("C5", None, big, metadata, actions=connect))
     assert "".join(block["text"] for block in preserved["blocks"][:-2]) == big
-    assert preserved["blocks"][-2] == connect
+    assert preserved["blocks"][-2] == connect[0]
     with pytest.raises(ValueError, match="metadata is too large"):
         slack.slack_reply_body("C5", None, "hi", "x" * (slack.SLACK_CONTEXT_TEXT_LIMIT + 1))
 
@@ -2119,11 +2130,19 @@ async def test_oversize_artifact_is_delivered_as_a_download_link(
     assert status == WRITEBACK_DELIVERED
 
 
-@pytest.mark.parametrize("connect_request", [None, ConnectRequest(provider="google_calendar")])
+@pytest.mark.parametrize(
+    ("question", "connect_request"),
+    [
+        (None, None),
+        (None, ConnectRequest(provider="google_calendar")),
+        (ASK_QUESTION, None),
+    ],
+)
 async def test_invalid_blocks_reposts_once(
     db: None,
     tmp_path,
     monkeypatch,
+    question: AskUserInput | None,
     connect_request: ConnectRequest | None,
 ) -> None:
     workspace_id, _ = await _seed()
@@ -2149,6 +2168,7 @@ async def test_invalid_blocks_reposts_once(
         "hi **there**",
         blob,
         artifact=False,
+        question=question,
         connect_request=connect_request,
     )
 
@@ -2159,7 +2179,7 @@ async def test_invalid_blocks_reposts_once(
     first = json.loads(posts[0].content)
     second = json.loads(posts[1].content)
     assert first["blocks"][-1]["type"] == "context"
-    if connect_request is None:
+    if question is None and connect_request is None:
         assert "blocks" not in second
         assert second["text"] == (
             "hi **there**\n\n$0.001234 (1,234 tokens, 42% cached) · claude-opus-4-8-[high]"
@@ -2169,7 +2189,14 @@ async def test_invalid_blocks_reposts_once(
             "type": "section",
             "text": {"type": "mrkdwn", "text": "hi **there**"},
         }
-        assert second["blocks"][-2]["elements"][0]["action_id"] == slack.CONNECT_ACTION_ID
+        if connect_request is not None:
+            assert second["blocks"][-2]["elements"][0]["action_id"] == slack.CONNECT_ACTION_ID
+        else:
+            assert second["blocks"][1]["text"]["text"] == "*Need a decision*"
+            assert [b["action_id"] for b in second["blocks"][-2]["elements"]] == [
+                "ask:0:0",
+                "ask:0:1",
+            ]
 
     async with workspace_tx() as connection:
         row = (
@@ -2428,47 +2455,76 @@ async def test_newest_turn_owns_the_thread_status(db: None, tmp_path, monkeypatc
     assert final == {"channel_id": "C1", "thread_ts": "100.5", "status": slack.STATUS_CLEAR_TEXT}
 
 
-ASK_QUESTION = AskUserInput(
-    title="Need a decision",
-    questions=(
-        AskQuestion(
-            question="Ship it?",
-            options=(QuestionOption(label="Ship"), QuestionOption(label="Hold")),
-        ),
-    ),
-)
-
-
-def test_only_a_single_choice_question_renders_buttons() -> None:
+def test_ask_blocks_render_title_every_question_and_choice_buttons() -> None:
+    assert slack.slack_ask_blocks(None) is None
     single = ASK_QUESTION.questions[0]
-    actions = slack.slack_answer_actions(ASK_QUESTION)
-    assert actions is not None and actions["type"] == "actions"
-    assert [b["text"]["text"] for b in actions["elements"]] == ["Ship", "Hold"]
-    assert slack.slack_answer_actions(None) is None
-    two = AskUserInput(title="t", questions=(single, single))
-    assert slack.slack_answer_actions(two) is None
-    multi = AskUserInput(title="t", questions=(single.model_copy(update={"multi_select": True}),))
-    assert slack.slack_answer_actions(multi) is None
-    free = AskUserInput(title="t", questions=(single.model_copy(update={"free_text_only": True}),))
-    assert slack.slack_answer_actions(free) is None
-    prose = AskUserInput(title="t", questions=(AskQuestion(question="Ship it?"),))
-    assert slack.slack_answer_actions(prose) is None
-    attach = AskUserInput(
-        title="t", questions=(single.model_copy(update={"allow_attachments": True}),)
+
+    lone = slack.slack_ask_blocks(ASK_QUESTION)
+    assert lone is not None
+    assert [block["type"] for block in lone] == ["section", "section", "actions"]
+    assert lone[0]["text"]["text"] == "*Need a decision*"
+    assert lone[1]["text"]["text"] == "Ship it?"
+    buttons = lone[2]["elements"]
+    assert [b["text"]["text"] for b in buttons] == ["Ship", "Hold"]
+    assert [b["action_id"] for b in buttons] == ["ask:0:0", "ask:0:1"]
+    assert [b["value"] for b in buttons] == ["Ship", "Hold"]
+
+    pair = slack.slack_ask_blocks(
+        AskUserInput(
+            title="t",
+            questions=(
+                single.model_copy(
+                    update={
+                        "header": "Release",
+                        "options": (
+                            QuestionOption(label="Ship", description="cut it now"),
+                            QuestionOption(label="Hold"),
+                        ),
+                    }
+                ),
+                AskQuestion(
+                    question="Name the tag?",
+                    options=(QuestionOption(label="v1", description="the usual"),),
+                    free_text_only=True,
+                ),
+            ),
+        )
     )
-    assert slack.slack_answer_actions(attach) is None
-    crowded = AskUserInput(
-        title="t",
-        questions=(
-            AskQuestion(
-                question="q",
-                options=tuple(
-                    QuestionOption(label=f"o{i}") for i in range(slack.MAX_ANSWER_BUTTONS + 1)
+    assert pair is not None
+    assert [block["type"] for block in pair] == ["section", "section", "actions", "section"]
+    assert pair[1]["text"]["text"] == "*Release* — Ship it?\n• Ship — cut it now"
+    assert [b["action_id"] for b in pair[2]["elements"]] == ["ask:0:0", "ask:0:1"]
+    assert [b["value"] for b in pair[2]["elements"]] == ["Ship · Ship it?", "Hold · Ship it?"]
+    assert pair[3]["text"]["text"] == "Name the tag?\n• v1 — the usual"
+
+    multi = slack.slack_ask_blocks(
+        AskUserInput(title="t", questions=(single.model_copy(update={"multi_select": True}),))
+    )
+    assert multi is not None
+    assert [block["type"] for block in multi] == ["section", "section"]
+    assert (
+        multi[1]["text"]["text"]
+        == "Ship it?\n• Ship\n• Hold\n_Select all that apply — answer by replying in this thread._"
+    )
+
+    for richer in (
+        AskUserInput(title="t", questions=(AskQuestion(question="Ship it?"),)),
+        AskUserInput(title="t", questions=(single.model_copy(update={"allow_attachments": True}),)),
+        AskUserInput(
+            title="t",
+            questions=(
+                AskQuestion(
+                    question="q",
+                    options=tuple(
+                        QuestionOption(label=f"o{i}") for i in range(slack.MAX_ANSWER_BUTTONS + 1)
+                    ),
                 ),
             ),
         ),
-    )
-    assert slack.slack_answer_actions(crowded) is None
+    ):
+        rendered = slack.slack_ask_blocks(richer)
+        assert rendered is not None
+        assert [block["type"] for block in rendered] == ["section", "section"]
 
 
 async def test_question_writeback_posts_answer_buttons(db: None, tmp_path, monkeypatch) -> None:
@@ -2488,10 +2544,12 @@ async def test_question_writeback_posts_answer_buttons(db: None, tmp_path, monke
 
     reply = json.loads(_requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)[0].content)
     assert reply["blocks"][0] == {"type": "markdown", "text": "Ship it? (Ship / Hold)"}
-    actions = reply["blocks"][1]
+    assert reply["blocks"][1]["text"]["text"] == "*Need a decision*"
+    assert reply["blocks"][2]["text"]["text"] == "Ship it?"
+    actions = reply["blocks"][3]
     assert actions["type"] == "actions"
     assert [b["text"]["text"] for b in actions["elements"]] == ["Ship", "Hold"]
-    assert [b["action_id"] for b in actions["elements"]] == ["ask:0", "ask:1"]
+    assert [b["action_id"] for b in actions["elements"]] == ["ask:0:0", "ask:0:1"]
     assert [b["value"] for b in actions["elements"]] == ["Ship", "Hold"]
     assert reply["blocks"][-1]["type"] == "context"
 
@@ -2628,14 +2686,30 @@ async def test_dm_connect_click_posts_the_link_unthreaded(db: None, tmp_path, mo
     assert "thread_ts" not in private[0]
 
 
+CLICK_MESSAGE_BLOCKS: list[dict[str, object]] = [
+    {"type": "markdown", "text": "Ship it? (Ship / Hold)", "block_id": "b-md"},
+    {
+        "type": "actions",
+        "block_id": "b-ask-0",
+        "elements": [{"type": "button", "action_id": "ask:0:0", "value": "Ship"}],
+    },
+]
+
+
 def _click_body(
-    action_id: str = "ask:0",
+    action_id: str = "ask:0:0",
     value: str = "Ship",
     user: str = "U9",
     channel: str = "C5",
     thread: str | None = "200.0",
+    blocks: list[dict[str, object]] | None = None,
+    block_id: str = "b-ask-0",
 ) -> bytes:
-    message = {"ts": "999.100", "text": "Ship it? (Ship / Hold)"}
+    message: dict[str, object] = {
+        "ts": "999.100",
+        "text": "Ship it? (Ship / Hold)",
+        "blocks": CLICK_MESSAGE_BLOCKS if blocks is None else blocks,
+    }
     if thread is not None:
         message["thread_ts"] = thread
     payload = {
@@ -2644,7 +2718,7 @@ def _click_body(
         "user": {"id": user},
         "channel": {"id": channel},
         "message": message,
-        "actions": [{"action_id": action_id, "value": value}],
+        "actions": [{"action_id": action_id, "value": value, "block_id": block_id}],
         "response_url": RESPONSE_URL,
     }
     return urlencode({"payload": json.dumps(payload)}).encode()
@@ -2866,15 +2940,82 @@ async def test_first_click_wins_and_alone_rewrites_the_message(
         ).scalar_one()
     assert len(turns) == 1
     assert turns[0].inbound == "[Answered by <@U9> via button] Ship"
-    assert turns[0].idempotency_key == "C5:200.0:999.100:answer"
+    assert turns[0].idempotency_key == "C5:200.0:999.100:answer:0"
     assert queue_key == "C5:200.0"
 
-    rewrites = _requests_to(recorder, RESPONSE_URL)
+    rewrites = _requests_to(recorder, slack.SLACK_CHAT_UPDATE_URL)
     assert len(rewrites) == 1
     rewrite = json.loads(rewrites[0].content)
-    assert rewrite["replace_original"] is True
-    assert rewrite["blocks"][0] == {"type": "markdown", "text": "Ship it? (Ship / Hold)"}
+    assert rewrite["channel"] == "C5"
+    assert rewrite["ts"] == "999.100"
+    assert rewrite["blocks"][0] == {
+        "type": "markdown",
+        "text": "Ship it? (Ship / Hold)",
+        "block_id": "b-md",
+    }
     answered = rewrite["blocks"][1]
     assert answered["type"] == "context"
     assert "Answered by <@U9>" in answered["elements"][0]["text"]
     assert "Ship" in answered["elements"][0]["text"]
+
+
+async def test_each_question_row_takes_its_own_answer(db: None, tmp_path, monkeypatch) -> None:
+    workspace_id, _ = await _seed()
+    await _seed_answer_conversation(workspace_id)
+    recorder: list[httpx.Request] = []
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    two_rows: list[dict[str, object]] = [
+        {"type": "markdown", "text": "Two questions", "block_id": "b-md"},
+        {
+            "type": "actions",
+            "block_id": "b-ask-0",
+            "elements": [{"type": "button", "action_id": "ask:0:0", "value": "Ship"}],
+        },
+        {
+            "type": "actions",
+            "block_id": "b-ask-1",
+            "elements": [{"type": "button", "action_id": "ask:1:0", "value": "v2 · Tag?"}],
+        },
+    ]
+    second = _click_body(
+        action_id="ask:1:0", value="v2 · Tag?", blocks=two_rows, block_id="b-ask-1"
+    )
+    first = _click_body(action_id="ask:0:0", value="Ship", blocks=two_rows, block_id="b-ask-0")
+    async with client:
+        await client.post(INTERACTIVE_PATH, content=second, headers=_signed_form(second))
+        await asyncio.gather(*slack._REWRITE_TASKS)
+        await client.post(INTERACTIVE_PATH, content=first, headers=_signed_form(first))
+        await asyncio.gather(*slack._REWRITE_TASKS)
+
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(
+                sa.select(tables.turn.c.inbound, tables.turn.c.idempotency_key).where(
+                    tables.turn.c.workspace_id == workspace_id
+                )
+            )
+        ).all()
+        arrivals = (
+            await connection.execute(
+                sa.select(
+                    tables.inbound_message.c.body, tables.inbound_message.c.idempotency_key
+                ).where(tables.inbound_message.c.workspace_id == workspace_id)
+            )
+        ).all()
+    assert [(turn.idempotency_key, turn.inbound) for turn in turns] == [
+        ("C5:200.0:999.100:answer:1", "[Answered by <@U9> via button] v2 · Tag?")
+    ]
+    assert [(arrival.idempotency_key, arrival.body) for arrival in arrivals] == [
+        ("C5:200.0:999.100:answer:0", "[Answered by <@U9> via button] Ship")
+    ]
+
+    rewrites = [
+        json.loads(request.content)
+        for request in _requests_to(recorder, slack.SLACK_CHAT_UPDATE_URL)
+    ]
+    assert len(rewrites) == 2
+    assert [block["type"] for block in rewrites[0]["blocks"]] == ["markdown", "actions", "context"]
+    assert rewrites[0]["blocks"][1]["block_id"] == "b-ask-0"
+    assert "v2 · Tag?" in rewrites[0]["blocks"][2]["elements"][0]["text"]
+    assert [block["type"] for block in rewrites[1]["blocks"]] == ["markdown", "context", "actions"]
+    assert "Ship" in rewrites[1]["blocks"][1]["elements"][0]["text"]
