@@ -8,13 +8,15 @@ import pytest
 
 from ufo.blob import FilesystemBlobStore
 from ufo.loop.compaction import (
+    AUTOCOMPACT_BUFFER_TOKENS,
     COMPACTED_CONTEXT_PREFIX,
+    COMPACTION_SUMMARY_MAX_TOKENS,
     DEFAULT_CONTEXT_WINDOW_TOKENS,
     Compaction,
     CompactionSummary,
     FileRef,
 )
-from ufo.loop.engine import OFFLOAD_NOTICE
+from ufo.loop.engine import MAX_OUTPUT_TOKENS, OFFLOAD_NOTICE
 from ufo.models.interface import (
     ImageBlock,
     ImageSource,
@@ -382,11 +384,20 @@ async def test_an_unparseable_summary_fails_loud(tmp_path: Path) -> None:
         await compaction.maybe_compact(_history())
 
 
+def test_round_output_budget_fits_under_the_compaction_trigger() -> None:
+    """Providers require input + max_tokens <= window and the derived trigger is window less the
+    summary reserve and buffer, so with the window cancelled the reserve plus buffer must cover a
+    round's full output budget — for every window in MODEL_CONTEXT_WINDOW and the default."""
+    assert MAX_OUTPUT_TOKENS <= COMPACTION_SUMMARY_MAX_TOKENS + AUTOCOMPACT_BUFFER_TOKENS
+
+
 async def test_trigger_derives_from_the_model_window(tmp_path: Path) -> None:
     """Phase 3: with no explicit trigger the threshold is the model window less the summary reserve
     and buffer — a window just under it is left alone, just over it compacts."""
     compaction = _compaction(tmp_path, keep_messages=2)
-    derived = DEFAULT_CONTEXT_WINDOW_TOKENS - compaction.summary_max_tokens - 13_000
+    derived = (
+        DEFAULT_CONTEXT_WINDOW_TOKENS - compaction.summary_max_tokens - AUTOCOMPACT_BUFFER_TOKENS
+    )
     under = (
         Message(role="user", content="a " + "x" * (derived - 200) * 4),
         Message(role="assistant", content="b"),
