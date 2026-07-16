@@ -22,6 +22,7 @@ from ufo.models.interface import (
     ImageSource,
     Message,
     ModelEvent,
+    ModelRefusal,
     ModelRequest,
     ModelResponseTruncated,
     TextBlock,
@@ -545,6 +546,21 @@ async def test_anthropic_truncation_raises() -> None:
     )
     with pytest.raises(ModelResponseTruncated):
         await collect(AnthropicClient(client=anthropic_sdk(create)))
+
+
+async def test_anthropic_refusal_raises() -> None:
+    create = ScriptedCreate(
+        (
+            [
+                anthropic_message_start(input_tokens=1),
+                anthropic_output(1, stop_reason="refusal"),
+            ],
+            None,
+        )
+    )
+    with pytest.raises(ModelRefusal):
+        await collect(AnthropicClient(client=anthropic_sdk(create)))
+    assert create.calls == 1
 
 
 async def test_openai_truncation_raises() -> None:

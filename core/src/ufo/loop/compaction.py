@@ -2,10 +2,11 @@
 
 When the loaded history crosses the model's token window, the head is compressed into a validated
 structured summary and the recent tail is kept verbatim. The pipeline is deterministic around a
-single external model call: group into API rounds, render the head (images become markers),
-summarize into a typed `CompactionSummary` (retrying with fewer rounds if the summarize request
-itself overflows), harvest the durable `.tool-output` references the head offloaded, reconstruct the
-window, and persist. The whole pre-compaction window (`before`), the window that replaces it
+single external model call: group into API rounds, render the head (images become markers,
+verbatim-repeated runs fold to one copy plus a count marker), summarize into a typed
+`CompactionSummary` (retrying with fewer rounds if the summarize request itself overflows), harvest
+the durable `.tool-output` references the head offloaded, reconstruct the window, and persist. The
+whole pre-compaction window (`before`), the window that replaces it
 (`after`), and the typed summary persist above the live transcript at
 `conversations/<cid>/compactions/<n>/{before,after,summary}.json.lz4`, so a pre-compaction fact
 survives verbatim and an eval reader gets the structured object, not just rendered text."""
@@ -47,6 +48,16 @@ PTL_DROP_DENOMINATOR = 5
 MAX_REFERENCE_PATHS = 5
 COMPACTED_CONTEXT_PREFIX = "Compacted context:\n"
 IMAGE_MARKER = "[image]"
+REPEATED_RUN_MIN_OCCURRENCES = 10
+REPEATED_RUN_UNIT_MAX_WORDS = 32
+REPEATED_RUN_WORD_MAX_CHARS = 80
+REPEATED_RUN_RE = re.compile(
+    rf"(?:^|(?<=\s))"
+    rf"(\S{{1,{REPEATED_RUN_WORD_MAX_CHARS}}}"
+    rf"(?:\s\S{{1,{REPEATED_RUN_WORD_MAX_CHARS}}}){{0,{REPEATED_RUN_UNIT_MAX_WORDS - 1}}}?)"
+    rf"(?:\s\1){{{REPEATED_RUN_MIN_OCCURRENCES - 1},}}"
+)
+REPEATED_RUN_MARKER = "[repeated {count} times]"
 TOOL_OUTPUT_DIRNAME = ".tool-output"
 TOOL_OUTPUT_PATH_RE = re.compile(rf"/\S*{re.escape(TOOL_OUTPUT_DIRNAME)}/\S+\.txt")
 CONTEXT_OVERFLOW_MARKERS = ("too long", "context length", "maximum context", "prompt is too large")
@@ -279,10 +290,29 @@ class Compaction:
     def _prepare(self, rounds: tuple[tuple[Message, ...], ...]) -> str:
         """Render the head rounds to the summarizer's input: one `role: content` block per message,
         preserving block structure. Inline images are already `[image]` markers in `_text` — they
-        carry no text but must not vanish silently, so the summarizer knows one was there."""
-        return "\n\n".join(
-            f"{message.role}: {self._text(message)}" for round_ in rounds for message in round_
+        carry no text but must not vanish silently, so the summarizer knows one was there. The
+        rendered head then folds verbatim repetition, so the summarize request carries the
+        information, not the bulk."""
+        return self._fold_repeated_runs(
+            "\n\n".join(
+                f"{message.role}: {self._text(message)}" for round_ in rounds for message in round_
+            )
         )
+
+    def _fold_repeated_runs(self, text: str) -> str:
+        """Fold a short word-sequence repeated verbatim `REPEATED_RUN_MIN_OCCURRENCES`+ times in a
+        row into one copy plus a count marker. A head can be dominated by such runs — a wedged tool
+        loop, pasted spam — and rendering them verbatim ships hundreds of thousands of characters
+        that carry no more information than one copy and the count; at that scale Anthropic
+        deterministically refuses the summarize request (stop_reason=refusal), so the fold is what
+        lets a repetition-heavy window compact at all."""
+
+        def fold(match: re.Match[str]) -> str:
+            unit = match.group(1)
+            count = (len(match.group(0)) + 1) // (len(unit) + 1)
+            return f"{unit} {REPEATED_RUN_MARKER.format(count=count)}"
+
+        return REPEATED_RUN_RE.sub(fold, text)
 
     def _drop_oldest(
         self, rounds: tuple[tuple[Message, ...], ...]

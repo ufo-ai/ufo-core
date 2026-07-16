@@ -275,6 +275,47 @@ async def test_head_images_become_markers_in_the_summarizer_input(tmp_path: Path
     assert "SECRETBASE64" not in model.seen[0]
 
 
+async def test_summarizer_input_folds_verbatim_repetition(tmp_path: Path) -> None:
+    """A head dominated by one word-sequence repeated verbatim reaches the summarizer as a single
+    copy plus a count marker, with the surrounding instruction intact — rendered verbatim at this
+    scale, Anthropic refuses the summarize request outright (stop_reason=refusal)."""
+    salad = ("river stone cedar orbit lantern meadow copper harbor velvet winter " * 800)[:49_000]
+    model = CapturingSummaryModel()
+    compaction = _compaction(tmp_path, model=model, trigger_tokens=1, keep_messages=2)
+    messages = (
+        Message(role="user", content="Persistent instruction: retain RETENTION-abc. " + salad),
+        Message(role="assistant", content="Continue retaining the instruction. " + salad),
+        Message(role="user", content="keep going " + salad),
+        Message(role="assistant", content="working"),
+        Message(role="user", content="tail"),
+    )
+    await compaction.maybe_compact(messages)
+    seen = model.seen[0]
+    assert "Persistent instruction: retain RETENTION-abc." in seen
+    assert "[repeated 731 times]" in seen
+    assert len(seen) < 2_000
+
+
+async def test_repetition_below_the_fold_threshold_reaches_the_summarizer_verbatim(
+    tmp_path: Path,
+) -> None:
+    nine = " ".join(["spam"] * 9)
+    ten = " ".join(["spam"] * 10)
+    model = CapturingSummaryModel()
+    compaction = _compaction(tmp_path, model=model, trigger_tokens=1, keep_messages=2)
+    messages = (
+        Message(role="user", content="first " + nine),
+        Message(role="assistant", content="then " + ten),
+        Message(role="user", content="keep going " + "x" * 40),
+        Message(role="assistant", content="working"),
+        Message(role="user", content="tail"),
+    )
+    await compaction.maybe_compact(messages)
+    seen = model.seen[0]
+    assert nine in seen
+    assert "spam [repeated 10 times]" in seen
+
+
 async def test_offloaded_tool_output_paths_are_re_referenced_after_compaction(
     tmp_path: Path,
 ) -> None:

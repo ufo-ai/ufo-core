@@ -12,6 +12,7 @@ from ufo.models.interface import (
     ImageBlock,
     ImageSource,
     ModelEvent,
+    ModelRefusal,
     ModelRequest,
     ModelResponseTruncated,
     TextBlock,
@@ -96,10 +97,12 @@ class AnthropicClient:
         retry on the same backoff and shared attempt budget (each retry logged, exhaustion logged
         and re-raising the provider's APITimeoutError) — both only until the first event is
         yielded; any failure after that raises immediately. stop_reason=max_tokens
-        is a truncated completion and raises ModelResponseTruncated. stop_reason=tool_use is a
-        normal stop. An empty completion (no event, stop_reason=end_turn) is a retryable provider
-        failure, re-issued up to MAX_EMPTY_PROVIDER_RETRIES before degrading to the empty result
-        for the turn loop's nudge — a tool-call-only response has yielded and never degrades.
+        is a truncated completion and raises ModelResponseTruncated; stop_reason=refusal raises
+        ModelRefusal (deterministic per request — never retried, never an empty success).
+        stop_reason=tool_use is a normal stop. An empty completion (no event,
+        stop_reason=end_turn) is a retryable provider failure, re-issued up to
+        MAX_EMPTY_PROVIDER_RETRIES before degrading to the empty result for the turn loop's
+        nudge — a tool-call-only response has yielded and never degrades.
         """
         delay = INITIAL_RETRY_DELAY_SECONDS
         attempt = 0
@@ -208,6 +211,8 @@ class AnthropicClient:
                     "Anthropic completion truncated at the max_tokens budget "
                     "(stop_reason=max_tokens)"
                 )
+            if stop_reason == "refusal":
+                raise ModelRefusal("Anthropic declined the completion (stop_reason=refusal)")
             if output_tokens is None:
                 raise RuntimeError("model stream produced no usage")
             if (

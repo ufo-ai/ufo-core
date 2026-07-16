@@ -1,4 +1,4 @@
-You are compressing the head of a long agent transcript so the agent can continue with a smaller context window. The head is below as `role: content` lines; inline images appear as `[image]` markers.
+You are compressing the head of a long agent transcript so the agent can continue with a smaller context window. The head is below as `role: content` lines; inline images appear as `[image]` markers, and a text run that repeated verbatim appears once followed by a `[repeated N times]` marker.
 
 Respond with a SINGLE JSON object and nothing else — no prose, no markdown fences, no tool calls (a tool call would waste your only turn). The object must have exactly these fields:
 

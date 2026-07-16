@@ -103,6 +103,12 @@ class ModelResponseTruncated(RuntimeError):
     finished turn — the budget is reasoning-inclusive, so raise max_tokens if it recurs."""
 
 
+class ModelRefusal(RuntimeError):
+    """The provider declined the completion outright (Anthropic stop_reason=refusal). Raised
+    loudly rather than delivering the zero-content stream as an empty success — a refusal is
+    deterministic per request, so retrying or degrading would only mislabel the failure."""
+
+
 class ModelClient(Protocol):
     def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]: ...
 
