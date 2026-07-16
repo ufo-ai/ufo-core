@@ -873,6 +873,40 @@ async def test_ask_user_as_the_final_tool_call_rides_the_terminal_frame(
     assert TerminalFrame.model_validate(stored).question == frame.question
 
 
+@dataclass(frozen=True)
+class NarratesProposalThenAsksModel:
+    """Narrates a proposal in the same round it calls ask_user — text a live surface streams as
+    it is produced — then, seeing the directive, poses a short question in the next round. A
+    durable surface only ever delivers the terminal frame, so the proposal must ride it too."""
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        answered = any(
+            isinstance(message.content, tuple)
+            and any(isinstance(block, ToolResultBlock) for block in message.content)
+            for message in request.messages
+        )
+        if answered:
+            yield TextDelta(text="Given that, ship or hold?")
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        yield TextDelta(text="Here is the proposed structure: two sub-issues under #318.")
+        yield ToolCallStart(id="q1", name="ask_user")
+        yield ToolCallDelta(id="q1", partial_json=json.dumps(ASK_INPUT))
+        yield Usage(input_tokens=2, output_tokens=2)
+
+
+async def test_terminal_answer_carries_narration_from_every_round_not_just_the_last(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    engine = _engine(turn, NarratesProposalThenAsksModel(), tmp_path)
+    frame = await engine.run()
+    assert frame.status == "done"
+    assert "two sub-issues under #318" in frame.text
+    assert "ship or hold?" in frame.text
+    assert frame.question is not None
+
+
 def test_asked_question_reads_the_handlers_result_not_the_raw_call() -> None:
     folded = {
         "title": "Folded",

@@ -740,14 +740,19 @@ class TurnEngine:
         while the turn commits its terminal — and feeds all results back as one user turn.
         Every round opens by absorbing queued arrivals — messages admitted while the previous
         round streamed or its tools ran — so the drain always lands between a completed
-        (tool_use, tool_result) pair and the next model call, never inside one. Also returns the
-        structured question, credential request, or connect request left pending when its tool was
-        the turn's final act — each round overwrites all three, so a turn that asked and then
-        worked on carries none."""
+        (tool_use, tool_result) pair and the next model call, never inside one. A round that calls
+        a tool still narrates: its text streams live same as any other, so the returned answer
+        joins every round's narration with the closing round's text — a durable surface (which
+        never tails live deltas) delivers the whole turn, not just its last round, and the model
+        is never left referring to prose no surface actually sent. Also returns the structured
+        question, credential request, or connect request left pending when its tool was the turn's
+        final act — each round overwrites all three, so a turn that asked and then worked on
+        carries none."""
         nudged = False
         question: AskUserInput | None = None
         credential_request: CredentialRequest | None = None
         connect_request: ConnectRequest | None = None
+        narrated: list[str] = []
         for _round in range(self.max_rounds):
             absorbed = await self._absorb_arrivals(messages, arrival_log, absorbed_ids)
             if len(absorbed) > len(messages):
@@ -762,12 +767,15 @@ class TurnEngine:
             await self._publish_cost(usage_events)
             if not tool_calls:
                 if text.strip():
-                    return messages, text, question, credential_request, connect_request
+                    answer = "\n\n".join((*narrated, text)) if narrated else text
+                    return messages, answer, question, credential_request, connect_request
                 if nudged:
                     raise RuntimeError("model returned an empty response twice")
                 nudged = True
                 messages = (*messages, Message(role="user", content=EMPTY_RESPONSE_NUDGE))
                 continue
+            if text.strip():
+                narrated.append(text)
             assistant_blocks = (*((TextBlock(text=text),) if text else ()), *tool_calls)
             results: tuple[ToolResultBlock, ...] = ()
             for segment in _dispatch_segments(self.tools, tool_calls):
@@ -793,6 +801,8 @@ class TurnEngine:
                 Message(role="user", content=results),
             )
         messages, text = await self._force_final(messages, usage_events, system)
+        if narrated:
+            text = "\n\n".join(part for part in (*narrated, text) if part.strip())
         return messages, text, None, None, None
 
     async def _absorb_arrivals(
