@@ -29,6 +29,7 @@ from evals.__main__ import EVAL_SHARE_BUCKET_ENV
 from evals.__main__ import _run as run_evals
 from evals.__main__ import main as eval_main
 from evals.browser_nav import CASES as BROWSER_CASES
+from evals.compaction.target import CompactionTarget
 from evals.driver import WorkspaceDriver, resolve_workspace_and_agent
 from evals.harness.capability import (
     CapabilityCase,
@@ -2585,6 +2586,53 @@ async def test_eval_run_pins_model_metadata_on_boundary_report(tmp_path, monkeyp
             }
         ),
     )
+
+
+async def test_run_builds_the_compaction_client_inside_the_workspace_scope(
+    tmp_path, monkeypatch
+) -> None:
+    workspace_id = uuid4()
+    agent_id = uuid4()
+    seen: dict[str, object] = {}
+
+    async def resolve(*_args):
+        return workspace_id, agent_id, "prompt", MODEL
+
+    async def run(target) -> EvalReport:
+        seen["compaction"] = target.compaction
+        return EvalReport(
+            name="compaction.overload", suite="compaction", digest="sha256:abc", cases=()
+        )
+
+    async def dispose() -> None:
+        return None
+
+    monkeypatch.delenv("UFO_CREDENTIAL_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr("ufo.workspace._store", None)
+    monkeypatch.setattr("evals.__main__.init_db", lambda _url: None)
+    monkeypatch.setattr("evals.__main__.dispose_db", dispose)
+    monkeypatch.setattr("evals.__main__.init_workspace_credentials", lambda _store: None)
+    monkeypatch.setattr("evals.__main__.resolve_workspace_and_agent", resolve)
+    monkeypatch.setattr("evals.__main__.blob_store_for", lambda _config: object())
+    monkeypatch.setattr("evals.__main__.DBOSClient", lambda **_kwargs: object())
+    monkeypatch.setattr("evals.__main__.WorkspaceDriver", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr("evals.__main__.load_manifests", lambda *_args: ())
+    monkeypatch.setattr(
+        "evals.__main__.context_for",
+        lambda *_args, **kwargs: SimpleNamespace(
+            model=SimpleNamespace(model=kwargs["model_resolver"].auto_model)
+        ),
+    )
+    config = Config(
+        database=DatabaseConfig(url="sqlite+aiosqlite:///:memory:"),
+        blob=BlobConfig(backend="filesystem", root=tmp_path),
+    )
+    task = EvalTask("compaction.overload", "compaction", "sha256:abc", (), run)
+
+    await run_evals(config, (task,), "assistant")
+
+    assert isinstance(seen["compaction"], CompactionTarget)
 
 
 def test_report_pass_rate_ignores_excluded_and_suite_fails_on_a_real_failure() -> None:

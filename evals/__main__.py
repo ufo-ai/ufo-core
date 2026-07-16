@@ -418,33 +418,33 @@ async def _run(
             )
             if ctx.model is None:
                 raise RuntimeError("eval context requires model access")
-            compaction: CompactionTarget | None = None
-            if any(task.suite == "compaction" for task in tasks):
-                resolved_model = registry.resolve(agent_model)
-                compaction = CompactionTarget(
-                    client=await registry.client_for(resolved_model),
-                    model=resolved_model,
-                    blob=blob,
-                )
-            target = InProcessTarget(
-                ctx=ctx,
-                agent_id=agent_id,
-                conversations=driver,
-                outcome=driver,
-                blob=blob,
-                logs=collector,
-                mcp_atlas=await _mcp_atlas_target(
-                    stack,
-                    config,
-                    tasks,
-                    agent_prompt,
-                    agent_model,
-                    mcp_atlas_url,
-                    mcp_atlas_external_url,
-                ),
-                compaction=compaction,
-            )
             with ws(workspace_id):
+                compaction: CompactionTarget | None = None
+                if any(task.suite == "compaction" for task in tasks):
+                    resolved_model = registry.resolve(agent_model)
+                    compaction = CompactionTarget(
+                        client=await registry.client_for(resolved_model),
+                        model=resolved_model,
+                        blob=blob,
+                    )
+                target = InProcessTarget(
+                    ctx=ctx,
+                    agent_id=agent_id,
+                    conversations=driver,
+                    outcome=driver,
+                    blob=blob,
+                    logs=collector,
+                    mcp_atlas=await _mcp_atlas_target(
+                        stack,
+                        config,
+                        tasks,
+                        agent_prompt,
+                        agent_model,
+                        mcp_atlas_url,
+                        mcp_atlas_external_url,
+                    ),
+                    compaction=compaction,
+                )
                 reports = tuple(
                     [
                         await task.run(
