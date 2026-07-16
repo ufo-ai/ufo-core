@@ -36,6 +36,13 @@ member binding) and every attempt its tool trajectory, tool errors, per-criterio
 grader evidence, turn log, and stored transcript snapshot (with the agent's base prompt); inline
 images and private credential handoffs are omitted. Evidence keys the viewer does not model render
 as raw JSON, so a new suite's evidence is never invisible. Comparisons show deltas only for
-digest-identical suites. Shared viewers contain only the named runs; their S3 object key has 192
-random bits and the presigned URL expires after seven days by default. Sharing uses `--s3-bucket`,
-then `UFO_EVAL_SHARE_BUCKET`, then the configured S3 `[blob]` bucket.
+digest-identical suites.
+
+Every case is recorded whole — `record_run` refuses a case whose prompt or response arrived null —
+and a run whose archive was recorded without evidence renders as "not recorded — rerun the case",
+never as a valid empty result; `--reconstruct <run> --workspace <id>` rebuilds a diagnostic copy
+from the durable conversation, turn, and blob records under `eval-reports/reconstructions/`
+without touching the original. Shared viewers are private and carry the whole record: they contain
+only the named runs, their S3 object key has 192 random bits, and the presigned URL expires after
+seven days by default. Sharing uses `--s3-bucket`, then `UFO_EVAL_SHARE_BUCKET`, then the
+configured S3 `[blob]` bucket.

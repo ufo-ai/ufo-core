@@ -11,7 +11,6 @@ from evals.harness.capability import (
     EvalTrajectory,
     SharedArtifact,
     ToolInvocation,
-    redacted_case,
     run_capability_case,
 )
 from evals.harness.harness import EvalMetric, EvalReport
@@ -379,34 +378,17 @@ async def _private_case_result():
     return await run_capability_case(case, Target())
 
 
-async def test_hle_case_keeps_source_and_candidate_text_in_the_local_record() -> None:
+async def test_hle_case_keeps_source_and_candidate_text_in_the_record() -> None:
     result = await _private_case_result()
     body = json.dumps(result.model_dump(mode="json"))
 
     assert result.passed
-    assert result.redact_evidence
     assert "Which place is intended?" in body
     assert "private-gold-answer" in body
     assert "private source trajectory" in body
     assert "private artifact filename" in body
     assert "Humanities/Social Science" in body
-
-
-async def test_hle_share_redaction_removes_source_and_candidate_text() -> None:
-    result = await _private_case_result()
-    shared = redacted_case(result)
-    body = json.dumps(shared.model_dump(mode="json"))
-
-    assert shared.passed
-    assert "Which place is intended?" not in body
-    assert "private-gold-answer" not in body
-    assert "private source trajectory" not in body
-    assert "private artifact filename" not in body
-    assert "Humanities/Social Science" not in body
-    assert "History" not in body
-    assert shared.evidence["attempts"][0]["artifactError"] == "artifact error"
-    assert shared.reason == "passed"
-    recorded = HLERecordedEvidence.model_validate(shared.evidence)
+    recorded = HLERecordedEvidence.model_validate(result.evidence)
     grader = recorded.attempts[recorded.selected_attempt].grader
     assert grader is not None
     assert grader.answer and grader.format and grader.behavior

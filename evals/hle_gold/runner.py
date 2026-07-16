@@ -236,7 +236,6 @@ def _capability_case(item: ManifestCase, record: GoldRecord) -> CapabilityCase:
         digest_tag=f"hle-gold:{item.id}:{item.record_sha256}",
         workspace_files=fixtures,
         prior_messages=_compaction_messages(record.id) if item.leaf == "compaction_retain" else (),
-        redact_evidence=True,
     )
 
 

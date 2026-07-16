@@ -16,8 +16,10 @@ uv run python -m evals --share <run-id>
 ```
 
 The final command uses `--s3-bucket`, `UFO_EVAL_SHARE_BUCKET`, or the configured S3 blob bucket,
-in that order, and prints a seven-day presigned URL. HLE reports redact prompts, answers, tool
-arguments, and tool results before they reach the local archive or shared viewer.
+in that order, and prints a seven-day presigned URL. Reports carry the whole record — prompts,
+answers, tool arguments and results, trajectories — in the local archive and in the shared
+viewer alike; a share is private (random object key, expiring presigned URL), never a
+publication.
 
 HLE source material remains in the target's durable turn transcripts. The CLI therefore requires
 an explicit disposable workspace; delete that workspace after the run.

@@ -1,10 +1,12 @@
-"""Run eval suites, browse recorded runs, or share a two-run comparison.
+"""Run eval suites, browse recorded runs, share a two-run comparison, or reconstruct one.
 
 `python -m evals` drives capability cases as real turns and MCP-Atlas cases through their pinned
 sandbox, grades each answer and trajectory, and records one immutable run under `--out`. `--view`
-opens the offline archive; `--share CURRENT [BASELINE]` publishes only those runs behind an
-expiring S3 URL. Capability cases create durable conversations and may write memory or artifacts,
-so target a disposable workspace with `--workspace`."""
+opens the offline archive; `--share CURRENT [BASELINE]` publishes only those runs, whole, behind a
+private expiring S3 URL; `--reconstruct RUN_ID` rebuilds a diagnostic copy of a run recorded
+without evidence from the workspace's durable conversations, turns, and blobs, without touching
+the original. Capability cases create durable conversations and may write memory or artifacts, so
+target a disposable workspace with `--workspace`."""
 
 from __future__ import annotations
 
@@ -41,7 +43,6 @@ from evals.gdpval_100.runner import (
 from evals.gdpval_100.runner import (
     WORKFLOW_WAIT_SECONDS as GDPVAL_WORKFLOW_WAIT_SECONDS,
 )
-from evals.harness.capability import redacted_case
 from evals.harness.harness import EvalReport, digest_payload
 from evals.harness.judge import ModelJudge
 from evals.harness.registry import EvalTask, selected_tasks
@@ -59,6 +60,7 @@ from evals.hle_gold.runner import HLEGoldRun, load_hle_gold
 from evals.mcp_atlas_100.runner import load_mcp_atlas_task
 from evals.mcp_atlas_100.target import McpAtlasTarget
 from evals.memory_100.runner import Memory100Run, load_memory_100
+from evals.reconstruct import RunReconstruction, write_reconstruction
 from evals.registry import TASKS, selected_run_tasks
 from evals.turn_logs import TurnLogCollector
 from ufo.blob import blob_store_for
@@ -91,6 +93,11 @@ def main(argv: list[str] | None = None) -> None:
         nargs="+",
         metavar="RUN_ID",
         help="publish CURRENT and an optional BASELINE run",
+    )
+    action.add_argument(
+        "--reconstruct",
+        metavar="RUN_ID",
+        help="rebuild a diagnostic copy of a run recorded without evidence from durable state",
     )
     parser.add_argument("--only", nargs="*", default=(), help="run only the named suites")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="run archive directory")
@@ -196,6 +203,17 @@ def main(argv: list[str] | None = None) -> None:
         if not webbrowser.open(viewer.as_uri()):
             raise RuntimeError(f"browser did not open; open {viewer}")
         return
+    if args.reconstruct:
+        if args.workspace is None:
+            parser.error("--reconstruct requires the --workspace the run executed in")
+        matches = [run for run in load_runs(args.out) if str(run.id).startswith(args.reconstruct)]
+        if len(matches) != 1:
+            parser.error(f"run id {args.reconstruct!r} matched {len(matches)} recorded runs")
+        rebuilt = asyncio.run(_reconstruct(load_config(), matches[0], args.workspace))
+        record, rebuilt_page = write_reconstruction(args.out, rebuilt)
+        print(f"reconstruction {record.resolve()}")
+        print(f"viewer {rebuilt_page.resolve()}")
+        return
     if args.share:
         if len(args.share) > 2:
             parser.error("--share accepts CURRENT and one optional BASELINE run")
@@ -221,17 +239,8 @@ def main(argv: list[str] | None = None) -> None:
             selected.append(matches[0])
         current = selected[0]
         baseline = selected[1] if len(selected) == 2 else None
-        shared: list[EvalRun] = []
-        for run in selected:
-            reports = tuple(
-                report.model_copy(
-                    update={"cases": tuple(redacted_case(case) for case in report.cases)}
-                )
-                for report in run.reports
-            )
-            shared.append(run.model_copy(update={"reports": reports}))
         page = render_viewer(
-            tuple(shared), current.id, baseline.id if baseline is not None else None
+            tuple(selected), current.id, baseline.id if baseline is not None else None
         )
         url = asyncio.run(
             S3ViewerShare(
@@ -431,6 +440,19 @@ async def _run(
             return tuple(completed), agent_prompt
     finally:
         init_workspace_credentials(None)
+        await dispose_db()
+
+
+async def _reconstruct(config: Config, run: EvalRun, workspace_id: UUID) -> EvalRun:
+    init_db(config.database.url)
+    try:
+        with ws(workspace_id):
+            return await RunReconstruction(
+                workspace_id=workspace_id,
+                blob=blob_store_for(config.blob),
+                run=run,
+            ).reconstruct()
+    finally:
         await dispose_db()
 
 

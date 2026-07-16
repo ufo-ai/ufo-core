@@ -1972,50 +1972,49 @@ endpoint_url = "https://s3.invalid"
     ]
 
 
-def test_share_publishes_flagged_cases_redacted_while_the_local_record_keeps_them(
-    tmp_path, monkeypatch
-) -> None:
-    flagged = EvalCaseResult(
+def test_share_publishes_the_whole_record_behind_the_private_url(tmp_path, monkeypatch) -> None:
+    """A share is private — an expiring presigned URL on a random object key — so the published
+    page carries the same complete evidence as the local archive, HLE cases included."""
+    hle_case = EvalCaseResult(
         name="hle_gold.tool_restraint.abc",
         passed=True,
-        reason="matched the private gold answer",
+        reason="matched the gold answer",
         evidence={
-            "message": "private question",
+            "message": "gold question",
             "rubric": [],
             "selectedAttempt": 0,
             "attempts": [
                 {
                     "passed": True,
-                    "reason": "matched the private gold answer",
-                    "response": "private answer",
+                    "reason": "matched the gold answer",
+                    "response": "gold answer",
                     "calls": [
                         {
                             "name": "read",
-                            "input": {"file_path": "private path"},
-                            "result": "private result",
+                            "input": {"file_path": "gold path"},
+                            "result": "gold result",
                             "hasResult": True,
                             "isError": False,
                         }
                     ],
-                    "toolErrors": ["private tool error"],
-                    "artifacts": ["private artifact"],
+                    "toolErrors": [],
+                    "artifacts": ["gold artifact"],
                     "artifactError": None,
                     "tokens": 12,
                     "costMicroUsd": 3,
                     "log": None,
                     "compactions": 1,
-                    "grader": {"answer": True, "confidence": 80, "rawSubject": "private subject"},
-                    "trajectory": None,
+                    "grader": {"answer": True, "confidence": 80},
+                    "trajectory": {
+                        "conversation_id": "00000000-0000-0000-0000-000000000001",
+                        "turn_id": "00000000-0000-0000-0000-000000000002",
+                        "status": "done",
+                        "messages": [{"role": "user", "content": "gold source trajectory"}],
+                        "error": "",
+                    },
                 }
             ],
         },
-        redact_evidence=True,
-    )
-    open_case = EvalCaseResult(
-        name="capability.open",
-        passed=True,
-        reason="public reason",
-        evidence={"message": "public question", "rubric": [], "selectedAttempt": 0, "attempts": []},
     )
     run = EvalRun(
         id=uuid4(),
@@ -2029,10 +2028,7 @@ def test_share_publishes_flagged_cases_redacted_while_the_local_record_keeps_the
                 name="hle_gold.tool_restraint",
                 suite="hle_gold",
                 digest="sha256:a",
-                cases=(flagged,),
-            ),
-            EvalReport(
-                name="capability", suite="capability", digest="sha256:b", cases=(open_case,)
+                cases=(hle_case,),
             ),
         ),
     )
@@ -2048,27 +2044,284 @@ def test_share_publishes_flagged_cases_redacted_while_the_local_record_keeps_the
 
     eval_main(["--share", str(run.id), "--out", str(tmp_path), "--s3-bucket", "bucket"])
 
-    local = (tmp_path / "runs" / f"{run.id}.json").read_text()
-    for private in ("private question", "private answer", "private result", "private gold answer"):
-        assert private in local
     published = pages[0].decode()
-    for private in (
-        "private question",
-        "private answer",
-        "private result",
-        "private path",
-        "private tool error",
-        "private artifact",
-        "private gold answer",
-        "private subject",
+    local = (tmp_path / "runs" / f"{run.id}.json").read_text()
+    for evidence in (
+        "gold question",
+        "gold answer",
+        "gold result",
+        "gold path",
+        "gold artifact",
+        "gold source trajectory",
+        "matched the gold answer",
     ):
-        assert private not in published
-    assert "public question" in published
+        assert evidence in local
+        assert evidence in published
     assert '"tokens":12' in published
-    assert '"compactions":1' in published
     assert '"confidence":80' in published
-    assert "tool error" in published
-    assert load_runs(tmp_path)[0].reports[0].cases[0].redact_evidence
+
+
+SENTINELS = (
+    "sentinel-prompt-9f1",
+    "sentinel-response-9f1",
+    "sentinel-tool-input-9f1",
+    "sentinel-tool-result-9f1",
+    "sentinel-grader-reason-9f1",
+    "sentinel-trajectory-9f1",
+    "sentinel-rubric-9f1",
+    "sentinel-artifact-9f1.txt",
+)
+
+
+def _sentinel_run() -> EvalRun:
+    flagged = EvalCaseResult(
+        name="hle_gold.tool_restraint.fff",
+        passed=True,
+        reason="sentinel-grader-reason-9f1",
+        evidence={
+            "message": "sentinel-prompt-9f1 </script><script>alert('eval')</script>",
+            "rubric": ["sentinel-rubric-9f1"],
+            "selectedAttempt": 0,
+            "attempts": [
+                {
+                    "passed": True,
+                    "reason": "sentinel-grader-reason-9f1",
+                    "response": "sentinel-response-9f1",
+                    "calls": [
+                        {
+                            "name": "bash",
+                            "input": {"command": "sentinel-tool-input-9f1"},
+                            "result": "sentinel-tool-result-9f1",
+                            "hasResult": True,
+                            "isError": False,
+                        }
+                    ],
+                    "toolErrors": [],
+                    "artifacts": ["sentinel-artifact-9f1.txt"],
+                    "artifactError": None,
+                    "tokens": 7,
+                    "costMicroUsd": 2,
+                    "log": None,
+                    "compactions": 0,
+                    "grader": {"answer": True, "confidence": 66},
+                    "trajectory": {
+                        "conversation_id": "00000000-0000-0000-0000-000000000001",
+                        "turn_id": "00000000-0000-0000-0000-000000000002",
+                        "status": "done",
+                        "messages": [{"role": "user", "content": "sentinel-trajectory-9f1"}],
+                        "error": "",
+                    },
+                }
+            ],
+        },
+    )
+    return EvalRun(
+        id=uuid4(),
+        created_at=datetime(2026, 7, 15, tzinfo=UTC),
+        label="sentinel",
+        agent="assistant",
+        ufo_version="0.1.0",
+        revision="abc123def456",
+        reports=(
+            EvalReport(
+                name="hle_gold.tool_restraint",
+                suite="hle_gold",
+                digest="sha256:a",
+                cases=(flagged,),
+            ),
+        ),
+    )
+
+
+def test_sentinels_survive_the_local_archive_and_the_share_render_alike(tmp_path) -> None:
+    """One render serves both audiences: the archive on disk and the private share carry the same
+    complete evidence, and hostile strings reach neither un-escaped."""
+    run = _sentinel_run()
+
+    record = record_run(tmp_path, run)
+
+    local_json = record.read_text()
+    local_html = (tmp_path / "index.html").read_text()
+    shared = render_viewer((run,), run.id).decode()
+    for sentinel in SENTINELS:
+        assert sentinel in local_json
+        assert sentinel in local_html
+        assert sentinel in shared
+    assert "</script><script>alert('eval')</script>" not in local_html
+    assert "</script><script>alert('eval')</script>" not in shared
+    assert '"confidence":66' in shared
+
+
+def test_record_run_refuses_a_case_recorded_without_evidence(tmp_path) -> None:
+    """The observed failure mode: a recorder that scrubbed while recording produced cases with
+    null prompts, responses, and trajectories. The archive refuses them loudly instead of storing
+    a case that renders as validly empty."""
+    scrubbed = EvalCaseResult(
+        name="hle_gold.tool_restraint.abc",
+        passed=True,
+        reason="passed",
+        evidence={
+            "message": None,
+            "rubric": [],
+            "selectedAttempt": 0,
+            "attempts": [
+                {
+                    "passed": True,
+                    "reason": "passed",
+                    "response": None,
+                    "calls": [],
+                    "toolErrors": [],
+                    "artifacts": [],
+                    "artifactError": None,
+                    "tokens": 7,
+                    "costMicroUsd": 2,
+                    "log": None,
+                    "compactions": 0,
+                    "grader": {"answer": True},
+                    "trajectory": None,
+                }
+            ],
+        },
+    )
+    run = EvalRun(
+        id=uuid4(),
+        created_at=datetime(2026, 7, 15, tzinfo=UTC),
+        label="",
+        agent="assistant",
+        ufo_version="0.1.0",
+        revision="abc123",
+        reports=(
+            EvalReport(name="hle_gold", suite="hle_gold", digest="sha256:a", cases=(scrubbed,)),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="recorded without evidence"):
+        record_run(tmp_path, run)
+
+    assert not (tmp_path / "runs").exists()
+
+
+def test_unrecorded_evidence_renders_as_rerun_guidance_never_a_valid_empty_result(
+    tmp_path,
+) -> None:
+    """A historical archive recorded without evidence must say so: the viewer distinguishes a
+    null (never recorded) response from an empty one and never shows the misleading
+    'No final response' copy for either."""
+    scrubbed = EvalCaseResult(
+        name="hle_gold.tool_restraint.abc",
+        passed=True,
+        reason="passed",
+        evidence={
+            "message": None,
+            "rubric": [],
+            "selectedAttempt": 0,
+            "attempts": [
+                {
+                    "passed": True,
+                    "reason": "passed",
+                    "response": None,
+                    "calls": [],
+                    "toolErrors": [],
+                    "artifacts": [],
+                    "artifactError": None,
+                    "tokens": 7,
+                    "costMicroUsd": 2,
+                    "log": None,
+                    "compactions": 0,
+                    "grader": {"answer": True},
+                    "trajectory": None,
+                }
+            ],
+        },
+    )
+    run = EvalRun(
+        id=uuid4(),
+        created_at=datetime(2026, 7, 15, tzinfo=UTC),
+        label="historic",
+        agent="assistant",
+        ufo_version="0.1.0",
+        revision="abc123",
+        reports=(
+            EvalReport(name="hle_gold", suite="hle_gold", digest="sha256:a", cases=(scrubbed,)),
+        ),
+    )
+    directory = tmp_path / "runs"
+    directory.mkdir(parents=True)
+    (directory / f"{run.id}.json").write_text(
+        run.model_dump_json(indent=2, by_alias=True, exclude_none=True)
+    )
+
+    html = render_viewer(load_runs(tmp_path)).decode()
+
+    assert '"response":null' in html
+    assert "Not recorded — evidence was unavailable at recording time." in html
+    assert "Rerun the case to collect evidence" in html
+    assert "--reconstruct" in html
+    assert "No final response" not in html
+
+
+async def test_capability_case_records_complete_evidence_from_the_real_target(
+    db: None, tmp_path
+) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path / "blob")
+    worker = StubWorker(
+        blob,
+        workspace_id,
+        _research_transcript(),
+        artifact=("evidence.txt", b"artifact"),
+        tokens=140,
+        cost_micro_usd=9,
+    )
+    ctx = _context(blob, worker)
+    target = InProcessTarget(
+        ctx=ctx,
+        agent_id=agent_id,
+        conversations=DbConversations(workspace_id),
+        outcome=CorpusOutcome(ctx),
+        blob=blob,
+    )
+
+    async def grader(output: CapabilityOutput) -> CapabilityVerdict:
+        return CapabilityVerdict(True, "found the sentinel record", {"answer": True})
+
+    case = CapabilityCase("hle_gold.sentinel", "find the record then remember it", grader)
+
+    with ws(workspace_id):
+        result = await run_capability_case(case, target)
+    run = EvalRun(
+        id=uuid4(),
+        created_at=datetime(2026, 7, 15, tzinfo=UTC),
+        label="",
+        agent="assistant",
+        ufo_version="0.1.0",
+        revision="abc123",
+        reports=(
+            EvalReport(name="hle_gold", suite="hle_gold", digest="sha256:a", cases=(result,)),
+        ),
+    )
+    record = record_run(tmp_path / "archive", run)
+
+    body = record.read_text()
+    attempts = cast(list[dict[str, object]], result.evidence["attempts"])
+    trajectory = cast(dict[str, object], attempts[0]["trajectory"])
+    for expected in (
+        "find the record then remember it",
+        "Done — found it and remembered it for the team.",
+        "found the sentinel record",
+        '"search_web"',
+        '"query": "record"',
+        "the record is 2:00:35",
+        "evidence.txt",
+        '"tokens": 140',
+        '"costMicroUsd": 9',
+        '"compactions": 0',
+        '"status": "done"',
+        str(trajectory["conversation_id"]),
+        str(trajectory["turn_id"]),
+    ):
+        assert expected in body
 
 
 def test_eval_run_is_recorded_without_git(tmp_path, monkeypatch) -> None:

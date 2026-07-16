@@ -13,6 +13,7 @@ from aiobotocore.session import get_session
 from botocore.config import Config
 from pydantic import BaseModel, ConfigDict
 
+from evals.harness.capability import recorded_evidence_missing
 from evals.harness.harness import EvalReport
 
 RUNS_DIR = "runs"
@@ -65,7 +66,14 @@ def write_atomic(path: Path, data: bytes) -> None:
 
 
 def record_run(root: Path, run: EvalRun) -> Path:
-    """Persist one run and rebuild the archive viewer around every recorded run."""
+    """Persist one run and rebuild the archive viewer around every recorded run. The archive is
+    the debugging record, so a case arriving without its evidence — a null prompt or response —
+    is refused here, never stored as a case that looks validly empty."""
+    for report in run.reports:
+        for case in report.cases:
+            missing = recorded_evidence_missing(case)
+            if missing:
+                raise ValueError(f"case {case.name!r} was recorded without evidence: {missing}")
     path = root / RUNS_DIR / f"{run.id}.json"
     write_atomic(path, run.model_dump_json(indent=2, by_alias=True, exclude_none=True).encode())
     write_viewer(root, load_runs(root))
@@ -82,7 +90,9 @@ def write_viewer(root: Path, runs: tuple[EvalRun, ...]) -> Path:
 def render_viewer(
     runs: tuple[EvalRun, ...], current: UUID | None = None, baseline: UUID | None = None
 ) -> bytes:
-    """Render an offline dashboard whose data and interface live in one shareable HTML asset."""
+    """Render the dashboard whose data and interface live in one offline HTML asset — the same
+    page locally and behind a `--share` URL: shares are private, expiring, and carry the whole
+    record."""
     payload = json.dumps(
         {
             "runs": [run.model_dump(mode="json", by_alias=True, exclude_none=True) for run in runs],

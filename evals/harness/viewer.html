@@ -480,19 +480,34 @@ function caseMarkup(before, after, canCompare, name, leaf) {
     <div class="row-meta"><span class="leaf-label" title="${h(leaf)}">${h(leafLabel(leaf))}</span><span>B ${caseStatus(prior).label}</span><span>→</span><span>C ${status.label}</span></div>
   </button>`;
 }
-function callMarkup(call, index) {
-  const stateLabel = call.isError ? 'error' : call.hasResult ? 'ok' : 'no result';
-  return `<details class="call"><summary>${index + 1}. ${h(call.name)} · ${stateLabel}</summary>
+const EVIDENCE_UNRECORDED = 'Not recorded — evidence was unavailable at recording time.';
+function attemptState(attempt) {
+  return attempt.response === null ? 'unrecorded' : 'complete';
+}
+function evidenceState(evidence) {
+  if (!evidence) return 'complete';
+  if (evidence.message === null) return 'unrecorded';
+  if ((evidence.attempts || []).some(attempt => attemptState(attempt) === 'unrecorded')) return 'unrecorded';
+  return 'complete';
+}
+function callMarkup(attState) {
+  return (call, index) => {
+    const stateLabel = call.isError ? 'error' : call.hasResult ? 'ok' : 'no result';
+    const input = attState === 'complete' ? JSON.stringify(call.input, null, 2) : EVIDENCE_UNRECORDED;
+    const result = !call.hasResult ? 'No tool result was recorded.'
+      : attState === 'complete' ? call.result : EVIDENCE_UNRECORDED;
+    return `<details class="call"><summary>${index + 1}. ${h(call.name)} · ${stateLabel}</summary>
     <div class="call-body"><div class="call-grid">
-      <div><div class="section-title">Input</div><pre>${h(JSON.stringify(call.input, null, 2))}</pre></div>
-      <div><div class="section-title">Result</div><pre>${h(call.hasResult ? call.result : 'No tool result was recorded.')}</pre></div>
+      <div><div class="section-title">Input</div><pre>${h(input)}</pre></div>
+      <div><div class="section-title">Result</div><pre>${h(result)}</pre></div>
     </div></div></details>`;
+  };
 }
 const ATTEMPT_KEYS = new Set(['passed', 'reason', 'response', 'calls', 'toolErrors', 'artifacts',
   'artifactError', 'tokens', 'costMicroUsd', 'compactions', 'log', 'grader', 'judge', 'turns',
   'stopped', 'trajectory']);
 const CASE_EVIDENCE_KEYS = new Set(['message', 'rubric', 'memberKey', 'webDependent',
-  'selectedAttempt', 'attempts', 'user', 'maxTurns', 'claims', 'claimVerdicts',
+  'reconstructed', 'selectedAttempt', 'attempts', 'user', 'maxTurns', 'claims', 'claimVerdicts',
   'claimCoverage', 'enabledTools', 'exposedTools', 'omittedEnabledTools', 'referenceTools',
   'referenceServers', 'enabledCatalogServers']);
 function unrendered(source, known) {
@@ -549,12 +564,17 @@ function scenarioMarkup(attempt) {
     <article class="message"><div class="message-head">exchange ${index + 1} · agent</div><div class="message-body"><pre>${h(turn.reply || 'No reply.')}</pre></div></article>`).join('');
   return `<div class="section"><div class="section-title">Conversation · ${attempt.turns.length} exchanges · ${h(outcome)}</div>${rows || '<div class="empty">No exchanges.</div>'}</div>`;
 }
+function responseMarkup(attempt) {
+  if (attempt.response == null) return EVIDENCE_UNRECORDED;
+  return attempt.response === '' ? 'The turn recorded no final response text.' : attempt.response;
+}
 function attemptMarkup(attempt, index, selected, kind) {
+  const attState = attemptState(attempt);
   const calls = attempt.calls || [];
   const artifacts = attempt.artifacts || [];
   const trajectory = attempt.trajectory
     ? `<a class="trajectory-link" href="${h(stateHash({trajectory: kind + ':' + index}))}">View trajectory →</a>`
-    : '';
+    : attState === 'complete' ? '' : `<span class="trajectory-meta">Trajectory: ${h(EVIDENCE_UNRECORDED)}</span>`;
   return `<details class="attempt" ${index === selected ? 'open' : ''}>
     <summary>Attempt ${index + 1} · <span class="${attempt.passed ? 'positive' : 'negative'}">${attempt.passed ? 'pass' : 'fail'}</span>${index === selected ? ' · selected' : ''}</summary>
     <div class="attempt-body">
@@ -562,9 +582,9 @@ function attemptMarkup(attempt, index, selected, kind) {
       ${trajectory}
       <div class="section"><div class="section-title">Resources</div><pre>${attempt.tokens == null && attempt.costMicroUsd == null ? 'not recorded' : `${h(attempt.tokens || 0)} tokens\n${h(attempt.costMicroUsd || 0)} micro-USD${attempt.compactions ? `\n${h(attempt.compactions)} compactions` : ''}`}</pre></div>
       ${scenarioMarkup(attempt)}
-      <div class="section"><div class="section-title">Agent response</div><pre>${h(attempt.response || 'No final response.')}</pre></div>
+      <div class="section"><div class="section-title">Agent response</div><pre>${h(responseMarkup(attempt))}</pre></div>
       ${judgeMarkup(attempt.judge)}
-      <div class="section"><div class="section-title">Tool trajectory · ${calls.length}</div>${calls.length ? calls.map(callMarkup).join('') : '<div class="empty">No tool calls.</div>'}</div>
+      <div class="section"><div class="section-title">Tool trajectory · ${calls.length}</div>${calls.length ? calls.map(callMarkup(attState)).join('') : '<div class="empty">No tool calls.</div>'}</div>
       ${toolErrorsMarkup(attempt.toolErrors)}
       ${jsonSection('Grader evidence', attempt.grader)}
       ${jsonSection('Turn log', attempt.log)}
@@ -578,6 +598,14 @@ function paneMarkup(kind, run, report, item) {
   const evidence = item.evidence || {};
   const attempts = evidence.attempts || [];
   const status = caseStatus(item);
+  const notice = [
+    evidence.reconstructed
+      ? '<div class="reason">Diagnostic reconstruction from durable workspace state (conversation, turn, and blob records) — not the original recording; verdicts are copied from the original run.</div>'
+      : '',
+    evidenceState(evidence) === 'unrecorded'
+      ? `<div class="reason negative">${evidence.reconstructed ? 'Some of this case’s evidence could not be reconstructed — no durable conversation matched.' : 'Evidence was unavailable at recording time: the recording process scrubbed evidence as it recorded, so this is not a valid empty result.'} Rerun the case to collect evidence${evidence.reconstructed ? '' : ', or rebuild a diagnostic copy with python -m evals --reconstruct'}.</div>`
+      : ''
+  ].join('');
   const setup = [
     `${h(formatDate(run.created_at))}`,
     `revision ${h(run.revision)}`,
@@ -594,6 +622,7 @@ function paneMarkup(kind, run, report, item) {
   return `<section class="run-pane">
     <div class="pane-head"><div><div class="pane-kicker">${kind} · ${h(shortId(run))}</div><div class="pane-title">${h(runName(run))}</div></div><span class="badge ${status.cls}">${status.label}</span></div>
     <div class="reason">${h(item.reason)}</div>
+    ${notice}
     <div class="section"><div class="section-title">Run</div><pre>${setup}</pre>${agentPrompt}</div>
     ${claimsMarkup(evidence)}
     ${toolExposureMarkup(evidence)}
@@ -679,7 +708,9 @@ function detailMarkup(base, current, before, after) {
   const evidence = (item || prior || {}).evidence || {};
   const rubric = evidence.rubric || [];
   const setup = setupMeta(evidence);
-  const prompt = evidence.message || scenarioUserBlock(evidence.user);
+  const prompt = evidence.message === null
+    ? `[case prompt: ${EVIDENCE_UNRECORDED.toLowerCase()}]`
+    : evidence.message || scenarioUserBlock(evidence.user);
   return `<section class="detail">
     <div class="detail-head"><div class="detail-leaf">${h(leafLabel(state.suite))}</div><h2>${h(state.caseName || 'Choose a case')}</h2>
       ${setup ? `<div class="row-meta"><span>${h(setup)}</span></div>` : ''}

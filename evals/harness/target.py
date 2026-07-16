@@ -244,7 +244,7 @@ class InProcessTarget:
             )
         output = capability_output(trajectory.messages)
         status = await self._turn_status(turn_id)
-        snapshot = await self._trajectory(conversation_id, turn_id, status, trajectory.messages)
+        snapshot = trajectory_snapshot(conversation_id, turn_id, status, trajectory.messages)
         output, descendant_ids, missing_child = await self._merge_descendants(turn_id, output)
         tokens, cost_micro_usd = await self._turn_resources((turn_id, *descendant_ids))
         output = replace(output, tokens=tokens, cost_micro_usd=cost_micro_usd)
@@ -363,33 +363,6 @@ class InProcessTarget:
             return f"turn ended with status {status}"
         return ""
 
-    async def _trajectory(
-        self,
-        conversation_id: UUID,
-        turn_id: UUID,
-        status: TurnStatus | None,
-        messages: tuple[Message, ...],
-    ) -> EvalTrajectory:
-        private_results, private_values = _private_handoffs(messages)
-        snapshot = EvalTrajectory(
-            conversation_id=conversation_id,
-            turn_id=turn_id,
-            status=status,
-            messages=_safe_messages(messages, private_results, private_values),
-        )
-        if len(snapshot.model_dump_json().encode()) <= MAX_EVAL_TRAJECTORY_BYTES:
-            return snapshot
-        return EvalTrajectory(
-            conversation_id=conversation_id,
-            turn_id=turn_id,
-            status=status,
-            messages=(),
-            error=(
-                f"stored transcript snapshot exceeds {MAX_EVAL_TRAJECTORY_BYTES} bytes and was "
-                "omitted"
-            ),
-        )
-
     async def _shared_artifacts(self, turn_ids: tuple[UUID, ...]) -> ArtifactCollection:
         """Artifacts the run shared, from the evaluated turn and every delegated descendant — a
         child's share_file records against the child turn, and its file must be as visible to a
@@ -476,6 +449,35 @@ class InProcessTarget:
                 )
             )
         return tuple(references), ""
+
+
+def trajectory_snapshot(
+    conversation_id: UUID,
+    turn_id: UUID,
+    status: TurnStatus | None,
+    messages: tuple[Message, ...],
+) -> EvalTrajectory:
+    """The storable form of one turn's transcript: private handoffs and images redacted, oversized
+    snapshots omitted with the omission named. The live target and the offline reconstruction both
+    store trajectories only through this."""
+    private_results, private_values = _private_handoffs(messages)
+    snapshot = EvalTrajectory(
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        status=status,
+        messages=_safe_messages(messages, private_results, private_values),
+    )
+    if len(snapshot.model_dump_json().encode()) <= MAX_EVAL_TRAJECTORY_BYTES:
+        return snapshot
+    return EvalTrajectory(
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        status=status,
+        messages=(),
+        error=(
+            f"stored transcript snapshot exceeds {MAX_EVAL_TRAJECTORY_BYTES} bytes and was omitted"
+        ),
+    )
 
 
 def capability_output(messages: tuple[Message, ...]) -> CapabilityOutput:

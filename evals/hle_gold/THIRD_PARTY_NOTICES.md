@@ -7,5 +7,5 @@ Selection metadata derives from the HLE-Verified Gold subset at commit
 - <https://huggingface.co/datasets/SKYLENAGE-AI/HLE-Verified>
 
 The source asset is not redistributed. Operators supply it locally; the local run archive stays
-on the operator's machine, and published report pages redact source questions, answers,
-rationales, images, and tool payloads.
+on the operator's machine, and report pages leave it only as private shares — a random 192-bit
+S3 object key behind a presigned URL that expires within seven days, never a publication.
