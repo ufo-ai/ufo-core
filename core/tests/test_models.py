@@ -533,6 +533,56 @@ async def test_timeout_after_first_yield_does_not_retry(harness: ProviderHarness
     assert create.calls == 1
 
 
+def stream_read_timeout() -> httpx.ReadTimeout:
+    return httpx.ReadTimeout(
+        "read timed out", request=httpx.Request("POST", "https://provider.invalid/v1")
+    )
+
+
+async def test_anthropic_iteration_timeout_before_first_event_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zero_backoff(monkeypatch)
+    create = ScriptedCreate(
+        ([], stream_read_timeout()),
+        (
+            [
+                anthropic_message_start(input_tokens=1),
+                anthropic_text("ok"),
+                anthropic_output(1),
+            ],
+            None,
+        ),
+    )
+    events = await collect(AnthropicClient(client=anthropic_sdk(create)))
+    assert create.calls == 2
+    assert events[0] == TextDelta(text="ok")
+    assert isinstance(events[-1], Usage)
+
+
+async def test_anthropic_iteration_timeout_after_first_event_raises() -> None:
+    create = ScriptedCreate(
+        (
+            [anthropic_message_start(input_tokens=1), anthropic_text("partial")],
+            stream_read_timeout(),
+        ),
+        (
+            [
+                anthropic_message_start(input_tokens=1),
+                anthropic_text("ok"),
+                anthropic_output(1),
+            ],
+            None,
+        ),
+    )
+    received = []
+    with pytest.raises(httpx.ReadTimeout):
+        async for event in AnthropicClient(client=anthropic_sdk(create)).complete(REQUEST):
+            received.append(event)
+    assert received == [TextDelta(text="partial")]
+    assert create.calls == 1
+
+
 async def test_anthropic_truncation_raises() -> None:
     create = ScriptedCreate(
         (

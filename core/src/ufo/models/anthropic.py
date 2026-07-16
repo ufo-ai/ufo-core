@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import anthropic
+import httpx
 
 from ufo.models.interface import (
     ContentBlock,
@@ -95,9 +96,11 @@ class AnthropicClient:
 
         429/5xx responses retry with retry-after-aware exponential backoff, and request timeouts
         retry on the same backoff and shared attempt budget (each retry logged, exhaustion logged
-        and re-raising the provider's APITimeoutError) — both only until the first event is
-        yielded; any failure after that raises immediately. stop_reason=max_tokens
-        is a truncated completion and raises ModelResponseTruncated; stop_reason=refusal raises
+        and re-raising the timeout) — both only until the first event is yielded; any failure
+        after that raises immediately. A streamed request surfaces its timeout as a raw httpx
+        timeout during iteration (the SDK wraps only the create call), so the retry catches both.
+        stop_reason=max_tokens is a truncated completion and raises ModelResponseTruncated;
+        stop_reason=refusal raises
         ModelRefusal (deterministic per request — never retried, never an empty success).
         stop_reason=tool_use is a normal stop. An empty completion (no event,
         stop_reason=end_turn) is a retryable provider failure, re-issued up to
@@ -174,7 +177,7 @@ class AnthropicClient:
                         case anthropic.types.RawMessageDeltaEvent(delta=delta, usage=usage):
                             output_tokens = usage.output_tokens
                             stop_reason = delta.stop_reason
-            except anthropic.APITimeoutError:
+            except (anthropic.APITimeoutError, httpx.TimeoutException):
                 attempt += 1
                 if yielded or attempt > MAX_PROVIDER_RETRIES:
                     log(
