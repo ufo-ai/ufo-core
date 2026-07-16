@@ -7,6 +7,7 @@ metadata:
   labels: {app: ufo-migrate}
 spec:
   backoffLimit: 0
+  activeDeadlineSeconds: 540
   template:
     metadata:
       labels: {app: ufo-migrate}

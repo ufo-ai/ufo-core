@@ -28,6 +28,7 @@ from ufo.schema.records import DEFAULT_AGENT_NAME
 from ufo.workspace import ws
 from ufo_ext_ufo.surface import verify_token
 
+from ufo_control import rls
 from ufo_control.gateway import Onboarding
 from ufo_control.gateway_claim import ClaimWorkflow
 from ufo_control.gateway_email import WorkEmailPolicy
@@ -53,6 +54,7 @@ ADMIN_DSN = f"postgresql://admin:admin@{POSTGRES_HOST}/postgres"
 APP_DATABASE = "ufo_rls_test"
 ADMIN_APP_DSN = f"postgresql://admin:admin@{POSTGRES_HOST}/{APP_DATABASE}"
 FAILLOUD_DATABASE = "ufo_rls_failloud"
+LOCKWEDGE_DATABASE = "ufo_rls_lockwedge"
 OWNER_ROLE = "ufo_owner"
 OWNER_PASSWORD = "ownerpw"
 SEED = "rls-test-seed"
@@ -197,12 +199,11 @@ async def test_bootstrap_fails_loud_on_an_unpoliced_table() -> None:
             await bootstrap_policies(dsn)
         inspection = await asyncpg.connect(dsn)
         try:
-            assert not await inspection.fetchval(
+            assert await inspection.fetchval(
                 "select relrowsecurity from pg_class where relname = 'workspace'"
             )
-            assert (
-                await inspection.fetchval("select 1 from pg_policies where tablename = 'workspace'")
-                is None
+            assert await inspection.fetchval(
+                "select 1 from pg_policies where tablename = 'workspace'"
             )
         finally:
             await inspection.close()
@@ -210,6 +211,41 @@ async def test_bootstrap_fails_loud_on_an_unpoliced_table() -> None:
         cleanup = await asyncpg.connect(ADMIN_DSN)
         try:
             await cleanup.execute(f'drop database if exists "{FAILLOUD_DATABASE}" with (force)')
+        finally:
+            await cleanup.close()
+
+
+async def test_bootstrap_fails_fast_when_a_table_lock_is_held(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(rls, "LOCK_TIMEOUT", "200ms")
+    reset = await asyncpg.connect(ADMIN_DSN)
+    try:
+        await reset.execute(f'drop database if exists "{LOCKWEDGE_DATABASE}" with (force)')
+        await reset.execute(f'create database "{LOCKWEDGE_DATABASE}"')
+    finally:
+        await reset.close()
+    dsn = f"postgresql://admin:admin@{POSTGRES_HOST}/{LOCKWEDGE_DATABASE}"
+    setup = await asyncpg.connect(dsn)
+    try:
+        await setup.execute("create table workspace (id uuid primary key)")
+    finally:
+        await setup.close()
+    holder = await asyncpg.connect(dsn)
+    transaction = holder.transaction()
+    await transaction.start()
+    try:
+        await holder.execute("lock table workspace in access share mode")
+        with pytest.raises(RuntimeError, match="lock on table 'workspace' timed out") as caught:
+            await bootstrap_policies(dsn)
+        assert "idle in transaction" in str(caught.value)
+        assert "lock table workspace" in str(caught.value)
+    finally:
+        await transaction.rollback()
+        await holder.close()
+        cleanup = await asyncpg.connect(ADMIN_DSN)
+        try:
+            await cleanup.execute(f'drop database if exists "{LOCKWEDGE_DATABASE}" with (force)')
         finally:
             await cleanup.close()
 
