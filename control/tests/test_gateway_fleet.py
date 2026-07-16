@@ -88,7 +88,7 @@ def _configure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, gateway_postgres
     )
     monkeypatch.setenv(TOKEN_SECRET_ENV, TOKEN_SECRET)
     monkeypatch.setenv(WORKSPACE_BASE_URL_ENV, WORKSPACE_URL)
-    monkeypatch.setenv(SES_SENDER_ENV, "no-reply@testing.flyingobject.ai")
+    monkeypatch.setenv(SES_SENDER_ENV, "no-reply@flyingobject.ai")
     monkeypatch.setenv(AWS_ROLE_ARN_ENV, "arn:aws:iam::123456789012:role/gateway-ses")
     monkeypatch.setenv(AWS_WEB_IDENTITY_TOKEN_FILE_ENV, str(token_file))
 

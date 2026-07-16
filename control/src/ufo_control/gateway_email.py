@@ -89,6 +89,7 @@ INVITE_BODY = """\
 SES_SERVICE = "ses"
 SES_PATH = "/v2/email/outbound-emails"
 SES_TIMEOUT_SECONDS = 10.0
+ERROR_BODY_CHARS = 1000
 
 SES_SENDER_ENV = "UFO_SES_SENDER"
 SES_REGION_ENV = "UFO_SES_REGION"
@@ -203,7 +204,10 @@ class SesEmailSender:
         headers = _sigv4_headers(host, body, self.region, credentials, datetime.now(UTC))
         async with httpx.AsyncClient(timeout=SES_TIMEOUT_SECONDS) as client:
             response = await client.post(f"https://{host}{SES_PATH}", content=body, headers=headers)
-            response.raise_for_status()
+        if response.is_error:
+            raise RuntimeError(
+                f"SES SendEmail returned {response.status_code}: {response.text[:ERROR_BODY_CHARS]}"
+            )
 
     async def _assume_role(self) -> SesCredentials:
         token = self.token_file.read_text().strip()
@@ -219,7 +223,11 @@ class SesEmailSender:
                     "DurationSeconds": str(STS_SESSION_SECONDS),
                 },
             )
-            response.raise_for_status()
+        if response.is_error:
+            raise RuntimeError(
+                f"STS AssumeRoleWithWebIdentity returned {response.status_code}: "
+                f"{response.text[:ERROR_BODY_CHARS]}"
+            )
         return _parse_assume_role_credentials(response.text)
 
 

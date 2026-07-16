@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import httpx
 import pytest
 
 from ufo_control.gateway_email import (
@@ -117,6 +118,68 @@ def test_sigv4_headers_sign_the_session_token() -> None:
         "AWS4-HMAC-SHA256 Credential=ASIAEXAMPLE/20260710/us-east-1/ses/aws4_request, "
     )
     assert "x-amz-security-token" in headers["authorization"].split("SignedHeaders=")[1]
+
+
+async def test_send_surfaces_the_ses_denial_body(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.host.startswith("sts."):
+            return httpx.Response(200, text=STS_RESPONSE)
+        return httpx.Response(
+            403, json={"Message": "not authorized on identity/no-reply@flyingobject.ai"}
+        )
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(respond), **kwargs),
+    )
+    token_file = tmp_path / "token"
+    token_file.write_text("projected-token\n")
+    sender = SesEmailSender(
+        source="no-reply@flyingobject.ai",
+        region="us-east-1",
+        role_arn="arn:aws:iam::111122223333:role/ufo-testing-gateway-ses",
+        token_file=token_file,
+    )
+    with pytest.raises(RuntimeError, match="identity/no-reply@flyingobject"):
+        await sender.send(
+            "member@example.com",
+            "042042",
+            datetime(2026, 7, 16, 16, 10, tzinfo=UTC),
+            timedelta(minutes=15),
+        )
+
+
+async def test_assume_role_surfaces_the_sts_error_body(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, text="<Error><Code>ExpiredTokenException</Code></Error>")
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(respond), **kwargs),
+    )
+    token_file = tmp_path / "token"
+    token_file.write_text("projected-token\n")
+    sender = SesEmailSender(
+        source="no-reply@flyingobject.ai",
+        region="us-east-1",
+        role_arn="arn:aws:iam::111122223333:role/ufo-testing-gateway-ses",
+        token_file=token_file,
+    )
+    with pytest.raises(RuntimeError, match="ExpiredTokenException"):
+        await sender.send(
+            "member@example.com",
+            "042042",
+            datetime(2026, 7, 16, 16, 10, tzinfo=UTC),
+            timedelta(minutes=15),
+        )
 
 
 def test_email_sender_from_env_builds_ses_from_irsa(

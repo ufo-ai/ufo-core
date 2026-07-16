@@ -3,9 +3,9 @@
 # identity, scoped to the From address. The grant lands on a
 # dedicated IRSA role annotated on the gateway's ServiceAccount (ufo-system:ufo-gateway) — the pod
 # exchanges its projected web identity at STS; the FromAddress condition pins it to ses_sender.
+# Each env materializes ses_dkim_records in the Cloudflare zone to verify the domain.
 #
-# After apply: add the ses_dkim_records CNAMEs to the authoritative DNS (Cloudflare) to verify the
-# domain, and request SES production access to send beyond the verified set (a new account is
+# After apply: request SES production access to send beyond the verified set (a new account is
 # sandboxed to verified recipients only).
 
 variable "ses_sender" {
@@ -75,7 +75,7 @@ module "irsa_gateway_ses" {
 }
 
 output "ses_dkim_records" {
-  description = "DKIM CNAMEs to add to DNS (Cloudflare) to verify the SES sending domain."
+  description = "DKIM CNAMEs for the sending domain; each env materializes them in the Cloudflare zone."
   value = [
     for token in aws_sesv2_email_identity.onboard.dkim_signing_attributes[0].tokens : {
       name  = "${token}._domainkey.${local.ses_domain}"

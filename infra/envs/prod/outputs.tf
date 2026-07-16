@@ -28,11 +28,6 @@ output "api_keys_secret_arn" {
   value       = module.platform.api_keys_secret_arn
 }
 
-output "ses_dkim_records" {
-  description = "Add these CNAMEs to Cloudflare to verify the SES sending domain."
-  value       = module.platform.ses_dkim_records
-}
-
 output "hostname" {
   value = module.platform.hostname
 }

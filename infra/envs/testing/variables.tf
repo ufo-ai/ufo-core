@@ -29,7 +29,7 @@ variable "acme_server" {
 
 variable "ses_sender" {
   type        = string
-  default     = "no-reply@testing.flyingobject.ai"
+  default     = "no-reply@flyingobject.ai"
   description = "From address for onboarding email; its domain is verified as the SES sending identity."
 }
 
