@@ -1,7 +1,7 @@
 ---
 rfc: 0012
 title: "Turn speaker and private handoffs"
-status: proposed
+status: implemented
 date: 2026-07-12
 ---
 

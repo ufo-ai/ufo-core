@@ -1,13 +1,13 @@
 ---
 rfc: 0009
 title: "RFC — structured context compression, a pipeline not a summarize call"
-status: proposed
+status: implemented
 date: 2026-07-06
 ---
 
 # RFC — structured context compression, a pipeline not a summarize call
 
-**Status:** proposal, not adopted. **Scope:** the turn loop's window compaction
+**Status:** implemented. **Scope:** the turn loop's window compaction
 (`core/src/selfhost/loop/compaction.py`) — how the head of an over-window transcript is compressed
 before the next model round. **Verdict:** selfhost today does compaction with **one freeform
 summarize call** — walk back to an assistant boundary, render the head as `role: text` lines, ask

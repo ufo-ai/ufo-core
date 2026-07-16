@@ -1,7 +1,7 @@
 ---
 rfc: 0011
 title: "ufo — the merged hosted service: one repo, one database, RLS"
-status: accepted
+status: implemented
 date: 2026-07-07
 ---
 

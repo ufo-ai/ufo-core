@@ -1,13 +1,13 @@
 ---
 rfc: 0008
 title: "RFC — durable recovery without redoing completed work"
-status: proposed
+status: implemented
 date: 2026-07-06
 ---
 
 # RFC — durable recovery without redoing completed work
 
-**Status:** proposal, not adopted. **Scope:** crash recovery at three linked granularities — sub-turn
+**Status:** implemented. **Scope:** crash recovery at three linked granularities — sub-turn
 (per model-round / per tool-call), `wide_*` per-entity fan-out, and a browser task resuming on a new
 runner via CDP reconnect. **Verdict:** today a crash mid-turn re-runs the *entire* turn from scratch
 (every model round, every tool call, every fanned-out entity, every browser action); DBOS already
