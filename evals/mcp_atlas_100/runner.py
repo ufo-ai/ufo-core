@@ -282,6 +282,10 @@ class McpAtlasSuite:
         ]
         evidence: JsonObject = {
             "message": case.prompt,
+            "grading": (
+                "a model judge scores each claim fulfilled/partial/unfulfilled against the "
+                f"answer; passes at claim coverage ≥ {CLAIM_COVERAGE_THRESHOLD:.0%}"
+            ),
             "claims": claims,
             "enabledTools": enabled_tools,
             "exposedTools": exposed_tools,

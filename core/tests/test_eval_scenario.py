@@ -13,7 +13,7 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 
-from evals.harness.capability import CapabilityVerdict
+from evals.harness.capability import CapabilityVerdict, DescribedGrader
 from evals.harness.scenario import (
     MAX_SIMULATOR_REPLY_CHARS,
     OPENING_NUDGE,
@@ -223,7 +223,12 @@ async def test_scenario_drives_multiple_turns_on_one_conversation(db: None, tmp_
             STOP_TOKEN,
         )
     )
-    case = ScenarioCase("progressive-sum", _SUM_USER, _sum_grader, max_turns=4)
+    case = ScenarioCase(
+        "progressive-sum",
+        _SUM_USER,
+        DescribedGrader("the replies carry the $223 total", _sum_grader),
+        max_turns=4,
+    )
 
     with ws(workspace_id):
         result = await run_scenario_case(
@@ -255,6 +260,7 @@ async def test_scenario_drives_multiple_turns_on_one_conversation(db: None, tmp_
     assert len(cast(list[object], trajectory["messages"])) == 6
     assert attempts[0]["stopped"] is True
     assert result.evidence["user"] == _SUM_USER.payload()
+    assert result.evidence["grading"] == "the replies carry the $223 total"
     assert result.evidence["memberKey"] is None
     assert result.evidence["maxTurns"] == 4
 

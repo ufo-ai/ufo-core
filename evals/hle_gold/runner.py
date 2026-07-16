@@ -18,6 +18,7 @@ from evals.harness.capability import (
     CapabilityCase,
     CapabilityOutput,
     CapabilityVerdict,
+    DescribedGrader,
     WorkspaceFile,
     run_capability_case,
 )
@@ -64,6 +65,22 @@ type HLELeaf = Literal[
     "sandbox_compute",
     "tool_restraint",
 ]
+
+BEHAVIOR_CRITERIA: dict[HLELeaf, str] = {
+    "compaction_retain": (
+        "the turn compacts at least once and the response repeats the retention token"
+    ),
+    "codegen_solver": (
+        "a non-trivial solver file is written and then executed with the answer in its "
+        "output, without web tools"
+    ),
+    "vision_read": "the supplied image is read exactly once and no forbidden tool is used",
+    "web_search_fetch": (
+        "web research completes without benchmark-contaminated sources or exact-question queries"
+    ),
+    "sandbox_compute": "bash computes the answer without web tools",
+    "tool_restraint": "no tool is called",
+}
 
 
 class ManifestCase(BaseModel):
@@ -290,6 +307,8 @@ def _grader(item: ManifestCase, record: GoldRecord, path: str):
             "leaf": item.leaf,
             "category": record.category,
             "rawSubject": record.raw_subject,
+            "expectedAnswer": record.answer,
+            "answerType": record.answer_type,
             "format": formatted,
             "answer": answer_ok,
             "behavior": behavior,
@@ -303,7 +322,11 @@ def _grader(item: ManifestCase, record: GoldRecord, path: str):
             return CapabilityVerdict(False, "answer did not match", evidence)
         return CapabilityVerdict(behavior, reason, evidence)
 
-    return grade
+    return DescribedGrader(
+        "the response carries exactly one ANSWER and one CONFIDENCE line; ANSWER matches the "
+        f"gold {record.answer_type} answer; {BEHAVIOR_CRITERIA[item.leaf]}",
+        grade,
+    )
 
 
 def _answers_match(candidate: str, expected: str, answer_type: str) -> bool:

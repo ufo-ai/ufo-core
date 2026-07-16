@@ -275,6 +275,12 @@ def _answer_rubric(case: SnapshotCase) -> tuple[str, ...]:
 class Memory100Grader:
     expected: tuple[ExpectedEvidence, ...]
 
+    grading = (
+        "the turn exports a valid memory recall log whose selected memories are ranked "
+        "against each expected evidence owner and the answer is non-empty; answer substance "
+        "is judged against the semantic rubric"
+    )
+
     async def __call__(self, output: CapabilityOutput) -> CapabilityVerdict:
         if output.log is None:
             return CapabilityVerdict(False, "memory recall log is missing")

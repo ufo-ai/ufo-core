@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from evals.harness.capability import CapabilityVerdict
+from evals.harness.capability import CapabilityVerdict, DescribedGrader
 from evals.harness.scenario import ScenarioCase, ScenarioOutcome, ScenarioUser
 from evals.scenario_env.office import (
     BOB,
@@ -127,7 +127,11 @@ CASES = (
                 "what you know. Once both are done, you are satisfied."
             ),
         ),
-        _graded_reschedule_and_notify,
+        DescribedGrader(
+            "the Design sync moves off Thursday onto Friday July 24, exactly one email tells "
+            "Mara the new day, and the member ends satisfied",
+            _graded_reschedule_and_notify,
+        ),
         max_turns=8,
         digest_tag="env:reschedule-and-notify",
         seed=seed_office,
@@ -147,7 +151,11 @@ CASES = (
                 "satisfied."
             ),
         ),
-        _graded_interview_prep,
+        DescribedGrader(
+            "a live prep block lands on July 23 with the Jordan Lee interview intact, and the "
+            "member ends satisfied",
+            _graded_interview_prep,
+        ),
         max_turns=6,
         digest_tag="env:interview-prep-block",
         seed=seed_office,
@@ -165,7 +173,11 @@ CASES = (
                 "of it. Once it confirms the email was sent, you are satisfied."
             ),
         ),
-        _graded_budget_summary_to_priya,
+        DescribedGrader(
+            "exactly one summary email reaches Priya mentioning Project Bluefin, and the "
+            "member ends satisfied",
+            _graded_budget_summary_to_priya,
+        ),
         max_turns=6,
         digest_tag="env:budget-summary-to-priya",
         seed=seed_office,
@@ -182,7 +194,11 @@ CASES = (
                 "for the cancellation. Once both are done, you are satisfied."
             ),
         ),
-        _graded_cancel_one_on_one,
+        DescribedGrader(
+            "the Wednesday 1:1 is cancelled, exactly one email tells Priya, and the member "
+            "ends satisfied",
+            _graded_cancel_one_on_one,
+        ),
         max_turns=8,
         digest_tag="env:cancel-and-inform",
         seed=seed_office,
@@ -202,7 +218,11 @@ CASES = (
                 "confirms the email went to the attendees, you are satisfied."
             ),
         ),
-        _graded_all_hands_agenda,
+        DescribedGrader(
+            "exactly one agenda email reaches Dana, Bob, Mara, and Priya mentioning Bluefin, "
+            "and the member ends satisfied",
+            _graded_all_hands_agenda,
+        ),
         max_turns=8,
         digest_tag="env:all-hands-agenda",
         seed=seed_office,

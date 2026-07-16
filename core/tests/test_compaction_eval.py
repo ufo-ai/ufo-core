@@ -313,6 +313,9 @@ async def test_overload_weighted_recall_measures_the_kept_subset(
     report = await suite.run(ArtifactOnlyTarget(_lab(tmp_path, summary)))  # type: ignore[arg-type]
     expected = sum(fact.weight for fact in kept) / sum(fact.weight for fact in decisions)
     first = report.cases[0]
+    grading = first.evidence["grading"]
+    assert isinstance(grading, str)
+    assert "weighted decision-fact recall" in grading and "30%" in grading
     assert first.evidence["weightedRecall"] == pytest.approx(expected)
     assert first.evidence["distractorRate"] == pytest.approx(1 / 25)
     assert first.passed == (expected >= 0.30)
@@ -417,6 +420,12 @@ async def test_behavior_probes_grade_answers_and_reread_trajectories(
     assert by_name[f"{case.id}.reference"].passed
     assert not by_name[f"{case.id}.control"].passed
     assert "compaction" in by_name[f"{case.id}.recall"].evidence
+    recall_grading = by_name[f"{case.id}.recall"].evidence["grading"]
+    assert isinstance(recall_grading, str)
+    assert probes["recall"].expect_literals[0] in recall_grading
+    reference_grading = by_name[f"{case.id}.reference"].evidence["grading"]
+    assert isinstance(reference_grading, str)
+    assert reference.expect_read_path in reference_grading
     metric = next(metric for metric in report.metrics if metric.name == "probe_pass_rate")
     assert metric.value == pytest.approx(0.5)
     stored = decode(await lab.blob.get(transcript_key(conversation_id)))

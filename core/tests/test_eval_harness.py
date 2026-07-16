@@ -40,6 +40,7 @@ from evals.harness.capability import (
     ToolInvocation,
     TurnLog,
     WorkspaceFile,
+    grading_statement,
     run_capability_case,
 )
 from evals.harness.harness import EvalCaseResult, EvalMetric, EvalReport
@@ -566,6 +567,9 @@ async def test_capability_case_runs_through_invoke_and_scores_the_trajectory(
         result = await run_capability_case(case, target)
 
     assert result.passed
+    assert result.evidence["grading"] == (
+        "search_web, memory_update complete(s) successfully; search_web precedes memory_update"
+    )
     attempts = cast(list[dict[str, object]], result.evidence["attempts"])
     calls = cast(list[dict[str, object]], attempts[0]["calls"])
     assert [call["name"] for call in calls] == ["search_web", "memory_update"]
@@ -1128,6 +1132,11 @@ async def test_browser_navigation_requires_successful_navigation_and_reading() -
     assert not (await grader(failed_navigation)).passed
     assert not (await grader(failed_read)).passed
     assert (await grader(successful)).passed
+    assert grading_statement(grader) == (
+        "the final ANSWER equals 'Example Domain' (case-insensitive); navigate completes "
+        "successfully and a page-reading tool (find, get_page_text, read_page) completes "
+        "successfully"
+    )
 
 
 async def test_skill_scorer_requires_a_successful_first_load() -> None:
@@ -1893,6 +1902,7 @@ async def test_resolve_workspace_and_agent_accepts_an_explicit_workspace(db: Non
 def _debug_evidence(response: str, tools: tuple[str, ...] = ()) -> dict[str, object]:
     return {
         "message": "exercise the capability",
+        "grading": "the final ANSWER equals 'Tokyo' (case-insensitive)",
         "rubric": ["finish the work"],
         "memberKey": "member@example.com",
         "webDependent": True,
@@ -2004,6 +2014,10 @@ def test_eval_run_archive_renders_debug_evidence_and_escapes_script_data(tmp_pat
     assert '"webDependent":true' in html
     assert '"suiteSpecificContext":{"snapshotEpoch":4}' in html
     assert "Judge verdicts" in html
+    assert "Grading criteria" in html
+    assert "[grader] ${grading}" in html
+    assert "[judge rubric] ${value}" in html
+    assert '"grading":"the final ANSWER equals ' in html
     assert "Tool errors" in html
     assert "Grader evidence" in html
     assert "Turn log" in html

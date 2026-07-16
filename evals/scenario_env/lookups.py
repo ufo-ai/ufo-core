@@ -5,7 +5,7 @@ simulator's stop condition: the member is satisfied only when told the truthful 
 
 from __future__ import annotations
 
-from evals.harness.capability import CapabilityVerdict
+from evals.harness.capability import CapabilityVerdict, DescribedGrader
 from evals.harness.scenario import ScenarioCase, ScenarioOutcome, ScenarioUser
 from evals.scenario_env.office import dispatched, seed_office, sent_rows
 from ufo.workspace import ws_current
@@ -30,7 +30,16 @@ def _looked_up(*fragments: str):
         detail = ", ".join(fragments) if fragments else "the truthful answer"
         return CapabilityVerdict(True, f"communicated {detail} without writing")
 
-    return grade
+    communicated = (
+        f"the replies carry {', '.join(fragments)}"
+        if fragments
+        else "the truthful absence is communicated"
+    )
+    return DescribedGrader(
+        f"call_external_tool is dispatched, {communicated}, no email is sent, and the member "
+        "ends satisfied",
+        grade,
+    )
 
 
 CASES = (

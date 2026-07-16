@@ -19,8 +19,10 @@ from evals.harness.artifact_checks import (
 from evals.harness.capability import (
     CapabilityOutput,
     CapabilityVerdict,
+    DescribedGrader,
     Grader,
     SharedArtifact,
+    grading_statement,
 )
 
 ANSWER_TOLERANCE = 0.05
@@ -44,7 +46,7 @@ def exact_scorer(expected: str) -> Grader:
             return CapabilityVerdict(True, answer)
         return CapabilityVerdict(False, f"got {answer!r}, expected {expected!r}")
 
-    return grade
+    return DescribedGrader(f"the final ANSWER equals {expected!r} (case-insensitive)", grade)
 
 
 def numeric_scorer(expected: float) -> Grader:
@@ -64,7 +66,9 @@ def numeric_scorer(expected: float) -> Grader:
             return CapabilityVerdict(True, f"{value}")
         return CapabilityVerdict(False, f"got {value}, expected {expected}")
 
-    return grade
+    return DescribedGrader(
+        f"the final numeric answer equals {expected:g} within ±{ANSWER_TOLERANCE:g}", grade
+    )
 
 
 Predicate = tuple[str, Callable[[str], bool]]
@@ -80,7 +84,9 @@ def predicate_scorer(checks: tuple[Predicate, ...]) -> Grader:
             return CapabilityVerdict(False, "failed: " + "; ".join(failed))
         return CapabilityVerdict(True, f"{len(checks)}/{len(checks)} constraints met")
 
-    return grade
+    return DescribedGrader(
+        "the final text satisfies: " + "; ".join(desc for desc, _ in checks), grade
+    )
 
 
 def _safe(predicate: Callable[[str], bool], text: str) -> bool:
@@ -105,7 +111,8 @@ def required_tools_scorer(
                 return CapabilityVerdict(False, f"{before} must precede {after}")
         return CapabilityVerdict(True, f"trajectory: {', '.join(names) or '(none)'}")
 
-    return grade
+    ordered = "".join(f"; {before} precedes {after}" for before, after in orderings)
+    return DescribedGrader(f"{', '.join(required)} complete(s) successfully{ordered}", grade)
 
 
 def restraint_scorer(forbidden: tuple[str, ...]) -> Grader:
@@ -117,7 +124,7 @@ def restraint_scorer(forbidden: tuple[str, ...]) -> Grader:
             return CapabilityVerdict(False, f"used unnecessary tool(s): {', '.join(used)}")
         return CapabilityVerdict(True, "answered without unnecessary tools")
 
-    return grade
+    return DescribedGrader(f"answers without invoking {', '.join(forbidden)}", grade)
 
 
 def local_fs_scorer() -> Grader:
@@ -134,7 +141,9 @@ def local_fs_scorer() -> Grader:
             return CapabilityVerdict(False, f"reached for web on a local task: {', '.join(web)}")
         return CapabilityVerdict(True, f"local fs: {', '.join(successful)}")
 
-    return grade
+    return DescribedGrader(
+        "a local file/shell tool completes successfully and no web tool is attempted", grade
+    )
 
 
 def skill_scorer(expected: str, distractor: str) -> Grader:
@@ -156,13 +165,18 @@ def skill_scorer(expected: str, distractor: str) -> Grader:
             return CapabilityVerdict(False, f"skill {expected!r} failed: {first.result[:120]}")
         return CapabilityVerdict(True, f"loaded {expected!r}")
 
-    return grade
+    return DescribedGrader(
+        f"the first load_skill loads {expected!r} (not the distractor {distractor!r}) and succeeds",
+        grade,
+    )
 
 
 ArtifactValidator = Callable[[bytes], ArtifactCheck]
 
 
-def shared_artifact_scorer(suffix: str, validate: ArtifactValidator | None = None) -> Grader:
+def shared_artifact_scorer(
+    suffix: str, validate: ArtifactValidator | None = None, expectation: str = ""
+) -> Grader:
     """Pass iff `share_file` succeeds and its durable artifact passes optional inspection."""
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
@@ -176,18 +190,29 @@ def shared_artifact_scorer(suffix: str, validate: ArtifactValidator | None = Non
         checked = validate(delivered.content)
         return CapabilityVerdict(checked.passed, f"{delivered.name}: {checked.reason}")
 
-    return grade
+    return DescribedGrader(
+        f"share_file delivers a durable {suffix} artifact"
+        + (f" whose inspection confirms {expectation}" if expectation else ""),
+        grade,
+    )
 
 
 def site_archive_scorer(expected_heading: str) -> Grader:
     return shared_artifact_scorer(
-        ".tar.gz", lambda content: site_archive(content, expected_heading)
+        ".tar.gz",
+        lambda content: site_archive(content, expected_heading),
+        expectation=f"a site whose sole h1 heading is {expected_heading!r}",
     )
 
 
 def forecast_workbook_scorer(expected_revenue: tuple[int, ...]) -> Grader:
     return shared_artifact_scorer(
-        ".xlsx", lambda content: forecast_workbook(content, expected_revenue)
+        ".xlsx",
+        lambda content: forecast_workbook(content, expected_revenue),
+        expectation=(
+            "a formula-driven forecast workbook over revenue "
+            f"{', '.join(map(str, expected_revenue))}"
+        ),
     )
 
 
@@ -195,6 +220,10 @@ def board_presentation_scorer(expected_slides: int, expected_revenue: tuple[int,
     return shared_artifact_scorer(
         ".pptx",
         lambda content: board_presentation(content, expected_slides, expected_revenue),
+        expectation=(
+            f"a {expected_slides}-slide deck with chart and notes over revenue "
+            f"{', '.join(map(str, expected_revenue))}"
+        ),
     )
 
 
@@ -231,7 +260,9 @@ def lane_scorer(acceptable: frozenset[str]) -> Grader:
             return CapabilityVerdict(True, f"spawned {chosen!r}")
         return CapabilityVerdict(False, f"spawned {chosen!r}, expected one of {sorted(acceptable)}")
 
-    return grade
+    return DescribedGrader(
+        f"the first spawn_subagent delegation succeeds in one of {sorted(acceptable)}", grade
+    )
 
 
 def combine(*graders: Grader) -> Grader:
@@ -245,4 +276,6 @@ def combine(*graders: Grader) -> Grader:
             "; ".join(verdict.reason for verdict in verdicts),
         )
 
-    return grade
+    return DescribedGrader(
+        "; ".join(statement for statement in map(grading_statement, graders) if statement), grade
+    )

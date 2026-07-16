@@ -11,6 +11,7 @@ from evals.harness.capability import (
     EvalTrajectory,
     SharedArtifact,
     ToolInvocation,
+    grading_statement,
     run_capability_case,
 )
 from evals.harness.harness import EvalMetric, EvalReport
@@ -188,6 +189,9 @@ async def test_hle_grader_checks_format_and_leaf_tool_policy() -> None:
 
     assert passed.passed
     assert passed.evidence["answer"] is True
+    assert passed.evidence["expectedAnswer"] == record.answer
+    assert passed.evidence["answerType"] == record.answer_type
+    assert "bash computes the answer without web tools" in grading_statement(grader)
     assert failed.passed is False
     assert failed.evidence["behavior"] is False
 

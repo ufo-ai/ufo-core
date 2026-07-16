@@ -12,7 +12,7 @@ from hashlib import sha256
 from inspect import getmodule, getsource
 from uuid import UUID
 
-from evals.harness.capability import CapabilityOutput, CapabilityVerdict
+from evals.harness.capability import CapabilityOutput, CapabilityVerdict, grading_statement
 from evals.harness.harness import EvalCaseResult, Json, JsonObject
 from evals.harness.judge import JudgeLeg
 from evals.harness.target import CapabilityTarget, TargetResult
@@ -207,6 +207,7 @@ class _ScenarioRun:
             reason = f"{passes}/{len(trials)} trials passed; first failure: {first_failure.reason}"
         evidence: JsonObject = {
             "user": self.case.user.payload(),
+            "grading": grading_statement(self.case.grader) or None,
             "memberKey": self.case.member_key,
             "maxTurns": self.case.max_turns,
             "selectedAttempt": trials.index(first_failure) if first_failure is not None else 0,

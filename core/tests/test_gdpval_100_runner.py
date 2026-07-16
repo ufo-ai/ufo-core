@@ -19,6 +19,7 @@ from evals.harness.capability import (
     CapabilityOutput,
     SharedArtifactReference,
     ToolInvocation,
+    grading_statement,
 )
 from evals.harness.target import TargetResult
 
@@ -227,6 +228,10 @@ async def test_submission_grader_rejects_an_absent_share_file_submission() -> No
     assert not verdict.passed
     assert verdict.reason == "no artifact was submitted through share_file"
     assert verdict.evidence == {"submissionCount": 0, "submissionDigests": []}
+    assert grading_statement(_submission_grader) == (
+        "at least one deliverable is submitted through share_file and captured durably; "
+        "deliverable quality is judged offline against the task rubric"
+    )
 
 
 async def test_submission_grader_rejects_share_calls_without_matching_durable_artifacts() -> None:

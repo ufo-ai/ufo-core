@@ -82,11 +82,21 @@ class DSQAGrader:
     case: SnapshotCase
     judge: JudgeLeg
 
+    @property
+    def grading(self) -> str:
+        return (
+            "the official DeepSearchQA judge rates the answer against the gold answer "
+            f"({self.case.answer_type}); passes only when fully correct — every expected "
+            "answer present and none excessive"
+        )
+
     async def __call__(self, output: CapabilityOutput) -> CapabilityVerdict:
         metadata: dict[str, Json] = {
             "category": self.case.category,
             "pressureBand": self.case.pressure_band,
             "toolPressureScore": self.case.tool_pressure_score,
+            "goldAnswer": self.case.answer,
+            "answerType": self.case.answer_type,
         }
         if not output.response.strip():
             return CapabilityVerdict(
@@ -118,9 +128,13 @@ class DSQAGrader:
                 {**metadata, "judgeStatus": "invalid"},
             )
         score = self._score(response.answer_correctness)
+        rating = response.answer_correctness
         evidence: dict[str, Json] = {
             **metadata,
             "judgeStatus": "rated",
+            "judgeExplanation": rating.explanation,
+            "correctnessDetails": dict(rating.correctness_details),
+            "excessiveAnswers": list(rating.excessive_answers),
             "correctCount": score.correct,
             "expectedCount": score.expected,
             "excessiveCount": score.excessive,

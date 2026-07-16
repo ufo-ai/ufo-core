@@ -216,9 +216,13 @@ async def test_dsqa_six_leaves_share_cases_and_emit_macro_metrics(tmp_path: Path
         and case.evidence["attempts"][0]["costMicroUsd"] == 7
         for case in report.cases
     )
-    serialized = report.model_dump_json()
-    assert "private gold 17" not in serialized
-    assert "private gold answer" not in serialized
+    case_17 = next(case for case in report.cases if case.name == "dsqa/17")
+    grader = case_17.evidence["attempts"][0]["grader"]
+    assert grader["goldAnswer"] == "private gold 17"
+    assert grader["correctnessDetails"] == {"private gold answer": True}
+    assert grader["excessiveAnswers"] == []
+    assert grader["judgeExplanation"] == "rated"
+    assert "DeepSearchQA judge" in case_17.evidence["grading"]
 
 
 def test_dsqa_task_digest_tracks_judge_reasoning(

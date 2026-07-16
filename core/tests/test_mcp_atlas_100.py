@@ -362,6 +362,9 @@ async def test_suite_reports_threshold_tier_and_catalog_coverage() -> None:
     assert "Top tier, mean claim coverage 100% at 75% task threshold" in report.console_summary
     evidence = report.cases[0].evidence
     assert evidence["message"] == dataset.cases[0].prompt
+    grading = evidence["grading"]
+    assert isinstance(grading, str)
+    assert "model judge scores each claim" in grading and "75%" in grading
     assert evidence["selectedAttempt"] == 0
     attempts = cast(list[dict[str, object]], evidence["attempts"])
     assert len(attempts) == 1

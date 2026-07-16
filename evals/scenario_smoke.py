@@ -7,7 +7,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 from ufo_ext_memory.store import memory_item
 
-from evals.harness.capability import CapabilityVerdict
+from evals.harness.capability import CapabilityVerdict, DescribedGrader
 from evals.harness.scenario import ScenarioCase, ScenarioGrader, ScenarioOutcome, ScenarioUser
 from ufo.db import workspace_tx
 from ufo.workspace import ws_current
@@ -36,7 +36,11 @@ def _communicated(*fragments: str) -> ScenarioGrader:
             True, f"communicated {', '.join(fragments)} across {len(outcome.turns)} exchanges"
         )
 
-    return grade
+    return DescribedGrader(
+        f"the replies carry {', '.join(fragments)} across at least {MIN_EXCHANGES} exchanges "
+        "and the member ends satisfied",
+        grade,
+    )
 
 
 async def _remembered_review_day(outcome: ScenarioOutcome) -> CapabilityVerdict:
@@ -96,7 +100,11 @@ CASES = (
                 "Once it answers Thursday, you are satisfied."
             ),
         ),
-        _remembered_review_day,
+        DescribedGrader(
+            "a successful memory_update lands a durable memory_item holding the Thursday "
+            "review day, the agent recalls it to the member, and the member ends satisfied",
+            _remembered_review_day,
+        ),
         max_turns=5,
         digest_tag="scenario:remember-review-day",
     ),

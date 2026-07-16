@@ -10,6 +10,7 @@ from evals.harness.capability import (
     CapabilityOutput,
     CapabilityReference,
     CapabilityVerdict,
+    DescribedGrader,
 )
 from evals.harness.harness import JsonObject
 from evals.harness.registry import EvalTask, capability_task
@@ -130,7 +131,7 @@ def _envelope(reference_paths: tuple[str, ...]) -> str:
     )
 
 
-async def _submission_grader(output: CapabilityOutput) -> CapabilityVerdict:
+async def _submission_check(output: CapabilityOutput) -> CapabilityVerdict:
     share_calls = tuple(
         call for call in output.calls if call.name == "share_file" and call.succeeded
     )
@@ -148,3 +149,10 @@ async def _submission_grader(output: CapabilityOutput) -> CapabilityVerdict:
             evidence,
         )
     return CapabilityVerdict(True, f"captured {len(references)} durable submissions", evidence)
+
+
+_submission_grader = DescribedGrader(
+    "at least one deliverable is submitted through share_file and captured durably; "
+    "deliverable quality is judged offline against the task rubric",
+    _submission_check,
+)

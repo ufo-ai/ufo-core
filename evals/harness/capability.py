@@ -11,7 +11,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -123,6 +123,36 @@ class CapabilityOutput:
 
 
 type Grader = Callable[[CapabilityOutput], Awaitable[CapabilityVerdict]]
+
+
+@runtime_checkable
+class Graded(Protocol):
+    """A grader that states its criteria; suite grader classes satisfy this structurally."""
+
+    @property
+    def grading(self) -> str: ...
+
+
+@dataclass(frozen=True)
+class DescribedGrader[OutputT]:
+    """A grader carrying the human-readable statement of what it requires. The statement is
+    recorded into case evidence, so the archive shows the criteria a verdict answered to; grader
+    factories derive it from the same arguments that drive the checks, so it cannot drift."""
+
+    grading: str
+    grade: Callable[[OutputT], Awaitable[CapabilityVerdict]]
+
+    async def __call__(self, output: OutputT) -> CapabilityVerdict:
+        return await self.grade(output)
+
+
+def grading_statement(grader: object) -> str:
+    """The grader's criteria statement, or "" for an undescribed grader."""
+    match grader:
+        case Graded():
+            return grader.grading
+        case _:
+            return ""
 
 
 @dataclass(frozen=True)
@@ -260,6 +290,7 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
         )
     evidence: JsonObject = {
         "message": case.message,
+        "grading": grading_statement(case.grader) or None,
         "rubric": list(case.rubric),
         "memberKey": case.member_key,
         "webDependent": case.web_dependent,

@@ -2,8 +2,8 @@ import json
 
 import pytest
 
-from evals.harness.capability import CapabilityOutput, ToolInvocation
-from evals.yc_workflows import CASES
+from evals.harness.capability import CapabilityOutput, ToolInvocation, grading_statement
+from evals.yc_workflows import CASES, _constraint_name, _keeps_conflicting_metrics_separate
 
 
 def _case(identifier: str):
@@ -12,6 +12,29 @@ def _case(identifier: str):
 
 def _call(name: str, input_: dict[str, object]) -> ToolInvocation:
     return ToolInvocation(name, input_, has_result=True)
+
+
+def test_constraint_names_humanize_named_predicates_and_shield_lambdas() -> None:
+    assert (
+        _constraint_name(_keeps_conflicting_metrics_separate)
+        == "keeps conflicting metrics separate"
+    )
+    assert _constraint_name(lambda text: bool(text)) == "a structural constraint"
+
+
+def test_workflow_grading_statements_derive_from_the_scorers() -> None:
+    restraint = _case("W25")
+    assert grading_statement(restraint.grader) == (
+        "no yc_index call; no yc_read call matching any of "
+        "[{'action': 'search', 'entity': 'chats'}, {'action': 'search', 'entity': 'follows'}, "
+        "{'action': 'search', 'entity': 'routes'}, "
+        "{'action': 'search', 'entity': 'candidates'}]; "
+        "the answer satisfies 'sensitive index restraint'"
+    )
+    grounded = _case("W02")
+    statement = grading_statement(grounded.grader)
+    assert "at least 1 successful yc_read call(s) matching" in statement
+    assert "the answer satisfies 'cites at least one http(s) URL'" in statement
 
 
 def test_suite_has_exactly_twenty_five_unique_ordered_workflows() -> None:

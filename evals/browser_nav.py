@@ -10,6 +10,7 @@ from evals.harness.capability import (
     CapabilityCase,
     CapabilityOutput,
     CapabilityVerdict,
+    DescribedGrader,
     Grader,
 )
 from evals.harness.scorers import combine, exact_scorer, restraint_scorer
@@ -32,7 +33,7 @@ BROWSER_TOOLS = (
 PAGE_READ_TOOLS = frozenset({"get_page_text", "read_page", "find"})
 
 
-async def _browsed(output: CapabilityOutput) -> CapabilityVerdict:
+async def _browsed_check(output: CapabilityOutput) -> CapabilityVerdict:
     navigated = [call for call in output.calls if call.name == "navigate" and call.succeeded]
     if not navigated:
         return CapabilityVerdict(False, "navigate did not complete successfully")
@@ -42,6 +43,13 @@ async def _browsed(output: CapabilityOutput) -> CapabilityVerdict:
     if not readers:
         return CapabilityVerdict(False, "no page-reading tool completed successfully")
     return CapabilityVerdict(True, f"browsed: navigate, {', '.join(readers)}")
+
+
+_browsed = DescribedGrader(
+    "navigate completes successfully and a page-reading tool "
+    f"({', '.join(sorted(PAGE_READ_TOOLS))}) completes successfully",
+    _browsed_check,
+)
 
 
 NAVIGATION_SPECS: list[tuple[str, str, Grader]] = [

@@ -134,7 +134,8 @@ async def _seed_case_conversation(
 def _scrubbed_case(name: str) -> EvalCaseResult:
     evidence: JsonObject = {
         "message": None,
-        "rubric": [],
+        "grading": "sentinel grading criteria",
+        "rubric": ["sentinel rubric criterion"],
         "selectedAttempt": 0,
         "attempts": [
             {
@@ -239,6 +240,8 @@ async def test_reconstruction_rebuilds_evidence_without_mutating_the_original_ru
     attempt = attempts[0]
     assert isinstance(attempt, dict)
     assert attempt["response"] == "sentinel durable response"
+    assert matched.evidence["grading"] == "sentinel grading criteria"
+    assert matched.evidence["rubric"] == ["sentinel rubric criterion"]
     calls = attempt["calls"]
     assert isinstance(calls, list) and isinstance(calls[0], dict)
     assert calls[0]["input"] == {"command": "sentinel durable command"}

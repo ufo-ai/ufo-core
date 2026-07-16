@@ -10,6 +10,7 @@ from evals.harness.capability import (
     CapabilityCase,
     CapabilityOutput,
     CapabilityVerdict,
+    DescribedGrader,
     Grader,
     ToolInvocation,
 )
@@ -98,7 +99,35 @@ def _grader(spec: RecallSpec) -> Grader:
             return CapabilityVerdict(False, "answer exceeded the limited-paraphrase bound")
         return CapabilityVerdict(True, "grounding, trajectory, and answer constraints met")
 
-    return grade
+    return DescribedGrader(_grading(spec), grade)
+
+
+def _call_label(expected: ExpectedCall) -> str:
+    return "/".join(part for part in (expected.name, expected.action, expected.entity) if part)
+
+
+def _grading(spec: RecallSpec) -> str:
+    parts: list[str] = []
+    if spec.calls:
+        order = " in order" if spec.ordered else ""
+        parts.append(
+            f"successful calls{order}: {', '.join(_call_label(item) for item in spec.calls)}"
+        )
+    if spec.forbidden:
+        parts.append(f"never calls {', '.join(_call_label(item) for item in spec.forbidden)}")
+    if spec.concepts:
+        parts.append(
+            "the answer covers: " + "; ".join(" or ".join(group) for group in spec.concepts)
+        )
+    if spec.predicate is not None:
+        parts.append("the answer satisfies its structural constraint")
+    if spec.links:
+        parts.append(f"cites at least {spec.links} source link(s)")
+    if spec.asks_question:
+        parts.append("asks a clarifying question")
+    if spec.max_response_chars is not None:
+        parts.append(f"stays within {spec.max_response_chars} characters")
+    return "; ".join(parts)
 
 
 MEMORY = (ExpectedCall("memory_search"),)

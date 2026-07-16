@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from evals.harness.capability import CapabilityVerdict
+from evals.harness.capability import CapabilityVerdict, DescribedGrader
 from evals.harness.scenario import ScenarioCase, ScenarioOutcome, ScenarioUser
 from evals.scenario_env.office import (
     BOB,
@@ -42,7 +42,11 @@ def _sent_one(recipient: str, *fragments: str):
             return CapabilityVerdict(False, "the member never signalled satisfaction")
         return CapabilityVerdict(True, f"one email to {recipient} carrying {', '.join(fragments)}")
 
-    return grade
+    return DescribedGrader(
+        f"exactly one email goes out, to {recipient}, mentioning {', '.join(fragments)}, and "
+        "the member ends satisfied",
+        grade,
+    )
 
 
 async def _graded_focus_block(outcome: ScenarioOutcome) -> CapabilityVerdict:
@@ -135,7 +139,11 @@ CASES = (
                 "for any emails."
             ),
         ),
-        _graded_focus_block,
+        DescribedGrader(
+            "a live focus event lands on Friday July 24, no email goes out, and the member "
+            "ends satisfied",
+            _graded_focus_block,
+        ),
         max_turns=5,
         digest_tag="env:focus-block",
         seed=seed_office,
@@ -154,7 +162,11 @@ CASES = (
                 "satisfied."
             ),
         ),
-        _graded_cancel_deep_dive,
+        DescribedGrader(
+            "the monthly deep dive is cancelled, the weekly Design sync stays live, and the "
+            "member ends satisfied",
+            _graded_cancel_deep_dive,
+        ),
         max_turns=5,
         digest_tag="env:cancel-deep-dive",
         seed=seed_office,
@@ -187,7 +199,10 @@ CASES = (
                 "9:30am for 15 minutes. Once it confirms the event exists, you are satisfied."
             ),
         ),
-        _graded_standup_event,
+        DescribedGrader(
+            "a live standup event lands on Monday July 20 and the member ends satisfied",
+            _graded_standup_event,
+        ),
         max_turns=5,
         digest_tag="env:standup-on-calendar",
         seed=seed_office,

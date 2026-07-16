@@ -185,6 +185,8 @@ async def test_memory_100_grader_reports_observed_evidence_without_gating_the_an
     verdict = await grader(output)
 
     assert verdict.passed
+    assert "memory recall log" in grader.grading
+    assert "semantic rubric" in grader.grading
     assert verdict.evidence["coverage"] == 1.0
     assert verdict.evidence["evidenceRanks"] == {"memory/answer": 2}
     assert verdict.evidence["recallError"] is None

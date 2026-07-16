@@ -288,6 +288,42 @@ class CompactionSuite:
             case _:
                 return False, f"leaf {case.leaf!r} has no artifact verdict"
 
+    def _grading(self, case: CompactionCase) -> str:
+        match case.leaf:
+            case "overload":
+                return (
+                    "every generation compacts; weighted decision-fact recall in the final "
+                    f"summary ≥ {OVERLOAD_PASS_WEIGHTED_RECALL:.0%} under summary-budget overload"
+                )
+            case "buried":
+                return (
+                    "every generation compacts; buried-fact weighted recall "
+                    f"≥ {BURIED_PASS_WEIGHTED_RECALL:.0%}"
+                )
+            case "supersession":
+                return (
+                    "every generation compacts; correction recall "
+                    f"≥ {SUPERSESSION_PASS_RECALL:.0%} with stale rate "
+                    f"≤ {SUPERSESSION_MAX_STALE_RATE:.0%}"
+                )
+            case "reference":
+                return (
+                    "every generation compacts; weighted reference coverage "
+                    f"≥ {REFERENCE_PASS_WEIGHTED_COVERAGE:.0%} — the harvester keeps only the "
+                    f"{MAX_REFERENCE_PATHS} most recent paths, so the summary's own files field "
+                    "must carry the heavy early references"
+                )
+            case "chain":
+                return (
+                    f"every generation compacts; critical-weight (≥{CHAIN_CRITICAL_WEIGHT}) "
+                    f"fact survival after generation {case.generations} "
+                    f"≥ {CHAIN_PASS_FINAL_SURVIVAL:.0%}"
+                )
+            case "image":
+                return "the image-borne fact survives the compaction boundary"
+            case _:
+                raise RuntimeError(f"leaf {case.leaf!r} has no artifact grading criteria")
+
     def _evidence(
         self, case: CompactionCase, grades: list[GenerationGrade], tokens_spent: int
     ) -> JsonObject:
@@ -322,6 +358,7 @@ class CompactionSuite:
             for grade in grades
         ]
         evidence: JsonObject = {
+            "grading": self._grading(case),
             "facts": facts,
             "generations": generations,
             "tokensSpent": tokens_spent,
@@ -369,7 +406,7 @@ class CompactionSuite:
                     name=f"{case.id}.{probe.id}",
                     passed=False,
                     reason=f"seed turn failed: {seed.failure_reason}",
-                    evidence={"question": probe.question},
+                    evidence={"question": probe.question, "grading": _probe_grading(probe)},
                 )
                 for probe in case.probes
             ]
@@ -429,6 +466,15 @@ class CompactionSuite:
                 return ()
 
 
+def _probe_grading(probe: CompactionProbe) -> str:
+    parts = [f"after compaction, the probe answer carries {', '.join(probe.expect_literals)}"]
+    if probe.forbid_literals:
+        parts.append(f"omits the superseded {', '.join(probe.forbid_literals)}")
+    if probe.expect_read_path:
+        parts.append(f"and the trajectory re-reads {probe.expect_read_path}")
+    return "; ".join(parts)
+
+
 def _grade_probe(
     case: CompactionCase, probe: CompactionProbe, outcome: TargetResult
 ) -> EvalCaseResult:
@@ -436,6 +482,7 @@ def _grade_probe(
     calls: list[Json] = [call.name for call in outcome.output.calls]
     evidence: JsonObject = {
         "question": probe.question,
+        "grading": _probe_grading(probe),
         "response": outcome.output.response,
         "calls": calls,
     }

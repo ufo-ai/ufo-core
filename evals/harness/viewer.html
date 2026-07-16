@@ -506,7 +506,7 @@ function callMarkup(attState) {
 const ATTEMPT_KEYS = new Set(['passed', 'reason', 'response', 'calls', 'toolErrors', 'artifacts',
   'artifactError', 'tokens', 'costMicroUsd', 'compactions', 'log', 'grader', 'judge', 'turns',
   'stopped', 'trajectory']);
-const CASE_EVIDENCE_KEYS = new Set(['message', 'rubric', 'memberKey', 'webDependent',
+const CASE_EVIDENCE_KEYS = new Set(['message', 'grading', 'rubric', 'memberKey', 'webDependent',
   'reconstructed', 'selectedAttempt', 'attempts', 'user', 'maxTurns', 'claims', 'claimVerdicts',
   'claimCoverage', 'enabledTools', 'exposedTools', 'omittedEnabledTools', 'referenceTools',
   'referenceServers', 'enabledCatalogServers']);
@@ -707,6 +707,11 @@ function detailMarkup(base, current, before, after) {
   const item = caseByName(after, state.caseName);
   const evidence = (item || prior || {}).evidence || {};
   const rubric = evidence.rubric || [];
+  const grading = typeof evidence.grading === 'string' ? evidence.grading : '';
+  const criteria = [
+    grading ? `[grader] ${grading}` : '',
+    ...rubric.map(value => `[judge rubric] ${value}`)
+  ].filter(Boolean);
   const setup = setupMeta(evidence);
   const prompt = evidence.message === null
     ? `[case prompt: ${EVIDENCE_UNRECORDED.toLowerCase()}]`
@@ -714,7 +719,8 @@ function detailMarkup(base, current, before, after) {
   return `<section class="detail">
     <div class="detail-head"><div class="detail-leaf">${h(leafLabel(state.suite))}</div><h2>${h(state.caseName || 'Choose a case')}</h2>
       ${setup ? `<div class="row-meta"><span>${h(setup)}</span></div>` : ''}
-      <div class="prompt">${h(prompt)}${rubric.length ? '\n\nRubric\n' + h(rubric.map(value => '• ' + value).join('\n')) : ''}</div></div>
+      <div class="prompt">${h(prompt)}</div>
+      ${criteria.length ? `<div class="section"><div class="section-title">Grading criteria</div><pre>${h(criteria.map(value => '• ' + value).join('\n'))}</pre></div>` : ''}</div>
     <div class="compare-grid">${paneMarkup('Baseline', base, before, prior)}${paneMarkup('Current', current, after, item)}</div>
   </section>`;
 }

@@ -9,8 +9,10 @@ from evals.harness.capability import (
     CapabilityCase,
     CapabilityOutput,
     CapabilityVerdict,
+    DescribedGrader,
     Grader,
     ToolInvocation,
+    grading_statement,
 )
 from evals.harness.scorers import combine, required_tools_scorer, skill_scorer
 
@@ -52,7 +54,9 @@ def _tool_input_scorer(
             return CapabilityVerdict(False, f"expected {minimum} distinct {distinct} values")
         return CapabilityVerdict(True, f"{len(calls)} {tool} call(s) matched {expected}")
 
-    return grade
+    count = "exactly one" if exact else f"at least {minimum}"
+    variety = f" with {minimum} distinct {distinct} value(s)" if distinct is not None else ""
+    return DescribedGrader(f"{count} successful {tool} call(s) matching {expected}{variety}", grade)
 
 
 def _ordered_inputs_scorer(*steps: tuple[str, dict[str, object]]) -> Grader:
@@ -74,7 +78,11 @@ def _ordered_inputs_scorer(*steps: tuple[str, dict[str, object]]) -> Grader:
             position = found
         return CapabilityVerdict(True, "ordered tool inputs matched")
 
-    return grade
+    return DescribedGrader(
+        "successful calls in order: "
+        + " then ".join(f"{tool} matching {expected}" for tool, expected in steps),
+        grade,
+    )
 
 
 def _one_of_scorer(*graders: Grader) -> Grader:
@@ -84,7 +92,11 @@ def _one_of_scorer(*graders: Grader) -> Grader:
             return CapabilityVerdict(True, "one accepted trajectory matched")
         return CapabilityVerdict(False, "; ".join(verdict.reason for verdict in verdicts))
 
-    return grade
+    return DescribedGrader(
+        "one of: "
+        + " OR ".join(statement for statement in map(grading_statement, graders) if statement),
+        grade,
+    )
 
 
 def _forbid_scorer(tool: str, forbidden: tuple[dict[str, object], ...] = ({},)) -> Grader:
@@ -94,13 +106,15 @@ def _forbid_scorer(tool: str, forbidden: tuple[dict[str, object], ...] = ({},)) 
             return CapabilityVerdict(False, f"forbidden {tool} input(s): {used}")
         return CapabilityVerdict(True, f"avoided forbidden {tool} inputs")
 
-    return grade
+    scope = "" if forbidden == ({},) else f" matching any of {list(forbidden)}"
+    return DescribedGrader(f"no {tool} call{scope}", grade)
 
 
 def _answer_scorer(
     required: tuple[str, ...] = (),
     forbidden: tuple[str, ...] = (),
     predicate: Callable[[str], bool] | None = None,
+    constraint: str = "",
 ) -> Grader:
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         text = output.response.strip()
@@ -115,11 +129,26 @@ def _answer_scorer(
             return CapabilityVerdict(False, "answer failed its structural constraint")
         return CapabilityVerdict(True, "answer constraints met")
 
-    return grade
+    parts: list[str] = []
+    if required:
+        parts.append(f"the answer mentions {', '.join(required)}")
+    if forbidden:
+        parts.append(f"the answer omits {', '.join(forbidden)}")
+    if predicate is not None:
+        parts.append(f"the answer satisfies {constraint or _constraint_name(predicate)!r}")
+    return DescribedGrader("; ".join(parts), grade)
+
+
+def _constraint_name(predicate: Callable[[str], bool]) -> str:
+    name = predicate.__name__.strip("_").replace("_", " ")
+    return "a structural constraint" if "lambda" in name else name
 
 
 def _links_scorer() -> Grader:
-    return _answer_scorer(predicate=lambda text: re.search(r"https?://\S+", text) is not None)
+    return _answer_scorer(
+        predicate=lambda text: re.search(r"https?://\S+", text) is not None,
+        constraint="cites at least one http(s) URL",
+    )
 
 
 def _json_scorer(required: tuple[tuple[str, ...], ...]) -> Grader:
@@ -155,14 +184,24 @@ def _json_scorer(required: tuple[tuple[str, ...], ...]) -> Grader:
             return CapabilityVerdict(False, "evidence_url must be an HTTP URL")
         return CapabilityVerdict(True, "valid structured company JSON")
 
-    return grade
+    return DescribedGrader(
+        "the answer is a JSON object with non-empty string values for "
+        + ", ".join("/".join(aliases) for aliases in required)
+        + ", and an HTTP evidence URL",
+        grade,
+    )
 
 
-async def _limited_paraphrase(output: CapabilityOutput) -> CapabilityVerdict:
+async def _limited_paraphrase_check(output: CapabilityOutput) -> CapabilityVerdict:
     quoted = re.findall(r'["“](.*?)["”]', output.response, flags=re.DOTALL)
     if any(len(text.split()) > 12 for text in quoted):
         return CapabilityVerdict(False, "answer copied a long direct quote")
     return CapabilityVerdict(True, "answer uses limited paraphrase")
+
+
+_limited_paraphrase = DescribedGrader(
+    "no direct quote in the answer runs longer than 12 words", _limited_paraphrase_check
+)
 
 
 def _keeps_conflicting_metrics_separate(text: str) -> bool:
@@ -362,7 +401,8 @@ SPECS = (
                         "contradict",
                         "refute",
                     )
-                )
+                ),
+                constraint="reaches an evidential verdict (supports, mixed, insufficient, ...)",
             ),
             _links_scorer(),
         ),
@@ -458,7 +498,8 @@ SPECS = (
                     text,
                     ("eligib",),
                     ("current", "available", "active"),
-                )
+                ),
+                constraint="addresses eligibility and whether the deals are current",
             ),
             _links_scorer(),
         ),
@@ -482,7 +523,8 @@ SPECS = (
                     ("deal", "term", "discount", "price", "cost"),
                     ("founder", "experience", "anecdote", "report"),
                     ("compare", "versus", " vs ", "differ", "while", "whereas", "both"),
-                )
+                ),
+                constraint="compares the payroll and PEO deals and carries founder experiences",
             ),
             _links_scorer(),
         ),
@@ -525,7 +567,8 @@ SPECS = (
                         "lead with",
                         "pitch",
                     )
-                )
+                ),
+                constraint="describes how the companies position themselves",
             ),
             _links_scorer(),
         ),
@@ -555,7 +598,8 @@ SPECS = (
                     text,
                     ("reference",),
                     ("prepare", "agenda", "question", "attend", "structure"),
-                )
+                ),
+                constraint="covers how reference calls are prepared or structured",
             ),
             _links_scorer(),
             _limited_paraphrase,

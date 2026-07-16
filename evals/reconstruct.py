@@ -106,7 +106,8 @@ class RunReconstruction:
             message = message or inbound
         evidence: JsonObject = {
             "message": message,
-            "rubric": [],
+            "grading": case.evidence.get("grading") or None,
+            "rubric": case.evidence.get("rubric") or [],
             "reconstructed": True,
             "selectedAttempt": recorded.selected_attempt,
             "attempts": attempts,

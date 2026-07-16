@@ -1,6 +1,6 @@
 import re
 
-from evals.harness.capability import CapabilityOutput, ToolInvocation
+from evals.harness.capability import CapabilityOutput, ToolInvocation, grading_statement
 from evals.yc_recall import CASES, SPECS, ExpectedCall
 
 
@@ -67,6 +67,27 @@ def test_recall_cases_guard_sensitive_searches_and_private_paraphrase() -> None:
     assert ExpectedCall("yc_read", action="search", entity="deals") in ambiguous.forbidden
     assert ambiguous.asks_question
     assert forum.max_response_chars == 2500
+
+
+def test_recall_grading_statements_derive_from_the_spec() -> None:
+    ordered = _case("r20-investor-portfolio-join")
+    assert grading_statement(ordered.grader) == (
+        "successful calls in order: yc_read/search/investors, yc_read/search/companies; "
+        "the answer covers: disambigu or which northstar; investor; company; hiring; "
+        "cites at least 1 source link(s)"
+    )
+    ambiguous = _case("r25-deal-versus-fundraising-ambiguity")
+    assert grading_statement(ambiguous.grader) == (
+        "never calls yc_read/search/deals; "
+        "the answer covers: discount or perk or vendor deal; investor; "
+        "manual or fundraising guidance; asks a clarifying question"
+    )
+    constrained = _case("r01-fundraise-runway-timing")
+    assert "the answer satisfies its structural constraint" in grading_statement(constrained.grader)
+    bounded = _case("r21-forum-anecdote-versus-policy")
+    statement = grading_statement(bounded.grader)
+    assert "cites at least 2 source link(s)" in statement
+    assert "stays within 2500 characters" in statement
 
 
 async def test_indexed_recall_grader_requires_memory_and_grounded_answer() -> None:
