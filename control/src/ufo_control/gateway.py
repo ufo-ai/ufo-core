@@ -43,6 +43,8 @@ SHELLSCRIPT_MEDIA_TYPE = "text/x-shellscript"
 MAX_CHANNEL_BYTES = 64
 MAX_SESSION_BYTES = 128
 MAX_BODY_BYTES = 4096
+GATEWAY_POOL_MIN_SIZE = 1
+GATEWAY_POOL_MAX_SIZE = 4
 
 _CLIENT_SCRIPT = Path(__file__).parent / "client" / "ufo"
 
@@ -228,7 +230,9 @@ def gateway_app() -> FastAPI:
         nonlocal state
         owner_url = owner_dsn()
         serve_url = serve_dsn()
-        pool = await asyncpg.create_pool(dsn=owner_url)
+        pool = await asyncpg.create_pool(
+            dsn=owner_url, min_size=GATEWAY_POOL_MIN_SIZE, max_size=GATEWAY_POOL_MAX_SIZE
+        )
         store = OnboardStore(pool=pool)
         await store.ensure_table()
         invites = InviteCodes(pool=pool)
