@@ -29,6 +29,8 @@ from httpx import AsyncClient, Timeout
 from pydantic import ValidationError
 from ufo_ext_memory.events import MEMORY_RECALL_EVENT
 
+from evals.compaction.runner import CompactionRun, load_compaction
+from evals.compaction.target import CompactionTarget
 from evals.driver import WORKFLOW_WAIT_SECONDS, WorkspaceDriver, resolve_workspace_and_agent
 from evals.dsqa_100.runner import (
     DSQA_JUDGE_MODEL,
@@ -122,6 +124,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--hle-gold", type=Path, metavar="GOLD_JSONL")
     parser.add_argument("--hle-gold-smoke", action="store_true")
     parser.add_argument("--dsqa-100", type=Path, metavar="SNAPSHOT")
+    parser.add_argument("--compaction", type=Path, metavar="SNAPSHOT")
     parser.add_argument("--gdpval-100", type=Path, metavar="SNAPSHOT")
     parser.add_argument("--gdpval-treatment", choices=TREATMENTS)
     parser.add_argument("--gdpval-task", action="append", default=[], metavar="TASK_ID")
@@ -159,7 +162,13 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--gdpval-task requires --gdpval-100")
     requested_runs = sum(
         source is not None
-        for source in (args.memory_100, args.dsqa_100, args.gdpval_100, args.hle_gold)
+        for source in (
+            args.memory_100,
+            args.dsqa_100,
+            args.gdpval_100,
+            args.hle_gold,
+            args.compaction,
+        )
     )
     if requested_runs > 1:
         parser.error("corpus-backed evals are separate eval runs")
@@ -167,6 +176,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.memory_100 is not None and args.memory_100_state is not None:
         memory_run = load_memory_100(args.memory_100, args.memory_100_state)
     dsqa_run = load_dsqa_100(args.dsqa_100) if args.dsqa_100 is not None else None
+    compaction_run = load_compaction(args.compaction) if args.compaction is not None else None
     if (args.mcp_atlas_data is not None or args.mcp_atlas_samples is not None) and (
         "mcp_atlas_100" not in names
     ):
@@ -186,6 +196,7 @@ def main(argv: list[str] | None = None) -> None:
             names,
             memory_run,
             dsqa_run,
+            compaction_run,
             gdpval_run,
             args.mcp_atlas_data,
             args.mcp_atlas_samples,
@@ -368,6 +379,7 @@ async def _run(
                 agent_model,
                 workflow_wait_seconds=workflow_wait_seconds,
             )
+            registry = model_registry(config, load_manifests(config.pack.name))
             ctx = context_for(
                 "evals",
                 frozenset(),
@@ -376,10 +388,18 @@ async def _run(
                     admission=Admission(dbos=dbos, durable_surfaces=frozenset()),
                     workspace_id=workspace_id,
                 ),
-                model_resolver=model_registry(config, load_manifests(config.pack.name)),
+                model_resolver=registry,
             )
             if ctx.model is None:
                 raise RuntimeError("eval context requires model access")
+            compaction: CompactionTarget | None = None
+            if any(task.suite == "compaction" for task in tasks):
+                resolved_model = registry.resolve(agent_model)
+                compaction = CompactionTarget(
+                    client=await registry.client_for(resolved_model),
+                    model=resolved_model,
+                    blob=blob,
+                )
             target = InProcessTarget(
                 ctx=ctx,
                 agent_id=agent_id,
@@ -401,6 +421,7 @@ async def _run(
                     mcp_atlas_url,
                     mcp_atlas_external_url,
                 ),
+                compaction=compaction,
             )
             with ws(workspace_id):
                 reports = tuple([await task.run(target) for task in tasks])
@@ -534,6 +555,7 @@ def _tasks(
     names: tuple[str, ...],
     memory_run: Memory100Run | None,
     dsqa_run: DSQA100Run | None = None,
+    compaction_run: CompactionRun | None = None,
     gdpval_run: GDPvalCalibration | None = None,
     mcp_atlas_data: Path | None = None,
     mcp_atlas_samples: int | None = None,
@@ -548,6 +570,11 @@ def _tasks(
         if mcp_atlas_data is not None
         else ((load_mcp_atlas_task(limit=mcp_atlas_samples),) if "mcp_atlas_100" in names else ())
     )
+    if compaction_run is not None:
+        return selected_tasks(
+            (*TASKS, *compaction_run.tasks, *mcp_atlas),
+            names or tuple(task.name for task in compaction_run.tasks),
+        )
     if memory_run is None and dsqa_run is None:
         return selected_tasks((*TASKS, *mcp_atlas), names) if names else selected_run_tasks()
     if dsqa_run is not None:

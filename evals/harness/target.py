@@ -39,6 +39,7 @@ from ufo.sdk.models import ImageBlock, Message, TextBlock, ToolResultBlock, Tool
 from ufo.transcript import TranscriptDecodeError, decode, transcript_key
 
 if TYPE_CHECKING:
+    from evals.compaction.target import CompactionTarget
     from evals.mcp_atlas_100.target import McpAtlasTarget
 
 MAX_EVAL_ARTIFACTS = 8
@@ -148,6 +149,7 @@ class InProcessTarget:
     blob: BlobStore | None = None
     logs: TurnLogReader | None = None
     mcp_atlas: McpAtlasTarget | None = None
+    compaction: CompactionTarget | None = None
 
     async def preflight_mcp_atlas(self, required_tool_servers: dict[str, str]) -> frozenset[str]:
         if self.mcp_atlas is None:
