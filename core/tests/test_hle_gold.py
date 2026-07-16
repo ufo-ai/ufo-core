@@ -286,15 +286,25 @@ async def test_codegen_grader_requires_solver_source_and_post_write_execution() 
         "write", {"file_path": path, "content": "print(760)\n"}, "written", True
     )
     run = ToolInvocation("bash", {"command": f"python {path}"}, "760", True)
+    relative_run = ToolInvocation(
+        "bash", {"command": f"cd /workspace/hle && python {record.id}.py"}, "760", True
+    )
+    other_run = ToolInvocation(
+        "bash", {"command": "cd /workspace/hle && python other.py"}, "760", True
+    )
     response = "ANSWER: 760\nCONFIDENCE: 90%"
 
     passed = await grader(CapabilityOutput(response, (valid_write, run)))
+    relative = await grader(CapabilityOutput(response, (valid_write, relative_run)))
     literal = await grader(CapabilityOutput(response, (literal_write, run)))
     wrong_order = await grader(CapabilityOutput(response, (run, valid_write)))
+    wrong_file = await grader(CapabilityOutput(response, (valid_write, other_run)))
 
     assert passed.passed
+    assert relative.passed
     assert literal.passed is False
     assert wrong_order.passed is False
+    assert wrong_file.passed is False
 
 
 async def test_web_grader_rejects_exact_queries_and_benchmark_mirrors() -> None:
@@ -430,7 +440,8 @@ def test_compaction_pressure_is_bounded_and_carries_the_nonce() -> None:
     assert max(map(len, messages)) < 200_000
     assert "RETENTION-671ebaf92a7c16b748fd2709" in messages[0]
     assert sum(map(len, messages)) // 4 > 251_000
-    assert sum(map(len, messages[-8:])) // 4 < 178_000
+    assert sum(map(len, messages[-8:])) < 40_000
+    assert all("RETENTION-" not in message for message in messages[-8:])
 
 
 def test_hle_metrics_cross_the_report_and_viewer_boundaries() -> None:

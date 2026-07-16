@@ -53,8 +53,8 @@ CONTAMINATION_MARKERS = (
     "humanitys-last-exam",
 )
 COMPACTION_WORDS = "river stone cedar orbit lantern meadow copper harbor velvet winter "
-COMPACTION_HEAD = (COMPACTION_WORDS * 5_000)[:49_000]
-COMPACTION_TAIL = (COMPACTION_WORDS * 8_000)[:79_000]
+COMPACTION_HEAD = (COMPACTION_WORDS * 20_000)[:126_000]
+COMPACTION_TAIL = (COMPACTION_WORDS * 8_000)[:3_000]
 
 type HLELeaf = Literal[
     "compaction_retain",
@@ -366,12 +366,13 @@ def _behavior(
             valid = "bash" in names and not names.intersection(WEB_TOOLS)
             return valid, "sandbox computation" if valid else "required bash without web"
         case "codegen_solver":
-            expected = f"/workspace/hle/{item.id}.py"
+            solver_file = f"{item.id}.py"
             write = next(
                 (
                     call
                     for call in successful
-                    if call.name == "write" and call.input.get("file_path") == expected
+                    if call.name == "write"
+                    and call.input.get("file_path") == f"/workspace/hle/{solver_file}"
                 ),
                 None,
             )
@@ -383,7 +384,7 @@ def _behavior(
                     if index > write_index
                     and call.name == "bash"
                     and call.succeeded
-                    and expected in str(call.input.get("command", ""))
+                    and solver_file in str(call.input.get("command", ""))
                 ),
                 None,
             )
