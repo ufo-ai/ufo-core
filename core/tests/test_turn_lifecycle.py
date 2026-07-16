@@ -16,22 +16,28 @@ from pydantic import BaseModel
 from ufo_ext_index_default import DefaultIndex
 from ufo_testsupport.stream_gate import GatingHub, StreamGate, release_when_running
 
+from evals.driver import WorkspaceDriver
+from evals.harness.capability import CapabilityCase
+from evals.harness.scorers import exact_scorer
+from evals.harness.target import InProcessTarget
 from ufo.accounting import CORE_PRICING
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
 from ufo.connectors import ConnectorRegistry
 from ufo.db import workspace_tx
+from ufo.ext.context import context_for
 from ufo.ext.loader import embed_backend, index_backend, skill_registry
 from ufo.ext.manifest import EmbedBackendSpec, IndexBackendSpec, Manifest, ModelProviderSpec
 from ufo.hub import Hub, InProcessHub
 from ufo.jobs import TurnDispatcher
 from ufo.loop import queue as loop_queue
-from ufo.loop.engine import EMPTY_RESPONSE_NUDGE, FORCE_FINAL_PROMPT
+from ufo.loop.engine import EMPTY_RESPONSE_NUDGE, FORCE_FINAL_PROMPT, ModelStreamError
 from ufo.loop.subagents import SubagentProfile, SubagentRegistry, Subagents
 from ufo.loop.transcript import Transcript
 from ufo.models.interface import (
     ModelEvent,
     ModelRequest,
+    ModelResponseTruncated,
     TextDelta,
     ToolCallDelta,
     ToolCallStart,
@@ -42,6 +48,7 @@ from ufo.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, Sandbo
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame, Turn, Usage
 from ufo.surfaces import hub_tail
+from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.surfaces.cli import router
 from ufo.tools.context import TextContent, ToolContext, ToolResult
 from ufo.tools.registry import ToolDef
@@ -49,6 +56,9 @@ from ufo.transcript import Conversation
 from ufo.workspace import ws
 
 STREAM_TIMEOUT_SECONDS = 30
+TRUNCATION_MESSAGE = (
+    "Anthropic completion truncated at the max_tokens budget (stop_reason=max_tokens)"
+)
 STREAM_GATE = StreamGate()
 SEEN_SYSTEM_PROMPTS: list[str] = []
 SEEN_TOOLS: list[tuple[str, ...]] = []
@@ -254,6 +264,8 @@ class StandInModel:
             raise RuntimeError("late boom")
         if "explode" in inbound:
             raise RuntimeError("boom")
+        if "truncate" in inbound:
+            raise ModelResponseTruncated(TRUNCATION_MESSAGE)
         if "slow" in inbound:
             await asyncio.sleep(30)
         if "mute" in inbound or ("shy" in inbound and not nudged):
@@ -671,6 +683,7 @@ async def test_failure_commits_terminal_bills_nothing_preserves_inbound(
     assert streamed == ""
     assert terminal["status"] == "failed"
     assert terminal["error_class"] == "RuntimeError"
+    assert terminal["error_message"] == "boom"
     status, conversation_id = await _turn_row(turn_id)
     assert status == "failed"
     async with workspace_tx() as connection:
@@ -711,6 +724,63 @@ async def test_cancel_commits_terminal_while_model_runs(surface: AsyncClient) ->
     assert terminal["status"] == "cancelled"
     status, _ = await _turn_row(turn_id)
     assert status == "cancelled"
+
+
+EVAL_DEADLINE_SECONDS = 1.0
+
+
+async def test_eval_settle_deadline_cancels_the_turn_before_the_runner_advances(
+    db: None, dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore]
+) -> None:
+    """A case whose model round outlives the eval driver's wait must not leak a running turn into
+    the next case: settle's deadline commits the cancelled terminal and durably cancels the DBOS
+    workflow before returning, the harness records the case as an infrastructure failure, and the
+    following case runs clean on a turn whose predecessor is already terminal."""
+    _, _, blob = dbos_runtime
+    STREAM_GATE.reset()
+    await _bootstrap()
+    async with workspace_tx() as connection:
+        workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
+        agent_id = (await connection.execute(sa.select(tables.agent.c.id))).scalar_one()
+    runtime = loop_queue._runtime
+    assert runtime is not None
+    driver = WorkspaceDriver(
+        workspace_id,
+        agent_id,
+        "be brief",
+        blob,
+        runtime.dbos,
+        poll_interval_seconds=0.05,
+        workflow_wait_seconds=EVAL_DEADLINE_SECONDS,
+    )
+    target = InProcessTarget(
+        ctx=context_for(
+            "evals",
+            frozenset(),
+            invoker=AdmissionInvoker(
+                admission=Admission(dbos=runtime.dbos, durable_surfaces=frozenset()),
+                workspace_id=workspace_id,
+            ),
+        ),
+        agent_id=agent_id,
+        conversations=driver,
+        outcome=driver,
+    )
+
+    with ws(workspace_id):
+        overdue = await target.run(CapabilityCase("deadline", "slow", exact_scorer("unused")))
+        followup = await target.run(CapabilityCase("follow-up", "ping", exact_scorer("unused")))
+
+    assert not overdue.clean
+    assert overdue.failure_reason == "turn produced no terminal transcript"
+    assert overdue.trajectory is not None
+    assert overdue.trajectory.turn_id is not None
+    assert overdue.trajectory.status == "cancelled"
+    status, _ = await _turn_row(str(overdue.trajectory.turn_id))
+    assert status == "cancelled"
+    handle = await runtime.dbos.retrieve_workflow_async(str(overdue.trajectory.turn_id))
+    assert (await handle.get_status()).status == "CANCELLED"
+    assert followup.clean
 
 
 async def test_foreign_token_cannot_reach_the_turn(surface: AsyncClient) -> None:
@@ -851,7 +921,47 @@ async def test_empty_response_twice_fails_loud(surface: AsyncClient) -> None:
     assert streamed == ""
     assert terminal["status"] == "failed"
     assert terminal["error_class"] == "RuntimeError"
+    assert terminal["error_message"] == "model returned an empty response twice"
     assert terminal["tokens"] == 10
+
+
+async def test_truncated_response_fails_durably_and_round_trips_through_dbos(
+    surface: AsyncClient, dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore]
+) -> None:
+    """A stream dying at max_tokens leaves ONE durable failed terminal carrying the provider's
+    error class AND message, and the workflow error DBOS pickled reconstructs through a client
+    handle — the eval driver's retrieval leg — instead of failing deserialization."""
+    config, _, _ = dbos_runtime
+    headers = await _bootstrap()
+    turn_id = (await surface.post("/v1/chat", content=b"truncate", headers=headers)).json()[
+        "turn_id"
+    ]
+    _, terminal = await _consume(surface, headers, turn_id)
+    assert terminal["status"] == "failed"
+    assert terminal["error_class"] == "ModelResponseTruncated"
+    assert terminal["error_message"] == TRUNCATION_MESSAGE
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.turn.c.status, tables.turn.c.terminal).where(
+                    tables.turn.c.id == UUID(turn_id)
+                )
+            )
+        ).one()
+    assert row.status == "failed"
+    durable = TerminalFrame.model_validate(row.terminal)
+    assert durable.error_class == "ModelResponseTruncated"
+    assert durable.error_message == TRUNCATION_MESSAGE
+    client = DBOSClient(system_database_url=config.database.system_url)
+    try:
+        handle = await client.retrieve_workflow_async(turn_id)
+        with pytest.raises(ModelStreamError) as caught:
+            async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+                await handle.get_result(polling_interval_sec=0.05)
+    finally:
+        client.destroy()
+    assert caught.value.model_error_class == "ModelResponseTruncated"
+    assert str(caught.value) == f"ModelResponseTruncated: {TRUNCATION_MESSAGE}"
 
 
 async def test_concurrent_admissions_land_every_message_once(surface: AsyncClient) -> None:

@@ -125,6 +125,7 @@ class TerminalFrame(BaseModel):
     status: TerminalStatus
     text: str = ""
     error_class: str | None = None
+    error_message: str | None = None
     tokens: int = 0
     cost_micro_usd: int = 0
     cache_percent: int = Field(default=0, ge=0, le=100)

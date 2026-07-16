@@ -1,5 +1,6 @@
 import asyncio
 import json
+import pickle
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -12,6 +13,7 @@ from cryptography.fernet import Fernet
 from opentelemetry import trace
 from pydantic import BaseModel
 
+from ufo.accounting import record_turn_usage
 from ufo.blob import FilesystemBlobStore
 from ufo.connectors import ConnectorRegistry
 from ufo.credentials import CredentialRequests, CredentialStore, open_credential_request
@@ -40,6 +42,7 @@ from ufo.loop.engine import (
     UNTRUSTED_RESULT_NOTICE,
     UNTRUSTED_RESULT_OPEN,
     Arrival,
+    ModelStreamError,
     TurnEngine,
     TurnParked,
     _bounded,
@@ -1912,6 +1915,17 @@ async def _unavailable_tool(ctx: ToolContext, args: object) -> ToolResult:
     raise RuntimeError("never dispatched in the segmentation test")
 
 
+def test_model_stream_error_survives_a_pickle_round_trip() -> None:
+    """DBOS persists a failed workflow's exception as a pickle and reconstructs it as
+    `cls(*args)` on retrieval — the exact round-trip a failed turn's error takes before an eval
+    driver or client handle re-raises it."""
+    revived = pickle.loads(pickle.dumps(ModelStreamError("APIStatusError", "boom")))
+    assert type(revived) is ModelStreamError
+    assert revived.model_error_class == "APIStatusError"
+    assert revived.model_error_message == "boom"
+    assert str(revived) == "APIStatusError: boom"
+
+
 class TwoUnsafeToolModel:
     """Round one calls the probe tool twice; round two answers — so a test can prove default
     (not parallel-safe) calls never overlap and still run in call order."""
@@ -1983,3 +1997,29 @@ async def test_resolve_unclaimed_republishes_the_committed_terminal(
         for message in stored.messages
         if isinstance(message.content, str)
     ] == ["hi"]
+
+
+async def test_commit_retries_a_transient_failure_and_keeps_the_error(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A database failure during the terminal commit delays it rather than losing it, and the
+    retry re-enters the commit with the turn's own failing exception still bound, so the durable
+    frame carries the provider's error class and message."""
+    turn = await _seed_turn("running", None)
+    engine = _engine(turn, object(), tmp_path)
+    outages = [sa.exc.OperationalError("insert", None, Exception("db outage"))]
+
+    async def flaky_record_turn_usage(*args: object, **kwargs: object) -> None:
+        if outages:
+            raise outages.pop()
+        await record_turn_usage(*args, **kwargs)
+
+    monkeypatch.setattr("ufo.loop.engine.record_turn_usage", flaky_record_turn_usage)
+    with ws(turn.workspace_id):
+        async with asyncio.timeout(10):
+            frame = await engine._commit(
+                "failed", [], error=ModelStreamError("APIStatusError", "boom")
+            )
+    assert frame is not None
+    assert frame.error_class == "APIStatusError"
+    assert frame.error_message == "boom"

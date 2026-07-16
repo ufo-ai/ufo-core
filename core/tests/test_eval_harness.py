@@ -323,6 +323,68 @@ class MissingDbos:
         raise dbos_error.DBOSNonExistentWorkflowError("target", workflow_id)
 
 
+@dataclass(frozen=True)
+class StalledHandle:
+    """A workflow that never finishes within the driver's wait."""
+
+    async def get_result(self, polling_interval_sec: float) -> object:
+        await asyncio.Event().wait()
+        return None
+
+
+@dataclass
+class CancellingDbos:
+    cancelled: list[str] = field(default_factory=list)
+
+    async def retrieve_workflow_async(self, workflow_id: str) -> object:
+        return StalledHandle()
+
+    async def cancel_workflow_async(self, workflow_id: str) -> None:
+        self.cancelled.append(workflow_id)
+
+
+@dataclass(frozen=True)
+class FinishingHandle:
+    """A workflow whose turn commits its own done terminal in the same instant the wait's deadline
+    fires — the raised TimeoutError is that deadline, landing deterministically after the
+    commit."""
+
+    blob: FilesystemBlobStore
+    conversation_id: UUID
+    turn_id: UUID
+
+    async def get_result(self, polling_interval_sec: float) -> object:
+        await self.blob.put(
+            transcript_key(self.conversation_id),
+            encode(Conversation(seq=1, messages=_research_transcript())),
+        )
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.turn)
+                .values(
+                    status="done",
+                    terminal={"status": "done", "text": "Done.", "model": MODEL},
+                    updated_at=sa.func.now(),
+                )
+                .where(tables.turn.c.id == self.turn_id)
+            )
+        raise TimeoutError
+
+    async def get_status(self) -> SimpleNamespace:
+        return SimpleNamespace(status="PENDING")
+
+
+@dataclass(frozen=True)
+class FinishingDbos:
+    handle: FinishingHandle
+
+    async def retrieve_workflow_async(self, workflow_id: str) -> object:
+        return self.handle
+
+    async def cancel_workflow_async(self, workflow_id: str) -> None:
+        raise AssertionError("a turn that reached its own terminal must not be cancelled")
+
+
 @dataclass
 class FencedJudge:
     async def complete(self, system: str, messages: tuple[Message, ...]) -> str:
@@ -1619,6 +1681,95 @@ async def test_workspace_driver_waits_when_a_queued_workflow_does_not_exist(
 
     assert trajectory is not None
     assert trajectory.messages == _research_transcript()
+
+
+async def _seed_running_turn(workspace_id: UUID, agent_id: UUID, conversation_id: UUID) -> UUID:
+    turn_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="running",
+                inbound="test",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return turn_id
+
+
+async def test_workspace_driver_deadline_cancels_a_running_turn(db: None, tmp_path) -> None:
+    """A wait that reaches its deadline ends the turn instead of abandoning it: settle commits the
+    cancelled terminal and durably requests DBOS cancellation before returning None, so a runner
+    advancing on that None never overlaps a still-running predecessor."""
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    conversation_id = await DbConversations(workspace_id).open("overdue")
+    turn_id = await _seed_running_turn(workspace_id, agent_id, conversation_id)
+    dbos = CancellingDbos()
+    driver = WorkspaceDriver(
+        workspace_id,
+        agent_id,
+        PROMPT,
+        FilesystemBlobStore(root=tmp_path),
+        cast(DBOSClient, dbos),
+        poll_interval_seconds=0.001,
+        workflow_wait_seconds=0.05,
+    )
+
+    with ws(workspace_id):
+        settled = await driver.settle(conversation_id, turn_id)
+
+    assert settled is None
+    assert dbos.cancelled == [str(turn_id)]
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.turn.c.status, tables.turn.c.terminal).where(
+                    tables.turn.c.id == turn_id
+                )
+            )
+        ).one()
+    assert row.status == "cancelled"
+    assert row.terminal["status"] == "cancelled"
+
+
+async def test_workspace_driver_deadline_race_settles_the_turns_own_terminal(
+    db: None, tmp_path
+) -> None:
+    """The deadline can fire in the same instant the turn commits done: the guarded cancel matches
+    nothing, no workflow cancellation is requested, and settle returns the finished trajectory."""
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    conversation_id = await DbConversations(workspace_id).open("photo-finish")
+    turn_id = await _seed_running_turn(workspace_id, agent_id, conversation_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    dbos = FinishingDbos(FinishingHandle(blob, conversation_id, turn_id))
+    driver = WorkspaceDriver(
+        workspace_id,
+        agent_id,
+        PROMPT,
+        blob,
+        cast(DBOSClient, dbos),
+        poll_interval_seconds=0.001,
+    )
+
+    with ws(workspace_id):
+        settled = await driver.settle(conversation_id, turn_id)
+
+    assert settled is not None
+    assert settled.messages == _research_transcript()
+    async with workspace_tx() as connection:
+        status = (
+            await connection.execute(
+                sa.select(tables.turn.c.status).where(tables.turn.c.id == turn_id)
+            )
+        ).scalar_one()
+    assert status == "done"
 
 
 async def test_workspace_driver_rejects_an_unknown_member_key(db: None, tmp_path) -> None:

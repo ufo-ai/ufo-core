@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 
+import click
 import httpx
 import pytest
 
@@ -178,6 +179,24 @@ def test_cancelled_erases_pending_meter() -> None:
     display.tick(1000, 5000)
     display.terminal({"status": "cancelled", "text": "stopped by user"})
     assert screen(buffer.getvalue()) == ["stopped by user", ""]
+
+
+def test_failed_terminal_reports_error_class_and_message() -> None:
+    display = tty_display(io.StringIO())
+    frame = {
+        "status": "failed",
+        "error_class": "ModelResponseTruncated",
+        "error_message": "Anthropic completion truncated at the max_tokens budget",
+    }
+    with pytest.raises(click.ClickException) as failure:
+        display.terminal(frame)
+    assert failure.value.message == (
+        "turn failed: ModelResponseTruncated — "
+        "Anthropic completion truncated at the max_tokens budget"
+    )
+    with pytest.raises(click.ClickException) as bare:
+        display.terminal({"status": "failed", "error_class": "RuntimeError"})
+    assert bare.value.message == "turn failed: RuntimeError"
 
 
 def test_load_dotenv_fills_unset_vars_without_overriding(

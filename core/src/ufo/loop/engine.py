@@ -120,6 +120,7 @@ TRANSCRIPT_WRITE_ATTEMPTS = 3
 TRANSCRIPT_WRITE_RETRY_SECONDS = 0.5
 COMMIT_RETRY_INITIAL_SECONDS = 1.0
 COMMIT_RETRY_MAX_SECONDS = 30.0
+TERMINAL_ERROR_MESSAGE_MAX_CHARS = 2_000
 SKILL_LOAD_TOOL = "load_skill"
 ASK_USER_TOOL = "ask_user"
 REQUEST_CREDENTIALS_TOOL = "request_credentials"
@@ -312,11 +313,26 @@ class DispatchResult(BaseModel):
 class ModelStreamError(Exception):
     """A model stream that raised mid-round, re-raised by the caller once the round's usage is
     accumulated so a failed turn bills the partial burn and the terminal records the model's own
-    error class. The message re-embeds that class so context-overflow detection still matches."""
+    error class and message. `args` carries both parts, so the pickle DBOS persists for a failed
+    workflow reconstructs the exception on retrieval; str() re-embeds the class so context-overflow
+    detection still matches."""
 
     def __init__(self, error_class: str, message: str) -> None:
-        super().__init__(f"{error_class}: {message}")
-        self.model_error_class = error_class
+        super().__init__(error_class, message)
+
+    def __str__(self) -> str:
+        error_class, message = self.args
+        return f"{error_class}: {message}"
+
+    @property
+    def model_error_class(self) -> str:
+        error_class, _ = self.args
+        return error_class
+
+    @property
+    def model_error_message(self) -> str:
+        _, message = self.args
+        return message
 
 
 class TurnParked(Exception):
@@ -660,12 +676,7 @@ class TurnEngine:
                 await self._persist_inbound(tuple(arrival_log))
                 raise
             except Exception as error:
-                match error:
-                    case ModelStreamError():
-                        error_class = error.model_error_class
-                    case _:
-                        error_class = type(error).__name__
-                await self._commit("failed", usage_events, error_class=error_class)
+                await self._commit("failed", usage_events, error=error)
                 await self._release_unabsorbed(tuple(absorbed_ids))
                 await self._persist_inbound(tuple(arrival_log))
                 raise
@@ -1248,7 +1259,7 @@ class TurnEngine:
         status: TerminalStatus,
         usage_events: list[Usage],
         answer: str = "",
-        error_class: str | None = None,
+        error: BaseException | None = None,
         question: AskUserInput | None = None,
         credential_request: CredentialRequest | None = None,
         connect_request: ConnectRequest | None = None,
@@ -1267,7 +1278,7 @@ class TurnEngine:
                     status,
                     usage_events,
                     answer,
-                    error_class,
+                    error,
                     question,
                     credential_request,
                     connect_request,
@@ -1275,11 +1286,11 @@ class TurnEngine:
                     absorbed,
                 )
                 break
-            except Exception as error:
+            except Exception as commit_error:
                 log(
                     "turn.commit_retry",
                     turn_id=str(self.turn.id),
-                    error_class=type(error).__name__,
+                    error_class=type(commit_error).__name__,
                 )
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, COMMIT_RETRY_MAX_SECONDS)
@@ -1295,7 +1306,7 @@ class TurnEngine:
         status: TerminalStatus,
         usage_events: list[Usage],
         answer: str,
-        error_class: str | None,
+        error: BaseException | None,
         question: AskUserInput | None,
         credential_request: CredentialRequest | None,
         connect_request: ConnectRequest | None,
@@ -1340,10 +1351,24 @@ class TurnEngine:
             cost = await read_turn_cost(connection, self.turn.id)
             tokens, micro_usd, model = cost if cost is not None else (0, 0, "")
             prompt_tokens = usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens
+            match error:
+                case None:
+                    error_class = error_message = None
+                case ModelStreamError():
+                    error_class = error.model_error_class
+                    error_message = error.model_error_message
+                case _:
+                    error_class = type(error).__name__
+                    error_message = str(error)
             frame = TerminalFrame(
                 status=status,
                 text=answer,
                 error_class=error_class,
+                error_message=(
+                    error_message[:TERMINAL_ERROR_MESSAGE_MAX_CHARS]
+                    if error_message is not None
+                    else None
+                ),
                 tokens=tokens,
                 cost_micro_usd=micro_usd,
                 cache_percent=(

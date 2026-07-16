@@ -4,7 +4,9 @@ opening a fresh conversation per case and awaiting an admitted turn's terminal t
 reaching the workspace's own rows and blob store, and it builds the ExtensionContext bound to the
 shared admission invoker (the same producer every surface and job admits through). Enqueuing needs a
 running serve to drain the turn queue; the driver awaits a queued or running durable workflow, then
-reads the terminal row and its exact-sequence transcript."""
+reads the terminal row and its exact-sequence transcript. A wait that reaches its deadline cancels
+the turn — cancelled terminal committed, DBOS workflow durably cancelled — so the runner never
+advances over a still-running predecessor."""
 
 from __future__ import annotations
 
@@ -24,6 +26,7 @@ from ufo.ext.context import Trajectory
 from ufo.ext.surface import workspace_key
 from ufo.governance import prompt_digest
 from ufo.schema import tables
+from ufo.schema.records import TerminalFrame
 from ufo.sdk.models import Message
 from ufo.transcript import Conversation, TranscriptDecodeError, decode, encode, transcript_key
 from ufo.workspace import ws
@@ -182,6 +185,38 @@ class WorkspaceDriver:
                     if workflow.status not in FAILED_WORKFLOW_STATUSES:
                         raise
         except TimeoutError:
+            return await self._cancel_overdue(conversation_id, turn_id)
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(tables.turn.c.status, tables.turn.c.seq).where(
+                        tables.turn.c.id == turn_id
+                    )
+                )
+            ).one_or_none()
+        if row is None or row.status not in TERMINAL_STATUSES:
+            return None
+        return await self._trajectory(conversation_id, row.seq)
+
+    async def _cancel_overdue(self, conversation_id: UUID, turn_id: UUID) -> Trajectory | None:
+        """The wait's deadline fired: terminalize the turn before the runner advances. The
+        canceller commits the cancelled terminal (the same pattern as the surface cancel endpoint;
+        the engine's terminal commits guard on a queued/running row and can no longer overwrite
+        it), then durably cancels the DBOS workflow — dequeuing a queued run and preempting a
+        streaming model round. A turn that reached its own terminal in the race settles normally."""
+        frame = TerminalFrame(status="cancelled")
+        async with workspace_tx() as connection:
+            cancelled = await connection.execute(
+                sa.update(tables.turn)
+                .values(
+                    status="cancelled",
+                    terminal=frame.model_dump(mode="json"),
+                    updated_at=sa.func.now(),
+                )
+                .where(tables.turn.c.id == turn_id, tables.turn.c.status.in_(WORKFLOW_STATUSES))
+            )
+        if cancelled.rowcount == 1:
+            await self.dbos.cancel_workflow_async(str(turn_id))
             return None
         async with workspace_tx() as connection:
             row = (

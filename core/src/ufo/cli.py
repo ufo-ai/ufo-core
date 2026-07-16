@@ -390,7 +390,10 @@ class _TurnDisplay:
             case "cancelled":
                 click.echo(frame.get("text") or "(cancelled)", file=self.out)
             case _:
-                raise click.ClickException(f"turn failed: {frame['error_class']}")
+                failure = f"turn failed: {frame['error_class']}"
+                if frame.get("error_message"):
+                    failure += f" — {frame['error_message']}"
+                raise click.ClickException(failure)
 
     def _erase_meter(self) -> None:
         if not self.meter:
