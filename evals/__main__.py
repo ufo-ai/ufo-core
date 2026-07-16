@@ -59,6 +59,14 @@ from evals.harness.viewer import (
     write_viewer,
 )
 from evals.hle_gold.runner import HLEGoldRun, load_hle_gold
+from evals.jobbench.runner import (
+    JOBBENCH_PACKS,
+    SUBMISSIONS_ROOT,
+    load_boundary,
+)
+from evals.jobbench.runner import (
+    WORKFLOW_WAIT_SECONDS as JOBBENCH_WORKFLOW_WAIT_SECONDS,
+)
 from evals.mcp_atlas_100.runner import load_mcp_atlas_task
 from evals.mcp_atlas_100.target import McpAtlasTarget
 from evals.memory_100.runner import Memory100Run, load_memory_100
@@ -128,6 +136,14 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--gdpval-100", type=Path, metavar="SNAPSHOT")
     parser.add_argument("--gdpval-treatment", choices=TREATMENTS)
     parser.add_argument("--gdpval-task", action="append", default=[], metavar="TASK_ID")
+    parser.add_argument("--jobbench", type=Path, metavar="SNAPSHOT")
+    parser.add_argument("--jobbench-case", action="append", default=[], metavar="CASE_ID")
+    parser.add_argument(
+        "--jobbench-submissions",
+        type=Path,
+        default=SUBMISSIONS_ROOT,
+        help="folder that captures each case's share_file deliverables for offline grading",
+    )
     parser.add_argument(
         "--mcp-atlas-data",
         type=Path,
@@ -160,12 +176,15 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--gdpval-100 and --gdpval-treatment must be provided together")
     if args.gdpval_task and args.gdpval_100 is None:
         parser.error("--gdpval-task requires --gdpval-100")
+    if args.jobbench_case and args.jobbench is None:
+        parser.error("--jobbench-case requires --jobbench")
     requested_runs = sum(
         source is not None
         for source in (
             args.memory_100,
             args.dsqa_100,
             args.gdpval_100,
+            args.jobbench,
             args.hle_gold,
             args.compaction,
         )
@@ -192,12 +211,18 @@ def main(argv: list[str] | None = None) -> None:
             if args.gdpval_100 is not None and args.gdpval_treatment is not None
             else None
         )
+        jobbench_tasks = (
+            load_boundary(args.jobbench, tuple(args.jobbench_case), args.jobbench_submissions)
+            if args.jobbench is not None
+            else None
+        )
         tasks = _tasks(
             names,
             memory_run,
             dsqa_run,
             compaction_run,
             gdpval_run,
+            jobbench_tasks,
             args.mcp_atlas_data,
             args.mcp_atlas_samples,
             hle_run,
@@ -284,6 +309,10 @@ def main(argv: list[str] | None = None) -> None:
             f"GDPval treatment {gdpval_run.treatment!r} requires [pack] name = "
             f"{gdpval_run.treatment!r}, found {config.pack.name!r}"
         )
+    if jobbench_tasks is not None and config.pack.name not in JOBBENCH_PACKS:
+        parser.error(
+            f"jobbench requires [pack] name in {JOBBENCH_PACKS}, found {config.pack.name!r}"
+        )
     workspace_id = args.workspace
     if memory_run is not None:
         if workspace_id is not None and workspace_id != memory_run.readiness.workspace_id:
@@ -298,6 +327,11 @@ def main(argv: list[str] | None = None) -> None:
             MEMORY_RECALL_EVENT,
         )
     )
+    workflow_wait_seconds = WORKFLOW_WAIT_SECONDS
+    if gdpval_run is not None:
+        workflow_wait_seconds = GDPVAL_WORKFLOW_WAIT_SECONDS
+    if jobbench_tasks is not None:
+        workflow_wait_seconds = JOBBENCH_WORKFLOW_WAIT_SECONDS
     reports, agent_prompt = asyncio.run(
         _run(
             config,
@@ -305,7 +339,7 @@ def main(argv: list[str] | None = None) -> None:
             args.agent,
             workspace_id,
             collector,
-            GDPVAL_WORKFLOW_WAIT_SECONDS if gdpval_run is not None else WORKFLOW_WAIT_SECONDS,
+            workflow_wait_seconds,
             args.mcp_atlas_url,
             args.mcp_atlas_external_url,
         )
@@ -557,6 +591,7 @@ def _tasks(
     dsqa_run: DSQA100Run | None = None,
     compaction_run: CompactionRun | None = None,
     gdpval_run: GDPvalCalibration | None = None,
+    jobbench_tasks: tuple[EvalTask, ...] | None = None,
     mcp_atlas_data: Path | None = None,
     mcp_atlas_samples: int | None = None,
     hle_run: HLEGoldRun | None = None,
@@ -565,6 +600,8 @@ def _tasks(
         return selected_tasks(hle_run.tasks, names)
     if gdpval_run is not None:
         return selected_tasks(gdpval_run.tasks, names)
+    if jobbench_tasks is not None:
+        return selected_tasks(jobbench_tasks, names)
     mcp_atlas = (
         (load_mcp_atlas_task(mcp_atlas_data, mcp_atlas_samples),)
         if mcp_atlas_data is not None

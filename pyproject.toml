@@ -93,12 +93,16 @@ ufo_testsupport = "ufo_testsupport.plugin"
 dev = [
     "pre-commit>=4.0",
     "ufo-control",
+    "mammoth>=1.8",
     "mypy>=1.13",
+    "openpyxl>=3.1",
+    "pdfplumber>=0.11",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "pytest-xdist>=3.6",
     "ruff>=0.7",
     "types-croniter>=6.2",
+    "types-openpyxl>=3.1",
     "types-protobuf>=6.30",
     "types-pyyaml>=6.0",
 ]
@@ -199,7 +203,16 @@ files = ["core/src/ufo", "extensions", "evals", "gates.py"]
 exclude = ["extensions/.*/skills/", "extensions/.*/tests/"]
 
 [[tool.mypy.overrides]]
-module = ["asyncpg", "aiobotocore.*", "botocore.*", "lz4.*", "pyarrow", "pyarrow.*"]
+module = [
+    "asyncpg",
+    "aiobotocore.*",
+    "botocore.*",
+    "lz4.*",
+    "mammoth",
+    "pdfplumber",
+    "pyarrow",
+    "pyarrow.*",
+]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
