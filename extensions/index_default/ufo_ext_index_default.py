@@ -260,7 +260,8 @@ class DefaultIndex:
                     )
                 ).mappings()
                 return tuple(_hit(row, row["score"]) for row in rows)
-            match = " ".join(f'"{term}"' for term in query.split() if term)
+            literal_terms = query.replace('"', " ").split()
+            match = " ".join(f'"{term}"' for term in literal_terms)
             if not match:
                 return ()
             rows = (

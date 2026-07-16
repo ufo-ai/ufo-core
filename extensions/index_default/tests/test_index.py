@@ -63,6 +63,45 @@ async def test_upsert_lexical_and_vector_return_ordered_hits(
     assert vector[1].score == pytest.approx(0.7071, abs=1e-2)
 
 
+PUNCTUATED_RECALL_QUERIES = (
+    "velvet, harbor.",
+    'said "velvet harbor"',
+    'she "said velvet',
+    'said"velvet harbor',
+    "velvet - harbor",
+    "(velvet) harbor",
+    "velvet AND harbor",
+)
+NO_TOKEN_QUERIES = ('"', '" "', ",")
+LITERAL_MISS_QUERIES = ('vel"vet', "NEAR(wild rumpus)", "wild*", "^wild", "title:wild", "NOT wild")
+
+
+async def test_lexical_recalls_through_punctuated_queries(
+    clean_chunk: None, database_url: str
+) -> None:
+    backend = DefaultIndex(embed=StubEmbed(vec((0, 1.0))), transaction=workspace_tx)
+    await backend.upsert(
+        (
+            Chunk(
+                "d-punct",
+                "memory_item",
+                "m1",
+                SUBJECT,
+                0,
+                "she said velvet harbor and moved on",
+                vec((0, 1.0)),
+            ),
+        )
+    )
+    for query in PUNCTUATED_RECALL_QUERIES:
+        hits = await backend.lexical(query, frozenset({SUBJECT}), "memory_item", 10)
+        assert [hit.chunk_digest for hit in hits] == ["d-punct"], query
+    for query in NO_TOKEN_QUERIES:
+        assert await backend.lexical(query, frozenset({SUBJECT}), "memory_item", 10) == (), query
+    for query in LITERAL_MISS_QUERIES:
+        assert await backend.lexical(query, frozenset({SUBJECT}), "memory_item", 10) == (), query
+
+
 async def test_foreign_subject_is_excluded(clean_chunk: None, database_url: str) -> None:
     backend = DefaultIndex(embed=StubEmbed(vec((0, 1.0))), transaction=workspace_tx)
     await backend.upsert(
