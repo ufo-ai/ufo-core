@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from typing import cast
 from uuid import UUID, uuid4
 
+import anthropic
+import httpx
 import pytest
 import sqlalchemy as sa
 
@@ -49,6 +51,7 @@ class ScriptedWorker:
     workspace_id: UUID
     replies: tuple[tuple[Message, ...], ...]
     statuses: tuple[str, ...] = ()
+    error_classes: tuple[str, ...] = ()
     invoked: int = 0
     idempotency_keys: list[str] = field(default_factory=list)
     transcript: tuple[Message, ...] = ()
@@ -60,7 +63,11 @@ class ScriptedWorker:
         self.invoked += 1
         self.idempotency_keys.append(idempotency_key)
         status = self.statuses[index] if index < len(self.statuses) else "done"
+        error_class = self.error_classes[index] if index < len(self.error_classes) else None
         turn_id = uuid4()
+        terminal = {"status": status, "text": "Done.", "model": MODEL}
+        if error_class is not None:
+            terminal["error_class"] = error_class
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.insert(tables.turn).values(
@@ -71,7 +78,7 @@ class ScriptedWorker:
                     seq=index + 1,
                     status=status,
                     inbound=message,
-                    terminal={"status": status, "text": "Done.", "model": MODEL},
+                    terminal=terminal,
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
@@ -437,7 +444,7 @@ async def test_multi_trial_case_reseeds_and_requires_every_trial(db: None, tmp_p
         )
 
     assert not result.passed
-    assert result.reason == "1/2 trials passed; first failure: no total"
+    assert result.reason == "1/2 scored trials passed; first failure: no total"
     assert seeds == [0, 1]
     assert result.evidence["selectedAttempt"] == 1
     attempts = cast(list[dict[str, object]], result.evidence["attempts"])
@@ -456,3 +463,154 @@ async def test_multi_trial_case_reseeds_and_requires_every_trial(db: None, tmp_p
 def test_zero_trials_fails_loud() -> None:
     with pytest.raises(ValueError, match="at least one trial"):
         ScenarioCase("typo", _SUM_USER, _sum_grader, trials=0)
+
+
+def test_nonpositive_tier_fails_loud() -> None:
+    with pytest.raises(ValueError, match="tier must be at least 1"):
+        ScenarioCase("typo", _SUM_USER, _sum_grader, tier=0)
+
+
+def test_is_transient_flags_provider_faults_not_real_failures() -> None:
+    from evals.harness.scenario import _is_transient
+
+    assert _is_transient("ReadTimeout")
+    assert _is_transient("ReadError")
+    assert _is_transient("OverloadedError")
+    assert _is_transient("RateLimitError")
+    assert not _is_transient("ValueError")
+    assert not _is_transient("TimeoutError")
+    assert not _is_transient("ConnectionError")
+    assert not _is_transient("OperationalError")
+    assert not _is_transient(None)
+
+
+async def _always_fail(outcome: ScenarioOutcome) -> CapabilityVerdict:
+    return CapabilityVerdict(False, "nope")
+
+
+async def test_transient_trial_is_excluded_a_real_trial_still_scores(db: None, tmp_path) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = ScriptedWorker(
+        blob,
+        workspace_id,
+        replies=(
+            (Message(role="assistant", content="..."),),
+            (Message(role="assistant", content="answer"),),
+        ),
+        statuses=("failed", "done"),
+        error_classes=("ReadTimeout",),
+    )
+    member = ScriptedMember(("first ask", "second ask", STOP_TOKEN))
+    case = ScenarioCase("mixed", _SUM_USER, _always_fail, max_turns=2, trials=2)
+
+    with ws(workspace_id):
+        result = await run_scenario_case(
+            case, _target(workspace_id, agent_id, blob, worker, member)
+        )
+
+    assert not result.passed
+    assert not result.excluded
+    assert result.evidence["excludedTrials"] == 1
+    assert "infra-excluded" in result.reason
+    attempts = cast(list[dict[str, object]], result.evidence["attempts"])
+    assert [a["infra"] for a in attempts] == [True, False]
+
+
+async def test_all_transient_trials_exclude_the_case(db: None, tmp_path) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = ScriptedWorker(
+        blob,
+        workspace_id,
+        replies=(
+            (Message(role="assistant", content="..."),),
+            (Message(role="assistant", content="..."),),
+        ),
+        statuses=("failed", "failed"),
+        error_classes=("ReadTimeout", "ReadError"),
+    )
+    member = ScriptedMember(("first ask", "second ask"))
+    case = ScenarioCase("all-infra", _SUM_USER, _sum_grader, max_turns=2, trials=2)
+
+    with ws(workspace_id):
+        result = await run_scenario_case(
+            case, _target(workspace_id, agent_id, blob, worker, member)
+        )
+
+    assert result.excluded
+    assert not result.passed
+    assert "all 2 trial(s) infra-excluded" in result.reason
+
+
+async def test_nontransient_turn_failure_counts_as_a_real_failure(db: None, tmp_path) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = ScriptedWorker(
+        blob,
+        workspace_id,
+        replies=((Message(role="assistant", content="..."),),),
+        statuses=("failed",),
+        error_classes=("ValueError",),
+    )
+    member = ScriptedMember(("ask",))
+    case = ScenarioCase("real-fail", _SUM_USER, _sum_grader, max_turns=2)
+
+    with ws(workspace_id):
+        result = await run_scenario_case(
+            case, _target(workspace_id, agent_id, blob, worker, member)
+        )
+
+    assert not result.passed
+    assert not result.excluded
+    assert result.evidence["excludedTrials"] == 0
+
+
+@dataclass
+class RaisingMember:
+    """A simulator leg that raises on its first call — stands in for a transient provider fault
+    (or a genuine bug) hitting the member simulation."""
+
+    error: Exception
+
+    async def complete(self, system: str, messages: tuple[Message, ...]) -> str:
+        raise self.error
+
+
+async def test_transient_simulator_failure_excludes_the_trial(db: None, tmp_path) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = ScriptedWorker(blob, workspace_id, replies=())
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    overloaded = anthropic.OverloadedError(
+        "Overloaded", response=httpx.Response(529, request=request), body=None
+    )
+    member = RaisingMember(overloaded)
+    case = ScenarioCase("sim-overload", _SUM_USER, _sum_grader, max_turns=3)
+
+    with ws(workspace_id):
+        result = await run_scenario_case(
+            case, _target(workspace_id, agent_id, blob, member, member)
+        )
+
+    assert result.excluded
+    assert not result.passed
+    assert worker.invoked == 0
+    assert "infra-excluded" in result.reason
+
+
+async def test_genuine_simulator_error_propagates(db: None, tmp_path) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = ScriptedWorker(blob, workspace_id, replies=())
+    member = RaisingMember(ValueError("a real bug in the simulator"))
+    case = ScenarioCase("sim-bug", _SUM_USER, _sum_grader, max_turns=3)
+
+    with ws(workspace_id):
+        with pytest.raises(ValueError, match="a real bug"):
+            await run_scenario_case(case, _target(workspace_id, agent_id, blob, worker, member))

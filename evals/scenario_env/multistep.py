@@ -4,8 +4,6 @@ tool order reaching that state accepted."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 from evals.harness.capability import CapabilityVerdict, DescribedGrader
 from evals.harness.scenario import ScenarioCase, ScenarioOutcome, ScenarioUser
 from evals.scenario_env.office import (
@@ -14,6 +12,8 @@ from evals.scenario_env.office import (
     MARA,
     PRIYA,
     SYNC_NEW_DATE,
+    THURSDAY,
+    WEDNESDAY,
     WEEKLY_SYNC_DATE,
     email_text,
     live_events,
@@ -22,15 +22,15 @@ from evals.scenario_env.office import (
 )
 from ufo.workspace import ws_current
 
-INTERVIEW_DATE = datetime(2026, 7, 23, tzinfo=UTC).date()
-ONE_ON_ONE_DATE = datetime(2026, 7, 22, tzinfo=UTC).date()
+INTERVIEW_DATE = THURSDAY
+ONE_ON_ONE_DATE = WEDNESDAY
 
 
 async def _graded_reschedule_and_notify(outcome: ScenarioOutcome) -> CapabilityVerdict:
     workspace_id = ws_current().workspace_id
     syncs = await live_events(workspace_id, "design sync")
     if not any(event.start_at.date() == SYNC_NEW_DATE for event in syncs):
-        return CapabilityVerdict(False, "no live Design sync lands on July 24")
+        return CapabilityVerdict(False, "no live Design sync lands on next Friday")
     if any(event.start_at.date() == WEEKLY_SYNC_DATE for event in syncs):
         return CapabilityVerdict(False, "the original Thursday Design sync is still live")
     sent = await sent_rows(workspace_id)
@@ -38,11 +38,11 @@ async def _graded_reschedule_and_notify(outcome: ScenarioOutcome) -> CapabilityV
     if len(to_mara) != 1:
         return CapabilityVerdict(False, f"expected exactly one email to Mara, found {len(to_mara)}")
     text = email_text(to_mara[0])
-    if "friday" not in text and "july 24" not in text:
+    if "friday" not in text:
         return CapabilityVerdict(False, "Mara's email never mentions the new day")
     if not outcome.stopped:
         return CapabilityVerdict(False, "the member never signalled satisfaction")
-    return CapabilityVerdict(True, "Design sync moved to July 24 and Mara notified once")
+    return CapabilityVerdict(True, "Design sync moved to next Friday and Mara notified once")
 
 
 async def _graded_interview_prep(outcome: ScenarioOutcome) -> CapabilityVerdict:
@@ -53,12 +53,12 @@ async def _graded_interview_prep(outcome: ScenarioOutcome) -> CapabilityVerdict:
         if event.start_at.date() == INTERVIEW_DATE
     ]
     if not preps:
-        return CapabilityVerdict(False, "no live prep block lands on July 23")
+        return CapabilityVerdict(False, "no live prep block lands on next Thursday")
     if not await live_events(workspace_id, "Interview: Jordan Lee"):
         return CapabilityVerdict(False, "the interview itself is no longer live")
     if not outcome.stopped:
         return CapabilityVerdict(False, "the member never signalled satisfaction")
-    return CapabilityVerdict(True, "prep block sits on July 23 with the interview intact")
+    return CapabilityVerdict(True, "prep block sits on next Thursday with the interview intact")
 
 
 async def _graded_budget_summary_to_priya(outcome: ScenarioOutcome) -> CapabilityVerdict:
@@ -118,47 +118,49 @@ CASES = (
                 "You need your weekly Design sync moved to a new time and the attendee told."
             ),
             known_info=(
-                "The weekly Design sync is on Thursday July 23 at 2pm. Mara (mara@evalco.test) "
-                "attends. It must move to Friday July 24 at 3pm, still one hour long."
+                "The weekly Design sync is on next Thursday at 2pm. Mara (mara@evalco.test) "
+                "attends. It must move to next Friday at 3pm, still one hour long."
             ),
             task_instructions=(
-                "Ask the assistant to move the weekly Design sync (the Thursday July 23 one) to "
-                "Friday July 24 at 3pm and to email Mara the new time. Answer questions from "
+                "Ask the assistant to move the weekly Design sync (the next Thursday one) to "
+                "next Friday at 3pm and to email Mara the new time. Answer questions from "
                 "what you know. Once both are done, you are satisfied."
             ),
         ),
         DescribedGrader(
-            "the Design sync moves off Thursday onto Friday July 24, exactly one email tells "
+            "the Design sync moves off Thursday onto next Friday, exactly one email tells "
             "Mara the new day, and the member ends satisfied",
             _graded_reschedule_and_notify,
         ),
         max_turns=8,
         digest_tag="env:reschedule-and-notify",
         seed=seed_office,
+        tier=3,
     ),
     ScenarioCase(
         "interview-prep-block",
         ScenarioUser(
             reason_for_call="You want prep time blocked right before your Thursday interview.",
             known_info=(
-                "You have an interview on your calendar on Thursday July 23; you want a "
+                "You have an interview on your calendar on next Thursday; you want a "
                 "30-minute 'Interview prep' block immediately before it."
             ),
             unknown_info="You do not remember the interview's exact start time.",
             task_instructions=(
-                "Ask the assistant to find Thursday July 23's interview and block 30 minutes of "
+                "Ask the assistant to find next Thursday's interview and block 30 minutes of "
                 "Interview prep right before it. Once it confirms the block exists, you are "
                 "satisfied."
             ),
         ),
         DescribedGrader(
-            "a live prep block lands on July 23 with the Jordan Lee interview intact, and the "
-            "member ends satisfied",
+            "a live prep block lands on next Thursday with the Jordan Lee interview intact, and "
+            "the member ends satisfied",
             _graded_interview_prep,
         ),
         max_turns=6,
         digest_tag="env:interview-prep-block",
         seed=seed_office,
+        tier=2,
     ),
     ScenarioCase(
         "budget-summary-to-priya",
@@ -181,13 +183,14 @@ CASES = (
         max_turns=6,
         digest_tag="env:budget-summary-to-priya",
         seed=seed_office,
+        tier=2,
     ),
     ScenarioCase(
         "cancel-and-inform",
         ScenarioUser(
             reason_for_call="You need Wednesday's 1:1 cancelled and Priya told.",
             known_info=(
-                "Your 1:1 with Priya is on Wednesday July 22. Priya's address is priya@evalco.test."
+                "Your 1:1 with Priya is on next Wednesday. Priya's address is priya@evalco.test."
             ),
             task_instructions=(
                 "Ask the assistant to cancel Wednesday's 1:1 with Priya and email her an apology "
@@ -202,13 +205,14 @@ CASES = (
         max_turns=8,
         digest_tag="env:cancel-and-inform",
         seed=seed_office,
+        tier=2,
     ),
     ScenarioCase(
         "all-hands-agenda",
         ScenarioUser(
             reason_for_call="You want Friday's All hands attendees emailed the agenda.",
             known_info=(
-                "The All hands is on your calendar for Friday July 24. The agenda: Q3 numbers "
+                "The All hands is on your calendar for next Friday. The agenda: Q3 numbers "
                 "and the Project Bluefin kickoff."
             ),
             unknown_info="You do not remember who is invited — the assistant should look.",
@@ -226,5 +230,6 @@ CASES = (
         max_turns=8,
         digest_tag="env:all-hands-agenda",
         seed=seed_office,
+        tier=3,
     ),
 )

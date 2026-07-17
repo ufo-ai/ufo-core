@@ -72,6 +72,7 @@ class TargetResult:
     output: CapabilityOutput
     clean: bool
     failure_reason: str = ""
+    error_class: str | None = None
     trajectory: EvalTrajectory | None = None
 
 
@@ -90,7 +91,7 @@ def _invoke_failure(conversation_id: UUID, error: Exception) -> TargetResult:
         CapabilityOutput("", (), (message,)),
         False,
         f"invoke raised: {message}",
-        EvalTrajectory(
+        trajectory=EvalTrajectory(
             conversation_id=conversation_id,
             turn_id=None,
             status=None,
@@ -239,7 +240,7 @@ class InProcessTarget:
                     CapabilityOutput("", (), (), tokens=tokens, cost_micro_usd=cost_micro_usd),
                     False,
                     "turn produced no terminal transcript",
-                    EvalTrajectory(
+                    trajectory=EvalTrajectory(
                         conversation_id=conversation_id,
                         turn_id=turn_id,
                         status=await self._turn_status(turn_id),
@@ -263,8 +264,16 @@ class InProcessTarget:
             )
         turn_failure = self._turn_failure(status)
         if turn_failure:
+            error_class = await self._turn_error_class(turn_id)
+            reason = f"{turn_failure} ({error_class})" if error_class else turn_failure
             return _Settled(
-                TargetResult(output, clean=False, failure_reason=turn_failure, trajectory=snapshot),
+                TargetResult(
+                    output,
+                    clean=False,
+                    failure_reason=reason,
+                    error_class=error_class or None,
+                    trajectory=snapshot,
+                ),
                 descendant_ids,
             )
         return _Settled(TargetResult(output, clean=True, trajectory=snapshot), descendant_ids)
@@ -368,6 +377,20 @@ class InProcessTarget:
         if status != "done":
             return f"turn ended with status {status}"
         return ""
+
+    async def _turn_error_class(self, turn_id: UUID) -> str:
+        """The model/transport error class a failed turn recorded on its terminal frame (e.g.
+        `ReadTimeout`), so a caller can tell a transient provider fault from a real one — empty when
+        the terminal carries no error."""
+        async with workspace_tx() as connection:
+            terminal = (
+                await connection.execute(
+                    sa.select(tables.turn.c.terminal).where(tables.turn.c.id == turn_id)
+                )
+            ).scalar_one_or_none()
+        if terminal is None:
+            return ""
+        return TerminalFrame.model_validate(terminal).error_class or ""
 
     async def _shared_artifacts(self, turn_ids: tuple[UUID, ...]) -> ArtifactCollection:
         """Artifacts the run shared, from the evaluated turn and every delegated descendant — a

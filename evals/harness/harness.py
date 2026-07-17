@@ -29,6 +29,7 @@ class EvalCaseResult(BaseModel):
     reason: str
     evidence: JsonObject
     excluded: bool = False
+    tier: int | None = None
 
 
 class EvalReport(BaseModel):
@@ -78,6 +79,21 @@ class EvalReport(BaseModel):
         return sum(1 for case in scored if case.passed) / len(scored)
 
     @property
+    def tier_rates(self) -> tuple[tuple[int, int, int], ...]:
+        """(tier, passed, total) per difficulty tier over scored cases that carry one, ascending —
+        the boundary-eval signal: a suite with a difficulty gradient reads its frontier here, where
+        the top tier stays below 100% until the agent genuinely improves."""
+        tiers = sorted({case.tier for case in self.scored if case.tier is not None})
+        return tuple(
+            (
+                tier,
+                sum(1 for case in self.scored if case.tier == tier and case.passed),
+                sum(1 for case in self.scored if case.tier == tier),
+            )
+            for tier in tiers
+        )
+
+    @property
     def console_summary(self) -> str:
         passed = sum(1 for case in self.scored if case.passed)
         benchmark = ""
@@ -100,9 +116,15 @@ class EvalReport(BaseModel):
         metric_summary = ", ".join(
             f"{metric.name.replace('_', ' ')} {metric.value:.1%}" for metric in self.metrics
         )
+        tiers = self.tier_rates
+        tier_summary = (
+            " [" + ", ".join(f"T{tier} {passed}/{total}" for tier, passed, total in tiers) + "]"
+            if tiers
+            else ""
+        )
         if self.degraded_recall_count is None or self.unmapped_evidence_count is None:
             detail = f", {metric_summary}" if metric_summary else ""
-            return f"{summary}{detail} {self.digest}"
+            return f"{summary}{detail}{tier_summary} {self.digest}"
         coverage = "mapped evidence coverage n/a"
         if (
             self.mean_mapped_evidence_coverage is not None
@@ -130,12 +152,17 @@ class EvalReport(BaseModel):
             "passRate": self.pass_rate,
             "excludedCount": self.excluded_count,
             "metrics": [metric.model_dump(mode="json") for metric in self.metrics],
+            "tierRates": [
+                {"tier": tier, "passed": passed, "total": total}
+                for tier, passed, total in self.tier_rates
+            ],
             "cases": [
                 {
                     "name": case.name,
                     "passed": case.passed,
                     "excluded": case.excluded,
                     "reason": case.reason,
+                    "tier": case.tier,
                     "evidence": case.evidence,
                 }
                 for case in self.cases

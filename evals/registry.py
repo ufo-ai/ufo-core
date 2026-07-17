@@ -17,7 +17,7 @@ from evals import (
     yc_workflows,
 )
 from evals.harness.registry import EvalTask, capability_task, scenario_task, selected_tasks
-from evals.scenario_env import lookups, multistep, restraint, writes
+from evals.scenario_env import frontier, lookups, multistep, restraint, writes
 
 SEMANTIC_JUDGE_MODEL = "gpt-5.4-mini"
 SCENARIO_SIMULATOR_MODEL = "claude-haiku-4-5"
@@ -38,7 +38,14 @@ TASKS: tuple[EvalTask, ...] = (
     *DEFAULT_TASKS,
     scenario_task(
         "scenario_env",
-        (*lookups.CASES, *writes.CASES, *multistep.CASES, *restraint.CASES),
+        (
+            *lookups.CASES,
+            *writes.CASES,
+            *multistep.CASES,
+            *restraint.CASES,
+            *frontier.CONSTRAINT_CASES,
+            *frontier.CASES,
+        ),
         simulator_model=SCENARIO_SIMULATOR_MODEL,
     ),
     capability_task("yc_recall", yc_recall.CASES),

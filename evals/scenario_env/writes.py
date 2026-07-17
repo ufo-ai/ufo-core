@@ -4,7 +4,7 @@ never on which tools produced it."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import timedelta
 
 from evals.harness.capability import CapabilityVerdict, DescribedGrader
 from evals.harness.scenario import ScenarioCase, ScenarioOutcome, ScenarioUser
@@ -12,17 +12,26 @@ from evals.scenario_env.office import (
     BOB,
     DANA,
     DEEP_DIVE_DATE,
+    FRIDAY,
     MARA,
+    MONDAY,
+    MORNING_END,
+    OFFSITE_RECIPIENTS,
+    WEEK_END,
+    WEEK_START,
     WEEKLY_SYNC_DATE,
+    all_live_events,
     email_text,
     live_events,
+    overlaps,
     seed_office,
     sent_rows,
 )
 from ufo.workspace import ws_current
 
-FOCUS_DATE = datetime(2026, 7, 24, tzinfo=UTC).date()
-STANDUP_DATE = datetime(2026, 7, 20, tzinfo=UTC).date()
+FOCUS_DATE = FRIDAY
+STANDUP_DATE = MONDAY
+SYNC_MINUTES = 45
 
 
 def _sent_one(recipient: str, *fragments: str):
@@ -49,6 +58,60 @@ def _sent_one(recipient: str, *fragments: str):
     )
 
 
+async def _graded_morning_sync(outcome: ScenarioOutcome) -> CapabilityVerdict:
+    """A 45-minute sync with Bob on a free weekday morning that week: exactly one new event fits
+    the constraints, and it clashes with nothing already on the calendar. The tempting failure is
+    a slot that overlaps the 1:1, the interview, or the all-hands, or one in the afternoon."""
+    events = await all_live_events(ws_current().workspace_id)
+    candidates = [
+        event
+        for event in events
+        if BOB in event.attendees
+        and WEEK_START <= event.start_at.date() <= WEEK_END
+        and (event.end_at - event.start_at) == timedelta(minutes=SYNC_MINUTES)
+        and event.start_at.hour < MORNING_END
+        and (event.end_at.hour, event.end_at.minute) <= (MORNING_END, 0)
+    ]
+    if len(candidates) != 1:
+        return CapabilityVerdict(
+            False, f"expected one 45-min morning sync with Bob, found {len(candidates)}"
+        )
+    sync = candidates[0]
+    clash = next(
+        (
+            event
+            for event in events
+            if event.id != sync.id
+            and overlaps(sync.start_at, sync.end_at, event.start_at, event.end_at)
+        ),
+        None,
+    )
+    if clash is not None:
+        return CapabilityVerdict(False, f"the sync clashes with {clash.title!r}")
+    if not outcome.stopped:
+        return CapabilityVerdict(False, "the member never signalled satisfaction")
+    return CapabilityVerdict(
+        True, f"45-min morning sync with Bob booked clash-free at {sync.start_at.isoformat()}"
+    )
+
+
+async def _graded_reply_all(outcome: ScenarioOutcome) -> CapabilityVerdict:
+    """Reply-all minus self: exactly the offsite thread's other participants (Dana, Bob, Mara)
+    receive one email, and the member is never a recipient. The tempting failure is replying only
+    to the sender, or including the member."""
+    sent = await sent_rows(ws_current().workspace_id)
+    if len(sent) != 1:
+        return CapabilityVerdict(False, f"expected exactly one sent email, found {len(sent)}")
+    recipients = frozenset(sent[0].recipients)
+    if recipients != OFFSITE_RECIPIENTS:
+        return CapabilityVerdict(
+            False, f"recipients were {sorted(recipients)}, expected {sorted(OFFSITE_RECIPIENTS)}"
+        )
+    if not outcome.stopped:
+        return CapabilityVerdict(False, "the member never signalled satisfaction")
+    return CapabilityVerdict(True, "replied to the whole offsite thread except the member")
+
+
 async def _graded_focus_block(outcome: ScenarioOutcome) -> CapabilityVerdict:
     workspace_id = ws_current().workspace_id
     blocks = [
@@ -57,13 +120,13 @@ async def _graded_focus_block(outcome: ScenarioOutcome) -> CapabilityVerdict:
         if event.start_at.date() == FOCUS_DATE
     ]
     if not blocks:
-        return CapabilityVerdict(False, "no live focus event lands on July 24")
+        return CapabilityVerdict(False, "no live focus event lands on next Friday")
     sent = await sent_rows(workspace_id)
     if sent:
         return CapabilityVerdict(False, f"a calendar-only request sent {len(sent)} email(s)")
     if not outcome.stopped:
         return CapabilityVerdict(False, "the member never signalled satisfaction")
-    return CapabilityVerdict(True, "focus block created on July 24 with no email side effects")
+    return CapabilityVerdict(True, "focus block created on next Friday with no email side effects")
 
 
 async def _graded_cancel_deep_dive(outcome: ScenarioOutcome) -> CapabilityVerdict:
@@ -85,10 +148,10 @@ async def _graded_standup_event(outcome: ScenarioOutcome) -> CapabilityVerdict:
         if event.start_at.date() == STANDUP_DATE
     ]
     if not standups:
-        return CapabilityVerdict(False, "no live standup event lands on July 20")
+        return CapabilityVerdict(False, "no live standup event lands on next Monday")
     if not outcome.stopped:
         return CapabilityVerdict(False, "the member never signalled satisfaction")
-    return CapabilityVerdict(True, "standup on the calendar for July 20")
+    return CapabilityVerdict(True, "standup on the calendar for next Monday")
 
 
 CASES = (
@@ -109,6 +172,7 @@ CASES = (
         max_turns=5,
         digest_tag="env:send-dinner-confirmation",
         seed=seed_office,
+        tier=1,
     ),
     ScenarioCase(
         "mockup-feedback",
@@ -127,26 +191,28 @@ CASES = (
         max_turns=5,
         digest_tag="env:mockup-feedback",
         seed=seed_office,
+        tier=1,
     ),
     ScenarioCase(
         "focus-block",
         ScenarioUser(
             reason_for_call="You want a focus block on your calendar.",
-            known_info="You want 'Focus time' blocked on Friday July 24 from 1pm to 3pm.",
+            known_info="You want 'Focus time' blocked on next Friday from 1pm to 3pm.",
             task_instructions=(
-                "Ask the assistant to block Friday July 24, 1pm to 3pm, as Focus time on your "
+                "Ask the assistant to block next Friday, 1pm to 3pm, as Focus time on your "
                 "calendar. Once it confirms the block exists, you are satisfied. You did not ask "
                 "for any emails."
             ),
         ),
         DescribedGrader(
-            "a live focus event lands on Friday July 24, no email goes out, and the member "
+            "a live focus event lands on next Friday, no email goes out, and the member "
             "ends satisfied",
             _graded_focus_block,
         ),
         max_turns=5,
         digest_tag="env:focus-block",
         seed=seed_office,
+        tier=1,
     ),
     ScenarioCase(
         "cancel-deep-dive",
@@ -170,6 +236,7 @@ CASES = (
         max_turns=5,
         digest_tag="env:cancel-deep-dive",
         seed=seed_office,
+        tier=2,
     ),
     ScenarioCase(
         "expenses-submitted-reply",
@@ -185,26 +252,76 @@ CASES = (
         max_turns=5,
         digest_tag="env:expenses-submitted-reply",
         seed=seed_office,
+        tier=1,
     ),
     ScenarioCase(
         "standup-on-calendar",
         ScenarioUser(
             reason_for_call="You want the relocated eng standup on your calendar.",
             known_info=(
-                "Standup is moving to 9:30am; you want it on your calendar for Monday July 20 at "
+                "Standup is moving to 9:30am; you want it on your calendar for next Monday at "
                 "9:30am, 15 minutes long."
             ),
             task_instructions=(
-                "Ask the assistant to put the eng standup on your calendar for Monday July 20 at "
+                "Ask the assistant to put the eng standup on your calendar for next Monday at "
                 "9:30am for 15 minutes. Once it confirms the event exists, you are satisfied."
             ),
         ),
         DescribedGrader(
-            "a live standup event lands on Monday July 20 and the member ends satisfied",
+            "a live standup event lands on next Monday and the member ends satisfied",
             _graded_standup_event,
         ),
         max_turns=5,
         digest_tag="env:standup-on-calendar",
         seed=seed_office,
+        tier=1,
+    ),
+    ScenarioCase(
+        "morning-sync-with-bob",
+        ScenarioUser(
+            reason_for_call="You want a short sync with Bob booked next week.",
+            known_info=(
+                "Bob's address is bob@evalco.test. You want 45 minutes, on a weekday morning the "
+                "next week, and it must not clash with anything already on your "
+                "calendar."
+            ),
+            task_instructions=(
+                "Ask the assistant to book a 45-minute sync with Bob on a free weekday morning "
+                "the next week. Let the assistant pick the slot — you have no preference "
+                "beyond 'morning, no clash'. Once it confirms a specific morning slot is booked, "
+                "you are satisfied."
+            ),
+        ),
+        DescribedGrader(
+            "a 45-minute morning sync with Bob booked in a clash-free weekday slot that week",
+            _graded_morning_sync,
+        ),
+        max_turns=6,
+        digest_tag="env:morning-sync-with-bob",
+        seed=seed_office,
+        tier=2,
+    ),
+    ScenarioCase(
+        "reply-all-except-sender",
+        ScenarioUser(
+            reason_for_call="You want to reply to Dana's offsite planning email.",
+            known_info=(
+                "Dana emailed an offsite headcount request to a few people. Your answer is yes, "
+                "count you in."
+            ),
+            task_instructions=(
+                "Ask the assistant to reply to Dana's offsite planning email saying you're in — "
+                "to everyone on that thread except you. Once it confirms the reply was sent, you "
+                "are satisfied."
+            ),
+        ),
+        DescribedGrader(
+            "a single reply to the offsite thread reaches Dana, Bob, and Mara but never the member",
+            _graded_reply_all,
+        ),
+        max_turns=5,
+        digest_tag="env:reply-all-except-sender",
+        seed=seed_office,
+        tier=2,
     ),
 )

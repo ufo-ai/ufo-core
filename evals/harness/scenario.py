@@ -119,10 +119,13 @@ class ScenarioCase:
     digest_tag: str = ""
     seed: ScenarioSeed | None = None
     trials: int = 1
+    tier: int = 1
 
     def __post_init__(self) -> None:
         if self.trials < 1:
             raise ValueError(f"case {self.name!r} needs at least one trial, got {self.trials}")
+        if self.tier < 1:
+            raise ValueError(f"case {self.name!r} tier must be at least 1, got {self.tier}")
 
     def payload(self) -> JsonObject:
         payload: JsonObject = {
@@ -132,6 +135,7 @@ class ScenarioCase:
             "grader": self.digest_tag or self.name,
             "seed": None if self.seed is None else _seed_digest(self.seed),
             "trials": self.trials,
+            "tier": self.tier,
             "simulatorRevision": SIMULATOR_REVISION,
         }
         if self.member_key is not None:
@@ -163,9 +167,45 @@ def _bounded(reply: str) -> str:
     return reply[:MAX_SIMULATOR_REPLY_CHARS] + "\n[reply truncated for the simulator]"
 
 
+TRANSIENT_ERROR_CLASSES = frozenset(
+    {
+        "RateLimitError",
+        "InternalServerError",
+        "ServiceUnavailableError",
+        "OverloadedError",
+        "DeadlineExceededError",
+        "APIConnectionError",
+        "APITimeoutError",
+        "ReadTimeout",
+        "ConnectTimeout",
+        "PoolTimeout",
+        "WriteTimeout",
+        "ReadError",
+        "ConnectError",
+        "WriteError",
+        "RemoteProtocolError",
+        "ProxyError",
+    }
+)
+
+
+def _is_transient(error_class: str | None) -> bool:
+    """A trial whose turn crashed on a model or transport fault the provider owns — a read/connect
+    timeout, an overload, a 5xx — carried on the terminal's `error_class` (or the class of a
+    simulator-leg model call that raised). These are external uncertainty, not a capability signal,
+    so the trial is excluded from pass^k rather than counted as a failure (mirroring the capability
+    harness's `web_dependent` infra exclusion). Matched by exact class name against the anthropic
+    SDK / httpx transient set, never a substring: the terminal `error_class` also carries the class
+    of an internal fault (a DB or DBOS wedge the backstop commits as `type(error).__name__`), and a
+    builtin `TimeoutError` or `ConnectionError` there is an internal wedge that must surface as a
+    failure, never be masked as external."""
+    return error_class in TRANSIENT_ERROR_CLASSES
+
+
 @dataclass(frozen=True)
 class _Trial:
-    """One independent run of the case's conversation and its verdict."""
+    """One independent run of the case's conversation and its verdict. `infra` marks a trial whose
+    turn crashed on a transient provider fault — excluded from scoring, not counted as a failure."""
 
     turns: tuple[ScenarioTurn, ...]
     stopped: bool
@@ -175,6 +215,7 @@ class _Trial:
     tokens: int = 0
     cost_micro_usd: int = 0
     grader_evidence: JsonObject | None = None
+    infra: bool = False
 
 
 async def run_scenario_case(case: ScenarioCase, target: CapabilityTarget) -> EvalCaseResult:
@@ -196,24 +237,47 @@ class _ScenarioRun:
 
     async def result(self) -> EvalCaseResult:
         trials = [await self._trial(index) for index in range(self.case.trials)]
-        passes = sum(1 for trial in trials if trial.passed)
-        passed = passes == len(trials)
-        first_failure = next((trial for trial in trials if not trial.passed), None)
-        if len(trials) == 1:
-            reason = trials[0].reason
-        elif first_failure is None:
-            reason = f"{passes}/{len(trials)} trials passed"
-        else:
-            reason = f"{passes}/{len(trials)} trials passed; first failure: {first_failure.reason}"
+        scored = [trial for trial in trials if not trial.infra]
+        excluded = len(trials) - len(scored)
+        first_failure = next((trial for trial in scored if not trial.passed), None)
+        selected = trials.index(first_failure) if first_failure is not None else 0
         evidence: JsonObject = {
             "user": self.case.user.payload(),
             "grading": grading_statement(self.case.grader) or None,
             "memberKey": self.case.member_key,
             "maxTurns": self.case.max_turns,
-            "selectedAttempt": trials.index(first_failure) if first_failure is not None else 0,
+            "selectedAttempt": selected,
+            "excludedTrials": excluded,
             "attempts": [self._attempt(trial) for trial in trials],
         }
-        return EvalCaseResult(name=self.case.name, passed=passed, reason=reason, evidence=evidence)
+        if not scored:
+            return EvalCaseResult(
+                name=self.case.name,
+                passed=False,
+                reason=f"all {len(trials)} trial(s) infra-excluded (transient model faults)",
+                evidence=evidence,
+                excluded=True,
+                tier=self.case.tier,
+            )
+        passes = sum(1 for trial in scored if trial.passed)
+        passed = passes == len(scored)
+        note = f" ({excluded} infra-excluded)" if excluded else ""
+        if len(scored) == 1 and not excluded:
+            reason = scored[0].reason
+        elif first_failure is None:
+            reason = f"{passes}/{len(scored)} scored trials passed{note}"
+        else:
+            reason = (
+                f"{passes}/{len(scored)} scored trials passed{note}; "
+                f"first failure: {first_failure.reason}"
+            )
+        return EvalCaseResult(
+            name=self.case.name,
+            passed=passed,
+            reason=reason,
+            evidence=evidence,
+            tier=self.case.tier,
+        )
 
     async def _trial(self, trial: int) -> _Trial:
         case = self.case
@@ -228,7 +292,15 @@ class _ScenarioRun:
         tokens = 0
         cost_micro_usd = 0
         for index in range(case.max_turns):
-            message = await self.simulator.next_message(tuple(turns))
+            try:
+                message = await self.simulator.next_message(tuple(turns))
+            except Exception as error:
+                reason = f"simulator model call failed: {type(error).__name__}: {error}"
+                if not _is_transient(type(error).__name__):
+                    raise
+                return _Trial(
+                    tuple(turns), stopped, last, False, reason, tokens, cost_micro_usd, infra=True
+                )
             if STOP_TOKEN in message:
                 stopped = True
                 break
@@ -258,6 +330,7 @@ class _ScenarioRun:
                     result.failure_reason,
                     tokens,
                     cost_micro_usd,
+                    infra=_is_transient(result.error_class),
                 )
         if last is None:
             return _Trial(
@@ -304,6 +377,7 @@ class _ScenarioRun:
                 {"userMessage": turn.user_message, "reply": turn.reply} for turn in trial.turns
             ],
             "stopped": trial.stopped,
+            "infra": trial.infra,
             "tokens": trial.tokens,
             "costMicroUsd": trial.cost_micro_usd,
             "grader": trial.grader_evidence or None,
