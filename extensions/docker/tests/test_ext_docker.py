@@ -94,6 +94,23 @@ async def test_export_filesystem_mount_streams_from_the_host_path(tmp_path: Path
     assert await blob.inner.get("artifacts/y/out.bin") == b"host-bytes"
 
 
+async def test_running_id_raises_on_docker_ps_failure_instead_of_reporting_not_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuine no-match is exit 0 with empty stdout; a non-zero `docker ps` means the command
+    itself failed (daemon hiccup, timeout). Swallowing that as "not running" would send `create`
+    down the fresh-create path against a name a live container still holds, surfacing a misleading
+    name conflict instead of the real transient fault."""
+
+    async def fake_docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60):
+        return 1, b"", b"error during connect: transient daemon error"
+
+    monkeypatch.setattr(docker_ext, "_docker", fake_docker)
+
+    with pytest.raises(RuntimeError, match="docker ps failed"):
+        await DockerCarrier()._running_id("ufo-sbx-x")
+
+
 def test_config_backend_docker_resolves_the_extension_contributed_carrier() -> None:
     config = Config(
         database=DatabaseConfig(url="sqlite+aiosqlite:///carrier.db"),

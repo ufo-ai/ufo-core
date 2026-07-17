@@ -262,11 +262,15 @@ class DockerCarrier:
         )
 
     async def _running_id(self, name: str) -> str | None:
-        code, stdout, _ = await _docker(
+        """A genuine no-match is exit 0 with empty stdout — `docker ps` only returns non-zero when
+        the command itself failed (daemon hiccup, timeout). Treating that failure as "not running"
+        would send `create` down the fresh-create path against a name a live container still holds,
+        surfacing as a misleading name conflict instead of the real transient fault."""
+        code, stdout, stderr = await _docker(
             "ps", "-q", "--filter", f"name=^{name}$", "--filter", "status=running"
         )
         if code != 0:
-            return None
+            raise RuntimeError(f"docker ps failed: {stderr.decode().strip()}")
         found = stdout.decode().strip()
         return found or None
 
