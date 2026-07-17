@@ -14,7 +14,7 @@ from ufo.loop.compaction import CHARS_PER_TOKEN, IMAGE_MARKER, IMAGE_TOKEN_ESTIM
 from ufo.models.interface import ImageBlock, Message, TextBlock, ToolResultBlock, ToolUseBlock
 
 type CompactionLeaf = Literal[
-    "overload", "buried", "supersession", "chain", "reference", "image", "behavior"
+    "overload", "buried", "supersession", "chain", "reference", "image", "behavior", "real"
 ]
 type FactKind = Literal[
     "decision", "buried", "superseded", "reference", "image", "distractor", "control"
@@ -78,11 +78,15 @@ class SnapshotFile(BaseModel):
 
 
 class CompactionManifest(BaseModel):
+    """`skeletons` pins the real transcripts the real-leaf cases were composed from — provenance
+    for the report, folded into the digest like the corpus."""
+
     name: Literal["compaction"] = "compaction"
     digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     builder_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     target_tokens: int = Field(gt=0)
     corpus: tuple[CorpusFile, ...]
+    skeletons: tuple[CorpusFile, ...] = ()
     cases: SnapshotFile
 
 

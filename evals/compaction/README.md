@@ -19,6 +19,7 @@ retrieval.
 | `compaction.reference` | 1 | 9 load-bearing offloaded `.tool-output` files against the `MAX_REFERENCE_PATHS = 5` harvester cap, heaviest planted earliest — recency keeps the wrong five, so coverage above the mechanical floor requires the summary's own `files` field to carry the early heavy paths | weighted coverage ≥ 50% |
 | `compaction.image` | 1 | a fact whose only home is an inline image in the head | fact survives the boundary |
 | `compaction.behavior` | 2×4 probes | live probe turns on a materialized full-scale conversation: recall, supersession, re-read of an offloaded `.tool-output` file, and a verbatim-tail control | per probe |
+| `compaction.real` | 3×4–5 probes | real agent transcripts composed into full-scale windows with spliced graded exchanges: a plan revised twice ending in a reversal-by-reference, seven versions of one deliverable whose keeper pointer flips twice, and a confident mid-run recap that two later corrections poison | sanity: the window compacts; survival recorded as metrics |
 
 Reference evidence splits every surviving path into `harvested` (kept by the pipeline's
 recency-capped durable-reference block) vs `carried` (preserved by the model in the summary's
@@ -49,6 +50,34 @@ The builder harvests `spec.md`, `README.md`, `docs/**/*.md`, and `core/src/ufo/*
 checkout it runs in (`--repo` overrides), so the snapshot digest moves with the harvested
 material. Reports are comparable only across runs of the byte-identical snapshot; keep the
 snapshot directory with the runs it graded.
+
+## Real cases
+
+`--transcripts DIR` adds the `compaction.real` cases: each composes two real agent transcripts
+(exported conversation blobs, `<conversation-id>.messages.json.lz4`) into one full-scale window
+and splices the graded exchanges in at round boundaries — the skeletons contribute real plans,
+tool traffic, and pacing; every graded fact stays a collision-checked literal. Skeletons are
+scrubbed (emails, secret-shaped tokens) at load and sha256-pinned in the manifest. The roster's
+skeleton ids name JobBench campaign runs; export them from that archive's blob store:
+
+```bash
+SRC=…/jobbench/campaign/blobs/conversations
+mkdir -p .local/compaction/skeletons
+for id in $(uv run python -c "from evals.compaction.build import REAL_SKELETONS; \
+  print('\n'.join(sorted({n for p in REAL_SKELETONS.values() for n in p})))"); do
+  cp "$SRC/$id/messages.json.lz4" ".local/compaction/skeletons/$id.messages.json.lz4"
+done
+uv run python -m evals.compaction.build --out "$SNAPSHOT" --transcripts .local/compaction/skeletons
+```
+
+Real cases run through the behavior flow (seed turn, transcript swap, live probe turns). Sanity
+is their pass bar: each case's scorable result asserts that the window compacted through the
+probe turn. Probe verdicts and the artifact-layer survival grades read from the compaction record
+(weighted recall, stale rate, reference carry) are recorded as excluded results and observability
+metrics — the same contract as the chain leaf's `survival_gen1..3` rates. The version-churn
+case's deliverables live at ordinary `/workspace/` paths, which the durable-reference harvester
+never keeps — its mechanical coverage floor is 0%, and any survival is the summary's own files
+field.
 
 ## Run the eval
 

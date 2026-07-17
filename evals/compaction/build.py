@@ -9,9 +9,12 @@ same machinery builds at any `--target-tokens`, which is how the unit tests exer
 import argparse
 import base64
 import hashlib
+import json
+import re
 import struct
 import sys
 import zlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,9 +35,11 @@ from ufo.loop.compaction import (
     COMPACTION_KEEP_MESSAGES,
     COMPACTION_SUMMARY_MAX_TOKENS,
     DEFAULT_CONTEXT_WINDOW_TOKENS,
+    IMAGE_MARKER,
 )
 from ufo.loop.engine import OFFLOAD_NOTICE
 from ufo.models.interface import (
+    ContentBlock,
     ImageBlock,
     ImageSource,
     Message,
@@ -42,6 +47,7 @@ from ufo.models.interface import (
     ToolResultBlock,
     ToolUseBlock,
 )
+from ufo.transcript import decode
 
 TRIGGER_MARGIN_TOKENS = 2_000
 DEFAULT_TARGET_TOKENS = (
@@ -169,6 +175,40 @@ PROGRESS_POOL = (
     "Resuming the read-through.",
 )
 
+REAL_VALUE_OFFSETS = {
+    "real-plan-reversal": 0,
+    "real-version-churn": 100,
+    "real-poisoned-recap": 200,
+}
+REAL_TRIM_FRACTION = 1.05
+REAL_TAIL_GUARD_ROUNDS = 5
+SKELETON_SUFFIX = ".messages.json.lz4"
+REAL_SKELETONS: dict[str, tuple[str, ...]] = {
+    "real-plan-reversal": (
+        "6d58f714-1016-4a0d-ad4b-fdf7e8182f52",
+        "b4dd15fe-d94f-4d06-8443-f4370de75eae",
+    ),
+    "real-version-churn": (
+        "5445d6e3-ff52-4f43-8a65-707076359949",
+        "0a4c8d40-6e01-4178-aef8-c684ed388055",
+    ),
+    "real-poisoned-recap": (
+        "221e13bd-fc1c-4fb5-b2b1-0d51a2556776",
+        "0eb0a497-46b9-45c6-8481-b87838b1425b",
+        "08dd500d-b2a6-4d06-bbb6-90fb52c7152c",
+    ),
+}
+SCRUB_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"), "redacted@example.com"),
+    (
+        re.compile(
+            r"\b(?:sk-[A-Za-z0-9_-]{8,}|xox[a-z]-[A-Za-z0-9-]{8,}"
+            r"|ghp_[A-Za-z0-9]{8,}|AKIA[A-Z0-9]{12,})\b"
+        ),
+        "[redacted]",
+    ),
+)
+
 FONT = {
     "0": (".XXX.", "X...X", "X..XX", "X.X.X", "XX..X", "X...X", ".XXX."),
     "1": ("..X..", ".XX..", "..X..", "..X..", "..X..", "..X..", "XXXXX"),
@@ -253,11 +293,13 @@ class FactSeed:
 @dataclass(frozen=True)
 class SnapshotBuild:
     """The build workflow: harvest the corpus, synthesize one window per roster case, prove every
-    literal collision-free, and write the digest-pinned snapshot."""
+    literal collision-free, and write the digest-pinned snapshot. With `transcripts` set, real
+    agent transcripts compose the additional real-leaf cases and pin into the manifest."""
 
     repo: Path
     out: Path
     target_tokens: int = DEFAULT_TARGET_TOKENS
+    transcripts: Path | None = None
 
     def build(self) -> str:
         corpus, slices = self._harvest()
@@ -267,12 +309,18 @@ class SnapshotBuild:
         for spec in ROSTER:
             case, cursor, value_key = self._case(spec, slices, cursor, value_key)
             cases.append(case)
+        skeletons: tuple[CorpusFile, ...] = ()
+        if self.transcripts is not None:
+            pinned, decoded = _load_skeletons(self.transcripts)
+            skeletons = pinned
+            cases.extend(RealCaseBuild(skeletons=decoded, target_tokens=self.target_tokens).build())
         manifest = write_snapshot(
             self.out,
             builder_digest=_builder_digest(),
             target_tokens=self.target_tokens,
             corpus=corpus,
             cases=tuple(cases),
+            skeletons=skeletons,
         )
         return manifest.digest
 
@@ -322,7 +370,7 @@ class SnapshotBuild:
             extensions=tuple(extensions),
             probes=self._probes(seeds) if spec.probed else (),
         )
-        self._verify_literals(case)
+        _verify_literals(case)
         return case, cursor, value_key
 
     def _seeds(
@@ -614,67 +662,616 @@ class SnapshotBuild:
             ),
         )
 
-    def _verify_literals(self, case: CompactionCase) -> None:
-        window_text = "\n".join(message_text(message) for message in case.messages)
-        extension_text = "\n".join(
-            message_text(message) for extension in case.extensions for message in extension.messages
-        )
-        expected_by_kind = {
-            "decision": 1,
-            "buried": 1,
-            "control": 1,
-            "distractor": 1,
-            "superseded": 1,
-            "reference": 0,
-            "image": 0,
-        }
-        for fact in case.facts:
-            found = window_text.count(fact.literal)
-            if found != expected_by_kind[fact.kind]:
-                raise ValueError(
-                    f"case {case.id!r} fact {fact.id!r} literal appears {found} times, "
-                    f"expected {expected_by_kind[fact.kind]}"
-                )
-            if fact.literal in extension_text:
-                raise ValueError(
-                    f"case {case.id!r} fact {fact.id!r} literal leaks into an extension"
-                )
-            if fact.kind == "reference" and fact.literal not in fact.body:
-                raise ValueError(f"reference fact {fact.id!r} body does not carry its literal")
-            if fact.stale_literal and window_text.count(fact.stale_literal) != 1:
-                raise ValueError(f"case {case.id!r} fact {fact.id!r} stale literal is not unique")
-        tail_text = "\n".join(message_text(message) for message in self._tail(case.messages))
-        for fact in case.facts:
-            if fact.kind == "control":
-                if fact.literal not in tail_text:
-                    raise ValueError(f"control fact {fact.id!r} fell out of the verbatim tail")
-                continue
-            marks = (fact.literal, fact.stale_literal, fact.path)
-            leaked = next((mark for mark in marks if mark and mark in tail_text), None)
-            if leaked is not None:
-                raise ValueError(
-                    f"case {case.id!r} fact {fact.id!r} leaks into the verbatim tail "
-                    f"({leaked!r}) — it would survive compaction without being summarized"
-                )
 
-    def _tail(self, messages: tuple[Message, ...]) -> tuple[Message, ...]:
-        rounds: list[list[Message]] = []
-        current: list[Message] = []
-        for message in messages:
-            if message.role == "assistant" and current:
-                rounds.append(current)
-                current = [message]
-            else:
-                current.append(message)
-        if current:
-            rounds.append(current)
-        kept: list[Message] = []
-        count = 0
-        while rounds and count < COMPACTION_KEEP_MESSAGES:
-            count += len(rounds[-1])
-            kept = [*rounds[-1], *kept]
-            rounds = rounds[:-1]
-        return tuple(kept)
+def _verify_literals(case: CompactionCase) -> None:
+    window_text = "\n".join(message_text(message) for message in case.messages)
+    extension_text = "\n".join(
+        message_text(message) for extension in case.extensions for message in extension.messages
+    )
+    expected_by_kind = {
+        "decision": 1,
+        "buried": 1,
+        "control": 1,
+        "distractor": 1,
+        "superseded": 1,
+        "reference": 0,
+        "image": 0,
+    }
+    for fact in case.facts:
+        found = window_text.count(fact.literal)
+        if found != expected_by_kind[fact.kind]:
+            raise ValueError(
+                f"case {case.id!r} fact {fact.id!r} literal appears {found} times, "
+                f"expected {expected_by_kind[fact.kind]}"
+            )
+        if fact.literal in extension_text:
+            raise ValueError(f"case {case.id!r} fact {fact.id!r} literal leaks into an extension")
+        if fact.kind == "reference" and fact.literal not in fact.body:
+            raise ValueError(f"reference fact {fact.id!r} body does not carry its literal")
+        if fact.stale_literal and window_text.count(fact.stale_literal) != 1:
+            raise ValueError(f"case {case.id!r} fact {fact.id!r} stale literal is not unique")
+    tail_text = "\n".join(message_text(message) for message in _tail(case.messages))
+    for fact in case.facts:
+        if fact.kind == "control":
+            if fact.literal not in tail_text:
+                raise ValueError(f"control fact {fact.id!r} fell out of the verbatim tail")
+            continue
+        marks = (fact.literal, fact.stale_literal, fact.path)
+        leaked = next((mark for mark in marks if mark and mark in tail_text), None)
+        if leaked is not None:
+            raise ValueError(
+                f"case {case.id!r} fact {fact.id!r} leaks into the verbatim tail "
+                f"({leaked!r}) — it would survive compaction without being summarized"
+            )
+
+
+def _round_groups(messages: tuple[Message, ...]) -> list[tuple[Message, ...]]:
+    rounds: list[tuple[Message, ...]] = []
+    current: list[Message] = []
+    for message in messages:
+        if message.role == "assistant" and current:
+            rounds.append(tuple(current))
+            current = [message]
+        else:
+            current.append(message)
+    if current:
+        rounds.append(tuple(current))
+    return rounds
+
+
+def _tail(messages: tuple[Message, ...]) -> tuple[Message, ...]:
+    rounds = _round_groups(messages)
+    kept: list[Message] = []
+    count = 0
+    while rounds and count < COMPACTION_KEEP_MESSAGES:
+        count += len(rounds[-1])
+        kept = [*rounds[-1], *kept]
+        rounds = rounds[:-1]
+    return tuple(kept)
+
+
+def _load_skeletons(
+    transcripts: Path,
+) -> tuple[tuple[CorpusFile, ...], dict[str, tuple[Message, ...]]]:
+    pinned: list[CorpusFile] = []
+    decoded: dict[str, tuple[Message, ...]] = {}
+    for name in sorted({name for pair in REAL_SKELETONS.values() for name in pair}):
+        path = transcripts / f"{name}{SKELETON_SUFFIX}"
+        if not path.exists():
+            raise ValueError(f"real-case skeleton missing: {path}")
+        messages = tuple(_scrub_message(m) for m in decode(path.read_bytes()).messages)
+        payload = "\n".join(message_text(m) for m in messages).encode()
+        pinned.append(
+            CorpusFile(path=path.name, sha256=f"sha256:{hashlib.sha256(payload).hexdigest()}")
+        )
+        decoded[name] = messages
+    return tuple(pinned), decoded
+
+
+def _scrub(text: str) -> str:
+    for pattern, replacement in SCRUB_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def _scrub_message(message: Message) -> Message:
+    if isinstance(message.content, str):
+        return Message(role=message.role, content=_scrub(message.content))
+    blocks: list[ContentBlock] = []
+    for block in message.content:
+        match block:
+            case TextBlock(text=text):
+                blocks.append(TextBlock(text=_scrub(text)))
+            case ImageBlock():
+                blocks.append(TextBlock(text=IMAGE_MARKER))
+            case ToolResultBlock(tool_use_id=tid, content=str(content)):
+                blocks.append(ToolResultBlock(tool_use_id=tid, content=_scrub(content)))
+            case ToolResultBlock(tool_use_id=tid, content=tuple(parts)):
+                blocks.append(
+                    ToolResultBlock(
+                        tool_use_id=tid,
+                        content=tuple(
+                            TextBlock(text=_scrub(part.text))
+                            if isinstance(part, TextBlock)
+                            else TextBlock(text=IMAGE_MARKER)
+                            for part in parts
+                        ),
+                    )
+                )
+            case ToolUseBlock(id=call_id, name=name, input=arguments):
+                blocks.append(
+                    ToolUseBlock(
+                        id=call_id,
+                        name=name,
+                        input=json.loads(_scrub(json.dumps(arguments))),
+                    )
+                )
+            case _:
+                blocks.append(block)
+    return Message(role=message.role, content=tuple(blocks))
+
+
+@dataclass(frozen=True)
+class RealCaseBuild:
+    """The real-leaf cases: two pinned agent transcripts composed into one full-scale window, with
+    the graded exchanges spliced in at round boundaries. Skeletons contribute the texture — real
+    plans, tool traffic, file writes — and every graded fact stays a collision-checked literal, so
+    grading is unchanged. The runner reports these cases without applying a pass bar."""
+
+    skeletons: dict[str, tuple[Message, ...]]
+    target_tokens: int
+
+    def build(self) -> tuple[CompactionCase, ...]:
+        cases = (self._plan_reversal(), self._version_churn(), self._poisoned_recap())
+        for case in cases:
+            if estimate_tokens(case.messages) < self.target_tokens:
+                raise ValueError(f"real case {case.id!r} fell short of {self.target_tokens} tokens")
+            _verify_literals(case)
+        return cases
+
+    def _plan_reversal(self) -> CompactionCase:
+        rounds = self._base("real-plan-reversal")
+        value = _value_source("real-plan-reversal", rounds)
+        steps = (
+            ("rollout batch size", "conversations"),
+            ("canary hold period", "minutes"),
+            ("writeback batch window", "milliseconds"),
+            ("index refresh interval", "seconds"),
+            ("canary sample rate", "checks per hour"),
+            ("reconciliation table row cap", "rows"),
+        )
+        originals = [value() for _ in steps]
+        revised_window = value()
+        revised_rate = value()
+        controls = [value(), value()]
+        plan_lines = "\n".join(
+            f"- step {index + 1}, {subject}: {literal} {unit}"
+            for index, ((subject, unit), literal) in enumerate(zip(steps, originals, strict=True))
+        )
+        inserts = (
+            (
+                0.10,
+                _exchange(
+                    "Before you go further, here is the rollout plan we are executing. "
+                    f"Keep every step's number straight:\n{plan_lines}",
+                    "Plan recorded — six steps with their targets. Continuing.",
+                ),
+            ),
+            (
+                0.45,
+                _exchange(
+                    "Two changes after the sync: the writeback batch window moves to "
+                    f"{revised_window} milliseconds, and the canary sample rate moves to "
+                    f"{revised_rate} checks per hour. Also drop step 6 entirely — we are not "
+                    "building the reconciliation table; fold that work into the export job.",
+                    "Updated: new batch window and sample rate recorded, step 6 dropped.",
+                ),
+            ),
+            (
+                0.75,
+                _exchange(
+                    "On the writeback batch window — go back to what you first proposed in the "
+                    "original plan; keep it simple. The step-6 decision from the sync stands.",
+                    "Reverted the batch window to the original plan value; step 6 stays dropped.",
+                ),
+            ),
+        )
+        facts = (
+            _real_fact("real-plan-reversal", "decision", 0, originals[0], weight=3),
+            _real_fact("real-plan-reversal", "decision", 1, originals[1], weight=3),
+            _real_fact("real-plan-reversal", "decision", 2, originals[3], weight=4),
+            _real_fact(
+                "real-plan-reversal",
+                "superseded",
+                0,
+                originals[2],
+                stale=revised_window,
+                weight=5,
+            ),
+            _real_fact(
+                "real-plan-reversal", "superseded", 1, revised_rate, stale=originals[4], weight=4
+            ),
+            _real_fact("real-plan-reversal", "distractor", 0, originals[5]),
+            _real_fact("real-plan-reversal", "control", 0, controls[0], weight=3),
+            _real_fact("real-plan-reversal", "control", 1, controls[1], weight=3),
+        )
+        probes = (
+            CompactionProbe(
+                id="recall",
+                question=(
+                    "What rollout batch size did the plan lock in? Answer with the exact number."
+                ),
+                expect_literals=(originals[0],),
+            ),
+            CompactionProbe(
+                id="reversal",
+                question=(
+                    "What writeback batch window stands right now, after every revision? "
+                    "Give only the value that stands."
+                ),
+                expect_literals=(originals[2],),
+                forbid_literals=(revised_window,),
+            ),
+            CompactionProbe(
+                id="revision",
+                question=(
+                    "What is the current canary sample rate? Give only the value that stands."
+                ),
+                expect_literals=(revised_rate,),
+                forbid_literals=(originals[4],),
+            ),
+            CompactionProbe(
+                id="deleted",
+                question=(
+                    "Are we still building the reconciliation table from the plan, and at what "
+                    "row cap if so?"
+                ),
+                forbid_literals=(originals[5],),
+            ),
+            CompactionProbe(
+                id="control",
+                question=(
+                    "What export retention floor did we just record? Answer with the exact number."
+                ),
+                expect_literals=(controls[0],),
+            ),
+        )
+        return self._case("real-plan-reversal", rounds, inserts, facts, probes, controls)
+
+    def _version_churn(self) -> CompactionCase:
+        rounds = self._base("real-version-churn")
+        value = _value_source("real-version-churn", rounds)
+        figures = [value() for _ in range(7)]
+        ticket_keeper = value()
+        ticket_pretender = value()
+        controls = [value(), value()]
+        weights = (3, 5, 2, 4, 1, 1, 1)
+        version_inserts = tuple(
+            (
+                0.12 + index * 0.09,
+                _write_round("real-version-churn", index + 1, figures[index]),
+            )
+            for index in range(7)
+        )
+        inserts = (
+            *version_inserts,
+            (
+                0.35,
+                _exchange(
+                    "For the record: briefing_v2.md is the copy legal approved, under change "
+                    f"ticket {ticket_keeper}. Everything after v2 is exploratory until I say "
+                    "otherwise.",
+                    "Noted — v2 carries the standing approval; later drafts are exploratory.",
+                ),
+            ),
+            (
+                0.60,
+                _exchange(
+                    f"Scratch that — legal moved the sign-off to briefing_v4.md under ticket "
+                    f"{ticket_pretender}. Treat v4 as the approved copy.",
+                    "Updated — v4 now carries the approval.",
+                ),
+            ),
+            (
+                0.70,
+                _exchange(
+                    "Legal pulled the v4 approval this morning; the original v2 sign-off "
+                    "stands. Do not cite the newer ticket anywhere.",
+                    "Reverted — v2 is the approved briefing again, under its original ticket.",
+                ),
+            ),
+        )
+        facts = (
+            *(
+                _real_fact(
+                    "real-version-churn",
+                    "reference",
+                    index,
+                    figures[index],
+                    weight=weights[index],
+                    path=_briefing_path(index + 1),
+                    body=(
+                        f"# Executive briefing, draft v{index + 1}\n\n"
+                        f"Headline figure for this revision: {figures[index]} committed "
+                        "units across the program.\n"
+                        "Remaining sections summarize the sourcing plan and the open "
+                        "risks register.\n"
+                    ),
+                )
+                for index in range(7)
+            ),
+            _real_fact(
+                "real-version-churn",
+                "superseded",
+                0,
+                ticket_keeper,
+                stale=ticket_pretender,
+                weight=5,
+            ),
+            _real_fact("real-version-churn", "control", 0, controls[0], weight=3),
+            _real_fact("real-version-churn", "control", 1, controls[1], weight=3),
+        )
+        probes = (
+            CompactionProbe(
+                id="authority",
+                question=(
+                    "Which change ticket covers the briefing approval that stands right now? "
+                    "Give only the ticket number that stands."
+                ),
+                expect_literals=(ticket_keeper,),
+                forbid_literals=(ticket_pretender,),
+            ),
+            CompactionProbe(
+                id="reread",
+                question=(
+                    "What headline figure does the approved briefing carry? "
+                    "Read the approved copy if you need to."
+                ),
+                expect_literals=(figures[1],),
+                expect_read_path=_briefing_path(2),
+            ),
+            CompactionProbe(
+                id="recall",
+                question=("What headline figure did briefing_v1.md carry? Read it if you need to."),
+                expect_literals=(figures[0],),
+                expect_read_path=_briefing_path(1),
+            ),
+            CompactionProbe(
+                id="control",
+                question=(
+                    "What export retention floor did we just record? Answer with the exact number."
+                ),
+                expect_literals=(controls[0],),
+            ),
+        )
+        return self._case("real-version-churn", rounds, inserts, facts, probes, controls)
+
+    def _poisoned_recap(self) -> CompactionCase:
+        rounds = self._base("real-poisoned-recap")
+        value = _value_source("real-poisoned-recap", rounds)
+        subjects = (
+            ("bid item unit price floor", "dollars"),
+            ("estimate contingency margin", "basis points"),
+            ("quantity takeoff tolerance", "units"),
+            ("submittal review window", "hours"),
+            ("retainage release threshold", "dollars"),
+            ("crew mobilization budget", "dollars"),
+            ("materials escalation reserve", "dollars"),
+            ("closeout punch-list cap", "items"),
+        )
+        stable = [value() for _ in subjects]
+        recap_review = value()
+        recap_reserve = value()
+        corrected_review = value()
+        corrected_reserve = value()
+        controls = [value(), value()]
+        statement_inserts = tuple(
+            (
+                0.12 + index * 0.05,
+                _exchange(
+                    DECISION_POOL[index % len(DECISION_POOL)].format(
+                        subject=subject, value=f"{stable[index]} {unit}"
+                    ),
+                    ACK_POOL[index % len(ACK_POOL)],
+                )
+                if index not in (3, 6)
+                else _exchange(
+                    f"Set the {subject} to a working value for now; I will confirm the final "
+                    "number before the recap.",
+                    ACK_POOL[index % len(ACK_POOL)],
+                ),
+            )
+            for index, (subject, unit) in enumerate(subjects)
+        )
+        inserts = (
+            *statement_inserts,
+            (
+                0.55,
+                _exchange(
+                    "Where do we stand? Give me the rundown before we continue.",
+                    "Here's where we stand on the recorded numbers. The floors and caps we "
+                    "locked earlier all stand as stated. On the two open items: the submittal "
+                    f"review window is set at {recap_review} hours, and the materials "
+                    f"escalation reserve is set at {recap_reserve} dollars. Nothing else "
+                    "changed. Continuing from here.",
+                ),
+            ),
+            (
+                0.65,
+                _exchange(
+                    f"Final call on the submittal review window: {corrected_review} hours — "
+                    "the number from the rundown was the stale working figure.",
+                    "Corrected — the review window from the rundown is superseded.",
+                ),
+            ),
+            (
+                0.80,
+                _exchange(
+                    f"And the materials escalation reserve settles at {corrected_reserve} "
+                    "dollars, not what the rundown said.",
+                    "Corrected — the reserve from the rundown is superseded.",
+                ),
+            ),
+        )
+        facts = (
+            *(
+                _real_fact(
+                    "real-poisoned-recap", "decision", index, stable[index], weight=1 + index % 5
+                )
+                for index in (0, 1, 2, 4, 5, 7)
+            ),
+            _real_fact(
+                "real-poisoned-recap",
+                "superseded",
+                0,
+                corrected_review,
+                stale=recap_review,
+                weight=5,
+            ),
+            _real_fact(
+                "real-poisoned-recap",
+                "superseded",
+                1,
+                corrected_reserve,
+                stale=recap_reserve,
+                weight=4,
+            ),
+            _real_fact("real-poisoned-recap", "control", 0, controls[0], weight=3),
+            _real_fact("real-poisoned-recap", "control", 1, controls[1], weight=3),
+        )
+        probes = (
+            CompactionProbe(
+                id="poisoned-review",
+                question=(
+                    "What submittal review window stands now? Give only the value that stands "
+                    "after any corrections."
+                ),
+                expect_literals=(corrected_review,),
+                forbid_literals=(recap_review,),
+            ),
+            CompactionProbe(
+                id="poisoned-reserve",
+                question=(
+                    "What materials escalation reserve stands now? Give only the value that "
+                    "stands after any corrections."
+                ),
+                expect_literals=(corrected_reserve,),
+                forbid_literals=(recap_reserve,),
+            ),
+            CompactionProbe(
+                id="recall",
+                question=(
+                    "What bid item unit price floor did we record? Answer with the exact number."
+                ),
+                expect_literals=(stable[0],),
+            ),
+            CompactionProbe(
+                id="control",
+                question=(
+                    "What export retention floor did we just record? Answer with the exact number."
+                ),
+                expect_literals=(controls[0],),
+            ),
+        )
+        return self._case("real-poisoned-recap", rounds, inserts, facts, probes, controls)
+
+    def _base(self, case_id: str) -> list[tuple[Message, ...]]:
+        rounds = [
+            unit for name in REAL_SKELETONS[case_id] for unit in _round_groups(self.skeletons[name])
+        ]
+        ceiling = int(self.target_tokens * REAL_TRIM_FRACTION)
+        total = sum(estimate_tokens(unit) for unit in rounds)
+        while len(rounds) > 1 and total > ceiling:
+            last = estimate_tokens(rounds[-1])
+            if total - last < self.target_tokens:
+                break
+            rounds.pop()
+            total -= last
+        return rounds
+
+    def _case(
+        self,
+        case_id: str,
+        rounds: list[tuple[Message, ...]],
+        inserts: tuple[tuple[float, tuple[Message, ...]], ...],
+        facts: tuple[PlantedFact, ...],
+        probes: tuple[CompactionProbe, ...],
+        controls: list[str],
+    ) -> CompactionCase:
+        cap = max(1, len(rounds) - REAL_TAIL_GUARD_ROUNDS)
+        for fraction, unit in sorted(inserts, key=lambda insert: insert[0], reverse=True):
+            rounds.insert(min(int(len(rounds) * fraction), cap), unit)
+        tail = (
+            Message(role="assistant", content="Pausing the work to log two housekeeping values."),
+            Message(
+                role="user",
+                content=(
+                    f"Before you continue: put the export retention floor down as {controls[0]} "
+                    f"days, and the audit sample count as {controls[1]} records."
+                ),
+            ),
+            Message(role="assistant", content=CLOSER),
+        )
+        messages = (*(message for unit in rounds for message in unit), *tail)
+        return CompactionCase(
+            id=case_id, leaf="real", messages=messages, facts=facts, probes=probes
+        )
+
+
+def _value_source(case_id: str, rounds: list[tuple[Message, ...]]) -> Callable[[], str]:
+    text = "\n".join(message_text(message) for unit in rounds for message in unit)
+    taken: set[str] = set()
+    key = REAL_VALUE_OFFSETS[case_id]
+
+    def next_value() -> str:
+        nonlocal key
+        while True:
+            value = str(VALUE_FLOOR + (key * VALUE_STEP) % VALUE_SPAN)
+            key += 1
+            if value not in taken and value not in text:
+                taken.add(value)
+                return value
+
+    return next_value
+
+
+def _real_fact(
+    case_id: str,
+    kind: FactKind,
+    ordinal: int,
+    literal: str,
+    stale: str = "",
+    weight: int = 3,
+    path: str = "",
+    body: str = "",
+) -> PlantedFact:
+    return PlantedFact(
+        id=f"{case_id}-{kind}-{ordinal}",
+        kind=kind,
+        literal=literal,
+        stale_literal=stale,
+        weight=weight,
+        path=path,
+        body=body,
+    )
+
+
+def _exchange(user: str, assistant: str) -> tuple[Message, ...]:
+    return (
+        Message(role="user", content=user),
+        Message(role="assistant", content=assistant),
+    )
+
+
+def _briefing_path(version: int) -> str:
+    return f"/workspace/deliverables/briefing_v{version}.md"
+
+
+def _write_round(case_id: str, version: int, figure: str) -> tuple[Message, ...]:
+    path = _briefing_path(version)
+    call_id = f"{case_id}-write-{version}"
+    return (
+        Message(
+            role="assistant",
+            content=(
+                TextBlock(text=f"Regenerating the briefing as draft v{version}."),
+                ToolUseBlock(
+                    id=call_id,
+                    name="bash",
+                    input={"command": f"briefing-gen --rev {version} > {path}"},
+                ),
+            ),
+        ),
+        Message(
+            role="user",
+            content=(
+                ToolResultBlock(
+                    tool_use_id=call_id,
+                    content=f"generated {path} ({version + 1} sections)",
+                ),
+            ),
+        ),
+    )
 
 
 def _inject(text: str, note: str) -> str:
@@ -757,8 +1354,18 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--out", type=Path, required=True, help="snapshot output directory")
     parser.add_argument("--repo", type=Path, default=Path.cwd(), help="repo checkout to harvest")
     parser.add_argument("--target-tokens", type=int, default=DEFAULT_TARGET_TOKENS)
+    parser.add_argument(
+        "--transcripts",
+        type=Path,
+        help="directory of exported real transcripts; adds the real-leaf cases",
+    )
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
-    digest = SnapshotBuild(repo=args.repo, out=args.out, target_tokens=args.target_tokens).build()
+    digest = SnapshotBuild(
+        repo=args.repo,
+        out=args.out,
+        target_tokens=args.target_tokens,
+        transcripts=args.transcripts,
+    ).build()
     print(digest)
 
 

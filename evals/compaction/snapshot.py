@@ -33,15 +33,17 @@ def write_snapshot(
     target_tokens: int,
     corpus: tuple[CorpusFile, ...],
     cases: tuple[CompactionCase, ...],
+    skeletons: tuple[CorpusFile, ...] = (),
 ) -> CompactionManifest:
     _validate_cases(cases)
     root.mkdir(parents=True, exist_ok=True)
     case_file = _write_jsonl(root / CASES_FILE, cases)
     manifest = CompactionManifest(
-        digest=_snapshot_digest(builder_digest, target_tokens, corpus, case_file),
+        digest=_snapshot_digest(builder_digest, target_tokens, corpus, skeletons, case_file),
         builder_digest=builder_digest,
         target_tokens=target_tokens,
         corpus=corpus,
+        skeletons=skeletons,
         cases=case_file,
     )
     (root / MANIFEST_FILE).write_bytes(canonical_json(manifest) + b"\n")
@@ -60,7 +62,11 @@ def load_snapshot(root: Path) -> CompactionSnapshot:
     if len(cases) != manifest.cases.records:
         raise ValueError("compaction snapshot case count does not match the manifest")
     if manifest.digest != _snapshot_digest(
-        manifest.builder_digest, manifest.target_tokens, manifest.corpus, manifest.cases
+        manifest.builder_digest,
+        manifest.target_tokens,
+        manifest.corpus,
+        manifest.skeletons,
+        manifest.cases,
     ):
         raise ValueError("compaction snapshot digest does not match its files")
     _validate_cases(cases)
@@ -84,10 +90,12 @@ def _snapshot_digest(
     builder_digest: str,
     target_tokens: int,
     corpus: tuple[CorpusFile, ...],
+    skeletons: tuple[CorpusFile, ...],
     cases: SnapshotFile,
 ) -> str:
     payload = f"{builder_digest}\n{target_tokens}\n".encode()
     payload += b"".join(f"{file.path}\0{file.sha256}\n".encode() for file in corpus)
+    payload += b"".join(f"skeleton:{file.path}\0{file.sha256}\n".encode() for file in skeletons)
     payload += f"{cases.path}\0{cases.records}\0{cases.sha256}\n".encode()
     return f"sha256:{hashlib.sha256(payload).hexdigest()}"
 
@@ -106,10 +114,10 @@ def _validate_cases(cases: tuple[CompactionCase, ...]) -> None:
             raise ValueError(f"chain case {case.id!r} carries no window extensions")
         if case.leaf != "chain" and case.extensions:
             raise ValueError(f"case {case.id!r} carries extensions outside the chain leaf")
-        if case.leaf == "behavior" and not case.probes:
-            raise ValueError(f"behavior case {case.id!r} carries no probes")
-        if case.leaf != "behavior" and case.probes:
-            raise ValueError(f"case {case.id!r} carries probes outside the behavior leaf")
+        if case.leaf in ("behavior", "real") and not case.probes:
+            raise ValueError(f"{case.leaf} case {case.id!r} carries no probes")
+        if case.leaf not in ("behavior", "real") and case.probes:
+            raise ValueError(f"case {case.id!r} carries probes outside a probed leaf")
         if case.leaf == "image" and not any(fact.kind == "image" for fact in case.facts):
             raise ValueError(f"image case {case.id!r} plants no image fact")
         broken_reference = next(

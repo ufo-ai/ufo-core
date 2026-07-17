@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from evals.compaction.build import SnapshotBuild
+from evals.compaction.build import REAL_SKELETONS, SKELETON_SUFFIX, SnapshotBuild
 from evals.compaction.models import CompactionCase, PlantedFact, estimate_tokens, message_text
 from evals.compaction.runner import SEED_MESSAGE, CompactionSuite, _grade_probe, load_compaction
 from evals.compaction.snapshot import load_snapshot, write_snapshot
@@ -15,9 +15,19 @@ from evals.harness.capability import CapabilityOutput, ToolInvocation
 from evals.harness.target import TargetResult
 from ufo.blob import FilesystemBlobStore
 from ufo.loop.compaction import MAX_REFERENCE_PATHS, TOOL_OUTPUT_PATH_RE, CompactionSummary
-from ufo.models.interface import ImageBlock, Message, ModelEvent, ModelRequest, TextDelta
+from ufo.models.interface import (
+    ImageBlock,
+    ImageSource,
+    Message,
+    ModelEvent,
+    ModelRequest,
+    TextBlock,
+    TextDelta,
+    ToolResultBlock,
+    ToolUseBlock,
+)
 from ufo.schema.records import Usage
-from ufo.transcript import decode, transcript_key
+from ufo.transcript import Conversation, decode, encode, transcript_key
 
 TEST_TARGET_TOKENS = 9_000
 TEST_TRIGGER_TOKENS = int(TEST_TARGET_TOKENS * 0.9)
@@ -505,3 +515,215 @@ async def test_snapshot_rejects_duplicate_case_ids(tmp_path: Path) -> None:
             corpus=(),
             cases=(case, case),
         )
+
+
+SCRUB_BAIT = "escalate to ops.oncall@metalcraft.ai holding token ghp_abcdefghijklmnop123"
+IMAGE_PAYLOAD = "QkFTRTY0U0VDUkVU" * 40
+
+
+def _skeleton(root: Path, name: str, rounds: int) -> None:
+    messages: list[Message] = [
+        Message(role="user", content=f"Start the export task. {SCRUB_BAIT}"),
+        Message(
+            role="assistant",
+            content=(
+                TextBlock(text="Grabbing the dashboard screenshot."),
+                ToolUseBlock(
+                    id=f"{name}-shot",
+                    name="browser_task",
+                    input={"note": f"send to {SCRUB_BAIT}"},
+                ),
+            ),
+        ),
+        Message(
+            role="user",
+            content=(
+                ToolResultBlock(
+                    tool_use_id=f"{name}-shot",
+                    content=(
+                        TextBlock(text=f"Screenshot captured. {SCRUB_BAIT}"),
+                        ImageBlock(source=ImageSource(media_type="image/png", data=IMAGE_PAYLOAD)),
+                    ),
+                ),
+            ),
+        ),
+    ]
+    for index in range(rounds):
+        messages.append(
+            Message(
+                role="assistant", content=f"Working step {index} of the export task " + "x" * 120
+            )
+        )
+        messages.append(Message(role="user", content=f"Result {index} acknowledged " + "y" * 120))
+    (root / f"{name}{SKELETON_SUFFIX}").write_bytes(
+        encode(Conversation(seq=1, messages=tuple(messages)))
+    )
+
+
+def _real_build(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    repo = tmp_path_factory.mktemp("real-corpus")
+    _corpus(repo)
+    transcripts = tmp_path_factory.mktemp("skeletons")
+    for name in sorted({name for pair in REAL_SKELETONS.values() for name in pair}):
+        _skeleton(transcripts, name, rounds=72)
+    out = tmp_path_factory.mktemp("real-snapshot")
+    SnapshotBuild(
+        repo=repo, out=out, target_tokens=TEST_TARGET_TOKENS, transcripts=transcripts
+    ).build()
+    return out
+
+
+@pytest.fixture(scope="module")
+def real_snapshot_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return _real_build(tmp_path_factory)
+
+
+async def test_real_cases_build_only_with_transcripts(
+    snapshot_dir: Path, real_snapshot_dir: Path
+) -> None:
+    without = load_snapshot(snapshot_dir)
+    assert not [case for case in without.cases if case.leaf == "real"]
+    assert without.manifest.skeletons == ()
+    snapshot = load_snapshot(real_snapshot_dir)
+    real = [case for case in snapshot.cases if case.leaf == "real"]
+    assert sorted(case.id for case in real) == sorted(REAL_SKELETONS)
+    assert len(snapshot.manifest.skeletons) == len(
+        {name for pair in REAL_SKELETONS.values() for name in pair}
+    )
+    for case in real:
+        assert estimate_tokens(case.messages) >= TEST_TARGET_TOKENS
+        assert case.probes
+    tasks = load_compaction(real_snapshot_dir).tasks
+    assert "compaction.real" in {task.name for task in tasks}
+
+
+async def test_real_skeletons_are_scrubbed(real_snapshot_dir: Path) -> None:
+    snapshot = load_snapshot(real_snapshot_dir)
+    case = next(case for case in snapshot.cases if case.leaf == "real")
+    text = "\n".join(message_text(message) for message in case.messages)
+    assert "ops.oncall@metalcraft.ai" not in text
+    assert "ghp_abcdefghijklmnop123" not in text
+    assert "redacted@example.com" in text
+    assert "[redacted]" in text
+
+
+async def test_real_skeleton_blocks_are_scrubbed_and_images_become_markers(
+    real_snapshot_dir: Path,
+) -> None:
+    """The fixture skeletons open with block-shaped content — a tool_use whose input carries a
+    secret, a tool_result carrying text plus an inline screenshot — so the block match arms are
+    what this proves: payloads reduce to markers, secrets scrub inside every block shape."""
+    snapshot = load_snapshot(real_snapshot_dir)
+    for case in snapshot.cases:
+        if case.leaf != "real":
+            continue
+        blocks = [
+            block
+            for message in case.messages
+            if not isinstance(message.content, str)
+            for block in message.content
+        ]
+        assert not any(isinstance(block, ImageBlock) for block in blocks)
+        text = "\n".join(message_text(message) for message in case.messages)
+        assert IMAGE_PAYLOAD not in text
+        tool_inputs = "\n".join(
+            str(block.input) for block in blocks if isinstance(block, ToolUseBlock)
+        )
+        parts_text = "\n".join(
+            part.text
+            for block in blocks
+            if isinstance(block, ToolResultBlock) and isinstance(block.content, tuple)
+            for part in block.content
+            if isinstance(part, TextBlock)
+        )
+        assert "ops.oncall@metalcraft.ai" not in tool_inputs
+        assert "redacted@example.com" in tool_inputs
+        assert "ops.oncall@metalcraft.ai" not in parts_text
+        assert "[image]" in text
+
+
+async def test_real_literals_are_disjoint_across_cases(real_snapshot_dir: Path) -> None:
+    snapshot = load_snapshot(real_snapshot_dir)
+    seen: dict[str, str] = {}
+    for case in snapshot.cases:
+        if case.leaf != "real":
+            continue
+        for fact in case.facts:
+            for literal in (fact.literal, fact.stale_literal):
+                if not literal:
+                    continue
+                assert literal not in seen, (
+                    f"literal {literal} appears in both {seen[literal]} and {case.id}"
+                )
+                seen[literal] = case.id
+
+
+async def test_real_probes_are_report_only(real_snapshot_dir: Path, tmp_path: Path) -> None:
+    snapshot = load_snapshot(real_snapshot_dir)
+    case = next(case for case in snapshot.cases if case.id == "real-plan-reversal")
+    probes = {probe.id: probe for probe in case.probes}
+    reversal = next(fact for fact in case.facts if fact.id.endswith("superseded-0"))
+    lab = _lab(
+        tmp_path,
+        _summary(
+            decisions=(
+                f"writeback batch window {reversal.literal}",
+                f"earlier figure {reversal.stale_literal} discarded",
+            )
+        ),
+    )
+    conversation_id = uuid4()
+    await lab.compactor(conversation_id, TEST_TRIGGER_TOKENS).maybe_compact(case.messages)
+    answers = {
+        SEED_MESSAGE: _clean("ready"),
+        probes["recall"].question: _clean(f"It is {probes['recall'].expect_literals[0]}."),
+        probes["reversal"].question: _clean(f"It is {probes['reversal'].forbid_literals[0]}."),
+        probes["revision"].question: _clean(f"It is {probes['revision'].expect_literals[0]}."),
+        probes["deleted"].question: _clean("No — that step was dropped from the plan."),
+        probes["control"].question: _clean("I do not have that value."),
+    }
+    target = ScriptedStepTarget(lab, conversation_id, answers)
+    suite = CompactionSuite(
+        leaf="real", cases=(case,), digest="test", trigger_tokens=TEST_TRIGGER_TOKENS
+    )
+    report = await suite.run(target)  # type: ignore[arg-type]
+    assert report.passed
+    probes_results = [result for result in report.cases if not result.name.endswith(".compacted")]
+    sanity = next(result for result in report.cases if result.name.endswith(".compacted"))
+    assert sanity.passed and not sanity.excluded
+    assert all(result.excluded for result in probes_results)
+    assert all("excluded from the pass bar" in result.reason for result in probes_results)
+    first = report.cases[0]
+    assert "compaction" in first.evidence
+    assert "artifactGrading" in first.evidence
+    assert first.evidence["weightedRecall"] == 0.0
+    assert first.evidence["staleRate"] == pytest.approx(0.5)
+    assert first.evidence["correctionRecall"] == pytest.approx(0.5)
+    by_metric = {metric.name: metric.value for metric in report.metrics}
+    assert by_metric["probe_pass_rate"] == pytest.approx(0.6)
+    assert by_metric["stale_rate"] == pytest.approx(0.5)
+
+
+async def test_real_sanity_failure_is_not_report_only(
+    real_snapshot_dir: Path, tmp_path: Path
+) -> None:
+    snapshot = load_snapshot(real_snapshot_dir)
+    case = next(case for case in snapshot.cases if case.id == "real-plan-reversal")
+    lab = _lab(tmp_path, _summary())
+    answers = {SEED_MESSAGE: _clean("ready")}
+    for probe in case.probes:
+        answers[probe.question] = _clean(" ".join(probe.expect_literals) or "dropped")
+    target = ScriptedStepTarget(lab, uuid4(), answers)
+    suite = CompactionSuite(
+        leaf="real", cases=(case,), digest="test", trigger_tokens=TEST_TRIGGER_TOKENS
+    )
+    report = await suite.run(target)  # type: ignore[arg-type]
+    assert not report.passed
+    assert all(not result.excluded for result in report.cases)
+    assert all("compaction never fired" in result.reason for result in report.cases)
+
+
+async def test_real_builds_are_deterministic(tmp_path_factory: pytest.TempPathFactory) -> None:
+    first = load_snapshot(_real_build(tmp_path_factory)).manifest.digest
+    second = load_snapshot(_real_build(tmp_path_factory)).manifest.digest
+    assert first == second

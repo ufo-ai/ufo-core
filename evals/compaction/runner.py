@@ -57,6 +57,7 @@ LEAF_ORDER: tuple[CompactionLeaf, ...] = (
     "reference",
     "image",
     "behavior",
+    "real",
 )
 
 
@@ -146,7 +147,7 @@ class CompactionSuite:
             raise RuntimeError("the compaction suite requires the compaction eval target")
         results: list[EvalCaseResult] = []
         for case in self.cases:
-            if case.leaf == "behavior":
+            if case.leaf in ("behavior", "real"):
                 results.extend(await self._behavior_case(case, run_target, lab))
             else:
                 results.append(await self._artifact_case(case, lab))
@@ -183,29 +184,13 @@ class CompactionSuite:
                     reason=f"generation {generation} produced no compacted-context message",
                     evidence=self._evidence(case, grades, tokens_spent),
                 )
-            files_block = _section(rendered, FILES_HEADING)
-            references_block = _section(rendered, REFERENCES_HEADING)
             grades.append(
-                GenerationGrade(
+                _grade_rendered(
+                    case,
+                    rendered,
                     generation=generation,
                     before_tokens=before_tokens,
                     after_tokens=estimate_tokens(after),
-                    present=frozenset(fact.id for fact in case.facts if fact.literal in rendered),
-                    stale_present=frozenset(
-                        fact.id
-                        for fact in case.facts
-                        if fact.stale_literal and fact.stale_literal in rendered
-                    ),
-                    harvested=frozenset(
-                        fact.id
-                        for fact in case.facts
-                        if fact.kind == "reference" and fact.path in references_block
-                    ),
-                    carried=frozenset(
-                        fact.id
-                        for fact in case.facts
-                        if fact.kind == "reference" and fact.path in files_block
-                    ),
                 )
             )
             tokens_spent += sum(usage.input_tokens + usage.output_tokens for usage in usages)
@@ -321,6 +306,12 @@ class CompactionSuite:
                 )
             case "image":
                 return "the image-borne fact survives the compaction boundary"
+            case "real":
+                return (
+                    "sanity is the pass bar: the case passes when the window compacts through "
+                    "the live probe turn; probe verdicts and record-graded survival are "
+                    "recorded as observability metrics, like the chain leaf's generation rates"
+                )
             case _:
                 raise RuntimeError(f"leaf {case.leaf!r} has no artifact grading criteria")
 
@@ -440,6 +431,43 @@ class CompactionSuite:
         results[0] = results[0].model_copy(
             update={"evidence": {**results[0].evidence, "compaction": compaction_evidence}}
         )
+        if case.leaf == "real":
+            grade = _grade_rendered(
+                case,
+                str(record.after[0].content),
+                generation=1,
+                before_tokens=estimate_tokens(record.before),
+                after_tokens=estimate_tokens(record.after),
+            )
+            artifact = self._evidence(case, [grade], tokens_spent=0)
+            artifact["artifactGrading"] = artifact.pop("grading")
+            artifact.pop("tokensSpent")
+            results[0] = results[0].model_copy(
+                update={"evidence": {**artifact, **results[0].evidence}}
+            )
+            results = [
+                result.model_copy(
+                    update={
+                        "excluded": True,
+                        "reason": (
+                            f"{result.reason} "
+                            "(recorded as observability, excluded from the pass bar)"
+                        ),
+                    }
+                )
+                for result in results
+            ]
+            results.append(
+                EvalCaseResult(
+                    name=f"{case.id}.compacted",
+                    passed=True,
+                    reason=(
+                        "window compacted through the live probe turn; probe verdicts and "
+                        "survival metrics recorded as observability"
+                    ),
+                    evidence={"grading": self._grading(case), "compaction": compaction_evidence},
+                )
+            )
         return results
 
     def _metrics(self, results: tuple[EvalCaseResult, ...]) -> tuple[EvalMetric, ...]:
@@ -462,6 +490,23 @@ class CompactionSuite:
                     return ()
                 rate = sum(result.passed for result in scored) / len(scored)
                 return (EvalMetric(name="probe_pass_rate", value=rate),)
+            case "real":
+                probes = [result for result in results if not result.name.endswith(".compacted")]
+                if not probes:
+                    return ()
+                rate = sum(result.passed for result in probes) / len(probes)
+                return (
+                    EvalMetric(name="probe_pass_rate", value=rate),
+                    *_rate_metrics(
+                        results,
+                        (
+                            "weighted_recall",
+                            "stale_rate",
+                            "correction_recall",
+                            "weighted_reference_coverage",
+                        ),
+                    ),
+                )
             case _:
                 return ()
 
@@ -523,6 +568,34 @@ def _grade_probe(
         )
     return EvalCaseResult(
         name=name, passed=True, reason="answer carries the surviving value", evidence=evidence
+    )
+
+
+def _grade_rendered(
+    case: CompactionCase,
+    rendered: str,
+    generation: int,
+    before_tokens: int,
+    after_tokens: int,
+) -> GenerationGrade:
+    files_block = _section(rendered, FILES_HEADING)
+    references_block = _section(rendered, REFERENCES_HEADING)
+    return GenerationGrade(
+        generation=generation,
+        before_tokens=before_tokens,
+        after_tokens=after_tokens,
+        present=frozenset(fact.id for fact in case.facts if fact.literal in rendered),
+        stale_present=frozenset(
+            fact.id for fact in case.facts if fact.stale_literal and fact.stale_literal in rendered
+        ),
+        harvested=frozenset(
+            fact.id
+            for fact in case.facts
+            if fact.kind == "reference" and fact.path in references_block
+        ),
+        carried=frozenset(
+            fact.id for fact in case.facts if fact.kind == "reference" and fact.path in files_block
+        ),
     )
 
 
