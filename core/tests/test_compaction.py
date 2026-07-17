@@ -10,6 +10,7 @@ from ufo.blob import FilesystemBlobStore
 from ufo.loop.compaction import (
     AUTOCOMPACT_BUFFER_TOKENS,
     COMPACTED_CONTEXT_PREFIX,
+    COMPACTION_FORMAT_RESTATEMENT,
     COMPACTION_SUMMARY_MAX_TOKENS,
     DEFAULT_CONTEXT_WINDOW_TOKENS,
     Compaction,
@@ -275,6 +276,23 @@ async def test_head_images_become_markers_in_the_summarizer_input(tmp_path: Path
     assert model.seen
     assert "[image]" in model.seen[0]
     assert "SECRETBASE64" not in model.seen[0]
+
+
+async def test_summarizer_input_closes_with_the_format_restatement(tmp_path: Path) -> None:
+    """The rendered head ends with the JSON-format restatement: at a full-scale head the system
+    prompt sits too far back to govern the reply, and without a trailing instruction the model can
+    continue the conversation instead of summarizing it."""
+    model = CapturingSummaryModel()
+    compaction = _compaction(tmp_path, model=model, trigger_tokens=1, keep_messages=2)
+    messages = (
+        Message(role="user", content="begin " + "x" * 40),
+        Message(role="assistant", content="acknowledged " + "x" * 40),
+        Message(role="user", content="keep going " + "x" * 40),
+        Message(role="assistant", content="working"),
+        Message(role="user", content="tail"),
+    )
+    await compaction.maybe_compact(messages)
+    assert model.seen[0].endswith(COMPACTION_FORMAT_RESTATEMENT)
 
 
 async def test_summarizer_input_folds_verbatim_repetition(tmp_path: Path) -> None:

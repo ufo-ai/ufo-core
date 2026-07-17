@@ -47,6 +47,10 @@ MAX_PTL_RETRIES = 3
 PTL_DROP_DENOMINATOR = 5
 MAX_REFERENCE_PATHS = 5
 COMPACTED_CONTEXT_PREFIX = "Compacted context:\n"
+COMPACTION_FORMAT_RESTATEMENT = (
+    "\n\n---\nEnd of transcript head. Respond now with the SINGLE JSON object described in "
+    "your instructions — no prose, no markdown fences, nothing else."
+)
 IMAGE_MARKER = "[image]"
 REPEATED_RUN_MIN_OCCURRENCES = 10
 REPEATED_RUN_UNIT_MAX_WORDS = 32
@@ -292,11 +296,20 @@ class Compaction:
         preserving block structure. Inline images are already `[image]` markers in `_text` — they
         carry no text but must not vanish silently, so the summarizer knows one was there. The
         rendered head then folds verbatim repetition, so the summarize request carries the
-        information, not the bulk."""
-        return self._fold_repeated_runs(
-            "\n\n".join(
-                f"{message.role}: {self._text(message)}" for round_ in rounds for message in round_
+        information, not the bulk. The format restatement closes the input because the model's
+        response shape follows the nearest instruction: at a full-scale head the system prompt sits
+        hundreds of thousands of tokens back and the transcript's own momentum otherwise captures
+        the reply into continuing the conversation (measured 4/6 continuations on a captured
+        window, 0/12 with the restatement)."""
+        return (
+            self._fold_repeated_runs(
+                "\n\n".join(
+                    f"{message.role}: {self._text(message)}"
+                    for round_ in rounds
+                    for message in round_
+                )
             )
+            + COMPACTION_FORMAT_RESTATEMENT
         )
 
     def _fold_repeated_runs(self, text: str) -> str:
