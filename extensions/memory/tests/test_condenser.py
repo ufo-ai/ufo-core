@@ -115,6 +115,9 @@ class _Resolver:
     async def client_for(self, model: str) -> ModelClient:
         return self.client
 
+    def key_slot_for(self, model: str) -> str | None:
+        return None
+
 
 def _model(payload: str) -> ModelAccess:
     return ModelAccess(

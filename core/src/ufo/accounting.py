@@ -3,7 +3,7 @@
 import hashlib
 import json
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -370,11 +370,16 @@ class UsageExport:
     model: str
     price_digest: str | None
     turn_id: UUID | None
+    byok: bool
     occurred_at: datetime
 
 
 async def mint_usage_exports(
-    connection: AsyncConnection, workspace_id: UUID, consumer: str, floor: datetime
+    connection: AsyncConnection,
+    workspace_id: UUID,
+    consumer: str,
+    floor: datetime,
+    key_slot_for: Callable[[str], str | None],
 ) -> None:
     """Freeze the consumer's unshipped usage growth into `ledger_export` intent rows. This is the
     export seam's settlement knowledge, kept beside the writers that define it: a `tokens` row is
@@ -384,9 +389,26 @@ async def mint_usage_exports(
     further intent from the prior high-water mark, so no growth is ever lost to timing. Egress
     rows (a zero-priced request count) never export. Usage settling before `floor` never mints —
     the consumer's backfill bound. Idempotent: an intent's `(consumer, ledger_id, from_amount)`
-    key makes concurrent or replayed mints collapse onto one frozen row."""
+    key makes concurrent or replayed mints collapse onto one frozen row.
+
+    Each intent freezes its `byok` label too: host-side `tokens` usage whose model's provider
+    key slot (`key_slot_for` — the same resolution `client_for` applies) is stored by the
+    workspace is the workspace's spend; everything else — providers keyed from platform env, and
+    `sandbox_tokens`, whose egress proxy injects the platform key — is the platform's. Frozen at
+    mint, a re-send carries the label of the key state that served the usage, never the
+    drain-time state."""
     now = datetime.now(UTC)
     settle_cutoff = now - timedelta(seconds=EXPORT_SETTLE_MARGIN_SECONDS)
+    stored_slots = {
+        row.slot
+        for row in (
+            await connection.execute(
+                sa.select(tables.credential.c.slot).where(
+                    tables.credential.c.workspace_id == workspace_id
+                )
+            )
+        ).all()
+    }
     latest = (
         sa.select(
             tables.ledger_export.c.ledger_id,
@@ -404,6 +426,8 @@ async def mint_usage_exports(
                 tables.ledger.c.workspace_id,
                 tables.ledger.c.amount,
                 tables.ledger.c.priced_micro_usd,
+                tables.ledger.c.dimension,
+                tables.ledger.c.model,
                 tables.ledger.c.updated_at,
                 sa.func.coalesce(latest.c.to_amount, 0).label("from_amount"),
                 sa.func.coalesce(latest.c.to_micro_usd, 0).label("from_micro_usd"),
@@ -439,6 +463,11 @@ async def mint_usage_exports(
                 to_amount=row.amount,
                 from_micro_usd=row.from_micro_usd,
                 to_micro_usd=row.priced_micro_usd,
+                byok=(
+                    row.dimension == TOKENS_DIMENSION
+                    and (slot := key_slot_for(row.model)) is not None
+                    and slot in stored_slots
+                ),
                 occurred_at=row.updated_at,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
@@ -471,6 +500,7 @@ async def read_pending_usage_exports(
                 tables.ledger.c.model,
                 tables.ledger.c.price_digest,
                 tables.ledger.c.turn_id,
+                export.c.byok,
                 export.c.occurred_at,
             )
             .select_from(export.join(tables.ledger, tables.ledger.c.id == export.c.ledger_id))
@@ -493,6 +523,7 @@ async def read_pending_usage_exports(
             model=row.model,
             price_digest=row.price_digest,
             turn_id=row.turn_id,
+            byok=row.byok,
             occurred_at=row.occurred_at,
         )
         for row in rows

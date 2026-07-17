@@ -17,6 +17,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 import sqlalchemy as sa
+import ufo_ext_bedrock as bedrock
 import ufo_ext_metronome as metronome
 from cryptography.fernet import Fernet
 
@@ -27,18 +28,20 @@ from ufo.accounting import (
     record_workspace_usage,
 )
 from ufo.blob import FilesystemBlobStore
-from ufo.credentials import CredentialStore
+from ufo.config import BlobConfig, Config, DatabaseConfig
+from ufo.credentials import CredentialRequests, CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, context_for
 from ufo.ext.loader import turn_tools
 from ufo.jobs import JobRunner, bindings_from
+from ufo.models.registry import ModelRegistry, model_registry
 from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.schema import tables
 from ufo.schema.records import Agent, TerminalFrame, Turn, Usage
 from ufo.seats import OwnerSeatRevocation, SeatLimitReached
 from ufo.tools.context import SpawnResult, ToolContext
 from ufo.tools.registry import ToolDef
-from ufo.workspace import ws
+from ufo.workspace import init_workspace_credentials, ws
 
 TOKEN = "sandbox-bearer-0xdecafbad"
 MODEL = "claude-opus-4-8"
@@ -77,9 +80,25 @@ class _Recorder:
         return httpx.Response(self._status, json={})
 
 
+def _registry() -> ModelRegistry:
+    config = Config(
+        database=DatabaseConfig(url="sqlite+aiosqlite://"),
+        blob=BlobConfig(backend="filesystem", root=Path()),
+    )
+    return model_registry(config, (bedrock.manifest(),))
+
+
+def _shipper_context() -> ExtensionContext:
+    return context_for(
+        metronome.NAME,
+        frozenset((metronome.ANTHROPIC_KEY_SLOT,)),
+        model_resolver=_registry(),
+    )
+
+
 def _shipper(recorder: _Recorder) -> metronome.UsageShipper:
     return metronome.UsageShipper(
-        ctx=context_for(metronome.NAME, frozenset()),
+        ctx=_shipper_context(),
         transport=httpx.MockTransport(recorder.handle),
     )
 
@@ -196,7 +215,9 @@ def test_manifest_declares_two_cron_jobs_three_tools_one_section() -> None:
     assert not declared.tools[2].side_effecting
     (section,) = declared.prompt_sections
     assert section.name == "seats"
-    assert not declared.credentials
+    (slot,) = declared.credentials
+    assert slot.name == "anthropic_api_key"
+    assert slot.injection is None
     assert not declared.routes
 
 
@@ -440,7 +461,7 @@ async def test_manifest_job_fires_through_job_runner(
     workspace_id, _, _ = await _seed()
     async with workspace_tx() as connection:
         await record_workspace_usage(connection, workspace_id, MODEL, Usage(input_tokens=100))
-    runner = JobRunner(bindings=bindings_from((metronome.manifest(),), ()))
+    runner = JobRunner(bindings=bindings_from((metronome.manifest(),), ()), registry=_registry())
     await runner.fire(f"{metronome.NAME}:{metronome.JOB_NAME}")
     (request,) = recorder.requests
     (event,) = _events(request)
@@ -595,7 +616,7 @@ async def test_any_member_lists_seats(db: None, tmp_path: Path) -> None:
 
 def _seat_shipper(recorder: _Recorder) -> metronome.SeatShipper:
     return metronome.SeatShipper(
-        ctx=context_for(metronome.NAME, frozenset()),
+        ctx=_shipper_context(),
         transport=httpx.MockTransport(recorder.handle),
     )
 
@@ -624,7 +645,7 @@ async def test_seat_job_establishes_the_limit_and_ships_one_daily_snapshot(
             .values(seated_at=sa.func.now(), updated_at=sa.func.now())
             .where(tables.member.c.workspace_id == workspace_id)
         )
-    runner = JobRunner(bindings=bindings_from((metronome.manifest(),), ()))
+    runner = JobRunner(bindings=bindings_from((metronome.manifest(),), ()), registry=_registry())
     await runner.fire(f"{metronome.NAME}:{metronome.SEAT_JOB_NAME}")
     assert await _workspace_limit(workspace_id) == metronome.SEAT_LIMIT_DEFAULT
     (request,) = recorder.requests
@@ -693,3 +714,185 @@ async def test_seat_job_missing_token_fails_loud(db: None, monkeypatch: pytest.M
         await _seat_shipper(recorder).run()
     assert recorder.requests == []
     assert await _workspace_limit(workspace_id) is None
+
+
+async def test_byok_label_flips_with_the_stored_key_and_stays_per_workspace(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(metronome.METRONOME_BEARER_TOKEN_ENV, TOKEN)
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    init_workspace_credentials(store)
+    workspace_id, agent_id, conversation_id = await _seed()
+    other_workspace, other_agent, other_conversation = await _seed()
+    for ws_id, conv_id, ag_id in (
+        (workspace_id, conversation_id, agent_id),
+        (other_workspace, other_conversation, other_agent),
+    ):
+        turn_id = await _turn(ws_id, conv_id, ag_id)
+        await _settle(turn_id, age_seconds=0)
+        async with workspace_tx() as connection:
+            await record_turn_usage(
+                connection, ws_id, turn_id, MODEL, Usage(input_tokens=1000, output_tokens=500)
+            )
+    await store.put(workspace_id, metronome.ANTHROPIC_KEY_SLOT, "sk-ant-workspace-own")
+    recorder = _Recorder()
+    with ws(workspace_id):
+        await _shipper(recorder).run()
+    with ws(other_workspace):
+        await _shipper(recorder).run()
+    byok_events = _events(recorder.requests[0])
+    passthrough_events = _events(recorder.requests[1])
+    assert {event["properties"]["byok"] for event in byok_events} == {"true"}
+    assert {event["properties"]["byok"] for event in passthrough_events} == {"false"}
+
+
+async def test_byok_label_reflects_a_key_added_between_ticks(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(metronome.METRONOME_BEARER_TOKEN_ENV, TOKEN)
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    init_workspace_credentials(store)
+    workspace_id, agent_id, conversation_id = await _seed()
+    turn_id = await _turn(workspace_id, conversation_id, agent_id)
+    await _settle(turn_id, age_seconds=0)
+    async with workspace_tx() as connection:
+        await record_turn_usage(connection, workspace_id, turn_id, MODEL, Usage(input_tokens=100))
+    recorder = _Recorder()
+    with ws(workspace_id):
+        await _shipper(recorder).run()
+    await store.put(workspace_id, metronome.ANTHROPIC_KEY_SLOT, "sk-ant-late")
+    second_turn = await _turn(workspace_id, conversation_id, agent_id, seq=2)
+    await _settle(second_turn, age_seconds=0)
+    async with workspace_tx() as connection:
+        await record_turn_usage(
+            connection, workspace_id, second_turn, MODEL, Usage(input_tokens=50)
+        )
+    with ws(workspace_id):
+        await _shipper(recorder).run()
+    (first,) = _events(recorder.requests[0])
+    (second,) = _events(recorder.requests[1])
+    assert first["properties"]["byok"] == "false"
+    assert second["properties"]["byok"] == "true"
+
+
+async def test_the_declared_slot_opens_the_chat_seal_and_byok_resolution(db: None) -> None:
+    """The whole BYOK path over real parts: the manifest's declared union lets the private
+    handoff seal exactly this slot (and refuses it when metronome is absent), the fulfilled
+    secret lands in the store, and model-key resolution prefers it over the platform env."""
+    workspace_id, _, _ = await _seed()
+    fernet = Fernet(Fernet.generate_key())
+    declared = frozenset(slot.name for slot in metronome.manifest().credentials)
+    requests = CredentialRequests(fernet=fernet, declared=declared)
+    member_id = uuid4()
+    sealed = requests.seal(workspace_id, member_id, (metronome.ANTHROPIC_KEY_SLOT,))
+    assert sealed
+    without_metronome = CredentialRequests(fernet=fernet, declared=frozenset())
+    with pytest.raises(ValueError, match="anthropic_api_key"):
+        without_metronome.seal(workspace_id, member_id, (metronome.ANTHROPIC_KEY_SLOT,))
+    store = CredentialStore(fernet=fernet)
+    init_workspace_credentials(store)
+    await store.put(workspace_id, metronome.ANTHROPIC_KEY_SLOT, "sk-ant-byok")
+    with ws(workspace_id) as scope:
+        assert await scope.credential(metronome.ANTHROPIC_KEY_SLOT, "ANTHROPIC_API_KEY") == (
+            "sk-ant-byok"
+        )
+
+
+async def test_byok_labels_only_anthropic_served_host_tokens(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(metronome.METRONOME_BEARER_TOKEN_ENV, TOKEN)
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    init_workspace_credentials(store)
+    workspace_id, agent_id, conversation_id = await _seed()
+    await store.put(workspace_id, metronome.ANTHROPIC_KEY_SLOT, "sk-ant-workspace-own")
+    turn_id = await _turn(workspace_id, conversation_id, agent_id)
+    async with workspace_tx() as connection:
+        await record_turn_usage(
+            connection, workspace_id, turn_id, MODEL, Usage(input_tokens=1000, output_tokens=500)
+        )
+        await record_sandbox_tokens(
+            connection, workspace_id, turn_id, MODEL, Usage(input_tokens=200)
+        )
+        await record_workspace_usage(connection, workspace_id, "gpt-5", Usage(input_tokens=300))
+    await _settle(turn_id, age_seconds=PAST_MARGIN_SECONDS)
+    recorder = _Recorder()
+    with ws(workspace_id):
+        await _shipper(recorder).run()
+    labels = {
+        (event["properties"]["dimension"], event["properties"]["model"]): event["properties"][
+            "byok"
+        ]
+        for event in _events(recorder.requests[0])
+    }
+    assert labels == {
+        ("tokens", MODEL): "true",
+        ("sandbox_tokens", MODEL): "false",
+        ("tokens", "gpt-5"): "false",
+    }
+
+
+async def test_byok_label_is_frozen_at_mint_across_a_key_change(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An intent minted before the key was stored re-sends byte-identical after it: the label is
+    the key state that served the usage, never the drain-time state."""
+    monkeypatch.setenv(metronome.METRONOME_BEARER_TOKEN_ENV, TOKEN)
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    init_workspace_credentials(store)
+    workspace_id, agent_id, conversation_id = await _seed()
+    turn_id = await _turn(workspace_id, conversation_id, agent_id)
+    await _settle(turn_id, age_seconds=0)
+    async with workspace_tx() as connection:
+        await record_turn_usage(connection, workspace_id, turn_id, MODEL, Usage(input_tokens=100))
+    failing = _Recorder(status=500)
+    with ws(workspace_id), pytest.raises(metronome.MetronomeError):
+        await _shipper(failing).run()
+    await store.put(workspace_id, metronome.ANTHROPIC_KEY_SLOT, "sk-ant-added-mid-outage")
+    recorder = _Recorder()
+    with ws(workspace_id):
+        await _shipper(recorder).run()
+    (failed_event,) = _events(failing.requests[0])
+    (event,) = _events(recorder.requests[0])
+    assert event == failed_event
+    assert event["properties"]["byok"] == "false"
+
+
+async def test_byok_follows_the_serving_providers_stored_key(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Bedrock-served model labels from the bedrock slot, never the anthropic one: storing
+    `anthropic_api_key` does not make Bedrock usage BYOK, and storing `bedrock_api_key` does —
+    the label follows whichever key `client_for` would actually resolve for the model."""
+    monkeypatch.setenv(metronome.METRONOME_BEARER_TOKEN_ENV, TOKEN)
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    init_workspace_credentials(store)
+    workspace_id, agent_id, conversation_id = await _seed()
+    await store.put(workspace_id, metronome.ANTHROPIC_KEY_SLOT, "sk-ant-own")
+    turn_id = await _turn(workspace_id, conversation_id, agent_id)
+    await _settle(turn_id, age_seconds=0)
+    async with workspace_tx() as connection:
+        await record_turn_usage(
+            connection, workspace_id, turn_id, "anthropic.claude-opus-4-8", Usage(input_tokens=10)
+        )
+    recorder = _Recorder()
+    with ws(workspace_id):
+        await _shipper(recorder).run()
+    (event,) = _events(recorder.requests[0])
+    assert event["properties"]["model"] == "anthropic.claude-opus-4-8"
+    assert event["properties"]["byok"] == "false"
+    await store.put(workspace_id, bedrock.BEDROCK_KEY_SLOT, "bedrock-bearer-own")
+    second_turn = await _turn(workspace_id, conversation_id, agent_id, seq=2)
+    await _settle(second_turn, age_seconds=0)
+    async with workspace_tx() as connection:
+        await record_turn_usage(
+            connection,
+            workspace_id,
+            second_turn,
+            "anthropic.claude-opus-4-8",
+            Usage(input_tokens=10),
+        )
+    with ws(workspace_id):
+        await _shipper(recorder).run()
+    (bedrock_event,) = _events(recorder.requests[1])
+    assert bedrock_event["properties"]["byok"] == "true"

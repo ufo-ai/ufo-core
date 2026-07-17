@@ -205,6 +205,7 @@ ledger_export = sa.Table(
     sa.Column("to_amount", sa.BigInteger, nullable=False),
     sa.Column("from_micro_usd", sa.BigInteger, nullable=False),
     sa.Column("to_micro_usd", sa.BigInteger, nullable=False),
+    sa.Column("byok", sa.Boolean, nullable=False, server_default=sa.false()),
     sa.Column("occurred_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("acked_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),

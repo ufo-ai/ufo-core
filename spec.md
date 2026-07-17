@@ -309,7 +309,10 @@ tools drive grants and report counts.
 An external billing vendor is an extension draining the usage-export seam
 (`ctx.pending_usage_exports` / `ctx.ack_usage_exports`): core mints frozen, consumer-keyed delta
 intents from settled ledger rows — settlement and dedup keys are writer knowledge — and the
-extension is a pure delivery adapter (`metronome` ships them to Metronome's ingest API).
+extension is a pure delivery adapter (`metronome` ships them to Metronome's ingest API). Each
+intent freezes a `byok` label at mint: host `tokens` whose model's serving provider key slot
+(`ModelRegistry.key_slot_for` — the same resolution `client_for` applies, any provider) is stored
+by the workspace, so the rate card bills only pass-through usage.
 
 ## Model abstraction
 

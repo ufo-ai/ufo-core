@@ -66,6 +66,16 @@ class ModelRegistry:
             ) from unset
         return spec.client(model, key)
 
+    def key_slot_for(self, model: str) -> str | None:
+        """The BYOK slot whose stored value would key this model's calls — the same provider
+        resolution `client_for` applies, total instead of loud: an unclaimed model (a historical
+        ledger row from a removed provider) or a keyless provider answers None, so a billing
+        export labels it platform-served rather than wedging on it."""
+        spec = next((spec for spec in self.providers if spec.matches(model)), None)
+        if spec is None or not spec.key_slot:
+            return None
+        return spec.key_slot
+
     def model_key_env(self, model: str, config: Config) -> str | None:
         """The env var onboarding requires set before this model's first turn: a core provider's
         configured key, or None for a contributed provider that resolves its own key lazily at turn

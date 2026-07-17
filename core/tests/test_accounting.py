@@ -1,5 +1,7 @@
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -16,7 +18,9 @@ from ufo.accounting import (
     record_workspace_usage,
     usage_priced_micro_usd,
 )
+from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.db import workspace_tx
+from ufo.models.registry import model_registry
 from ufo.schema import tables
 from ufo.schema.records import Usage
 
@@ -472,12 +476,22 @@ async def _settle_turn(connection: AsyncConnection, turn_id: UUID, age_seconds: 
     )
 
 
+def _key_slot_for() -> Callable[[str], str | None]:
+    config = Config(
+        database=DatabaseConfig(url="sqlite+aiosqlite://"),
+        blob=BlobConfig(backend="filesystem", root=Path()),
+    )
+    return model_registry(config, ()).key_slot_for
+
+
 async def _pending(
     workspace_id: UUID, consumer: str = CONSUMER
 ) -> tuple[accounting.UsageExport, ...]:
     floor = datetime.now(UTC) - timedelta(days=7)
     async with workspace_tx() as connection:
-        await accounting.mint_usage_exports(connection, workspace_id, consumer, floor)
+        await accounting.mint_usage_exports(
+            connection, workspace_id, consumer, floor, _key_slot_for()
+        )
         return await accounting.read_pending_usage_exports(connection, workspace_id, consumer, 100)
 
 

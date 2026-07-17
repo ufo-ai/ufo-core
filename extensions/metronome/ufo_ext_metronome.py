@@ -16,6 +16,14 @@ never accumulate an undercount. Seat changes are chat acts: the owner asks and t
 `grant_seat`/`revoke_seat`; the rules (the count, the limit, the owner's irrevocable seat) are
 core's — this module only decides when to apply them and what to report back.
 
+Every usage event is labelled `byok`: a workspace holding its own key for the provider serving
+the model — `anthropic_api_key` (declared here so the standard `request_credentials` chat handoff
+can fill it), `bedrock_api_key`, whatever a provider extension declares — pays that provider
+directly, so the rate card bills only `byok="false"` usage while everything stays visible. Core
+freezes the label into each export intent at mint, resolved through the deploy's model registry —
+this module only relays `export.byok` — so a backlog drained after an outage carries the key
+state that served it, and a re-send is byte-identical whatever changed since.
+
 Which Metronome environment receives the events — sandbox or production — is decided entirely by
 whose bearer token `METRONOME_BEARER_TOKEN` carries."""
 
@@ -30,7 +38,7 @@ from pydantic import BaseModel, Field
 from ufo.sdk.accounting import UsageExport, metered_workspaces
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.jobs import JobSpec
-from ufo.sdk.manifest import Manifest, PromptSection
+from ufo.sdk.manifest import CredentialSlot, Manifest, PromptSection
 from ufo.sdk.o11y import log
 from ufo.sdk.seats import Seats, SeatSnapshot, member_workspaces
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
@@ -44,6 +52,7 @@ SEAT_JOB_SCHEDULE = "0 0 * * * *"
 INGEST_URL = "https://api.metronome.com/v1/ingest"
 METRONOME_BEARER_TOKEN_ENV = "METRONOME_BEARER_TOKEN"
 EVENT_TYPE = "ufo_usage"
+ANTHROPIC_KEY_SLOT = "anthropic_api_key"
 SEAT_EVENT_TYPE = "ufo_seats"
 SEAT_LIMIT_DEFAULT = 25
 SEAT_SHIPPED_KEY = "seats_shipped_date"
@@ -139,7 +148,7 @@ class UsageShipper:
                     "priced_micro_usd": str(export.priced_micro_usd),
                     "price_digest": export.price_digest or "",
                     "turn_id": str(export.turn_id) if export.turn_id else "",
-                    "byok": "false",
+                    "byok": "true" if export.byok else "false",
                 },
             }
             for export in exports
@@ -319,4 +328,14 @@ def manifest() -> Manifest:
             ),
         ),
         prompt_sections=(PromptSection(name=SEATS_SECTION_NAME, body=SEATS_SECTION_BODY),),
+        credentials=(
+            CredentialSlot(
+                name=ANTHROPIC_KEY_SLOT,
+                description=(
+                    "Workspace's own Anthropic API key (BYOK): model usage is metered for "
+                    "visibility but not billed; without it the platform key is used and usage "
+                    "bills as pass-through."
+                ),
+            ),
+        ),
     )

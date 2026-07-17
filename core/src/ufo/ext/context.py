@@ -10,7 +10,7 @@ index/embed backends, a transaction over the extension's own tables, governed pr
 invoke, without reshaping what handlers already hold."""
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -297,6 +297,8 @@ class ModelResolver(Protocol):
 
     async def client_for(self, model: str) -> ModelClient: ...
 
+    def key_slot_for(self, model: str) -> str | None: ...
+
 
 @dataclass(frozen=True)
 class ModelAccess:
@@ -402,6 +404,7 @@ class ExtensionContext:
     scheduler: ScheduleStore | None = None
     invoker: TurnInvoker | None = None
     model: ModelAccess | None = None
+    key_slot_for: Callable[[str], str | None] | None = None
 
     async def pending_usage_exports(self, floor: datetime, limit: int) -> tuple[UsageExport, ...]:
         """This extension's settled, unacknowledged usage deltas, at most `limit`, minting new
@@ -409,10 +412,19 @@ class ExtensionContext:
         name, so two exporters never touch each other's marks; usage settling before `floor`
         never exports (the extension's backfill bound). Core owns the mint because settlement and
         delta-freezing are writer knowledge no extension can express through the SDK without
-        re-declaring the ledger's private schema."""
+        re-declaring the ledger's private schema — as is the `byok` label, resolved per model
+        through the deploy's provider registry."""
+        if self.key_slot_for is None:
+            raise RuntimeError(
+                "usage export needs the model registry to label byok; serve wires it"
+            )
         async with workspace_tx() as connection:
             await mint_usage_exports(
-                connection, self.store.workspace_id, self.store.extension, floor
+                connection,
+                self.store.workspace_id,
+                self.store.extension,
+                floor,
+                self.key_slot_for,
             )
             return await read_pending_usage_exports(
                 connection, self.store.workspace_id, self.store.extension, limit
@@ -612,4 +624,5 @@ def context_for(
         scheduler=ScheduleStore(schedule_invoker),
         invoker=invoker,
         model=None if model_resolver is None else ModelAccess(model_resolver),
+        key_slot_for=None if model_resolver is None else model_resolver.key_slot_for,
     )

@@ -74,6 +74,9 @@ class _Resolver:
     async def client_for(self, model: str) -> ModelClient:
         return self.client
 
+    def key_slot_for(self, model: str) -> str | None:
+        return None
+
 
 async def _seed(surface: str = "slack") -> tuple[UUID, UUID, UUID]:
     workspace_id, member_id, agent_id, conversation_id = uuid4(), uuid4(), uuid4(), uuid4()
