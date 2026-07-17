@@ -302,7 +302,7 @@ def _tool_results(request: ModelRequest, errored: bool | None = None) -> bool:
 @dataclass
 class FinishCallingModel:
     """Narrates and calls bash in round one, then ends by calling finish — so a subagent turn's
-    terminal comes from the finish payload, never the joined narration. Records each round's
+    terminal comes from the finish payload, never the narration. Records each round's
     offered tool names so a test can assert finish rode beside the registry's set."""
 
     offered: list[tuple[str, ...]] = field(default_factory=list)
@@ -991,8 +991,8 @@ async def test_ask_user_as_the_final_tool_call_rides_the_terminal_frame(
 @dataclass(frozen=True)
 class NarratesProposalThenAsksModel:
     """Narrates a proposal in the same round it calls ask_user — text a live surface streams as
-    it is produced — then, seeing the directive, poses a short question in the next round. A
-    durable surface only ever delivers the terminal frame, so the proposal must ride it too."""
+    it is produced — then, seeing the directive, poses a short question in the next round. The
+    narration is transient working prose: only the closing round's text is the terminal answer."""
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         answered = any(
@@ -1010,15 +1010,14 @@ class NarratesProposalThenAsksModel:
         yield Usage(input_tokens=2, output_tokens=2)
 
 
-async def test_terminal_answer_carries_narration_from_every_round_not_just_the_last(
+async def test_terminal_answer_is_the_closing_rounds_text_never_mid_turn_narration(
     db: None, tmp_path: Path
 ) -> None:
     turn = await _seed_turn("queued", None)
     engine = _engine(turn, NarratesProposalThenAsksModel(), tmp_path)
     frame = await engine.run()
     assert frame.status == "done"
-    assert "two sub-issues under #318" in frame.text
-    assert "ship or hold?" in frame.text
+    assert frame.text == "Given that, ship or hold?"
     assert frame.question is not None
 
 
@@ -1264,7 +1263,7 @@ async def test_a_lone_valid_finish_call_ends_a_subagent_turn_with_its_payload(
     db: None, tmp_path: Path
 ) -> None:
     """The finish payload — canonical JSON of the output model — is the terminal, and round
-    narration never joins it: the parent validates the answer, not the working prose."""
+    narration never reaches it: the parent validates the answer, not the working prose."""
     turn = await _seed_turn("queued", None)
     model = FinishCallingModel()
     engine = replace(_engine(turn, model, tmp_path), output_model=_Report)
