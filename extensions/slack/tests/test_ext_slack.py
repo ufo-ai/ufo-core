@@ -39,7 +39,7 @@ from ufo.ext.surface import (
     workspace_key,
 )
 from ufo.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
-from ufo.hub import InProcessHub, Terminal, ToolCall
+from ufo.hub import InProcessHub, Terminal, TextDelta, ToolCall
 from ufo.schema import tables
 from ufo.schema.records import (
     WRITEBACK_PENDING,
@@ -2317,6 +2317,10 @@ async def test_status_follows_the_turn_and_clears_at_terminal(
     while len(_requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)) < 2:
         assert time.monotonic() < deadline, "status update never reached Slack"
         await asyncio.sleep(0.01)
+    await hub.publish(turn_id, TextDelta(text="Here is"))
+    while len(_requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)) < 3:
+        assert time.monotonic() < deadline, "generating status never reached Slack"
+        await asyncio.sleep(0.01)
     await hub.publish(turn_id, Terminal(frame=TerminalFrame(status="done", text="hi")))
     await task
 
@@ -2329,6 +2333,7 @@ async def test_status_follows_the_turn_and_clears_at_terminal(
         "status": slack.STATUS_THINKING_TEXT,
     }
     assert statuses[1]["status"] == "Reading the repo"
+    assert statuses[2]["status"] == slack.STATUS_GENERATING_TEXT
     assert statuses[-1]["status"] == slack.STATUS_CLEAR_TEXT
     assert not _requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)
     assert turn_id not in slack._STATUS_TASKS

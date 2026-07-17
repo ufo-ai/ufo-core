@@ -51,7 +51,7 @@ import httpx
 from pydantic import BaseModel, ValidationError
 
 from ufo.sdk.http import JSONResponse, Request, Response
-from ufo.sdk.hub import Parked, SkillLoad, Terminal, ToolCall
+from ufo.sdk.hub import Parked, SkillLoad, Terminal, TextDelta, ToolCall
 from ufo.sdk.sandbox import BlobStore
 from ufo.sdk.surfaces import (
     AskUserInput,
@@ -227,6 +227,7 @@ SLACK_FILES_COMPLETE_UPLOAD = "https://slack.com/api/files.completeUploadExterna
 STATUS_THINKING_TEXT = "Thinking…"
 STATUS_WORKING_TEXT = "Working… ({tool})"
 STATUS_SKILL_TEXT = "Loading skill {skill}…"
+STATUS_GENERATING_TEXT = "Generating…"
 STATUS_CLEAR_TEXT = ""
 STATUS_TEXT_LIMIT = 200
 STATUS_UPDATE_MIN_SECONDS = 1.0
@@ -1008,9 +1009,10 @@ def _files_note(downloaded: DownloadedFiles) -> str:
 class ThreadStatus:
     """Live feedback for one running turn through the thread's native status
     (`assistant.threads.setStatus`): "Thinking…" the moment the turn is admitted, then the turn's
-    hub frames — each tool call as the model's own `user_description` when it gave one — cleared
-    when the turn ends (the durable reply is the poller's job). The status is state on the thread,
-    not a message, and the thread has one writer — the newest turn (`_THREAD_WRITERS`) — so an
+    hub frames — each tool call as the model's own `user_description` when it gave one, streamed
+    text as "Generating…" — cleared when the turn ends (the durable reply is the poller's job).
+    The status is state on the thread, not a message, and the thread has one writer — the newest
+    turn (`_THREAD_WRITERS`) — so an
     outrun sibling's writes, its clear included, are skipped rather than blanking the status the
     member is watching. Slack drops a status two minutes after its last write, so a quiet stretch
     re-stamps the shown text every STATUS_REFRESH_SECONDS. An update inside
@@ -1074,6 +1076,8 @@ class ThreadStatus:
                         text = description or STATUS_WORKING_TEXT.format(tool=tool)
                     case SkillLoad(skill=skill):
                         text = STATUS_SKILL_TEXT.format(skill=skill)
+                    case TextDelta():
+                        text = STATUS_GENERATING_TEXT
                     case _:
                         continue
                 text = text[:STATUS_TEXT_LIMIT]
