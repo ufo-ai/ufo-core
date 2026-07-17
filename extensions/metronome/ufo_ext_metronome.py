@@ -40,7 +40,7 @@ from ufo.sdk.context import ExtensionContext
 from ufo.sdk.jobs import JobSpec
 from ufo.sdk.manifest import CredentialSlot, Manifest, PromptSection
 from ufo.sdk.o11y import log
-from ufo.sdk.seats import Seats, SeatSnapshot, member_workspaces
+from ufo.sdk.seats import Seats, SeatSnapshot, member_workspaces, owner_conversation
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 
 NAME = "metronome"
@@ -55,6 +55,18 @@ EVENT_TYPE = "ufo_usage"
 ANTHROPIC_KEY_SLOT = "anthropic_api_key"
 SEAT_EVENT_TYPE = "ufo_seats"
 SEAT_LIMIT_DEFAULT = 25
+INCLUDED_SEATS_DEFAULT = 5
+SEAT_APPROVAL_JOB_NAME = "seat_approvals"
+SEAT_APPROVAL_JOB_SCHEDULE = "30 * * * * *"
+SEAT_APPROVAL_KEY_PREFIX = "seat_approval_asked/"
+SEAT_APPROVAL_PROMPT = (
+    "[seat approval request] {email} joined the workspace but every included seat is taken "
+    "({seated} seated, {included} included in the plan). Ask the workspace owner to decide with "
+    "the ask_user tool, question 'Grant {email} a seat? It bills as overage on the invoice.' and "
+    "options 'Grant the seat' and 'Decline'. When they choose Grant, call grant_seat with that "
+    "email and confirm the overage; when they Decline, confirm and take no action — the member "
+    "stays unseated."
+)
 SEAT_SHIPPED_KEY = "seats_shipped_date"
 BATCH_EVENTS = 100
 INGEST_TIMEOUT_SECONDS = 30
@@ -66,9 +78,10 @@ REVOKE_SEAT_TOOL = "revoke_seat"
 LIST_SEATS_TOOL = "list_seats"
 
 GRANT_SEAT_DESCRIPTION = (
-    "Grant a workspace seat to a member by email so the agent answers them. Owner-only. Fails "
-    "when every seat is taken — revoke one first; raising the limit is not a chat act, contact "
-    "us for that."
+    "Grant a workspace seat to a member by email so the agent answers them. Owner-only. A seat "
+    "beyond the plan's included allowance bills as overage on the invoice — say so when the "
+    "owner approves one. Fails when the hard seat limit is reached; raising that is not a chat "
+    "act, contact us."
 )
 REVOKE_SEAT_DESCRIPTION = (
     "Revoke a member's seat by email. Owner-only; the owner's own seat cannot be revoked. The "
@@ -79,11 +92,12 @@ LIST_SEATS_DESCRIPTION = "Show the workspace's seat limit and who holds a seat."
 
 SEATS_SECTION_NAME = "seats"
 SEATS_SECTION_BODY = (
-    "Seats gate who this agent answers: members hold seats up to the workspace's seat limit, and "
-    "an unseated member's messages are refused automatically with a pointer to the owner. A newly "
-    "joined member is seated automatically while a seat is open. Only the workspace owner can "
-    "change seats: when the owner asks, call grant_seat or revoke_seat with the member's email; "
-    "call list_seats to show current standing."
+    "Seats gate who this agent answers. A newly joined member is seated automatically while an "
+    "included seat is open; beyond the included allowance they stay unseated, their messages are "
+    "refused, and the owner receives a seat approval request — if the owner approves, call "
+    "grant_seat with the member's email and note the seat bills as overage; if they decline, do "
+    "nothing. Only the workspace owner can change seats (grant_seat / revoke_seat); list_seats "
+    "shows the limit, the included allowance, billed overage seats, and who holds one."
 )
 
 INGEST_TRANSPORT: httpx.AsyncBaseTransport | None = None
@@ -177,6 +191,7 @@ class SeatShipper:
         workspace_id = self.ctx.store.workspace_id
         async with self.ctx.transaction() as connection:
             await Seats(workspace_id).ensure_limit(connection, SEAT_LIMIT_DEFAULT)
+            await Seats(workspace_id).ensure_included(connection, INCLUDED_SEATS_DEFAULT)
             snapshot = await Seats(workspace_id).snapshot(connection)
         await _ingest(token, [self._event(snapshot, today)], self.transport)
         log(
@@ -202,6 +217,51 @@ class SeatShipper:
 
 async def _ship_seats(ctx: ExtensionContext) -> None:
     await SeatShipper(ctx=ctx, transport=INGEST_TRANSPORT).run()
+
+
+@dataclass(frozen=True)
+class SeatApprovals:
+    """Turn every never-asked unseated member into one approval request in the owner's own
+    conversation: an internal turn tells the owner who needs a seat and that granting bills as
+    overage, and the owner's reply drives grant_seat — chat-native consent, no new surface. The
+    ask is marked per member only after the invoke lands, so a fire without an owner conversation
+    retries next tick, and a granted or declined member is never re-asked (the mark is the ask,
+    not the answer; revoke_seat marks too, so an explicitly unseated member is a decision, not a
+    request). Asks fire only while the included allowance is exhausted — an unseated member with
+    a silent seat still open is the owner's own doing, never a request."""
+
+    ctx: ExtensionContext
+
+    async def run(self) -> None:
+        async with self.ctx.transaction() as connection:
+            snapshot = await Seats(self.ctx.store.workspace_id).snapshot(connection)
+        if snapshot.included is None or snapshot.seated < snapshot.included:
+            return
+        pending = [entry for entry in snapshot.members if not entry.seated]
+        for entry in pending:
+            marker = f"{SEAT_APPROVAL_KEY_PREFIX}{entry.email.strip().lower()}"
+            if await self.ctx.store.get(marker) is not None:
+                continue
+            async with self.ctx.transaction() as connection:
+                venue = await owner_conversation(connection, self.ctx.store.workspace_id)
+            if venue is None:
+                return
+            conversation_id, agent_id = venue
+            await self.ctx.invoke(
+                conversation_id,
+                agent_id,
+                SEAT_APPROVAL_PROMPT.format(
+                    email=entry.email,
+                    seated=snapshot.seated,
+                    included=snapshot.included,
+                ),
+                idempotency_key=f"seat-approval:{entry.email}",
+            )
+            await self.ctx.store.put(marker, datetime.now(UTC).isoformat())
+
+
+async def _ask_seat_approvals(ctx: ExtensionContext) -> None:
+    await SeatApprovals(ctx=ctx).run()
 
 
 class GrantSeatInput(BaseModel):
@@ -231,6 +291,10 @@ async def revoke_seat(ctx: ToolContext, args: RevokeSeatInput) -> ToolResult:
     async with ctx.ext.transaction() as connection:
         await seats.revoke(connection, args.email)
         snapshot = await seats.snapshot(connection)
+    await ctx.ext.store.put(
+        f"{SEAT_APPROVAL_KEY_PREFIX}{args.email.strip().lower()}",
+        datetime.now(UTC).isoformat(),
+    )
     return _snapshot_result(snapshot)
 
 
@@ -252,6 +316,10 @@ async def _owner_seats(ctx: ToolContext) -> Seats:
 def _snapshot_result(snapshot: SeatSnapshot) -> ToolResult:
     payload = {
         "seat_limit": snapshot.limit,
+        "included_seats": snapshot.included,
+        "billed_overage_seats": (
+            max(0, snapshot.seated - snapshot.included) if snapshot.included is not None else 0
+        ),
         "seated": snapshot.seated,
         "members": [
             {"email": entry.email, "seated": entry.seated, "owner": entry.owner}
@@ -324,6 +392,12 @@ def manifest() -> Manifest:
                 name=SEAT_JOB_NAME,
                 schedule=SEAT_JOB_SCHEDULE,
                 handler=_ship_seats,
+                candidates=member_workspaces(),
+            ),
+            JobSpec(
+                name=SEAT_APPROVAL_JOB_NAME,
+                schedule=SEAT_APPROVAL_JOB_SCHEDULE,
+                handler=_ask_seat_approvals,
                 candidates=member_workspaces(),
             ),
         ),

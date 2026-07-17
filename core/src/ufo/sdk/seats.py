@@ -25,3 +25,6 @@ from ufo.seats import (
 from ufo.seats import (
     member_workspaces as member_workspaces,
 )
+from ufo.seats import (
+    owner_conversation as owner_conversation,
+)

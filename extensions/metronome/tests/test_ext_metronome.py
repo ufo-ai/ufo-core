@@ -10,6 +10,7 @@ the real `JobRunner`: candidates find the workspace, the dispatcher binds it, an
 ships scoped."""
 
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -39,6 +40,7 @@ from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, Sandb
 from ufo.schema import tables
 from ufo.schema.records import Agent, TerminalFrame, Turn, Usage
 from ufo.seats import OwnerSeatRevocation, SeatLimitReached
+from ufo.surfaces.admission import Admission
 from ufo.tools.context import SpawnResult, ToolContext
 from ufo.tools.registry import ToolDef
 from ufo.workspace import init_workspace_credentials, ws
@@ -200,16 +202,19 @@ async def _acked() -> set[tuple[UUID, int]]:
         return {(row.ledger_id, row.from_amount) for row in result.all()}
 
 
-def test_manifest_declares_two_cron_jobs_three_tools_one_section() -> None:
+def test_manifest_declares_three_cron_jobs_three_tools_one_section() -> None:
     declared = metronome.manifest()
     assert declared.name == "metronome"
-    usage, seats = declared.jobs
+    usage, seats, approvals = declared.jobs
     assert usage.name == "usage_shipper"
     assert usage.schedule == "0 * * * * *"
     assert usage.handler is metronome._ship
     assert seats.name == "seat_shipper"
     assert seats.schedule == "0 0 * * * *"
     assert seats.handler is metronome._ship_seats
+    assert approvals.name == "seat_approvals"
+    assert approvals.schedule == "30 * * * * *"
+    assert approvals.handler is metronome._ask_seat_approvals
     assert [tool.name for tool in declared.tools] == ["grant_seat", "revoke_seat", "list_seats"]
     assert all(tool.side_effecting for tool in declared.tools[:2])
     assert not declared.tools[2].side_effecting
@@ -563,6 +568,8 @@ async def test_owner_grants_and_revokes_a_seat_through_real_dispatch(
     )
     assert await _seated(joiner_id)
     assert payload["seat_limit"] == 2
+    assert payload["included_seats"] is None
+    assert payload["billed_overage_seats"] == 0
     assert payload["seated"] == 2
     assert payload["members"] == [
         {"email": "owner@example.com", "seated": True, "owner": True},
@@ -648,6 +655,15 @@ async def test_seat_job_establishes_the_limit_and_ships_one_daily_snapshot(
     runner = JobRunner(bindings=bindings_from((metronome.manifest(),), ()), registry=_registry())
     await runner.fire(f"{metronome.NAME}:{metronome.SEAT_JOB_NAME}")
     assert await _workspace_limit(workspace_id) == metronome.SEAT_LIMIT_DEFAULT
+    async with workspace_tx() as connection:
+        included = (
+            await connection.execute(
+                sa.select(tables.workspace.c.included_seats).where(
+                    tables.workspace.c.id == workspace_id
+                )
+            )
+        ).scalar_one()
+    assert included == metronome.INCLUDED_SEATS_DEFAULT
     (request,) = recorder.requests
     (event,) = _events(request)
     today = datetime.now(UTC).date().isoformat()
@@ -896,3 +912,145 @@ async def test_byok_follows_the_serving_providers_stored_key(
         await _shipper(recorder).run()
     (bedrock_event,) = _events(recorder.requests[1])
     assert bedrock_event["properties"]["byok"] == "true"
+
+
+class _RecordingInvoker:
+    """A TurnInvoker riding the REAL Admission producer: the approval turn lands as a durable
+    turn row asserted below — the recorder only binds the workspace the way serve's
+    invoker_factory does."""
+
+    def __init__(self, workspace_id: UUID) -> None:
+        self.workspace_id = workspace_id
+        self.admission = Admission(dbos=_ApprovalStubDbos(), durable_surfaces=frozenset())
+
+    async def invoke(
+        self, conversation_id: UUID, agent_id: UUID, message: str, idempotency_key: str
+    ) -> UUID:
+        return await self.admission.invoke(
+            self.workspace_id, conversation_id, agent_id, message, idempotency_key
+        )
+
+
+@dataclass
+class _ApprovalStubDbos:
+    async def enqueue_async(self, options: object, workspace_id: str, turn_id: str) -> None:
+        return None
+
+
+async def test_seat_approvals_ask_the_owner_once_per_unseated_member(db: None) -> None:
+    workspace_id, owner_id, _joiner_id = await _seat_seed(limit=25)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.workspace)
+            .values(included_seats=1, updated_at=sa.func.now())
+            .where(tables.workspace.c.id == workspace_id)
+        )
+    agent_id, conversation_id = uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="assistant",
+                prompt="p",
+                model=MODEL,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                surface="slack",
+                queue_key="dm-owner",
+                member_id=owner_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    context = context_for(metronome.NAME, frozenset(), invoker=_RecordingInvoker(workspace_id))
+    with ws(workspace_id):
+        await metronome.SeatApprovals(ctx=context).run()
+        await metronome.SeatApprovals(ctx=context).run()
+    async with workspace_tx() as connection:
+        asks = (
+            await connection.execute(
+                sa.select(tables.turn.c.inbound).where(
+                    tables.turn.c.conversation_id == conversation_id
+                )
+            )
+        ).all()
+    assert len(asks) == 1
+    assert "late@example.com" in asks[0].inbound
+    assert "ask_user" in asks[0].inbound
+    assert "grant_seat" in asks[0].inbound
+    assert "overage" in asks[0].inbound
+
+
+async def test_seat_approvals_wait_for_an_owner_conversation(db: None) -> None:
+    workspace_id, _owner_id, _joiner_id = await _seat_seed(limit=25)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.workspace)
+            .values(included_seats=1, updated_at=sa.func.now())
+            .where(tables.workspace.c.id == workspace_id)
+        )
+    context = context_for(metronome.NAME, frozenset(), invoker=_RecordingInvoker(workspace_id))
+    with ws(workspace_id):
+        await metronome.SeatApprovals(ctx=context).run()
+    marker = f"{metronome.SEAT_APPROVAL_KEY_PREFIX}late@example.com"
+    with ws(workspace_id):
+        assert await context.store.get(marker) is None
+
+
+async def test_seat_approvals_stay_silent_while_an_included_seat_is_open(db: None) -> None:
+    workspace_id, owner_id, _joiner_id = await _seat_seed(limit=25)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.workspace)
+            .values(included_seats=5, updated_at=sa.func.now())
+            .where(tables.workspace.c.id == workspace_id)
+        )
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                surface="slack",
+                queue_key="dm-owner-open",
+                member_id=owner_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    context = context_for(metronome.NAME, frozenset(), invoker=_RecordingInvoker(workspace_id))
+    with ws(workspace_id):
+        await metronome.SeatApprovals(ctx=context).run()
+        assert (
+            await context.store.get(f"{metronome.SEAT_APPROVAL_KEY_PREFIX}late@example.com") is None
+        )
+
+
+async def test_revoke_marks_the_member_as_decided_for_the_approval_job(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id, owner_id, joiner_id = await _seat_seed(limit=25)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.workspace)
+            .values(included_seats=2, updated_at=sa.func.now())
+            .where(tables.workspace.c.id == workspace_id)
+        )
+        await connection.execute(
+            sa.update(tables.member)
+            .values(seated_at=sa.func.now(), updated_at=sa.func.now())
+            .where(tables.member.c.id == joiner_id)
+        )
+    await _run_tool(
+        workspace_id, tmp_path, owner_id, metronome.REVOKE_SEAT_TOOL, email="late@example.com"
+    )
+    _registry_tools, ext_by_tool = _seat_tools()
+    ext = ext_by_tool[metronome.REVOKE_SEAT_TOOL]
+    with ws(workspace_id):
+        marker = await ext.store.get(f"{metronome.SEAT_APPROVAL_KEY_PREFIX}late@example.com")
+    assert marker is not None

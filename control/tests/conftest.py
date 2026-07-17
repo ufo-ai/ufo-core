@@ -27,6 +27,7 @@ RUNTIME_SCHEMA = (
     "create table if not exists workspace ("
     "  id uuid primary key,"
     "  seat_limit integer check (seat_limit is null or seat_limit > 0),"
+    "  included_seats integer check (included_seats is null or included_seats > 0),"
     "  created_at timestamptz not null default now(),"
     "  updated_at timestamptz not null default now())",
     "create table if not exists member ("

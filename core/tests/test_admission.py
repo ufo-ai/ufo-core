@@ -9,7 +9,7 @@ from ufo.loop.engine import _claim_turn
 from ufo.scheduling import ONE_TIME_SCHEDULE, ScheduledTask
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame, TurnContext
-from ufo.seats import SEAT_REFUSAL_MESSAGE
+from ufo.seats import SEAT_REFUSAL_MESSAGE, UNRESOLVED_SPEAKER_MESSAGE
 from ufo.surfaces.admission import Admission
 
 
@@ -692,4 +692,101 @@ async def test_unseated_speakers_message_does_not_take_over_a_timer_turn(db: Non
         ).one()
     assert timer.inbound == "resume the plan"
     assert timer.speaker_member_id is None
+    assert timer.status == "queued"
+
+
+async def test_speakerless_member_message_is_refused_under_a_seat_limit(db: None) -> None:
+    workspace_id, _member_id, agent_id, conversation_id = await _seed()
+    await _set_limit(workspace_id, 1)
+    dbos = StubDbos()
+    turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset()).admit_member(
+        workspace_id, conversation_id, agent_id, "who am i", None
+    )
+    assert dbos.enqueued == []
+    status, text = await _turn_row(turn_id)
+    assert status == "cancelled"
+    assert text == UNRESOLVED_SPEAKER_MESSAGE
+
+
+async def test_speakerless_member_message_passes_an_ungated_workspace(db: None) -> None:
+    workspace_id, _member_id, agent_id, conversation_id = await _seed()
+    dbos = StubDbos()
+    turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset()).admit_member(
+        workspace_id, conversation_id, agent_id, "hello", None
+    )
+    assert dbos.enqueued == [str(turn_id)]
+
+
+async def test_speakerless_member_message_does_not_fold_under_a_seat_limit(db: None) -> None:
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    await _set_limit(workspace_id, 2)
+    await _seat(member_id)
+    dbos = StubDbos()
+    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
+    first = await admission.admit_member(
+        workspace_id, conversation_id, agent_id, "first", member_id
+    )
+    ghost = await admission.admit_member(workspace_id, conversation_id, agent_id, "psst", None)
+    assert ghost != first
+    status, text = await _turn_row(ghost)
+    assert status == "cancelled"
+    assert text == UNRESOLVED_SPEAKER_MESSAGE
+    assert await _queued_bodies(conversation_id) == []
+
+
+async def test_ghost_message_does_not_take_over_a_timer_turn_under_a_seat_limit(db: None) -> None:
+    workspace_id, _member_id, agent_id, conversation_id = await _seed()
+    task_id, timer_turn_id = uuid4(), uuid4()
+    due = datetime.now(UTC)
+    timer_key = f"{task_id}:{due.isoformat()}"
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=timer_turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="queued",
+                inbound="resume the plan",
+                admission_source="scheduled",
+                idempotency_key=timer_key,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.scheduled_task).values(
+                id=task_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                name="resume-ghost",
+                schedule=ONE_TIME_SCHEDULE,
+                prompt="resume the plan",
+                description="one-time resume",
+                next_run_at=due,
+                resume_turn_id=timer_turn_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    await _set_limit(workspace_id, 1)
+    dbos = StubDbos()
+    refused = await Admission(dbos=dbos, durable_surfaces=frozenset()).admit_member(
+        workspace_id, conversation_id, agent_id, "hey", None
+    )
+    assert refused != timer_turn_id
+    status, text = await _turn_row(refused)
+    assert status == "cancelled"
+    assert text == UNRESOLVED_SPEAKER_MESSAGE
+    async with workspace_tx() as connection:
+        timer = (
+            await connection.execute(
+                sa.select(tables.turn.c.inbound, tables.turn.c.status).where(
+                    tables.turn.c.id == timer_turn_id
+                )
+            )
+        ).one()
+    assert timer.inbound == "resume the plan"
     assert timer.status == "queued"

@@ -9,9 +9,13 @@ workspace = sa.Table(
     metadata,
     sa.Column("id", sa.Uuid, primary_key=True),
     sa.Column("seat_limit", sa.Integer, nullable=True),
+    sa.Column("included_seats", sa.Integer, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.CheckConstraint("seat_limit is null or seat_limit > 0", name="workspace_seat_limit"),
+    sa.CheckConstraint(
+        "included_seats is null or included_seats > 0", name="workspace_included_seats"
+    ),
 )
 
 member = sa.Table(

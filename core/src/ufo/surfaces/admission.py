@@ -26,8 +26,9 @@ The inbound spend decision routes the turn before it is enqueued: allow queues i
 either parks it (held, not enqueued — the resume job re-admits it when the cap is raised) or, when
 the cap rejects, commits it cancelled with the reason, so a client's wait ends in-surface either
 way. The seat gate runs first in the same commit: a speaking member without a seat — or a
-scheduled fire into a seatless member's conversation — commits cancelled with the refusal, and an
-unseated speaker's message never folds into a live turn."""
+scheduled fire into a seatless member's conversation — commits cancelled with the refusal, an
+unseated speaker's message never folds into a live turn, and under a seat limit a member-surface
+message whose speaker never resolved to a member is refused rather than answered as a ghost."""
 
 import asyncio
 from dataclasses import dataclass
@@ -57,7 +58,7 @@ from ufo.schema.records import (
     TurnStatus,
     turn_id_for,
 )
-from ufo.seats import SEAT_REFUSAL_MESSAGE, Seats, gate_member
+from ufo.seats import SEAT_REFUSAL_MESSAGE, UNRESOLVED_SPEAKER_MESSAGE, Seats, gate_member
 
 QUEUED: TurnStatus = "queued"
 CANCELLED: TerminalStatus = "cancelled"
@@ -324,8 +325,9 @@ class Admission:
                 if timer_turn is not None:
                     timer_key = f"{timer_turn.pause_id}:{timer_turn.pause_due_at.isoformat()}"
                     if timer_turn.idempotency_key == timer_key and (
-                        speaker_member_id is None
-                        or await Seats(workspace_id).admits(connection, speaker_member_id)
+                        await Seats(workspace_id).admits(connection, speaker_member_id)
+                        if speaker_member_id is not None
+                        else not await Seats(workspace_id).gated(connection)
                     ):
                         taken_over = await connection.execute(
                             sa.update(tables.turn)
@@ -389,8 +391,10 @@ class Admission:
                 fold_admitted = (
                     live_turn is not None
                     and (
-                        speaker_member_id is None
-                        or await Seats(workspace_id).admits(connection, speaker_member_id)
+                        await Seats(workspace_id).admits(connection, speaker_member_id)
+                        if speaker_member_id is not None
+                        else pending_pause is None
+                        or not await Seats(workspace_id).gated(connection)
                     )
                     and (
                         parked_gate is None
@@ -511,7 +515,14 @@ class Admission:
                     else INTERNAL_ADMISSION
                 )
                 gate = gate_member(speaker_member_id, admission_source, conversation.member_id)
-                if gate is not None and not await Seats(workspace_id).admits(connection, gate):
+                if (
+                    gate is None
+                    and pending_pause is not None
+                    and await Seats(workspace_id).gated(connection)
+                ):
+                    status = CANCELLED
+                    terminal = TerminalFrame(status=CANCELLED, text=UNRESOLVED_SPEAKER_MESSAGE)
+                elif gate is not None and not await Seats(workspace_id).admits(connection, gate):
                     status = CANCELLED
                     terminal = TerminalFrame(status=CANCELLED, text=SEAT_REFUSAL_MESSAGE)
                 else:

@@ -30,6 +30,7 @@ from ufo.seats import (
     UnknownMember,
     create_member,
     gate_member,
+    owner_conversation,
     seat_gate_absent,
 )
 from ufo.surfaces.hub_tail import PARK_NOTICE, turn_status_frame
@@ -394,3 +395,87 @@ async def test_create_member_collapses_a_lost_race_onto_the_surviving_row(db: No
         ).scalar_one()
     assert rows == 1
     assert await _seated_at(first) is not None
+
+
+async def _set_included(workspace_id: UUID, included: int) -> None:
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.workspace)
+            .values(included_seats=included, updated_at=sa.func.now())
+            .where(tables.workspace.c.id == workspace_id)
+        )
+
+
+async def test_auto_seat_stops_at_the_included_allowance(db: None) -> None:
+    workspace_id = await _workspace(limit=25)
+    await _set_included(workspace_id, 1)
+    async with workspace_tx() as connection:
+        first = await create_member(connection, workspace_id, OWNER_EMAIL)
+        second = await create_member(connection, workspace_id, TEAMMATE_EMAIL)
+    assert await _seated_at(first) is not None
+    assert await _seated_at(second) is None
+    async with workspace_tx() as connection:
+        await Seats(workspace_id).grant(connection, TEAMMATE_EMAIL)
+    assert await _seated_at(second) is not None
+
+
+async def test_ensure_included_writes_only_when_null(db: None) -> None:
+    workspace_id = await _workspace(limit=None)
+    async with workspace_tx() as connection:
+        await Seats(workspace_id).ensure_included(connection, 5)
+        await Seats(workspace_id).ensure_included(connection, 3)
+        with pytest.raises(ValueError, match="positive"):
+            await Seats(workspace_id).ensure_included(connection, 0)
+        included = (
+            await connection.execute(
+                sa.select(tables.workspace.c.included_seats).where(
+                    tables.workspace.c.id == workspace_id
+                )
+            )
+        ).scalar_one()
+    assert included == 5
+
+
+async def test_admits_gates_on_included_even_without_a_hard_limit(db: None) -> None:
+    workspace_id = await _workspace(limit=None)
+    await _set_included(workspace_id, 1)
+    seated = await _member(workspace_id, OWNER_EMAIL, offset_seconds=0)
+    unseated = await _member(workspace_id, TEAMMATE_EMAIL, seated=False, offset_seconds=1)
+    async with workspace_tx() as connection:
+        assert await Seats(workspace_id).admits(connection, seated)
+        assert not await Seats(workspace_id).admits(connection, unseated)
+        assert await Seats(workspace_id).gated(connection)
+
+
+async def test_owner_conversation_is_the_owners_latest_with_the_earliest_agent(db: None) -> None:
+    workspace_id = await _workspace(limit=25)
+    owner = await _member(workspace_id, OWNER_EMAIL, offset_seconds=0)
+    async with workspace_tx() as connection:
+        assert await owner_conversation(connection, workspace_id) is None
+    agent_id, conversation_id = uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="assistant",
+                prompt="p",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                surface="slack",
+                queue_key="dm",
+                member_id=owner,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    async with workspace_tx() as connection:
+        venue = await owner_conversation(connection, workspace_id)
+    assert venue == (conversation_id, agent_id)

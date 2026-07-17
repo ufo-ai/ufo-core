@@ -42,8 +42,8 @@ Tables (all keyed by `workspace_id`, `created_at`, `updated_at`):
 
 | Table | Owns |
 |---|---|
-| `workspace` | The team unit: name, config digest, `seat_limit` (NULL = unlimited — the shape every deploy without a billing extension keeps). |
-| `member` | A human. The owner is the earliest member by (created_at, id) — no role column. `seated_at` marks a seat — a member the agent answers: auto-seated at creation while a seat is open, granted/revoked by the owner in chat, gated at admission and per round. Surface identities link here (Slack user id, CLI token, web session) — one human, many surfaces, one memory subject. |
+| `workspace` | The team unit: name, config digest, `included_seats` (the silent auto-seat allowance), `seat_limit` (the grantable ceiling) — both NULL = unlimited, the shape every deploy without a billing extension keeps. |
+| `member` | A human. The owner is the earliest member by (created_at, id) — no role column. `seated_at` marks a seat — a member the agent answers: auto-seated at creation while an included seat is open, granted beyond that only by the owner in chat (billed overage, asked via a seat approval turn in the owner's conversation), gated at admission and per round. Surface identities link here (Slack user id, CLI token, web session) — one human, many surfaces, one memory subject. |
 | `surface_installation` | A chat installation's unique external identity → workspace binding. Shared ingress uses it only to select a candidate credential, authenticates the original request bytes, then binds that workspace. |
 | `agent` | A configured agent: name, prompt, model policy, granted tool set, skill packs, memory scope. |
 | `grant` | Agent ← capability binding: a connector account, a credential slot, a tool group. Records grantor, when, via which conversation. Created through chat; `connect_account` leaves a terminal private handoff that memoizes one URL for the persisted turn speaker until expiry, so the OAuth URL never enters a shared transcript. Tool-visible extension authorization requires the speaker's private audience. The speaker gates the *granting act*, never subsequent use. |
@@ -302,9 +302,11 @@ Every model call and tool call meters into `ledger` in the same commit as the st
 visibility: live per-turn cost on the stream, workspace/member/agent rollups in CLI and web. Caps
 evaluated at inbound and per-step; `reject` refuses new turns, `park` suspends. Prices are a pinned
 table per model; BYOK usage still meters (visibility without billing). Seats gate who the
-agent answers: `workspace.seat_limit` bounds seated members, core owns the rules (admission
-refusal, per-round park on revocation, the owner's irrevocable seat), and a billing extension's
-tools drive grants and report counts.
+agent answers: `workspace.included_seats` bounds silent auto-seating, `workspace.seat_limit` the
+grantable ceiling; core owns the rules (admission refusal — including a member-surface speaker
+who never resolved to a member, per-round park on revocation, the owner's irrevocable seat), and
+a billing extension's tools drive grants, ask the owner to approve overage seats, and report
+counts.
 
 An external billing vendor is an extension draining the usage-export seam
 (`ctx.pending_usage_exports` / `ctx.ack_usage_exports`): core mints frozen, consumer-keyed delta
