@@ -530,8 +530,31 @@ async def test_share_file_confines_a_traversal_name(
     token = json.loads(result.content[0].text)["url"].split("token=", 1)[1]
     claims = verify_artifact_token(token, ARTIFACT_SECRET, datetime.now(UTC))
     parts = claims.blob_key.split("/")
-    assert parts[0] == "artifacts" and ".." not in parts and parts[-1] == "x"
-    assert claims.filename == "x"
+    assert parts[0] == "artifacts" and ".." not in parts and parts[-1] == "x.txt"
+    assert claims.filename == "x.txt"
+
+
+async def test_share_file_appends_the_source_extension_to_a_display_name(
+    file_ctx: tuple[ToolContext, Path],
+    db: None,
+) -> None:
+    """Agents habitually pass display-style names ('Q1_Risk_Report'); the recipient must still
+    get an openable file, and suffix-based consumers (office apps, graders) must still see the
+    format — so a name with no recognizable extension gains the source file's."""
+    ctx, _ = file_ctx
+    await _seed_turn_rows(ctx.turn)
+    await ctx.sandbox.write_file("risk.xlsx", b"PK\x03\x04fake")
+    result = await _run("share_file", ctx, file_path="risk.xlsx", name="Q1_Risk_Report")
+    token = json.loads(result.content[0].text)["url"].split("token=", 1)[1]
+    claims = verify_artifact_token(token, ARTIFACT_SECRET, datetime.now(UTC))
+    assert claims.filename == "Q1_Risk_Report.xlsx"
+
+    named = await _run("share_file", ctx, file_path="risk.xlsx", name="already_named.xlsx")
+    token = json.loads(named.content[0].text)["url"].split("token=", 1)[1]
+    assert (
+        verify_artifact_token(token, ARTIFACT_SECRET, datetime.now(UTC)).filename
+        == "already_named.xlsx"
+    )
 
 
 class _NoArgs(BaseModel):

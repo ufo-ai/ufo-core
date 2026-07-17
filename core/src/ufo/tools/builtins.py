@@ -169,8 +169,10 @@ class ShareFileInput(BaseModel):
     file_path: str = Field(description="Absolute path to the file to share.")
     name: str | None = Field(
         default=None,
-        description="Logical asset name, e.g. 'revenue_chart', 'quarterly_report'. Use the SAME "
-        "name when sharing updated versions to enable version history. Defaults to the filename.",
+        description="Logical asset name, e.g. 'quarterly_report.xlsx'. Use the SAME name when "
+        "sharing updated versions to enable version history. Defaults to the filename; a name "
+        "without a recognizable extension gets the source file's extension appended so the "
+        "recipient receives an openable file.",
     )
     subject: str | None = Field(
         default=None, description="Optional caption shown when a chat surface posts the file."
@@ -448,6 +450,13 @@ async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResu
     stat = json.loads(preflight.stdout)
     basename = PurePosixPath((args.name or args.file_path).replace("\\", "/")).name
     safe_name = basename if basename not in ("", ".", "..") else ARTIFACT_FALLBACK_NAME
+    source_suffix = PurePosixPath(args.file_path.replace("\\", "/")).suffix
+    if (
+        source_suffix
+        and mimetypes.guess_type(safe_name)[0] is None
+        and not safe_name.lower().endswith(source_suffix.lower())
+    ):
+        safe_name += source_suffix
     key = f"{ARTIFACT_KEY_PREFIX}{uuid4()}/{safe_name}"
     await ctx.sandbox.export_file(args.file_path, ctx.blob, key)
     media_type = mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
@@ -760,9 +769,11 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
             "visible outside the sandbox — the user CANNOT see a workspace file until this is "
             "called. The file must be under the /workspace directory. Any file type and size works "
             "(reports, code, csv, json, images, PDFs, large archives); it is streamed out, never "
-            "read whole into memory. `name` sets the download name; any directory components in it "
-            "are stripped. `subject` is an optional caption shown when a chat surface posts the "
-            "file. Supports version history: use the same `name` parameter for updated versions."
+            "read whole into memory. `name` sets the download name — include the file extension "
+            "(e.g. 'report.xlsx') so the recipient gets an openable file; any directory "
+            "components in it are stripped. `subject` is an optional caption shown when a chat "
+            "surface posts the file. Supports version history: use the same `name` parameter "
+            "for updated versions."
         ),
         input_model=ShareFileInput,
         handler=share_file_handler,
