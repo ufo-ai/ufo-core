@@ -790,10 +790,8 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
             "(e.g. 'report.xlsx') so the recipient gets an openable file; any directory "
             "components in it are stripped. `subject` is an optional caption shown when a chat "
             "surface posts the file. Supports version history: use the same `name` parameter "
-            "for updated versions. Each filename shared in this conversation is an `artifact` "
-            "workspace object (the result carries its name; re-shares become its versions), so "
-            "a later turn can "
-            "re-fetch the latest bytes with object_get."
+            "for updated versions. Files shared in other sessions can be fetched into the "
+            "workspace as `artifact` objects with object_get."
         ),
         input_model=ShareFileInput,
         handler=share_file_handler,
