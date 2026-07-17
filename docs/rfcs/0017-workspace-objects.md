@@ -222,6 +222,7 @@ Every failure is terminal for the call and names its cause:
 | `connector` | connectors | `provider`, `account_id` | delete | grantor, granted-at, host | nothing existed — fills the list/revoke gap |
 | `credential` | core | `slot`, `description`, injection host — never the value | delete | filled or empty, updated-at | nothing existed — fills the what's-filled / unset gap |
 | `agent` | core | `model` | update | prompt + its digest, read-only | nothing deleted — `prompt` stays proposal-owned, so the two write paths are disjoint by construction |
+| `artifact` | core | `filename`, `media_type`, `subject` — the share record, never authored | delete | shared-at, sharing turn + conversation, size, version count, fresh download link, workspace copy path | nothing existed — fills the list/re-fetch/delete gap over `share_file` |
 
 **`scheduled_task`.** Handlers are thin adapters over `ScheduleStore.create/cancel/list`
 (`core/src/ufo/scheduling.py:133,313,323`); apply validates through the extension's existing
@@ -296,6 +297,27 @@ machinery is the seed of the governance layer this RFC defers; prompt-writing di
 object surface when that layer lands (proposals gating `object_apply`/`object_delete`), which is
 also when its HTTP approval endpoint — a member action outside chat — finally dies.
 
+**`artifact`.** `shared_artifact` rows (`share_file`'s record of every file shared out of a turn)
+projected as objects, **one object per conversation and filename** — `share_file` already treats
+a re-share of the same name as version history, and that history is a conversation's: re-sharing
+`report.txt` in one conversation versions the same object, while `report.txt` from another
+conversation is a different file and a different object. Names carry both halves of the identity
+— `<conversation-prefix>-<filename-slug>` (`3f2a9c1b-report-txt`; the grammar admits no dots) —
+so one session's artifacts cluster in a listing and generic filenames never collide across
+sessions; the name rides in `share_file`'s result, so the producer and the kind agree by
+construction, and a short identity-digest suffix appears only when distinct identities still
+collide on one name (the `connector` kind's precedent). The kind is read + delete; **create and
+update raise `VerbNotSupported`** naming `share_file`, the one producer. `object_get` is the
+re-fetch path: it copies the latest bytes back into the conversation workspace at
+`artifacts/<name>/<filename>` (bounded at 32 MiB; larger files report `workspace_path: null` and
+are fetched via the link) — how a turn reuses a file an earlier turn produced, including another
+conversation's. The copy runs in the `status` handler, which the seam calls only on `object_get`,
+so `apply`/`delete` reading the current spec never write into the workspace as a side effect.
+Status also mints a fresh TTL download link from the deploy secret, exactly as `share_file` does,
+and carries the sharing turn, conversation, and version count. Delete removes every version's row
+and blob bytes (`BlobStore.delete`, added with this kind); already-minted links then 404 at the
+download route, which decides on blob presence.
+
 ### 4. Deleted and kept
 
 | Surface | Disposition |
@@ -325,7 +347,6 @@ surface that would need reshaping to admit them would be the wrong surface:
 | `memory` | memory extension items | thousands | delete (writes stay `memory_update`) | `query` maps to the kind's own search, never a table scan |
 | `page` | `page` table (`tables.py:376-391`) | tens of thousands | delete | cursor paging; spec = metadata, body by reference |
 | `conversation` | `conversation` table | thousands | delete | derived, id-shaped names |
-| `artifact` | `shared_artifact` rows (`share_file`) | hundreds | delete | — |
 | `website` | sites extension (no durable rows today) | few | create · update · delete | a kind needs a durable row family first — the extension persists deployments before it registers |
 | `seat` | `member` table | tens | create · update · delete | role gating; the last-live-owner refusal is the kind's own invariant |
 | `surface` | `surfaces` manifest point (deploy config, not rows) | few | create · update · delete | a workspace-level surface→agent binding. metalcraft's precedent is a **separate kind** (`Channel`: surface, `bind.agentRef`, identity — `~/src/metalcraft/src/metalcraft_contracts/kinds/channel.py:49-66`), not an agent field: a binding carries its own identity config and lifecycle, and an agent field could not say *which* of several bindings changed. Recommended: separate kind, designed when multi-agent or multi-binding lands |

@@ -69,6 +69,14 @@ async def test_filesystem_copy_missing_source_raises(tmp_path: Path) -> None:
         await FilesystemBlobStore(root=tmp_path).copy("absent", "artifacts/x/y")
 
 
+async def test_filesystem_delete_removes_and_absent_is_a_noop(tmp_path: Path) -> None:
+    store = FilesystemBlobStore(root=tmp_path)
+    await store.put("artifacts/x/report.txt", b"bytes")
+    await store.delete("artifacts/x/report.txt")
+    assert not await store.exists("artifacts/x/report.txt")
+    await store.delete("artifacts/x/report.txt")
+
+
 def test_blob_store_for_filesystem(tmp_path: Path) -> None:
     store = blob_store_for(BlobConfig(backend="filesystem", root=tmp_path))
     assert store == FilesystemBlobStore(root=tmp_path)
@@ -100,6 +108,13 @@ async def test_s3_overwrite_replaces(s3_store: S3BlobStore) -> None:
     await s3_store.put("versioned", b"first")
     await s3_store.put("versioned", b"second")
     assert await s3_store.get("versioned") == b"second"
+
+
+async def test_s3_delete_removes_and_absent_is_a_noop(s3_store: S3BlobStore) -> None:
+    await s3_store.put("artifacts/x/report.txt", b"bytes")
+    await s3_store.delete("artifacts/x/report.txt")
+    assert not await s3_store.exists("artifacts/x/report.txt")
+    await s3_store.delete("artifacts/x/report.txt")
 
 
 async def test_s3_stream_round_trip(s3_store: S3BlobStore) -> None:

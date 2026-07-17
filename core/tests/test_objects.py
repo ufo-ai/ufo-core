@@ -9,6 +9,7 @@ name-grammar refusals, spec validation naming its field, handler-raised `VerbNot
 
 import json
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -21,6 +22,8 @@ from cryptography.fernet import Fernet
 from pydantic import BaseModel, ConfigDict, SecretStr
 
 from ufo.agents import AGENT_KIND
+from ufo.artifact_token import verify_artifact_token
+from ufo.artifacts import ARTIFACT_KIND, MATERIALIZE_MAX_BYTES, artifact_object_names
 from ufo.blob import FilesystemBlobStore
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
@@ -29,6 +32,8 @@ from ufo.ext.manifest import Manifest
 from ufo.governance import Governance, prompt_digest
 from ufo.objects import (
     OBJECT_LIST_PAGE,
+    OBJECT_NAME_MAX_LENGTH,
+    OBJECT_NAME_PATTERN,
     BoundKind,
     InvalidManifest,
     InvalidName,
@@ -40,7 +45,15 @@ from ufo.objects import (
     VerbNotSupported,
     object_registry,
 )
-from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
+from ufo.sandbox.local import LocalCarrier
+from ufo.sandbox.session import (
+    ExecResult,
+    MountSpec,
+    ProxyEndpoint,
+    SandboxHandle,
+    SandboxSession,
+    SandboxSpec,
+)
 from ufo.schema import tables
 from ufo.schema.records import Agent, AgentChange, Turn
 from ufo.tools.context import SpawnResult, TextContent, ToolContext, ToolResult
@@ -540,3 +553,320 @@ async def test_agent_apply_and_pending_proposal_write_disjoint_fields(db: None) 
             ).one()
     assert status == "approved"
     assert (row.prompt, row.model) == ("proposed prompt", "claude-fable-5")
+
+
+ARTIFACT_TEST_SECRET = "artifact-test-secret"
+
+
+async def _turn_row(workspace_id: UUID) -> Turn:
+    agent_id = await _agent_row(workspace_id, name=f"agent-{uuid4().hex[:8]}")
+    conversation_id, turn_id = uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                surface="cli",
+                queue_key=f"objects-{conversation_id.hex[:8]}",
+                member_id=None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="running",
+                inbound="hi",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return Turn(
+        id=turn_id,
+        workspace_id=workspace_id,
+        conversation_id=conversation_id,
+        agent_id=agent_id,
+        seq=1,
+        status="running",
+        inbound="hi",
+        created_at=datetime(2026, 7, 16, tzinfo=UTC),
+    )
+
+
+async def _artifact_context(turn: Turn, tmp_path: Path) -> tuple[ToolContext, Path]:
+    """A context whose sandbox is the real local carrier over a temp workspace and whose blob
+    store is a real temp filesystem store — `share_file` and the artifact kind's workspace copy
+    both run their true paths, no stand-ins."""
+    workspace_dir = tmp_path / "workspace"
+    carrier = LocalCarrier()
+    handle = await carrier.create(
+        SandboxSpec(
+            conversation_id=turn.conversation_id,
+            image_ref="ufo-sandbox:latest",
+            mount=MountSpec(kind="filesystem", host_path=str(workspace_dir)),
+            proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM"),
+            run_token="run-token",
+        )
+    )
+    ctx = ToolContext(
+        sandbox=SandboxSession(carrier=carrier, handle=handle),
+        blob=FilesystemBlobStore(root=tmp_path / "blobs"),
+        turn=turn,
+        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        spawn=_unavailable_spawn,
+        speaker_member_id=None,
+        audience_member_id=None,
+        artifact_token_secret=ARTIFACT_TEST_SECRET,
+    )
+    return ctx, workspace_dir
+
+
+async def _shared_artifact_row(turn: Turn, blob_key: str, filename: str, size_bytes: int) -> None:
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.shared_artifact).values(
+                turn_id=turn.id,
+                blob_key=blob_key,
+                workspace_id=turn.workspace_id,
+                filename=filename,
+                subject=None,
+                media_type="application/octet-stream",
+                size_bytes=size_bytes,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+
+def test_artifact_object_names_prefix_the_conversation_and_slug_the_filename() -> None:
+    conv_a, conv_b = uuid4(), uuid4()
+    names = artifact_object_names(
+        [(conv_a, "Q3 Report(final).PDF"), (conv_a, ".env"), (conv_a, "¡!")]
+    )
+    assert names[(conv_a, "Q3 Report(final).PDF")] == f"{conv_a.hex[:8]}-q3-report-final-pdf"
+    assert names[(conv_a, ".env")] == f"{conv_a.hex[:8]}-env"
+    assert names[(conv_a, "¡!")] == f"{conv_a.hex[:8]}-artifact"
+
+    across = artifact_object_names([(conv_a, "report.txt"), (conv_b, "report.txt")])
+    assert across[(conv_a, "report.txt")] == f"{conv_a.hex[:8]}-report-txt"
+    assert across[(conv_b, "report.txt")] == f"{conv_b.hex[:8]}-report-txt"
+
+    colliding = artifact_object_names([(conv_a, "a b.txt"), (conv_a, "a_b.txt")])
+    assert len(set(colliding.values())) == 2
+    for name in colliding.values():
+        assert name.startswith(f"{conv_a.hex[:8]}-a-b-txt-")
+        assert OBJECT_NAME_PATTERN.fullmatch(name)
+
+    long_filename = f"{'a' * 100}.txt"
+    long = artifact_object_names([(conv_a, long_filename)])[(conv_a, long_filename)]
+    assert len(long) <= OBJECT_NAME_MAX_LENGTH
+    assert OBJECT_NAME_PATTERN.fullmatch(long)
+
+
+async def test_share_file_lands_an_artifact_object_and_get_copies_the_latest_back(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        turn = await _turn_row(workspace_id)
+        ctx, workspace_dir = await _artifact_context(turn, tmp_path)
+        await ctx.sandbox.bash("printf 'quarterly numbers' > report.txt")
+
+        name = f"{turn.conversation_id.hex[:8]}-report-txt"
+        shared = json.loads(
+            await _text(tools, "share_file", ctx, file_path="report.txt", subject="Q3 numbers")
+        )
+        assert shared["artifact"] == name
+
+        listing = json.loads(await _text(tools, "object_list", ctx, kind=ARTIFACT_KIND))
+        assert [row["name"] for row in listing["objects"]] == [name]
+        assert "report.txt" in listing["objects"][0]["summary"]
+        filtered = json.loads(
+            await _text(tools, "object_list", ctx, kind=ARTIFACT_KIND, query="no-such-share")
+        )
+        assert filtered["objects"] == []
+        folded = json.loads(
+            await _text(tools, "object_list", ctx, kind=ARTIFACT_KIND, query="q3 NUMBERS")
+        )
+        assert [row["name"] for row in folded["objects"]] == [name]
+
+        fetched = yaml.safe_load(
+            await _text(tools, "object_get", ctx, kind=ARTIFACT_KIND, name=name)
+        )
+        assert fetched["spec"] == {
+            "filename": "report.txt",
+            "media_type": "text/plain",
+            "subject": "Q3 numbers",
+        }
+        status = fetched["status"]
+        assert status["size_bytes"] == len(b"quarterly numbers")
+        assert status["turn_id"] == str(turn.id)
+        assert status["conversation_id"] == str(turn.conversation_id)
+        assert status["versions"] == 1
+        assert status["workspace_path"] == f"artifacts/{name}/report.txt"
+        assert (workspace_dir / "artifacts" / name / "report.txt").read_bytes() == (
+            b"quarterly numbers"
+        )
+        token = status["download_url"].split("token=", 1)[1]
+        claims = verify_artifact_token(token, ARTIFACT_TEST_SECRET, datetime.now(UTC))
+        assert claims.filename == "report.txt"
+
+        await ctx.sandbox.bash("printf 'revised numbers' > report.txt")
+        reshared = json.loads(await _text(tools, "share_file", ctx, file_path="report.txt"))
+        assert reshared["artifact"] == name
+        listing = json.loads(await _text(tools, "object_list", ctx, kind=ARTIFACT_KIND))
+        assert [row["name"] for row in listing["objects"]] == [name]
+        refetched = yaml.safe_load(
+            await _text(tools, "object_get", ctx, kind=ARTIFACT_KIND, name=name)
+        )
+        assert refetched["status"]["versions"] == 2
+        assert (workspace_dir / "artifacts" / name / "report.txt").read_bytes() == (
+            b"revised numbers"
+        )
+
+
+async def test_artifact_kind_refuses_apply_and_delete_removes_every_version(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        turn = await _turn_row(workspace_id)
+        name = f"{turn.conversation_id.hex[:8]}-report-txt"
+        ctx, _ = await _artifact_context(turn, tmp_path)
+        await ctx.sandbox.bash("printf 'v1' > report.txt")
+        await _text(tools, "share_file", ctx, file_path="report.txt")
+        await ctx.sandbox.bash("printf 'v2' > report.txt")
+        await _text(tools, "share_file", ctx, file_path="report.txt")
+        async with workspace_tx() as connection:
+            blob_keys = (
+                (
+                    await connection.execute(
+                        sa.select(tables.shared_artifact.c.blob_key).where(
+                            tables.shared_artifact.c.workspace_id == workspace_id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert len(blob_keys) == 2
+        for blob_key in blob_keys:
+            assert await ctx.blob.exists(blob_key)
+
+        apply_tool = tools["object_apply"]
+        manifest = yaml.safe_dump(
+            {
+                "kind": ARTIFACT_KIND,
+                "name": name,
+                "spec": {"filename": "report.txt", "media_type": "text/plain"},
+            }
+        )
+        with pytest.raises(VerbNotSupported, match="share_file"):
+            await apply_tool.handler(
+                ctx, apply_tool.input_model.model_validate({"manifest": manifest})
+            )
+
+        deleted = json.loads(
+            await _text(tools, "object_delete", ctx, kind=ARTIFACT_KIND, name=name)
+        )
+        assert deleted["spec"]["filename"] == "report.txt"
+        listing = json.loads(await _text(tools, "object_list", ctx, kind=ARTIFACT_KIND))
+        assert listing["objects"] == []
+        for blob_key in blob_keys:
+            assert not await ctx.blob.exists(blob_key)
+
+        delete_tool = tools["object_delete"]
+        with pytest.raises(UnknownObject):
+            await delete_tool.handler(
+                ctx,
+                delete_tool.input_model.model_validate({"kind": ARTIFACT_KIND, "name": name}),
+            )
+
+
+async def test_artifact_over_the_copy_bound_reports_no_workspace_path(db: None) -> None:
+    """An oversize share renders spec and status without touching the sandbox or the blob store —
+    the untouched carrier proves the copy is skipped, and with no deploy secret the status link is
+    null too."""
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        turn = await _turn_row(workspace_id)
+        blob_key = f"artifacts/{uuid4()}/huge.bin"
+        await _shared_artifact_row(turn, blob_key, "huge.bin", MATERIALIZE_MAX_BYTES + 1)
+        ctx = _tool_context(workspace_id)
+
+        fetched = yaml.safe_load(
+            await _text(
+                tools,
+                "object_get",
+                ctx,
+                kind=ARTIFACT_KIND,
+                name=f"{turn.conversation_id.hex[:8]}-huge-bin",
+            )
+        )
+        assert fetched["spec"]["filename"] == "huge.bin"
+        assert fetched["status"]["workspace_path"] is None
+        assert fetched["status"]["download_url"] is None
+
+
+async def test_artifact_with_missing_bytes_fails_loud_on_get(db: None, tmp_path: Path) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        turn = await _turn_row(workspace_id)
+        await _shared_artifact_row(turn, f"artifacts/{uuid4()}/gone.txt", "gone.txt", 5)
+        ctx = replace(_tool_context(workspace_id), blob=FilesystemBlobStore(root=tmp_path))
+
+        get_tool = tools["object_get"]
+        with pytest.raises(ValueError, match="no stored bytes"):
+            await get_tool.handler(
+                ctx,
+                get_tool.input_model.model_validate(
+                    {
+                        "kind": ARTIFACT_KIND,
+                        "name": f"{turn.conversation_id.hex[:8]}-gone-txt",
+                    }
+                ),
+            )
+
+
+async def test_artifact_slug_collisions_list_under_distinct_names(db: None) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        turn = await _turn_row(workspace_id)
+        await _shared_artifact_row(turn, f"artifacts/{uuid4()}/a b.txt", "a b.txt", 1)
+        await _shared_artifact_row(turn, f"artifacts/{uuid4()}/a_b.txt", "a_b.txt", 1)
+        ctx = _tool_context(workspace_id)
+
+        listing = json.loads(await _text(tools, "object_list", ctx, kind=ARTIFACT_KIND))
+        names = [row["name"] for row in listing["objects"]]
+        expected = artifact_object_names(
+            [(turn.conversation_id, "a b.txt"), (turn.conversation_id, "a_b.txt")]
+        )
+        assert names == sorted(expected.values())
+        assert len(set(names)) == 2
+
+
+async def test_same_filename_across_conversations_stays_distinct(db: None) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        turn_a = await _turn_row(workspace_id)
+        turn_b = await _turn_row(workspace_id)
+        await _shared_artifact_row(turn_a, f"artifacts/{uuid4()}/report.txt", "report.txt", 1)
+        await _shared_artifact_row(turn_b, f"artifacts/{uuid4()}/report.txt", "report.txt", 1)
+        ctx = _tool_context(workspace_id)
+
+        listing = json.loads(await _text(tools, "object_list", ctx, kind=ARTIFACT_KIND))
+        names = sorted(row["name"] for row in listing["objects"])
+        assert names == sorted(
+            f"{turn.conversation_id.hex[:8]}-report-txt" for turn in (turn_a, turn_b)
+        )

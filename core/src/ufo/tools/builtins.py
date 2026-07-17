@@ -44,6 +44,7 @@ from ufo.artifact_token import (
     ARTIFACT_TOKEN_TTL_SECONDS,
     mint_artifact_token,
 )
+from ufo.artifacts import artifact_object_names
 from ufo.blob import BlobNotFound
 from ufo.db import workspace_tx
 from ufo.grants import installed_connect_flow
@@ -460,6 +461,7 @@ async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResu
     key = f"{ARTIFACT_KEY_PREFIX}{uuid4()}/{safe_name}"
     await ctx.sandbox.export_file(args.file_path, ctx.blob, key)
     media_type = mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
+    shared_at = datetime.now(UTC)
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.shared_artifact).values(
@@ -470,10 +472,22 @@ async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResu
                 subject=args.subject,
                 media_type=media_type,
                 size_bytes=stat["size"],
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
+                created_at=shared_at,
+                updated_at=shared_at,
             )
         )
+        identities = (
+            await connection.execute(
+                sa.select(tables.turn.c.conversation_id, tables.shared_artifact.c.filename)
+                .select_from(
+                    tables.shared_artifact.join(
+                        tables.turn, tables.shared_artifact.c.turn_id == tables.turn.c.id
+                    )
+                )
+                .where(tables.shared_artifact.c.workspace_id == ctx.turn.workspace_id)
+                .distinct()
+            )
+        ).all()
     expires_at = int(datetime.now(UTC).timestamp()) + ARTIFACT_TOKEN_TTL_SECONDS
     token = mint_artifact_token(ctx.artifact_token_secret, key, safe_name, expires_at)
     return ToolResult(
@@ -483,6 +497,9 @@ async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResu
                     {
                         "url": f"{ARTIFACT_DOWNLOAD_PATH}?token={token}",
                         "name": safe_name,
+                        "artifact": artifact_object_names(
+                            [(row.conversation_id, row.filename) for row in identities]
+                        )[(ctx.turn.conversation_id, safe_name)],
                         "size_bytes": int(stat["size"]),
                         "digest": str(stat["digest"]),
                         "is_text": bool(stat["is_text"]),
@@ -773,7 +790,10 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
             "(e.g. 'report.xlsx') so the recipient gets an openable file; any directory "
             "components in it are stripped. `subject` is an optional caption shown when a chat "
             "surface posts the file. Supports version history: use the same `name` parameter "
-            "for updated versions."
+            "for updated versions. Each filename shared in this conversation is an `artifact` "
+            "workspace object (the result carries its name; re-shares become its versions), so "
+            "a later turn can "
+            "re-fetch the latest bytes with object_get."
         ),
         input_model=ShareFileInput,
         handler=share_file_handler,

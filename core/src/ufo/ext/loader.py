@@ -26,7 +26,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
-from ufo.agents import CORE_OBJECT_KINDS
+from ufo.agents import AGENT_OBJECT
+from ufo.artifacts import ARTIFACT_OBJECT
 from ufo.credential_kind import (
     CREDENTIAL_DESCRIPTION,
     CREDENTIAL_GUIDANCE,
@@ -68,6 +69,10 @@ from ufo.skills.runtime import (
 from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.registry import ToolDef, ToolRegistry
 
+CORE_OBJECT_KINDS: tuple[BoundKind, ...] = (
+    BoundKind(kind=AGENT_OBJECT, extension=None, context=None),
+    BoundKind(kind=ARTIFACT_OBJECT, extension=None, context=None),
+)
 EXTENSION_ENTRY_POINT_GROUP = "ufo.extension"
 PACK_ENTRY_POINT_GROUP = "ufo.pack"
 LOCKFILE_PATH_ENV = "UFO_LOCKFILE"

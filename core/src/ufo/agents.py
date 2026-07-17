@@ -17,14 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ufo.db import workspace_tx
 from ufo.ext.context import JsonValue
 from ufo.governance import prompt_digest
-from ufo.objects import (
-    BoundKind,
-    ObjectKind,
-    ObjectPage,
-    ObjectRow,
-    OwnerRequired,
-    VerbNotSupported,
-)
+from ufo.objects import ObjectKind, ObjectPage, ObjectRow, OwnerRequired, VerbNotSupported
 from ufo.schema import tables
 from ufo.tools.context import ToolContext
 from ufo.workspace import ws_current
@@ -136,8 +129,4 @@ AGENT_OBJECT = ObjectKind(
     ),
     spec_model=AgentSpec,
     store=AgentObjects(),
-)
-
-CORE_OBJECT_KINDS: tuple[BoundKind, ...] = (
-    BoundKind(kind=AGENT_OBJECT, extension=None, context=None),
 )

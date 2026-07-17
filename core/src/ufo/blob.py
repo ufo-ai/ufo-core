@@ -41,6 +41,10 @@ class BlobStore(Protocol):
 
     async def exists(self, key: str) -> bool: ...
 
+    async def delete(self, key: str) -> None:
+        """Remove a stored object; deleting an absent key is a no-op, so a retried delete holds."""
+        ...
+
     def get_stream(self, key: str) -> AsyncIterator[bytes]: ...
 
     async def put_stream(self, key: str, chunks: AsyncIterator[bytes]) -> None: ...
@@ -83,6 +87,10 @@ class FilesystemBlobStore:
     async def exists(self, key: str) -> bool:
         path = self._resolve(key)
         return await asyncio.to_thread(path.is_file)
+
+    async def delete(self, key: str) -> None:
+        path = self._resolve(key)
+        await asyncio.to_thread(path.unlink, missing_ok=True)
 
     async def get_stream(self, key: str) -> AsyncIterator[bytes]:
         path = self._resolve(key)
@@ -203,6 +211,10 @@ class S3BlobStore:
                     return False
                 raise
             return True
+
+    async def delete(self, key: str) -> None:
+        async with self._client() as client:
+            await client.delete_object(Bucket=self.bucket, Key=key)
 
     async def get_stream(self, key: str) -> AsyncIterator[bytes]:
         async with self._client() as client:
