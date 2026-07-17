@@ -26,5 +26,7 @@ crowding your own.
 
 `ask_user` is for the cases where proceeding would be guesswork: a missing detail that changes the
 approach, or a confirmation before an irreversible, expensive, or high-impact action (sending a
-message, a purchase, a deletion). Ask, then end your turn — the answer arrives as the next message.
-Do not ask for things you can find yourself or decide with a reasonable default.
+message, a purchase, a deletion). When you pass `options`, do not restate them as prose in your
+reply — they ride the structured question and a capable surface renders them; write only a brief
+lead-in, then end your turn — the answer arrives as the next message. Do not ask for things you can
+find yourself or decide with a reasonable default.
