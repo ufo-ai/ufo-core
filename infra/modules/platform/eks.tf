@@ -57,6 +57,9 @@ module "eks" {
 
   eks_managed_node_group_defaults = {
     ami_type = "AL2023_x86_64_STANDARD"
+    # Without this, node AMIs only refresh on cluster-version bumps — kernel and NIC-driver
+    # fixes go stale for months and known panics keep hard-resetting nodes.
+    use_latest_ami_release_version = true
   }
 
   eks_managed_node_groups = {
