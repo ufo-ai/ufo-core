@@ -188,6 +188,7 @@ data "kubectl_file_documents" "hosted" {
     ingress_class  = "nginx"
     bundle_image   = local.bundle_image
     serve_role_arn = module.platform.app_s3_role_arn
+    region         = var.region
     otlp_endpoint  = "http://otel-collector.${local.system_namespace}.svc.cluster.local:4318"
 
     ses_sender           = var.ses_sender

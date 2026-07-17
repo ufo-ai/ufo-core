@@ -31,7 +31,7 @@ test for the extension API — every entry must be expressible without touching 
 | Streaming | Durable terminal frames in Postgres; live token deltas through a hub interface — in-process in the single-process default, a Redis hub extension for multi-instance deploys. A lost delta costs a redrawn token, never correctness. |
 | Topology | `ufoctl serve` is one process on one event loop: surfaces + DBOS workers + jobs. Everything is async-native — a blocking call stalls the whole deploy, so blocking-in-async fails lint. Scale-out = more instances plus a shared hub. |
 | Sandbox | A local temp-dir carrier is the core default: no kernel isolation (a raw shell reaches the host FS — only tool arguments are workspace-guarded), and egress is proxy-scoped/metered only for clients that honor the proxy env, not kernel-enforced (model keys still stay fail-closed via the sentinel). It is the development / trusted-input default; use Docker or E2B (carrier extensions on the `carriers` point) for untrusted input, isolation, or multi-tenant deploys. |
-| Models | Model providers are an extension point; core ships Anthropic + OpenAI direct clients behind one `ModelClient` interface. OpenRouter (or any router) is an extension, never core. |
+| Models | Model providers are an extension point; core ships Anthropic + OpenAI direct clients behind one `ModelClient` interface. Bedrock Mantle and OpenRouter ship as extensions. |
 | Observability | OpenTelemetry APIs only in product code; the OTLP export target (Datadog, …) is deploy config. No vendor SDK in core. |
 | Kubernetes | Absent from core by construction. The enterprise offering later wraps core with k8s (principle 3); nothing in core may assume or import it. |
 | CLI | One CLI: `ufo` (`chat`, `serve`, `bundle`, `ext`, admin verbs). |
@@ -306,8 +306,11 @@ table per model; BYOK usage still meters (visibility without billing).
 ## Model abstraction
 
 `ModelClient`: `complete(messages, tools, stream)` + token accounting + provider image/content
-limits. Implementations: Anthropic, OpenAI. Model policy per agent (`auto` routes by task class);
-keys come from `credential` slots or deploy config.
+limits. Core implementations: Anthropic, OpenAI. The Bedrock extension serves Mantle model IDs over
+the native Anthropic Messages API and OpenAI-compatible Chat Completions and Responses APIs. Model
+policy per agent (`auto` routes by task class); its `bedrock_api_key` credential falls back to the
+deploy's `AWS_BEARER_TOKEN_BEDROCK`, as provider credentials come from workspace slots or deploy
+config.
 
 ## Deploy config bundling
 

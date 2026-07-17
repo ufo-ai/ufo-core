@@ -1,10 +1,12 @@
-"""Public re-export: the model seam — the wire types a Trajectory carries and a model leg speaks,
-the `ModelClient` protocol a model-provider extension implements, and the OpenAI-wire building
-blocks (message translation, SDK client factory) such an extension reuses to speak a compatible
-endpoint. An extension types against these here rather than reaching into core internals."""
+"""Public re-export: the model seam — wire types, clients, and compatible API building blocks.
+
+An extension types against these here rather than reaching into core internals."""
 
 from ufo.accounting import (
     ModelPrice as ModelPrice,
+)
+from ufo.models.anthropic import (
+    AnthropicClient as AnthropicClient,
 )
 from ufo.models.interface import (
     ImageBlock as ImageBlock,
@@ -20,6 +22,9 @@ from ufo.models.interface import (
 )
 from ufo.models.interface import (
     ModelEvent as ModelEvent,
+)
+from ufo.models.interface import (
+    ModelRefusal as ModelRefusal,
 )
 from ufo.models.interface import (
     ModelRequest as ModelRequest,
@@ -47,6 +52,12 @@ from ufo.models.interface import (
 )
 from ufo.models.interface import (
     ToolUseBlock as ToolUseBlock,
+)
+from ufo.models.interface import (
+    trim_images as trim_images,
+)
+from ufo.models.openai import (
+    OpenAIClient as OpenAIClient,
 )
 from ufo.models.openai import (
     openai_messages as openai_messages,

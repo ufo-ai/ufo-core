@@ -225,6 +225,7 @@ spec:
           envFrom:
             - secretRef: {name: ufo-platform-secrets}
           env:
+            - {name: AWS_REGION, value: "${region}"}
             # The fleet's platform Fernet key (seals hosted credential rows) and artifact-delivery
             # secret — minted for the fleet, in the ufo-serve Secret.
             - name: UFO_CREDENTIAL_KEY

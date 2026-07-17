@@ -59,6 +59,7 @@ spec:
   # Model keys arrive empty until populated out-of-band.
   data:
     - {secretKey: ANTHROPIC_API_KEY, remoteRef: {key: ${secret_api_keys}, property: anthropic-api-key}}
+    - {secretKey: AWS_BEARER_TOKEN_BEDROCK, remoteRef: {key: ${secret_api_keys}, property: bedrock-api-key}}
     - {secretKey: OPENAI_API_KEY, remoteRef: {key: ${secret_api_keys}, property: openai-api-key}}
     - {secretKey: OPENROUTER_API_KEY, remoteRef: {key: ${secret_api_keys}, property: openrouter-api-key}}
     - {secretKey: COMPOSIO_API_KEY, remoteRef: {key: ${secret_api_keys}, property: composio-api-key}}

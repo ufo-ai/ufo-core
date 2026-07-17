@@ -148,6 +148,7 @@ resource "aws_secretsmanager_secret_version" "api_keys" {
   secret_id = aws_secretsmanager_secret.api_keys.id
   secret_string = jsonencode({
     "anthropic-api-key"            = ""
+    "bedrock-api-key"              = ""
     "openai-api-key"               = ""
     "openrouter-api-key"           = ""
     "composio-api-key"             = ""

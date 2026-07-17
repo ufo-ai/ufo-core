@@ -7,7 +7,7 @@ dependencies = [
     "aiobotocore>=3.7.0",
     "aiosqlite>=0.22.1",
     "alembic>=1.18.5",
-    "anthropic>=0.40",
+    "anthropic>=0.116",
     "asyncpg>=0.31.0",
     "click>=8.1",
     "croniter>=2.0",
@@ -35,6 +35,7 @@ dependencies = [
 ufoctl = "ufo.cli:main"
 
 [project.entry-points."ufo.extension"]
+bedrock = "ufo_ext_bedrock:manifest"
 brief_pipeline = "ufo_ext_brief_pipeline.manifest:manifest"
 browser = "ufo_ext_browser.manifest:manifest"
 browserbase = "ufo_ext_browserbase:manifest"
@@ -151,6 +152,7 @@ exclude = ["**/__pycache__", "**/*.pyc"]
 # a data file) map into a package directory so the runtime's `_package_dir` / `Path(__file__).parent`
 # resolve that data uniquely per extension; the dataless ones map to a flat top-level module.
 [tool.hatch.build.targets.wheel.force-include]
+"extensions/bedrock/ufo_ext_bedrock.py" = "ufo_ext_bedrock.py"
 "extensions/browserbase/ufo_ext_browserbase.py" = "ufo_ext_browserbase.py"
 "extensions/docker/ufo_ext_docker.py" = "ufo_ext_docker.py"
 "extensions/e2b/ufo_ext_e2b.py" = "ufo_ext_e2b.py"

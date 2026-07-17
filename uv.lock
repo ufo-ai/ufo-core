@@ -3069,7 +3069,7 @@ requires-dist = [
     { name = "aiobotocore", specifier = ">=3.7.0" },
     { name = "aiosqlite", specifier = ">=0.22.1" },
     { name = "alembic", specifier = ">=1.18.5" },
-    { name = "anthropic", specifier = ">=0.40" },
+    { name = "anthropic", specifier = ">=0.116" },
     { name = "asyncpg", specifier = ">=0.31.0" },
     { name = "click", specifier = ">=8.1" },
     { name = "croniter", specifier = ">=2.0" },
