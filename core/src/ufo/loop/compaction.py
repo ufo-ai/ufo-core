@@ -19,7 +19,7 @@ from uuid import UUID
 
 import lz4.frame
 from dbos import DBOS
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from ufo.blob import BlobNotFound, BlobStore
 from ufo.ext.loader import HookChain
@@ -324,13 +324,18 @@ class Compaction:
     def _parse_summary(self, text: str) -> CompactionSummary:
         """Validate the summarize call's output into the typed CompactionSummary. The model is asked
         for a single JSON object; the outermost braces are extracted (tolerating a stray fence) and
-        validated. An empty or unparseable summary raises — a compaction that cannot produce a
-        usable summary fails the turn loud rather than swapping in a degraded window."""
+        validated. An empty, unparseable, or schema-invalid summary raises the module's own
+        RuntimeError (never pydantic's) — a compaction that cannot produce a usable summary fails
+        the turn loud rather than swapping in a degraded window, and every failure mode of this
+        method shares one exception type an operator can filter on."""
         start = text.find("{")
         end = text.rfind("}")
         if start == -1 or end <= start:
             raise RuntimeError("compaction produced no JSON summary")
-        summary = CompactionSummary.model_validate_json(text[start : end + 1])
+        try:
+            summary = CompactionSummary.model_validate_json(text[start : end + 1])
+        except ValidationError as error:
+            raise RuntimeError(f"compaction produced an invalid summary: {error}") from error
         if not summary.intent.strip():
             raise RuntimeError("compaction produced an empty summary")
         return summary

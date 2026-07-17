@@ -384,6 +384,16 @@ async def test_an_unparseable_summary_fails_loud(tmp_path: Path) -> None:
         await compaction.maybe_compact(_history())
 
 
+async def test_a_summary_missing_required_fields_fails_loud(tmp_path: Path) -> None:
+    """A model that answers with well-formed JSON that isn't the CompactionSummary shape (e.g. it
+    echoed a tool call's arguments instead of the requested schema) must fail with the module's own
+    RuntimeError, not a raw pydantic ValidationError leaking past this boundary."""
+    model = RawTextModel(text='{"query": "create issue in the repo", "source_id": "github"}')
+    compaction = _compaction(tmp_path, model=model, trigger_tokens=1, keep_messages=2)
+    with pytest.raises(RuntimeError, match="invalid summary"):
+        await compaction.maybe_compact(_history())
+
+
 def test_round_output_budget_fits_under_the_compaction_trigger() -> None:
     """Providers require input + max_tokens <= window and the derived trigger is window less the
     summary reserve and buffer, so with the window cancelled the reserve plus buffer must cover a
