@@ -80,7 +80,7 @@ INVITE_BODY = """\
   code:     {code}
   expires:  {expires} UTC
 
-  curl -fsSL https://{apex_host}/install | sh
+  curl -fsSL https://{apex_host}/ufo | sh
 
   Your code identifies one company. You'll receive
   3 more when your fleet is live.

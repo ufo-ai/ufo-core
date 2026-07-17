@@ -3,7 +3,7 @@
 # (`landing.html`, substituted into the script below), stamped with the craft count from this
 # front door's own gateway (`origin_base`'s `/fleet`); plain-http browsers are bounced to https
 # first. `POST /waitlist`
-# records emails in D1 (the card's counter reads them back), and `GET /install(.sh)` proxies the
+# records emails in D1 (the card's counter reads them back), and `GET /ufo` proxies the
 # gateway's version-stamped client script. The route claims the whole host — Cloudflare matches patterns against the URL
 # including its query, so exact-path routes never fire for query'd URLs (`/?utm=…`). Paths the
 # worker doesn't handle pass through to origin via its default `fetch(request)`. The zone-level

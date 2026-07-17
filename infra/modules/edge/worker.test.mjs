@@ -81,7 +81,7 @@ test("curl landing renders the ledger card with live counts and https commands",
   assert.match(body, /0 objects\. 0 unidentified\./);
   assert.match(body, /request identification:/);
   assert.match(body, /curl https:\/\/flyingobject\.ai\/waitlist -d email=/);
-  assert.match(body, /curl -fsSL https:\/\/flyingobject\.ai\/install \| sh/);
+  assert.match(body, /curl -fsSL https:\/\/flyingobject\.ai\/ufo \| sh/);
 });
 
 test("curl landing over plain http gets the card directly", async () => {
@@ -389,11 +389,9 @@ test("GET /waitlist answers with usage for the requested host", async () => {
   assert.match(await reply.text(), /curl https:\/\/testing\.flyingobject\.ai\/waitlist/);
 });
 
-test("/install and /install.sh proxy the gateway's stamped client script", async () => {
-  for (const path of ["/install", "/install.sh"]) {
-    const reply = await request(`https://flyingobject.ai${path}`);
-    assert.equal(await reply.text(), "origin:https://testing.flyingobject.ai/ufo");
-  }
+test("/ufo proxies the gateway's stamped client script", async () => {
+  const reply = await request("https://flyingobject.ai/ufo");
+  assert.equal(await reply.text(), "origin:https://testing.flyingobject.ai/ufo");
 });
 
 test("any other path passes through untouched", async () => {
@@ -401,10 +399,10 @@ test("any other path passes through untouched", async () => {
   assert.equal(await reply.text(), "origin:https://flyingobject.ai/v1/onboard/ufo");
 });
 
-test("/install serves byte-identical content to every user agent", async () => {
-  const cli = await (await request("https://flyingobject.ai/install")).text();
+test("/ufo serves byte-identical content to every user agent", async () => {
+  const cli = await (await request("https://flyingobject.ai/ufo")).text();
   const browser = await (
-    await request("https://flyingobject.ai/install", { ua: "Mozilla/5.0" })
+    await request("https://flyingobject.ai/ufo", { ua: "Mozilla/5.0" })
   ).text();
   assert.equal(cli, browser);
 });

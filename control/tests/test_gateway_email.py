@@ -79,7 +79,7 @@ def test_invite_email_renders_the_ledger() -> None:
         "  code:     abcd-efgh-jkmn\n"
         "  expires:  2026-07-26 18:45 UTC\n"
         "\n"
-        "  curl -fsSL https://flyingobject.ai/install | sh\n"
+        "  curl -fsSL https://flyingobject.ai/ufo | sh\n"
         "\n"
         "  Your code identifies one company. You'll receive\n"
         "  3 more when your fleet is live.\n"

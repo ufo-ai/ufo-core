@@ -54,7 +54,7 @@ function card(host, total, identified) {
     curl https://${host}/waitlist -d email=you@yourco.com
 
   have a code?
-    curl -fsSL https://${host}/install | sh
+    curl -fsSL https://${host}/ufo | sh
 
 `;
 }
@@ -175,8 +175,7 @@ export default {
         return landing(request, env, url);
       case "/waitlist":
         return request.method === "POST" ? join(request, env, url) : text(usage(url.hostname));
-      case "/install":
-      case "/install.sh":
+      case "/ufo":
         return fetch(`${env.ORIGIN_BASE}/ufo`);
       default:
         return fetch(request);

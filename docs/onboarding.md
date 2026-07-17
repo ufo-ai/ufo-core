@@ -1,7 +1,7 @@
 # Onboarding
 
 Onboarding is CLI-first: the apex's public face is a Cloudflare edge worker (landing card,
-waitlist, `/install`), and the terminal client is the one onboarding renderer. The gateway serves
+waitlist, `/ufo`), and the terminal client is the one onboarding renderer. The gateway serves
 the client script and drives every screen server-side as directives over
 `POST /v1/onboard/{channel}`.
 
@@ -14,7 +14,7 @@ curl / ------->|  GET /            CLI UA -> landing card   |
                |                   other UA -> prod site    |
                |  POST /waitlist   email -> D1 + mail queue |
                |  queue consumer   confirmation email       |
-               |  GET /install     proxy of gateway /ufo    |
+               |  GET /ufo         proxy of gateway /ufo    |
                +----------------------+---------------------+
                                       | origin
                                       v
@@ -54,13 +54,13 @@ paths — every other request passes through to what the host serves:
   failed publish without resending delivered mail. Delivery retries five times before its terminal
   failure is logged and re-armed by the dead-letter consumer. The card's "N identified flying
   objects" counter reads D1 (≤1h stale per isolate, busted on join).
-- `GET /install` / `/install.sh` — proxies the gateway's stamped `/ufo` from the module's
-  `origin_base`; both apexes point at the one live fleet.
+- `GET /ufo` — proxies the gateway's stamped `/ufo` from the module's `origin_base`; both apexes
+  point at the one live fleet.
 
 ## Terminal onboarding flow
 
 ```text
-curl -fsSL https://flyingobject.ai/install | sh
+curl -fsSL https://flyingobject.ai/ufo | sh
   |
   | POST /v1/onboard/{channel}
   | header: x-ufo-session=<host.pid.epoch>
@@ -282,7 +282,7 @@ not a separate setup surface.
 
 ```text
 infra/modules/edge/
-  worker.js               apex landing card, waitlist mail, install proxy
+  worker.js               apex landing card, waitlist mail, /ufo proxy
   worker.test.mjs         its behavior proof (node --test, ci checks job)
 
 control/src/ufo_control/
