@@ -1,9 +1,12 @@
 import asyncio
 import json
 import pickle
+import zlib
+from base64 import b64decode, b64encode
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from io import BytesIO
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -11,6 +14,7 @@ import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from opentelemetry import trace
+from PIL import Image
 from pydantic import BaseModel
 
 from ufo.accounting import record_turn_usage
@@ -39,6 +43,7 @@ from ufo.loop.engine import (
     OFFLOAD_NOTICE,
     REQUEST_CREDENTIALS_TOOL,
     TOOL_IMAGE_BLOB_DIR,
+    TOOL_IMAGE_EDGE_LIMIT,
     TOOL_OUTPUT_DIR,
     TOOL_RESULT_PREVIEW_CHARS,
     UNTRUSTED_RESULT_CLOSE,
@@ -1956,6 +1961,89 @@ async def test_dispatch_step_offloads_image_bytes_to_a_blob_reference(
         TextBlock(text="chart.png"),
         ImageBlock(source=ImageSource(media_type="image/png", data=payload)),
     )
+
+
+async def test_dispatch_step_bounds_oversized_tool_images(db: None, tmp_path: Path) -> None:
+    """A tool image over the provider edge limit is downscaled once at blob-write time — every
+    later rehydration and model round reads the bounded bytes — while an in-bounds image ships
+    byte-identical."""
+    turn = await _seed_turn("queued", None)
+
+    def png(width: int, height: int) -> str:
+        buffer = BytesIO()
+        Image.new("RGB", (width, height)).save(buffer, format="PNG")
+        return b64encode(buffer.getvalue()).decode()
+
+    oversized, small = png(TOOL_IMAGE_EDGE_LIMIT + 500, 40), png(10, 10)
+
+    async def shot(context: ToolContext, args: BaseModel) -> ToolResult:
+        return ToolResult(
+            content=(
+                ImageContent(media_type="image/png", data=oversized),
+                ImageContent(media_type="image/png", data=small),
+            )
+        )
+
+    tool = replace(_image_result_tool("shot"), handler=shot)
+    engine = replace(_engine(turn, EchoModel(), tmp_path), tools=ToolRegistry((tool,)))
+    context = ToolContext(
+        sandbox=engine.sandbox,
+        blob=engine.blob,
+        turn=engine.turn,
+        agent=engine.agent,
+        spawn=engine.spawn,
+        speaker_member_id=engine.turn.speaker_member_id,
+        audience_member_id=engine.audience_member_id,
+        artifact_token_secret=engine.artifact_token_secret,
+        grants=engine.grants,
+    )
+
+    step = await engine._dispatch_step(context, ToolUseBlock(id="c1", name="shot", input={}))
+
+    bounded_ref, small_ref = step.image_refs
+    stored = Image.open(BytesIO(b64decode((await engine.blob.get(bounded_ref.blob_key)).decode())))
+    assert max(stored.size) == TOOL_IMAGE_EDGE_LIMIT
+    assert bounded_ref.media_type == "image/png"
+    assert (await engine.blob.get(small_ref.blob_key)).decode() == small
+
+
+async def test_dispatch_step_survives_a_decompression_bomb(
+    db: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    turn = await _seed_turn("queued", None)
+    buffer = BytesIO()
+    Image.new("RGB", (10, 10)).save(buffer, format="PNG")
+    bomb = bytearray(buffer.getvalue())
+    bomb[16:24] = (20_000).to_bytes(4, "big") * 2
+    bomb[29:33] = zlib.crc32(bomb[12:29]).to_bytes(4, "big")
+    payload = b64encode(bomb).decode()
+
+    async def shot(context: ToolContext, args: BaseModel) -> ToolResult:
+        return ToolResult(content=(ImageContent(media_type="image/png", data=payload),))
+
+    tool = replace(_image_result_tool("shot"), handler=shot)
+    engine = replace(_engine(turn, EchoModel(), tmp_path), tools=ToolRegistry((tool,)))
+    context = ToolContext(
+        sandbox=engine.sandbox,
+        blob=engine.blob,
+        turn=engine.turn,
+        agent=engine.agent,
+        spawn=engine.spawn,
+        speaker_member_id=engine.turn.speaker_member_id,
+        audience_member_id=engine.audience_member_id,
+        artifact_token_secret=engine.artifact_token_secret,
+        grants=engine.grants,
+    )
+
+    with caplog.at_level("INFO", logger="ufo"):
+        step = await engine._dispatch_step(context, ToolUseBlock(id="c1", name="shot", input={}))
+
+    (image_ref,) = step.image_refs
+    assert (await engine.blob.get(image_ref.blob_key)).decode() == payload
+    record = next(
+        record for record in caplog.records if record.getMessage() == "tool_image.bound_failed"
+    )
+    assert record.ufo["error_class"] == "DecompressionBombError"
 
 
 def _image_error_tool(name: str) -> ToolDef:

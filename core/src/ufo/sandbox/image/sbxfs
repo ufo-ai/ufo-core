@@ -51,6 +51,13 @@ IMAGE_MEDIA_TYPES = {
     ".webp": "image/webp",
 }
 
+IMAGE_MAGIC = (
+    ("image/png", b"\x89PNG\r\n\x1a\n"),
+    ("image/jpeg", b"\xff\xd8\xff"),
+    ("image/gif", b"GIF87a"),
+    ("image/gif", b"GIF89a"),
+)
+
 BINARY_EXTENSIONS = frozenset(
     {
         ".png",
@@ -259,20 +266,39 @@ def _number_lines(lines: list[str], start: int, width: int) -> list[str]:
 
 
 def _read_image(path: Path) -> dict:
-    media_type = IMAGE_MEDIA_TYPES[path.suffix.lower()]
+    """The extension routes here; the bytes decide the media type. A model provider validates
+    image bytes against the declared type, so a mislabeled file (PDF bytes in a `.png`, a JPEG
+    saved as `.png`) must surface as a recoverable error or the corrected type here — shipping
+    the extension's claim fails the whole model request downstream."""
     size = path.stat().st_size
     if size > IMAGE_MAX_BYTES:
         raise FsError(
             f"{path} is {size} bytes; over the {IMAGE_MAX_BYTES}-byte image read cap. "
             "Resize it (e.g. with a bash tool) before reading."
         )
+    data = path.read_bytes()
+    media_type = _image_media_type(data)
+    if media_type is None:
+        raise FsError(
+            f"{path} has an image extension but its bytes are not png/jpeg/gif/webp "
+            f"(they start with {data[:8]!r}). Re-export it as a real image, then read it again."
+        )
     return {
         "path": str(path),
         "type": "image",
         "media_type": media_type,
-        "data": base64.b64encode(path.read_bytes()).decode("ascii"),
+        "data": base64.b64encode(data).decode("ascii"),
         "size_bytes": size,
     }
+
+
+def _image_media_type(data: bytes) -> str | None:
+    for media_type, magic in IMAGE_MAGIC:
+        if data.startswith(magic):
+            return media_type
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
 
 
 def _pdf_total_pages(path: Path) -> int:

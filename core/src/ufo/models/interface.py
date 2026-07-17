@@ -52,6 +52,7 @@ ContentBlock = Annotated[
 
 MAX_IMAGES_PER_MESSAGE = 20
 MAX_IMAGES_PER_REQUEST = 100
+MAX_IMAGE_BYTES_PER_REQUEST = 20 * 1024 * 1024
 IMAGE_OMITTED_TEXT = "[image omitted: over the provider image limit]"
 
 
@@ -136,10 +137,12 @@ AUTO_MODEL = "auto"
 def trim_images(messages: tuple[Message, ...]) -> tuple[Message, ...]:
     """Drop the OLDEST inline images until each message holds ≤MAX_IMAGES_PER_MESSAGE and the whole
     request holds ≤MAX_IMAGES_PER_REQUEST — Anthropic's caps, the tightest across providers, applied
-    once to the canonical messages before either client translates them. Images ride both as
-    top-level blocks and inside a tool_result's content; both count and both trim. A dropped image
-    becomes a short text placeholder so the message stays non-empty and the model knows one was
-    elided. Recent images matter most to the current turn, so the tail is what survives."""
+    once to the canonical messages before either client translates them. Kept images then spend a
+    request-wide byte budget (MAX_IMAGE_BYTES_PER_REQUEST, newest first) so a stack of bounded
+    scans cannot push the request past the provider's size cap. Images ride both as top-level
+    blocks and inside a tool_result's content; both count and both trim. A dropped image becomes
+    a short text placeholder so the message stays non-empty and the model knows one was elided.
+    Recent images matter most to the current turn, so the tail is what survives."""
     positions = _image_positions(messages)
     if not positions:
         return messages
@@ -148,10 +151,32 @@ def trim_images(messages: tuple[Message, ...]) -> tuple[Message, ...]:
     for message_index in {position[0] for position in positions}:
         in_message = [position for position in positions if position[0] == message_index]
         keep_message |= set(in_message[-MAX_IMAGES_PER_MESSAGE:])
-    drop = set(positions) - (keep_request & keep_message)
+    kept = [position for position in positions if position in (keep_request & keep_message)]
+    budget = MAX_IMAGE_BYTES_PER_REQUEST
+    within_budget: set[tuple[int, int, int | None]] = set()
+    for position in reversed(kept):
+        budget -= _image_data_len(messages, position)
+        if budget < 0:
+            break
+        within_budget.add(position)
+    drop = set(positions) - within_budget
     if not drop:
         return messages
     return tuple(_trim_message(index, message, drop) for index, message in enumerate(messages))
+
+
+def _image_data_len(messages: tuple[Message, ...], position: tuple[int, int, int | None]) -> int:
+    message_index, block_index, sub_index = position
+    block = messages[message_index].content[block_index]
+    match block, sub_index:
+        case ImageBlock(source=source), None:
+            return len(source.data)
+        case ToolResultBlock(content=tuple(parts)), int():
+            part = parts[sub_index]
+            match part:
+                case ImageBlock(source=source):
+                    return len(source.data)
+    raise RuntimeError(f"position {position} does not address an image block")
 
 
 def _image_positions(

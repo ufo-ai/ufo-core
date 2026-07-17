@@ -313,6 +313,29 @@ async def test_read_image_returns_an_image_content_block(
     assert base64.b64decode(block.data) == png
 
 
+async def test_read_rejects_an_image_file_whose_bytes_are_not_an_image(
+    file_ctx: tuple[ToolContext, Path],
+) -> None:
+    """The observed failure: a sandbox pipeline writes PDF bytes into a `.png`, `read` ships them
+    as image content, and the provider 400s the whole model request. The mismatch must surface
+    here as a recoverable tool error the model can act on."""
+    ctx, _ = file_ctx
+    await ctx.sandbox.write_file("fake.png", MINIMAL_PDF)
+    with pytest.raises(ValueError, match="bytes are not png/jpeg/gif/webp"):
+        await _run("read", ctx, file_path="fake.png")
+
+
+async def test_read_labels_a_mislabeled_image_by_its_bytes(
+    file_ctx: tuple[ToolContext, Path],
+) -> None:
+    ctx, _ = file_ctx
+    await ctx.sandbox.write_file("photo.png", b"\xff\xd8\xff\xe0" + b"\x00" * 32)
+    result = await _run("read", ctx, file_path="photo.png")
+    block = result.content[0]
+    assert isinstance(block, ImageContent)
+    assert block.media_type == "image/jpeg"
+
+
 async def test_read_pdf_returns_text_then_page_image_blocks(
     file_ctx: tuple[ToolContext, Path],
 ) -> None:

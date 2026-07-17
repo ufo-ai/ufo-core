@@ -331,6 +331,27 @@ def test_trim_images_enforces_request_cap() -> None:
     assert all(isinstance(block, TextBlock) for block in trimmed[0].content)
 
 
+def test_trim_images_enforces_request_byte_budget() -> None:
+    """Twenty dimension-bounded scans can still sum past the provider's request size cap (the
+    observed 413), so kept images also spend a byte budget, newest first."""
+    six_mb = "x" * (6 * 1024 * 1024)
+    messages = (
+        Message(
+            role="user",
+            content=tuple(
+                ImageBlock(source=ImageSource(media_type="image/png", data=six_mb))
+                for _ in range(4)
+            ),
+        ),
+    )
+    trimmed = trim_images(messages)
+    kept = [block for block in trimmed[0].content if isinstance(block, ImageBlock)]
+    dropped = [block for block in trimmed[0].content if isinstance(block, TextBlock)]
+    assert len(kept) == 3
+    assert [block.text for block in dropped] == [IMAGE_OMITTED_TEXT]
+    assert trimmed[0].content[0] == dropped[0]
+
+
 def test_trim_images_trims_images_nested_in_a_tool_result() -> None:
     result = ToolResultBlock(tool_use_id="t1", content=_images(22))
     trimmed = trim_images((Message(role="user", content=(result,)),))
