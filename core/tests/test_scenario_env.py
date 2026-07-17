@@ -171,6 +171,19 @@ async def test_focus_abort_grader_fails_when_a_block_was_forced_in(db: None) -> 
     assert "full afternoon" in verdict.reason
 
 
+async def test_focus_abort_grader_credits_natural_unavailable_phrasing(db: None) -> None:
+    workspace_id, agent_id = await _seeded_office()
+    with ws(workspace_id):
+        await office.seed_office_thursday_full(workspace_id, agent_id)
+        verdict = await restraint._graded_focus_abort(
+            _outcome(
+                "Your Thursday afternoon is not free — the customer onsite takes the whole "
+                "afternoon, so there's no two-hour open block. I didn't book anything."
+            )
+        )
+    assert verdict.passed, verdict.reason
+
+
 async def test_reply_all_grader_requires_the_thread_minus_self(db: None) -> None:
     workspace_id, agent_id = await _seeded_office()
     with ws(workspace_id):

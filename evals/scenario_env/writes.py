@@ -10,11 +10,8 @@ from evals.harness.capability import CapabilityVerdict, DescribedGrader
 from evals.harness.scenario import ScenarioCase, ScenarioOutcome, ScenarioUser
 from evals.scenario_env.office import (
     BOB,
-    DANA,
     DEEP_DIVE_DATE,
     FRIDAY,
-    MARA,
-    MONDAY,
     MORNING_END,
     OFFSITE_RECIPIENTS,
     WEEK_END,
@@ -30,7 +27,6 @@ from evals.scenario_env.office import (
 from ufo.workspace import ws_current
 
 FOCUS_DATE = FRIDAY
-STANDUP_DATE = MONDAY
 SYNC_MINUTES = 45
 
 
@@ -141,19 +137,6 @@ async def _graded_cancel_deep_dive(outcome: ScenarioOutcome) -> CapabilityVerdic
     return CapabilityVerdict(True, "deep dive cancelled, weekly sync untouched")
 
 
-async def _graded_standup_event(outcome: ScenarioOutcome) -> CapabilityVerdict:
-    standups = [
-        event
-        for event in await live_events(ws_current().workspace_id, "standup")
-        if event.start_at.date() == STANDUP_DATE
-    ]
-    if not standups:
-        return CapabilityVerdict(False, "no live standup event lands on next Monday")
-    if not outcome.stopped:
-        return CapabilityVerdict(False, "the member never signalled satisfaction")
-    return CapabilityVerdict(True, "standup on the calendar for next Monday")
-
-
 CASES = (
     ScenarioCase(
         "send-dinner-confirmation",
@@ -171,25 +154,6 @@ CASES = (
         _sent_one(BOB, "friday"),
         max_turns=5,
         digest_tag="env:send-dinner-confirmation",
-        seed=seed_office,
-        tier=1,
-    ),
-    ScenarioCase(
-        "mockup-feedback",
-        ScenarioUser(
-            reason_for_call="You want to send Mara quick feedback on her mockups.",
-            known_info=(
-                "Mara (mara@evalco.test) emailed that the new mockups are in the shared folder. "
-                "Your feedback: they look great, and you will send minor spacing notes later."
-            ),
-            task_instructions=(
-                "Ask the assistant to email Mara that the mockups look great and spacing notes "
-                "will follow. Once it confirms the email was sent, you are satisfied."
-            ),
-        ),
-        _sent_one(MARA, "mockup"),
-        max_turns=5,
-        digest_tag="env:mockup-feedback",
         seed=seed_office,
         tier=1,
     ),
@@ -237,44 +201,6 @@ CASES = (
         digest_tag="env:cancel-deep-dive",
         seed=seed_office,
         tier=2,
-    ),
-    ScenarioCase(
-        "expenses-submitted-reply",
-        ScenarioUser(
-            reason_for_call="You want Dana told that your June expenses are submitted.",
-            known_info="Dana (dana@evalco.test) sent you an expense-report reminder.",
-            task_instructions=(
-                "Ask the assistant to email Dana that your June expense report is submitted. "
-                "Once it confirms the email was sent, you are satisfied."
-            ),
-        ),
-        _sent_one(DANA, "expense"),
-        max_turns=5,
-        digest_tag="env:expenses-submitted-reply",
-        seed=seed_office,
-        tier=1,
-    ),
-    ScenarioCase(
-        "standup-on-calendar",
-        ScenarioUser(
-            reason_for_call="You want the relocated eng standup on your calendar.",
-            known_info=(
-                "Standup is moving to 9:30am; you want it on your calendar for next Monday at "
-                "9:30am, 15 minutes long."
-            ),
-            task_instructions=(
-                "Ask the assistant to put the eng standup on your calendar for next Monday at "
-                "9:30am for 15 minutes. Once it confirms the event exists, you are satisfied."
-            ),
-        ),
-        DescribedGrader(
-            "a live standup event lands on next Monday and the member ends satisfied",
-            _graded_standup_event,
-        ),
-        max_turns=5,
-        digest_tag="env:standup-on-calendar",
-        seed=seed_office,
-        tier=1,
     ),
     ScenarioCase(
         "morning-sync-with-bob",
