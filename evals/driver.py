@@ -26,12 +26,13 @@ from ufo.ext.context import Trajectory
 from ufo.ext.surface import workspace_key
 from ufo.governance import prompt_digest
 from ufo.schema import tables
-from ufo.schema.records import TerminalFrame
+from ufo.schema.records import PENDING, TerminalFrame
 from ufo.sdk.models import Message
 from ufo.transcript import Conversation, TranscriptDecodeError, decode, encode, transcript_key
 from ufo.workspace import ws
 
 EVAL_SURFACE = "eval"
+CANDIDATE_AGENT_NAME = "candidate:{proposal_id}"
 POLL_INTERVAL_SECONDS = 1.0
 WORKFLOW_WAIT_SECONDS = 300.0
 TERMINAL_STATUSES = frozenset({"done", "cancelled", "failed"})
@@ -57,6 +58,77 @@ async def resolve_workspace_and_agent(
                 )
             ).one()
     return workspace_id, agent.id, agent.prompt, agent.model
+
+
+async def seed_candidate_agent(
+    proposal_id: UUID, workspace_id: UUID | None = None
+) -> tuple[UUID, str]:
+    """Seed a disposable scratch agent carrying a pending proposal's candidate prompt and its base
+    agent's model, and return the workspace and the scratch agent's name — the arm the harness runs
+    to measure a self-improvement proposal's cross-suite impact. The candidate varies only the
+    prompt body; model, workspace, and the suites stay fixed against the baseline run, so the
+    before/after diff isolates the proposal. Upsert by name: a re-run against the same proposal
+    reseeds one stable `candidate:<proposal>` agent rather than accreting rows."""
+    if workspace_id is None:
+        async with workspace_tx() as connection:
+            workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
+    name = CANDIDATE_AGENT_NAME.format(proposal_id=proposal_id)
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            proposal = (
+                await connection.execute(
+                    sa.select(
+                        tables.proposal.c.agent_id,
+                        tables.proposal.c.body,
+                        tables.proposal.c.status,
+                    ).where(
+                        tables.proposal.c.workspace_id == workspace_id,
+                        tables.proposal.c.id == proposal_id,
+                    )
+                )
+            ).one_or_none()
+            if proposal is None:
+                raise ValueError(f"no proposal {proposal_id} in workspace {workspace_id}")
+            if proposal.status != PENDING:
+                raise ValueError(f"proposal {proposal_id} is {proposal.status}, not pending")
+            prompt = proposal.body.get("prompt")
+            if not isinstance(prompt, str) or not prompt:
+                raise ValueError(f"proposal {proposal_id} carries no prompt body")
+            model = (
+                await connection.execute(
+                    sa.select(tables.agent.c.model).where(
+                        tables.agent.c.workspace_id == workspace_id,
+                        tables.agent.c.id == proposal.agent_id,
+                    )
+                )
+            ).scalar_one()
+            existing = (
+                await connection.execute(
+                    sa.select(tables.agent.c.id).where(
+                        tables.agent.c.workspace_id == workspace_id,
+                        tables.agent.c.name == name,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is None:
+                await connection.execute(
+                    sa.insert(tables.agent).values(
+                        id=uuid4(),
+                        workspace_id=workspace_id,
+                        name=name,
+                        prompt=prompt,
+                        model=model,
+                        created_at=sa.func.now(),
+                        updated_at=sa.func.now(),
+                    )
+                )
+            else:
+                await connection.execute(
+                    sa.update(tables.agent)
+                    .values(prompt=prompt, model=model, updated_at=sa.func.now())
+                    .where(tables.agent.c.id == existing)
+                )
+    return workspace_id, name
 
 
 @dataclass(frozen=True)

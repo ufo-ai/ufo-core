@@ -16,6 +16,7 @@ their reasoning intact — nothing is deleted. Start from [`0000-template.md`](0
 | [0010](0010-degraded-features-audit.md) | Degraded-features audit — what was silently crippled | accepted |
 | [0011](0011-ufo-hosted-service.md) | ufo — the merged hosted service: one repo, one database, RLS | implemented |
 | [0012](0012-turn-speaker-and-private-handoffs.md) | Turn speaker and private handoffs | implemented |
+| [0016](0016-self-improvement-eval-impact.md) | Self-improvement impact — human feedback in, eval harness as the impact meter | proposed |
 
 `0010` is an audit, not a proposal — `accepted` marks its findings as the working record.
 

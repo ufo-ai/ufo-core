@@ -31,7 +31,13 @@ from ufo_ext_memory.events import MEMORY_RECALL_EVENT
 
 from evals.compaction.runner import CompactionRun, load_compaction
 from evals.compaction.target import CompactionTarget
-from evals.driver import WORKFLOW_WAIT_SECONDS, WorkspaceDriver, resolve_workspace_and_agent
+from evals.driver import (
+    CANDIDATE_AGENT_NAME,
+    WORKFLOW_WAIT_SECONDS,
+    WorkspaceDriver,
+    resolve_workspace_and_agent,
+    seed_candidate_agent,
+)
 from evals.dsqa_100.runner import DSQA100Run, load_dsqa_100
 from evals.gdpval_100.runner import (
     TREATMENTS,
@@ -108,6 +114,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--only", nargs="*", default=(), help="run only the named suites")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="run archive directory")
     parser.add_argument("--agent", default=DEFAULT_AGENT_NAME, help="target agent name")
+    parser.add_argument(
+        "--candidate-from-proposal",
+        type=UUID,
+        metavar="PROPOSAL_ID",
+        help="run the suites against a pending proposal's candidate prompt on a scratch agent",
+    )
     parser.add_argument("--label", default="", help="human-readable run label")
     parser.add_argument("--s3-bucket", help="private bucket override for --share")
     parser.add_argument("--s3-region", help="S3 region for --share")
@@ -187,6 +199,10 @@ def main(argv: list[str] | None = None) -> None:
     )
     if requested_runs > 1:
         parser.error("corpus-backed evals are separate eval runs")
+    if args.candidate_from_proposal is not None and requested_runs:
+        parser.error(
+            "--candidate-from-proposal runs the capability/scenario suites, not a corpus eval"
+        )
     memory_run: Memory100Run | None = None
     if args.memory_100 is not None and args.memory_100_state is not None:
         memory_run = load_memory_100(args.memory_100, args.memory_100_state)
@@ -334,7 +350,13 @@ def main(argv: list[str] | None = None) -> None:
             workflow_wait_seconds,
             args.mcp_atlas_url,
             args.mcp_atlas_external_url,
+            args.candidate_from_proposal,
         )
+    )
+    run_agent = (
+        args.agent
+        if args.candidate_from_proposal is None
+        else CANDIDATE_AGENT_NAME.format(proposal_id=args.candidate_from_proposal)
     )
     failed = False
     for report in reports:
@@ -360,7 +382,7 @@ def main(argv: list[str] | None = None) -> None:
         id=uuid4(),
         created_at=datetime.now(UTC),
         label=args.label,
-        agent=args.agent,
+        agent=run_agent,
         agent_prompt=agent_prompt,
         ufo_version=version("ufo"),
         revision=revision,
@@ -382,6 +404,7 @@ async def _run(
     workflow_wait_seconds: float = WORKFLOW_WAIT_SECONDS,
     mcp_atlas_url: str | None = None,
     mcp_atlas_external_url: str | None = None,
+    candidate_proposal: UUID | None = None,
 ) -> tuple[tuple[EvalReport, ...], str]:
     init_db(config.database.url)
     key = os.environ.get(config.credentials.key_env)
@@ -391,6 +414,10 @@ async def _run(
         async with AsyncExitStack() as stack:
             if collector is not None:
                 await stack.enter_async_context(collector.serving())
+            if candidate_proposal is not None:
+                workspace_id, agent_name = await seed_candidate_agent(
+                    candidate_proposal, workspace_id
+                )
             workspace_id, agent_id, agent_prompt, agent_model = await resolve_workspace_and_agent(
                 agent_name, workspace_id
             )

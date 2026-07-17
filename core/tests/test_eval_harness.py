@@ -30,7 +30,12 @@ from evals.__main__ import _run as run_evals
 from evals.__main__ import main as eval_main
 from evals.browser_nav import CASES as BROWSER_CASES
 from evals.compaction.target import CompactionTarget
-from evals.driver import WorkspaceDriver, resolve_workspace_and_agent
+from evals.driver import (
+    CANDIDATE_AGENT_NAME,
+    WorkspaceDriver,
+    resolve_workspace_and_agent,
+    seed_candidate_agent,
+)
 from evals.harness.capability import (
     CapabilityCase,
     CapabilityOutput,
@@ -90,6 +95,7 @@ from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, ModelAccess, Trajectory, context_for
 from ufo.ext.surface import workspace_key
+from ufo.governance import Governance, prompt_digest
 from ufo.loop.transcript import Transcript
 from ufo.models.interface import (
     ImageBlock,
@@ -105,7 +111,7 @@ from ufo.models.interface import (
 )
 from ufo.models.registry import ModelRegistry
 from ufo.schema import tables
-from ufo.schema.records import Usage
+from ufo.schema.records import AgentChange, Usage
 from ufo.transcript import Conversation, decode, encode, transcript_key
 from ufo.workspace import ws
 
@@ -138,6 +144,57 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
         for name, task in tasks.items()
         if name not in {"semantic_quality", "scenario_smoke", "scenario_env"}
     )
+
+
+async def test_seed_candidate_agent_arms_a_pending_proposals_prompt(db: None) -> None:
+    workspace_id = await _workspace()
+    base_agent = await _seed_agent(workspace_id)
+    candidate_prompt = f"{PROMPT}\nWhen a tool errors, retry with corrected arguments."
+    governance = Governance(workspace_id=workspace_id, extension="self_improvement")
+    with ws(workspace_id):
+        ref = await governance.propose_change(
+            AgentChange(
+                agent_id=base_agent,
+                new_prompt=candidate_prompt,
+                from_digest=prompt_digest(PROMPT),
+            )
+        )
+    proposal_id = ref.proposal_id
+
+    resolved_workspace, name = await seed_candidate_agent(proposal_id, workspace_id)
+    assert resolved_workspace == workspace_id
+    assert name == CANDIDATE_AGENT_NAME.format(proposal_id=proposal_id)
+
+    _, scratch_id, scratch_prompt, scratch_model = await resolve_workspace_and_agent(
+        name, workspace_id
+    )
+    assert scratch_id != base_agent
+    assert scratch_prompt == candidate_prompt
+    assert scratch_model == MODEL
+
+    await seed_candidate_agent(proposal_id, workspace_id)
+    async with workspace_tx() as connection:
+        count = (
+            await connection.execute(
+                sa.select(sa.func.count()).where(
+                    tables.agent.c.workspace_id == workspace_id,
+                    tables.agent.c.name == name,
+                )
+            )
+        ).scalar_one()
+    assert count == 1
+    assert await resolve_workspace_and_agent("assistant", workspace_id) == (
+        workspace_id,
+        base_agent,
+        PROMPT,
+        MODEL,
+    )
+
+
+async def test_seed_candidate_agent_rejects_a_missing_proposal(db: None) -> None:
+    workspace_id = await _workspace()
+    with pytest.raises(ValueError, match="no proposal"):
+        await seed_candidate_agent(uuid4(), workspace_id)
 
 
 def _research_transcript() -> tuple[Message, ...]:
@@ -2523,6 +2580,46 @@ def test_eval_run_is_recorded_without_git(tmp_path, monkeypatch) -> None:
     assert recorded[0].label == "no-git"
     assert recorded[0].revision == "0.1.0"
     assert recorded[0].agent_prompt == "be helpful"
+
+
+def test_candidate_arm_labels_the_recorded_run(tmp_path, monkeypatch) -> None:
+    proposal_id = uuid4()
+    received: list[UUID] = []
+
+    async def run(*args) -> tuple[tuple[EvalReport, ...], str]:
+        received.append(args[-1])
+        return (), "candidate prompt"
+
+    def missing_git(*_args, **_kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr("evals.__main__._run", run)
+    monkeypatch.setattr("evals.__main__.load_config", lambda: object())
+    monkeypatch.setattr("evals.__main__.subprocess.run", missing_git)
+    monkeypatch.setattr("evals.__main__.version", lambda _package: "0.1.0")
+
+    eval_main(["--out", str(tmp_path), "--candidate-from-proposal", str(proposal_id)])
+
+    assert received == [proposal_id]
+    recorded = load_runs(tmp_path)
+    assert len(recorded) == 1
+    assert recorded[0].agent == CANDIDATE_AGENT_NAME.format(proposal_id=proposal_id)
+    assert recorded[0].agent_prompt == "candidate prompt"
+
+
+def test_candidate_arm_rejects_corpus_backed_evals(tmp_path) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        eval_main(
+            [
+                "--out",
+                str(tmp_path),
+                "--candidate-from-proposal",
+                str(uuid4()),
+                "--hle-gold",
+                str(tmp_path / "hle.jsonl"),
+            ]
+        )
+    assert excinfo.value.code == 2
 
 
 async def test_eval_run_pins_model_metadata_on_boundary_report(tmp_path, monkeypatch) -> None:
