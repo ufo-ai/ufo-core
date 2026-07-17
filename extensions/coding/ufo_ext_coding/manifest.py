@@ -11,7 +11,7 @@ fills its skill index. The `coding` skill teaches the main agent to route repo w
 
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ufo.sdk.manifest import Manifest, SkillSpec, SubagentProfile
 
@@ -34,10 +34,16 @@ CODING_TOOL_NAMES = (
     "fetch_url",
 )
 CODING_PROMPT = (Path(__file__).parent / "prompts" / "subagent_coding.md").read_text()
+CODING_ROUND_LIMIT = 100
 
 
 class CodingInput(BaseModel):
     objective: str
+    extended_context: bool | None = Field(
+        default=None,
+        description="Run the child under the main agent's round ceiling instead of its default "
+        "budget, for an unusually deep task that needs more tool-use rounds.",
+    )
 
 
 class CodingOutput(BaseModel):
@@ -50,6 +56,7 @@ CODING_PROFILE = SubagentProfile(
     tool_names=CODING_TOOL_NAMES,
     input_model=CodingInput,
     output_model=CodingOutput,
+    max_rounds=CODING_ROUND_LIMIT,
 )
 
 

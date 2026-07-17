@@ -3,6 +3,8 @@ code builtins, and core's shell-wrap renders it with the shared citation discipl
 skill index. The profile names only tool names, so the pack is self-contained — nothing here
 imports a core internal."""
 
+import json
+
 import ufo_ext_coding.manifest as coding
 
 from ufo.ext.loader import skill_registry
@@ -36,6 +38,15 @@ def test_coding_profile_excludes_the_connector_tools_pr_review_uses() -> None:
     subagent — whose profile therefore names none of them, so it cannot review a PR itself."""
     profile = coding.CODING_PROFILE
     assert {"call_external_tool", "describe_external_tools"}.isdisjoint(profile.tool_names)
+
+
+def test_coding_profile_raises_the_round_budget() -> None:
+    assert coding.CODING_PROFILE.max_rounds == 100
+
+
+def test_extended_context_survives_the_spawn_payload_serialization() -> None:
+    spawned = coding.CodingInput.model_validate({"objective": "x", "extended_context": True})
+    assert json.loads(spawned.model_dump_json())["extended_context"] is True
 
 
 def test_coding_skills_parse_and_index() -> None:

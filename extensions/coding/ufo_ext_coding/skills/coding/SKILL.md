@@ -89,3 +89,5 @@ spawn_subagent(
   }
 )
 ```
+
+For an unusually deep task, add `"extended_context": true` to the payload to run the child under the main agent's round ceiling instead of its default budget.
