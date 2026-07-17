@@ -781,6 +781,33 @@ async def test_untrusted_profile_validation_failure_raises_a_walled_error(
             await subagents.spawn(profile, {"task": "acme"}, dedup_key=f"bad-{profile}")
 
 
+async def test_spawn_coerces_a_non_json_final_turn_into_the_schemas_lone_field(
+    db: None, dbos_launched: Config
+) -> None:
+    """A child that ends its turn on plain prose (a refusal, a summary) rather than the JSON
+    contract still carries a genuine answer; `_Finding` has exactly one required field, so the raw
+    text becomes its value instead of raising and discarding the child's work."""
+    workspace_id, agent_id = await _workspace_agent()
+    parent = await _parent(workspace_id, agent_id)
+    subagents = Subagents(
+        client=_RecordingClient(), registry=SubagentRegistry((_profile("plain"),)), parent=parent
+    )
+    text = "I could not complete this task in full, so here is what I found instead."
+    spawned = await subagents.spawn("plain", {"task": "acme"}, background=True, dedup_key="prose")
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(
+                status="done",
+                terminal=TerminalFrame(status="done", text=text).model_dump(mode="json"),
+            )
+            .where(tables.turn.c.id == spawned.turn_id)
+        )
+    reconnected = await subagents.spawn("plain", {"task": "acme"}, dedup_key="prose")
+    assert reconnected.output is not None
+    assert reconnected.output.model_dump()["finding"] == text
+
+
 async def test_wait_refuses_a_turn_this_parent_did_not_spawn(
     db: None, dbos_launched: Config
 ) -> None:

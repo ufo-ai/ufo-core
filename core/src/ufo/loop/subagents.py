@@ -16,7 +16,7 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import sqlalchemy as sa
 from dbos import DBOSClient, EnqueueOptions
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -114,6 +114,25 @@ def subagent_system_prompt(
     return f"{body}\n\n{SUBAGENT_OUTPUT_DISCIPLINE}\n\n{contract}"
 
 
+def _coerce_output(model: type[BaseModel], text: str) -> BaseModel:
+    """A child's final turn ends the same way any turn does — an ordinary text message — so the
+    JSON-object contract in its system prompt is a request, not an enforced shape; a refusal or a
+    prose summary lands as plain, non-JSON text. When that happens and the schema has exactly one
+    required field, that field is where the contract already points the answer, so the raw text is
+    coerced into it rather than raising and discarding the child's work. Valid JSON that simply
+    answers the wrong shape (a missing or misnamed field) still fails loud — that is a genuine
+    schema violation, not a child that skipped the JSON contract."""
+    try:
+        return model.model_validate_json(text)
+    except ValidationError as error:
+        if any(item["type"] != "json_invalid" for item in error.errors()):
+            raise
+        required = [name for name, field in model.model_fields.items() if field.is_required()]
+        if len(required) == 1 and model.model_fields[required[0]].annotation is str:
+            return model.model_validate({required[0]: text})
+        raise
+
+
 @dataclass(frozen=True)
 class Subagents:
     """The spawn workflow, bound to the turn that spawns: resolve the profile, admit and enqueue a
@@ -152,7 +171,7 @@ class Subagents:
         if terminal.status != "done":
             raise RuntimeError(f"subagent {profile!r} turn ended {terminal.status}")
         try:
-            output = resolved.output_model.model_validate_json(terminal.text)
+            output = _coerce_output(resolved.output_model, terminal.text)
         except ValidationError as error:
             if resolved.untrusted_output:
                 raise UntrustedContentError(
