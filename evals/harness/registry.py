@@ -88,7 +88,15 @@ def scenario_task(
     simulator_model: str,
     simulator_max_tokens: int = JUDGE_MAX_TOKENS,
     simulator_reasoning: ReasoningEffort = "off",
+    judge_model: str | None = None,
+    judge_max_tokens: int = JUDGE_MAX_TOKENS,
+    judge_reasoning: ReasoningEffort = "low",
 ) -> EvalTask:
+    needs_judge = any(case.rubric for case in cases)
+    if needs_judge and judge_model is None:
+        raise ValueError(f"scenario task {name!r} has semantic rubrics but no judge model")
+    if judge_model is not None and not needs_judge:
+        raise ValueError(f"scenario task {name!r} declares a judge model without semantic rubrics")
     digest = digest_payload(
         {
             "runner": "scenario-case",
@@ -97,6 +105,15 @@ def scenario_task(
             "simulatorModel": simulator_model,
             "simulatorMaxTokens": simulator_max_tokens,
             "simulatorReasoning": simulator_reasoning,
+            **(
+                {
+                    "judgeModel": judge_model,
+                    "judgeMaxTokens": judge_max_tokens,
+                    "judgeReasoning": judge_reasoning,
+                }
+                if judge_model is not None
+                else {}
+            ),
         }
     )
 
@@ -113,6 +130,10 @@ def scenario_task(
         simulator_model=simulator_model,
         simulator_max_tokens=simulator_max_tokens,
         simulator_reasoning=simulator_reasoning,
+        judge_model=judge_model,
+        judge_revision=JUDGE_REVISION if judge_model is not None else None,
+        judge_max_tokens=judge_max_tokens,
+        judge_reasoning=judge_reasoning,
     )
 
 

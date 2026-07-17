@@ -18,7 +18,7 @@ from typing import ClassVar
 from uuid import UUID
 
 import sqlalchemy as sa
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from ufo.sdk.authproxy import AuthProxySpec, Credential
 from ufo.sdk.browser import CdpEndpoint, CdpLease
@@ -30,7 +30,7 @@ from ufo.sdk.connectors import (
     StagedUpload,
     UnknownBrokerTool,
 )
-from ufo.sdk.context import AgentChange, ExtensionContext
+from ufo.sdk.context import AgentChange, ExtensionContext, JsonValue
 from ufo.sdk.http import (
     JSONResponse,
     PlainTextResponse,
@@ -73,6 +73,14 @@ from ufo.sdk.manifest import (
 )
 from ufo.sdk.memory import MemoryMatch
 from ufo.sdk.models import ModelEvent, ModelPrice, ModelRequest, TextDelta, Usage
+from ufo.sdk.objects import (
+    OBJECT_LIST_PAGE,
+    ObjectKind,
+    ObjectPage,
+    ObjectRow,
+    OwnerRequired,
+    VerbNotSupported,
+)
 from ufo.sdk.sandbox import (
     WORKSPACE_DIR,
     BlobStore,
@@ -178,6 +186,21 @@ SAMPLE_MEMORY_TEXT = "the sample memory provider returns a scoped result"
 MEMORY_SEARCH_KEY = "memory_search"
 MEMORY_SEARCH_PROVIDER = "sample"
 SAMPLE_FETCH_TEXT = "the sample search backend fetched a canned page"
+WIDGET_KIND = "sample_widget"
+WIDGET_KEY_PREFIX = "object:widget:"
+RELIC_KIND = "sample_relic"
+RELIC_NAME = "meteor-shard"
+RELIC_INSCRIPTION = "the sample relic is excavated, never authored"
+RELIC_REFUSAL = "sample relics are read-only — they are excavated, never applied or deleted"
+WIDGET_DELETE_GATE = "only the workspace owner can delete a sample widget"
+WIDGET_GUIDANCE = (
+    "Apply a color and size to create or update a probe widget; any member may write, and "
+    "delete requires the workspace owner."
+)
+RELIC_GUIDANCE = (
+    "Read-only probes of the object surface: list and get them, but every mutation is "
+    "refused — relics are excavated, never authored."
+)
 
 
 NOTE_TABLE = sa.Table(
@@ -259,6 +282,88 @@ async def _hook(ctx: ExtensionContext, request: Request) -> Response:
     body = (await request.body()).decode()
     await ctx.store.put(ROUTE_KEY, {"body": body})
     return PlainTextResponse(body)
+
+
+class WidgetSpec(BaseModel):
+    """The probe kind's authored spec — `extra="forbid"` as the registration gate requires."""
+
+    model_config = ConfigDict(extra="forbid")
+    color: str
+    size: int = 1
+
+
+class RelicSpec(BaseModel):
+    """The read-only probe kind's spec: system-produced, never authored."""
+
+    model_config = ConfigDict(extra="forbid")
+    inscription: str
+
+
+@dataclass(frozen=True)
+class WidgetStore:
+    """The full-CRUD probe store over the sample's own `ext_store` keys: apply/get/delete round a
+    spec through `WIDGET_KEY_PREFIX` rows, list pages by keyset over the store's key order, and
+    delete gates on the workspace owner — so the conformance tests drive create, update, paging,
+    owner refusal, and delete through the real verbs and read back through this public store."""
+
+    async def list(self, ctx: ToolContext, query: str, cursor: str) -> ObjectPage:
+        entries = await self._ext(ctx).store.list(WIDGET_KEY_PREFIX)
+        names = [
+            name
+            for key, _value in entries
+            if query in (name := key.removeprefix(WIDGET_KEY_PREFIX))
+        ]
+        remaining = [name for name in names if name > cursor] if cursor else names
+        page, rest = remaining[:OBJECT_LIST_PAGE], remaining[OBJECT_LIST_PAGE:]
+        rows = tuple(ObjectRow(name=name, summary=f"a {name} widget") for name in page)
+        return ObjectPage(rows=rows, next_cursor=page[-1] if rest else None)
+
+    async def get(self, ctx: ToolContext, name: str) -> WidgetSpec | None:
+        value = await self._ext(ctx).store.get(WIDGET_KEY_PREFIX + name)
+        return None if value is None else WidgetSpec.model_validate(value)
+
+    async def status(self, ctx: ToolContext, name: str) -> None:
+        return None
+
+    async def apply(
+        self, ctx: ToolContext, name: str, spec: WidgetSpec, old: WidgetSpec | None
+    ) -> None:
+        await self._ext(ctx).store.put(WIDGET_KEY_PREFIX + name, spec.model_dump())
+
+    async def delete(self, ctx: ToolContext, name: str) -> None:
+        if not await ctx.speaker_is_owner():
+            raise OwnerRequired(WIDGET_DELETE_GATE)
+        await self._ext(ctx).store.delete(WIDGET_KEY_PREFIX + name)
+
+    def _ext(self, ctx: ToolContext) -> ExtensionContext:
+        if ctx.ext is None:
+            raise RuntimeError("sample widget store dispatched without its ExtensionContext")
+        return ctx.ext
+
+
+@dataclass(frozen=True)
+class RelicStore:
+    """The read-only probe store: one canned instance with live status, every mutation refused —
+    the shape a system-produced kind (pages, conversations) takes."""
+
+    async def list(self, ctx: ToolContext, query: str, cursor: str) -> ObjectPage:
+        if query and query not in RELIC_NAME:
+            return ObjectPage(rows=())
+        return ObjectPage(rows=(ObjectRow(name=RELIC_NAME, summary=RELIC_INSCRIPTION),))
+
+    async def get(self, ctx: ToolContext, name: str) -> RelicSpec | None:
+        return RelicSpec(inscription=RELIC_INSCRIPTION) if name == RELIC_NAME else None
+
+    async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
+        return {"origin": "excavated"}
+
+    async def apply(
+        self, ctx: ToolContext, name: str, spec: RelicSpec, old: RelicSpec | None
+    ) -> None:
+        raise VerbNotSupported(RELIC_REFUSAL)
+
+    async def delete(self, ctx: ToolContext, name: str) -> None:
+        raise VerbNotSupported(RELIC_REFUSAL)
 
 
 class SampleSourceConfig(BaseModel):
@@ -828,6 +933,24 @@ def manifest() -> Manifest:
                 description="Write and read a note in the sample's own migration-created table.",
                 input_model=NoteInput,
                 handler=_note,
+            ),
+        ),
+        objects=(
+            ObjectKind(
+                name=WIDGET_KIND,
+                description=(
+                    "Probe widgets: full CRUD through the object verbs; delete is owner-only."
+                ),
+                guidance=WIDGET_GUIDANCE,
+                spec_model=WidgetSpec,
+                store=WidgetStore(),
+            ),
+            ObjectKind(
+                name=RELIC_KIND,
+                description="Probe relics: read-only; every mutation is refused.",
+                guidance=RELIC_GUIDANCE,
+                spec_model=RelicSpec,
+                store=RelicStore(),
             ),
         ),
         jobs=(

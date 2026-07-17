@@ -370,6 +370,19 @@ class ModelAccess:
 
 
 @dataclass(frozen=True)
+class SourceRecord:
+    """One live content-sync source as `ExtensionContext.sources` reads it: the row's identity,
+    the backend's typed per-source parameters as stored, and the timing marks a caller renders as
+    status. A value object — never leaves the process."""
+
+    id: UUID
+    backend: str
+    config: dict[str, JsonValue]
+    next_sync_at: datetime
+    consecutive_errors: int
+
+
+@dataclass(frozen=True)
 class ExtensionContext:
     store: ScopedStore
     credentials: CredentialAccess
@@ -417,10 +430,27 @@ class ExtensionContext:
         async with workspace_tx() as connection:
             present = (
                 await connection.execute(
-                    sa.select(tables.source.c.id).where(tables.source.c.id == source_id)
+                    sa.select(tables.source.c.id, tables.source.c.removed_at).where(
+                        tables.source.c.id == source_id
+                    )
                 )
             ).one_or_none()
+            if present is not None and present.removed_at is None:
+                return source_id
             if present is not None:
+                await connection.execute(
+                    sa.update(tables.source)
+                    .values(
+                        removed_at=None,
+                        cursor=None,
+                        next_sync_at=datetime.now(UTC),
+                        consecutive_errors=0,
+                        claimed_by=None,
+                        claim_expires_at=None,
+                        updated_at=sa.func.now(),
+                    )
+                    .where(tables.source.c.id == source_id)
+                )
                 return source_id
             await connection.execute(
                 sa.insert(tables.source).values(
@@ -437,6 +467,71 @@ class ExtensionContext:
                 )
             )
         return source_id
+
+    async def sources(self, backend: str | None = None) -> tuple[SourceRecord, ...]:
+        """This workspace's live registered sources, optionally narrowed to one backend — the read
+        half of `register_source`, scoped exactly as it is. Removed sources never appear."""
+        query = (
+            sa.select(
+                tables.source.c.id,
+                tables.source.c.backend,
+                tables.source.c.config,
+                tables.source.c.next_sync_at,
+                tables.source.c.consecutive_errors,
+            )
+            .where(
+                tables.source.c.workspace_id == self.store.workspace_id,
+                tables.source.c.removed_at.is_(None),
+            )
+            .order_by(tables.source.c.backend, tables.source.c.id)
+        )
+        if backend is not None:
+            query = query.where(tables.source.c.backend == backend)
+        async with workspace_tx() as connection:
+            rows = (await connection.execute(query)).mappings().all()
+        return tuple(
+            SourceRecord(
+                id=row["id"],
+                backend=row["backend"],
+                config=row["config"],
+                next_sync_at=row["next_sync_at"],
+                consecutive_errors=row["consecutive_errors"],
+            )
+            for row in rows
+        )
+
+    async def remove_source(self, source_id: UUID) -> None:
+        """Remove one registered source: mark the row removed so the sync driver never claims it
+        again, and tombstone its live pages in the same transaction — the existing page-change
+        delivery then clears derived index state, exactly as a snapshot shrink does. The row
+        persists as the pages' referent (they carry its foreign key); re-registering the identical
+        config revives it fresh. Fails loud on an unknown or already-removed id."""
+        now = datetime.now(UTC)
+        async with workspace_tx() as connection:
+            removed = await connection.execute(
+                sa.update(tables.source)
+                .values(
+                    removed_at=now,
+                    claimed_by=None,
+                    claim_expires_at=None,
+                    updated_at=sa.func.now(),
+                )
+                .where(
+                    tables.source.c.id == source_id,
+                    tables.source.c.workspace_id == self.store.workspace_id,
+                    tables.source.c.removed_at.is_(None),
+                )
+            )
+            if removed.rowcount == 0:
+                raise ValueError(f"no live source {source_id} in this workspace")
+            await connection.execute(
+                sa.update(tables.page)
+                .values(tombstone=True, updated_at=now)
+                .where(
+                    tables.page.c.source_id == source_id,
+                    tables.page.c.tombstone.is_(False),
+                )
+            )
 
     async def propose_change(self, change: AgentChange) -> ProposalRef:
         """Open a governed proposal against an agent's prompt, stamped with this extension as the

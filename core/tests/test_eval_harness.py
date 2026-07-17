@@ -139,10 +139,21 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
     assert tasks["scenario_smoke"].simulator_model == SCENARIO_SIMULATOR_MODEL
     assert tasks["scenario_smoke"].simulator_reasoning == "off"
     assert tasks["scenario_env"].simulator_model == SCENARIO_SIMULATOR_MODEL
+    assert tasks["object_tools"].judge_model == SEMANTIC_JUDGE_MODEL
+    assert tasks["object_tools"].simulator_model is None
+    assert tasks["object_tools_flows"].judge_model == SEMANTIC_JUDGE_MODEL
+    assert tasks["object_tools_flows"].simulator_model == SCENARIO_SIMULATOR_MODEL
     assert all(
         task.judge_model is None and task.simulator_model is None
         for name, task in tasks.items()
-        if name not in {"semantic_quality", "scenario_smoke", "scenario_env"}
+        if name
+        not in {
+            "semantic_quality",
+            "scenario_smoke",
+            "scenario_env",
+            "object_tools",
+            "object_tools_flows",
+        }
     )
 
 

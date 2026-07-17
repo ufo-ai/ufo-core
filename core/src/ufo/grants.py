@@ -91,12 +91,13 @@ class Grant:
 
 @dataclass(frozen=True)
 class GrantSummary:
-    """The audit view of a grant for `ufoctl grants` — no secret, only who granted which provider
-    account to which agent, and when."""
+    """The audit view of a grant for `ufoctl grants` and the connector object kind — no secret,
+    only who granted which provider account to which agent, the host it admits, and when."""
 
     agent: str
     provider: str
     account_id: str
+    host: str
     grantor_member_id: UUID
     conversation_id: UUID
     granted_at: datetime
@@ -202,6 +203,21 @@ class GrantStore:
         return tuple(
             Grant(provider=row.provider, account_id=row.account_id, host=row.host) for row in rows
         )
+
+    async def revoke(self, workspace_id: UUID, provider: str, account_id: str) -> bool:
+        """Remove every grant binding this provider account in the workspace — the delete half of
+        the connector object kind. The broker holds the account's token and exposes no revoke
+        surface, so withdrawal is the row delete: the account stops resolving for tools, syncs,
+        and proxy-rule derivation the moment the row is gone."""
+        async with workspace_tx() as connection:
+            deleted = await connection.execute(
+                sa.delete(tables.grant).where(
+                    tables.grant.c.workspace_id == workspace_id,
+                    tables.grant.c.provider == provider,
+                    tables.grant.c.account_id == account_id,
+                )
+            )
+        return deleted.rowcount > 0
 
 
 @dataclass(frozen=True)
@@ -415,6 +431,7 @@ async def grant_summaries(workspace_id: UUID) -> tuple[GrantSummary, ...]:
                     tables.agent.c.name,
                     tables.grant.c.provider,
                     tables.grant.c.account_id,
+                    tables.grant.c.host,
                     tables.grant.c.grantor_member_id,
                     tables.grant.c.conversation_id,
                     tables.grant.c.created_at,
@@ -431,6 +448,7 @@ async def grant_summaries(workspace_id: UUID) -> tuple[GrantSummary, ...]:
             agent=row.name,
             provider=row.provider,
             account_id=row.account_id,
+            host=row.host,
             grantor_member_id=row.grantor_member_id,
             conversation_id=row.conversation_id,
             granted_at=row.created_at,

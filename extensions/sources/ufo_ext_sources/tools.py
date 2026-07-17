@@ -1,17 +1,41 @@
-"""Chat-native discovery and registration for the source catalog."""
+"""The `source` object kind: registered content-sync bindings managed through the object verbs.
 
+A source object is one provider binding — an account (or the workspace's BYOK credential) plus a
+tenant URL where the provider needs one — carrying the selected streams, each stream a `source`
+row the core sync driver polls. Identity IS the binding, so names derive from it
+(`<provider>-<8-hex digest>`): apply with the wrong name refuses and hands back the exact one,
+changing streams is delete-and-recreate, and re-applying the identical spec is a no-op. Every
+mutation is owner-gated; validation refuses with the valid provider and stream sets, so discovery
+is error-driven plus `object_explain`."""
+
+import hashlib
 import json
 import re
+from dataclasses import dataclass
+from datetime import datetime
 from urllib.parse import urlsplit
+from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
-from ufo.sdk.context import CredentialSlotUnset
+from ufo.sdk.connectors import ConnectorRegistry
+from ufo.sdk.context import CredentialSlotUnset, ExtensionContext
+from ufo.sdk.objects import (
+    OBJECT_LIST_PAGE,
+    ObjectKind,
+    ObjectPage,
+    ObjectRow,
+    OwnerRequired,
+    VerbNotSupported,
+)
 from ufo.sdk.sources import ConnectorSourceConfig
-from ufo.sdk.tools import ConnectUnavailable, TextContent, ToolContext, ToolDef, ToolResult
+from ufo.sdk.tools import ConnectUnavailable, ToolContext
 from ufo_ext_sources.registry import CONNECTORS
 
+SOURCE_KIND = "source"
 DIRECT_ACCOUNT = "default"
+NAME_DIGEST_HEX = 8
+SUMMARY_MAX = 120
 DOMAIN_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 TENANT_URL_RULES: dict[str, tuple[re.Pattern[str], re.Pattern[str], str]] = {
     "activecampaign": (
@@ -57,176 +81,239 @@ TENANT_URL_RULES: dict[str, tuple[re.Pattern[str], re.Pattern[str], str]] = {
 }
 
 
-class SyncSourceInput(BaseModel):
-    provider: str | None = Field(
-        default=None,
-        description="Source provider slug. Omit to list providers; select one to inspect streams.",
+class SourceSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    provider: str = Field(
+        description="Source provider slug; an unknown provider's refusal lists the catalog."
     )
     streams: tuple[str, ...] = Field(
-        default=(),
-        description="Exact stream names to sync. Omit with a provider to inspect its catalog.",
+        min_length=1,
+        description="Exact stream names to sync; a wrong stream's refusal lists the provider's.",
     )
-    account_id: str | None = Field(
-        default=None,
-        description="Connected-account ID. Required only when this agent has multiple accounts.",
+    account_id: str = Field(
+        default="",
+        description="Connected-account ID, needed only when the agent holds several accounts. "
+        "Direct (BYOK-credential) providers leave it empty.",
     )
-    base_url: str | None = Field(
-        default=None,
-        description="Tenant API URL for providers whose catalog entry requires one.",
+    base_url: str = Field(
+        default="",
+        description="Tenant API URL, only for providers that require one; the refusal names the "
+        "expected shape.",
     )
 
 
-async def sync_source(ctx: ToolContext, args: SyncSourceInput) -> ToolResult:
+def _binding_name(provider: str, account: str, base_url: str | None) -> str:
+    digest = hashlib.sha256(
+        json.dumps(
+            {"account": account, "base_url": base_url, "provider": provider}, sort_keys=True
+        ).encode()
+    ).hexdigest()[:NAME_DIGEST_HEX]
+    return f"{provider.replace('_', '-')}-{digest}"
+
+
+@dataclass(frozen=True)
+class _Stream:
+    name: str
+    next_sync_at: datetime
+    consecutive_errors: int
+    source_id: UUID
+
+
+@dataclass(frozen=True)
+class _Binding:
+    provider: str
+    account: str
+    base_url: str | None
+    streams: tuple[_Stream, ...]
+
+    @property
+    def name(self) -> str:
+        return _binding_name(self.provider, self.account, self.base_url)
+
+    def spec(self) -> SourceSpec:
+        return SourceSpec(
+            provider=self.provider,
+            streams=tuple(stream.name for stream in self.streams),
+            account_id="" if self.account == DIRECT_ACCOUNT else self.account,
+            base_url=self.base_url or "",
+        )
+
+    def summary(self) -> str:
+        streams = ", ".join(stream.name for stream in self.streams)
+        return f"{self.provider} ({self.account}): {streams}"[:SUMMARY_MAX]
+
+
+def _require_ext(ctx: ToolContext) -> ExtensionContext:
     if ctx.ext is None:
-        raise RuntimeError("sync_source dispatched without its ExtensionContext")
+        raise RuntimeError("source objects dispatched without their ExtensionContext")
+    return ctx.ext
+
+
+def _require_connectors(ctx: ToolContext) -> ConnectorRegistry:
     if ctx.connectors is None:
-        raise RuntimeError("sync_source dispatched without the turn's connector registry")
-    brokered = ctx.connectors.entries
-    direct = ctx.ext.credentials.declared
-    has_direct_backend = ctx.connectors.fallback is not None
-    if args.provider is None:
-        if args.streams:
-            return _error("provider_required", "Choose a provider before selecting streams.")
-        if args.account_id is not None or args.base_url is not None:
-            return _error(
-                "invalid_discovery_input",
-                "account_id and base_url apply only when registering provider streams.",
-            )
-        return _json_result(
-            {
-                "providers": [
-                    _provider_row(
-                        provider,
-                        brokered=provider in brokered,
-                        direct_available=provider in direct and has_direct_backend,
-                    )
-                    for provider in sorted(CONNECTORS)
-                ]
+        raise RuntimeError("source objects dispatched without the turn's connector registry")
+    return ctx.connectors
+
+
+@dataclass(frozen=True)
+class SourceObjects:
+    """The kind's handlers over the workspace's registered source rows: get/list reconstruct
+    bindings by grouping rows on (provider, account, base_url); apply validates provider, streams,
+    tenant URL, and auth exactly as registration always has, then registers one row per stream
+    (the first sync is scheduled immediately); delete removes the binding's rows and their synced
+    pages follow through the page-tombstone pipeline. Mutations are owner-gated."""
+
+    async def list(self, ctx: ToolContext, query: str, cursor: str) -> ObjectPage:
+        bindings = [
+            binding
+            for binding in await self._bindings(ctx)
+            if query in binding.name or query in binding.summary()
+        ]
+        bindings.sort(key=lambda binding: binding.name)
+        remaining = [b for b in bindings if b.name > cursor] if cursor else bindings
+        page, rest = remaining[:OBJECT_LIST_PAGE], remaining[OBJECT_LIST_PAGE:]
+        rows = tuple(ObjectRow(name=b.name, summary=b.summary()) for b in page)
+        return ObjectPage(rows=rows, next_cursor=page[-1].name if rest else None)
+
+    async def get(self, ctx: ToolContext, name: str) -> SourceSpec | None:
+        binding = await self._find(ctx, name)
+        return None if binding is None else binding.spec()
+
+    async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
+        binding = await self._find(ctx, name)
+        if binding is None:
+            return None
+        return {
+            "streams": {
+                stream.name: {
+                    "next_sync_at": stream.next_sync_at.isoformat(),
+                    "consecutive_errors": stream.consecutive_errors,
+                }
+                for stream in binding.streams
             }
-        )
-
-    connector_cls = CONNECTORS.get(args.provider)
-    if connector_cls is None:
-        return _error(
-            "unsupported_provider",
-            f"Unknown source provider {args.provider!r}.",
-            providers=sorted(CONNECTORS),
-        )
-    connector = connector_cls()
-    stream_specs = connector.streams()
-    available_streams = tuple(stream.name for stream in stream_specs)
-    if not args.streams:
-        if args.account_id is not None or args.base_url is not None:
-            return _error(
-                "streams_required",
-                "Choose one or more streams before supplying account_id or base_url.",
-            )
-        provider = _provider_row(
-            args.provider,
-            brokered=args.provider in brokered,
-            direct_available=args.provider in direct and has_direct_backend,
-        )
-        provider["streams"] = list(available_streams)
-        provider["canonical_streams"] = [stream.name for stream in stream_specs if stream.canonical]
-        return _json_result({"provider": provider})
-    if not await ctx.speaker_is_owner():
-        return _error("owner_required", "Only the workspace owner can register shared sources.")
-
-    selected_streams = tuple(dict.fromkeys(args.streams))
-    unsupported = [stream for stream in selected_streams if stream not in available_streams]
-    if unsupported:
-        return _error(
-            "unsupported_stream",
-            f"{args.provider!r} does not provide every requested stream.",
-            unsupported=unsupported,
-            streams=list(available_streams),
-        )
-    try:
-        base_url = _validated_base_url(args.provider, args.base_url)
-    except ValueError as error:
-        return _error("invalid_base_url", str(error), provider=args.provider)
-
-    if args.provider in brokered:
-        try:
-            accounts = await ctx.connector_accounts(args.provider)
-        except ConnectUnavailable:
-            accounts = ()
-        if not accounts:
-            return _error(
-                "account_not_connected",
-                f"Connect a {args.provider!r} account before registering its sources.",
-                action={"tool": "connect_account", "arguments": {"provider": args.provider}},
-            )
-        if args.account_id is None and len(accounts) > 1:
-            return _error(
-                "account_ambiguous",
-                f"Choose which {args.provider!r} account to sync.",
-                accounts=list(accounts),
-            )
-        account = args.account_id or accounts[0]
-        if account not in accounts:
-            return _error(
-                "account_not_granted",
-                f"This agent has no active {args.provider!r} grant for {account!r}.",
-                accounts=list(accounts),
-            )
-        auth = "broker"
-    else:
-        if args.provider not in direct or not has_direct_backend:
-            return _error(
-                "auth_unavailable",
-                f"No direct authentication backend can sync {args.provider!r}.",
-            )
-        if args.account_id is not None:
-            return _error(
-                "account_not_applicable",
-                f"{args.provider!r} uses its workspace credential, not a connected account.",
-            )
-        try:
-            await ctx.ext.credentials.get(args.provider)
-        except CredentialSlotUnset:
-            return _error(
-                "credential_required",
-                f"Add the {args.provider!r} credential before registering its sources.",
-                action={
-                    "tool": "request_credentials",
-                    "arguments": {
-                        "reason": f"Authenticate {args.provider} source sync.",
-                        "prompts": [
-                            {
-                                "slot": args.provider,
-                                "prompt": f"Enter the {args.provider} API credential.",
-                            }
-                        ],
-                    },
-                },
-            )
-        account = DIRECT_ACCOUNT
-        auth = "direct"
-
-    sources: list[dict[str, str]] = []
-    for stream in selected_streams:
-        source_id = await ctx.ext.register_source(
-            args.provider,
-            ConnectorSourceConfig(account=account, stream=stream, base_url=base_url),
-        )
-        sources.append({"stream": stream, "source_id": str(source_id)})
-    return _json_result(
-        {
-            "provider": args.provider,
-            "account_id": account,
-            "auth": auth,
-            "sources": sources,
         }
-    )
 
+    async def apply(
+        self, ctx: ToolContext, name: str, spec: SourceSpec, old: SourceSpec | None
+    ) -> None:
+        ext = _require_ext(ctx)
+        if not await ctx.speaker_is_owner():
+            raise OwnerRequired("only the workspace owner can register shared sources")
+        connector_cls = CONNECTORS.get(spec.provider)
+        if connector_cls is None:
+            raise ValueError(
+                f"unknown source provider {spec.provider!r}; providers: "
+                f"{', '.join(sorted(CONNECTORS))}"
+            )
+        available = tuple(stream.name for stream in connector_cls().streams())
+        streams = tuple(sorted(dict.fromkeys(spec.streams)))
+        unsupported = [stream for stream in streams if stream not in available]
+        if unsupported:
+            raise ValueError(
+                f"{spec.provider!r} does not provide {', '.join(map(repr, unsupported))}; "
+                f"streams: {', '.join(available)}"
+            )
+        base_url = _validated_base_url(spec.provider, spec.base_url or None)
+        account = await self._resolved_account(ctx, spec)
+        derived = _binding_name(spec.provider, account, base_url)
+        if name != derived:
+            raise ValueError(
+                f"source names derive from the binding — apply this spec as name {derived!r}"
+            )
+        resolved = SourceSpec(
+            provider=spec.provider,
+            streams=streams,
+            account_id="" if account == DIRECT_ACCOUNT else account,
+            base_url=base_url or "",
+        )
+        if old is not None and resolved != old:
+            raise VerbNotSupported(
+                "a source's identity is its config — delete the binding and recreate it"
+            )
+        for stream in streams:
+            await ext.register_source(
+                spec.provider,
+                ConnectorSourceConfig(account=account, stream=stream, base_url=base_url),
+            )
 
-def _provider_row(provider: str, *, brokered: bool, direct_available: bool) -> dict[str, object]:
-    return {
-        "provider": provider,
-        "auth": "broker" if brokered else ("direct" if direct_available else "unavailable"),
-        "requires_base_url": not bool(CONNECTORS[provider].base_url),
-    }
+    async def delete(self, ctx: ToolContext, name: str) -> None:
+        ext = _require_ext(ctx)
+        if not await ctx.speaker_is_owner():
+            raise OwnerRequired("only the workspace owner can remove shared sources")
+        binding = await self._find(ctx, name)
+        if binding is None:
+            raise ValueError(f"no source binding named {name!r}")
+        for stream in binding.streams:
+            await ext.remove_source(stream.source_id)
+
+    async def _resolved_account(self, ctx: ToolContext, spec: SourceSpec) -> str:
+        ext = _require_ext(ctx)
+        registry = _require_connectors(ctx)
+        if spec.provider in registry.entries:
+            try:
+                accounts = await ctx.connector_accounts(spec.provider)
+            except ConnectUnavailable:
+                accounts = ()
+            if not accounts:
+                raise ValueError(
+                    f"connect a {spec.provider!r} account before registering its sources "
+                    f"(connect_account with provider={spec.provider!r})"
+                )
+            if not spec.account_id and len(accounts) > 1:
+                raise ValueError(
+                    f"choose which {spec.provider!r} account to sync; set account_id to one of: "
+                    f"{', '.join(accounts)}"
+                )
+            account = spec.account_id or accounts[0]
+            if account not in accounts:
+                raise ValueError(
+                    f"this agent has no active {spec.provider!r} grant for {account!r}; "
+                    f"accounts: {', '.join(accounts)}"
+                )
+            return account
+        if spec.provider not in ext.credentials.declared or registry.fallback is None:
+            raise ValueError(f"no direct authentication backend can sync {spec.provider!r}")
+        if spec.account_id:
+            raise ValueError(
+                f"{spec.provider!r} uses its workspace credential, not a connected account"
+            )
+        try:
+            await ext.credentials.get(spec.provider)
+        except CredentialSlotUnset:
+            raise ValueError(
+                f"add the {spec.provider!r} credential before registering its sources "
+                f"(request_credentials for slot {spec.provider!r})"
+            ) from None
+        return DIRECT_ACCOUNT
+
+    async def _find(self, ctx: ToolContext, name: str) -> _Binding | None:
+        return next(
+            (binding for binding in await self._bindings(ctx) if binding.name == name), None
+        )
+
+    async def _bindings(self, ctx: ToolContext) -> tuple[_Binding, ...]:
+        grouped: dict[tuple[str, str, str | None], list[_Stream]] = {}
+        for record in await _require_ext(ctx).sources():
+            if record.backend not in CONNECTORS:
+                continue
+            config = ConnectorSourceConfig.model_validate(record.config)
+            grouped.setdefault((record.backend, config.account, config.base_url), []).append(
+                _Stream(
+                    name=config.stream,
+                    next_sync_at=record.next_sync_at,
+                    consecutive_errors=record.consecutive_errors,
+                    source_id=record.id,
+                )
+            )
+        return tuple(
+            _Binding(
+                provider=provider,
+                account=account,
+                base_url=base_url,
+                streams=tuple(sorted(streams, key=lambda stream: stream.name)),
+            )
+            for (provider, account, base_url), streams in grouped.items()
+        )
 
 
 def _validated_base_url(provider: str, base_url: str | None) -> str | None:
@@ -266,26 +353,22 @@ def _validated_base_url(provider: str, base_url: str | None) -> str | None:
     return f"https://{hostname}{path}"
 
 
-def _json_result(payload: dict[str, object], *, is_error: bool = False) -> ToolResult:
-    return ToolResult(
-        content=(TextContent(text=json.dumps(payload, sort_keys=True)),), is_error=is_error
-    )
-
-
-def _error(code: str, message: str, **details: object) -> ToolResult:
-    return _json_result({"error": {"code": code, "message": message, **details}}, is_error=True)
-
-
-SYNC_SOURCE_TOOL = ToolDef(
-    name="sync_source",
+SOURCE_OBJECT = ObjectKind(
+    name=SOURCE_KIND,
     description=(
-        "Discover content-source providers and register selected streams into shared memory. Omit "
-        "provider to list providers; pass a provider without streams to inspect its stream "
-        "catalog; pass provider plus streams to register them. Brokered providers use this "
-        "agent's active connected-account grant; providers without a broker use their workspace "
-        "credential. Only the workspace owner can register sources."
+        "A registered content-sync binding: one provider account's selected streams syncing "
+        "into shared memory. Owner-only mutations: create and delete; changing streams is "
+        "delete-and-recreate."
     ),
-    input_model=SyncSourceInput,
-    handler=sync_source,
-    side_effecting=True,
+    guidance=(
+        "Apply a manifest to register selected streams of a content-source provider into "
+        "shared memory; an unknown provider or stream is refused with the valid choices, and "
+        "an unknown name is refused with the exact derived name to re-apply (names derive from "
+        "provider, account, and tenant URL). Brokered providers use this agent's active "
+        "connected-account grant; providers without a broker use their workspace credential. "
+        "Only the workspace owner can register or delete sources; a source's identity is its "
+        "config, so changing one is delete and recreate."
+    ),
+    spec_model=SourceSpec,
+    store=SourceObjects(),
 )

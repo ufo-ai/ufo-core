@@ -302,6 +302,16 @@ async def test_openai_request_carries_image_url_and_lifts_tool_result_images() -
     }
 
 
+async def test_openai_request_sends_max_completion_tokens() -> None:
+    """Reasoning-tier OpenAI models reject the legacy `max_tokens` parameter outright, so the
+    budget must ride `max_completion_tokens` — the judge model pin surfaced this live."""
+    create = CapturingCreate(([openai_text("ok"), openai_usage(prompt=1, completion=1)], None))
+    async for _ in OpenAIClient(client=openai_sdk(create)).complete(IMAGE_REQUEST):
+        pass
+    assert create.kwargs["max_completion_tokens"] == IMAGE_REQUEST.max_tokens
+    assert "max_tokens" not in create.kwargs
+
+
 def _images(count: int, base: int = 0) -> tuple[ImageBlock, ...]:
     return tuple(
         ImageBlock(source=ImageSource(media_type="image/png", data=str(base + i)))

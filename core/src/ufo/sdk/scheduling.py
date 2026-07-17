@@ -14,5 +14,8 @@ from ufo.scheduling import (
     ScheduleStore as ScheduleStore,
 )
 from ufo.scheduling import (
+    TaskInspection as TaskInspection,
+)
+from ufo.scheduling import (
     due_task_workspaces as due_task_workspaces,
 )

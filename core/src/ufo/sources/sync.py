@@ -248,6 +248,7 @@ class SyncDriver:
                     sa.select(tables.source.c.workspace_id)
                     .where(
                         tables.source.c.next_sync_at <= now,
+                        tables.source.c.removed_at.is_(None),
                         sa.or_(
                             tables.source.c.claimed_by.is_(None),
                             tables.source.c.claim_expires_at < now,
@@ -296,6 +297,7 @@ class SyncDriver:
             )
             .where(
                 tables.source.c.next_sync_at <= now,
+                tables.source.c.removed_at.is_(None),
                 sa.or_(
                     tables.source.c.claimed_by.is_(None),
                     tables.source.c.claim_expires_at < now,

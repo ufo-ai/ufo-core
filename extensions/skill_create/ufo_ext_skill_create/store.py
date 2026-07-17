@@ -16,6 +16,7 @@ import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from uuid import UUID
 
 import sqlalchemy as sa
@@ -159,9 +160,9 @@ class UserSkillStore:
             rows = (
                 (
                     await connection.execute(
-                        sa.select(user_skill.c.name, user_skill.c.content).where(
-                            user_skill.c.workspace_id == workspace_id
-                        )
+                        sa.select(user_skill.c.name, user_skill.c.content)
+                        .where(user_skill.c.workspace_id == workspace_id)
+                        .order_by(user_skill.c.name)
                     )
                 )
                 .mappings()
@@ -183,6 +184,44 @@ class UserSkillStore:
                     },
                 )
         return tuple(skills)
+
+    async def files(self, workspace_id: UUID, name: str) -> dict[str, bytes] | None:
+        """One saved skill's file map — the persisted bundle decoded back to bytes, None when the
+        workspace holds no skill of that name."""
+        async with self.ctx.transaction() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(user_skill.c.content).where(
+                        user_skill.c.workspace_id == workspace_id,
+                        user_skill.c.name == name,
+                    )
+                )
+            ).one_or_none()
+        if row is None:
+            return None
+        stored = StoredSkill.model_validate_json(row.content)
+        return {path: base64.b64decode(content) for path, content in stored.files.items()}
+
+    async def delete(self, workspace_id: UUID, name: str) -> None:
+        async with self.ctx.transaction() as connection:
+            await connection.execute(
+                sa.delete(user_skill).where(
+                    user_skill.c.workspace_id == workspace_id,
+                    user_skill.c.name == name,
+                )
+            )
+
+    async def updated_at(self, workspace_id: UUID, name: str) -> datetime | None:
+        async with self.ctx.transaction() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(user_skill.c.updated_at).where(
+                        user_skill.c.workspace_id == workspace_id,
+                        user_skill.c.name == name,
+                    )
+                )
+            ).one_or_none()
+        return None if row is None else row.updated_at
 
     async def _count(self, workspace_id: UUID) -> int:
         async with self.ctx.transaction() as connection:

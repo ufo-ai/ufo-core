@@ -346,9 +346,16 @@ def test_turn_tools_maps_extension_tools_to_owning_context_and_leaves_builtins_u
     assert not any(builtin.name in ext_by_tool for builtin in BUILTIN_TOOLS)
 
 
-def test_turn_tools_without_manifests_is_builtins_and_empty_map() -> None:
+def test_turn_tools_without_manifests_is_builtins_object_verbs_and_empty_map() -> None:
     tools, ext_by_tool = turn_tools((), None)
-    assert tools == BUILTIN_TOOLS
+    assert tools[: len(BUILTIN_TOOLS)] == BUILTIN_TOOLS
+    assert [tool.name for tool in tools[len(BUILTIN_TOOLS) :]] == [
+        "object_list",
+        "object_get",
+        "object_explain",
+        "object_apply",
+        "object_delete",
+    ]
     assert ext_by_tool == {}
 
 

@@ -49,5 +49,5 @@ class ScheduledTaskRunner:
             if turn_id is None:
                 return None
         if task.schedule != ONE_TIME_SCHEDULE and failure is None:
-            await scheduler.reschedule(task, next_fire(task.schedule, now), now)
+            await scheduler.reschedule(task, next_fire(task.schedule, now), now, turn_id)
         return failure

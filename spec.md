@@ -93,7 +93,9 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   the base-pinned `embed_openai` extension; turbopuffer is a drop-in index alternative. Source
   pages reach recall through the memory extension's own page-index job over the core `PageFeed`.
 - **Minimal built-in tools** — `bash`, `read`, `write`, `edit`,
-  `ask_user`, `request_credentials`, `spawn_subagent`, `load_skill`, `share_file`. Everything else
+  `ask_user`, `request_credentials`, `spawn_subagent`, `load_skill`, `share_file`, and the five
+  object verbs (`object_list`/`get`/`explain`/`apply`/`delete`) over extension-registered kinds
+  (RFC 0017) — one generic CRUD surface instead of per-extension config tools. Everything else
   arrives via extensions.
   Two tools where one would do is a defect. `share_file` ports the shipped design: byte custody in
   the blob store, a TTL-bound token URL served by core's artifact route — no token, no bytes.
@@ -135,6 +137,7 @@ Manifest registers (each optional):
 | Point | Contract |
 |---|---|
 | `tools` | Typed tool defs + handlers; appear in agents' granted tool sets. A `profile_only` tool never reaches a main agent — only the subagent profiles that name it (the raw browser surface reaches main agents solely through `browser_task`/`wide_browse`). |
+| `objects` | Workspace-object kinds (RFC 0017): name, one-line description, model-facing guidance, spec model (`extra="forbid"`, JSON-round-trippable, no secret fields — boot-gated), and store handlers over the extension's own tables. Core's five `object_*` verbs validate the YAML envelope and spec, then dispatch to the kind under its own ExtensionContext; refusals and role gates live in the handlers. |
 | `subagents` | Typed subagent profiles. |
 | `prompt_sections` | Capability sections a pack contributes to the agent's system prompt, rendered into the shell's `{{sections}}` slot ordered by name — a pack's rules (web search, browsing, office docs) reach the agent without core naming the capability. |
 | `skills` | Skill folders (SKILL.md + bundled scripts/assets) contributed to the loadable set; the loader parses each into the registry `load_skill` and the `{{skill_index}}` consult, mounted into the sandbox under `.skills/<name>/` beside core's own three. A skill script imports nothing from ufo (it runs in the sandbox) — a CI gate holds that boundary. |

@@ -1,7 +1,7 @@
 ---
 rfc: 0017
 title: "Workspace objects — registered kinds, YAML CRUD in chat"
-status: proposed
+status: implemented
 date: 2026-07-16
 ---
 

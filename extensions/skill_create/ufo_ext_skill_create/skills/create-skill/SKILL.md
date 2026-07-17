@@ -96,18 +96,33 @@ Example inputs and expected outputs.
 5. **Add any bundled files** (scripts, references, assets) under the skill directory. A bundled
    script runs in the sandbox and must not depend on anything outside it.
 
-6. **Save the skill.** Once every file is in place, call `save_custom_skill` with `path` set to the
-   skill directory (for example `/workspace/<skill-name>`). It validates the skill and persists it
-   for this workspace. If validation fails, read the error, fix `SKILL.md`, and save again.
+6. **Save the skill.** Once every file is in place, apply a `skill` object whose `files` map
+   references what you authored — the object `name` must equal the frontmatter `name`:
+
+   ```yaml
+   kind: skill
+   name: my-skill
+   spec:
+     files:
+       SKILL.md: {from: my-skill/SKILL.md}
+       references/guide.md: {from: my-skill/references/guide.md}
+   ```
+
+   Each `{from: <path>}` is read from the workspace at apply and stored inline, so the saved
+   skill outlives the sandbox. Short content may be inlined directly as the value instead. It
+   validates the skill and persists it for this workspace; if validation fails, read the error,
+   fix `SKILL.md`, and apply again.
 
 7. **Confirm to the user** that the skill was saved. It is available to `load_skill` and appears in
    `<available_skills>` on subsequent turns.
 
-## Modifying an Existing Skill
+## Modifying or Removing an Existing Skill
 
-To change a saved skill: recreate its directory in the workspace (author the updated `SKILL.md` and
-any files under `/workspace/<skill-name>/`), then call `save_custom_skill` on that directory again
-under the same name. Saving replaces the stored skill in place.
+To change a saved skill: `object_get` lists its files as `{sha256, size}` references — read the
+current content with `load_skill`, which mounts the files. Author the updates in the workspace and
+re-apply under the same name, passing `{from: <path>}` for changed files and each unchanged file's
+`{sha256: <digest>}` back as-is — applying replaces the stored skill in place. To remove one, use
+`object_delete` with `kind: skill`; it drops from the loadable set on the next turn.
 
 ## Common Errors
 
@@ -118,7 +133,9 @@ one. The very first character must be the opening delimiter; no title or blank l
 treats specially, most often `:`. Wrap the value in double quotes. Quoting is always safe.
 
 **"skill name ... must match its directory"** — the `name` in the frontmatter differs from the
-directory name. Make them identical.
+object name you applied. Make them identical.
+
+**"is not text"** — a referenced file is not UTF-8. A skill bundles only text files.
 
 **"is already a core or pack skill and cannot be overridden"** — the name belongs to a built-in
 skill. Choose a different name; a custom skill can never shadow a built-in one.

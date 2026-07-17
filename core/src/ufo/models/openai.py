@@ -152,7 +152,7 @@ class OpenAIClient:
             create_kwargs: dict[str, Any] = {
                 "model": request.model,
                 "messages": openai_messages(request.system, request.messages),
-                "max_tokens": request.max_tokens,
+                "max_completion_tokens": request.max_tokens,
                 "stream": True,
                 "stream_options": {"include_usage": True},
             }

@@ -1,5 +1,6 @@
-"""End-to-end proof of the scheduled-tasks seam: the chat tool writes a durable schedule row, and
-the batch-at-interval runner fires a due row into a real admitted turn through the invoke seam.
+"""End-to-end proof of the scheduled-tasks seam: the `scheduled_task` object kind writes a durable
+schedule row through the generic object verbs, and the batch-at-interval runner fires a due row
+into a real admitted turn through the invoke seam.
 
 The runner drives the real `Admission` (real spend preflight, real turn row, real seq allocation);
 only the DBOS enqueue stands in, recording the workflow id a live queue would receive — the same
@@ -14,22 +15,18 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
+import yaml
 from ufo_ext_scheduled_tasks.manifest import NAME, RUNNER_JOB, manifest
 from ufo_ext_scheduled_tasks.runner import ScheduledTaskRunner
 from ufo_ext_scheduled_tasks.tools import (
-    CancelScheduledTaskInput,
-    ListScheduledTasksInput,
+    SCHEDULED_TASK_KIND,
     PauseAndWaitInput,
-    ScheduleTaskInput,
-    cancel_scheduled_task,
-    list_scheduled_tasks,
     pause_and_wait,
-    schedule_task,
 )
 
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, context_for
-from ufo.ext.loader import skill_registry
+from ufo.ext.loader import skill_registry, turn_tools
 from ufo.jobs import JobRunner, bindings_from
 from ufo.loop.engine import _claim_turn
 from ufo.scheduling import ONE_TIME_SCHEDULE, ScheduleStore
@@ -37,9 +34,31 @@ from ufo.schema import tables
 from ufo.schema.records import WRITEBACK_PENDING, Agent, TerminalFrame, Turn
 from ufo.surfaces.admission import Admission, AdmissionInvoker, MemberAdmission
 from ufo.tools.context import SpawnResult, ToolContext
+from ufo.tools.registry import ToolDef
 from ufo.workspace import ws
 
 DAILY_9AM = "0 9 * * *"
+
+
+def _object_tool(name: str) -> ToolDef:
+    tools, _ = turn_tools((manifest(),), None)
+    return next(tool for tool in tools if tool.name == name)
+
+
+def _task_manifest(name: str, schedule: str, prompt: str, description: str = "") -> str:
+    return yaml.safe_dump(
+        {
+            "kind": SCHEDULED_TASK_KIND,
+            "name": name,
+            "spec": {"schedule": schedule, "prompt": prompt, "description": description},
+        }
+    )
+
+
+async def _dispatch(tool: ToolDef, ctx: ToolContext, **args: object) -> str:
+    result = await tool.handler(ctx, tool.input_model.model_validate(args))
+    assert result.is_error is False
+    return result.content[0].text
 
 
 @dataclass
@@ -181,22 +200,38 @@ async def _turns(conversation_id: UUID) -> list[sa.RowMapping]:
         )
 
 
-async def test_schedule_task_tool_writes_durable_row(db: None) -> None:
+async def test_applied_task_writes_durable_row_bound_to_the_turn(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     ctx = _tool_ctx(workspace_id, conversation_id, agent_id)
     with ws(workspace_id):
-        result = await schedule_task(
-            ctx,
-            ScheduleTaskInput(schedule=DAILY_9AM, prompt="check the inbox for investor replies"),
+        applied = json.loads(
+            await _dispatch(
+                _object_tool("object_apply"),
+                ctx,
+                manifest=_task_manifest(
+                    "investor-replies", DAILY_9AM, "check the inbox for investor replies"
+                ),
+            )
         )
-        assert result.is_error is False
+        assert applied == {
+            "kind": SCHEDULED_TASK_KIND,
+            "name": "investor-replies",
+            "result": "created",
+        }
         tasks = await ScheduleStore().list()
+        fetched = yaml.safe_load(
+            await _dispatch(
+                _object_tool("object_get"), ctx, kind=SCHEDULED_TASK_KIND, name="investor-replies"
+            )
+        )
     assert len(tasks) == 1
     assert tasks[0].schedule == DAILY_9AM
     assert tasks[0].prompt == "check the inbox for investor replies"
     assert tasks[0].conversation_id == conversation_id
     assert tasks[0].agent_id == agent_id
-    assert tasks[0].name.startswith("scheduled-")
+    assert fetched["spec"]["schedule"] == DAILY_9AM
+    assert fetched["status"]["next_run_at"] == tasks[0].next_run_at.isoformat()
+    assert fetched["status"]["last_run_at"] is None
 
 
 async def test_pause_and_wait_runs_tool_to_timer_to_resumed_turn(db: None) -> None:
@@ -1123,17 +1158,19 @@ def test_pause_and_wait_bounds_the_timer(wait_minutes: int) -> None:
         )
 
 
-async def test_reschedule_same_name_updates_in_place(db: None) -> None:
+async def test_reapplied_name_updates_in_place(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     ctx = _tool_ctx(workspace_id, conversation_id, agent_id)
+    apply = _object_tool("object_apply")
     with ws(workspace_id):
-        await schedule_task(
-            ctx, ScheduleTaskInput(schedule=DAILY_9AM, prompt="daily", name="report")
-        )
-        await schedule_task(
-            ctx, ScheduleTaskInput(schedule="0 17 * * 1", prompt="weekly", name="report")
+        await _dispatch(ctx=ctx, tool=apply, manifest=_task_manifest("report", DAILY_9AM, "daily"))
+        second = json.loads(
+            await _dispatch(
+                ctx=ctx, tool=apply, manifest=_task_manifest("report", "0 17 * * 1", "weekly")
+            )
         )
         tasks = await ScheduleStore().list()
+    assert second["result"] == "updated"
     assert len(tasks) == 1
     assert tasks[0].schedule == "0 17 * * 1"
     assert tasks[0].prompt == "weekly"
@@ -1216,6 +1253,75 @@ async def test_runner_fires_due_task_into_a_turn(db: None) -> None:
         advanced = (await store.list())[0]
         assert advanced.last_run_at is not None
         assert await store.claim_due(datetime.now(UTC), 300) == ()
+
+        inspection = await store.inspect("scheduled-daily")
+        assert inspection is not None
+        assert inspection.last_turn_id == turns[0]["id"]
+        assert inspection.conversation_id == conversation_id
+        assert inspection.surface == "cli"
+        assert inspection.last_response is None
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.turn)
+                .values(status="done", terminal={"status": "done", "text": "found 3 new replies"})
+                .where(tables.turn.c.id == turns[0]["id"])
+            )
+        status = yaml.safe_load(
+            await _dispatch(
+                _object_tool("object_get"),
+                _tool_ctx(workspace_id, conversation_id, agent_id),
+                kind=SCHEDULED_TASK_KIND,
+                name="scheduled-daily",
+            )
+        )["status"]
+        assert status["reports_to"] == {
+            "conversation_id": str(conversation_id),
+            "surface": "cli",
+        }
+        assert status["last_run"]["turn_id"] == str(turns[0]["id"])
+        assert status["last_run"]["response"] == "found 3 new replies"
+        assert status["updated_at"] is not None
+
+
+async def test_update_from_another_conversation_keeps_reporting_home(db: None) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    second_conversation = uuid4()
+    async with workspace_tx() as connection:
+        member_id = (
+            await connection.execute(
+                sa.select(tables.member.c.id).where(tables.member.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=second_conversation,
+                workspace_id=workspace_id,
+                surface="cli",
+                queue_key="second-session",
+                member_id=member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    apply = _object_tool("object_apply")
+    with ws(workspace_id):
+        await _dispatch(
+            ctx=_tool_ctx(workspace_id, conversation_id, agent_id),
+            tool=apply,
+            manifest=_task_manifest("report", DAILY_9AM, "daily"),
+        )
+        updated = json.loads(
+            await _dispatch(
+                ctx=_tool_ctx(workspace_id, second_conversation, agent_id),
+                tool=apply,
+                manifest=_task_manifest("report", "0 17 * * 1", "weekly"),
+            )
+        )
+        rows = await ScheduleStore().list()
+    assert updated["result"] == "updated"
+    assert len(rows) == 1
+    assert rows[0].schedule == "0 17 * * 1"
+    assert rows[0].conversation_id == conversation_id
 
 
 async def test_claim_due_caps_a_sweep_at_its_batch_limit(db: None) -> None:
@@ -1328,27 +1434,55 @@ async def test_next_recurring_fire_admits_a_distinct_turn(db: None) -> None:
     assert dbos.enqueued == [str(turns[0]["id"])]
 
 
-async def test_cancel_scheduled_task_removes_it(db: None) -> None:
+async def test_deleted_task_stops_and_leaves_the_listing(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     ctx = _tool_ctx(workspace_id, conversation_id, agent_id)
     with ws(workspace_id):
-        await schedule_task(ctx, ScheduleTaskInput(schedule=DAILY_9AM, prompt="x", name="watcher"))
-        cancelled = await cancel_scheduled_task(
-            ctx, CancelScheduledTaskInput(name="scheduled-watcher")
+        await _dispatch(
+            _object_tool("object_apply"), ctx, manifest=_task_manifest("watcher", DAILY_9AM, "x")
         )
-        assert "Cancelled" in cancelled.content[0].text
+        deleted = json.loads(
+            await _dispatch(
+                _object_tool("object_delete"), ctx, kind=SCHEDULED_TASK_KIND, name="watcher"
+            )
+        )
+        assert deleted["deleted"] is True
+        assert deleted["spec"]["schedule"] == DAILY_9AM
         assert await ScheduleStore().list() == ()
-        listed = await list_scheduled_tasks(ctx, ListScheduledTasksInput())
-        assert listed.content[0].text == "No scheduled tasks."
+        listing = json.loads(
+            await _dispatch(_object_tool("object_list"), ctx, kind=SCHEDULED_TASK_KIND)
+        )
+        assert listing["objects"] == []
 
 
-async def test_schedule_task_rejects_non_five_field_cron(db: None) -> None:
+async def test_applied_task_rejects_non_five_field_cron(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     ctx = _tool_ctx(workspace_id, conversation_id, agent_id)
+    apply = _object_tool("object_apply")
+    args = apply.input_model.model_validate(
+        {"manifest": _task_manifest("too-many", "0 9 * * * *", "too many fields")}
+    )
     with ws(workspace_id), pytest.raises(ValueError, match="5-field"):
-        await schedule_task(
-            ctx, ScheduleTaskInput(schedule="0 9 * * * *", prompt="too many fields")
+        await apply.handler(ctx, args)
+
+
+async def test_pause_rows_never_surface_as_objects(db: None) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    ctx = _tool_ctx(workspace_id, conversation_id, agent_id)
+    with ws(workspace_id):
+        await pause_and_wait(
+            ctx,
+            PauseAndWaitInput(
+                ai_response="waiting",
+                wait_minutes=5,
+                next_steps="continue",
+                reason="approval",
+            ),
         )
+        listing = json.loads(
+            await _dispatch(_object_tool("object_list"), ctx, kind=SCHEDULED_TASK_KIND)
+        )
+    assert listing["objects"] == []
 
 
 def test_task_scheduling_skill_parses_and_indexes() -> None:

@@ -14,7 +14,7 @@ from uuid import UUID
 
 from evals.harness.capability import CapabilityOutput, CapabilityVerdict, grading_statement
 from evals.harness.harness import EvalCaseResult, Json, JsonObject
-from evals.harness.judge import JudgeLeg
+from evals.harness.judge import JUDGE_REVISION, CriterionVerdict, JudgeLeg, rubric_pass
 from evals.harness.target import CapabilityTarget, TargetResult
 from ufo.sdk.models import Message
 from ufo.workspace import ws_current
@@ -120,6 +120,7 @@ class ScenarioCase:
     seed: ScenarioSeed | None = None
     trials: int = 1
     tier: int = 1
+    rubric: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.trials < 1:
@@ -137,7 +138,10 @@ class ScenarioCase:
             "trials": self.trials,
             "tier": self.tier,
             "simulatorRevision": SIMULATOR_REVISION,
+            "rubric": list(self.rubric),
         }
+        if self.rubric:
+            payload["judgeRevision"] = JUDGE_REVISION
         if self.member_key is not None:
             payload["memberKey"] = self.member_key
         return payload
@@ -216,6 +220,7 @@ class _Trial:
     cost_micro_usd: int = 0
     grader_evidence: JsonObject | None = None
     infra: bool = False
+    judge: tuple[CriterionVerdict, ...] = ()
 
 
 async def run_scenario_case(case: ScenarioCase, target: CapabilityTarget) -> EvalCaseResult:
@@ -343,6 +348,21 @@ class _ScenarioRun:
                 cost_micro_usd,
             )
         verdict = await case.grader(ScenarioOutcome(tuple(turns), last.output, stopped))
+        judged: tuple[CriterionVerdict, ...] = ()
+        if verdict.passed and case.rubric:
+            if self.target.judge is None:
+                verdict = CapabilityVerdict(False, "semantic rubric requires a model judge")
+            else:
+                transcript = "\n".join(
+                    f"member: {turn.user_message}\nassistant: {turn.reply}" for turn in turns
+                )
+                rubric = await rubric_pass(
+                    case.user.reason_for_call, transcript, case.rubric, self.target.judge
+                )
+                judged = rubric.criteria
+                verdict = CapabilityVerdict(
+                    rubric.passed, f"{verdict.reason}; {rubric.reason}", verdict.evidence
+                )
         return _Trial(
             tuple(turns),
             stopped,
@@ -352,6 +372,7 @@ class _ScenarioRun:
             tokens,
             cost_micro_usd,
             verdict.evidence,
+            judge=judged,
         )
 
     def _attempt(self, trial: _Trial) -> Json:
@@ -381,5 +402,13 @@ class _ScenarioRun:
             "tokens": trial.tokens,
             "costMicroUsd": trial.cost_micro_usd,
             "grader": trial.grader_evidence or None,
+            "judge": (
+                [
+                    {"criterion": item.criterion, "passed": item.passed, "reason": item.reason}
+                    for item in trial.judge
+                ]
+                if trial.judge
+                else None
+            ),
             "trajectory": None if trajectory is None else trajectory.model_dump(mode="json"),
         }

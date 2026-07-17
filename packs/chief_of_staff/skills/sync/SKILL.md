@@ -51,8 +51,8 @@ the next run's window marker.
 ## 5 — Amend the manual
 
 A correction in step 4 is a rule. Keep the workspace skill `sync-rules` current: author or update
-its folder in the sandbox and `save_custom_skill`; start every run with `load_skill sync-rules`
-when it exists. Prompt-level improvements arrive separately as governed self-improvement
+its folder in the sandbox and apply the `skill` object (see `create-skill`); start every run with
+`load_skill sync-rules` when it exists. Prompt-level improvements arrive separately as governed self-improvement
 proposals the member approves in chat.
 
 ## Guardrails

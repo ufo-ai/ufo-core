@@ -26,6 +26,15 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
+from ufo.agents import CORE_OBJECT_KINDS
+from ufo.credential_kind import (
+    CREDENTIAL_DESCRIPTION,
+    CREDENTIAL_GUIDANCE,
+    CREDENTIAL_KIND,
+    CredentialObjects,
+    CredentialSpec,
+    DeclaredSlot,
+)
 from ufo.credentials import CredentialStore
 from ufo.ext.context import ExtensionContext, context_for
 from ufo.ext.manifest import (
@@ -48,6 +57,7 @@ from ufo.ext.manifest import (
 from ufo.indexing import EmbedClient, IndexBackend
 from ufo.memory import DEFAULT_MEMORY_SEARCH_PROVIDER, MemorySearch
 from ufo.o11y import log
+from ufo.objects import BoundKind, ObjectKind, ObjectVerbs, object_registry
 from ufo.schema.records import Agent, Turn
 from ufo.skills.runtime import (
     CORE_SKILLS_BY_NAME,
@@ -288,15 +298,18 @@ def turn_tools(
     provider host under that extension's context. Only an extension that declares credential slots
     needs the credential key — a tool-only extension with no slots (a todo list) builds its context
     with none; a slot-declaring extension with no key set fails loud. Installation registration is
-    limited to the surfaces that same manifest declares."""
+    limited to the surfaces that same manifest declares. Declared object kinds join one registry
+    behind the five object verbs, each kind's store dispatching under its own extension's context
+    exactly as its tools do."""
     tools: list[ToolDef] = list(BUILTIN_TOOLS)
     ext_by_tool: dict[str, ExtensionContext] = {}
+    bound_kinds: list[BoundKind] = list(CORE_OBJECT_KINDS)
     for manifest in manifests:
         declared_tools = (
             *manifest.tools,
             *(tool for connector in manifest.connectors for tool in connector.tools),
         )
-        if not declared_tools:
+        if not declared_tools and not manifest.objects:
             continue
         declared = frozenset(slot.name for slot in manifest.credentials)
         if declared and credential_store is None:
@@ -314,7 +327,36 @@ def turn_tools(
         for tool in declared_tools:
             tools.append(tool)
             ext_by_tool[tool.name] = context
+        bound_kinds.extend(
+            BoundKind(kind=kind, extension=manifest.name, context=context)
+            for kind in manifest.objects
+        )
+    bound_kinds.extend(core_object_kinds(manifests))
+    tools.extend(ObjectVerbs(object_registry(tuple(bound_kinds))).tools())
     return tuple(tools), ext_by_tool
+
+
+def core_object_kinds(manifests: tuple[Manifest, ...]) -> tuple[BoundKind, ...]:
+    """The kinds core itself registers, bound with no extension context — their handlers read the
+    ambient workspace directly. `credential` projects every active manifest's declared slots."""
+    slots = tuple(
+        DeclaredSlot(
+            name=slot.name,
+            description=slot.description,
+            extension=manifest.name,
+            injection_host="" if slot.injection is None else slot.injection.host,
+        )
+        for manifest in manifests
+        for slot in manifest.credentials
+    )
+    kind = ObjectKind(
+        name=CREDENTIAL_KIND,
+        description=CREDENTIAL_DESCRIPTION,
+        guidance=CREDENTIAL_GUIDANCE,
+        spec_model=CredentialSpec,
+        store=CredentialObjects(slots=slots),
+    )
+    return (BoundKind(kind=kind, extension=None, context=None),)
 
 
 def skill_registry(manifests: tuple[Manifest, ...]) -> SkillRegistry:
@@ -473,10 +515,11 @@ def validate_ext_tools(
     credential_store: CredentialStore | None,
 ) -> None:
     """Fail loud at boot on a misconfigured extension — a tool whose name collides with a builtin or
-    another extension, or a tools-declaring extension with no credential key — so a deploy fails to
-    start rather than coming up healthy and then failing every turn that builds the registry.
-    Deploy-level: it checks the tool defs and key presence, never builds a per-workspace context (a
-    shared fleet has no workspace at boot; the turn builds each tool's context per request)."""
+    another extension, an object kind that collides or fails the registration gates, or a
+    tools-declaring extension with no credential key — so a deploy fails to start rather than
+    coming up healthy and then failing every turn that builds the registry. Deploy-level: it checks
+    the tool defs, kind gates, and key presence, never builds a per-workspace context (a shared
+    fleet has no workspace at boot; the turn builds each tool's context per request)."""
     tools: list[ToolDef] = list(BUILTIN_TOOLS)
     for manifest in manifests:
         declared_tools = (
@@ -491,6 +534,18 @@ def validate_ext_tools(
                 f"{sorted(slot.name for slot in manifest.credentials)} but no credential key is set"
             )
         tools.extend(declared_tools)
+    registry = object_registry(
+        (
+            *CORE_OBJECT_KINDS,
+            *(
+                BoundKind(kind=kind, extension=manifest.name, context=None)
+                for manifest in manifests
+                for kind in manifest.objects
+            ),
+            *core_object_kinds(manifests),
+        )
+    )
+    tools.extend(ObjectVerbs(registry).tools())
     ToolRegistry(tuple(tools))
 
 

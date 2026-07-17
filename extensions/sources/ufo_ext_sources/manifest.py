@@ -1,6 +1,6 @@
 """What the sources extension declares: one content-source backend per registered connector, the
 credential slots the direct auth backend reads BYOK keys from, the `direct` auth-proxy backend
-itself, and the `sync_source` chat tool that turns a granted or keyed provider into syncing
+itself, and the `source` object kind that turns a granted or keyed provider into syncing
 source rows. One extension, N backends — each provider builds on the REST connector framework from
 `ufo.sdk.sources`, consuming the pluggable auth-proxy seam rather than importing a broker: the sync
 runner routes a brokered provider's credential to the broker extension that registers it (Composio,
@@ -16,7 +16,7 @@ from ufo.sdk.manifest import CredentialSlot, Manifest, SourceProvider
 from ufo.sdk.sources import Connector, ConnectorBackend
 from ufo_ext_sources.direct import DirectAuthProxy
 from ufo_ext_sources.registry import CONNECTORS
-from ufo_ext_sources.tools import SYNC_SOURCE_TOOL
+from ufo_ext_sources.tools import SOURCE_OBJECT
 
 NAME = "sources"
 VERSION = "0.1.0"
@@ -35,7 +35,7 @@ def manifest() -> Manifest:
     return Manifest(
         name=NAME,
         version=VERSION,
-        tools=(SYNC_SOURCE_TOOL,),
+        objects=(SOURCE_OBJECT,),
         sources=tuple(
             SourceProvider(
                 backend=name,

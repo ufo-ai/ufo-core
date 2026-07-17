@@ -29,6 +29,7 @@ from ufo.hub import Hub
 from ufo.indexing import EmbedClient, IndexBackend
 from ufo.memory import MemorySearchProvider
 from ufo.models.interface import ModelClient
+from ufo.objects import ObjectKind
 from ufo.sandbox.session import Carrier
 from ufo.schema.records import Agent, Turn
 from ufo.search import SearchProvider
@@ -532,6 +533,7 @@ class Manifest:
     version: str
     _: KW_ONLY
     tools: tuple[ToolDef, ...] = ()
+    objects: tuple[ObjectKind, ...] = ()
     jobs: tuple[JobSpec, ...] = ()
     routes: tuple[RouteSpec, ...] = ()
     credentials: tuple[CredentialSlot, ...] = ()

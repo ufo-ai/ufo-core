@@ -21,8 +21,8 @@ driver reads through the broker — no key ever lands here. Everything this pack
 read-only; grant no write scope anywhere. Confirm with the member before registering anything —
 the speaker gates the granting act.
 
-- Google Meet: ask the member to connect `google_meet`, inspect it with `sync_source`, then
-  register the exact `meeting_artifacts` stream. The source reads generated Meet transcripts
+- Google Meet: ask the member to connect `google_meet` (`object_explain` on kind `source` shows
+  the spec), then apply a `source` object with the exact `meeting_artifacts` stream. The source reads generated Meet transcripts
   (rendered as speaker-grouped dialogue) and Gemini smart notes. The operator first creates a
   custom Google OAuth auth config for the `googlemeet` toolkit in the Composio project, requesting
   only
@@ -30,8 +30,8 @@ the speaker gates the granting act.
   records, transcripts, and transcript entries. Adding
   `https://www.googleapis.com/auth/documents.readonly` is optional: with it, smart-note Docs are
   inlined as prose; without it, each page keeps the Doc link and syncs fine.
-- Slack chatter: ask the member to connect `slack`, inspect it with `sync_source`, then register
-  the exact `users`, `conversations`, `conversation_threads`, `messages`, and
+- Slack chatter: ask the member to connect `slack`, then apply a `source` object with the exact
+  `users`, `conversations`, `conversation_threads`, `messages`, and
   `message_participants` streams. The sync reads conversations through the granted account, so the
   consent's scope set must include the conversation read scopes (`channels:read`, `groups:read`,
   `im:read`, `mpim:read`, and the matching `*:history`); if the project's Slack auth config
@@ -53,9 +53,9 @@ editing the repo with their own tools — nothing edits canon from here.
 
 ## 4 — The cadence
 
-In the inbox channel, schedule the sync (see `task-scheduling`): `schedule_task` with a cron like
-`*/30 * * * *` and the prompt "Load the `sync` skill and run it." Confirm the cadence with the
-member first — each run costs credits.
+In the inbox channel, schedule the sync (see `task-scheduling`): apply a `scheduled_task` object
+with a schedule like `*/30 * * * *` and the prompt "Load the `sync` skill and run it." Confirm the
+cadence with the member first — each run costs credits.
 
 ## 5 — Prove the loop
 

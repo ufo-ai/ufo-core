@@ -22,6 +22,9 @@ from ufo.ext.context import (
     ScopedStore as ScopedStore,
 )
 from ufo.ext.context import (
+    SourceRecord as SourceRecord,
+)
+from ufo.ext.context import (
     Trajectory as Trajectory,
 )
 from ufo.ext.context import (

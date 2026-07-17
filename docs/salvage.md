@@ -39,7 +39,7 @@ Working against the old repo:
 | `metalcraft_brain/sync/{contracts,jobs,persistence,runtime}.py` | `core/…/sources/` framework + `extensions/sources/` providers | U4 | Source CRD → source rows; sync framework in core, providers are extensions; cursor/claim/commit shape stays |
 | `metalcraft_agent/tools/knowledge.py` | the memory extension's `memory_search`/`memory_update` tools | U4 | `store_search`/`file_fetch`/`load_sessions` fold into `memory_search` modes |
 | `metalcraft_agent/subagents.py` | `loop/subagents.py` | U5 | typed profiles become the registry; spawn = DBOS child |
-| `metalcraft_agent/skills/__init__.py` + `skills/` content | `tools/builtins/load_skill.py` + `packs/` | U5 | discovery is the prompt skill index; `save_custom_skill` folds into `share_file` |
+| `metalcraft_agent/skills/__init__.py` + `skills/` content | `tools/builtins/load_skill.py` + `packs/` | U5 | discovery is the prompt skill index; member-authored skills are the `skill` object kind |
 | `metalcraft_agent/tools/files.py` | `tools/builtins/share_file.py`, `load_skill` | U5 | one artifact-share path |
 | `metalcraft_agent/tools/interaction.py` | `tools/builtins/ask_user.py`, `extensions/scheduled_tasks` | U5/U10 | `confirm_action` folds in; `pause_and_wait` persists a hidden one-time wakeup; `send_notification` is absent |
 | `metalcraft_store/{artifact_delivery,artifact_providers}.py`, `gateway/{artifacts,tokens}.py` | `share_file` + web delivery | U5/U6 | TTL token URL over BlobStore; drop provider zoo (fs/S3 only) |

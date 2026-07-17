@@ -20,7 +20,7 @@ import ufo_ext_sources.manifest as sources_manifest
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import PageIndexer
-from ufo_ext_sources.tools import SyncSourceInput, sync_source
+from ufo_ext_sources.tools import SourceObjects, SourceSpec, _binding_name
 
 from ufo.blob import FilesystemBlobStore
 from ufo.connectors import ConnectorEntry, ConnectorRegistry
@@ -157,16 +157,19 @@ async def _sync_and_search(
     state: State,
     context: ToolContext,
     provider: str,
+    account: str,
     stream: str,
     query: str,
     database_url: str,
     tmp_path: Path,
 ) -> str:
     with ws(state.workspace_id):
-        registered = await sync_source(
-            context, SyncSourceInput(provider=provider, streams=(stream,))
+        await SourceObjects().apply(
+            context,
+            _binding_name(provider, account, None),
+            SourceSpec(provider=provider, streams=(stream,)),
+            None,
         )
-        assert registered.is_error is False
         driver = SyncDriver(
             blob=FilesystemBlobStore(root=tmp_path / "blobs"),
             postgres=database_url.startswith("postgresql"),
@@ -336,7 +339,7 @@ async def test_brokered_source_reaches_memory_search(
     context = _context(state, grants, connectors)
 
     recalled = await _sync_and_search(
-        state, context, provider, stream, query, database_url, tmp_path / provider
+        state, context, provider, account, stream, query, database_url, tmp_path / provider
     )
 
     assert query.lower() in recalled.lower()

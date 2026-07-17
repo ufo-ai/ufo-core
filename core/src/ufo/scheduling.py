@@ -51,6 +51,21 @@ class ScheduleInvoker(Protocol):
     async def invoke_scheduled(self, task: ScheduledTask) -> UUID | None: ...
 
 
+@dataclass(frozen=True)
+class TaskInspection:
+    """One scheduled task's live picture for status rendering: the conversation it reports into
+    (with its surface), timing marks, and the latest fire's turn and terminal text."""
+
+    conversation_id: UUID
+    surface: str
+    next_run_at: datetime
+    last_run_at: datetime | None
+    updated_at: datetime
+    last_turn_id: UUID | None
+    last_turn_status: str | None
+    last_response: str | None
+
+
 _COLUMNS = (
     tables.scheduled_task.c.id,
     tables.scheduled_task.c.conversation_id,
@@ -140,9 +155,11 @@ class ScheduleStore:
         description: str,
         next_run_at: datetime,
     ) -> ScheduledTask:
-        """Upsert a schedule row by name: an existing name is re-pointed at the new cadence, prompt,
-        and conversation and its claim cleared; a new name inserts. One row per (workspace, name),
-        so the name a caller keeps addresses exactly one task at cancel time."""
+        """Upsert a schedule row by name: an existing name is re-pointed at the new cadence and
+        prompt and its claim cleared, while its reporting conversation stays where it was created —
+        an update from another conversation never silently moves the task's replies. A new name
+        inserts bound to `conversation_id`. One row per (workspace, name), so the name a caller
+        keeps addresses exactly one task at cancel time."""
         if schedule == ONE_TIME_SCHEDULE:
             raise ValueError("one-time workflow pauses must use ScheduleStore.pause")
         if name.startswith(PAUSE_NAME_PREFIX):
@@ -250,13 +267,13 @@ class ScheduleStore:
                     effective_next_run_at = datetime.now(UTC)
             task_id = uuid4()
             values = {
-                "conversation_id": conversation_id,
                 "agent_id": effective_agent_id,
                 "schedule": schedule,
                 "prompt": prompt,
                 "description": description,
                 "next_run_at": effective_next_run_at,
                 "last_run_at": None,
+                "last_turn_id": None,
                 "origin_seq": origin_seq,
                 "resume_turn_id": resume_turn_id,
                 "claimed_by": None,
@@ -264,7 +281,7 @@ class ScheduleStore:
                 "updated_at": sa.func.now(),
             }
             insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
-            task_id = (
+            row = (
                 await connection.execute(
                     insert(tables.scheduled_task)
                     .values(
@@ -278,6 +295,7 @@ class ScheduleStore:
                         description=description,
                         next_run_at=effective_next_run_at,
                         last_run_at=None,
+                        last_turn_id=None,
                         origin_seq=origin_seq,
                         resume_turn_id=resume_turn_id,
                         claimed_by=None,
@@ -292,12 +310,15 @@ class ScheduleStore:
                         ),
                         set_=values,
                     )
-                    .returning(tables.scheduled_task.c.id)
+                    .returning(
+                        tables.scheduled_task.c.id,
+                        tables.scheduled_task.c.conversation_id,
+                    )
                 )
-            ).scalar_one()
+            ).one()
         return ScheduledTask(
-            id=task_id,
-            conversation_id=conversation_id,
+            id=row.id,
+            conversation_id=row.conversation_id,
             agent_id=effective_agent_id,
             name=name,
             schedule=schedule,
@@ -392,24 +413,32 @@ class ScheduleStore:
         return tuple(_task(row) for row in rows)
 
     async def reschedule(
-        self, task: ScheduledTask, next_run_at: datetime, last_run_at: datetime
+        self,
+        task: ScheduledTask,
+        next_run_at: datetime,
+        last_run_at: datetime,
+        last_turn_id: UUID | None = None,
     ) -> bool:
-        """Advance the exact claimed task version and clear its claim, recording when it ran."""
+        """Advance the exact claimed task version and clear its claim, recording when it ran and —
+        when the fire admitted a turn — which turn, so `inspect` can surface the latest response."""
         if task.claim_id is None:
             raise ValueError("an unclaimed scheduled task cannot be rescheduled")
         if task.schedule == ONE_TIME_SCHEDULE:
             raise ValueError("a one-time workflow pause cannot be rescheduled")
+        values: dict[str, object] = {
+            "next_run_at": next_run_at,
+            "last_run_at": last_run_at,
+            "resume_turn_id": None,
+            "claimed_by": None,
+            "claim_expires_at": None,
+            "updated_at": sa.func.now(),
+        }
+        if last_turn_id is not None:
+            values["last_turn_id"] = last_turn_id
         async with workspace_tx() as connection:
             updated = await connection.execute(
                 sa.update(tables.scheduled_task)
-                .values(
-                    next_run_at=next_run_at,
-                    last_run_at=last_run_at,
-                    resume_turn_id=None,
-                    claimed_by=None,
-                    claim_expires_at=None,
-                    updated_at=sa.func.now(),
-                )
+                .values(**values)
                 .where(
                     tables.scheduled_task.c.workspace_id == self.workspace_id,
                     tables.scheduled_task.c.id == task.id,
@@ -417,3 +446,46 @@ class ScheduleStore:
                 )
             )
         return updated.rowcount > 0
+
+    async def inspect(self, name: str) -> TaskInspection | None:
+        """One task's live picture beyond its definition: where it reports (the bound conversation
+        and its surface), its timing marks, and the latest fire's turn with its terminal outcome —
+        the read the `scheduled_task` object kind renders as status."""
+        query = (
+            sa.select(
+                tables.scheduled_task.c.conversation_id,
+                tables.scheduled_task.c.next_run_at,
+                tables.scheduled_task.c.last_run_at,
+                tables.scheduled_task.c.updated_at,
+                tables.scheduled_task.c.last_turn_id,
+                tables.conversation.c.surface,
+                tables.turn.c.status.label("turn_status"),
+                tables.turn.c.terminal,
+            )
+            .select_from(
+                tables.scheduled_task.join(
+                    tables.conversation,
+                    tables.scheduled_task.c.conversation_id == tables.conversation.c.id,
+                ).outerjoin(tables.turn, tables.scheduled_task.c.last_turn_id == tables.turn.c.id)
+            )
+            .where(
+                tables.scheduled_task.c.workspace_id == self.workspace_id,
+                tables.scheduled_task.c.name == name,
+                tables.scheduled_task.c.schedule != ONE_TIME_SCHEDULE,
+            )
+        )
+        async with workspace_tx() as connection:
+            row = (await connection.execute(query)).mappings().one_or_none()
+        if row is None:
+            return None
+        terminal = row["terminal"]
+        return TaskInspection(
+            conversation_id=row["conversation_id"],
+            surface=row["surface"],
+            next_run_at=row["next_run_at"],
+            last_run_at=row["last_run_at"],
+            updated_at=row["updated_at"],
+            last_turn_id=row["last_turn_id"],
+            last_turn_status=row["turn_status"],
+            last_response=(terminal or {}).get("text") if terminal else None,
+        )

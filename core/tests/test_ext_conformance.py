@@ -234,6 +234,7 @@ async def test_sample_is_discovered_via_its_entry_point() -> None:
         sample.SURFACE_LIVE_NAME,
     }
     assert {source.backend for source in manifest.sources} == {sample.SOURCE_BACKEND}
+    assert {kind.name for kind in manifest.objects} == {sample.WIDGET_KIND, sample.RELIC_KIND}
     assert {spec.name for spec in manifest.indexes} == {sample.INDEX_BACKEND}
     assert {spec.backend for spec in manifest.hubs} == {sample.HUB_BACKEND}
     assert {spec.path.name for spec in manifest.skills} == {sample.SKILL_NAME}
