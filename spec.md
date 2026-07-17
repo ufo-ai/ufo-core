@@ -303,6 +303,11 @@ visibility: live per-turn cost on the stream, workspace/member/agent rollups in 
 evaluated at inbound and per-step; `reject` refuses new turns, `park` suspends. Prices are a pinned
 table per model; BYOK usage still meters (visibility without billing).
 
+An external billing vendor is an extension draining the usage-export seam
+(`ctx.pending_usage_exports` / `ctx.ack_usage_exports`): core mints frozen, consumer-keyed delta
+intents from settled ledger rows — settlement and dedup keys are writer knowledge — and the
+extension is a pure delivery adapter (`metronome` ships them to Metronome's ingest API).
+
 ## Model abstraction
 
 `ModelClient`: `complete(messages, tools, stream)` + token accounting + provider image/content

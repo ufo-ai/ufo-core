@@ -14,6 +14,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from ufo.candidates import WorkspaceCandidates, owner_candidates
 from ufo.o11y import log
 from ufo.schema import tables
 from ufo.schema.records import Usage, ledger_id_for
@@ -349,6 +350,186 @@ async def record_sandbox_tokens(
             },
         )
     )
+
+
+EXPORT_SETTLE_MARGIN_SECONDS = 900
+
+
+@dataclass(frozen=True, slots=True)
+class UsageExport:
+    """One unshipped usage delta for an external billing consumer: the ledger row's growth between
+    `from_amount` and the amount at mint, frozen so a re-send after an unacknowledged delivery is
+    byte-identical under the same `(ledger_id, from_amount)` dedup key — the consumer's
+    at-least-once retry can therefore never double- or under-bill."""
+
+    ledger_id: UUID
+    from_amount: int
+    amount: int
+    priced_micro_usd: int
+    dimension: str
+    model: str
+    price_digest: str | None
+    turn_id: UUID | None
+    occurred_at: datetime
+
+
+async def mint_usage_exports(
+    connection: AsyncConnection, workspace_id: UUID, consumer: str, floor: datetime
+) -> None:
+    """Freeze the consumer's unshipped usage growth into `ledger_export` intent rows. This is the
+    export seam's settlement knowledge, kept beside the writers that define it: a `tokens` row is
+    insert-once and settles at creation; a `sandbox_tokens` row accumulates until its turn is
+    terminal, and `EXPORT_SETTLE_MARGIN_SECONDS` past `turn.updated_at` only bounds how often a
+    late egress-proxy write costs an extra top-up intent — a row that grows after minting mints a
+    further intent from the prior high-water mark, so no growth is ever lost to timing. Egress
+    rows (a zero-priced request count) never export. Usage settling before `floor` never mints —
+    the consumer's backfill bound. Idempotent: an intent's `(consumer, ledger_id, from_amount)`
+    key makes concurrent or replayed mints collapse onto one frozen row."""
+    now = datetime.now(UTC)
+    settle_cutoff = now - timedelta(seconds=EXPORT_SETTLE_MARGIN_SECONDS)
+    latest = (
+        sa.select(
+            tables.ledger_export.c.ledger_id,
+            sa.func.max(tables.ledger_export.c.to_amount).label("to_amount"),
+            sa.func.max(tables.ledger_export.c.to_micro_usd).label("to_micro_usd"),
+        )
+        .where(tables.ledger_export.c.consumer == consumer)
+        .group_by(tables.ledger_export.c.ledger_id)
+        .subquery()
+    )
+    growth = (
+        await connection.execute(
+            sa.select(
+                tables.ledger.c.id,
+                tables.ledger.c.workspace_id,
+                tables.ledger.c.amount,
+                tables.ledger.c.priced_micro_usd,
+                tables.ledger.c.updated_at,
+                sa.func.coalesce(latest.c.to_amount, 0).label("from_amount"),
+                sa.func.coalesce(latest.c.to_micro_usd, 0).label("from_micro_usd"),
+            )
+            .select_from(
+                tables.ledger.outerjoin(
+                    tables.turn, tables.turn.c.id == tables.ledger.c.turn_id
+                ).outerjoin(latest, latest.c.ledger_id == tables.ledger.c.id)
+            )
+            .where(
+                tables.ledger.c.workspace_id == workspace_id,
+                sa.or_(latest.c.ledger_id.is_(None), tables.ledger.c.amount > latest.c.to_amount),
+                sa.or_(
+                    (tables.ledger.c.dimension == TOKENS_DIMENSION)
+                    & (tables.ledger.c.created_at >= floor),
+                    (tables.ledger.c.dimension == SANDBOX_TOKENS_DIMENSION)
+                    & tables.turn.c.terminal.isnot(None)
+                    & (tables.turn.c.updated_at <= settle_cutoff)
+                    & (tables.turn.c.updated_at >= floor),
+                ),
+            )
+        )
+    ).all()
+    insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
+    for row in growth:
+        await connection.execute(
+            insert(tables.ledger_export)
+            .values(
+                consumer=consumer,
+                ledger_id=row.id,
+                from_amount=row.from_amount,
+                workspace_id=row.workspace_id,
+                to_amount=row.amount,
+                from_micro_usd=row.from_micro_usd,
+                to_micro_usd=row.priced_micro_usd,
+                occurred_at=row.updated_at,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+            .on_conflict_do_nothing(
+                index_elements=[
+                    tables.ledger_export.c.consumer,
+                    tables.ledger_export.c.ledger_id,
+                    tables.ledger_export.c.from_amount,
+                ]
+            )
+        )
+
+
+async def read_pending_usage_exports(
+    connection: AsyncConnection, workspace_id: UUID, consumer: str, limit: int
+) -> tuple[UsageExport, ...]:
+    """The consumer's minted, unacknowledged deltas in mint order, each joined to its ledger row's
+    immutable descriptive fields. A delivery the consumer never saw acknowledged stays pending and
+    re-reads identically — the frozen intent, never a recomputation."""
+    export = tables.ledger_export
+    rows = (
+        await connection.execute(
+            sa.select(
+                export.c.ledger_id,
+                export.c.from_amount,
+                (export.c.to_amount - export.c.from_amount).label("amount"),
+                (export.c.to_micro_usd - export.c.from_micro_usd).label("priced_micro_usd"),
+                tables.ledger.c.dimension,
+                tables.ledger.c.model,
+                tables.ledger.c.price_digest,
+                tables.ledger.c.turn_id,
+                export.c.occurred_at,
+            )
+            .select_from(export.join(tables.ledger, tables.ledger.c.id == export.c.ledger_id))
+            .where(
+                export.c.consumer == consumer,
+                export.c.workspace_id == workspace_id,
+                export.c.acked_at.is_(None),
+            )
+            .order_by(export.c.created_at, export.c.ledger_id, export.c.from_amount)
+            .limit(limit)
+        )
+    ).all()
+    return tuple(
+        UsageExport(
+            ledger_id=row.ledger_id,
+            from_amount=row.from_amount,
+            amount=row.amount,
+            priced_micro_usd=row.priced_micro_usd,
+            dimension=row.dimension,
+            model=row.model,
+            price_digest=row.price_digest,
+            turn_id=row.turn_id,
+            occurred_at=row.occurred_at,
+        )
+        for row in rows
+    )
+
+
+async def ack_usage_exports(
+    connection: AsyncConnection,
+    workspace_id: UUID,
+    consumer: str,
+    exports: tuple[UsageExport, ...],
+) -> None:
+    """Mark delivered intents acknowledged so they leave the pending read. Only ever called after
+    the external API accepted the batch; a crash before this lands re-delivers, and the frozen
+    intent plus the receiver's dedup make the re-delivery a no-op."""
+    keys = sa.or_(
+        *(
+            (tables.ledger_export.c.ledger_id == export.ledger_id)
+            & (tables.ledger_export.c.from_amount == export.from_amount)
+            for export in exports
+        )
+    )
+    await connection.execute(
+        sa.update(tables.ledger_export)
+        .where(
+            tables.ledger_export.c.consumer == consumer,
+            tables.ledger_export.c.workspace_id == workspace_id,
+            keys,
+        )
+        .values(acked_at=sa.func.now(), updated_at=sa.func.now())
+    )
+
+
+def metered_workspaces() -> WorkspaceCandidates:
+    """Candidates for a usage-export job: every workspace that has ever metered. Coarse on purpose
+    — the per-tick no-op for a fully exported workspace is one indexed pending read."""
+    return owner_candidates(lambda: sa.select(tables.ledger.c.workspace_id).distinct())
 
 
 @dataclass(frozen=True, slots=True)

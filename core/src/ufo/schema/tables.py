@@ -192,6 +192,31 @@ ledger = sa.Table(
     sa.Index("ledger_turn", "turn_id"),
 )
 
+ledger_export = sa.Table(
+    "ledger_export",
+    metadata,
+    sa.Column("consumer", sa.Text, nullable=False),
+    sa.Column("ledger_id", sa.Uuid, sa.ForeignKey("ledger.id"), nullable=False),
+    sa.Column("from_amount", sa.BigInteger, nullable=False),
+    sa.Column("workspace_id", sa.Uuid, nullable=False),
+    sa.Column("to_amount", sa.BigInteger, nullable=False),
+    sa.Column("from_micro_usd", sa.BigInteger, nullable=False),
+    sa.Column("to_micro_usd", sa.BigInteger, nullable=False),
+    sa.Column("occurred_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("acked_at", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.PrimaryKeyConstraint("consumer", "ledger_id", "from_amount"),
+    sa.CheckConstraint("to_amount > from_amount", name="ledger_export_delta"),
+    sa.Index(
+        "ledger_export_pending",
+        "consumer",
+        "workspace_id",
+        postgresql_where=sa.text("acked_at is null"),
+        sqlite_where=sa.text("acked_at is null"),
+    ),
+)
+
 spend_cap = sa.Table(
     "spend_cap",
     metadata,

@@ -70,6 +70,7 @@ spec:
     - {secretKey: E2B_API_KEY, remoteRef: {key: ${secret_api_keys}, property: e2b-api-key}}
     - {secretKey: TURBOPUFFER_API_KEY, remoteRef: {key: ${secret_api_keys}, property: turbopuffer-api-key}}
     - {secretKey: EXA_API, remoteRef: {key: ${secret_api_keys}, property: exa-api-key}}
+    - {secretKey: METRONOME_BEARER_TOKEN, remoteRef: {key: ${secret_api_keys}, property: metronome-bearer-token}}
     # Serve trusts the proxy certificate; only the proxy receives the key.
     - {secretKey: UFO_EGRESS_CA_CERT, remoteRef: {key: ${secret_platform}, property: egress-ca-cert}}
     - {secretKey: UFO_TOKEN_SECRET, remoteRef: {key: ${secret_platform}, property: ufo-token-secret}}

@@ -21,7 +21,13 @@ import sqlalchemy as sa
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ufo.accounting import Pricing
+from ufo.accounting import (
+    Pricing,
+    UsageExport,
+    ack_usage_exports,
+    mint_usage_exports,
+    read_pending_usage_exports,
+)
 from ufo.blob import BlobNotFound, BlobStore
 from ufo.candidates import WorkspaceCandidates, owner_candidates
 from ufo.db import workspace_tx
@@ -396,6 +402,32 @@ class ExtensionContext:
     scheduler: ScheduleStore | None = None
     invoker: TurnInvoker | None = None
     model: ModelAccess | None = None
+
+    async def pending_usage_exports(self, floor: datetime, limit: int) -> tuple[UsageExport, ...]:
+        """This extension's settled, unacknowledged usage deltas, at most `limit`, minting new
+        intents first — the billing-export read seam. Consumer-keyed by the extension's stable
+        name, so two exporters never touch each other's marks; usage settling before `floor`
+        never exports (the extension's backfill bound). Core owns the mint because settlement and
+        delta-freezing are writer knowledge no extension can express through the SDK without
+        re-declaring the ledger's private schema."""
+        async with workspace_tx() as connection:
+            await mint_usage_exports(
+                connection, self.store.workspace_id, self.store.extension, floor
+            )
+            return await read_pending_usage_exports(
+                connection, self.store.workspace_id, self.store.extension, limit
+            )
+
+    async def ack_usage_exports(self, exports: tuple[UsageExport, ...]) -> None:
+        """Acknowledge delivered exports so they leave the pending read — called only after the
+        external receiver accepted them; anything unacknowledged re-reads frozen and re-delivers
+        under the same dedup key."""
+        if not exports:
+            return
+        async with workspace_tx() as connection:
+            await ack_usage_exports(
+                connection, self.store.workspace_id, self.store.extension, exports
+            )
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[AsyncConnection]:

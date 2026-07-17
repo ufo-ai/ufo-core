@@ -160,6 +160,7 @@ resource "aws_secretsmanager_secret_version" "api_keys" {
     "exa-api-key"                  = ""
     "turbopuffer-api-key"          = ""
     "datadog-api-key"              = ""
+    "metronome-bearer-token"       = ""
   })
 
   lifecycle {

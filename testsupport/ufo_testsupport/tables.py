@@ -10,6 +10,7 @@ DELETE_ORDER = (
     tables.grant,
     tables.proposal,
     tables.spend_cap,
+    tables.ledger_export,
     tables.ledger,
     tables.writeback,
     tables.shared_artifact,

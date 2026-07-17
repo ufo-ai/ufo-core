@@ -454,3 +454,132 @@ async def test_spend_rollup_excludes_ledger_outside_the_window(db: None) -> None
     assert report.total_micro_usd == 0
     assert report.by_dimension == ()
     assert report.by_member == ()
+
+
+CONSUMER = "metronome"
+PAST_EXPORT_MARGIN_SECONDS = accounting.EXPORT_SETTLE_MARGIN_SECONDS + 100
+
+
+async def _settle_turn(connection: AsyncConnection, turn_id: UUID, age_seconds: int) -> None:
+    await connection.execute(
+        sa.update(tables.turn)
+        .where(tables.turn.c.id == turn_id)
+        .values(
+            status="done",
+            terminal={"status": "done", "text": "ok"},
+            updated_at=datetime.now(UTC) - timedelta(seconds=age_seconds),
+        )
+    )
+
+
+async def _pending(
+    workspace_id: UUID, consumer: str = CONSUMER
+) -> tuple[accounting.UsageExport, ...]:
+    floor = datetime.now(UTC) - timedelta(days=7)
+    async with workspace_tx() as connection:
+        await accounting.mint_usage_exports(connection, workspace_id, consumer, floor)
+        return await accounting.read_pending_usage_exports(connection, workspace_id, consumer, 100)
+
+
+async def test_usage_export_settlement_rules(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await record_turn_usage(
+            connection, workspace_id, turn_id, "claude-opus-4-8", Usage(input_tokens=1000)
+        )
+        await record_workspace_usage(
+            connection, workspace_id, "claude-opus-4-8", Usage(input_tokens=250)
+        )
+        await record_sandbox_tokens(
+            connection, workspace_id, turn_id, "claude-opus-4-8", Usage(input_tokens=175)
+        )
+        await record_egress_request(connection, workspace_id, turn_id)
+
+    settled = await _pending(workspace_id)
+    assert {export.dimension for export in settled} == {"tokens"}
+    assert all(export.from_amount == 0 and export.price_digest for export in settled)
+    assert {export.amount for export in settled} == {1000, 250}
+
+    async with workspace_tx() as connection:
+        await _settle_turn(connection, turn_id, age_seconds=0)
+    assert {export.dimension for export in await _pending(workspace_id)} == {"tokens"}
+
+    async with workspace_tx() as connection:
+        await _settle_turn(connection, turn_id, age_seconds=PAST_EXPORT_MARGIN_SECONDS)
+    settled = await _pending(workspace_id)
+    assert {export.dimension for export in settled} == {"tokens", "sandbox_tokens"}
+    sandbox = next(e for e in settled if e.dimension == "sandbox_tokens")
+    assert (sandbox.amount, sandbox.from_amount, sandbox.turn_id) == (175, 0, turn_id)
+    assert not any(export.dimension == "egress" for export in settled)
+
+
+async def test_usage_export_growth_mints_frozen_top_ups(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await record_sandbox_tokens(
+            connection, workspace_id, turn_id, "claude-opus-4-8", Usage(input_tokens=175)
+        )
+        await _settle_turn(connection, turn_id, age_seconds=PAST_EXPORT_MARGIN_SECONDS)
+    (first,) = await _pending(workspace_id)
+    assert (first.from_amount, first.amount) == (0, 175)
+
+    async with workspace_tx() as connection:
+        await record_sandbox_tokens(
+            connection, workspace_id, turn_id, "claude-opus-4-8", Usage(input_tokens=40)
+        )
+        await _settle_turn(connection, turn_id, age_seconds=PAST_EXPORT_MARGIN_SECONDS)
+    frozen, top_up = sorted(await _pending(workspace_id), key=lambda e: e.from_amount)
+    assert (frozen.from_amount, frozen.amount) == (0, 175)
+    assert (top_up.from_amount, top_up.amount) == (175, 40)
+    assert frozen.priced_micro_usd + top_up.priced_micro_usd > 0
+
+    async with workspace_tx() as connection:
+        await accounting.ack_usage_exports(connection, workspace_id, CONSUMER, (frozen, top_up))
+    assert await _pending(workspace_id) == ()
+
+
+async def test_usage_export_floor_consumer_and_workspace_scoping(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, _ = await _seed_turn(connection)
+        other_workspace, _ = await _seed_turn(connection)
+        await record_workspace_usage(
+            connection, workspace_id, "claude-opus-4-8", Usage(input_tokens=100)
+        )
+        await record_workspace_usage(
+            connection, workspace_id, "claude-opus-4-8", Usage(input_tokens=999)
+        )
+        await record_workspace_usage(
+            connection, other_workspace, "claude-opus-4-8", Usage(input_tokens=7)
+        )
+        pre_floor = (
+            await connection.execute(
+                sa.select(tables.ledger.c.id).where(tables.ledger.c.amount == 999)
+            )
+        ).scalar_one()
+        await connection.execute(
+            sa.update(tables.ledger)
+            .where(tables.ledger.c.id == pre_floor)
+            .values(created_at=datetime.now(UTC) - timedelta(days=40))
+        )
+
+    (mine,) = await _pending(workspace_id)
+    assert mine.amount == 100
+
+    (other_consumer,) = await _pending(workspace_id, consumer="other")
+    assert other_consumer.amount == 100
+    async with workspace_tx() as connection:
+        await accounting.ack_usage_exports(connection, workspace_id, CONSUMER, (mine,))
+    assert await _pending(workspace_id) == ()
+    (still_pending,) = await _pending(workspace_id, consumer="other")
+    assert still_pending.amount == 100
+
+    (theirs,) = await _pending(other_workspace)
+    assert theirs.amount == 7
+
+
+async def test_metered_workspaces_names_only_workspaces_with_ledger_rows(db: None) -> None:
+    async with workspace_tx() as connection:
+        metered, _ = await _seed_turn(connection)
+        await _seed_turn(connection)
+        await record_workspace_usage(connection, metered, "claude-opus-4-8", Usage(input_tokens=10))
+    assert await accounting.metered_workspaces()() == (metered,)
