@@ -35,8 +35,10 @@ from ufo.schema.records import (
     PARKED,
     TURN_QUEUE_NAME,
     TURN_WORKFLOW_NAME,
+    TurnAdmissionSource,
     TurnStatus,
 )
+from ufo.seats import Seats, gate_member
 from ufo.sources.sync import (
     SOURCE_SYNC_JOB,
     SOURCE_SYNC_SCHEDULE,
@@ -77,6 +79,8 @@ class _DispatchTurn:
     conversation_id: UUID
     agent_id: UUID
     member_id: UUID | None
+    speaker_member_id: UUID | None
+    admission_source: TurnAdmissionSource
     status: TurnStatus
 
 
@@ -88,7 +92,10 @@ class TurnDispatcher:
     eligible, so a later turn cannot overtake an earlier offer that has not started. A never-claimed
     QUEUED turn's DBOS workflow id is the turn id, making an ambiguous duplicate offer safe.
 
-    PARKED rows share the same scanner and advisory dispatch stamp, but remain spend-gated. A row
+    PARKED rows share the same scanner and advisory dispatch stamp, but remain spend- and
+    seat-gated: a parked turn stays held while its gate member — the speaker, or the
+    conversation's member for a scheduled fire — holds no seat, and resumes when one is granted
+    again. A row
     that has ever been claimed — a PARKED one, or a QUEUED one a fold resumed from park — needs a
     fresh DBOS workflow id because the run that claimed it consumed its original id; the choice
     reads `running_attempt` from the stamping update itself, so a claim-park-requeue racing the
@@ -108,10 +115,14 @@ class TurnDispatcher:
         for turn in await self._dispatchable_turns():
             if turn.status == PARKED:
                 async with workspace_tx() as connection:
+                    gate = gate_member(
+                        turn.speaker_member_id, turn.admission_source, turn.member_id
+                    )
+                    seated = gate is None or await Seats(turn.workspace_id).admits(connection, gate)
                     decision = await SpendEvaluator(
                         turn.workspace_id, turn.member_id, turn.agent_id
                     ).decide(connection, 0)
-                if decision.outcome != ALLOW:
+                if not seated or decision.outcome != ALLOW:
                     continue
             await self._enqueue(turn)
 
@@ -136,6 +147,8 @@ class TurnDispatcher:
                         tables.turn.c.conversation_id,
                         tables.turn.c.agent_id,
                         tables.conversation.c.member_id,
+                        tables.turn.c.speaker_member_id,
+                        tables.turn.c.admission_source,
                         tables.turn.c.status,
                     )
                     .select_from(tables.turn.join(tables.conversation))
@@ -155,6 +168,8 @@ class TurnDispatcher:
                 r.conversation_id,
                 r.agent_id,
                 r.member_id,
+                r.speaker_member_id,
+                r.admission_source,
                 r.status,
             )
             for r in rows

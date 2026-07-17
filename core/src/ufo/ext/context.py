@@ -432,9 +432,12 @@ class ExtensionContext:
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[AsyncConnection]:
         """A transaction for the extension's own tables — those a migration the extension ships
-        created. The handler builds queries against the SQLAlchemy tables it declares and scopes
-        rows by `self.store.workspace_id`. This yields a RAW whole-database connection: it is not
-        restricted to the extension's schema and enforces no workspace scoping — reaching only its
+        created — and for SDK-exported core rules that take the caller's connection
+        (`ufo.sdk.seats`' `Seats`), so an extension applies core-owned state changes inside its
+        own workspace scope. The handler builds queries against the SQLAlchemy tables it declares
+        and scopes rows by `self.store.workspace_id`. This yields a RAW whole-database
+        connection: it is not restricted to the extension's schema and enforces no workspace
+        scoping — reaching only its
         own tables, scoped to its workspace, is the extension's responsibility, not a guarantee of
         this handle (the SDK import boundary is a static gate over imports, not over runtime SQL).
         Commits on exit, rolls back on error — the same one transaction the ScopedStore rides."""

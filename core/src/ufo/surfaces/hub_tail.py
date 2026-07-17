@@ -17,6 +17,7 @@ from ufo.db import workspace_tx
 from ufo.hub import Hub, LiveFrame, Parked, Terminal
 from ufo.schema import tables
 from ufo.schema.records import PARKED, TerminalFrame
+from ufo.seats import SEAT_REVOKED_MESSAGE, Seats, gate_member, seat_gate_absent
 
 TERMINAL_POLL_SECONDS = 1.0
 PARK_NOTICE = "This turn is parked: over a spend cap. It resumes when the cap is raised."
@@ -73,18 +74,32 @@ async def turn_status_frame(turn_id: UUID) -> LiveFrame | None:
     async with workspace_tx() as connection:
         row = (
             await connection.execute(
-                sa.select(tables.turn.c.status, tables.turn.c.terminal).where(
-                    tables.turn.c.id == turn_id
+                sa.select(
+                    tables.turn.c.status,
+                    tables.turn.c.terminal,
+                    tables.turn.c.workspace_id,
+                    tables.turn.c.speaker_member_id,
+                    tables.turn.c.admission_source,
+                    tables.conversation.c.member_id,
                 )
+                .select_from(tables.turn.join(tables.conversation))
+                .where(tables.turn.c.id == turn_id)
             )
         ).one_or_none()
-    if row is None:
-        return None
-    if row.terminal is not None:
-        return Terminal(frame=TerminalFrame.model_validate(row.terminal))
-    if row.status == PARKED:
-        return Parked(message=PARK_NOTICE)
-    return None
+        if row is None:
+            return None
+        if row.terminal is not None:
+            return Terminal(frame=TerminalFrame.model_validate(row.terminal))
+        if row.status != PARKED:
+            return None
+        gate = gate_member(row.speaker_member_id, row.admission_source, row.member_id)
+        if (
+            gate is not None
+            and not seat_gate_absent(row.workspace_id)
+            and not await Seats(row.workspace_id).admits(connection, gate)
+        ):
+            return Parked(message=SEAT_REVOKED_MESSAGE)
+    return Parked(message=PARK_NOTICE)
 
 
 async def terminal_frame(turn_id: UUID) -> TerminalFrame | None:

@@ -11,12 +11,14 @@ ships scoped."""
 
 import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
 import sqlalchemy as sa
 import ufo_ext_metronome as metronome
+from cryptography.fernet import Fernet
 
 from ufo.accounting import (
     record_egress_request,
@@ -24,16 +26,42 @@ from ufo.accounting import (
     record_turn_usage,
     record_workspace_usage,
 )
+from ufo.blob import FilesystemBlobStore
+from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
-from ufo.ext.context import context_for
+from ufo.ext.context import ExtensionContext, context_for
+from ufo.ext.loader import turn_tools
 from ufo.jobs import JobRunner, bindings_from
+from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.schema import tables
-from ufo.schema.records import TerminalFrame, Usage
+from ufo.schema.records import Agent, TerminalFrame, Turn, Usage
+from ufo.seats import OwnerSeatRevocation, SeatLimitReached
+from ufo.tools.context import SpawnResult, ToolContext
+from ufo.tools.registry import ToolDef
 from ufo.workspace import ws
 
 TOKEN = "sandbox-bearer-0xdecafbad"
 MODEL = "claude-opus-4-8"
 PAST_MARGIN_SECONDS = 1000
+
+
+class _UntouchedCarrier:
+    async def create(self, spec: SandboxSpec) -> SandboxHandle:
+        raise AssertionError("a seat tool must not touch the sandbox")
+
+    async def exec(
+        self, handle: SandboxHandle, argv: tuple[str, ...], stdin: bytes, timeout_s: int
+    ) -> ExecResult:
+        raise AssertionError("a seat tool must not touch the sandbox")
+
+    async def destroy(self, handle: SandboxHandle) -> None:
+        raise AssertionError("a seat tool must not touch the sandbox")
+
+
+async def _unavailable_spawn(
+    profile: str, payload: dict[str, object], background: bool = False
+) -> SpawnResult:
+    raise AssertionError("a seat tool must not spawn a subagent")
 
 
 class _Recorder:
@@ -153,14 +181,21 @@ async def _acked() -> set[tuple[UUID, int]]:
         return {(row.ledger_id, row.from_amount) for row in result.all()}
 
 
-def test_manifest_declares_one_cron_ship_job() -> None:
+def test_manifest_declares_two_cron_jobs_three_tools_one_section() -> None:
     declared = metronome.manifest()
     assert declared.name == "metronome"
-    (job,) = declared.jobs
-    assert job.name == "usage_shipper"
-    assert job.schedule == "0 * * * * *"
-    assert job.handler is metronome._ship
-    assert not declared.tools
+    usage, seats = declared.jobs
+    assert usage.name == "usage_shipper"
+    assert usage.schedule == "0 * * * * *"
+    assert usage.handler is metronome._ship
+    assert seats.name == "seat_shipper"
+    assert seats.schedule == "0 0 * * * *"
+    assert seats.handler is metronome._ship_seats
+    assert [tool.name for tool in declared.tools] == ["grant_seat", "revoke_seat", "list_seats"]
+    assert all(tool.side_effecting for tool in declared.tools[:2])
+    assert not declared.tools[2].side_effecting
+    (section,) = declared.prompt_sections
+    assert section.name == "seats"
     assert not declared.credentials
     assert not declared.routes
 
@@ -411,3 +446,250 @@ async def test_manifest_job_fires_through_job_runner(
     (event,) = _events(request)
     assert event["customer_id"] == str(workspace_id)
     assert await _acked() != set()
+
+
+async def _seat_seed(limit: int | None = 2) -> tuple[UUID, UUID, UUID]:
+    """A workspace under a seat limit whose owner (earliest member) is seated and whose later
+    joiner is not — both sides of the owner gate and the seat count in one seed."""
+    workspace_id, owner_id, joiner_id = uuid4(), uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=workspace_id,
+                seat_limit=limit,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        for member_id, email, seated, created in (
+            (owner_id, "owner@example.com", True, datetime(2026, 1, 1, tzinfo=UTC)),
+            (joiner_id, "late@example.com", False, datetime(2026, 6, 1, tzinfo=UTC)),
+        ):
+            await connection.execute(
+                sa.insert(tables.member).values(
+                    id=member_id,
+                    workspace_id=workspace_id,
+                    email=email,
+                    seated_at=created if seated else None,
+                    created_at=created,
+                    updated_at=created,
+                )
+            )
+    return workspace_id, owner_id, joiner_id
+
+
+def _seat_tools() -> tuple[dict[str, ToolDef], dict[str, ExtensionContext]]:
+    declared, ext_by_tool = turn_tools(
+        (metronome.manifest(),), CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    )
+    return {tool.name: tool for tool in declared}, ext_by_tool
+
+
+def _tool_context(
+    workspace_id: UUID, ext: ExtensionContext, tmp_path: Path, member_id: UUID | None
+) -> ToolContext:
+    return ToolContext(
+        sandbox=SandboxSession(
+            carrier=_UntouchedCarrier(),
+            handle=SandboxHandle(conversation_id=uuid4(), container_id="test"),
+        ),
+        blob=FilesystemBlobStore(root=tmp_path),
+        turn=Turn(
+            id=uuid4(),
+            workspace_id=workspace_id,
+            conversation_id=uuid4(),
+            agent_id=uuid4(),
+            seq=1,
+            status="running",
+            inbound="manage seats",
+            created_at=datetime(2026, 7, 10, tzinfo=UTC),
+        ),
+        agent=Agent(prompt="p", model=MODEL),
+        spawn=_unavailable_spawn,
+        speaker_member_id=member_id,
+        audience_member_id=member_id,
+        artifact_token_secret="",
+        ext=ext,
+    )
+
+
+async def _run_tool(
+    workspace_id: UUID, tmp_path: Path, member_id: UUID | None, name: str, **args: object
+) -> dict[str, object]:
+    registry, ext_by_tool = _seat_tools()
+    tool = registry[name]
+    ctx = _tool_context(workspace_id, ext_by_tool[name], tmp_path, member_id)
+    with ws(workspace_id):
+        result = await tool.handler(ctx, tool.input_model.model_validate(args))
+    return json.loads(result.content[0].text)
+
+
+async def _seated(member_id: UUID) -> bool:
+    async with workspace_tx() as connection:
+        return (
+            await connection.execute(
+                sa.select(tables.member.c.seated_at).where(tables.member.c.id == member_id)
+            )
+        ).scalar_one() is not None
+
+
+async def test_owner_grants_and_revokes_a_seat_through_real_dispatch(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id, owner_id, joiner_id = await _seat_seed()
+    payload = await _run_tool(
+        workspace_id, tmp_path, owner_id, metronome.GRANT_SEAT_TOOL, email="late@example.com"
+    )
+    assert await _seated(joiner_id)
+    assert payload["seat_limit"] == 2
+    assert payload["seated"] == 2
+    assert payload["members"] == [
+        {"email": "owner@example.com", "seated": True, "owner": True},
+        {"email": "late@example.com", "seated": True, "owner": False},
+    ]
+    payload = await _run_tool(
+        workspace_id, tmp_path, owner_id, metronome.REVOKE_SEAT_TOOL, email="late@example.com"
+    )
+    assert not await _seated(joiner_id)
+    assert payload["seated"] == 1
+
+
+async def test_non_owner_and_speakerless_seat_changes_are_refused(db: None, tmp_path: Path) -> None:
+    workspace_id, _, joiner_id = await _seat_seed()
+    with pytest.raises(ValueError, match="only the workspace owner"):
+        await _run_tool(
+            workspace_id, tmp_path, joiner_id, metronome.GRANT_SEAT_TOOL, email="late@example.com"
+        )
+    with pytest.raises(ValueError, match="speaking member"):
+        await _run_tool(
+            workspace_id, tmp_path, None, metronome.REVOKE_SEAT_TOOL, email="late@example.com"
+        )
+    assert not await _seated(joiner_id)
+
+
+async def test_grant_at_the_limit_surfaces_the_seat_error(db: None, tmp_path: Path) -> None:
+    workspace_id, owner_id, _ = await _seat_seed(limit=1)
+    with pytest.raises(SeatLimitReached, match="all 1 seats"):
+        await _run_tool(
+            workspace_id, tmp_path, owner_id, metronome.GRANT_SEAT_TOOL, email="late@example.com"
+        )
+
+
+async def test_revoking_the_owner_is_refused(db: None, tmp_path: Path) -> None:
+    workspace_id, owner_id, _ = await _seat_seed()
+    with pytest.raises(OwnerSeatRevocation):
+        await _run_tool(
+            workspace_id, tmp_path, owner_id, metronome.REVOKE_SEAT_TOOL, email="owner@example.com"
+        )
+
+
+async def test_any_member_lists_seats(db: None, tmp_path: Path) -> None:
+    workspace_id, _, joiner_id = await _seat_seed()
+    payload = await _run_tool(workspace_id, tmp_path, joiner_id, metronome.LIST_SEATS_TOOL)
+    assert payload["seat_limit"] == 2
+    assert [entry["email"] for entry in payload["members"]] == [
+        "owner@example.com",
+        "late@example.com",
+    ]
+
+
+def _seat_shipper(recorder: _Recorder) -> metronome.SeatShipper:
+    return metronome.SeatShipper(
+        ctx=context_for(metronome.NAME, frozenset()),
+        transport=httpx.MockTransport(recorder.handle),
+    )
+
+
+async def _workspace_limit(workspace_id: UUID) -> int | None:
+    async with workspace_tx() as connection:
+        return (
+            await connection.execute(
+                sa.select(tables.workspace.c.seat_limit).where(
+                    tables.workspace.c.id == workspace_id
+                )
+            )
+        ).scalar_one()
+
+
+async def test_seat_job_establishes_the_limit_and_ships_one_daily_snapshot(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(metronome.METRONOME_BEARER_TOKEN_ENV, TOKEN)
+    recorder = _Recorder()
+    monkeypatch.setattr(metronome, "INGEST_TRANSPORT", httpx.MockTransport(recorder.handle))
+    workspace_id, _, _ = await _seed()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.member)
+            .values(seated_at=sa.func.now(), updated_at=sa.func.now())
+            .where(tables.member.c.workspace_id == workspace_id)
+        )
+    runner = JobRunner(bindings=bindings_from((metronome.manifest(),), ()))
+    await runner.fire(f"{metronome.NAME}:{metronome.SEAT_JOB_NAME}")
+    assert await _workspace_limit(workspace_id) == metronome.SEAT_LIMIT_DEFAULT
+    (request,) = recorder.requests
+    (event,) = _events(request)
+    today = datetime.now(UTC).date().isoformat()
+    assert event["transaction_id"] == f"seats:{workspace_id}:{today}"
+    assert event["customer_id"] == str(workspace_id)
+    assert event["event_type"] == "ufo_seats"
+    assert event["properties"] == {
+        "seat_count": "1",
+        "seat_limit": str(metronome.SEAT_LIMIT_DEFAULT),
+    }
+    assert all(isinstance(value, str) for value in event["properties"].values())
+    await runner.fire(f"{metronome.NAME}:{metronome.SEAT_JOB_NAME}")
+    assert len(recorder.requests) == 1
+
+
+async def test_seat_job_reships_after_a_stale_mark_and_never_overwrites_a_limit(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(metronome.METRONOME_BEARER_TOKEN_ENV, TOKEN)
+    workspace_id, _, _ = await _seed()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.workspace)
+            .values(seat_limit=3, updated_at=sa.func.now())
+            .where(tables.workspace.c.id == workspace_id)
+        )
+    recorder = _Recorder()
+    shipper = _seat_shipper(recorder)
+    yesterday = (datetime.now(UTC) - timedelta(days=1)).date().isoformat()
+    with ws(workspace_id):
+        await shipper.ctx.store.put(metronome.SEAT_SHIPPED_KEY, yesterday)
+        await shipper.run()
+    (event,) = _events(recorder.requests[0])
+    today = datetime.now(UTC).date().isoformat()
+    assert event["transaction_id"] == f"seats:{workspace_id}:{today}"
+    assert event["properties"]["seat_limit"] == "3"
+    assert await _workspace_limit(workspace_id) == 3
+
+
+async def test_seat_job_failed_post_leaves_no_mark_then_reships_the_same_id(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(metronome.METRONOME_BEARER_TOKEN_ENV, TOKEN)
+    workspace_id, _, _ = await _seed()
+    failing = _Recorder(status=500)
+    with ws(workspace_id), pytest.raises(metronome.MetronomeError):
+        await _seat_shipper(failing).run()
+    recorder = _Recorder()
+    with ws(workspace_id):
+        await _seat_shipper(recorder).run()
+    (failed_event,) = _events(failing.requests[0])
+    (event,) = _events(recorder.requests[0])
+    assert event["transaction_id"] == failed_event["transaction_id"]
+    with ws(workspace_id):
+        await _seat_shipper(recorder).run()
+    assert len(recorder.requests) == 1
+
+
+async def test_seat_job_missing_token_fails_loud(db: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(metronome.METRONOME_BEARER_TOKEN_ENV, raising=False)
+    workspace_id, _, _ = await _seed()
+    recorder = _Recorder()
+    with ws(workspace_id), pytest.raises(RuntimeError, match="METRONOME_BEARER_TOKEN"):
+        await _seat_shipper(recorder).run()
+    assert recorder.requests == []
+    assert await _workspace_limit(workspace_id) is None

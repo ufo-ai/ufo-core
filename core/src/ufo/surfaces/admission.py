@@ -25,7 +25,9 @@ same identity. Internal invocation never consumes a member's pause.
 The inbound spend decision routes the turn before it is enqueued: allow queues it; a breached cap
 either parks it (held, not enqueued — the resume job re-admits it when the cap is raised) or, when
 the cap rejects, commits it cancelled with the reason, so a client's wait ends in-surface either
-way."""
+way. The seat gate runs first in the same commit: a speaking member without a seat — or a
+scheduled fire into a seatless member's conversation — commits cancelled with the refusal, and an
+unseated speaker's message never folds into a live turn."""
 
 import asyncio
 from dataclasses import dataclass
@@ -55,6 +57,7 @@ from ufo.schema.records import (
     TurnStatus,
     turn_id_for,
 )
+from ufo.seats import SEAT_REFUSAL_MESSAGE, Seats, gate_member
 
 QUEUED: TurnStatus = "queued"
 CANCELLED: TerminalStatus = "cancelled"
@@ -320,7 +323,10 @@ class Admission:
                 ).one_or_none()
                 if timer_turn is not None:
                     timer_key = f"{timer_turn.pause_id}:{timer_turn.pause_due_at.isoformat()}"
-                    if timer_turn.idempotency_key == timer_key:
+                    if timer_turn.idempotency_key == timer_key and (
+                        speaker_member_id is None
+                        or await Seats(workspace_id).admits(connection, speaker_member_id)
+                    ):
                         taken_over = await connection.execute(
                             sa.update(tables.turn)
                             .values(
@@ -354,7 +360,13 @@ class Admission:
             if deduped is None and scheduled_task is None:
                 live_turn = (
                     await connection.execute(
-                        sa.select(tables.turn.c.id, tables.turn.c.seq, tables.turn.c.status)
+                        sa.select(
+                            tables.turn.c.id,
+                            tables.turn.c.seq,
+                            tables.turn.c.status,
+                            tables.turn.c.speaker_member_id,
+                            tables.turn.c.admission_source,
+                        )
                         .where(
                             tables.turn.c.workspace_id == workspace_id,
                             tables.turn.c.conversation_id == conversation_id,
@@ -365,9 +377,29 @@ class Admission:
                         .with_for_update()
                     )
                 ).one_or_none()
+                parked_gate = (
+                    None
+                    if live_turn is None or live_turn.status != PARKED
+                    else gate_member(
+                        live_turn.speaker_member_id,
+                        live_turn.admission_source,
+                        conversation.member_id,
+                    )
+                )
+                fold_admitted = (
+                    live_turn is not None
+                    and (
+                        speaker_member_id is None
+                        or await Seats(workspace_id).admits(connection, speaker_member_id)
+                    )
+                    and (
+                        parked_gate is None
+                        or await Seats(workspace_id).admits(connection, parked_gate)
+                    )
+                )
                 fold_decision = (
                     None
-                    if live_turn is None
+                    if not fold_admitted
                     else await SpendEvaluator(
                         workspace_id, conversation.member_id, agent_id
                     ).decide(connection, 0)
@@ -471,17 +503,29 @@ class Admission:
                 ).scalar_one()
                 turn_id = turn_id_for(workspace_id, conversation_id, seq)
                 turn_seq = seq
-                decision = await SpendEvaluator(
-                    workspace_id, conversation.member_id, agent_id
-                ).decide(connection, 0)
-                match decision.outcome:
-                    case "allow":
-                        status, terminal = QUEUED, None
-                    case "park":
-                        status, terminal = PARKED, None
-                    case _:
-                        status = CANCELLED
-                        terminal = TerminalFrame(status=CANCELLED, text=decision.message)
+                admission_source = (
+                    MEMBER_ADMISSION
+                    if pending_pause is not None
+                    else SCHEDULED_ADMISSION
+                    if scheduled_task is not None
+                    else INTERNAL_ADMISSION
+                )
+                gate = gate_member(speaker_member_id, admission_source, conversation.member_id)
+                if gate is not None and not await Seats(workspace_id).admits(connection, gate):
+                    status = CANCELLED
+                    terminal = TerminalFrame(status=CANCELLED, text=SEAT_REFUSAL_MESSAGE)
+                else:
+                    decision = await SpendEvaluator(
+                        workspace_id, conversation.member_id, agent_id
+                    ).decide(connection, 0)
+                    match decision.outcome:
+                        case "allow":
+                            status, terminal = QUEUED, None
+                        case "park":
+                            status, terminal = PARKED, None
+                        case _:
+                            status = CANCELLED
+                            terminal = TerminalFrame(status=CANCELLED, text=decision.message)
                 await connection.execute(
                     sa.insert(tables.turn).values(
                         id=turn_id,
@@ -491,13 +535,7 @@ class Admission:
                         seq=seq,
                         status=status,
                         inbound=body,
-                        admission_source=(
-                            MEMBER_ADMISSION
-                            if pending_pause is not None
-                            else SCHEDULED_ADMISSION
-                            if scheduled_task is not None
-                            else INTERNAL_ADMISSION
-                        ),
+                        admission_source=admission_source,
                         speaker_member_id=speaker_member_id,
                         context=None if context is None else context.model_dump(mode="json"),
                         terminal=None if terminal is None else terminal.model_dump(mode="json"),

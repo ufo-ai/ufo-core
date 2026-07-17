@@ -8,8 +8,10 @@ workspace = sa.Table(
     "workspace",
     metadata,
     sa.Column("id", sa.Uuid, primary_key=True),
+    sa.Column("seat_limit", sa.Integer, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint("seat_limit is null or seat_limit > 0", name="workspace_seat_limit"),
 )
 
 member = sa.Table(
@@ -18,6 +20,7 @@ member = sa.Table(
     sa.Column("id", sa.Uuid, primary_key=True),
     sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
     sa.Column("email", sa.Text, nullable=False),
+    sa.Column("seated_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint("workspace_id", "email"),

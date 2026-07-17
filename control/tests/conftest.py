@@ -26,12 +26,14 @@ WORKSPACE_ID = "11111111-1111-1111-1111-111111111111"
 RUNTIME_SCHEMA = (
     "create table if not exists workspace ("
     "  id uuid primary key,"
+    "  seat_limit integer check (seat_limit is null or seat_limit > 0),"
     "  created_at timestamptz not null default now(),"
     "  updated_at timestamptz not null default now())",
     "create table if not exists member ("
     "  id uuid primary key,"
     "  workspace_id uuid not null references workspace(id) on delete cascade,"
     "  email text not null,"
+    "  seated_at timestamptz,"
     "  created_at timestamptz not null,"
     "  updated_at timestamptz not null,"
     "  unique (workspace_id, email))",

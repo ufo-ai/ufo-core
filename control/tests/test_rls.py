@@ -337,13 +337,18 @@ async def test_shared_role_without_workspace_fails_closed(
 
 
 async def _members_in(workspace_id: str) -> list[str]:
+    """Emails of the workspace's members, asserting each holds a seat — the hosted join's
+    auto-seat invariant while no limit binds."""
     with ws(UUID(workspace_id)):
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
-                    sa.select(tables.member.c.email).order_by(tables.member.c.email)
+                    sa.select(tables.member.c.email, tables.member.c.seated_at).order_by(
+                        tables.member.c.email
+                    )
                 )
             ).all()
+    assert all(row.seated_at is not None for row in rows)
     return [row.email for row in rows]
 
 
@@ -360,6 +365,28 @@ async def test_shared_ensure_writes_workspace_and_members(
         assert await shared.ensure("sharedco.io", "founder@sharedco.io") == workspace_id
         assert await shared.ensure("sharedco.io", "colleague@sharedco.io") == workspace_id
         assert await _members_in(workspace_id) == ["colleague@sharedco.io", "founder@sharedco.io"]
+        with ws(UUID(workspace_id)):
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.update(tables.workspace)
+                    .values(seat_limit=2, updated_at=sa.func.now())
+                    .where(tables.workspace.c.id == UUID(workspace_id))
+                )
+        assert await shared.ensure("sharedco.io", "third@sharedco.io") == workspace_id
+        with ws(UUID(workspace_id)):
+            async with workspace_tx() as connection:
+                seated = (
+                    await connection.execute(
+                        sa.select(tables.member.c.email, tables.member.c.seated_at).order_by(
+                            tables.member.c.email
+                        )
+                    )
+                ).all()
+        assert [(row.email, row.seated_at is not None) for row in seated] == [
+            ("colleague@sharedco.io", True),
+            ("founder@sharedco.io", True),
+            ("third@sharedco.io", False),
+        ]
     finally:
         await pool.close()
 

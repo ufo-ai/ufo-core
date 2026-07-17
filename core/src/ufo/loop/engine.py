@@ -96,6 +96,7 @@ from ufo.schema.records import (
     Usage,
 )
 from ufo.search import SearchProvider
+from ufo.seats import SEAT_REVOKED_MESSAGE, Seats, gate_member, seat_gate_absent
 from ufo.skills.runtime import CORE_SKILL_REGISTRY, SkillRegistry
 from ufo.tools.context import (
     ImageContent,
@@ -1092,7 +1093,33 @@ class TurnEngine:
         under a reject cap: reject is the inbound gate, applied before any tokens are spent, and a
         turn already running has real spend to preserve. A foreground subagent that parks under a
         reject cap holds its awaiting parent until the cap is raised. The no-caps fast-path skips
-        the DB round-trip entirely once a recent decision confirmed no cap applies to this turn."""
+        the DB round-trip entirely once a recent decision confirmed no cap applies to this turn.
+
+        The seat gate re-checks here too, so revoking a seat stops the running turn before its
+        next model call — disable latency is bounded by one round — behind its own no-limit
+        fast-path so unlimited deploys pay nothing. A scheduled turn gates on its conversation's
+        member, the same derivation admission and the resume sweep apply."""
+        speaker = self.turn.speaker_member_id
+        scheduled = self.turn.admission_source == SCHEDULED_ADMISSION
+        if (speaker is not None or scheduled) and not seat_gate_absent(self.turn.workspace_id):
+            async with workspace_tx() as connection:
+                conversation_member = (
+                    None
+                    if speaker is not None or not scheduled
+                    else (
+                        await connection.execute(
+                            sa.select(tables.conversation.c.member_id).where(
+                                tables.conversation.c.id == self.turn.conversation_id
+                            )
+                        )
+                    ).scalar_one()
+                )
+                gate = gate_member(speaker, self.turn.admission_source, conversation_member)
+                admitted = gate is None or await Seats(self.turn.workspace_id).admits(
+                    connection, gate
+                )
+            if not admitted:
+                raise TurnParked(SEAT_REVOKED_MESSAGE)
         if applicable_caps_absent(
             self.turn.workspace_id, self.audience_member_id, self.turn.agent_id
         ):

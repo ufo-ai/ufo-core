@@ -1385,11 +1385,14 @@ async def _replace_buttons_with_answer(bot_token: str, click: AnswerClick) -> No
 
 def _reply_text(writeback: Writeback) -> str:
     """What to post for a terminal turn: the agent's reply for a done turn (a placeholder when it
-    produced none), or a short outcome line so a failed or cancelled turn still answers."""
+    produced none), or a short outcome line so a failed or cancelled turn still answers. A
+    cancelled turn carries the gate's reason when admission committed one — a seat refusal or a
+    spend rejection — and that reason is the reply; the static marker covers a reasonless
+    cancellation only."""
     if writeback.status == "failed":
         return SLACK_TURN_FAILED_TEXT
     if writeback.status == "cancelled":
-        return SLACK_TURN_CANCELLED_TEXT
+        return writeback.text or SLACK_TURN_CANCELLED_TEXT
     return writeback.text or SLACK_EMPTY_REPLY_TEXT
 
 

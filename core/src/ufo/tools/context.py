@@ -27,7 +27,6 @@ from dataclasses import dataclass, field
 from typing import Annotated, Any, Literal, Protocol
 from uuid import UUID
 
-import sqlalchemy as sa
 from pydantic import BaseModel, Field
 
 from ufo.blob import BlobStore
@@ -39,9 +38,9 @@ from ufo.ext.context import ExtensionContext
 from ufo.grants import ConnectUnavailable, GrantStore
 from ufo.o11y import log
 from ufo.sandbox.session import SandboxSession
-from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.search import SearchProvider
+from ufo.seats import owner_member_id
 from ufo.skills.runtime import CORE_SKILL_REGISTRY, SkillRegistry
 from ufo.workspace import ws_current
 
@@ -189,15 +188,8 @@ class ToolContext:
         if self.speaker_member_id is None:
             return False
         async with workspace_tx() as connection:
-            earliest = (
-                await connection.execute(
-                    sa.select(tables.member.c.id)
-                    .where(tables.member.c.workspace_id == self.turn.workspace_id)
-                    .order_by(tables.member.c.created_at.asc(), tables.member.c.id.asc())
-                    .limit(1)
-                )
-            ).one_or_none()
-        return earliest is not None and earliest.id == self.speaker_member_id
+            owner = await owner_member_id(connection, self.turn.workspace_id)
+        return owner is not None and owner == self.speaker_member_id
 
     async def begin_credential_authorization(self, slot: str, payload: str) -> str:
         requests, member_id = await self._credential_authorization(slot)

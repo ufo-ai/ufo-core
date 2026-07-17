@@ -969,3 +969,43 @@ async def test_credential_prompts_gate_per_slot_on_seal_workspace_and_marker(
         await context.fulfill_credential_request(sealed, "a", "hijack", uuid4())
     with pytest.raises(CredentialRequestInvalid, match="slot"):
         await context.fulfill_credential_request(sealed, "c", "off-seal", member_id)
+
+
+async def test_join_member_auto_seats_while_a_seat_is_open(db: None, tmp_path) -> None:
+    workspace_id, _, _ = await _seed()
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    early = datetime(2026, 1, 1, tzinfo=UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.workspace)
+            .values(seat_limit=2, updated_at=sa.func.now())
+            .where(tables.workspace.c.id == workspace_id)
+        )
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                email="owner@example.com",
+                seated_at=early,
+                created_at=early,
+                updated_at=early,
+            )
+        )
+    seated_join = await context.join_member("USEATED", "second@example.com")
+    assert seated_join is not None
+    unseated_join = await context.join_member("USIXTH", "third@example.com")
+    assert unseated_join is not None
+    assert await context.linked_member("USIXTH") == unseated_join
+    async with workspace_tx() as connection:
+        rows = {
+            row.id: row.seated_at
+            for row in (
+                await connection.execute(
+                    sa.select(tables.member.c.id, tables.member.c.seated_at).where(
+                        tables.member.c.workspace_id == workspace_id
+                    )
+                )
+            ).all()
+        }
+    assert rows[seated_join] is not None
+    assert rows[unseated_join] is None

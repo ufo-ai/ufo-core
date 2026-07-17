@@ -79,6 +79,7 @@ from ufo.schema.records import (
     TerminalStatus,
     TurnContext,
 )
+from ufo.seats import create_member
 from ufo.workspace import ws, ws_current
 
 WORKSPACE_SEGMENT = "workspace"
@@ -386,19 +387,8 @@ class SurfaceContext:
         domain = _email_domain(email)
         if owner is None or not domain or domain != _email_domain(owner):
             return None
-        try:
-            async with workspace_tx() as connection:
-                await connection.execute(
-                    sa.insert(tables.member).values(
-                        id=uuid4(),
-                        workspace_id=self.workspace_id,
-                        email=email.strip().lower(),
-                        created_at=sa.func.now(),
-                        updated_at=sa.func.now(),
-                    )
-                )
-        except sa.exc.IntegrityError:
-            log("surface.member_join_race", surface=self.surface, external_id=external_id)
+        async with workspace_tx() as connection:
+            await create_member(connection, self.workspace_id, email.strip().lower())
         return await self.link_member(external_id, email)
 
     def _conversation_lookup(self, queue_key: str) -> sa.Select:

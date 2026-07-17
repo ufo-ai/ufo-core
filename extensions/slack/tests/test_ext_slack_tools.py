@@ -4,6 +4,7 @@ the real credential store, identity record, and marker blob — deriving the ide
 
 import json
 import re
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -20,6 +21,7 @@ from ufo_ext_slack.manifest import manifest as slack_manifest
 from ufo_ext_slack.surface import (
     SLACK_BOT_TOKEN_SLOT,
     SLACK_SIGNING_SECRET_SLOT,
+    _reply_text,
     _reply_with_oversize_links,
     bot_token_fingerprint,
     read_identity,
@@ -374,3 +376,26 @@ def test_slack_writeback_hints_at_the_terminal_for_a_credential_request() -> Non
     assert "connecting Slack" in text
     assert "`ufo`" in text
     assert "secrets never pass through chat" in text
+
+
+def test_reply_text_renders_a_cancelled_turns_reason() -> None:
+    """A cancelled turn carrying the gate's reason — a seat refusal, a spend rejection — delivers
+    that reason to the thread; the static marker covers only a reasonless cancellation."""
+    refusal = Writeback(
+        turn_id=uuid4(),
+        queue_key="C1:1.0",
+        status="cancelled",
+        text="This workspace has no open seat for you yet — ask the workspace owner.",
+        tokens=0,
+        cost_micro_usd=0,
+        cache_percent=0,
+        model="",
+        reasoning=None,
+        artifacts=(),
+        question=None,
+        credential_request=None,
+        connect_request=None,
+    )
+    assert _reply_text(refusal) == refusal.text
+    bare = replace(refusal, text="")
+    assert _reply_text(bare) == slack.SLACK_TURN_CANCELLED_TEXT

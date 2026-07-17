@@ -1400,8 +1400,16 @@ async def test_connect_account_tool_call_in_a_turn_yields_a_terminal_handoff(
         )
     )
     try:
+        async with workspace_tx() as connection:
+            speaker = (
+                await connection.execute(
+                    sa.select(tables.member.c.id).where(
+                        tables.member.c.workspace_id == turn.workspace_id
+                    )
+                )
+            ).scalar_one()
         engine = _engine(turn, ConnectCallingModel(), tmp_path)
-        engine = replace(engine, turn=engine.turn.model_copy(update={"speaker_member_id": uuid4()}))
+        engine = replace(engine, turn=engine.turn.model_copy(update={"speaker_member_id": speaker}))
         frame = await engine.run()
     finally:
         install_connect_flow(None)
@@ -1564,6 +1572,56 @@ async def test_per_step_cap_parks_a_running_turn(db: None, tmp_path: Path) -> No
         )
     engine = _engine(turn, EchoModel(), tmp_path)
     with pytest.raises(TurnParked):
+        await engine.run()
+    async with workspace_tx() as connection:
+        status = (
+            await connection.execute(
+                sa.select(tables.turn.c.status).where(tables.turn.c.id == turn.id)
+            )
+        ).scalar_one()
+    assert status == "parked"
+
+
+async def test_per_round_seat_revocation_parks_a_running_turn(db: None, tmp_path: Path) -> None:
+    turn = await _seed_turn("queued", None)
+    async with workspace_tx() as connection:
+        speaker = (
+            await connection.execute(
+                sa.select(tables.member.c.id).where(
+                    tables.member.c.workspace_id == turn.workspace_id
+                )
+            )
+        ).scalar_one()
+        await connection.execute(
+            sa.update(tables.workspace)
+            .values(seat_limit=1, updated_at=sa.func.now())
+            .where(tables.workspace.c.id == turn.workspace_id)
+        )
+    engine = _engine(turn, EchoModel(), tmp_path)
+    engine = replace(engine, turn=engine.turn.model_copy(update={"speaker_member_id": speaker}))
+    with pytest.raises(TurnParked, match="seat was revoked"):
+        await engine.run()
+    async with workspace_tx() as connection:
+        status = (
+            await connection.execute(
+                sa.select(tables.turn.c.status).where(tables.turn.c.id == turn.id)
+            )
+        ).scalar_one()
+    assert status == "parked"
+
+
+async def test_per_round_seat_gate_parks_a_scheduled_turn_for_an_unseated_member(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None, admission_source=SCHEDULED_ADMISSION)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.workspace)
+            .values(seat_limit=1, updated_at=sa.func.now())
+            .where(tables.workspace.c.id == turn.workspace_id)
+        )
+    engine = _engine(turn, EchoModel(), tmp_path, memory=MemorySearch(StaticMemorySearch()))
+    with pytest.raises(TurnParked, match="seat was revoked"):
         await engine.run()
     async with workspace_tx() as connection:
         status = (

@@ -24,6 +24,7 @@ from ufo.models.registry import model_registry
 from ufo.o11y import log
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME
+from ufo.seats import create_member
 from ufo.workspace import ws
 
 DEFAULT_AGENT_PROMPT = "You are a helpful assistant."
@@ -132,21 +133,13 @@ class Onboarding:
             owner = (await connection.execute(sa.select(tables.member.c.email))).first()
             if owner is not None:
                 raise AlreadyInitialized(f"already initialized (owner {owner.email})")
-            workspace_id, member_id, agent_id = uuid4(), uuid4(), uuid4()
+            workspace_id, agent_id = uuid4(), uuid4()
             await connection.execute(
                 sa.insert(tables.workspace).values(
                     id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
                 )
             )
-            await connection.execute(
-                sa.insert(tables.member).values(
-                    id=member_id,
-                    workspace_id=workspace_id,
-                    email=self.email,
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
+            member_id = await create_member(connection, workspace_id, self.email)
             await connection.execute(
                 sa.insert(tables.agent).values(
                     id=agent_id,

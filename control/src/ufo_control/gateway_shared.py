@@ -11,6 +11,7 @@ from ufo.db import workspace_tx
 from ufo.onboarding import DEFAULT_AGENT_MODEL, DEFAULT_AGENT_PROMPT
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME
+from ufo.seats import create_member
 from ufo.workspace import ws
 
 SERVE_DSN_ENV = "UFO_CONTROL_SERVE_DSN"
@@ -46,19 +47,7 @@ class SharedWorkspaces:
                     .values(id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now())
                     .on_conflict_do_nothing(index_elements=[tables.workspace.c.id])
                 )
-                await connection.execute(
-                    insert(tables.member)
-                    .values(
-                        id=uuid4(),
-                        workspace_id=workspace_id,
-                        email=member,
-                        created_at=sa.func.now(),
-                        updated_at=sa.func.now(),
-                    )
-                    .on_conflict_do_nothing(
-                        index_elements=[tables.member.c.workspace_id, tables.member.c.email]
-                    )
-                )
+                await create_member(connection, workspace_id, member)
                 await connection.execute(
                     insert(tables.agent)
                     .values(
