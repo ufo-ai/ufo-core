@@ -1,11 +1,17 @@
 ---
 rfc: 0013
 title: "Workspace resources — governed CRUD, revisions, settings, pack agents, agent messaging"
-status: accepted
+status: withdrawn
 date: 2026-07-13
+superseded_by: 0017
 ---
 
 # Workspace resources — governed CRUD, revisions, settings, pack agents, agent messaging
+
+> **Withdrawn 2026-07-16, superseded by [RFC 0017](../0017-workspace-objects.md)**: the CRUD
+> substrate lands alone as workspace objects; governance, revisions, settings, packs, messaging,
+> and self-improvement layer on later over that surface. The analysis below stands as the record
+> of what each layer wants and why.
 
 > Make everything a workspace configures — agents, per-extension settings, workspace-authored
 > skills — one family of **governed resources**: typed rows as the live truth, one append-only
