@@ -7,8 +7,10 @@ slot nothing fills fails loud rather than reaching the model as a literal brace.
 
 import pytest
 
+from ufo.ext.loader import load_manifests
 from ufo.loop.prompts.render import (
     COMPACTION_SYSTEM_PROMPT,
+    MODEL_KNOWLEDGE_CUTOFF,
     render_skill_index,
     render_system_prompt,
     render_template,
@@ -59,6 +61,18 @@ def test_knowledge_cutoff_renders_the_models_boundary() -> None:
 def test_a_model_without_a_declared_cutoff_fails_loud() -> None:
     with pytest.raises(ValueError, match="no knowledge cutoff declared for model 'gpt-5'"):
         render_system_prompt("A", (), model="gpt-5")
+
+
+def test_every_extension_priced_model_declares_a_knowledge_cutoff() -> None:
+    for manifest in load_manifests():
+        if manifest.name == "sample":
+            continue
+        for spec in manifest.models:
+            for model, _ in spec.prices:
+                assert model in MODEL_KNOWLEDGE_CUTOFF, (
+                    f"extension {manifest.name!r} prices model {model!r} without a knowledge "
+                    f"cutoff — an agent set to it fails every turn at prompt render"
+                )
 
 
 def test_a_var_substitutes_in_the_agent_prompt() -> None:
