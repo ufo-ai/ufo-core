@@ -66,7 +66,7 @@ from ufo.hub import InProcessHub
 from ufo.indexing import OWNER_KIND_MEMORY_ITEM, Chunk, TextChunker
 from ufo.jobs import JobRunner, bindings_from
 from ufo.loop.prompts.render import render_system_prompt
-from ufo.loop.subagents import SubagentRegistry, subagent_system_prompt
+from ufo.loop.subagents import FINISH_CONTRACT, SubagentRegistry, subagent_system_prompt
 from ufo.loop.transcript import Transcript
 from ufo.models.interface import Message, ModelRequest, TextDelta
 from ufo.models.registry import model_registry
@@ -634,7 +634,7 @@ def test_sample_subagent_profile_flows_through_the_loader_into_the_registry() ->
     registry = SubagentRegistry(turn_subagents((manifest,)))
     profile = registry.get(sample.SUBAGENT_NAME)
     assert profile.tool_names == (sample.TOOL_NAME,)
-    assert "JSON" in subagent_system_prompt(profile)
+    assert subagent_system_prompt(profile).endswith(FINISH_CONTRACT)
 
 
 async def test_subagent_tool_grant_and_default_widen_a_child_beyond_its_named_tools(

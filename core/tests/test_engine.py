@@ -29,7 +29,11 @@ from ufo.loop.compaction import (
 )
 from ufo.loop.engine import (
     ASK_USER_TOOL,
+    FINISH_ALONE,
+    FINISH_PROMPT,
+    FINISH_TOOL,
     FORCE_FINAL_PROMPT,
+    FORCE_FINISH_PROMPT,
     MAX_PARALLEL_TOOL_CALLS,
     MAX_TOOL_RESULT_CHARS,
     OFFLOAD_NOTICE,
@@ -268,6 +272,112 @@ class NeverAnsweringModel:
         if request.messages[-1].content == FORCE_FINAL_PROMPT:
             self.forced_tools = request.tools
             yield TextDelta(text="best effort")
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        yield ToolCallStart(id="c1", name="bash")
+        yield ToolCallDelta(id="c1", partial_json='{"command": "true"}')
+        yield Usage(input_tokens=1, output_tokens=1)
+
+
+class _Report(BaseModel):
+    summary: str
+
+
+def _tool_results(request: ModelRequest, errored: bool | None = None) -> bool:
+    return any(
+        isinstance(message.content, tuple)
+        and any(
+            isinstance(block, ToolResultBlock) and (errored is None or block.is_error is errored)
+            for block in message.content
+        )
+        for message in request.messages
+    )
+
+
+@dataclass
+class FinishCallingModel:
+    """Narrates and calls bash in round one, then ends by calling finish — so a subagent turn's
+    terminal comes from the finish payload, never the joined narration. Records each round's
+    offered tool names so a test can assert finish rode beside the registry's set."""
+
+    offered: list[tuple[str, ...]] = field(default_factory=list)
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.offered.append(tuple(tool.name for tool in request.tools))
+        if _tool_results(request):
+            yield ToolCallStart(id="f1", name=FINISH_TOOL)
+            yield ToolCallDelta(id="f1", partial_json=json.dumps({"summary": "the answer"}))
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        yield TextDelta(text="working on it")
+        yield ToolCallStart(id="c1", name="bash")
+        yield ToolCallDelta(id="c1", partial_json='{"command": "true"}')
+        yield Usage(input_tokens=2, output_tokens=2)
+
+
+@dataclass
+class ProseThenForcedFinishModel:
+    """Stops on a prose answer; when the engine compels finish it complies — recording the forced
+    request so a test can assert the compulsion (finish offered alone, tool_choice set, reasoning
+    off)."""
+
+    forced: ModelRequest | None = None
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        if request.tool_choice is not None:
+            self.forced = request
+            yield ToolCallStart(id="f1", name=FINISH_TOOL)
+            yield ToolCallDelta(id="f1", partial_json=json.dumps({"summary": "wrapped"}))
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        yield TextDelta(text="here is my prose answer")
+        yield Usage(input_tokens=1, output_tokens=1)
+
+
+@dataclass
+class WrongThenRightFinishModel:
+    """Calls finish with a mis-shaped payload, then — seeing the validation error result — calls
+    it again correctly, so the schema retry loop runs end to end without a forced round."""
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        corrected = _tool_results(request, errored=True)
+        call_id = "f2" if corrected else "f1"
+        payload = {"summary": "right"} if corrected else {"wrong_field": "x"}
+        yield ToolCallStart(id=call_id, name=FINISH_TOOL)
+        yield ToolCallDelta(id=call_id, partial_json=json.dumps(payload))
+        yield Usage(input_tokens=1, output_tokens=1)
+
+
+@dataclass
+class FinishAlongsideWorkModel:
+    """Calls finish in the same round as bash; after the alone-rule error result it calls finish
+    alone."""
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        if _tool_results(request, errored=True):
+            yield ToolCallStart(id="f2", name=FINISH_TOOL)
+            yield ToolCallDelta(id="f2", partial_json=json.dumps({"summary": "alone"}))
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        yield ToolCallStart(id="c1", name="bash")
+        yield ToolCallDelta(id="c1", partial_json='{"command": "true"}')
+        yield ToolCallStart(id="f1", name=FINISH_TOOL)
+        yield ToolCallDelta(id="f1", partial_json=json.dumps({"summary": "premature"}))
+        yield Usage(input_tokens=2, output_tokens=2)
+
+
+@dataclass
+class NeverFinishingModel:
+    """Calls bash every round and never finishes on its own; when exhaustion compels finish it
+    complies, recording the forced request."""
+
+    forced: ModelRequest | None = None
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        if request.tool_choice is not None:
+            self.forced = request
+            yield ToolCallStart(id="f1", name=FINISH_TOOL)
+            yield ToolCallDelta(id="f1", partial_json=json.dumps({"summary": "best effort"}))
             yield Usage(input_tokens=1, output_tokens=1)
             return
         yield ToolCallStart(id="c1", name="bash")
@@ -1143,6 +1253,132 @@ async def test_round_budget_exhaustion_forces_a_final_answer_instead_of_failing(
     assert stored is not None
     assert Message(role="user", content=FORCE_FINAL_PROMPT) in stored.messages
     assert stored.messages[-1] == Message(role="assistant", content="best effort")
+
+
+async def test_a_lone_valid_finish_call_ends_a_subagent_turn_with_its_payload(
+    db: None, tmp_path: Path
+) -> None:
+    """The finish payload — canonical JSON of the output model — is the terminal, and round
+    narration never joins it: the parent validates the answer, not the working prose."""
+    turn = await _seed_turn("queued", None)
+    model = FinishCallingModel()
+    engine = replace(_engine(turn, model, tmp_path), output_model=_Report)
+    frame = await engine.run()
+    assert frame.status == "done"
+    assert frame.text == _Report(summary="the answer").model_dump_json()
+    assert all(FINISH_TOOL in offer for offer in model.offered)
+    stored = await engine.transcript.read()
+    assert stored is not None
+    assert stored.messages[-1] == Message(role="assistant", content=frame.text)
+
+
+async def test_a_subagent_prose_ending_closes_through_one_forced_finish_round(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    model = ProseThenForcedFinishModel()
+    engine = replace(_engine(turn, model, tmp_path), output_model=_Report)
+    frame = await engine.run()
+    assert frame.status == "done"
+    assert frame.text == _Report(summary="wrapped").model_dump_json()
+    assert model.forced is not None
+    assert tuple(tool.name for tool in model.forced.tools) == (FINISH_TOOL,)
+    assert model.forced.tool_choice == FINISH_TOOL
+    assert model.forced.reasoning == "off"
+    assert model.forced.messages[-1] == Message(role="user", content=FINISH_PROMPT)
+    assert model.forced.messages[-2] == Message(role="assistant", content="here is my prose answer")
+
+
+async def test_a_finish_call_failing_the_schema_errors_back_and_retries(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    engine = replace(_engine(turn, WrongThenRightFinishModel(), tmp_path), output_model=_Report)
+    frame = await engine.run()
+    assert frame.status == "done"
+    assert frame.text == _Report(summary="right").model_dump_json()
+    stored = await engine.transcript.read()
+    assert stored is not None
+    errors = [
+        block
+        for message in stored.messages
+        if isinstance(message.content, tuple)
+        for block in message.content
+        if isinstance(block, ToolResultBlock) and block.is_error
+    ]
+    assert len(errors) == 1
+    assert isinstance(errors[0].content, str)
+    assert "failed the output schema" in errors[0].content
+
+
+async def test_finish_sharing_a_round_with_work_is_rejected_then_honored(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    engine = replace(_engine(turn, FinishAlongsideWorkModel(), tmp_path), output_model=_Report)
+    frame = await engine.run()
+    assert frame.status == "done"
+    assert frame.text == _Report(summary="alone").model_dump_json()
+    stored = await engine.transcript.read()
+    assert stored is not None
+    results = {
+        block.tool_use_id: block
+        for message in stored.messages
+        if isinstance(message.content, tuple)
+        for block in message.content
+        if isinstance(block, ToolResultBlock)
+    }
+    assert results["c1"].is_error is False
+    assert results["f1"].is_error is True
+    assert results["f1"].content == FINISH_ALONE
+
+
+async def test_subagent_round_budget_exhaustion_forces_a_schema_shaped_final_answer(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    model = NeverFinishingModel()
+    engine = replace(_engine(turn, model, tmp_path), max_rounds=2, output_model=_Report)
+    frame = await engine.run()
+    assert frame.status == "done"
+    assert frame.text == _Report(summary="best effort").model_dump_json()
+    assert model.forced is not None
+    assert model.forced.messages[-1] == Message(role="user", content=FORCE_FINISH_PROMPT)
+    stored = await engine.transcript.read()
+    assert stored is not None
+    assert stored.messages[-1] == Message(role="assistant", content=frame.text)
+
+
+def test_a_subagent_engine_rejects_a_registry_tool_named_finish(tmp_path: Path) -> None:
+    async def rogue_handler(ctx: ToolContext, args: _Report) -> ToolResult:
+        raise NotImplementedError
+
+    turn = Turn(
+        id=uuid4(),
+        workspace_id=uuid4(),
+        conversation_id=uuid4(),
+        agent_id=uuid4(),
+        seq=1,
+        status="queued",
+        inbound="hi",
+        admission_source=INTERNAL_ADMISSION,
+        created_at=ADMITTED_AT,
+        terminal=None,
+    )
+    engine = _engine(turn, object(), tmp_path)
+    rogue = ToolRegistry(
+        (
+            *BUILTIN_TOOLS,
+            ToolDef(
+                name=FINISH_TOOL,
+                description="rogue",
+                input_model=_Report,
+                handler=rogue_handler,
+            ),
+        )
+    )
+    with pytest.raises(ValueError, match=FINISH_TOOL):
+        replace(engine, tools=rogue, output_model=_Report)
 
 
 async def test_connect_account_tool_call_in_a_turn_yields_a_terminal_handoff(

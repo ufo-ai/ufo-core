@@ -7,7 +7,6 @@ without the queue serializing them into a deadlock. Foreground awaits the child'
 returns its schema-validated output; background returns the child turn id at once."""
 
 import asyncio
-import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,7 +15,7 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import sqlalchemy as sa
 from dbos import DBOSClient, EnqueueOptions
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -46,6 +45,11 @@ from ufo.tools.context import SpawnResult, SubagentStatus, UntrustedContentError
 SUBAGENT_SURFACE = "subagent"
 SUBAGENT_POLL_SECONDS = 0.1
 PRELOAD_PROMPT_CHAR_BOUND = 200_000
+FINISH_CONTRACT = (
+    "End the turn by calling the `finish` tool with your final answer — its input schema is the "
+    "output contract. Text outside that call is working narration; only the finish payload "
+    "reaches the parent."
+)
 
 SUBAGENT_OUTPUT_DISCIPLINE = (
     (Path(__file__).parent / "prompts" / "subagent_shell.md")
@@ -86,13 +90,13 @@ def subagent_system_prompt(
     """The child's system prompt: the profile's own instructions with its `{{skill_index}}` slot
     filled from the loadable-skill index, then any preloaded skills' instructions, then the shared
     output discipline (citation and formatting rules, wrapped around every profile so a subagent
-    inherits the same citation contract the main agent renders), then the output contract — so the
-    child's final answer is a single JSON object the parent can validate against the schema, and a
-    preloaded skill's own answer-formatting instructions can never displace that contract from the
-    prompt's last word. A slot the profile leaves unfilled fails loud rather than reaching the
-    model as a literal brace; preloaded bodies over the char bound fail loud rather than blowing
-    the model call. Skill bodies are injected after slot validation — a literal brace inside a
-    skill is content, never an unfilled slot."""
+    inherits the same citation contract the main agent renders), then the output contract — the
+    child ends its turn by calling the engine's finish tool, whose input schema is the profile's
+    output model, and a preloaded skill's own answer-formatting instructions can never displace
+    that contract from the prompt's last word. A slot the profile leaves unfilled fails loud
+    rather than reaching the model as a literal brace; preloaded bodies over the char bound fail
+    loud rather than blowing the model call. Skill bodies are injected after slot validation — a
+    literal brace inside a skill is content, never an unfilled slot."""
     if "load_skill" in profile.tool_names and SKILL_INDEX_SLOT not in profile.prompt:
         raise ValueError(
             f"subagent profile {profile.name!r} grants load_skill but has no "
@@ -109,28 +113,7 @@ def subagent_system_prompt(
                 f"over the {PRELOAD_PROMPT_CHAR_BOUND} bound"
             )
         body = f"{body}\n\n---\n\nPreloaded skill(s):\n\n{bodies}"
-    schema = json.dumps(profile.output_model.model_json_schema(), sort_keys=True)
-    contract = f"Respond with a single JSON object matching this schema and nothing else:\n{schema}"
-    return f"{body}\n\n{SUBAGENT_OUTPUT_DISCIPLINE}\n\n{contract}"
-
-
-def _coerce_output(model: type[BaseModel], text: str) -> BaseModel:
-    """A child's final turn ends the same way any turn does — an ordinary text message — so the
-    JSON-object contract in its system prompt is a request, not an enforced shape; a refusal or a
-    prose summary lands as plain, non-JSON text. When that happens and the schema has exactly one
-    required field, that field is where the contract already points the answer, so the raw text is
-    coerced into it rather than raising and discarding the child's work. Valid JSON that simply
-    answers the wrong shape (a missing or misnamed field) still fails loud — that is a genuine
-    schema violation, not a child that skipped the JSON contract."""
-    try:
-        return model.model_validate_json(text)
-    except ValidationError as error:
-        if any(item["type"] != "json_invalid" for item in error.errors()):
-            raise
-        required = [name for name, field in model.model_fields.items() if field.is_required()]
-        if len(required) == 1 and model.model_fields[required[0]].annotation is str:
-            return model.model_validate({required[0]: text})
-        raise
+    return f"{body}\n\n{SUBAGENT_OUTPUT_DISCIPLINE}\n\n{FINISH_CONTRACT}"
 
 
 @dataclass(frozen=True)
@@ -171,7 +154,7 @@ class Subagents:
         if terminal.status != "done":
             raise RuntimeError(f"subagent {profile!r} turn ended {terminal.status}")
         try:
-            output = _coerce_output(resolved.output_model, terminal.text)
+            output = resolved.output_model.model_validate_json(terminal.text)
         except ValidationError as error:
             if resolved.untrusted_output:
                 raise UntrustedContentError(

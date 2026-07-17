@@ -69,6 +69,7 @@ from ufo.models.interface import (
     ToolCallDelta,
     ToolCallStart,
     ToolResultBlock,
+    ToolSchema,
     ToolUseBlock,
 )
 from ufo.o11y import emit_metric, log, turn_span
@@ -125,6 +126,23 @@ SKILL_LOAD_TOOL = "load_skill"
 ASK_USER_TOOL = "ask_user"
 REQUEST_CREDENTIALS_TOOL = "request_credentials"
 CONNECT_ACCOUNT_TOOL = "connect_account"
+FINISH_TOOL = "finish"
+FINISH_DESCRIPTION = (
+    "End the turn and return your final answer to the parent agent. Call it alone, once the work "
+    "is done; its input schema is the output contract."
+)
+FINISH_PROMPT = "End the turn now: call finish with your final answer."
+FORCE_FINISH_PROMPT = (
+    "You have reached the maximum number of tool-use rounds. Call finish now with your best "
+    "final answer from everything gathered so far."
+)
+FINISH_ALONE = (
+    "finish must be the only tool call in its round — finish the other work first, then call it "
+    "again alone."
+)
+FINISH_SCHEMA_ERROR = (
+    "finish failed the output schema — fix the payload and call it again:\n{error}"
+)
 SCHEDULED_MEMORY_CONTEXT = "<recalled_memory>\n{recalled}\n</recalled_memory>"
 SCHEDULED_MEMORY_SEARCH_TIMEOUT_SECONDS = 4.0
 
@@ -540,6 +558,16 @@ class TurnEngine:
     attempt: str = ""
     max_rounds: int = MAIN_ROUND_LIMIT
     skills: SkillRegistry = CORE_SKILL_REGISTRY
+    output_model: type[BaseModel] | None = None
+
+    def __post_init__(self) -> None:
+        if self.output_model is None:
+            return
+        try:
+            self.tools.get(FINISH_TOOL)
+        except KeyError:
+            return
+        raise ValueError(f"a subagent turn's tool set may not name a tool {FINISH_TOOL!r}")
 
     async def run(self) -> TerminalFrame | None:
         with turn_span(self.turn.id, self.turn.conversation_id, self.turn.traceparent):
@@ -747,7 +775,14 @@ class TurnEngine:
         is never left referring to prose no surface actually sent. Also returns the structured
         question, credential request, or connect request left pending when its tool was the turn's
         final act — each round overwrites all three, so a turn that asked and then worked on
-        carries none."""
+        carries none.
+
+        A subagent turn (`output_model` set) ends only through the finish tool: a lone finish call
+        whose args validate is the terminal, and its canonical JSON — never joined narration — is
+        the answer the parent validates. A finish call with a bad payload or sharing its round
+        with other work comes back as an error result the model corrects; a turn that stops on
+        plain prose instead is closed by one forced finish round, so the terminal is schema-shaped
+        by construction."""
         nudged = False
         question: AskUserInput | None = None
         credential_request: CredentialRequest | None = None
@@ -767,6 +802,14 @@ class TurnEngine:
             await self._publish_cost(usage_events)
             if not tool_calls:
                 if text.strip():
+                    if self.output_model is not None:
+                        messages = (
+                            *messages,
+                            Message(role="assistant", content=text),
+                            Message(role="user", content=FINISH_PROMPT),
+                        )
+                        messages, answer = await self._force_finish(messages, usage_events, system)
+                        return messages, answer, None, None, None
                     answer = "\n\n".join((*narrated, text)) if narrated else text
                     return messages, answer, question, credential_request, connect_request
                 if nudged:
@@ -774,11 +817,34 @@ class TurnEngine:
                 nudged = True
                 messages = (*messages, Message(role="user", content=EMPTY_RESPONSE_NUDGE))
                 continue
+            finish_error: str | None = None
+            if self.output_model is not None and any(
+                call.name == FINISH_TOOL for call in tool_calls
+            ):
+                if len(tool_calls) > 1:
+                    finish_error = FINISH_ALONE
+                else:
+                    try:
+                        output = self.output_model.model_validate(tool_calls[0].input)
+                    except ValidationError as error:
+                        finish_error = FINISH_SCHEMA_ERROR.format(error=error)
+                    else:
+                        return messages, output.model_dump_json(), None, None, None
             if text.strip():
                 narrated.append(text)
             assistant_blocks = (*((TextBlock(text=text),) if text else ()), *tool_calls)
             results: tuple[ToolResultBlock, ...] = ()
             for segment in _dispatch_segments(self.tools, tool_calls):
+                if finish_error is not None and segment[0].name == FINISH_TOOL:
+                    results = (
+                        *results,
+                        ToolResultBlock(
+                            tool_use_id=segment[0].id,
+                            content=_bounded(finish_error),
+                            is_error=True,
+                        ),
+                    )
+                    continue
                 dispatched = await asyncio.gather(
                     *(self._dispatch(context, call) for call in segment),
                     return_exceptions=True,
@@ -801,7 +867,7 @@ class TurnEngine:
                 Message(role="user", content=results),
             )
         messages, text = await self._force_final(messages, usage_events, system)
-        if narrated:
+        if narrated and self.output_model is None:
             text = "\n\n".join(part for part in (*narrated, text) if part.strip())
         return messages, text, None, None, None
 
@@ -929,8 +995,10 @@ class TurnEngine:
         """The round budget is spent: rather than fail the turn, force one closing answer. Append
         the force-final prompt and run a single model turn with no tools offered — the model can no
         longer call a tool, so it answers with what it gathered instead of the turn erroring out. A
-        subagent that exhausts its smaller budget ends `done` with this best-effort text, so it
-        never detonates the parent awaiting it. Exhaustion is a distinct terminal shape — a metric
+        subagent that exhausts its smaller budget closes through a forced finish call instead — a
+        best-effort `done` answer that keeps its output schema; only a forced call that still
+        violates the schema ends the turn `failed`, which the parent's spawn receives as an
+        ordinary tool error, never a crash. Exhaustion is a distinct terminal shape — a metric
         and log fire so an operator can spot an agent chronically hitting its ceiling (a prompt or
         tool-loop bug) that a plain `done` would hide."""
         emit_metric("turn_round_budget_exhausted_total")
@@ -938,6 +1006,9 @@ class TurnEngine:
         await self._enforce_spend(usage_events)
         messages, compaction_usage = await self.compaction.maybe_compact(messages)
         usage_events.extend(compaction_usage)
+        if self.output_model is not None:
+            messages = (*messages, Message(role="user", content=FORCE_FINISH_PROMPT))
+            return await self._force_finish(messages, usage_events, system)
         messages = (*messages, Message(role="user", content=FORCE_FINAL_PROMPT))
         messages, text, _ = await self._stream_recovering_overflow(
             messages, usage_events, system, offer_tools=False
@@ -945,12 +1016,40 @@ class TurnEngine:
         await self._publish_cost(usage_events)
         return messages, text
 
+    async def _force_finish(
+        self,
+        messages: tuple[Message, ...],
+        usage_events: list[Usage],
+        system: str,
+    ) -> tuple[tuple[Message, ...], str]:
+        """One forced closing round for a subagent turn: only the finish tool is offered and
+        tool_choice compels it, so a child that stopped on prose or spent its round budget still
+        commits a schema-shaped terminal. A forced call that fails the schema anyway is a hard
+        fault — the turn fails loud rather than committing a malformed answer."""
+        if self.output_model is None:
+            raise RuntimeError("finish forced on a turn with no output model")
+        messages, _, tool_calls = await self._stream_recovering_overflow(
+            messages, usage_events, system, force_finish=True
+        )
+        await self._publish_cost(usage_events)
+        match tool_calls:
+            case (ToolUseBlock(name=name, input=args),) if name == FINISH_TOOL:
+                try:
+                    return messages, self.output_model.model_validate(args).model_dump_json()
+                except ValidationError as error:
+                    raise RuntimeError(
+                        f"forced finish failed the output schema: {error}"
+                    ) from error
+            case _:
+                raise RuntimeError("forced finish round did not return a lone finish call")
+
     async def _stream_recovering_overflow(
         self,
         messages: tuple[Message, ...],
         usage_events: list[Usage],
         system: str,
         offer_tools: bool = True,
+        force_finish: bool = False,
     ) -> tuple[tuple[Message, ...], str, tuple[ToolUseBlock, ...]]:
         """Run one model round, recovering from a provider context-overflow: the proactive
         compaction already ran, so an overflow here means the window is still too large — force a
@@ -959,7 +1058,7 @@ class TurnEngine:
         to summarize), the overflow is unrecoverable and re-raises rather than retrying a doomed
         call; a non-overflow error re-raises unchanged."""
         try:
-            result = await self._stream_once(messages, system, offer_tools)
+            result = await self._stream_once(messages, system, offer_tools, force_finish)
             usage_events.extend(result.usages)
             if result.error_class is not None:
                 raise ModelStreamError(result.error_class, result.error_message or "")
@@ -973,7 +1072,7 @@ class TurnEngine:
             usage_events.extend(compaction_usage)
             emit_metric("turn_context_overflow_recovered_total")
             log("turn.context_overflow_recovered", turn_id=str(self.turn.id))
-            result = await self._stream_once(compacted, system, offer_tools)
+            result = await self._stream_once(compacted, system, offer_tools, force_finish)
             usage_events.extend(result.usages)
             if result.error_class is not None:
                 raise ModelStreamError(result.error_class, result.error_message or "") from None
@@ -1007,6 +1106,7 @@ class TurnEngine:
         messages: tuple[Message, ...],
         system: str,
         offer_tools: bool = True,
+        force_finish: bool = False,
     ) -> StreamResult:
         """One model round, memoized as a DBOS step: it streams the deltas live to the hub and
         returns the round's text, tool calls, and usage as a StreamResult. Memoizing the round
@@ -1014,14 +1114,37 @@ class TurnEngine:
         returns this recorded output without re-calling the model (no tokens re-spent, the same tool
         ids), and the per-tool `_dispatch` steps that follow key off those frozen ids. A mid-stream
         model error is caught and carried on the result, never raised out of the step, so the
-        already-consumed usage survives in the recorded output; the caller re-raises it."""
+        already-consumed usage survives in the recorded output; the caller re-raises it.
+
+        A subagent turn offers the finish tool beside the registry's set — its input schema is the
+        profile's output model, so the return shape is a tool contract the model corrects against,
+        not a prose convention. `force_finish` offers finish alone and compels it via tool_choice
+        (reasoning off — a forced choice cannot run under extended thinking)."""
+        finish = (
+            None
+            if self.output_model is None
+            else ToolSchema(
+                name=FINISH_TOOL,
+                description=FINISH_DESCRIPTION,
+                input_schema=self.output_model.model_json_schema(),
+            )
+        )
+        if force_finish:
+            if finish is None:
+                raise RuntimeError("finish forced on a turn with no output model")
+            tools: tuple[ToolSchema, ...] = (finish,)
+        elif offer_tools:
+            tools = self.tools.schemas() if finish is None else (*self.tools.schemas(), finish)
+        else:
+            tools = ()
         request = ModelRequest(
             model=self.agent.model,
             system=system,
             messages=messages,
             max_tokens=MAX_OUTPUT_TOKENS,
-            tools=self.tools.schemas() if offer_tools else (),
-            reasoning=self.reasoning,
+            tools=tools,
+            tool_choice=FINISH_TOOL if force_finish else None,
+            reasoning="off" if force_finish else self.reasoning,
         )
         parts: list[str] = []
         buffer: list[str] = []

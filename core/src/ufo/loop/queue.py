@@ -218,6 +218,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 agent.prompt, sections, skills=skills.index(), model=resolved.model
             )
             max_rounds = MAIN_ROUND_LIMIT
+            output_model = None
         else:
             profile = runtime.subagents.get(turn.subagent_profile)
             payload = json.loads(turn.inbound) if turn.seq == 1 else {}
@@ -238,6 +239,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             )
             system_prompt = rendered_prompt(resolved.prompt)
             max_rounds = MAIN_ROUND_LIMIT if payload.get("extended_context") else profile.max_rounds
+            output_model = profile.output_model
         model = await runtime.registry.client_for(resolved.model)
         handle = await _open_sandbox(
             runtime.carrier,
@@ -298,6 +300,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             attempt=attempt,
             max_rounds=max_rounds,
             skills=skills,
+            output_model=output_model,
         )
         frame = await engine.run()
         return "superseded" if frame is None else frame.status

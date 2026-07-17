@@ -144,10 +144,15 @@ class AnthropicClient:
                     for t in request.tools
                 ]
                 create_kwargs["tools"][-1]["cache_control"] = CACHE_CONTROL
-                create_kwargs["tool_choice"] = {
-                    "type": "auto",
-                    "disable_parallel_tool_use": False,
-                }
+                create_kwargs["tool_choice"] = (
+                    {"type": "auto", "disable_parallel_tool_use": False}
+                    if request.tool_choice is None
+                    else {
+                        "type": "tool",
+                        "name": request.tool_choice,
+                        "disable_parallel_tool_use": True,
+                    }
+                )
             try:
                 stream = await self.client.messages.create(**create_kwargs)
                 async for event in stream:

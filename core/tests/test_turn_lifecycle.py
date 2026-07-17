@@ -31,7 +31,7 @@ from ufo.ext.manifest import EmbedBackendSpec, IndexBackendSpec, Manifest, Model
 from ufo.hub import Hub, InProcessHub
 from ufo.jobs import TurnDispatcher
 from ufo.loop import queue as loop_queue
-from ufo.loop.engine import EMPTY_RESPONSE_NUDGE, FORCE_FINAL_PROMPT, ModelStreamError
+from ufo.loop.engine import EMPTY_RESPONSE_NUDGE, FINISH_TOOL, ModelStreamError
 from ufo.loop.subagents import SubagentProfile, SubagentRegistry, Subagents
 from ufo.loop.transcript import Transcript
 from ufo.models.interface import (
@@ -177,32 +177,36 @@ class StandInModel:
         SEEN_TOOLS.append(tuple(tool.name for tool in request.tools))
         if "ROUNDTRIP" in request.system:
             if request.messages[-1].content == FOLLOWUP_INBOUND:
-                yield TextDelta(text=json.dumps({"echoed": FOLLOWUP_ECHO}))
+                yield ToolCallStart(id="r2", name=FINISH_TOOL)
+                yield ToolCallDelta(id="r2", partial_json=json.dumps({"echoed": FOLLOWUP_ECHO}))
                 yield Usage(input_tokens=5, output_tokens=5)
                 return
             payload = json.loads(request.messages[-1].content)
-            yield TextDelta(text=json.dumps({"echoed": payload["value"]}))
+            yield ToolCallStart(id="r1", name=FINISH_TOOL)
+            yield ToolCallDelta(id="r1", partial_json=json.dumps({"echoed": payload["value"]}))
             yield Usage(input_tokens=5, output_tokens=5)
             return
         if "EXTEND" in request.system:
-            last = request.messages[-1].content
-            if last == FORCE_FINAL_PROMPT:
-                yield TextDelta(text=json.dumps({"echoed": FORCED_ECHO}))
+            if request.tool_choice is not None:
+                yield ToolCallStart(id="x2", name=FINISH_TOOL)
+                yield ToolCallDelta(id="x2", partial_json=json.dumps({"echoed": FORCED_ECHO}))
                 yield Usage(input_tokens=5, output_tokens=5)
                 return
-            if isinstance(last, str):
+            if isinstance(request.messages[-1].content, str):
                 yield ToolCallStart(id="x1", name="bash")
                 yield ToolCallDelta(id="x1", partial_json='{"command": "true"}')
                 yield Usage(input_tokens=2, output_tokens=2)
                 return
             payload = json.loads(request.messages[0].content)
-            yield TextDelta(text=json.dumps({"echoed": payload["value"]}))
+            yield ToolCallStart(id="x3", name=FINISH_TOOL)
+            yield ToolCallDelta(id="x3", partial_json=json.dumps({"echoed": payload["value"]}))
             yield Usage(input_tokens=5, output_tokens=5)
             return
         if "EXHAUST" in request.system:
-            if request.messages[-1].content == FORCE_FINAL_PROMPT:
+            if request.tool_choice is not None:
                 payload = json.loads(request.messages[0].content)
-                yield TextDelta(text=json.dumps({"echoed": payload["value"]}))
+                yield ToolCallStart(id="e2", name=FINISH_TOOL)
+                yield ToolCallDelta(id="e2", partial_json=json.dumps({"echoed": payload["value"]}))
                 yield Usage(input_tokens=5, output_tokens=5)
                 return
             yield ToolCallStart(id="e1", name="bash")

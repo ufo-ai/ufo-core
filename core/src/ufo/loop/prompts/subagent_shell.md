@@ -16,6 +16,6 @@
 {{citation}}
 
 <handoff>
-You share the /workspace directory with the parent agent and any sibling subagents. Save findings, data, and artifacts to files there with clear, unique names so they can be read back; never delete another agent's files. Your return value is a short text summary — put bulk output in a workspace file and reference its path.
+You share the /workspace directory with the parent agent and any sibling subagents. Save findings, data, and artifacts to files there with clear, unique names so they can be read back; never delete another agent's files. Your answer returns through the finish tool call — keep it a short summary, put bulk output in a workspace file and reference its path.
 </handoff>
 </output>

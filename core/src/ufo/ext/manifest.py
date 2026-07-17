@@ -451,10 +451,14 @@ SUBAGENT_ROUND_LIMIT = 50
 class SubagentProfile:
     """A typed subagent an extension registers. `prompt` is the child's own instructions and
     `tool_names` the subset of the turn's tool set the child may call; a spawn validates its payload
-    against `input_model` and its final answer against `output_model`. The loader collects every
+    against `input_model`, and the child ends its turn by calling the engine's finish tool, whose
+    input schema is `output_model` — the terminal a spawn validates is schema-shaped by
+    construction. The loader collects every
     manifest's profiles into the SubagentRegistry `spawn_subagent` dispatches against. `max_rounds`
-    caps the child's agentic tool-use rounds; on exhaustion it produces a best-effort final answer
-    rather than failing, so a runaway child never detonates its parent. A deep profile lifts it to
+    caps the child's agentic tool-use rounds; on exhaustion a forced finish call produces a
+    best-effort, schema-shaped final answer — the turn fails only if that forced call still
+    violates the schema, and the parent receives a failure as a tool error, never a crash. A deep
+    profile lifts it to
     the main ceiling; the default suits an ordinary focused subagent. `model` runs the child under
     a model distinct from its parent — possibly a different provider — while `None` inherits the
     parent's; a spawn resolves and bills the child under whichever model answers it.

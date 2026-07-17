@@ -772,6 +772,76 @@ async def test_anthropic_enables_parallel_tool_use() -> None:
     assert "tool_choice" not in bare.kwargs
 
 
+def test_model_request_rejects_a_forced_choice_that_names_no_offered_tool() -> None:
+    with pytest.raises(ValueError, match="names no offered tool"):
+        ModelRequest(
+            model="m",
+            system="s",
+            messages=(),
+            max_tokens=1,
+            tool_choice="finish",
+            reasoning="off",
+        )
+
+
+def test_model_request_forced_choice_requires_reasoning_off() -> None:
+    tool = ToolSchema(name="finish", description="d", input_schema={"type": "object"})
+    with pytest.raises(ValueError, match="reasoning off"):
+        ModelRequest(
+            model="m", system="s", messages=(), max_tokens=1, tools=(tool,), tool_choice="finish"
+        )
+    forced = ModelRequest(
+        model="m",
+        system="s",
+        messages=(),
+        max_tokens=1,
+        tools=(tool,),
+        tool_choice="finish",
+        reasoning="off",
+    )
+    assert forced.tool_choice == "finish"
+
+
+async def test_anthropic_forced_tool_choice_compels_the_named_tool() -> None:
+    create = CapturingCreate(
+        ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
+    )
+    request = REQUEST.model_copy(
+        update={
+            "tools": (
+                ToolSchema(name="finish", description="one", input_schema={"type": "object"}),
+            ),
+            "tool_choice": "finish",
+            "reasoning": "off",
+        }
+    )
+    async for _ in AnthropicClient(client=anthropic_sdk(create)).complete(request):
+        pass
+    assert create.kwargs["tool_choice"] == {
+        "type": "tool",
+        "name": "finish",
+        "disable_parallel_tool_use": True,
+    }
+    assert "thinking" not in create.kwargs
+
+
+async def test_openai_forced_tool_choice_compels_the_named_tool() -> None:
+    create = CapturingCreate(([openai_text("ok"), openai_usage(prompt=1, completion=1)], None))
+    request = REQUEST.model_copy(
+        update={
+            "tools": (
+                ToolSchema(name="finish", description="one", input_schema={"type": "object"}),
+            ),
+            "tool_choice": "finish",
+            "reasoning": "off",
+        }
+    )
+    async for _ in OpenAIClient(client=openai_sdk(create)).complete(request):
+        pass
+    assert create.kwargs["parallel_tool_calls"] is False
+    assert create.kwargs["tool_choice"] == {"type": "function", "function": {"name": "finish"}}
+
+
 async def test_openai_enables_parallel_tool_calls() -> None:
     create = CapturingCreate(([openai_text("ok"), openai_usage(prompt=1, completion=1)], None))
     request = REQUEST.model_copy(

@@ -37,7 +37,7 @@ from ufo.db import workspace_tx
 from ufo.ext.context import ScopedStore
 from ufo.ext.loader import skill_registry, turn_subagents
 from ufo.loop.prompts.render import render_system_prompt
-from ufo.loop.subagents import SubagentRegistry, subagent_system_prompt
+from ufo.loop.subagents import FINISH_CONTRACT, SubagentRegistry, subagent_system_prompt
 from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
@@ -459,7 +459,7 @@ def test_browser_profile_registers_and_is_spawnable() -> None:
 def test_browser_prompt_preserves_no_skill_index_slot() -> None:
     assert "{{" not in BROWSER_SUBAGENT_PROMPT
     assert "skill_index" not in BROWSER_SUBAGENT_PROMPT
-    assert "JSON" in subagent_system_prompt(BROWSER_PROFILE)
+    assert subagent_system_prompt(BROWSER_PROFILE).endswith(FINISH_CONTRACT)
 
 
 async def test_aclose_releases_the_lease_even_when_session_close_raises() -> None:

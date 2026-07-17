@@ -14,6 +14,7 @@ from ufo.ext.manifest import SUBAGENT_ROUND_LIMIT, SubagentProfile
 from ufo.loop.profiles import CORE_SUBAGENT_PROFILES, GENERAL_PURPOSE
 from ufo.loop.queue import _load_turn
 from ufo.loop.subagents import (
+    FINISH_CONTRACT,
     PRELOAD_PROMPT_CHAR_BOUND,
     SubagentRegistry,
     Subagents,
@@ -61,11 +62,10 @@ def test_registry_get_returns_named_profile() -> None:
     assert registry.get("b").tool_names == ("bash", "read")
 
 
-def test_system_prompt_carries_instructions_and_output_schema() -> None:
+def test_system_prompt_carries_instructions_and_the_finish_contract() -> None:
     prompt = subagent_system_prompt(_profile("research"))
     assert "research instructions" in prompt
-    assert "finding" in prompt
-    assert "JSON" in prompt
+    assert prompt.endswith(FINISH_CONTRACT)
 
 
 def test_core_ships_a_general_purpose_profile_the_registry_resolves() -> None:
@@ -125,7 +125,7 @@ def test_general_purpose_prompt_lists_the_loadable_skills_and_binds_its_output()
     assert "<available_skills>" in prompt
     for skill in ("sandbox", "delegation"):
         assert skill in prompt
-    assert "result" in prompt and "JSON" in prompt
+    assert FINISH_CONTRACT in prompt
 
 
 def test_core_ships_only_the_general_purpose_profile() -> None:
@@ -151,16 +151,16 @@ def test_subagent_prompt_fills_the_skill_index_slot() -> None:
     assert "<available_skills>" in prompt
 
 
-def test_subagent_prompt_keeps_the_json_contract_after_preloaded_skills() -> None:
+def test_subagent_prompt_keeps_the_finish_contract_after_preloaded_skills() -> None:
     """A preloaded skill's own answer-formatting instructions must never be the prompt's last word
-    — the JSON output contract stays after every preloaded body, or a website build would return
-    prose the parent's schema validation rejects."""
+    — the finish contract stays after every preloaded body, so a website build still ends its turn
+    through the finish tool instead of trailing prose."""
     skill = RuntimeSkill(
         name="verbose", description="d", instructions="End with a friendly prose summary."
     )
     prompt = subagent_system_prompt(_profile("research"), preload=(skill,))
     assert "Preloaded skill(s):" in prompt
-    contract_at = prompt.index("Respond with a single JSON object")
+    contract_at = prompt.index(FINISH_CONTRACT)
     assert prompt.index("End with a friendly prose summary.") < contract_at
     assert prompt.index("<citation_instructions>") > prompt.index("Preloaded skill(s):")
 
@@ -781,12 +781,10 @@ async def test_untrusted_profile_validation_failure_raises_a_walled_error(
             await subagents.spawn(profile, {"task": "acme"}, dedup_key=f"bad-{profile}")
 
 
-async def test_spawn_coerces_a_non_json_final_turn_into_the_schemas_lone_field(
-    db: None, dbos_launched: Config
-) -> None:
-    """A child that ends its turn on plain prose (a refusal, a summary) rather than the JSON
-    contract still carries a genuine answer; `_Finding` has exactly one required field, so the raw
-    text becomes its value instead of raising and discarding the child's work."""
+async def test_spawn_raises_loud_on_a_prose_terminal(db: None, dbos_launched: Config) -> None:
+    """The engine ends a child turn through the finish tool, so a done terminal is schema-shaped
+    by construction — a prose terminal is an engine fault, raised loud rather than repaired at the
+    consumer."""
     workspace_id, agent_id = await _workspace_agent()
     parent = await _parent(workspace_id, agent_id)
     subagents = Subagents(
@@ -803,9 +801,8 @@ async def test_spawn_coerces_a_non_json_final_turn_into_the_schemas_lone_field(
             )
             .where(tables.turn.c.id == spawned.turn_id)
         )
-    reconnected = await subagents.spawn("plain", {"task": "acme"}, dedup_key="prose")
-    assert reconnected.output is not None
-    assert reconnected.output.model_dump()["finding"] == text
+    with pytest.raises(ValidationError):
+        await subagents.spawn("plain", {"task": "acme"}, dedup_key="prose")
 
 
 async def test_wait_refuses_a_turn_this_parent_did_not_spawn(

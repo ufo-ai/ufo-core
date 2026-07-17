@@ -3,7 +3,7 @@
 from collections.abc import AsyncIterator
 from typing import Annotated, Any, Literal, Protocol
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from ufo.schema.records import DEFAULT_REASONING_EFFORT, ReasoningEffort, Usage
 
@@ -70,14 +70,27 @@ class ModelRequest(BaseModel):
     """`reasoning` is the extended-thinking depth each client renders in its provider's shape — the
     Anthropic `thinking` block plus `output_config.effort`, the OpenAI/OpenRouter `reasoning`/effort
     param. `max_tokens` is reasoning-inclusive: thinking draws from it, so the visible answer gets
-    what thinking leaves. `off` omits the thinking parameters entirely."""
+    what thinking leaves. `off` omits the thinking parameters entirely. `tool_choice` compels the
+    named tool as the round's single act — it must name an offered tool, and the request runs with
+    reasoning off (Anthropic rejects a forced tool choice under extended thinking)."""
 
     model: str
     system: str
     messages: tuple[Message, ...]
     max_tokens: int
     tools: tuple[ToolSchema, ...] = ()
+    tool_choice: str | None = None
     reasoning: ReasoningEffort = DEFAULT_REASONING_EFFORT
+
+    @model_validator(mode="after")
+    def _forced_choice_names_an_offered_tool_with_reasoning_off(self) -> "ModelRequest":
+        if self.tool_choice is None:
+            return self
+        if all(tool.name != self.tool_choice for tool in self.tools):
+            raise ValueError(f"tool_choice {self.tool_choice!r} names no offered tool")
+        if self.reasoning != "off":
+            raise ValueError("a forced tool_choice request must run with reasoning off")
+        return self
 
 
 class TextDelta(BaseModel):

@@ -8,7 +8,7 @@ import json
 import ufo_ext_coding.manifest as coding
 
 from ufo.ext.loader import skill_registry
-from ufo.loop.subagents import subagent_system_prompt
+from ufo.loop.subagents import FINISH_CONTRACT, subagent_system_prompt
 from ufo.tools.builtins import BUILTIN_TOOLS
 
 
@@ -64,5 +64,5 @@ def test_coding_prompt_wraps_with_citation_and_fills_the_skill_index() -> None:
     assert "- extension-skill: A turn-specific coding workflow." in prompt
     assert "<citation_instructions>" in prompt
     assert "software-engineering task" in prompt
-    assert "JSON" in prompt
+    assert prompt.endswith(FINISH_CONTRACT)
     assert "list_skills" not in coding.CODING_PROFILE.tool_names

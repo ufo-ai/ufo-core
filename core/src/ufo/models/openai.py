@@ -170,7 +170,12 @@ class OpenAIClient:
                     }
                     for t in request.tools
                 ]
-                create_kwargs["parallel_tool_calls"] = True
+                create_kwargs["parallel_tool_calls"] = request.tool_choice is None
+                if request.tool_choice is not None:
+                    create_kwargs["tool_choice"] = {
+                        "type": "function",
+                        "function": {"name": request.tool_choice},
+                    }
             try:
                 stream = await self.client.chat.completions.create(**create_kwargs)
                 async for chunk in stream:
