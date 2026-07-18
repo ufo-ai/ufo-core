@@ -60,58 +60,34 @@ The canonical snapshot digest is
 
 ## Run the eval
 
-Run the block from one shell at the repository root. It creates new Postgres application and DBOS
-databases plus a blob root on every invocation, materializes the snapshot, starts the eval receiver
-before the worker, executes only `memory_100`, and writes the reports beside the run state.
-Set `ONLY` to one leaf name, such as `memory_100.longmem.multi_session`, to rerun only that leaf.
+Runs go through the stack orchestrator (`python -m evals.stack`), which provisions an isolated
+deploy per run — its own Postgres application and DBOS databases on the template's server, blob
+root, serve and proxy ports, and a private loopback OTLP endpoint for the recall receiver —
+materializes the snapshot (`ufoctl migrate` then `python -m evals.memory_100.materialize`; never
+`ufoctl init`, which would occupy the workspace-free database materialization requires), boots
+`ufoctl serve`, and drives `python -m evals --memory-100 …` against it. Run directories land under
+`.local/evals/<stamp>/<label>/` with `seed.log`, `serve.log`, `eval.log`, and the run's `state/`;
+reports land in the shared `eval-reports/` archive.
 
 Use Postgres for this corpus. SQLite's single writer cannot serve the worker, scheduler, eval
-driver, and a 36,000-chunk brute-force vector read concurrently. The block reuses a pgvector
-container already publishing the repository's port, or starts the Compose service when none exists.
+driver, and a 36,000-chunk brute-force vector read concurrently. Start the Compose service first
+(`docker compose up -d --wait postgres`); the template's `database.url` names that server and an
+existing database on it (the stack dials it to create the per-run databases).
 
-`.env` must contain `ANTHROPIC_API_KEY` for the target and judge and `OPENAI_API_KEY` for corpus and
-query embeddings. The direct Python entry points do not load `.env`, so the block exports it. Do
-not run `ufoctl init`: materialization requires a database with no workspace or index chunks.
+The environment must carry `ANTHROPIC_API_KEY` for the target and judge and `OPENAI_API_KEY` for
+corpus and query embeddings; the stack passes the environment through to every subprocess, and
+the Python entry points do not load `.env`, so export it first (`set -a; source .env; set +a`).
 
 ```bash
-set -euo pipefail
+mkdir -p .local/memory-100
 
-set -a
-source .env
-set +a
-
-SNAPSHOT="$PWD/.local/memory-100/snapshot"
-RUN_ID="$(date +%Y%m%d_%H%M%S)"
-RUN="$PWD/.local/memory-100/runs/$RUN_ID"
-mkdir -p "$RUN"
-
-POSTGRES_CONTAINER="$(
-  docker ps --filter ancestor=pgvector/pgvector:pg17 --filter publish=5541 \
-    --format '{{.ID}}' | head -1
-)"
-if test -z "$POSTGRES_CONTAINER"; then
-  docker compose up -d --wait postgres
-  POSTGRES_CONTAINER="$(docker compose ps -q postgres)"
-fi
-APP_DB="memory_100_$RUN_ID"
-DBOS_DB="${APP_DB}_dbos"
-docker exec "$POSTGRES_CONTAINER" createdb -U ufo "$APP_DB"
-docker exec "$POSTGRES_CONTAINER" createdb -U ufo "$DBOS_DB"
-
-export UFO_CONFIG="$RUN/ufo.toml"
-export UFO_CREDENTIAL_KEY="${UFO_CREDENTIAL_KEY:-$(
-  uv run python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
-)}"
-export UFO_ARTIFACT_TOKEN_SECRET="${UFO_ARTIFACT_TOKEN_SECRET:-memory-100-local-eval}"
-
-cat > "$UFO_CONFIG" <<EOF
+cat > .local/memory-100/template.toml <<'EOF'
 [database]
-url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/$APP_DB"
-system_url = "postgresql+psycopg://ufo:ufo@127.0.0.1:5541/$DBOS_DB"
+url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo"
 
 [blob]
 backend = "filesystem"
-root = "$RUN/blobs"
+root = "./blobs"
 
 [pack]
 name = "yc"
@@ -120,49 +96,20 @@ name = "yc"
 otlp_endpoint = "http://127.0.0.1:4318"
 EOF
 
-uv run ufoctl migrate
-READINESS="$(
-  uv run python -m evals.memory_100.materialize \
-    --snapshot "$SNAPSHOT" \
-    --state "$RUN/state"
-)"
+cat > .local/memory-100/matrix.toml <<'EOF'
+[[run]]
+label = "memory-100"
+config = ".local/memory-100/template.toml"
+memory_100 = ".local/memory-100/snapshot"
+EOF
 
-ONLY_ARGS=()
-if test -n "${ONLY:-}"; then
-  ONLY_ARGS=(--only "$ONLY")
-fi
-
-uv run python -m evals \
-  --memory-100 "$SNAPSHOT" \
-  --memory-100-state "$READINESS" \
-  --out "$RUN/reports" \
-  "${ONLY_ARGS[@]}" >"$RUN/eval.log" 2>&1 &
-EVAL_PID=$!
-until curl --silent --max-time 1 --output /dev/null http://127.0.0.1:4318/; do
-  kill -0 "$EVAL_PID" 2>/dev/null || { cat "$RUN/eval.log"; exit 1; }
-  sleep 0.2
-done
-
-uv run ufoctl serve >"$RUN/serve.log" 2>&1 &
-SERVER_PID=$!
-cleanup() { kill "$EVAL_PID" "$SERVER_PID" 2>/dev/null || true; }
-trap cleanup EXIT
-until curl --silent --fail http://127.0.0.1:8710/openapi.json >/dev/null; do
-  kill -0 "$SERVER_PID" 2>/dev/null || { cat "$RUN/serve.log"; exit 1; }
-  kill -0 "$EVAL_PID" 2>/dev/null || { cat "$RUN/eval.log"; exit 1; }
-  sleep 0.2
-done
-
-if wait "$EVAL_PID"; then
-  EVAL_STATUS=0
-else
-  EVAL_STATUS=$?
-fi
-cat "$RUN/eval.log"
-cleanup
-trap - EXIT
-test "$EVAL_STATUS" -eq 0
+set -a; source .env; set +a
+uv run python -m evals.stack .local/memory-100/matrix.toml
 ```
+
+The template's OTLP endpoint is re-pointed to a free loopback port per run, so concurrent runs
+never contend; database, blob root, and ports are likewise rewritten per run. Select a single leaf
+by adding `args = ["--only", "memory_100.longmem.multi_session"]` to the run block.
 
 Materialization is API-bound and may be quiet while embedding 1,429 memories and 12,239 pages.
 It drains every selected pack's page-change consumer without model access, completing deterministic
@@ -188,9 +135,9 @@ snapshot, materialized corpus, and recall-grading policy.
 Evidence coverage maps injected memory-item ids to readiness owners. A source page without a
 materialized memory-item owner is reported as unmapped rather than inferred from page provenance.
 
-The offline viewer is `reports/index.html`; structured runs are
-`reports/runs/<run-uuid>.json`. The CLI prints the pass count and digest and exits nonzero when the
-suite fails. The reports record the target model, judge model, judge revision, logical snapshot,
-materialized corpus, and recall-grading policy. The target pack and loopback endpoint in `ufo.toml`
-must remain unchanged through migration, materialization, serving, and evaluation; the endpoint
-must be unused and dedicated to this disposable eval tenant.
+The offline viewer is `eval-reports/index.html`; structured runs are
+`eval-reports/runs/<run-uuid>.json`. The CLI prints the pass count and digest and exits nonzero
+when the suite fails. The reports record the target model, judge model, judge revision, logical
+snapshot, materialized corpus, and recall-grading policy. The stack derives one `ufo.toml` per run,
+so the pack and loopback endpoint hold unchanged through migration, materialization, serving, and
+evaluation, and each run's endpoint is unused and dedicated to its disposable eval tenant.

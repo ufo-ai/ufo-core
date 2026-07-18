@@ -8,7 +8,15 @@ from pydantic import ValidationError
 from sqlalchemy import make_url
 from ufo_testsupport.plugin import POSTGRES_TEST_URL, postgres_reachable
 
-from evals.stack import EvalStack, Matrix, RunSpec, _database_name, derived_config, template_config
+from evals.stack import (
+    EvalStack,
+    Matrix,
+    RunSpec,
+    _database_name,
+    derived_config,
+    materialize_readiness,
+    template_config,
+)
 from ufo.config import Config
 
 
@@ -231,6 +239,78 @@ async def test_create_databases_creates_the_app_and_dbos_pair_once(
         for name in (app_name, f"{app_name}_dbos"):
             await admin.execute(f'drop database if exists "{name}"')
         await admin.close()
+
+
+def test_memory_100_spec_requires_postgres_and_a_collector_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("UFO_CREDENTIAL_KEY", raising=False)
+    sqlite_template = tmp_path / "sqlite.toml"
+    sqlite_template.write_text(SQLITE_TEMPLATE)
+    postgres_template = tmp_path / "postgres.toml"
+    postgres_template.write_text(POSTGRES_TEMPLATE)
+    snapshot = tmp_path / "snapshot"
+
+    with pytest.raises(ValueError, match="Postgres template"):
+        EvalStack.provision(
+            RunSpec(label="memory", config=sqlite_template, memory_100=snapshot),
+            root=tmp_path / "a",
+            out=tmp_path / "archive",
+            repo_root=tmp_path,
+        )
+    with pytest.raises(ValueError, match="otlp_endpoint"):
+        EvalStack.provision(
+            RunSpec(label="memory", config=postgres_template, memory_100=snapshot),
+            root=tmp_path / "b",
+            out=tmp_path / "archive",
+            repo_root=tmp_path,
+        )
+    with pytest.raises(ValidationError, match="materialization owns the agent"):
+        RunSpec(label="memory", config=postgres_template, memory_100=snapshot, model="claude")
+    assert not (tmp_path / "a").exists()
+    assert not (tmp_path / "b").exists()
+
+
+def test_memory_100_child_args_carry_the_snapshot_and_readiness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("UFO_CREDENTIAL_KEY", raising=False)
+    template = tmp_path / "template.toml"
+    template.write_text(POSTGRES_TEMPLATE + '\n[o11y]\notlp_endpoint = "http://127.0.0.1:4318"\n')
+    snapshot = tmp_path / "snapshot"
+
+    stack = EvalStack.provision(
+        RunSpec(label="memory", config=template, memory_100=snapshot),
+        root=tmp_path / "run",
+        out=tmp_path / "archive",
+        repo_root=tmp_path,
+    )
+    for log in (stack.seed_log, stack.serve_log, stack.eval_log):
+        log.close()
+
+    readiness = tmp_path / "run" / "state" / "abc" / "readiness.json"
+    assert stack._child_args(readiness)[-4:] == (
+        "--memory-100",
+        str(snapshot.resolve()),
+        "--memory-100-state",
+        str(readiness),
+    )
+    assert "--memory-100" not in stack._child_args(None)
+    assert stack.config.o11y.otlp_endpoint != "http://127.0.0.1:4318"
+    assert stack.admin_database_url == "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo"
+
+
+def test_materialize_readiness_parses_the_last_line_and_fails_loud(tmp_path: Path) -> None:
+    seed_log = tmp_path / "seed.log"
+    stdout = b"validated 12239 pages\n/state/abc/readiness.json\n"
+
+    assert materialize_readiness(0, stdout, seed_log) == Path("/state/abc/readiness.json")
+    with pytest.raises(RuntimeError, match="exited 3"):
+        materialize_readiness(3, stdout, seed_log)
+    with pytest.raises(RuntimeError, match="readiness path"):
+        materialize_readiness(0, b"", seed_log)
+    with pytest.raises(RuntimeError, match="readiness path"):
+        materialize_readiness(0, b"no path printed\n", seed_log)
 
 
 def test_database_name_is_postgres_safe() -> None:

@@ -103,6 +103,7 @@ class RunSpec(BaseModel):
     args: tuple[str, ...] = ()
     env: dict[str, str] = {}
     model: str | None = None
+    memory_100: Path | None = None
 
     @field_validator("label")
     @classmethod
@@ -120,6 +121,10 @@ class RunSpec(BaseModel):
         for name in ORCHESTRATOR_ENV:
             if name in self.env:
                 raise ValueError(f"run {self.label!r} sets {name} — the stack owns it")
+        if self.memory_100 is not None and self.model is not None:
+            raise ValueError(
+                f"run {self.label!r} sets model with memory_100 — materialization owns the agent"
+            )
         return self
 
 
@@ -173,8 +178,16 @@ class EvalStack:
 
     @classmethod
     def provision(cls, spec: RunSpec, root: Path, out: Path, repo_root: Path) -> Self:
-        root.mkdir(parents=True, exist_ok=False)
         template = template_config(spec.config.read_text())
+        if spec.memory_100 is not None:
+            if not template.database.url.startswith("postgresql"):
+                raise ValueError(f"run {spec.label!r}: memory_100 requires a Postgres template")
+            if template.o11y.otlp_endpoint is None:
+                raise ValueError(
+                    f"run {spec.label!r}: memory_100 requires a template [o11y] otlp_endpoint — "
+                    "the recall collector binds it"
+                )
+        root.mkdir(parents=True, exist_ok=False)
         serve_probe, serve_port = _port_probe()
         proxy_probe, proxy_port = _port_probe()
         otlp_probe, otlp_port = _port_probe() if template.o11y.otlp_endpoint else (None, None)
@@ -218,11 +231,11 @@ class EvalStack:
         try:
             async with creation:
                 await self._create_databases()
-            await self._seed()
+            readiness = await self._seed()
             serve = await self._start_serve()
             try:
                 await self._ready(serve)
-                exit_code = await self._drive(serve)
+                exit_code = await self._drive(serve, readiness)
             finally:
                 await self._shutdown(serve)
         finally:
@@ -261,8 +274,26 @@ class EvalStack:
         finally:
             await connection.close()
 
-    async def _seed(self) -> None:
-        await self._checked(await self._ufoctl(*self._seed_args(), log=self.seed_log), "seed")
+    async def _seed(self) -> Path | None:
+        if self.spec.memory_100 is None:
+            await self._checked(await self._ufoctl(*self._seed_args(), log=self.seed_log), "seed")
+            return None
+        await self._checked(await self._ufoctl("migrate", log=self.seed_log), "seed")
+        materialize = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "evals.memory_100.materialize",
+            "--snapshot",
+            str(self.spec.memory_100.resolve()),
+            "--state",
+            str(self.root.resolve() / "state"),
+            cwd=self.repo_root,
+            env=self.env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=self.seed_log,
+        )
+        stdout, _ = await materialize.communicate()
+        return materialize_readiness(materialize.returncode, stdout, self._log_path("seed"))
 
     def _seed_args(self) -> tuple[str, ...]:
         argv = ["init", "--email", STACK_OWNER_EMAIL]
@@ -310,14 +341,14 @@ class EvalStack:
                     )
                 await asyncio.sleep(READY_POLL_SECONDS)
 
-    async def _drive(self, serve: asyncio.subprocess.Process) -> int:
+    async def _drive(self, serve: asyncio.subprocess.Process, readiness: Path | None) -> int:
         if self.otlp_probe is not None:
             self.otlp_probe.close()
         child = await asyncio.create_subprocess_exec(
             sys.executable,
             "-m",
             "evals",
-            *self._child_args(),
+            *self._child_args(readiness),
             cwd=self.repo_root,
             env=self.env,
             stdout=self.eval_log,
@@ -342,7 +373,7 @@ class EvalStack:
             future.cancel()
         return await child_wait
 
-    def _child_args(self) -> tuple[str, ...]:
+    def _child_args(self, readiness: Path | None = None) -> tuple[str, ...]:
         argv = list(self.spec.args)
         argv += ["--out", str(self.out)]
         flags = {token.partition("=")[0] for token in argv}
@@ -350,6 +381,13 @@ class EvalStack:
             argv += ["--label", self.spec.label]
         if "--jobbench" in flags and "--jobbench-submissions" not in flags:
             argv += ["--jobbench-submissions", str(self.root.resolve() / "submissions")]
+        if readiness is not None and self.spec.memory_100 is not None:
+            argv += [
+                "--memory-100",
+                str(self.spec.memory_100.resolve()),
+                "--memory-100-state",
+                str(readiness),
+            ]
         return tuple(argv)
 
     async def _shutdown(self, serve: asyncio.subprocess.Process) -> None:
@@ -363,6 +401,16 @@ class EvalStack:
 
     def _log_path(self, step: str) -> Path:
         return self.root / f"{step}.log"
+
+
+def materialize_readiness(returncode: int | None, stdout: bytes, seed_log: Path) -> Path:
+    """The materialize contract: exit 0 and the readiness.json path as the last stdout line."""
+    if returncode != 0:
+        raise RuntimeError(f"materialize exited {returncode} — see {seed_log}")
+    printed = stdout.decode().strip().splitlines()
+    if not printed or not printed[-1].endswith("readiness.json"):
+        raise RuntimeError(f"materialize did not print a readiness path — see {seed_log}")
+    return Path(printed[-1])
 
 
 def template_config(text: str) -> Config:
