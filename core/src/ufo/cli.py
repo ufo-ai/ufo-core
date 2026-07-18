@@ -34,7 +34,7 @@ from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME
 from ufo.serve import run as serve_run
 
-UFOCTL_DIR = Path.home() / ".ufoctl"
+UFOCTL_DIR_ENV = "UFOCTL_DIR"
 RECONNECT_SECONDS = 1.0
 TURN_REQUEST_TIMEOUT_SECONDS = 90.0
 ERASE_LINE = "\r\x1b[K"
@@ -53,7 +53,15 @@ name = "assistant"
 [research]
 search_provider = "exa"
 """
-DOTENV_PATH = Path(".env")
+
+
+def _ufoctl_dir() -> Path:
+    override = os.environ.get(UFOCTL_DIR_ENV)
+    return Path(override) if override else Path.home() / ".ufoctl"
+
+
+def _dotenv_path() -> Path:
+    return config_path().parent / ".env"
 
 
 def _dotenv_pairs(text: str) -> list[tuple[str, str]]:
@@ -76,13 +84,14 @@ def _dotenv_pairs(text: str) -> list[tuple[str, str]]:
 
 
 def _load_dotenv() -> None:
-    """Load a cwd `.env` into the environment before any verb reads a key, so exported secrets and
-    `ufoctl init`'s minted dev secrets both arrive with no manual `export` — the smooth local
-    default. An already-set var wins (an explicit `export` overrides the file), so this only fills
-    what is unset."""
-    if not DOTENV_PATH.exists():
+    """Load the `.env` beside the config file into the environment before any verb reads a key, so
+    exported secrets and `ufoctl init`'s minted dev secrets both arrive with no manual `export` —
+    the smooth local default. An already-set var wins (an explicit `export` overrides the file), so
+    this only fills what is unset."""
+    dotenv = _dotenv_path()
+    if not dotenv.exists():
         return
-    for name, value in _dotenv_pairs(DOTENV_PATH.read_text()):
+    for name, value in _dotenv_pairs(dotenv.read_text()):
         os.environ.setdefault(name, value)
 
 
@@ -98,14 +107,14 @@ def main() -> None:
 def init(email: str, model: str) -> None:
     """Write ufo.toml if absent, apply the schema, then onboard the workspace, owner, default
     agent and model key (plus any extension onboarding steps) and bind this machine's CLI token."""
-    config_path = Path("ufo.toml")
-    if not config_path.exists():
-        config_path.write_text(DEFAULT_CONFIG)
-        click.echo(f"wrote {config_path} (SQLite, filesystem blobs — zero services)")
+    path = config_path()
+    if not path.exists():
+        path.write_text(DEFAULT_CONFIG)
+        click.echo(f"wrote {path} (SQLite, filesystem blobs — zero services)")
     config = load_config()
     added = _write_dev_secrets(config)
     if added:
-        click.echo(f"wrote {', '.join(added)} to .env — serve auto-loads it")
+        click.echo(f"wrote {', '.join(added)} to {_dotenv_path()} — serve auto-loads it")
     if config.database.url.startswith("postgresql"):
         asyncio.run(_create_postgres_system_database(config))
     apply_migrations(config.database.url, config.pack.name)
@@ -114,8 +123,9 @@ def init(email: str, model: str) -> None:
         asyncio.run(_onboard(config, email, model, token))
     except (AlreadyInitialized, ValueError, RuntimeError) as error:
         raise click.ClickException(str(error)) from error
-    UFOCTL_DIR.mkdir(mode=0o700, exist_ok=True)
-    token_path = UFOCTL_DIR / "token"
+    ufoctl_dir = _ufoctl_dir()
+    ufoctl_dir.mkdir(mode=0o700, exist_ok=True)
+    token_path = ufoctl_dir / "token"
     token_path.write_text(token)
     token_path.chmod(0o600)
     click.echo(f"workspace ready — owner {email}, agent {DEFAULT_AGENT_NAME!r} ({model})")
@@ -123,24 +133,25 @@ def init(email: str, model: str) -> None:
 
 
 def _write_dev_secrets(config: Config) -> tuple[str, ...]:
-    """Mint the dev secrets a zero-config `serve` needs and merge them into the cwd `.env` without
-    clobbering: the Fernet credential key the store seals BYOK secrets with, and the HMAC secret
-    that signs artifact-delivery tokens. `.env` auto-loads on the next verb, so `serve` boots with
-    no manual export; a name already in `.env` (or exported) is left untouched. Returns the names
-    newly written."""
+    """Mint the dev secrets a zero-config `serve` needs and merge them into the `.env` beside the
+    config without clobbering: the Fernet credential key the store seals BYOK secrets with, and the
+    HMAC secret that signs artifact-delivery tokens. `.env` auto-loads on the next verb, so `serve`
+    boots with no manual export; a name already in `.env` or exported is left untouched. Returns
+    the names newly written."""
     minted = {
         config.credentials.key_env: Fernet.generate_key().decode(),
         config.artifacts.token_secret_env: secrets.token_urlsafe(32),
     }
-    existing = DOTENV_PATH.read_text() if DOTENV_PATH.exists() else ""
-    present = {name for name, _ in _dotenv_pairs(existing)}
+    dotenv = _dotenv_path()
+    existing = dotenv.read_text() if dotenv.exists() else ""
+    present = {name for name, _ in _dotenv_pairs(existing)} | os.environ.keys()
     added = {name: value for name, value in minted.items() if name not in present}
     if not added:
         return ()
     prefix = existing if not existing or existing.endswith("\n") else existing + "\n"
-    DOTENV_PATH.write_text(prefix + "".join(f"{name}={value}\n" for name, value in added.items()))
+    dotenv.write_text(prefix + "".join(f"{name}={value}\n" for name, value in added.items()))
     for name, value in added.items():
-        os.environ.setdefault(name, value)
+        os.environ[name] = value
     return tuple(added)
 
 
@@ -233,7 +244,7 @@ def proxy() -> None:
 def chat(message: str | None, new: bool) -> None:
     """Talk to the agent; the session continues across invocations."""
     config = load_config()
-    token_path = UFOCTL_DIR / "token"
+    token_path = _ufoctl_dir() / "token"
     if not token_path.exists():
         raise click.ClickException("no CLI token — run `ufoctl init` first")
     headers = {
@@ -254,9 +265,10 @@ def chat(message: str | None, new: bool) -> None:
 
 
 def _session(new: bool) -> str:
-    path = UFOCTL_DIR / "session"
+    ufoctl_dir = _ufoctl_dir()
+    path = ufoctl_dir / "session"
     if new or not path.exists():
-        UFOCTL_DIR.mkdir(mode=0o700, exist_ok=True)
+        ufoctl_dir.mkdir(mode=0o700, exist_ok=True)
         path.write_text(uuid4().hex)
     return path.read_text().strip()
 

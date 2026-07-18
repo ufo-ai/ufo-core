@@ -79,10 +79,13 @@ def cli_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[CliRun
     """A CliRunner in an isolated filesystem with the presence-only env the verbs require: a dummy
     Anthropic key (the StandIn never calls it) and a real Fernet credential key (the installed
     sample's onboarding step needs one). `UFOCTL_DIR` is redirected into the tmp tree so the token
-    and session files never touch the developer's home."""
+    and session files never touch the developer's home. The artifact-token secret starts unset —
+    `init` exports what it mints into this process, so a prior test's mint would otherwise
+    suppress minting here."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-cli")
     monkeypatch.setenv("UFO_CREDENTIAL_KEY", Fernet.generate_key().decode())
-    monkeypatch.setattr(cli, "UFOCTL_DIR", tmp_path / ".ufoctl")
+    monkeypatch.delenv("UFO_ARTIFACT_TOKEN_SECRET", raising=False)
+    monkeypatch.setenv("UFOCTL_DIR", str(tmp_path / ".ufoctl"))
     runner = CliRunner()
     with runner.isolated_filesystem():
         yield runner
@@ -113,10 +116,13 @@ def _dotenv(text: str) -> dict[str, str]:
     return dict(line.split("=", 1) for line in text.splitlines() if line.strip())
 
 
-def test_init_provisions_dev_secrets_into_dotenv(cli_home: CliRunner) -> None:
+def test_init_provisions_dev_secrets_into_dotenv(
+    cli_home: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """`init` mints the dev secrets a zero-config `serve` needs into a cwd `.env` — a valid Fernet
     credential key and the artifact-token secret — and reports that serve auto-loads it, so the next
     `serve` boots with no manual env export."""
+    monkeypatch.delenv("UFO_CREDENTIAL_KEY")
     result = cli_home.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
     assert result.exit_code == 0, result.output
     assert ".env" in result.output
@@ -125,15 +131,62 @@ def test_init_provisions_dev_secrets_into_dotenv(cli_home: CliRunner) -> None:
     assert env["UFO_ARTIFACT_TOKEN_SECRET"]
 
 
-def test_init_does_not_clobber_an_existing_dotenv_key(cli_home: CliRunner) -> None:
+def test_init_does_not_clobber_an_existing_dotenv_key(
+    cli_home: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A key already in `.env` is left untouched — init only fills what is missing, so a developer's
     own value (a real model key, a pinned secret) survives re-provisioning."""
+    monkeypatch.delenv("UFO_CREDENTIAL_KEY")
     Path(".env").write_text("UFO_ARTIFACT_TOKEN_SECRET=preexisting\n")
     result = cli_home.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
     assert result.exit_code == 0, result.output
     env = _dotenv(Path(".env").read_text())
     assert env["UFO_ARTIFACT_TOKEN_SECRET"] == "preexisting"
     Fernet(env["UFO_CREDENTIAL_KEY"].encode())
+
+
+def test_init_does_not_mint_an_exported_secret_into_dotenv(cli_home: CliRunner) -> None:
+    """A secret already exported in the environment (the fixture exports UFO_CREDENTIAL_KEY) is
+    never minted into `.env` — a second, divergent key would silently win on the next verb."""
+    result = cli_home.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
+    assert result.exit_code == 0, result.output
+    env = _dotenv(Path(".env").read_text())
+    assert "UFO_CREDENTIAL_KEY" not in env
+    assert env["UFO_ARTIFACT_TOKEN_SECRET"]
+
+
+def test_init_honors_ufo_config_for_config_and_dotenv(
+    cli_home: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With `UFO_CONFIG` set, init writes `ufo.toml` at that path and `.env` beside it — nothing
+    lands in the cwd."""
+    deploy = tmp_path / "deploy"
+    deploy.mkdir()
+    monkeypatch.setenv("UFO_CONFIG", str(deploy / "ufo.toml"))
+    result = cli_home.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
+    assert result.exit_code == 0, result.output
+    assert 'url = "sqlite+aiosqlite:///ufo.db"' in (deploy / "ufo.toml").read_text()
+    env = _dotenv((deploy / ".env").read_text())
+    assert env["UFO_ARTIFACT_TOKEN_SECRET"]
+    assert not Path("ufo.toml").exists()
+    assert not Path(".env").exists()
+
+
+def test_ufoctl_dir_env_redirects_the_token_file(
+    cli_home: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`UFOCTL_DIR` is read at call time: the token lands in the redirected dir, and neither the
+    fixture's default dir nor the real home dir is touched."""
+    home_token = Path.home() / ".ufoctl" / "token"
+    before = home_token.read_text() if home_token.exists() else None
+    redirected = tmp_path / "ctl"
+    monkeypatch.setenv("UFOCTL_DIR", str(redirected))
+    result = cli_home.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
+    assert result.exit_code == 0, result.output
+    assert (redirected / "token").read_text()
+    assert not (tmp_path / ".ufoctl").exists()
+    after = home_token.read_text() if home_token.exists() else None
+    assert after == before
 
 
 def test_spend_cap_set_then_list(cli_home: CliRunner) -> None:
@@ -453,7 +506,7 @@ def chat_server(
         f'[serve]\nhost = "127.0.0.1"\nport = {port}\n'
     )
     monkeypatch.setenv("UFO_CONFIG", str(config_path))
-    monkeypatch.setattr(cli, "UFOCTL_DIR", tmp_path / ".ufoctl")
+    monkeypatch.setenv("UFOCTL_DIR", str(tmp_path / ".ufoctl"))
     (tmp_path / ".ufoctl").mkdir(mode=0o700, exist_ok=True)
     (tmp_path / ".ufoctl" / "token").write_text(token)
 

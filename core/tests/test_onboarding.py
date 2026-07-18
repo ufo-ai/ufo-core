@@ -203,7 +203,7 @@ def test_cold_start_init_creates_durable_state_and_then_fails_loud(
 ) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-onboard")
     monkeypatch.setenv("UFO_CREDENTIAL_KEY", Fernet.generate_key().decode())
-    monkeypatch.setattr(cli, "UFOCTL_DIR", tmp_path / ".ufoctl")
+    monkeypatch.setenv("UFOCTL_DIR", str(tmp_path / ".ufoctl"))
     runner = CliRunner()
     with runner.isolated_filesystem():
         first = runner.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
@@ -225,7 +225,7 @@ def test_cold_start_mints_the_credential_key_for_onboarding(
     workspace."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-onboard")
     monkeypatch.delenv("UFO_CREDENTIAL_KEY", raising=False)
-    monkeypatch.setattr(cli, "UFOCTL_DIR", tmp_path / ".ufoctl")
+    monkeypatch.setenv("UFOCTL_DIR", str(tmp_path / ".ufoctl"))
     runner = CliRunner()
     with runner.isolated_filesystem():
         Path("ufo.toml").write_text(
