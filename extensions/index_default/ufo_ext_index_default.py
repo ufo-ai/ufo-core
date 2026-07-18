@@ -92,7 +92,7 @@ VECTOR_PG = sa.text(
            1 - (embedding <=> cast(:query as halfvec)) as score
     from chunk
     where subject = any(:subjects) and owner_kind = :owner_kind and embedding is not null
-    order by embedding <=> cast(:query as halfvec)
+    order by (embedding <=> cast(:query as halfvec)) + 0.0
     limit :limit
     """
 )
@@ -168,7 +168,12 @@ REEMBED_SQLITE = sa.text(
 
 @dataclass(frozen=True)
 class DefaultIndex:
-    """The dialect-native `IndexBackend`. Holds the deploy embed client (for reindex re-embedding)
+    """The dialect-native `IndexBackend`. The Postgres vector leg orders by
+    `(embedding <=> query) + 0.0` — an expression the HNSW index cannot serve, so the scan is
+    structurally exact on every plan: an HNSW scan under a selective subject/owner filter starves
+    before reaching a small subject's vectors (approximate search post-filters, so a two-row
+    subject can return nothing at all), and this backend's corpus scale is sized for a full scan.
+    Holds the deploy embed client (for reindex re-embedding)
     and the workspace-scoped `transaction()` opener core hands the factory; each operation opens one
     transaction and selects Postgres or SQLite SQL by the connection dialect."""
 

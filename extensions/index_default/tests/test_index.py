@@ -3,7 +3,12 @@ from collections.abc import AsyncIterator
 import pytest
 import sqlalchemy as sa
 from ufo_ext_embed_openai import EMBED_DIM
-from ufo_ext_index_default import DefaultIndex, pack_embedding, unpack_embedding
+from ufo_ext_index_default import (
+    DefaultIndex,
+    pack_embedding,
+    pgvector_literal,
+    unpack_embedding,
+)
 
 from ufo.db import workspace_tx
 from ufo.indexing import Chunk, IndexScope
@@ -114,6 +119,39 @@ async def test_foreign_subject_is_excluded(clean_chunk: None, database_url: str)
     assert [hit.chunk_digest for hit in lexical] == ["mine"]
     vector = await backend.vector(vec((0, 1.0)), frozenset({SUBJECT}), "memory_item", 10)
     assert [hit.chunk_digest for hit in vector] == ["mine"]
+
+
+async def test_vector_returns_a_small_owner_kinds_rows_under_a_dominant_corpus(
+    clean_chunk: None, database_url: str
+) -> None:
+    """The filtered vector leg returns exactly the best rows within the filter when the corpus is
+    dominated by another owner kind's vectors sitting nearest the query — the shape where an
+    approximate ordered scan starves (observed live: a two-chunk owner kind invisible in a 36k
+    corpus). The order expression is structurally unservable by the HNSW index, so the result is
+    exact on every plan; this pins the contract at real-database scale the suite can afford."""
+    if database_url.startswith("sqlite"):
+        pytest.skip("the starvation shape is Postgres-only")
+    backend = DefaultIndex(embed=StubEmbed(vec((0, 1.0))), transaction=workspace_tx)
+    await backend.upsert(
+        (
+            Chunk("target-0", "memory_item", "t0", SUBJECT, 0, "ledger decision", vec((1, 1.0))),
+            Chunk("target-1", "memory_item", "t1", SUBJECT, 0, "orion rollout", vec((1, 1.0))),
+        )
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.text(
+                "insert into chunk"
+                " (chunk_digest, owner_kind, owner_id, subject, ordinal, text, embedding)"
+                " select 'noise-' || n, 'page', 'noise-' || n, :subject, 0, 'noise',"
+                " cast(:embedding as halfvec)"
+                " from generate_series(1, 1500) as n"
+            ),
+            {"subject": SUBJECT, "embedding": pgvector_literal(vec((0, 1.0)))},
+        )
+        await connection.execute(sa.text("analyze chunk"))
+    hits = await backend.vector(vec((0, 1.0)), frozenset({SUBJECT}), "memory_item", 8)
+    assert {hit.chunk_digest for hit in hits} == {"target-0", "target-1"}
 
 
 async def test_delete_removes_only_its_scope(clean_chunk: None, database_url: str) -> None:
