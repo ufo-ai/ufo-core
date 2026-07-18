@@ -478,29 +478,25 @@ async def _run(
                     ),
                     compaction=compaction,
                 )
-                reports = tuple(
-                    [
-                        await task.run(
-                            replace(
-                                target,
-                                judge=_model_leg(
-                                    registry,
-                                    task.judge_model,
-                                    task.judge_max_tokens,
-                                    task.judge_reasoning,
-                                ),
-                                simulator=_model_leg(
-                                    registry,
-                                    task.simulator_model,
-                                    task.simulator_max_tokens,
-                                    task.simulator_reasoning,
-                                ),
-                            ),
-                            slots,
-                        )
-                        for task in tasks
-                    ]
+                targets = tuple(
+                    replace(
+                        target,
+                        judge=_model_leg(
+                            registry,
+                            task.judge_model,
+                            task.judge_max_tokens,
+                            task.judge_reasoning,
+                        ),
+                        simulator=_model_leg(
+                            registry,
+                            task.simulator_model,
+                            task.simulator_max_tokens,
+                            task.simulator_reasoning,
+                        ),
+                    )
+                    for task in tasks
                 )
+                reports = await _task_reports(tasks, targets, slots)
             manifests = load_manifests(config.pack.name)
             completed: list[EvalReport] = []
             for report, task in zip(reports, tasks, strict=True):
@@ -554,6 +550,29 @@ async def _run(
     finally:
         init_workspace_credentials(None)
         await dispose_db()
+
+
+async def _task_reports(
+    tasks: tuple[EvalTask, ...],
+    targets: tuple[InProcessTarget, ...],
+    slots: asyncio.Semaphore,
+) -> tuple[EvalReport, ...]:
+    reports: dict[int, EvalReport] = {}
+
+    async def run_task(index: int) -> None:
+        reports[index] = await tasks[index].run(targets[index], slots)
+
+    overlapping = tuple(index for index, task in enumerate(tasks) if not task.exclusive)
+    outcomes = await asyncio.gather(
+        *(run_task(index) for index in overlapping), return_exceptions=True
+    )
+    errors = tuple(outcome for outcome in outcomes if isinstance(outcome, BaseException))
+    if errors:
+        raise BaseExceptionGroup("eval tasks raised", errors)
+    for index, task in enumerate(tasks):
+        if task.exclusive:
+            await run_task(index)
+    return tuple(reports[index] for index in range(len(tasks)))
 
 
 async def _reconstruct(config: Config, run: EvalRun, workspace_id: UUID) -> EvalRun:

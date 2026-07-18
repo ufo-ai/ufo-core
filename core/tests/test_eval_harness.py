@@ -26,7 +26,7 @@ from dbos import error as dbos_error
 from httpx import AsyncClient
 
 import evals.harness.target as harness_target
-from evals.__main__ import EVAL_SHARE_BUCKET_ENV
+from evals.__main__ import EVAL_SHARE_BUCKET_ENV, _task_reports
 from evals.__main__ import _run as run_evals
 from evals.__main__ import main as eval_main
 from evals.browser_nav import CASES as BROWSER_CASES
@@ -157,6 +157,78 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
             "object_tools_flows",
         }
     )
+
+
+def test_scenario_tasks_are_exclusive() -> None:
+    exclusive = {task.name for task in TASKS if task.exclusive}
+    scenario = {task.name for task in TASKS if task.suite == "scenario"}
+
+    assert exclusive == scenario == {"object_tools_flows", "scenario_smoke", "scenario_env"}
+
+
+async def test_task_reports_overlaps_tasks_and_isolates_exclusive_ones() -> None:
+    started = {name: asyncio.Event() for name in ("left", "right")}
+    in_flight = 0
+    flight_during_exclusive: list[int] = []
+
+    def eval_report(name: str) -> EvalReport:
+        return EvalReport(name=name, suite="capability", digest="sha256:abc", cases=())
+
+    def overlapping(name: str, other: str) -> EvalTask:
+        async def run(target, slots) -> EvalReport:
+            nonlocal in_flight
+            in_flight += 1
+            started[name].set()
+            await started[other].wait()
+            in_flight -= 1
+            return eval_report(name)
+
+        return EvalTask(name, "capability", "sha256:abc", (), run)
+
+    def exclusive() -> EvalTask:
+        async def run(target, slots) -> EvalReport:
+            flight_during_exclusive.append(in_flight)
+            return eval_report("gate")
+
+        return EvalTask("gate", "scenario", "sha256:abc", (), run, exclusive=True)
+
+    tasks = (overlapping("left", "right"), exclusive(), overlapping("right", "left"))
+    targets = cast(tuple[InProcessTarget, ...], (object(), object(), object()))
+
+    reports = await _task_reports(tasks, targets, asyncio.Semaphore(4))
+
+    assert tuple(report.name for report in reports) == ("left", "gate", "right")
+    assert flight_during_exclusive == [0]
+
+
+async def test_task_reports_settles_the_wave_before_raising() -> None:
+    sibling_done = asyncio.Event()
+    exclusive_ran = asyncio.Event()
+
+    async def failing(target, slots) -> EvalReport:
+        raise RuntimeError("suite fault")
+
+    async def sibling(target, slots) -> EvalReport:
+        await asyncio.sleep(0)
+        sibling_done.set()
+        return EvalReport(name="sibling", suite="capability", digest="sha256:abc", cases=())
+
+    async def gated(target, slots) -> EvalReport:
+        exclusive_ran.set()
+        return EvalReport(name="gate", suite="scenario", digest="sha256:abc", cases=())
+
+    tasks = (
+        EvalTask("failing", "capability", "sha256:abc", (), failing),
+        EvalTask("sibling", "capability", "sha256:abc", (), sibling),
+        EvalTask("gate", "scenario", "sha256:abc", (), gated, exclusive=True),
+    )
+    targets = cast(tuple[InProcessTarget, ...], (object(), object(), object()))
+
+    with pytest.raises(BaseExceptionGroup):
+        await _task_reports(tasks, targets, asyncio.Semaphore(4))
+
+    assert sibling_done.is_set()
+    assert not exclusive_ran.is_set()
 
 
 async def test_gather_cases_preserves_corpus_order_under_out_of_order_completion() -> None:

@@ -53,6 +53,7 @@ class EvalTask:
     simulator_max_tokens: int = JUDGE_MAX_TOKENS
     simulator_reasoning: ReasoningEffort = "off"
     pin_runtime: bool = False
+    exclusive: bool = False
 
 
 def capability_task(
@@ -160,6 +161,7 @@ def scenario_task(
         judge_revision=JUDGE_REVISION if judge_model is not None else None,
         judge_max_tokens=judge_max_tokens,
         judge_reasoning=judge_reasoning,
+        exclusive=True,
     )
 
 
