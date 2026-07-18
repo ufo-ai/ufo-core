@@ -30,6 +30,13 @@ uv run python -m evals --view
 uv run python -m evals --share <current-run> <baseline-run>
 ```
 
+`python -m evals.stack matrix.toml` runs several suites at once, each in an auto-provisioned
+isolated stack — a run directory under `.local/evals/<stamp>/<label>/` with a derived `ufo.toml`
+(its own database, blob root, and probed serve/proxy ports), a freshly seeded workspace, and its
+own `ufoctl serve` — recording every run into the shared archive. Each `[[run]]` block names a
+label, a template config carrying the suite knobs, and the `python -m evals` arguments; run
+directories and per-run databases are retained for reconstruction.
+
 Each invocation records an immutable JSON run under `eval-reports/runs/` and rebuilds the offline
 `eval-reports/index.html` viewer. Every case shows its full setup (message or scenario, rubric,
 member binding) and every attempt its tool trajectory, tool errors, per-criterion judge verdicts,
