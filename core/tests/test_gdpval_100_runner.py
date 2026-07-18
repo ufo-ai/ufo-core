@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -168,7 +169,7 @@ async def test_calibration_case_preserves_prompt_stages_references_and_captures_
     calibration = load_calibration(snapshot_root, "gdpval_full", (task_id,))
     target = SubmittedTarget()
 
-    report = await calibration.tasks[0].run(target)
+    report = await calibration.tasks[0].run(target, asyncio.Semaphore(1))
 
     assert report.passed
     assert target.seen is not None

@@ -1,3 +1,4 @@
+import asyncio
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -185,7 +186,7 @@ async def test_dsqa_invalid_judge_output_is_a_visible_failure(tmp_path: Path) ->
 
 async def test_dsqa_judge_failure_does_not_abort_the_leaf(tmp_path: Path) -> None:
     run = load_dsqa_100(_snapshot(tmp_path))
-    report = await run.tasks[0].run(FixedTarget(RaisingJudge()))
+    report = await run.tasks[0].run(FixedTarget(RaisingJudge()), asyncio.Semaphore(1))
 
     assert len(report.cases) == 100
     assert report.metrics[0].name == "rated"
@@ -205,7 +206,7 @@ async def test_dsqa_six_leaves_share_cases_and_emit_macro_metrics(tmp_path: Path
     assert len({task.digest for task in run.tasks}) == 6
     assert {task.judge_reasoning for task in run.tasks} == {DSQA_JUDGE_REASONING}
     assert {task.judge_model for task in run.tasks} == {DSQA_JUDGE_MODEL}
-    report = await run.tasks[0].run(FixedTarget(FixedJudge(response)))
+    report = await run.tasks[0].run(FixedTarget(FixedJudge(response)), asyncio.Semaphore(1))
     metrics = {metric.name: metric.value for metric in report.metrics}
     assert metrics["precision"] == 1.0
     assert metrics["recall"] == 1.0

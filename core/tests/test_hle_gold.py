@@ -1,3 +1,4 @@
+import asyncio
 import json
 from collections import Counter
 from hashlib import sha256
@@ -223,7 +224,7 @@ async def test_out_of_range_confidence_is_a_leaf_format_failure() -> None:
         async def run(self, _case):
             return TargetResult(CapabilityOutput("ANSWER: Poblet\nCONFIDENCE: 150%", ()), True)
 
-    report = await _leaf_task("tool_restraint", (case,)).run(Target())
+    report = await _leaf_task("tool_restraint", (case,)).run(Target(), asyncio.Semaphore(1))
 
     assert report.cases[0].passed is False
     assert report.metrics[2] == EvalMetric(name="format_rate", value=0)
@@ -413,7 +414,7 @@ async def test_infra_excluded_cases_do_not_emit_hle_metrics() -> None:
                 True,
             )
 
-    report = await _leaf_task("web_search_fetch", (case,)).run(Target())
+    report = await _leaf_task("web_search_fetch", (case,)).run(Target(), asyncio.Semaphore(1))
 
     assert report.cases[0].excluded
     assert report.metrics == ()

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from asyncio import gather
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Literal, Protocol, cast
 
@@ -16,7 +18,7 @@ from evals.harness.judge import (
     MAX_REASON_CHARS,
     JudgeLeg,
 )
-from evals.harness.registry import EvalTask
+from evals.harness.registry import EvalTask, gather_cases
 from evals.harness.target import CapabilityTarget, TargetResult
 from evals.mcp_atlas_100.models import McpAtlasCase, McpAtlasDataset
 from ufo.sdk.models import Message
@@ -124,13 +126,16 @@ class McpAtlasSuite:
     cases: tuple[McpAtlasCase, ...]
     digest: str
 
-    async def run(self, target: CapabilityTarget) -> EvalReport:
+    async def run(self, target: CapabilityTarget, slots: asyncio.Semaphore) -> EvalReport:
         atlas_target = cast(McpAtlasRunTarget, target)
         required_tool_servers = {
             tool: case.tool_servers[tool] for case in self.cases for tool in case.enabled_tools
         }
         catalog = await atlas_target.preflight_mcp_atlas(required_tool_servers)
-        results = tuple([await self._run_case(case, atlas_target, catalog) for case in self.cases])
+        results = await gather_cases(
+            slots,
+            tuple(partial(self._run_case, case, atlas_target, catalog) for case in self.cases),
+        )
         passed = sum(result.passed for result in results)
         pass_rate = passed / len(results)
         claim_coverages: list[float] = []

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import base64
 import json
 import re
 import unicodedata
 from dataclasses import dataclass
+from functools import partial
 from hashlib import sha256
 from pathlib import Path
 from typing import Literal
@@ -23,7 +25,7 @@ from evals.harness.capability import (
     run_capability_case,
 )
 from evals.harness.harness import EvalMetric, EvalReport, JsonObject, digest_payload
-from evals.harness.registry import EvalTask
+from evals.harness.registry import EvalTask, gather_cases
 from evals.harness.target import CapabilityTarget
 
 SOURCE_REVISION = "b705e0fb541c025a1532ce0d60d70ae2f53b00e0"
@@ -460,8 +462,10 @@ def _leaf_task(leaf: HLELeaf, cases: tuple[CapabilityCase, ...]) -> EvalTask:
         {"runner": "hle-gold", "task": name, "cases": [case.payload() for case in cases]}
     )
 
-    async def run(target: CapabilityTarget) -> EvalReport:
-        results = tuple([await run_capability_case(case, target) for case in cases])
+    async def run(target: CapabilityTarget, slots: asyncio.Semaphore) -> EvalReport:
+        results = await gather_cases(
+            slots, tuple(partial(run_capability_case, case, target) for case in cases)
+        )
         confidence: list[float] = []
         format_passes = 0
         behavior_passes = 0

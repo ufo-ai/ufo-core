@@ -1,6 +1,8 @@
+import asyncio
 import hashlib
 from collections import Counter
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -16,7 +18,7 @@ from evals.harness.capability import (
 )
 from evals.harness.harness import EvalMetric, EvalReport, Json, digest_payload
 from evals.harness.judge import JudgeLeg
-from evals.harness.registry import EvalTask
+from evals.harness.registry import EvalTask, gather_cases
 from evals.harness.target import CapabilityTarget
 from ufo.sdk.models import Message
 
@@ -272,7 +274,7 @@ def _task(cases: tuple[SnapshotCase, ...], snapshot_digest: str, leaf: DSQA100Le
     }
     digest = digest_payload(payload)
 
-    async def run(target: CapabilityTarget) -> EvalReport:
+    async def run(target: CapabilityTarget, slots: asyncio.Semaphore) -> EvalReport:
         if target.judge is None:
             raise RuntimeError("dsqa_100 requires the official model judge")
         capability_cases = tuple(
@@ -287,7 +289,9 @@ def _task(cases: tuple[SnapshotCase, ...], snapshot_digest: str, leaf: DSQA100Le
             )
             for case, message in zip(cases, messages, strict=True)
         )
-        results = tuple([await run_capability_case(case, target) for case in capability_cases])
+        results = await gather_cases(
+            slots, tuple(partial(run_capability_case, case, target) for case in capability_cases)
+        )
         return _with_metrics(
             EvalReport(name=leaf.name, suite="dsqa_100", digest=digest, cases=results)
         )

@@ -4,17 +4,38 @@ these are the reusable machinery that turns them into runnable, comparable repor
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+import asyncio
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from functools import partial
+from typing import cast
 
 from evals.harness.capability import CapabilityCase, run_capability_case
-from evals.harness.harness import EvalReport, digest_payload
+from evals.harness.harness import EvalCaseResult, EvalReport, digest_payload
 from evals.harness.judge import JUDGE_MAX_TOKENS, JUDGE_REVISION
 from evals.harness.scenario import ScenarioCase, run_scenario_case
 from evals.harness.target import CapabilityTarget
 from ufo.schema.records import ReasoningEffort
 
-type EvalRunner = Callable[[CapabilityTarget], Awaitable[EvalReport]]
+type EvalRunner = Callable[[CapabilityTarget, asyncio.Semaphore], Awaitable[EvalReport]]
+
+
+async def gather_cases[ResultT](
+    slots: asyncio.Semaphore,
+    runs: Sequence[Callable[[], Awaitable[ResultT]]],
+) -> tuple[ResultT, ...]:
+    """Run every case bounded by the run-wide semaphore, preserving input order. Siblings always
+    settle; only then does any raise surface, so one harness fault never cancels in-flight turns."""
+
+    async def bounded(run: Callable[[], Awaitable[ResultT]]) -> ResultT:
+        async with slots:
+            return await run()
+
+    outcomes = await asyncio.gather(*(bounded(run) for run in runs), return_exceptions=True)
+    errors = tuple(outcome for outcome in outcomes if isinstance(outcome, BaseException))
+    if errors:
+        raise BaseExceptionGroup("eval cases raised", errors)
+    return tuple(cast("ResultT", outcome) for outcome in outcomes)
 
 
 @dataclass(frozen=True)
@@ -65,8 +86,10 @@ def capability_task(
         }
     )
 
-    async def run(target: CapabilityTarget) -> EvalReport:
-        results = tuple([await run_capability_case(case, target) for case in cases])
+    async def run(target: CapabilityTarget, slots: asyncio.Semaphore) -> EvalReport:
+        results = await gather_cases(
+            slots, tuple(partial(run_capability_case, case, target) for case in cases)
+        )
         return EvalReport(name=name, suite="capability", digest=digest, cases=results)
 
     return EvalTask(
@@ -117,9 +140,12 @@ def scenario_task(
         }
     )
 
-    async def run(target: CapabilityTarget) -> EvalReport:
-        results = tuple([await run_scenario_case(case, target) for case in cases])
-        return EvalReport(name=name, suite="scenario", digest=digest, cases=results)
+    async def run(target: CapabilityTarget, slots: asyncio.Semaphore) -> EvalReport:
+        results: list[EvalCaseResult] = []
+        for case in cases:
+            async with slots:
+                results.append(await run_scenario_case(case, target))
+        return EvalReport(name=name, suite="scenario", digest=digest, cases=tuple(results))
 
     return EvalTask(
         name,

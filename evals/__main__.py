@@ -121,6 +121,7 @@ def main(argv: list[str] | None = None) -> None:
         help="run the suites against a pending proposal's candidate prompt on a scratch agent",
     )
     parser.add_argument("--label", default="", help="human-readable run label")
+    parser.add_argument("--concurrency", type=int, default=1, help="max eval cases in flight")
     parser.add_argument("--s3-bucket", help="private bucket override for --share")
     parser.add_argument("--s3-region", help="S3 region for --share")
     parser.add_argument("--s3-endpoint-url", help="S3-compatible endpoint for --share")
@@ -173,6 +174,8 @@ def main(argv: list[str] | None = None) -> None:
         help=f"credentialed MCP-Atlas sandbox URL (or {MCP_ATLAS_EXTERNAL_URL_ENV})",
     )
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    if args.concurrency < 1:
+        parser.error("--concurrency must be at least 1")
     names = tuple(args.only)
     if (args.memory_100 is None) != (args.memory_100_state is None):
         parser.error("--memory-100 and --memory-100-state must be provided together")
@@ -351,6 +354,7 @@ def main(argv: list[str] | None = None) -> None:
             args.mcp_atlas_url,
             args.mcp_atlas_external_url,
             args.candidate_from_proposal,
+            args.concurrency,
         )
     )
     run_agent = (
@@ -405,6 +409,7 @@ async def _run(
     mcp_atlas_url: str | None = None,
     mcp_atlas_external_url: str | None = None,
     candidate_proposal: UUID | None = None,
+    concurrency: int = 1,
 ) -> tuple[tuple[EvalReport, ...], str]:
     init_db(config.database.url)
     key = os.environ.get(config.credentials.key_env)
@@ -445,6 +450,7 @@ async def _run(
             )
             if ctx.model is None:
                 raise RuntimeError("eval context requires model access")
+            slots = asyncio.Semaphore(concurrency)
             with ws(workspace_id):
                 compaction: CompactionTarget | None = None
                 if any(task.suite == "compaction" for task in tasks):
@@ -489,7 +495,8 @@ async def _run(
                                     task.simulator_max_tokens,
                                     task.simulator_reasoning,
                                 ),
-                            )
+                            ),
+                            slots,
                         )
                         for task in tasks
                     ]

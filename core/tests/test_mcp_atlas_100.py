@@ -1,3 +1,4 @@
+import asyncio
 import json
 from collections import Counter
 from dataclasses import dataclass, field
@@ -351,7 +352,7 @@ async def test_suite_reports_threshold_tier_and_catalog_coverage() -> None:
     dataset = McpAtlasDataset.model_validate(raw)
     target = SuiteTarget(StaticJudge())
 
-    report = await McpAtlasSuite(dataset.cases, "sha256:test").run(target)
+    report = await McpAtlasSuite(dataset.cases, "sha256:test").run(target, asyncio.Semaphore(1))
 
     assert report.pass_rate == 1.0
     assert report.benchmark is not None

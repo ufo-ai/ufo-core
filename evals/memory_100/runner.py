@@ -1,3 +1,4 @@
+import asyncio
 import json
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -187,8 +188,8 @@ def load_memory_100(snapshot_root: Path, readiness_path: Path) -> Memory100Run:
 def _memory_task(name: str, cases: tuple[CapabilityCase, ...]) -> EvalTask:
     task = capability_task(name, cases, judge_model=MEMORY_JUDGE_MODEL)
 
-    async def run(target: CapabilityTarget) -> EvalReport:
-        report = await task.run(target)
+    async def run(target: CapabilityTarget, slots: asyncio.Semaphore) -> EvalReport:
+        report = await task.run(target, slots)
         return _with_memory_recall_aggregates(report)
 
     return replace(task, run=run)

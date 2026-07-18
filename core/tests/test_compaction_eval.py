@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from itertools import pairwise
@@ -215,7 +216,7 @@ async def test_buried_recall_grades_against_the_spoken_comparator(
     suite = CompactionSuite(
         leaf="buried", cases=cases, digest="test", trigger_tokens=TEST_TRIGGER_TOKENS
     )
-    report = await suite.run(ArtifactOnlyTarget(_lab(tmp_path, summary)))  # type: ignore[arg-type]
+    report = await suite.run(ArtifactOnlyTarget(_lab(tmp_path, summary)), asyncio.Semaphore(1))  # type: ignore[arg-type]
     case = report.cases[0]
     expected = sum(fact.weight for fact in kept) / sum(fact.weight for fact in buried)
     assert case.evidence["buriedRecall"] == pytest.approx(expected)
@@ -241,7 +242,10 @@ async def test_reference_leaf_splits_the_harvester_cap_from_model_carry(
     suite = CompactionSuite(
         leaf="reference", cases=cases, digest="test", trigger_tokens=TEST_TRIGGER_TOKENS
     )
-    dropped = await suite.run(ArtifactOnlyTarget(_lab(tmp_path / "drop", _summary())))  # type: ignore[arg-type]
+    dropped = await suite.run(
+        ArtifactOnlyTarget(_lab(tmp_path / "drop", _summary())),  # type: ignore[arg-type]
+        asyncio.Semaphore(1),
+    )
     floor = sum(fact.weight for fact in recent) / total
     case = dropped.cases[0]
     assert case.evidence["harvestedCount"] == MAX_REFERENCE_PATHS
@@ -252,7 +256,10 @@ async def test_reference_leaf_splits_the_harvester_cap_from_model_carry(
     carrying = _summary(
         files=tuple({"path": fact.path, "why": "heavy soak report"} for fact in heavy)
     )
-    saved = await suite.run(ArtifactOnlyTarget(_lab(tmp_path / "carry", carrying)))  # type: ignore[arg-type]
+    saved = await suite.run(
+        ArtifactOnlyTarget(_lab(tmp_path / "carry", carrying)),  # type: ignore[arg-type]
+        asyncio.Semaphore(1),
+    )
     case = saved.cases[0]
     covered = sum(fact.weight for fact in (*recent, *heavy)) / total
     assert case.evidence["carriedCount"] == len(heavy)
@@ -320,7 +327,7 @@ async def test_overload_weighted_recall_measures_the_kept_subset(
     suite = CompactionSuite(
         leaf="overload", cases=cases, digest="test", trigger_tokens=TEST_TRIGGER_TOKENS
     )
-    report = await suite.run(ArtifactOnlyTarget(_lab(tmp_path, summary)))  # type: ignore[arg-type]
+    report = await suite.run(ArtifactOnlyTarget(_lab(tmp_path, summary)), asyncio.Semaphore(1))  # type: ignore[arg-type]
     expected = sum(fact.weight for fact in kept) / sum(fact.weight for fact in decisions)
     first = report.cases[0]
     grading = first.evidence["grading"]
@@ -347,7 +354,7 @@ async def test_supersession_fails_when_stale_values_survive(
     suite = CompactionSuite(
         leaf="supersession", cases=cases, digest="test", trigger_tokens=TEST_TRIGGER_TOKENS
     )
-    report = await suite.run(ArtifactOnlyTarget(_lab(tmp_path, summary)))  # type: ignore[arg-type]
+    report = await suite.run(ArtifactOnlyTarget(_lab(tmp_path, summary)), asyncio.Semaphore(1))  # type: ignore[arg-type]
     case = report.cases[0]
     assert case.evidence["correctionRecall"] == pytest.approx(1.0)
     assert case.evidence["staleRate"] == pytest.approx(len(stale_kept) / len(superseded))
@@ -363,7 +370,7 @@ async def test_chain_grades_every_generation(snapshot_dir: Path, tmp_path: Path)
     suite = CompactionSuite(
         leaf="chain", cases=cases, digest="test", trigger_tokens=TEST_TRIGGER_TOKENS
     )
-    report = await suite.run(ArtifactOnlyTarget(_lab(tmp_path, summary)))  # type: ignore[arg-type]
+    report = await suite.run(ArtifactOnlyTarget(_lab(tmp_path, summary)), asyncio.Semaphore(1))  # type: ignore[arg-type]
     case = report.cases[0]
     generations = case.evidence["generations"]
     assert isinstance(generations, list) and len(generations) == 3
@@ -380,7 +387,7 @@ async def test_image_leaf_is_red_while_images_die_at_the_boundary(
     suite = CompactionSuite(
         leaf="image", cases=cases, digest="test", trigger_tokens=TEST_TRIGGER_TOKENS
     )
-    report = await suite.run(ArtifactOnlyTarget(_lab(tmp_path, _summary())))  # type: ignore[arg-type]
+    report = await suite.run(ArtifactOnlyTarget(_lab(tmp_path, _summary())), asyncio.Semaphore(1))  # type: ignore[arg-type]
     case = report.cases[0]
     assert not case.passed
     assert "image-borne fact died" in case.reason
@@ -422,7 +429,7 @@ async def test_behavior_probes_grade_answers_and_reread_trajectories(
     suite = CompactionSuite(
         leaf="behavior", cases=(case,), digest="test", trigger_tokens=TEST_TRIGGER_TOKENS
     )
-    report = await suite.run(target)  # type: ignore[arg-type]
+    report = await suite.run(target, asyncio.Semaphore(1))  # type: ignore[arg-type]
     by_name = {result.name: result for result in report.cases}
     assert by_name[f"{case.id}.recall"].passed
     assert not by_name[f"{case.id}.supersession"].passed
@@ -474,7 +481,7 @@ async def test_behavior_probes_fail_when_compaction_never_fired(
     suite = CompactionSuite(
         leaf="behavior", cases=(case,), digest="test", trigger_tokens=TEST_TRIGGER_TOKENS
     )
-    report = await suite.run(target)  # type: ignore[arg-type]
+    report = await suite.run(target, asyncio.Semaphore(1))  # type: ignore[arg-type]
     assert not report.passed
     assert all("compaction never fired" in result.reason for result in report.cases)
 
@@ -686,7 +693,7 @@ async def test_real_probes_are_report_only(real_snapshot_dir: Path, tmp_path: Pa
     suite = CompactionSuite(
         leaf="real", cases=(case,), digest="test", trigger_tokens=TEST_TRIGGER_TOKENS
     )
-    report = await suite.run(target)  # type: ignore[arg-type]
+    report = await suite.run(target, asyncio.Semaphore(1))  # type: ignore[arg-type]
     assert report.passed
     probes_results = [result for result in report.cases if not result.name.endswith(".compacted")]
     sanity = next(result for result in report.cases if result.name.endswith(".compacted"))
@@ -717,7 +724,7 @@ async def test_real_sanity_failure_is_not_report_only(
     suite = CompactionSuite(
         leaf="real", cases=(case,), digest="test", trigger_tokens=TEST_TRIGGER_TOKENS
     )
-    report = await suite.run(target)  # type: ignore[arg-type]
+    report = await suite.run(target, asyncio.Semaphore(1))  # type: ignore[arg-type]
     assert not report.passed
     assert all(not result.excluded for result in report.cases)
     assert all("compaction never fired" in result.reason for result in report.cases)

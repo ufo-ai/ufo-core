@@ -6,6 +6,7 @@ The scoped context, the durable transcript, and the turn rows are the real depen
 stand-ins are the turn worker (a ScriptedWorker landing the rows and transcript a real serve
 would, one turn per invoke) and the member's LLM leg (a scripted message list)."""
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import cast
 from uuid import UUID, uuid4
@@ -16,6 +17,7 @@ import pytest
 import sqlalchemy as sa
 
 from evals.harness.capability import CapabilityVerdict, DescribedGrader
+from evals.harness.registry import scenario_task
 from evals.harness.scenario import (
     MAX_SIMULATOR_REPLY_CHARS,
     OPENING_NUDGE,
@@ -202,6 +204,45 @@ async def _sum_grader(outcome: ScenarioOutcome) -> CapabilityVerdict:
     if outcome.output.tools != ("js_repl",):
         return CapabilityVerdict(False, f"calls {outcome.output.tools}")
     return CapabilityVerdict(True, "totalled across two exchanges")
+
+
+async def test_scenario_task_runs_cases_serially_holding_a_permit_each(db: None, tmp_path) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = ScriptedWorker(
+        blob,
+        workspace_id,
+        replies=(
+            (Message(role="assistant", content="First case reply."),),
+            (Message(role="assistant", content="Second case reply."),),
+        ),
+    )
+    member = ScriptedMember(
+        ("Opening the first case.", STOP_TOKEN, "Opening the second case.", STOP_TOKEN)
+    )
+    slots = asyncio.Semaphore(1)
+    held_during_grading: list[bool] = []
+
+    async def grade(outcome: ScenarioOutcome) -> CapabilityVerdict:
+        held_during_grading.append(slots.locked())
+        return CapabilityVerdict(len(outcome.turns) == 1, "one exchange")
+
+    task = scenario_task(
+        "serial",
+        (
+            ScenarioCase("first", _SUM_USER, grade, max_turns=2),
+            ScenarioCase("second", _SUM_USER, grade, max_turns=2),
+        ),
+        simulator_model="claude-haiku-4-5",
+    )
+
+    with ws(workspace_id):
+        report = await task.run(_target(workspace_id, agent_id, blob, worker, member), slots)
+
+    assert tuple(case.name for case in report.cases) == ("first", "second")
+    assert all(case.passed for case in report.cases)
+    assert held_during_grading == [True, True]
 
 
 async def test_scenario_drives_multiple_turns_on_one_conversation(db: None, tmp_path) -> None:

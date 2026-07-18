@@ -11,6 +11,7 @@ from base64 import urlsafe_b64decode
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import partial
 from json import loads
 from types import SimpleNamespace
 from typing import cast
@@ -60,7 +61,7 @@ from evals.harness.judge import (
     ModelJudge,
     rubric_pass,
 )
-from evals.harness.registry import EvalTask
+from evals.harness.registry import EvalTask, capability_task, gather_cases
 from evals.harness.scorers import (
     WEB_TOOLS,
     exact_scorer,
@@ -155,6 +156,88 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
             "object_tools_flows",
         }
     )
+
+
+async def test_gather_cases_preserves_corpus_order_under_out_of_order_completion() -> None:
+    first_may_finish = asyncio.Event()
+
+    async def first() -> str:
+        await first_may_finish.wait()
+        return "first"
+
+    async def second() -> str:
+        first_may_finish.set()
+        return "second"
+
+    results = await gather_cases(asyncio.Semaphore(2), (first, second))
+
+    assert results == ("first", "second")
+
+
+async def test_gather_cases_bounds_in_flight_cases() -> None:
+    entered = [asyncio.Event() for _ in range(3)]
+    release = asyncio.Event()
+
+    async def case(index: int) -> int:
+        entered[index].set()
+        await release.wait()
+        return index
+
+    running = asyncio.ensure_future(
+        gather_cases(asyncio.Semaphore(2), tuple(partial(case, index) for index in range(3)))
+    )
+    await entered[0].wait()
+    await entered[1].wait()
+    await asyncio.sleep(0)
+    assert not entered[2].is_set()
+    release.set()
+
+    assert await running == (0, 1, 2)
+    assert entered[2].is_set()
+
+
+async def test_gather_cases_settles_siblings_before_raising() -> None:
+    sibling_done = asyncio.Event()
+
+    async def failing() -> str:
+        raise RuntimeError("harness fault")
+
+    async def sibling() -> str:
+        await asyncio.sleep(0)
+        sibling_done.set()
+        return "settled"
+
+    with pytest.raises(BaseExceptionGroup) as excinfo:
+        await gather_cases(asyncio.Semaphore(2), (failing, sibling))
+
+    assert sibling_done.is_set()
+    (error,) = excinfo.value.exceptions
+    assert isinstance(error, RuntimeError)
+
+
+async def test_capability_task_fans_out_and_keeps_corpus_order() -> None:
+    first_may_finish = asyncio.Event()
+
+    @dataclass
+    class OrderTarget:
+        judge: None = None
+
+        async def run(self, case: CapabilityCase) -> TargetResult:
+            if case.name == "one":
+                await first_may_finish.wait()
+            else:
+                first_may_finish.set()
+            return TargetResult(CapabilityOutput(case.name, ()), clean=True)
+
+    task = capability_task(
+        "ordered",
+        tuple(CapabilityCase(name, "answer", exact_scorer(name)) for name in ("one", "two")),
+    )
+
+    report = await task.run(OrderTarget(), asyncio.Semaphore(2))  # type: ignore[arg-type]
+
+    assert tuple(case.name for case in report.cases) == ("one", "two")
+    assert all(case.passed for case in report.cases)
 
 
 async def test_seed_candidate_agent_arms_a_pending_proposals_prompt(db: None) -> None:
@@ -2598,7 +2681,7 @@ def test_candidate_arm_labels_the_recorded_run(tmp_path, monkeypatch) -> None:
     received: list[UUID] = []
 
     async def run(*args) -> tuple[tuple[EvalReport, ...], str]:
-        received.append(args[-1])
+        received.append(args[-2])
         return (), "candidate prompt"
 
     def missing_git(*_args, **_kwargs):
@@ -2641,7 +2724,8 @@ async def test_eval_run_pins_model_metadata_on_boundary_report(tmp_path, monkeyp
     async def resolve(*_args):
         return workspace_id, agent_id, "prompt", MODEL
 
-    async def run(target) -> EvalReport:
+    async def run(target, slots) -> EvalReport:
+        assert isinstance(slots, asyncio.Semaphore)
         assert target.judge.model.model == "gpt-5.4-mini"
         assert target.simulator.model.model == "claude-haiku-4-5"
         return report
@@ -2706,7 +2790,7 @@ async def test_run_builds_the_compaction_client_inside_the_workspace_scope(
     async def resolve(*_args):
         return workspace_id, agent_id, "prompt", MODEL
 
-    async def run(target) -> EvalReport:
+    async def run(target, _slots) -> EvalReport:
         seen["compaction"] = target.compaction
         return EvalReport(
             name="compaction.overload", suite="compaction", digest="sha256:abc", cases=()

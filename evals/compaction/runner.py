@@ -10,8 +10,10 @@ the leaves measure prioritization under loss, and a perfect score is structurall
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Protocol, cast
 from uuid import UUID, uuid4
@@ -33,7 +35,7 @@ from evals.harness.harness import (
     JsonObject,
     digest_payload,
 )
-from evals.harness.registry import EvalTask
+from evals.harness.registry import EvalTask, gather_cases
 from evals.harness.target import CapabilityTarget, EvalConversations, TargetResult
 from ufo.loop.compaction import COMPACTED_CONTEXT_PREFIX, MAX_REFERENCE_PATHS
 
@@ -140,24 +142,29 @@ class CompactionSuite:
     digest: str
     trigger_tokens: int
 
-    async def run(self, target: CapabilityTarget) -> EvalReport:
+    async def run(self, target: CapabilityTarget, slots: asyncio.Semaphore) -> EvalReport:
         run_target = cast(CompactionRunTarget, target)
         lab = run_target.compaction
         if lab is None:
             raise RuntimeError("the compaction suite requires the compaction eval target")
-        results: list[EvalCaseResult] = []
-        for case in self.cases:
-            if case.leaf in ("behavior", "real"):
-                results.extend(await self._behavior_case(case, run_target, lab))
-            else:
-                results.append(await self._artifact_case(case, lab))
+        grouped = await gather_cases(
+            slots, tuple(partial(self._case_results, case, run_target, lab) for case in self.cases)
+        )
+        results = tuple(result for group in grouped for result in group)
         return EvalReport(
             name=f"compaction.{self.leaf}",
             suite="compaction",
             digest=self.digest,
-            cases=tuple(results),
-            metrics=self._metrics(tuple(results)),
+            cases=results,
+            metrics=self._metrics(results),
         )
+
+    async def _case_results(
+        self, case: CompactionCase, run_target: CompactionRunTarget, lab: CompactionTarget
+    ) -> tuple[EvalCaseResult, ...]:
+        if case.leaf in ("behavior", "real"):
+            return tuple(await self._behavior_case(case, run_target, lab))
+        return (await self._artifact_case(case, lab),)
 
     async def _artifact_case(self, case: CompactionCase, lab: CompactionTarget) -> EvalCaseResult:
         compactor = lab.compactor(uuid4(), self.trigger_tokens)

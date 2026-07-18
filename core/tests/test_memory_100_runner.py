@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -415,7 +416,9 @@ async def test_memory_100_leaves_pin_all_memory_owners_and_bind_member(
         readiness.model_copy(update={"evidence": tuple(changed_evidence)}).model_dump_json()
     )
     changed = load_memory_100(snapshot_root, readiness_path)
-    reports = tuple([await task.run(RecallTarget(first_memory_id)) for task in run.tasks])
+    reports = tuple(
+        [await task.run(RecallTarget(first_memory_id), asyncio.Semaphore(1)) for task in run.tasks]
+    )
 
     assert tuple((task.name, len(task.cases)) for task in run.tasks) == MEMORY_100_LEAF_COUNTS
     assert {task.judge_model for task in run.tasks} == {MEMORY_JUDGE_MODEL}
