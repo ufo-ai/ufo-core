@@ -8,13 +8,13 @@ Markdown report artifacts produce research reports in standard GitHub-Flavored M
 
 ### Output File
 
-**Always write the report to a file with a `.pplx.md` extension.** This enables native rich rendering in the Flying Object client.
+**Always write the report to a file with a `.md` extension.**
 
-- Derive the filename from the query topic: `<topic>.pplx.md`
+- Derive the filename from the query topic: `<topic>.md`
 - Use lowercase kebab-case for filenames
 - Write the file to the workspace directory using the file writing tool
 - After writing, share the file with the user so they can view the rendered report
-- The chat response should contain a brief summary — the full report lives in the `.pplx.md` file
+- The chat response should contain a brief summary — the full report lives in the `.md` file
 
 ### Content Format
 
@@ -39,7 +39,7 @@ Markdown report artifacts produce research reports in standard GitHub-Flavored M
 **Image embedding rules:**
 
 - First, generate and save the image file to the workspace (e.g., using `execute_code` to create a chart with matplotlib/plotly and save it as a `.png` file)
-- Reference the image in the `.pplx.md` report using the **relative path** `./filename.ext` — the system will replace these with permanent URLs when the report is shared
+- Reference the image in the `.md` report using the **relative path** `./filename.ext` — the system will replace these with permanent URLs when the report is shared
 - Use descriptive filenames that reflect the content (e.g., `revenue-growth-chart.png`, `market-share-comparison.png`)
 - Supported image formats: `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.svg`
 - Place images at contextually appropriate locations in the report — after the paragraph that discusses the data the image visualizes
@@ -49,7 +49,7 @@ Markdown report artifacts produce research reports in standard GitHub-Flavored M
 **Example workflow:**
 
 1. Generate a chart: use `execute_code` to create `revenue-chart.png` in the workspace
-2. In the `.pplx.md` report, embed it:
+2. In the `.md` report, embed it:
 
    ```markdown
    ## Revenue Analysis
@@ -283,7 +283,7 @@ Adapt structure to what the query actually requires—do not force a template on
 
 ### Quality Checklist
 
-- [ ] Report written to a `<topic>.pplx.md` file and shared with user
+- [ ] Report written to a `<topic>.md` file and shared with user
 - [ ] Valid GFM syntax, appropriate heading hierarchy
 - [ ] Markdown tables for comparisons and structured data
 - [ ] No MMD syntax — plain GFM only (LaTeX math allowed per `<mathematical_expressions>`)
