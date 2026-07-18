@@ -39,7 +39,7 @@ from ufo.ext.surface import (
     workspace_key,
 )
 from ufo.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
-from ufo.hub import InProcessHub, Terminal, TextDelta, ToolCall
+from ufo.hub import InProcessHub, Parked, Terminal, TextDelta, ToolCall
 from ufo.schema import tables
 from ufo.schema.records import (
     WRITEBACK_PENDING,
@@ -2288,7 +2288,7 @@ def _requests_to(recorder: list[httpx.Request], url: str) -> list[httpx.Request]
     return [r for r in recorder if str(r.url).split("?")[0] == url]
 
 
-async def test_status_follows_the_turn_and_clears_at_terminal(
+async def test_status_follows_the_turn_and_leaves_the_clear_to_the_reply(
     db: None, tmp_path, monkeypatch
 ) -> None:
     workspace_id, _ = await _seed()
@@ -2332,11 +2332,49 @@ async def test_status_follows_the_turn_and_clears_at_terminal(
         "thread_ts": "100.5",
         "status": slack.STATUS_THINKING_TEXT,
     }
-    assert statuses[1]["status"] == "Reading the repo"
+    assert statuses[1]["status"] == slack.STATUS_WORKING_TEXT.format(tool="bash")
     assert statuses[2]["status"] == slack.STATUS_GENERATING_TEXT
-    assert statuses[-1]["status"] == slack.STATUS_CLEAR_TEXT
+    assert all(s["status"] != slack.STATUS_CLEAR_TEXT for s in statuses)
     assert not _requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)
     assert turn_id not in slack._STATUS_TASKS
+
+
+async def test_a_parked_turn_clears_the_status(db: None, tmp_path, monkeypatch) -> None:
+    """A parked turn has no reply coming, so the status task clears the thread status itself. The
+    tool-call publish waits for its status write first — a Parked published before any subscriber
+    attaches drops the hub ring, and this turn never parks durably, so the poll would not end the
+    tail."""
+    workspace_id, _ = await _seed()
+    monkeypatch.setattr(slack, "STATUS_UPDATE_MIN_SECONDS", 0.0)
+    recorder: list[httpx.Request] = []
+    hub = InProcessHub()
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder, hub=hub)
+    mention = _event_body(
+        type="app_mention", user="U1", channel="C1", ts="100.5", text="<@UBOT00000> hi"
+    )
+    async with client:
+        response = await client.post(
+            EVENTS_PATH, content=mention, headers=_sign(mention, int(time.time()))
+        )
+    assert response.status_code == 200
+    async with workspace_tx() as connection:
+        turn_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    task = slack._STATUS_TASKS[turn_id]
+    await hub.publish(turn_id, ToolCall(tool="bash", preview="{}"))
+    deadline = time.monotonic() + 5
+    while len(_requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)) < 2:
+        assert time.monotonic() < deadline, "the status task never attached to the tail"
+        await asyncio.sleep(0.01)
+    await hub.publish(turn_id, Parked(message="spend cap reached"))
+    await task
+    statuses = [
+        json.loads(r.content) for r in _requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)
+    ]
+    assert statuses[-1]["status"] == slack.STATUS_CLEAR_TEXT
 
 
 async def test_status_re_stamps_before_slack_drops_it(db: None, tmp_path, monkeypatch) -> None:
@@ -2365,10 +2403,10 @@ async def test_status_re_stamps_before_slack_drops_it(db: None, tmp_path, monkey
 
 
 async def test_newest_turn_owns_the_thread_status(db: None, tmp_path, monkeypatch) -> None:
-    """The thread has one status writer — the newest turn: the finished first turn's stale clear
-    is skipped once the follow-up turn takes the thread over. The durable terminal poll is slowed
-    so the first turn's tail ends only on the hub Terminal this test publishes, after the writer
-    has moved."""
+    """The thread has one status writer — the newest turn: an outrun first turn's late writes are
+    skipped once the follow-up turn takes the thread over, while the owning turn's parked clear
+    lands. The durable terminal poll is slowed so the first turn's tail ends only on the hub
+    Terminal this test publishes, after the writer has moved."""
     workspace_id, _ = await _seed()
     monkeypatch.setattr(slack, "STATUS_UPDATE_MIN_SECONDS", 0.0)
     monkeypatch.setattr(hub_tail, "TERMINAL_POLL_SECONDS", 60.0)
@@ -2401,11 +2439,11 @@ async def test_newest_turn_owns_the_thread_status(db: None, tmp_path, monkeypatc
         first_task = slack._STATUS_TASKS[first_id]
         deadline = time.monotonic() + 5
         while not any(
-            json.loads(r.content)["status"] == "Priming the tail"
+            json.loads(r.content)["status"] == slack.STATUS_WORKING_TEXT.format(tool="primer")
             for r in _requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)
         ):
             await hub.publish(
-                first_id, ToolCall(tool="bash", preview="{}", description="Priming the tail")
+                first_id, ToolCall(tool="primer", preview="{}", description="Priming the tail")
             )
             assert time.monotonic() < deadline, "the first turn's tail never started draining"
             await asyncio.sleep(0.01)
@@ -2438,23 +2476,17 @@ async def test_newest_turn_owns_the_thread_status(db: None, tmp_path, monkeypatc
 
     second_task = slack._STATUS_TASKS[turns["C1:101.0"]]
     await hub.publish(
-        turns["C1:101.0"], ToolCall(tool="bash", preview="{}", description="Checking the calendar")
+        turns["C1:101.0"],
+        ToolCall(tool="calendar", preview="{}", description="Checking the calendar"),
     )
     deadline = time.monotonic() + 5
     while not any(
-        json.loads(r.content)["status"] == "Checking the calendar"
+        json.loads(r.content)["status"] == slack.STATUS_WORKING_TEXT.format(tool="calendar")
         for r in _requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)
     ):
         assert time.monotonic() < deadline, "the surviving turn never wrote its status"
         await asyncio.sleep(0.01)
-    second_terminal = TerminalFrame(status="done", text="two")
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.turn)
-            .where(tables.turn.c.id == turns["C1:101.0"])
-            .values(status="done", terminal=second_terminal.model_dump(mode="json"))
-        )
-    await hub.publish(turns["C1:101.0"], Terminal(frame=second_terminal))
+    await hub.publish(turns["C1:101.0"], Parked(message="spend cap reached"))
     await second_task
     final = json.loads(_requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)[-1].content)
     assert final == {"channel_id": "C1", "thread_ts": "100.5", "status": slack.STATUS_CLEAR_TEXT}
