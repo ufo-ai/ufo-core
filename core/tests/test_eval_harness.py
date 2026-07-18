@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
-from json import loads
+from json import dumps, loads
 from types import SimpleNamespace
 from typing import cast
 from urllib.parse import parse_qs, urlparse
@@ -57,6 +57,7 @@ from evals.harness.judge import (
     MAX_CRITERIA,
     MAX_CRITERION_CHARS,
     MAX_INSTRUCTION_CHARS,
+    MAX_REASON_CHARS,
     CriterionVerdict,
     ModelJudge,
     rubric_pass,
@@ -559,6 +560,12 @@ class FencedJudge:
 class ProseJudge:
     async def complete(self, system: str, messages: tuple[Message, ...]) -> str:
         return 'Here is my verdict:\n```json\n{"items":[{"passed":true,"reason":"ok"}]}\n```'
+
+
+@dataclass
+class VerboseJudge:
+    async def complete(self, system: str, messages: tuple[Message, ...]) -> str:
+        return dumps({"items": [{"passed": True, "reason": "evidence " * 120}]})
 
 
 @dataclass
@@ -1564,6 +1571,12 @@ async def test_rubric_parser_accepts_an_exactly_fenced_verdict() -> None:
     assert verdict.passed
     assert verdict.reason == "1/1 semantic criteria met"
     assert verdict.criteria == (CriterionVerdict("criterion", True, "ok"),)
+
+
+async def test_rubric_parser_clips_a_verbose_reason_instead_of_rejecting() -> None:
+    verdict = await rubric_pass("instruction", "answer", ("criterion",), VerboseJudge())
+    assert verdict.passed
+    assert len(verdict.criteria[0].reason) == MAX_REASON_CHARS
 
 
 async def test_rubric_parser_rejects_prose_around_the_verdict() -> None:
