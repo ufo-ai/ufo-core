@@ -1,11 +1,13 @@
 """The persistent-REPL pack: js_repl runs Node, xlsx_repl runs Python with openpyxl, plus the data
 skills the agent loads on demand for exploration, SQL, statistics, validation, and visualization.
 
-Each REPL keeps its state in a workspace file the pack accumulates across calls — a reset (or the
-first call) writes the code fresh, otherwise the new code appends to what ran before, so variables,
-imports, and definitions persist. js_repl runs the accumulated code as an ES module (`.mjs`, so
-top-level await works) behind the emitImage prelude; xlsx_repl runs the accumulated Python file
-with a footer that JSON-prints `result` when the code defined it. The work
+Each REPL keeps its state in a workspace file holding every successfully run block — new code
+executes appended to that state and commits into it only on exit 0, so a failed attempt's
+declarations never replay into later calls; a reset discards the state first. js_repl runs the
+composed code as an ES module (`.mjs`, so top-level await works) behind the emitImage prelude,
+with the global node_modules linked into the resolution path so bare imports of image-installed
+packages (playwright) resolve; xlsx_repl runs the composed Python with a footer that JSON-prints
+`result` when the code defined it. The work
 runs in the sandbox through `ctx.sandbox`, so the container's mount and egress scoping hold; the
 combined stdout/stderr and exit code come back, plus any images the JS code handed to `emitImage` —
 a prelude-defined global keeping a rolling base64 JSONL window the handler folds into
@@ -42,6 +44,9 @@ JS_EMIT_PATH = f"{WORKSPACE_DIR}/{JS_EMIT_RELATIVE}"
 XLSX_REPL_PATH = f"{REPL_STATE_DIR}/xlsx-repl.py"
 XLSX_RUN_PATH = f"{REPL_STATE_DIR}/xlsx-run.py"
 REPL_TIMEOUT_SECONDS = 120
+GLOBAL_MODULES_LINK = (
+    f'[ -e {REPL_STATE_DIR}/node_modules ] || ln -s "$(npm root -g)" {REPL_STATE_DIR}/node_modules'
+)
 EMIT_IMAGE_LIMIT = 5
 EMIT_IMAGE_MAX_B64_CHARS = 2_000_000
 JS_EMIT_PRELUDE = (
@@ -128,12 +133,13 @@ class XlsxReplInput(BaseModel):
     )
 
 
-async def _accumulate(ctx: ToolContext, path: str, code: str, reset: bool) -> None:
+async def _candidate_source(ctx: ToolContext, path: str, code: str, reset: bool) -> str:
+    if reset:
+        await ctx.sandbox.bash(f"rm -f {shlex.quote(path)}")
     if reset or not await ctx.sandbox.file_exists(path):
-        await ctx.sandbox.write_file(path, code.encode() + b"\n")
-        return
+        return code + "\n"
     existing = await ctx.sandbox.bash(f"cat {shlex.quote(path)}")
-    await ctx.sandbox.write_file(path, existing.stdout.encode() + code.encode() + b"\n")
+    return existing.stdout + code + "\n"
 
 
 def _repl_result(
@@ -170,26 +176,26 @@ async def _emitted_images(ctx: ToolContext) -> tuple[ImageContent, ...]:
 
 
 async def js_repl(ctx: ToolContext, args: JsReplInput) -> ToolResult:
-    await _accumulate(ctx, JS_REPL_PATH, args.code, bool(args.reset))
-    accumulated = await ctx.sandbox.bash(f"cat {shlex.quote(JS_REPL_PATH)}")
-    run_source = JS_EMIT_PRELUDE.encode() + accumulated.stdout.encode()
-    await ctx.sandbox.write_file(JS_RUN_PATH, run_source)
+    candidate = await _candidate_source(ctx, JS_REPL_PATH, args.code, bool(args.reset))
+    await ctx.sandbox.write_file(JS_RUN_PATH, JS_EMIT_PRELUDE.encode() + candidate.encode())
     await ctx.sandbox.bash(f"rm -f {shlex.quote(JS_EMIT_PATH)}")
+    await ctx.sandbox.bash(GLOBAL_MODULES_LINK)
     result = await ctx.sandbox.bash(
         f"node {shlex.quote(JS_RUN_PATH)}", timeout_s=REPL_TIMEOUT_SECONDS
     )
+    if result.exit_code == 0:
+        await ctx.sandbox.write_file(JS_REPL_PATH, candidate.encode())
     return _repl_result(result.stdout, result.stderr, result.exit_code, await _emitted_images(ctx))
 
 
 async def xlsx_repl(ctx: ToolContext, args: XlsxReplInput) -> ToolResult:
-    await _accumulate(ctx, XLSX_REPL_PATH, args.code, bool(args.reset))
-    accumulated = await ctx.sandbox.bash(f"cat {shlex.quote(XLSX_REPL_PATH)}")
-    await ctx.sandbox.write_file(
-        XLSX_RUN_PATH, accumulated.stdout.encode() + XLSX_RESULT_FOOTER.encode()
-    )
+    candidate = await _candidate_source(ctx, XLSX_REPL_PATH, args.code, bool(args.reset))
+    await ctx.sandbox.write_file(XLSX_RUN_PATH, candidate.encode() + XLSX_RESULT_FOOTER.encode())
     result = await ctx.sandbox.bash(
         f"python3 {shlex.quote(XLSX_RUN_PATH)}", timeout_s=REPL_TIMEOUT_SECONDS
     )
+    if result.exit_code == 0:
+        await ctx.sandbox.write_file(XLSX_REPL_PATH, candidate.encode())
     return _repl_result(result.stdout, result.stderr, result.exit_code)
 
 

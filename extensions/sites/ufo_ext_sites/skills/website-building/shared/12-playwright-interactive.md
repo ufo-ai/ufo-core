@@ -40,6 +40,8 @@ const page = await context.newPage();
 console.log('Playwright ready');
 ```
 
+If `launch()` reports a missing browser executable, the sandbox ships a system browser instead — launch with `chromium.launch({ headless: true, executablePath: '/usr/bin/chromium', args: ['--no-sandbox'] })`.
+
 Browser handles are `const` to prevent accidentally launching duplicate Chromium instances (each one uses 200MB+). If you need to start over after an unrecoverable error, use `js_repl` with `reset: true` and re-run this bootstrap. The reset kills the old kernel and all its child processes, so nothing leaks.
 
 ## Start or Reuse Web Session

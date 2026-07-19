@@ -140,6 +140,41 @@ async def test_js_repl_accumulates_state_across_calls(tmp_path: Path) -> None:
     assert sandbox.files[repl.JS_REPL_PATH] == b"let x = 1\nconsole.log(x)\n"
 
 
+async def test_js_repl_discards_failed_code(tmp_path: Path) -> None:
+    sandbox = FakeSandbox()
+    ctx = _context(sandbox, tmp_path)
+    await repl.js_repl(ctx, JsReplInput(code="const x = 1", user_description="d"))
+    sandbox.node_result = ExecResult(stdout="", stderr="boom", exit_code=1)
+    await repl.js_repl(ctx, JsReplInput(code="const x = broken", user_description="d"))
+    sandbox.node_result = ExecResult(stdout="2", stderr="", exit_code=0)
+    await repl.js_repl(ctx, JsReplInput(code="const y = 2", user_description="d"))
+    assert sandbox.files[repl.JS_REPL_PATH] == b"const x = 1\nconst y = 2\n"
+    run_file = sandbox.files[repl.JS_RUN_PATH].decode()
+    assert "broken" not in run_file
+
+
+async def test_js_repl_failed_reset_leaves_the_repl_empty(tmp_path: Path) -> None:
+    sandbox = FakeSandbox()
+    ctx = _context(sandbox, tmp_path)
+    await repl.js_repl(ctx, JsReplInput(code="const a = 1", user_description="d"))
+    sandbox.node_result = ExecResult(stdout="", stderr="boom", exit_code=1)
+    await repl.js_repl(ctx, JsReplInput(code="const b = broken", reset=True, user_description="d"))
+    sandbox.node_result = ExecResult(stdout="", stderr="", exit_code=0)
+    await repl.js_repl(ctx, JsReplInput(code="const c = 3", user_description="d"))
+    assert sandbox.files[repl.JS_REPL_PATH] == b"const c = 3\n"
+
+
+async def test_xlsx_repl_discards_failed_code(tmp_path: Path) -> None:
+    sandbox = FakeSandbox()
+    ctx = _context(sandbox, tmp_path)
+    await repl.xlsx_repl(ctx, XlsxReplInput(code="a = 1"))
+    sandbox.python_result = ExecResult(stdout="", stderr="boom", exit_code=1)
+    await repl.xlsx_repl(ctx, XlsxReplInput(code="a = broken"))
+    sandbox.python_result = ExecResult(stdout="{}", stderr="", exit_code=0)
+    await repl.xlsx_repl(ctx, XlsxReplInput(code="b = 2"))
+    assert sandbox.files[repl.XLSX_REPL_PATH] == b"a = 1\nb = 2\n"
+
+
 async def test_js_repl_reset_overwrites_state(tmp_path: Path) -> None:
     sandbox = FakeSandbox()
     ctx = _context(sandbox, tmp_path)
@@ -239,6 +274,13 @@ async def test_js_repl_emits_images_through_the_real_local_carrier(tmp_path: Pat
     assert [(image.media_type, image.data) for image in result.content[1:]] == [
         ("image/jpeg", "AQID")
     ]
+    assert (tmp_path / "workspace" / ".repl" / "node_modules").is_symlink()
+    resolved = await repl.js_repl(
+        ctx,
+        JsReplInput(code="console.log(import.meta.resolve('npm'));", user_description="d"),
+    )
+    assert resolved.is_error is False
+    assert "/node_modules/npm/" in json.loads(resolved.content[0].text)["stdout"]
     await carrier.destroy(handle)
 
 
