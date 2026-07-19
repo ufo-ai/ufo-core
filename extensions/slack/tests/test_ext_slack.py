@@ -2289,8 +2289,9 @@ def _requests_to(recorder: list[httpx.Request], url: str) -> list[httpx.Request]
 
 
 async def test_status_follows_the_turn_and_leaves_the_clear_to_the_reply(
-    db: None, tmp_path, monkeypatch
+    db: None, tmp_path, monkeypatch, caplog
 ) -> None:
+    caplog.set_level(logging.INFO, logger="ufo")
     workspace_id, _ = await _seed()
     monkeypatch.setattr(slack, "STATUS_UPDATE_MIN_SECONDS", 0.0)
     recorder: list[httpx.Request] = []
@@ -2337,6 +2338,49 @@ async def test_status_follows_the_turn_and_leaves_the_clear_to_the_reply(
     assert all(s["status"] != slack.STATUS_CLEAR_TEXT for s in statuses)
     assert not _requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)
     assert turn_id not in slack._STATUS_TASKS
+    assert any(record.message == "slack.thread_status.set" for record in caplog.records)
+
+
+async def test_a_failed_status_write_lands_in_the_event_log(
+    db: None, tmp_path, monkeypatch, caplog
+) -> None:
+    """Slack rejecting a status write must be observable — the failure event carries the Slack
+    error, so a rejected `assistant.threads.setStatus` (wrong thread kind, missing feature) shows
+    up in the log pipeline instead of dying in a best-effort task."""
+    caplog.set_level(logging.INFO, logger="ufo")
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    inner = _mock_transport(recorder, {})
+
+    def rejecting(request: httpx.Request) -> httpx.Response:
+        if str(request.url).split("?")[0] == slack.SLACK_ASSISTANT_STATUS_URL:
+            recorder.append(request)
+            return httpx.Response(200, json={"ok": False, "error": "feature_not_enabled"})
+        return inner.handler(request)
+
+    _, client, _ = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, httpx.MockTransport(rejecting), hub=InProcessHub()
+    )
+    mention = _event_body(
+        type="app_mention", user="U1", channel="C1", ts="100.5", text="<@UBOT00000> hi"
+    )
+    async with client:
+        response = await client.post(
+            EVENTS_PATH, content=mention, headers=_sign(mention, int(time.time()))
+        )
+    assert response.status_code == 200
+    async with workspace_tx() as connection:
+        turn_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    task = slack._STATUS_TASKS.get(turn_id)
+    if task is not None:
+        await task
+    failures = [r for r in caplog.records if r.message == "slack.thread_status.failed"]
+    assert failures and "feature_not_enabled" in failures[0].ufo["error"]
+    assert not any(record.message == "slack.thread_status.set" for record in caplog.records)
 
 
 async def test_a_parked_turn_clears_the_status(db: None, tmp_path, monkeypatch) -> None:

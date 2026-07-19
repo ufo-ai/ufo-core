@@ -53,6 +53,7 @@ from pydantic import BaseModel, ValidationError
 
 from ufo.sdk.http import JSONResponse, Request, Response
 from ufo.sdk.hub import Parked, SkillLoad, Terminal, TextDelta, ToolCall
+from ufo.sdk.o11y import log
 from ufo.sdk.sandbox import BlobStore
 from ufo.sdk.surfaces import (
     AskUserInput,
@@ -1035,6 +1036,12 @@ class ThreadStatus:
         reply_clears = False
         async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
             await self._set(client, bot_token, STATUS_THINKING_TEXT)
+            log(
+                "slack.thread_status.set",
+                turn=str(self.turn_id),
+                channel=self.channel,
+                thread_ts=self.thread_ts,
+            )
             try:
                 reply_clears = await self._follow(client, bot_token)
             finally:
@@ -1133,7 +1140,13 @@ async def _run_status(status: ThreadStatus) -> None:
     try:
         await status.run()
     except Exception as error:
-        _LOG.warning("slack status feedback failed for turn %s: %s", status.turn_id, error)
+        log(
+            "slack.thread_status.failed",
+            turn=str(status.turn_id),
+            channel=status.channel,
+            thread_ts=status.thread_ts,
+            error=repr(error),
+        )
 
 
 @dataclass(frozen=True)
