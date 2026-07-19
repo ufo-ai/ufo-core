@@ -75,6 +75,21 @@ from evals.memory_100.runner import Memory100Run, load_memory_100
 from evals.reconstruct import RunReconstruction, write_reconstruction
 from evals.registry import TASKS, selected_run_tasks
 from evals.turn_logs import TurnLogCollector
+from evals.wandr.runner import (
+    SUBMISSIONS_ROOT as WANDR_SUBMISSIONS_ROOT,
+)
+from evals.wandr.runner import (
+    SUBSETS as WANDR_SUBSETS,
+)
+from evals.wandr.runner import (
+    WANDR_PACKS,
+)
+from evals.wandr.runner import (
+    WORKFLOW_WAIT_SECONDS as WANDR_WORKFLOW_WAIT_SECONDS,
+)
+from evals.wandr.runner import (
+    load_boundary as load_wandr_boundary,
+)
 from ufo.blob import blob_store_for
 from ufo.config import Config, config_path, load_config
 from ufo.credentials import CredentialStore
@@ -153,6 +168,15 @@ def main(argv: list[str] | None = None) -> None:
         default=SUBMISSIONS_ROOT,
         help="folder that captures each case's share_file deliverables for offline grading",
     )
+    parser.add_argument("--wandr", type=Path, metavar="SNAPSHOT")
+    parser.add_argument("--wandr-subset", choices=WANDR_SUBSETS)
+    parser.add_argument("--wandr-case", action="append", default=[], metavar="TASK")
+    parser.add_argument(
+        "--wandr-submissions",
+        type=Path,
+        default=WANDR_SUBMISSIONS_ROOT,
+        help="folder that captures each case's share_file results files for offline grading",
+    )
     parser.add_argument(
         "--mcp-atlas-data",
         type=Path,
@@ -189,6 +213,10 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--gdpval-task requires --gdpval-100")
     if args.jobbench_case and args.jobbench is None:
         parser.error("--jobbench-case requires --jobbench")
+    if (args.wandr_subset is not None or args.wandr_case) and args.wandr is None:
+        parser.error("--wandr-subset and --wandr-case require --wandr")
+    if args.wandr is not None and args.wandr_subset is None and not args.wandr_case:
+        parser.error("--wandr requires --wandr-subset or --wandr-case")
     requested_runs = sum(
         source is not None
         for source in (
@@ -198,6 +226,7 @@ def main(argv: list[str] | None = None) -> None:
             args.jobbench,
             args.hle_gold,
             args.compaction,
+            args.wandr,
         )
     )
     if requested_runs > 1:
@@ -231,6 +260,13 @@ def main(argv: list[str] | None = None) -> None:
             if args.jobbench is not None
             else None
         )
+        wandr_tasks = (
+            load_wandr_boundary(
+                args.wandr, args.wandr_subset, tuple(args.wandr_case), args.wandr_submissions
+            )
+            if args.wandr is not None
+            else None
+        )
         tasks = _tasks(
             names,
             memory_run,
@@ -238,6 +274,7 @@ def main(argv: list[str] | None = None) -> None:
             compaction_run,
             gdpval_run,
             jobbench_tasks,
+            wandr_tasks,
             args.mcp_atlas_data,
             args.mcp_atlas_samples,
             hle_run,
@@ -324,6 +361,8 @@ def main(argv: list[str] | None = None) -> None:
         parser.error(
             f"jobbench requires [pack] name in {JOBBENCH_PACKS}, found {config.pack.name!r}"
         )
+    if wandr_tasks is not None and config.pack.name not in WANDR_PACKS:
+        parser.error(f"wandr requires [pack] name in {WANDR_PACKS}, found {config.pack.name!r}")
     workspace_id = args.workspace
     if memory_run is not None:
         if workspace_id is not None and workspace_id != memory_run.readiness.workspace_id:
@@ -343,6 +382,8 @@ def main(argv: list[str] | None = None) -> None:
         workflow_wait_seconds = GDPVAL_WORKFLOW_WAIT_SECONDS
     if jobbench_tasks is not None:
         workflow_wait_seconds = JOBBENCH_WORKFLOW_WAIT_SECONDS
+    if wandr_tasks is not None:
+        workflow_wait_seconds = WANDR_WORKFLOW_WAIT_SECONDS
     reports, agent_prompt = asyncio.run(
         _run(
             config,
@@ -673,6 +714,7 @@ def _tasks(
     compaction_run: CompactionRun | None = None,
     gdpval_run: GDPvalCalibration | None = None,
     jobbench_tasks: tuple[EvalTask, ...] | None = None,
+    wandr_tasks: tuple[EvalTask, ...] | None = None,
     mcp_atlas_data: Path | None = None,
     mcp_atlas_samples: int | None = None,
     hle_run: HLEGoldRun | None = None,
@@ -683,6 +725,8 @@ def _tasks(
         return selected_tasks(gdpval_run.tasks, names)
     if jobbench_tasks is not None:
         return selected_tasks(jobbench_tasks, names)
+    if wandr_tasks is not None:
+        return selected_tasks(wandr_tasks, names)
     mcp_atlas = (
         (load_mcp_atlas_task(mcp_atlas_data, mcp_atlas_samples),)
         if mcp_atlas_data is not None
