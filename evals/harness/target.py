@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     from evals.compaction.target import CompactionTarget
     from evals.mcp_atlas_100.target import McpAtlasTarget
 
-MAX_EVAL_ARTIFACTS = 64
+MAX_EVAL_ARTIFACTS = 256
 MAX_EVAL_ARTIFACT_BYTES = 16 * 1024 * 1024
 MAX_EVAL_ARTIFACT_TOTAL_BYTES = 32 * 1024 * 1024
 MAX_EVAL_TRAJECTORY_BYTES = 8 * 1024 * 1024
