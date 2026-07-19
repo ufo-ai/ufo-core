@@ -12,7 +12,8 @@ joins as a new member — only the owner ever onboards through the CLI.
 
 While the turn runs, a per-turn status task tails its live frames off the hub and keeps the
 thread's native status (`assistant.threads.setStatus`) current — "Thinking…", each tool call's
-slug, "Generating…" while text streams — and a done turn leaves the status for its reply to clear.
+slug, "Generating…" while text streams, pinned through `loading_messages` so Slack's agent UI
+shows our text rather than its own canned phrases — cleared when the turn ends.
 The status is thread-keyed state, not a
 message: a duplicate writer (Slack redelivers events, and every replica runs its own task)
 overwrites it rather than stacking a second indicator, and within a process the newest turn is a
@@ -1013,18 +1014,18 @@ class ThreadStatus:
     (`assistant.threads.setStatus`): "Thinking…" the moment the turn is admitted, then the turn's
     hub frames — each tool call as its slug, never the model's `user_description` (cycling prose
     reads as agent chatter on a one-line status; narration belongs to the reply), streamed text as
-    "Generating…". A turn that ends on a Terminal leaves its status standing: the poller's reply
-    clears it the moment it posts (Slack drops an assistant status when the app messages the
-    thread), so there is no blank beat between "Generating…" and the answer, and Slack's
-    two-minute drop bounds a reply that never lands. A parked turn or a dead stream clears
-    explicitly — nothing is coming to clear it.
+    "Generating…". Slack's agent UI renders its own canned phrases over a bare `status` string, so
+    every non-clear write pins the display through a one-element `loading_messages` rotation — the
+    field the client shows verbatim. The clear at turn end is always ours: a reply never ends the
+    status (a DM reply posts top-level, outside the status thread), so Terminal, Parked, and a
+    dead stream all clear alike.
     The status is state on the thread, not a message, and the thread has one writer — the newest
     turn (`_THREAD_WRITERS`) — so an
     outrun sibling's writes, its clear included, are skipped rather than blanking the status the
     member is watching. Slack drops a status two minutes after its last write, so a quiet stretch
     re-stamps the shown text every STATUS_REFRESH_SECONDS. An update inside
     STATUS_UPDATE_MIN_SECONDS of the last send is dropped, not delayed: the next distinct frame
-    refreshes."""
+    refreshes, and the clear ends the status regardless."""
 
     ctx: SurfaceContext
     turn_id: UUID
@@ -1033,7 +1034,6 @@ class ThreadStatus:
 
     async def run(self) -> None:
         bot_token = await self.ctx.credential(SLACK_BOT_TOKEN_SLOT)
-        reply_clears = False
         async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
             await self._set(client, bot_token, STATUS_THINKING_TEXT)
             log(
@@ -1043,10 +1043,9 @@ class ThreadStatus:
                 thread_ts=self.thread_ts,
             )
             try:
-                reply_clears = await self._follow(client, bot_token)
+                await self._follow(client, bot_token)
             finally:
-                if not reply_clears:
-                    await self._set(client, bot_token, STATUS_CLEAR_TEXT)
+                await self._set(client, bot_token, STATUS_CLEAR_TEXT)
 
     async def _set(self, client: httpx.AsyncClient, bot_token: str, status: str) -> None:
         if (
@@ -1054,12 +1053,17 @@ class ThreadStatus:
             != self.turn_id
         ):
             return
+        body: dict[str, object] = {
+            "channel_id": self.channel,
+            "thread_ts": self.thread_ts,
+            "status": status,
+        }
+        if status:
+            body["loading_messages"] = [status]
         await _slack_ok(
             client.post(
                 SLACK_ASSISTANT_STATUS_URL,
-                content=json.dumps(
-                    {"channel_id": self.channel, "thread_ts": self.thread_ts, "status": status}
-                ),
+                content=json.dumps(body),
                 headers={
                     "Authorization": f"Bearer {bot_token}",
                     "Content-Type": "application/json; charset=utf-8",
@@ -1067,7 +1071,7 @@ class ThreadStatus:
             )
         )
 
-    async def _follow(self, client: httpx.AsyncClient, bot_token: str) -> bool:
+    async def _follow(self, client: httpx.AsyncClient, bot_token: str) -> None:
         shown = STATUS_THINKING_TEXT
         sent_at = time.monotonic()
         frames = aiter(self.ctx.tail(self.turn_id))
@@ -1082,13 +1086,11 @@ class ThreadStatus:
                 try:
                     _cursor, frame = upcoming.result()
                 except StopAsyncIteration:
-                    return False
+                    return
                 upcoming = asyncio.ensure_future(anext(frames))
                 match frame:
-                    case Terminal():
-                        return True
-                    case Parked():
-                        return False
+                    case Terminal() | Parked():
+                        return
                     case ToolCall(tool=tool):
                         text = STATUS_WORKING_TEXT.format(tool=tool)
                     case SkillLoad(skill=skill):

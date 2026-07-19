@@ -1227,6 +1227,7 @@ async def test_dm_links_member_by_email_and_status_anchors_to_the_message(
         "channel_id": "D9",
         "thread_ts": "7.0",
         "status": slack.STATUS_THINKING_TEXT,
+        "loading_messages": [slack.STATUS_THINKING_TEXT],
     }
     async with workspace_tx() as connection:
         linked = (
@@ -2288,7 +2289,7 @@ def _requests_to(recorder: list[httpx.Request], url: str) -> list[httpx.Request]
     return [r for r in recorder if str(r.url).split("?")[0] == url]
 
 
-async def test_status_follows_the_turn_and_leaves_the_clear_to_the_reply(
+async def test_status_follows_the_turn_pins_the_text_and_clears_at_terminal(
     db: None, tmp_path, monkeypatch, caplog
 ) -> None:
     caplog.set_level(logging.INFO, logger="ufo")
@@ -2332,10 +2333,17 @@ async def test_status_follows_the_turn_and_leaves_the_clear_to_the_reply(
         "channel_id": "C1",
         "thread_ts": "100.5",
         "status": slack.STATUS_THINKING_TEXT,
+        "loading_messages": [slack.STATUS_THINKING_TEXT],
     }
-    assert statuses[1]["status"] == slack.STATUS_WORKING_TEXT.format(tool="bash")
+    working = slack.STATUS_WORKING_TEXT.format(tool="bash")
+    assert statuses[1]["status"] == working
+    assert statuses[1]["loading_messages"] == [working]
     assert statuses[2]["status"] == slack.STATUS_GENERATING_TEXT
-    assert all(s["status"] != slack.STATUS_CLEAR_TEXT for s in statuses)
+    assert statuses[-1] == {
+        "channel_id": "C1",
+        "thread_ts": "100.5",
+        "status": slack.STATUS_CLEAR_TEXT,
+    }
     assert not _requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)
     assert turn_id not in slack._STATUS_TASKS
     assert any(record.message == "slack.thread_status.set" for record in caplog.records)
