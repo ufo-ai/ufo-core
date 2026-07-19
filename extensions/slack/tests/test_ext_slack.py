@@ -2346,7 +2346,10 @@ async def test_status_follows_the_turn_pins_the_text_and_clears_at_terminal(
     }
     assert not _requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)
     assert turn_id not in slack._STATUS_TASKS
-    assert any(record.message == "slack.thread_status.set" for record in caplog.records)
+    written = [r.ufo["status"] for r in caplog.records if r.message == "slack.thread_status.write"]
+    assert working in written
+    assert slack.STATUS_GENERATING_TEXT in written
+    assert written[-1] == slack.STATUS_CLEAR_TEXT
 
 
 async def test_a_failed_status_write_lands_in_the_event_log(
@@ -2388,7 +2391,7 @@ async def test_a_failed_status_write_lands_in_the_event_log(
         await task
     failures = [r for r in caplog.records if r.message == "slack.thread_status.failed"]
     assert failures and "feature_not_enabled" in failures[0].ufo["error"]
-    assert not any(record.message == "slack.thread_status.set" for record in caplog.records)
+    assert not any(record.message == "slack.thread_status.write" for record in caplog.records)
 
 
 async def test_a_parked_turn_clears_the_status(db: None, tmp_path, monkeypatch) -> None:

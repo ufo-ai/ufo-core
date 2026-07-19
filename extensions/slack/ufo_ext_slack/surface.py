@@ -1036,12 +1036,6 @@ class ThreadStatus:
         bot_token = await self.ctx.credential(SLACK_BOT_TOKEN_SLOT)
         async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
             await self._set(client, bot_token, STATUS_THINKING_TEXT)
-            log(
-                "slack.thread_status.set",
-                turn=str(self.turn_id),
-                channel=self.channel,
-                thread_ts=self.thread_ts,
-            )
             try:
                 await self._follow(client, bot_token)
             finally:
@@ -1069,6 +1063,13 @@ class ThreadStatus:
                     "Content-Type": "application/json; charset=utf-8",
                 },
             )
+        )
+        log(
+            "slack.thread_status.write",
+            turn=str(self.turn_id),
+            channel=self.channel,
+            thread_ts=self.thread_ts,
+            status=status,
         )
 
     async def _follow(self, client: httpx.AsyncClient, bot_token: str) -> None:
