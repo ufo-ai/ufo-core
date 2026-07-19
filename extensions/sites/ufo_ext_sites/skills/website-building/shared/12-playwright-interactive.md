@@ -172,7 +172,7 @@ emitImage(mobileShot, 'image/jpeg');
 await mobileCtx.close();
 ```
 
-`emitImage(value, mediaType?)` accepts a Buffer, Uint8Array, base64 string, or `{bytes, mimeType}` object. Up to 5 images per execution. To save screenshots to disk instead (e.g. for persistence), use `page.screenshot({ path: ... })` and `read` to view them.
+`emitImage(value, mediaType?)` accepts a Buffer, Uint8Array, base64 string, or `{bytes, mimeType}` object. Up to 5 images per execution; an image over ~1.5 MB raises — lower the JPEG quality. To save screenshots to disk instead (e.g. for persistence), use `page.screenshot({ path: ... })` and `read` to view them.
 
 ## Viewport Fit Checks (Required)
 

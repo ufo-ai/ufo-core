@@ -10,7 +10,14 @@ from ufo_ext_repl.manifest import JsReplInput, XlsxReplInput
 
 from ufo.blob import FilesystemBlobStore
 from ufo.ext.loader import skill_registry
-from ufo.sandbox.session import ExecResult
+from ufo.sandbox.local import LocalCarrier
+from ufo.sandbox.session import (
+    ExecResult,
+    MountSpec,
+    ProxyEndpoint,
+    SandboxSession,
+    SandboxSpec,
+)
 from ufo.schema.records import Agent, Turn
 from ufo.tools.context import SpawnResult, ToolContext
 
@@ -18,13 +25,16 @@ from ufo.tools.context import SpawnResult, ToolContext
 @dataclass
 class FakeSandbox:
     """Scripts the sandbox for the REPL handlers: write_file/file_exists track a file dict, `cat`
-    reads it back (the accumulate read-back), and `node`/`python3` return canned results — so the
-    accumulate-then-run flow is exercised without a real container."""
+    reads it back (the accumulate read-back), `rm` deletes, and `node`/`python3` return canned
+    results — `node` also drops `node_emit` into the emit file when set, standing in for a run
+    whose code called emitImage — so the accumulate-then-run flow is exercised without a real
+    container."""
 
     files: dict[str, bytes] = field(default_factory=dict)
     node_result: ExecResult = field(
         default_factory=lambda: ExecResult(stdout="ran", stderr="", exit_code=0)
     )
+    node_emit: bytes | None = None
     python_result: ExecResult = field(
         default_factory=lambda: ExecResult(stdout="{}", stderr="", exit_code=0)
     )
@@ -37,7 +47,12 @@ class FakeSandbox:
             return ExecResult(
                 stdout=self.files.get(shlex.split(path)[0], b"").decode(), stderr="", exit_code=0
             )
+        if head == "rm":
+            self.files.pop(shlex.split(path)[-1], None)
+            return ExecResult(stdout="", stderr="", exit_code=0)
         if head == "node":
+            if self.node_emit is not None:
+                self.files[repl.JS_EMIT_PATH] = self.node_emit
             return self.node_result
         if head == "python3":
             return self.python_result
@@ -63,7 +78,7 @@ class _StubMemory:
         return None
 
 
-def _context(sandbox: FakeSandbox, tmp_path: Path) -> ToolContext:
+def _context(sandbox: FakeSandbox | SandboxSession, tmp_path: Path) -> ToolContext:
     turn = Turn(
         id=uuid4(),
         workspace_id=uuid4(),
@@ -133,6 +148,63 @@ async def test_js_repl_reset_overwrites_state(tmp_path: Path) -> None:
     assert sandbox.files[repl.JS_REPL_PATH] == b"let y = 2\n"
 
 
+async def test_js_repl_composes_prelude_and_accumulated_code_into_the_run_file(
+    tmp_path: Path,
+) -> None:
+    sandbox = FakeSandbox()
+    ctx = _context(sandbox, tmp_path)
+    await repl.js_repl(ctx, JsReplInput(code="let x = 1", user_description="d"))
+    await repl.js_repl(ctx, JsReplInput(code="console.log(x)", user_description="d"))
+    run_file = sandbox.files[repl.JS_RUN_PATH].decode()
+    assert run_file == repl.JS_EMIT_PRELUDE + "let x = 1\nconsole.log(x)\n"
+    assert any(command == f"node {repl.JS_RUN_PATH}" for command in sandbox.commands)
+
+
+async def test_js_repl_returns_emitted_images_after_the_text_result(tmp_path: Path) -> None:
+    emitted = (
+        json.dumps({"media_type": "image/jpeg", "data": "anBn"})
+        + "\n"
+        + json.dumps({"media_type": "image/png", "data": "cG5n"})
+        + "\n"
+    )
+    sandbox = FakeSandbox(node_emit=emitted.encode())
+    ctx = _context(sandbox, tmp_path)
+    result = await repl.js_repl(ctx, JsReplInput(code="emitImage(shot)", user_description="d"))
+    assert json.loads(result.content[0].text)["stdout"] == "ran"
+    assert [(image.media_type, image.data) for image in result.content[1:]] == [
+        ("image/jpeg", "anBn"),
+        ("image/png", "cG5n"),
+    ]
+
+
+async def test_js_repl_keeps_only_the_last_five_emitted_images(tmp_path: Path) -> None:
+    lines = "".join(
+        json.dumps({"media_type": "image/png", "data": f"aW1n{index}"}) + "\n" for index in range(7)
+    )
+    sandbox = FakeSandbox(node_emit=lines.encode())
+    ctx = _context(sandbox, tmp_path)
+    result = await repl.js_repl(ctx, JsReplInput(code="emitImage(shot)", user_description="d"))
+    assert [image.data for image in result.content[1:]] == [f"aW1n{index}" for index in range(2, 7)]
+
+
+async def test_js_repl_drops_a_torn_emit_line(tmp_path: Path) -> None:
+    emitted = json.dumps({"media_type": "image/png", "data": "b2s="}) + '\n{"media_type": "image/'
+    sandbox = FakeSandbox(node_emit=emitted.encode())
+    ctx = _context(sandbox, tmp_path)
+    result = await repl.js_repl(ctx, JsReplInput(code="emitImage(shot)", user_description="d"))
+    assert result.is_error is False
+    assert [image.data for image in result.content[1:]] == ["b2s="]
+
+
+async def test_js_repl_clears_stale_emits_and_stays_text_only(tmp_path: Path) -> None:
+    stale = b'{"media_type": "image/png", "data": "old"}\n'
+    sandbox = FakeSandbox(files={repl.JS_EMIT_PATH: stale})
+    ctx = _context(sandbox, tmp_path)
+    result = await repl.js_repl(ctx, JsReplInput(code="console.log(1)", user_description="d"))
+    assert len(result.content) == 1
+    assert repl.JS_EMIT_PATH not in sandbox.files
+
+
 async def test_xlsx_repl_wraps_accumulated_code_with_the_result_footer(tmp_path: Path) -> None:
     sandbox = FakeSandbox(python_result=ExecResult(stdout='{"a": 1}', stderr="", exit_code=0))
     ctx = _context(sandbox, tmp_path)
@@ -142,6 +214,32 @@ async def test_xlsx_repl_wraps_accumulated_code_with_the_result_footer(tmp_path:
     assert "_json.dumps(result, default=str)" in run_file
     assert any(command.startswith("python3 ") for command in sandbox.commands)
     assert json.loads(result.content[0].text)["stdout"] == '{"a": 1}'
+
+
+async def test_js_repl_emits_images_through_the_real_local_carrier(tmp_path: Path) -> None:
+    carrier = LocalCarrier()
+    handle = await carrier.create(
+        SandboxSpec(
+            conversation_id=uuid4(),
+            image_ref="ufo-sandbox:latest",
+            mount=MountSpec(kind="filesystem", host_path=str(tmp_path / "workspace")),
+            proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM-BYTES"),
+            run_token="run-token-abc",
+        )
+    )
+    ctx = _context(SandboxSession(carrier=carrier, handle=handle), tmp_path)
+    code = (
+        "await Promise.resolve();\n"
+        'emitImage(Buffer.from([1, 2, 3]), "image/jpeg");\n'
+        'console.log("emitted");'
+    )
+    result = await repl.js_repl(ctx, JsReplInput(code=code, user_description="d"))
+    assert result.is_error is False
+    assert json.loads(result.content[0].text)["stdout"] == "emitted\n"
+    assert [(image.media_type, image.data) for image in result.content[1:]] == [
+        ("image/jpeg", "AQID")
+    ]
+    await carrier.destroy(handle)
 
 
 async def test_nonzero_exit_is_flagged_as_error(tmp_path: Path) -> None:
