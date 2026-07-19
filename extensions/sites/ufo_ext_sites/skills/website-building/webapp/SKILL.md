@@ -269,7 +269,6 @@ These files live under `references/`.
 - `references/layout_and_spacing.md` - Use when structuring page layouts, sections, spacing rhythm, and component alignment.
 - `references/sidebar_rules.md` - Use when building or modifying a sidebar.
 - `references/visual_style_and_contrast.md` - Use when choosing contrast, borders, shadows, pane/panel treatment, and hero image presentation.
-- `references/supabase.md` - Use when the app needs a persistent database for multi-user data (Supabase as alternative to SQLite). Database only, no auth.
 
 ## SEO
 

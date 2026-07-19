@@ -38,7 +38,7 @@ Markdown report artifacts produce research reports in standard GitHub-Flavored M
 
 **Image embedding rules:**
 
-- First, generate and save the image file to the workspace (e.g., using `execute_code` to create a chart with matplotlib/plotly and save it as a `.png` file)
+- First, generate and save the image file to the workspace (e.g., using `bash` (python) to create a chart with matplotlib/plotly and save it as a `.png` file)
 - Reference the image in the `.md` report using the **relative path** `./filename.ext` — the system will replace these with permanent URLs when the report is shared
 - Use descriptive filenames that reflect the content (e.g., `revenue-growth-chart.png`, `market-share-comparison.png`)
 - Supported image formats: `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.svg`
@@ -48,7 +48,7 @@ Markdown report artifacts produce research reports in standard GitHub-Flavored M
 
 **Example workflow:**
 
-1. Generate a chart: use `execute_code` to create `revenue-chart.png` in the workspace
+1. Generate a chart: use `bash` (python) to create `revenue-chart.png` in the workspace
 2. In the `.md` report, embed it:
 
    ```markdown
