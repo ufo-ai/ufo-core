@@ -27,7 +27,7 @@ from evals.wandr.snapshot import TASKS_ROOT, load_snapshot
 
 WANDR_PACKS = ("assistant", "assistant_hosted")
 ENVELOPE_REVISION = "wandr-share-file-1"
-WORKFLOW_WAIT_SECONDS = 5_400.0
+WORKFLOW_WAIT_SECONDS = 7_200.0
 SUBMISSIONS_ROOT = Path(".local/wandr/submissions")
 SUBSETS: tuple[Subset, ...] = ("smoke", "hillclimb", "holdout")
 
