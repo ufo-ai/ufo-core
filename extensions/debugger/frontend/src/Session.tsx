@@ -7,7 +7,31 @@ import { Tail } from "./Tail";
 import { Transcript } from "./Transcript";
 
 type Details = Record<string, TurnDetail>;
+type Loaded = { turns: Turn[]; details: Details };
+type TimelineData = Loaded & { highlight: string | null };
 const LIVE_STATUSES = new Set(["queued", "running", "parked"]);
+
+async function loadConversation(conversationId: string): Promise<Loaded> {
+  const turns = await get<Turn[]>(`conversations/${conversationId}/turns`);
+  const fetched = await Promise.all(
+    turns.map((turn) => get<TurnDetail>(`turns/${turn.id}`).catch(() => null)),
+  );
+  const details: Details = {};
+  for (const detail of fetched) if (detail) details[detail.turn.id] = detail;
+  return { turns, details };
+}
+
+async function timelineRootedAtParent(
+  conversationId: string,
+  loaded: Loaded,
+): Promise<TimelineData> {
+  const parentTurnId = loaded.turns.find((turn) => turn.parent_turn_id)?.parent_turn_id;
+  if (!parentTurnId) return { ...loaded, highlight: null };
+  const parentTurn = await get<TurnDetail>(`turns/${parentTurnId}`).catch(() => null);
+  if (!parentTurn) return { ...loaded, highlight: null };
+  const parent = await loadConversation(parentTurn.turn.conversation_id);
+  return { ...parent, highlight: conversationId };
+}
 
 export function Session(props: {
   conversationId: string;
@@ -16,20 +40,25 @@ export function Session(props: {
 }) {
   const [turns, setTurns] = useState<Turn[] | null>(null);
   const [details, setDetails] = useState<Details>({});
+  const [timeline, setTimeline] = useState<TimelineData | null>(null);
   const [tab, setTab] = useState<"turns" | "transcript" | "compactions" | "files">("turns");
 
   useEffect(() => {
+    let cancelled = false;
     setTurns(null);
     setDetails({});
-    get<Turn[]>(`conversations/${props.conversationId}/turns`).then(async (listed) => {
-      setTurns(listed);
-      const fetched = await Promise.all(
-        listed.map((turn) => get<TurnDetail>(`turns/${turn.id}`).catch(() => null)),
-      );
-      const byId: Details = {};
-      for (const detail of fetched) if (detail) byId[detail.turn.id] = detail;
-      setDetails(byId);
+    setTimeline(null);
+    loadConversation(props.conversationId).then(async (loaded) => {
+      if (cancelled) return;
+      setTurns(loaded.turns);
+      setDetails(loaded.details);
+      const rooted = await timelineRootedAtParent(props.conversationId, loaded);
+      if (cancelled) return;
+      setTimeline(rooted);
     });
+    return () => {
+      cancelled = true;
+    };
   }, [props.conversationId]);
 
   if (turns === null) return <div className="empty">loading…</div>;
@@ -38,7 +67,14 @@ export function Session(props: {
     <>
       <section className="panel">
         <h2>timeline</h2>
-        <Timeline turns={turns} details={details} navigate={props.navigate} />
+        {timeline && (
+          <Timeline
+            turns={timeline.turns}
+            details={timeline.details}
+            highlight={timeline.highlight}
+            navigate={props.navigate}
+          />
+        )}
       </section>
       <div className="tabs">
         {(["turns", "transcript", "compactions", "files"] as const).map((name) => (
@@ -71,6 +107,7 @@ export function Session(props: {
 function Timeline(props: {
   turns: Turn[];
   details: Details;
+  highlight: string | null;
   navigate: (next: Partial<Params>) => void;
 }) {
   const lanes = useMemo(() => {
@@ -102,16 +139,13 @@ function Timeline(props: {
         const label = child
           ? `↳ ${turn.subagent_profile ?? "subagent"}: ${turn.inbound}`
           : `#${turn.seq} ${turn.inbound}`;
+        const current = props.highlight !== null && turn.conversation_id === props.highlight;
         return (
-          <div className="lane" key={turn.id}>
+          <div className={`lane${current ? " current" : ""}`} key={turn.id}>
             <span
               className={`label${child ? " child" : ""}`}
               title={turn.inbound}
-              onClick={() =>
-                child
-                  ? props.navigate({ c: turn.conversation_id, t: turn.id })
-                  : props.navigate({ t: turn.id })
-              }
+              onClick={() => props.navigate({ c: turn.conversation_id, t: turn.id })}
             >
               {label}
             </span>
