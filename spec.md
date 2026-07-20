@@ -289,7 +289,9 @@ from `url_private` into the conversation's workspace before the turn runs; a sha
 (`share_file` → a `shared_artifact` record) streams from the blob store to Slack's chunked
 external-upload API, into the conversation's thread (Slack forbids threading on a reply's ts). `surface_identity` and `conversation.surface`
 are open namespaces validated by surface registration, not a fixed enum.
-Slack renders each terminal's accounting and model metadata as the reply's final context block.
+Slack renders terminal accounting and model metadata as the reply's final context block only in
+the admin workspace — the workspace whose owner's email domain is `UFO_ADMIN_EMAIL_DOMAIN`; an
+unset domain renders none.
 
 Shared surface requests authenticate their workspace before core binds it. Slack uses canonical
 event and interactive URLs: the untrusted team id selects one unique `surface_installation`, its

@@ -29,6 +29,7 @@ downgrade, not a second seam."""
 import asyncio
 import hashlib
 import json
+import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -93,6 +94,7 @@ from ufo.transcript import (
 from ufo.workspace import ws, ws_current
 
 WORKSPACE_SEGMENT = "workspace"
+ADMIN_EMAIL_DOMAIN_ENV = "UFO_ADMIN_EMAIL_DOMAIN"
 
 
 class MemberAdmitter(Protocol):
@@ -384,6 +386,18 @@ class SurfaceContext:
                 )
             ).one_or_none()
         return None if row is None else row.email
+
+    async def is_admin_workspace(self) -> bool:
+        """Whether this workspace is the deploy operator's own — the workspace whose own domain
+        (its owner's email domain, the same resolution hosted onboarding joins by) is
+        `UFO_ADMIN_EMAIL_DOMAIN`. Gates renderings meant for the operator alone, like Slack's
+        accounting footer and its debugger link. An unset domain or an ownerless workspace is
+        False: internals render nowhere rather than in a customer's thread."""
+        domain = os.environ.get(ADMIN_EMAIL_DOMAIN_ENV, "").strip().lower()
+        if not domain:
+            return False
+        owner = await self._owner_email()
+        return owner is not None and _email_domain(owner) == domain
 
     async def adopt_identity(self, peer_surface: str, external_id: str) -> UUID | None:
         """Link this surface's external id to the member a peer surface already knows it by, so one

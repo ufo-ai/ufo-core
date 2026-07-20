@@ -26,6 +26,7 @@ from ufo.credentials import (
 )
 from ufo.db import workspace_tx
 from ufo.ext.surface import (
+    ADMIN_EMAIL_DOMAIN_ENV,
     WRITEBACK_CLAIMED,
     WRITEBACK_DELIVERED,
     WRITEBACK_FAILED,
@@ -556,6 +557,45 @@ async def test_join_member_refuses_without_a_domain_match(db: None, tmp_path) ->
             )
         ).scalar_one()
     assert members == 1
+
+
+async def test_is_admin_workspace_matches_the_owner_email_domain(
+    db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id, _, _ = await _seed(member_email="owner@metalcraft.example")
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    monkeypatch.delenv(ADMIN_EMAIL_DOMAIN_ENV, raising=False)
+    assert await context.is_admin_workspace() is False
+    monkeypatch.setenv(ADMIN_EMAIL_DOMAIN_ENV, " Metalcraft.Example ")
+    assert await context.is_admin_workspace() is True
+    monkeypatch.setenv(ADMIN_EMAIL_DOMAIN_ENV, "elsewhere.example")
+    assert await context.is_admin_workspace() is False
+    ownerless_id, _, _ = await _seed()
+    ownerless = _context(ownerless_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    monkeypatch.setenv(ADMIN_EMAIL_DOMAIN_ENV, "metalcraft.example")
+    assert await ownerless.is_admin_workspace() is False
+
+
+async def test_is_admin_workspace_keys_on_the_earliest_member(
+    db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id, _, _ = await _seed(member_email="joiner@elsewhere.example")
+    early = datetime(2026, 1, 1, tzinfo=UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                email="owner@metalcraft.example",
+                created_at=early,
+                updated_at=early,
+            )
+        )
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    monkeypatch.setenv(ADMIN_EMAIL_DOMAIN_ENV, "metalcraft.example")
+    assert await context.is_admin_workspace() is True
+    monkeypatch.setenv(ADMIN_EMAIL_DOMAIN_ENV, "elsewhere.example")
+    assert await context.is_admin_workspace() is False
 
 
 def test_public_base_url_is_the_wired_connect_base(tmp_path) -> None:

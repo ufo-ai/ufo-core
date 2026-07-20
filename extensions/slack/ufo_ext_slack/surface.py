@@ -464,21 +464,21 @@ def slack_reply_body(
     channel: str,
     thread_ts: str | None,
     text: str,
-    metadata: str,
+    metadata: str | None,
     blocks: bool = True,
     actions: list[dict[str, object]] | None = None,
     sections: bool = False,
 ) -> bytes:
     """The chat.postMessage body: one Block Kit `markdown` block so Slack renders the agent's own
     markdown natively, plus the `actions` blocks (the rendered ask or connect handoff) when the
-    turn ended on one and a final `context` block for the turn's accounting and model metadata —
-    degrading to a text-only body when a reply without required actions exceeds Slack's block or
-    payload caps. Action-bearing replies split their text across bounded blocks; `sections=True`
-    uses conservative section blocks after Slack rejects markdown blocks as `invalid_blocks`.
-    `text` always carries the whole reply as the notification fallback."""
-    if not text or not metadata:
-        raise ValueError("Slack reply text and metadata are required")
-    if len(metadata) > SLACK_CONTEXT_TEXT_LIMIT:
+    turn ended on one and an optional final `context` block for the turn's accounting and model
+    metadata — degrading to a text-only body when a reply without required actions exceeds
+    Slack's block or payload caps. Action-bearing replies split their text across bounded blocks;
+    `sections=True` uses conservative section blocks after Slack rejects markdown blocks as
+    `invalid_blocks`. `text` always carries the whole reply as the notification fallback."""
+    if not text:
+        raise ValueError("Slack reply text is required")
+    if metadata is not None and len(metadata) > SLACK_CONTEXT_TEXT_LIMIT:
         raise ValueError("Slack reply metadata is too large")
     base: dict[str, object] = {"channel": channel, "text": text}
     if thread_ts is not None:
@@ -496,13 +496,17 @@ def slack_reply_body(
         ]
         if actions is not None:
             block_list.extend(actions)
-        block_list.append({"type": "context", "elements": [{"type": "mrkdwn", "text": metadata}]})
+        if metadata is not None:
+            block_list.append(
+                {"type": "context", "elements": [{"type": "mrkdwn", "text": metadata}]}
+            )
         with_blocks = {**base, "blocks": block_list}
         encoded = json.dumps(with_blocks, separators=(",", ":")).encode()
         bound = MAX_SLACK_BLOCK_MESSAGE_BYTES if actions is not None else MAX_SLACK_MESSAGE_BYTES
         if len(encoded) <= bound:
             return encoded
-    base["text"] = f"{text}\n\n{metadata}"
+    if metadata is not None:
+        base["text"] = f"{text}\n\n{metadata}"
     encoded = json.dumps(base, separators=(",", ":")).encode()
     if len(encoded) > MAX_SLACK_MESSAGE_BYTES:
         raise ValueError("Slack reply text is too large")
@@ -1466,8 +1470,9 @@ async def _debug_link(ctx: SurfaceContext, writeback: Writeback) -> str | None:
 
 async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
     """Post the reply to the thread and return its message ref (`channel:ts`), the delivery record.
-    The accounting footer links to the admin session debugger's view of the thread when the deploy
-    has a public base URL. An `invalid_blocks` rejection is deterministic, so the reply re-posts
+    Only the admin workspace's replies carry the accounting footer, linking to the session
+    debugger's view of the thread when the deploy has a public base URL — internals never render
+    in a customer's thread. An `invalid_blocks` rejection is deterministic, so the reply re-posts
     once — as conservative section blocks when it carries an ask or connect handoff (the affordance
     survives the markdown blocks Slack rejected), as plain text otherwise — rather than the poller
     retrying the identical Block Kit body until it ages out."""
@@ -1478,17 +1483,19 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
     actions = slack_ask_blocks(writeback.question) or slack_connect_blocks(
         writeback.connect_request, writeback.turn_id
     )
-    model = writeback.model or "no-model"
-    params = f"-[{writeback.reasoning}]" if writeback.reasoning is not None else ""
-    metadata = (
-        f"${writeback.cost_micro_usd / 1_000_000:.6f} "
-        f"({writeback.tokens:,} tokens, {writeback.cache_percent}% cached) · "
-        f"{model}{params}"
-    )
-    debug_url = await _debug_link(ctx, writeback)
-    if debug_url is not None:
-        metadata = f"{metadata} · <{debug_url}|debug>"
-    metadata = metadata[:SLACK_CONTEXT_TEXT_LIMIT]
+    metadata = None
+    if await ctx.is_admin_workspace():
+        model = writeback.model or "no-model"
+        params = f"-[{writeback.reasoning}]" if writeback.reasoning is not None else ""
+        metadata = (
+            f"${writeback.cost_micro_usd / 1_000_000:.6f} "
+            f"({writeback.tokens:,} tokens, {writeback.cache_percent}% cached) · "
+            f"{model}{params}"
+        )
+        debug_url = await _debug_link(ctx, writeback)
+        if debug_url is not None:
+            metadata = f"{metadata} · <{debug_url}|debug>"
+        metadata = metadata[:SLACK_CONTEXT_TEXT_LIMIT]
     async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
         payload = await _chat_post(
             client, bot_token, slack_reply_body(channel, thread, text, metadata, actions=actions)
