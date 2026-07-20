@@ -59,6 +59,12 @@ from ufo.sdk.sandbox import (
 CARRIER_NAME = "e2b"
 E2B_API_KEY_ENV = "E2B_API_KEY"
 E2B_TEMPLATE_NAME = "ufo-sbx"
+NODE_GLOBAL_MODULES = "/usr/local/lib/node_modules"
+PLAYWRIGHT_BROWSERS_DIR = "/usr/local/lib/playwright"
+SANDBOX_ENV: dict[str, str] = {
+    "NODE_PATH": NODE_GLOBAL_MODULES,
+    "PLAYWRIGHT_BROWSERS_PATH": PLAYWRIGHT_BROWSERS_DIR,
+}
 DEFAULT_TIMEOUT_SECONDS = 300
 EXEC_TIMEOUT_CODE = 124
 CONVERSATION_METADATA_KEY = "ufo.conversation_id"
@@ -292,7 +298,7 @@ class E2BCarrier:
                 sandbox.commands.run,
                 command,
                 cwd=WORKSPACE_DIR,
-                envs=self._egress[handle.conversation_id],
+                envs={**SANDBOX_ENV, **self._egress[handle.conversation_id]},
                 timeout=timeout_s,
             )
         except CommandExitException as error:

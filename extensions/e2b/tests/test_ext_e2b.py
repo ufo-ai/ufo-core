@@ -30,6 +30,8 @@ from ufo_ext_e2b import (
     E2B_TEMPLATE_NAME,
     EXEC_TIMEOUT_CODE,
     INSTALL_CA_COMMAND,
+    NODE_GLOBAL_MODULES,
+    PLAYWRIGHT_BROWSERS_DIR,
     SENTINEL_MODEL_KEY,
     SYSTEM_CA_BUNDLE,
     E2BCarrier,
@@ -386,6 +388,8 @@ async def test_exec_runs_under_the_turn_egress_env() -> None:
     assert envs["REQUESTS_CA_BUNDLE"] == SYSTEM_CA_BUNDLE
     assert envs["CURL_CA_BUNDLE"] == SYSTEM_CA_BUNDLE
     assert envs["NODE_EXTRA_CA_CERTS"] == CA_SANDBOX_PATH
+    assert envs["NODE_PATH"] == NODE_GLOBAL_MODULES
+    assert envs["PLAYWRIGHT_BROWSERS_PATH"] == PLAYWRIGHT_BROWSERS_DIR
 
 
 async def test_create_without_a_reachable_proxy_url_fails_loud() -> None:

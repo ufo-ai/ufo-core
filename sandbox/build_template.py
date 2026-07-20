@@ -33,12 +33,14 @@ from pathlib import Path
 
 from e2b import Sandbox, Template
 from e2b.sandbox.commands.command_handle import CommandExitException
-from ufo_ext_e2b import E2B_TEMPLATE_NAME
+from ufo_ext_e2b import (
+    E2B_TEMPLATE_NAME,
+    PLAYWRIGHT_BROWSERS_DIR,
+    SANDBOX_ENV,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 SBX_BIN_DIR = "/usr/local/bin"
-NODE_GLOBAL_MODULES = "/usr/local/lib/node_modules"
-PLAYWRIGHT_BROWSERS_DIR = "/usr/local/lib/playwright"
 UFO_DIR = "/etc/ufo"
 # The in-sandbox binaries live in core beside the local carrier, which installs them onto its
 # command PATH; the image bakes the same files, so a script behaves identically under every carrier.
@@ -112,14 +114,11 @@ NPM_PACKAGES = (
     "pdf-lib",
     "playwright",
 )
-# Runtime env the image needs beyond the base: NODE_PATH so node resolves the globally installed
-# skill modules from any cwd, PLAYWRIGHT_BROWSERS_PATH so scripts find the Chromium baked at build
-# time. The Docker carrier inherits it from the image ENV (docker exec keeps it); the E2B carrier
-# applies it at the run boundary. One definition, shared by every image-backed carrier.
-SANDBOX_ENV: dict[str, str] = {
-    "NODE_PATH": NODE_GLOBAL_MODULES,
-    "PLAYWRIGHT_BROWSERS_PATH": PLAYWRIGHT_BROWSERS_DIR,
-}
+# Runtime env the image needs beyond the base — SANDBOX_ENV, defined in ufo_ext_e2b beside its
+# run-boundary consumer: NODE_PATH so node resolves the globally installed skill modules from any
+# cwd, PLAYWRIGHT_BROWSERS_PATH so scripts find the Chromium baked at build time. The Docker
+# carrier inherits it from the image ENV (docker exec keeps it); the E2B carrier merges it into
+# every exec's envs, since e2b commands do not inherit the template ENV.
 # The scripts baked into the image and installed by the local carrier, with a version bumped on any
 # content change so the digest moves. sbxfs is the in-sandbox file-op CLI; sbx is the egress CLI.
 SANDBOX_SCRIPTS: tuple[tuple[str, int], ...] = (("sbx", 2), ("sbxfs", 2))
