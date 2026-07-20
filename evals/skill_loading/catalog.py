@@ -178,6 +178,56 @@ REPO_SYNC_TEST = _file(
         assert wait_for_sync(SlowStore(), "job-1") == "ready"
     """,
 )
+REPORT_PROCESS = _file(
+    "notes/weekly-report-process.md",
+    """
+    # Weekly metrics report — our process
+
+    1. Pull the latest data/metrics.csv export.
+    2. Compute week-over-week deltas for signups, activation, and MRR.
+    3. Flag any metric that moved more than 10% either way.
+    4. Write the summary as: headline, wins, risks, asks — under 200 words.
+    """,
+)
+DRAFT_SKILL = _file(
+    "drafts/meeting-notes/SKILL.md",
+    """
+    ---
+    name: meeting-summaries
+    description: Summarize meeting transcripts into decisions: owners, deadlines, open questions.
+    ---
+
+    # Meeting Summaries
+
+    1. List each decision with its owner and deadline.
+    2. End with the open questions.
+    """,
+)
+RELEASE_CHECKLIST = _file(
+    "notes/release-checklist.md",
+    """
+    # Release preflight checklist
+
+    - Changelog entry drafted and dated.
+    - Version bumped in pyproject.toml.
+    - scripts/preflight.py exits clean.
+    - Rollback owner named in the release thread.
+    """,
+)
+PREFLIGHT_SCRIPT = _file(
+    "scripts/preflight.py",
+    """
+    import sys
+    from pathlib import Path
+
+    REQUIRED = ["CHANGELOG.md", "pyproject.toml"]
+
+    missing = [name for name in REQUIRED if not Path(name).exists()]
+    if missing:
+        sys.exit("missing: " + ", ".join(missing))
+    print("preflight ok")
+    """,
+)
 CUSTOMERS_CSV = _file(
     "data/customers.csv",
     """
@@ -515,6 +565,29 @@ CASES: tuple[SkillLoadCase, ...] = (
         "Find the cause of the timeout in repo/test_sync.py, fix it, and run the affected tests.",
         expected="coding",
         workspace_files=(REPO_SYNC, REPO_SYNC_TEST),
+    ),
+    SkillLoadCase(
+        "createskill-capture-workflow",
+        "Capture the weekly-report process described in notes/weekly-report-process.md as a "
+        "reusable skill so future turns produce the report the same way.",
+        expected="create-skill",
+        forbidden=("research-report",),
+        workspace_files=(REPORT_PROCESS,),
+    ),
+    SkillLoadCase(
+        "createskill-fix-draft-frontmatter",
+        "My draft skill at drafts/meeting-notes/SKILL.md keeps failing to save — fix whatever "
+        "is wrong with its frontmatter and save it for this workspace.",
+        expected="create-skill",
+        forbidden=("coding",),
+        workspace_files=(DRAFT_SKILL,),
+    ),
+    SkillLoadCase(
+        "createskill-package-checklist",
+        "Package the release checklist in notes/release-checklist.md and the helper script "
+        "scripts/preflight.py into a skill I can load in later turns.",
+        expected="create-skill",
+        workspace_files=(RELEASE_CHECKLIST, PREFLIGHT_SCRIPT),
     ),
     SkillLoadCase(
         "explore-customers-profile",
