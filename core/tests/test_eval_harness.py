@@ -1940,7 +1940,12 @@ async def test_workspace_driver_waits_when_a_queued_workflow_does_not_exist(
     assert trajectory.messages == _research_transcript()
 
 
-async def _seed_running_turn(workspace_id: UUID, agent_id: UUID, conversation_id: UUID) -> UUID:
+async def _seed_running_turn(
+    workspace_id: UUID,
+    agent_id: UUID,
+    conversation_id: UUID,
+    parent_turn_id: UUID | None = None,
+) -> UUID:
     turn_id = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -1952,6 +1957,7 @@ async def _seed_running_turn(workspace_id: UUID, agent_id: UUID, conversation_id
                 seq=1,
                 status="running",
                 inbound="test",
+                parent_turn_id=parent_turn_id,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -1993,6 +1999,42 @@ async def test_workspace_driver_deadline_cancels_a_running_turn(db: None, tmp_pa
         ).one()
     assert row.status == "cancelled"
     assert row.terminal["status"] == "cancelled"
+
+
+async def test_workspace_driver_cancel_sweeps_live_descendants(db: None, tmp_path) -> None:
+    """A delegated child turn is its own workflow: cancelling only the parent leaves the child
+    running to completion unobserved, so cancel recurses through descendants — the grandchild of a
+    cancelled turn dies with it, and every cancelled row carries its terminal."""
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    conversations = DbConversations(workspace_id)
+    parent_id = await _seed_running_turn(workspace_id, agent_id, await conversations.open("parent"))
+    child_id = await _seed_running_turn(
+        workspace_id, agent_id, await conversations.open("child"), parent_turn_id=parent_id
+    )
+    grandchild_id = await _seed_running_turn(
+        workspace_id, agent_id, await conversations.open("grandchild"), parent_turn_id=child_id
+    )
+    dbos = CancellingDbos()
+    driver = WorkspaceDriver(
+        workspace_id, agent_id, PROMPT, FilesystemBlobStore(root=tmp_path), cast(DBOSClient, dbos)
+    )
+
+    with ws(workspace_id):
+        cancelled = await driver.cancel(parent_id)
+
+    assert cancelled
+    assert dbos.cancelled == [str(parent_id), str(child_id), str(grandchild_id)]
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(tables.turn.c.status, tables.turn.c.terminal).where(
+                    tables.turn.c.id.in_([parent_id, child_id, grandchild_id])
+                )
+            )
+        ).all()
+    assert [row.status for row in rows] == ["cancelled"] * 3
+    assert all(row.terminal["status"] == "cancelled" for row in rows)
 
 
 async def test_workspace_driver_deadline_race_settles_the_turns_own_terminal(

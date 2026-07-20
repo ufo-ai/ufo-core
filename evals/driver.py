@@ -270,12 +270,14 @@ class WorkspaceDriver:
             return None
         return await self._trajectory(conversation_id, row.seq)
 
-    async def _cancel_overdue(self, conversation_id: UUID, turn_id: UUID) -> Trajectory | None:
-        """The wait's deadline fired: terminalize the turn before the runner advances. The
-        canceller commits the cancelled terminal (the same pattern as the surface cancel endpoint;
-        the engine's terminal commits guard on a queued/running row and can no longer overwrite
-        it), then durably cancels the DBOS workflow — dequeuing a queued run and preempting a
-        streaming model round. A turn that reached its own terminal in the race settles normally."""
+    async def cancel(self, turn_id: UUID) -> bool:
+        """Terminalize a live turn and every live descendant: commit the cancelled terminal (the
+        same pattern as the surface cancel endpoint; the engine's terminal commits guard on a
+        queued/running row and can no longer overwrite it), then durably cancel the DBOS workflow —
+        dequeuing a queued run and preempting a streaming model round. A delegated child turn is
+        its own workflow and would otherwise run to completion after its parent's cancel, so the
+        sweep recurses through children after the parent's workflow dies, regardless of this
+        turn's own state. False when the turn already reached its own terminal."""
         frame = TerminalFrame(status="cancelled")
         async with workspace_tx() as connection:
             cancelled = await connection.execute(
@@ -289,6 +291,24 @@ class WorkspaceDriver:
             )
         if cancelled.rowcount == 1:
             await self.dbos.cancel_workflow_async(str(turn_id))
+        async with workspace_tx() as connection:
+            children = (
+                (
+                    await connection.execute(
+                        sa.select(tables.turn.c.id).where(tables.turn.c.parent_turn_id == turn_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        for child_id in children:
+            await self.cancel(child_id)
+        return cancelled.rowcount == 1
+
+    async def _cancel_overdue(self, conversation_id: UUID, turn_id: UUID) -> Trajectory | None:
+        """The wait's deadline fired: terminalize the turn before the runner advances. A turn that
+        reached its own terminal in the race settles normally."""
+        if await self.cancel(turn_id):
             return None
         async with workspace_tx() as connection:
             row = (

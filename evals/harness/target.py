@@ -155,6 +155,7 @@ class InProcessTarget:
     logs: TurnLogReader | None = None
     mcp_atlas: McpAtlasTarget | None = None
     compaction: CompactionTarget | None = None
+    loadable_skills: frozenset[str] | None = None
 
     async def preflight_mcp_atlas(self, required_tool_servers: dict[str, str]) -> frozenset[str]:
         if self.mcp_atlas is None:

@@ -74,6 +74,8 @@ from evals.mcp_atlas_100.target import McpAtlasTarget
 from evals.memory_100.runner import Memory100Run, load_memory_100
 from evals.reconstruct import RunReconstruction, write_reconstruction
 from evals.registry import TASKS, selected_run_tasks
+from evals.skill_loading.catalog import CASES as SKILL_LOADING_CASES
+from evals.skill_loading.runner import skill_loading_task
 from evals.turn_logs import TurnLogCollector
 from evals.wandr.runner import (
     SUBMISSIONS_ROOT as WANDR_SUBMISSIONS_ROOT,
@@ -162,6 +164,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--gdpval-task", action="append", default=[], metavar="TASK_ID")
     parser.add_argument("--jobbench", type=Path, metavar="SNAPSHOT")
     parser.add_argument("--jobbench-case", action="append", default=[], metavar="CASE_ID")
+    parser.add_argument("--skill-loading-case", action="append", default=[], metavar="CASE_NAME")
     parser.add_argument(
         "--jobbench-submissions",
         type=Path,
@@ -213,6 +216,8 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--gdpval-task requires --gdpval-100")
     if args.jobbench_case and args.jobbench is None:
         parser.error("--jobbench-case requires --jobbench")
+    if args.skill_loading_case and "skill_loading" not in names:
+        parser.error("--skill-loading-case requires --only skill_loading")
     if (args.wandr_subset is not None or args.wandr_case) and args.wandr is None:
         parser.error("--wandr-subset and --wandr-case require --wandr")
     if args.wandr is not None and args.wandr_subset is None and not args.wandr_case:
@@ -279,6 +284,9 @@ def main(argv: list[str] | None = None) -> None:
             args.mcp_atlas_samples,
             hle_run,
         )
+        if args.skill_loading_case:
+            subset = _skill_loading_subset(tuple(args.skill_loading_case))
+            tasks = tuple(subset if task.name == "skill_loading" else task for task in tasks)
     except (OSError, ValueError, ValidationError) as error:
         parser.error(str(error))
     if args.list:
@@ -493,6 +501,11 @@ async def _run(
                 raise RuntimeError("eval context requires model access")
             slots = asyncio.Semaphore(concurrency)
             with ws(workspace_id):
+                loadable_skills: frozenset[str] | None = None
+                if any(task.suite == "skill_loading" for task in tasks):
+                    loadable_skills = frozenset(
+                        skill_registry(load_manifests(config.pack.name)).by_name
+                    )
                 compaction: CompactionTarget | None = None
                 if any(task.suite == "compaction" for task in tasks):
                     resolved_model = registry.resolve(agent_model)
@@ -518,6 +531,7 @@ async def _run(
                         mcp_atlas_external_url,
                     ),
                     compaction=compaction,
+                    loadable_skills=loadable_skills,
                 )
                 targets = tuple(
                     replace(
@@ -705,6 +719,14 @@ def _model_leg(
     if context.model is None:
         raise RuntimeError(f"eval model leg {model!r} requires model access")
     return ModelJudge(context.model, max_tokens, reasoning)
+
+
+def _skill_loading_subset(names: tuple[str, ...]) -> EvalTask:
+    by_name = {case.name: case for case in SKILL_LOADING_CASES}
+    missing = tuple(name for name in names if name not in by_name)
+    if missing:
+        raise ValueError(f"unknown skill_loading case: {', '.join(missing)}")
+    return skill_loading_task(tuple(by_name[name] for name in names))
 
 
 def _tasks(

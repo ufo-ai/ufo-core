@@ -19,6 +19,8 @@ from evals import (
 )
 from evals.harness.registry import EvalTask, capability_task, scenario_task, selected_tasks
 from evals.scenario_env import frontier, lookups, multistep, restraint, writes
+from evals.skill_loading.catalog import CASES as SKILL_LOADING_CASES
+from evals.skill_loading.runner import skill_loading_task
 
 SEMANTIC_JUDGE_MODEL = "gpt-5.4-mini"
 SCENARIO_SIMULATOR_MODEL = "claude-haiku-4-5"
@@ -56,6 +58,7 @@ TASKS: tuple[EvalTask, ...] = (
         ),
         simulator_model=SCENARIO_SIMULATOR_MODEL,
     ),
+    skill_loading_task(SKILL_LOADING_CASES),
     capability_task("yc_recall", yc_recall.CASES),
     capability_task("yc_workflows", yc_workflows.CASES),
 )
