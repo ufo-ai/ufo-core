@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
 import ufo_ext_repl.manifest as repl
 from ufo_ext_repl.manifest import JsReplInput, XlsxReplInput
 
@@ -38,11 +39,16 @@ class FakeSandbox:
     python_result: ExecResult = field(
         default_factory=lambda: ExecResult(stdout="{}", stderr="", exit_code=0)
     )
+    link_result: ExecResult = field(
+        default_factory=lambda: ExecResult(stdout="", stderr="", exit_code=0)
+    )
     commands: list[str] = field(default_factory=list)
 
     async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
         self.commands.append(command)
         head, path = command.split(" ", 1)
+        if head == "set":
+            return self.link_result
         if head == "cat":
             return ExecResult(
                 stdout=self.files.get(shlex.split(path)[0], b"").decode(), stderr="", exit_code=0
@@ -263,6 +269,9 @@ async def test_js_repl_emits_images_through_the_real_local_carrier(tmp_path: Pat
         )
     )
     ctx = _context(SandboxSession(carrier=carrier, handle=handle), tmp_path)
+    state_dir = tmp_path / "workspace" / ".repl"
+    state_dir.mkdir(parents=True)
+    (state_dir / "node_modules").symlink_to("/nonexistent")
     code = (
         "await Promise.resolve();\n"
         'emitImage(Buffer.from([1, 2, 3]), "image/jpeg");\n'
@@ -274,7 +283,7 @@ async def test_js_repl_emits_images_through_the_real_local_carrier(tmp_path: Pat
     assert [(image.media_type, image.data) for image in result.content[1:]] == [
         ("image/jpeg", "AQID")
     ]
-    assert (tmp_path / "workspace" / ".repl" / "node_modules").is_symlink()
+    assert (tmp_path / "workspace" / ".repl" / "node_modules" / "npm").is_symlink()
     resolved = await repl.js_repl(
         ctx,
         JsReplInput(code="console.log(import.meta.resolve('npm'));", user_description="d"),
@@ -282,6 +291,51 @@ async def test_js_repl_emits_images_through_the_real_local_carrier(tmp_path: Pat
     assert resolved.is_error is False
     assert "/node_modules/npm/" in json.loads(resolved.content[0].text)["stdout"]
     await carrier.destroy(handle)
+
+
+async def test_global_modules_link_resolves_a_package_only_in_a_secondary_root(
+    tmp_path: Path,
+) -> None:
+    carrier = LocalCarrier()
+    handle = await carrier.create(
+        SandboxSpec(
+            conversation_id=uuid4(),
+            image_ref="ufo-sandbox:latest",
+            mount=MountSpec(kind="filesystem", host_path=str(tmp_path / "workspace")),
+            proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM-BYTES"),
+            run_token="run-token-abc",
+        )
+    )
+    session = SandboxSession(carrier=carrier, handle=handle)
+    primary = tmp_path / "primary"
+    secondary = tmp_path / "secondary"
+    for root, marker in ((primary, "from-primary"), (secondary, "from-secondary")):
+        (root / "dup").mkdir(parents=True)
+        (root / "dup" / "package.json").write_text('{"name": "dup", "main": "index.js"}')
+        (root / "dup" / "index.js").write_text(f"module.exports = '{marker}';")
+    (secondary / "solo").mkdir()
+    (secondary / "solo" / "package.json").write_text('{"name": "solo", "main": "index.js"}')
+    (secondary / "solo" / "index.js").write_text("module.exports = 'from-solo';")
+    await session.bash(repl.global_modules_link((str(primary), str(secondary))))
+    ctx = _context(session, tmp_path)
+    code = (
+        "const solo = await import('solo');\n"
+        "const dup = await import('dup');\n"
+        "console.log(solo.default, dup.default);"
+    )
+    result = await repl.js_repl(ctx, JsReplInput(code=code, user_description="d"))
+    assert result.is_error is False
+    assert json.loads(result.content[0].text)["stdout"] == "from-solo from-primary\n"
+    await carrier.destroy(handle)
+
+
+async def test_js_repl_raises_when_global_module_linking_fails(tmp_path: Path) -> None:
+    sandbox = FakeSandbox(
+        link_result=ExecResult(stdout="", stderr="ln: permission denied", exit_code=1)
+    )
+    ctx = _context(sandbox, tmp_path)
+    with pytest.raises(OSError, match="permission denied"):
+        await repl.js_repl(ctx, JsReplInput(code="1", user_description="d"))
 
 
 async def test_nonzero_exit_is_flagged_as_error(tmp_path: Path) -> None:

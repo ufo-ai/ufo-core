@@ -44,9 +44,33 @@ JS_EMIT_PATH = f"{WORKSPACE_DIR}/{JS_EMIT_RELATIVE}"
 XLSX_REPL_PATH = f"{REPL_STATE_DIR}/xlsx-repl.py"
 XLSX_RUN_PATH = f"{REPL_STATE_DIR}/xlsx-run.py"
 REPL_TIMEOUT_SECONDS = 120
-GLOBAL_MODULES_LINK = (
-    f'[ -e {REPL_STATE_DIR}/node_modules ] || ln -s "$(npm root -g)" {REPL_STATE_DIR}/node_modules'
+GLOBAL_MODULES_DIR = f"{REPL_STATE_DIR}/node_modules"
+GLOBAL_MODULE_ROOTS = (
+    '"$(npm root -g)"',
+    "/usr/local/lib/node_modules",
+    "/usr/lib/node_modules",
 )
+
+
+def global_modules_link(roots: tuple[str, ...] = GLOBAL_MODULE_ROOTS) -> str:
+    """The command merging every global root's packages into the run file's resolution path:
+    per-package symlinks into `.repl/node_modules`, first root wins, a stale whole-dir symlink
+    replaced. An already-linked package is skipped by the existence guard; anything else that
+    fails (permissions, read-only mount) exits nonzero under `set -e` with stderr intact."""
+    return (
+        "set -e; "
+        f"if [ -L {GLOBAL_MODULES_DIR} ]; then rm {GLOBAL_MODULES_DIR}; fi; "
+        f"mkdir -p {GLOBAL_MODULES_DIR}; "
+        f"for root in {' '.join(roots)}; do "
+        '[ -d "$root" ] || continue; '
+        'for pkg in "$root"/*; do '
+        '[ -e "$pkg" ] || continue; '
+        f'dst="{GLOBAL_MODULES_DIR}/$(basename "$pkg")"; '
+        'if [ ! -e "$dst" ] && [ ! -L "$dst" ]; then ln -s "$pkg" "$dst"; fi; '
+        "done; done"
+    )
+
+
 EMIT_IMAGE_LIMIT = 5
 EMIT_IMAGE_MAX_B64_CHARS = 2_000_000
 JS_EMIT_PRELUDE = (
@@ -179,7 +203,9 @@ async def js_repl(ctx: ToolContext, args: JsReplInput) -> ToolResult:
     candidate = await _candidate_source(ctx, JS_REPL_PATH, args.code, bool(args.reset))
     await ctx.sandbox.write_file(JS_RUN_PATH, JS_EMIT_PRELUDE.encode() + candidate.encode())
     await ctx.sandbox.bash(f"rm -f {shlex.quote(JS_EMIT_PATH)}")
-    await ctx.sandbox.bash(GLOBAL_MODULES_LINK)
+    linked = await ctx.sandbox.bash(global_modules_link())
+    if linked.exit_code != 0:
+        raise OSError(linked.stderr.strip() or "linking global node_modules failed")
     result = await ctx.sandbox.bash(
         f"node {shlex.quote(JS_RUN_PATH)}", timeout_s=REPL_TIMEOUT_SECONDS
     )
