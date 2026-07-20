@@ -15,6 +15,7 @@ import sqlalchemy as sa
 
 from ufo.db import workspace_tx
 from ufo.hub import Hub, LiveFrame, Parked, Terminal
+from ufo.o11y import log
 from ufo.schema import tables
 from ufo.schema.records import PARKED, TerminalFrame
 from ufo.seats import SEAT_REVOKED_MESSAGE, Seats, gate_member, seat_gate_absent
@@ -55,17 +56,23 @@ async def tail_frames(
 async def _pump(
     hub: Hub, turn_id: UUID, since: str, frames: asyncio.Queue[tuple[str, LiveFrame]]
 ) -> None:
-    async for item in hub.subscribe(turn_id, since):
-        await frames.put(item)
+    try:
+        async for item in hub.subscribe(turn_id, since):
+            await frames.put(item)
+    except Exception as error:
+        log("hub_tail.pump_failed", turn=str(turn_id), error=repr(error))
 
 
 async def _poll_status(turn_id: UUID, frames: asyncio.Queue[tuple[str, LiveFrame]]) -> None:
-    while True:
-        await asyncio.sleep(TERMINAL_POLL_SECONDS)
-        frame = await turn_status_frame(turn_id)
-        if frame is not None:
-            await frames.put(("", frame))
-            return
+    try:
+        while True:
+            await asyncio.sleep(TERMINAL_POLL_SECONDS)
+            frame = await turn_status_frame(turn_id)
+            if frame is not None:
+                await frames.put(("", frame))
+                return
+    except Exception as error:
+        log("hub_tail.poll_failed", turn=str(turn_id), error=repr(error))
 
 
 async def turn_status_frame(turn_id: UUID) -> LiveFrame | None:

@@ -2346,7 +2346,9 @@ async def test_status_follows_the_turn_pins_the_text_and_clears_at_terminal(
     }
     assert not _requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)
     assert turn_id not in slack._STATUS_TASKS
-    written = [r.ufo["status"] for r in caplog.records if r.message == "slack.thread_status.write"]
+    written = [
+        r.ufo["status_text"] for r in caplog.records if r.message == "slack.thread_status.write"
+    ]
     assert working in written
     assert slack.STATUS_GENERATING_TEXT in written
     assert written[-1] == slack.STATUS_CLEAR_TEXT

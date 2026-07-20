@@ -1069,7 +1069,7 @@ class ThreadStatus:
             turn=str(self.turn_id),
             channel=self.channel,
             thread_ts=self.thread_ts,
-            status=status,
+            status_text=status,
         )
 
     async def _follow(self, client: httpx.AsyncClient, bot_token: str) -> None:
