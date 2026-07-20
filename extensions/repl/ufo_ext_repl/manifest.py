@@ -47,16 +47,17 @@ REPL_TIMEOUT_SECONDS = 120
 GLOBAL_MODULES_DIR = f"{REPL_STATE_DIR}/node_modules"
 GLOBAL_MODULE_ROOTS = (
     '"$(npm root -g)"',
-    "/usr/local/lib/node_modules",
-    "/usr/lib/node_modules",
+    '"$NODE_PATH"',
 )
 
 
 def global_modules_link(roots: tuple[str, ...] = GLOBAL_MODULE_ROOTS) -> str:
     """The command merging every global root's packages into the run file's resolution path:
     per-package symlinks into `.repl/node_modules`, first root wins, a stale whole-dir symlink
-    replaced. An already-linked package is skipped by the existence guard; anything else that
-    fails (permissions, read-only mount) exits nonzero under `set -e` with stderr intact."""
+    replaced. ESM ignores NODE_PATH by design, so the carrier env only names the image's module
+    root — these links are what make bare imports resolve. An already-linked package is skipped
+    by the existence guard; anything else that fails (permissions, read-only mount) exits nonzero
+    under `set -e` with stderr intact."""
     return (
         "set -e; "
         f"if [ -L {GLOBAL_MODULES_DIR} ]; then rm {GLOBAL_MODULES_DIR}; fi; "
