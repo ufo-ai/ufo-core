@@ -6,7 +6,8 @@ research (the research tools over the Exa search backend), brokered connectors (
 Pipedream for Gmail) and MCP,
 the sandbox browser/computer-use tools with Chrome driven inside each conversation's sandbox (the
 sandbox-chrome cdp provider), website building and the code REPL, document generation,
-todos, scheduled tasks, the web chat surface, an extra OpenRouter model provider, and the coding
+todos, scheduled tasks, member-authored skills, the web chat surface, an extra OpenRouter model
+provider, and the coding
 subagent. It runs on core's own local carrier and index with no managed infrastructure — that is
 what distinguishes it from `assistant_hosted`. It bundles only extensions and adds no pack-level
 skills or onboarding of its own: each capability's tools, skills, and onboarding ride that
@@ -32,6 +33,7 @@ EXTENSIONS = (
     "coding",
     "browser",
     "sandbox_chrome",
+    "skill_create",
     "index_default",
     "embed_openai",
     "knowledge_graph",
