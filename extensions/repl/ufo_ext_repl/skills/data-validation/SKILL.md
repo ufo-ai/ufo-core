@@ -1,6 +1,6 @@
 ---
 name: data-validation
-description: Load when validating data quality — schema checks, type and range constraints, deduplication, and integrity rules.
+description: Load before certifying data as correct prior to delivery. E.g. validate schemas; check uniqueness, ranges, and foreign keys.
 ---
 # Data Validation
 

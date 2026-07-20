@@ -1,6 +1,6 @@
 ---
 name: coding
-description: Load for any task involving a code repository — implementing tickets, fixing bugs, reviewing PRs, reading or debugging code.
+description: Load before working in a source tree — code files (.py, .ts, .go, etc), a repo, or a diff. E.g. trace how something works across files; implement a described change; find and fix a failing test.
 ---
 # Coding Subagent Routing
 

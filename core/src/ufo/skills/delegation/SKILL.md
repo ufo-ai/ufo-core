@@ -1,6 +1,6 @@
 ---
 name: delegation
-description: Handing a self-contained subtask to a subagent, and asking the user when you genuinely need input. Load when a task is large enough to split, or when a key detail is missing or an action is high-impact.
+description: Load before spawning subagents or asking the member a blocking question. E.g. fan an investigation out in parallel; batch many similar operations; confirm before an irreversible action.
 metadata:
   tools:
   - spawn_subagent

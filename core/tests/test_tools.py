@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from ufo.blob import FilesystemBlobStore
 from ufo.sandbox.session import ExecResult
 from ufo.schema.records import Agent, Turn
+from ufo.skills.runtime import CORE_SKILL_REGISTRY
 from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.context import SpawnResult, SubagentStatus, ToolContext
 from ufo.tools.registry import ToolRegistry
@@ -254,7 +255,7 @@ async def test_load_skill_mounts_files_under_the_workspace_and_returns_instructi
     result = await _load_skill(ctx, "sandbox")
     assert result.is_error is False
     assert "Loaded skill(s): sandbox" in result.content[0].text
-    assert "Working files and shell commands" in result.content[0].text
+    assert CORE_SKILL_REGISTRY.named("sandbox").description in result.content[0].text
     mounted = sandbox.files["/workspace/.skills/sandbox/SKILL.md"]
     assert b"name: sandbox" in mounted
 

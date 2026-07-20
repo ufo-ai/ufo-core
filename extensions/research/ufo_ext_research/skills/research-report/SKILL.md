@@ -1,6 +1,6 @@
 ---
 name: research-report
-description: Load when delivering research findings as a report or markdown document. The default research output format unless the user explicitly requests another.
+description: Load before writing findings, notes, or sources up into a report or executive summary.
 ---
 # Markdown Report Instructions
 

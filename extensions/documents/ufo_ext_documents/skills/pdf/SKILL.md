@@ -1,6 +1,6 @@
 ---
 name: pdf
-description: Load when creating, reading, extracting from, or filling PDF documents (.pdf) — text, forms, and page content.
+description: Load before producing or transforming a .pdf. E.g. merge, rotate, or compress; OCR a scan and extract tables; repair or unlock a damaged file.
 metadata:
   depends:
   - design-foundations

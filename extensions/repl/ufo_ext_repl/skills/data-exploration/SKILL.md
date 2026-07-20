@@ -1,6 +1,6 @@
 ---
 name: data-exploration
-description: Load when exploring a dataset — profiling structure, summary statistics, distributions, and missing values before deeper analysis.
+description: Load at first contact with an unfamiliar dataset (.csv, .parquet, database tables) including profiling structure, summary statistics, distributions, and missing values.
 ---
 # Data Exploration
 

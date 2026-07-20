@@ -1,6 +1,6 @@
 ---
 name: task-scheduling
-description: Load before scheduling recurring tasks or notifications, and before any reminder request — one-time reminders are not supported and this skill explains what to offer instead.
+description: Load before creating, changing, or cancelling recurring tasks, notifications, or reminders — one-time reminders are not supported and this skill explains what to offer instead.
 ---
 # Task Scheduling
 

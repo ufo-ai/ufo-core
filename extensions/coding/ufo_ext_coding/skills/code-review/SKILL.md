@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: Review a pull request for correctness, security, and quality, reporting findings back to the parent agent. Load when reviewing or auditing a PR's changes.
+description: Load before reviewing any diff, pull request/PR, or proposed change.
 ---
 # Code Review
 

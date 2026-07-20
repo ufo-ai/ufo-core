@@ -1,6 +1,6 @@
 ---
 name: design-foundations
-description: Universal design principles for color, typography, and visual hierarchy across any artifact (websites, slides, charts, documents). Load as fallback defaults when no art direction is given.
+description: "Load before visual choices without a full brand system or as fallback: color, typography, and visual hierarchy across any artifact (websites, slides, charts, documents)."
 ---
 # Design Foundations
 

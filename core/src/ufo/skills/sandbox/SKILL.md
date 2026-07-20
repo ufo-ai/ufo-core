@@ -1,6 +1,6 @@
 ---
 name: sandbox
-description: Working files and shell commands inside the conversation's sandbox — how to build up, inspect, and hand back results in /workspace. Load when a task needs to run code, produce files, or explore the filesystem.
+description: Load the first time a task has you run, build, or inspect anything in /workspace. E.g. execute a provided script; survey files you did not create.
 metadata:
   tools:
   - bash

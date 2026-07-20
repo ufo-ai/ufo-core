@@ -1,6 +1,6 @@
 ---
 name: office-pptx
-description: Load when creating, editing, reviewing, or styling PowerPoint presentations (.pptx) — slides, layouts, speaker notes, and comments.
+description: Load when creating, restyling, reviewing, editing, or mining PowerPoint decks, slides, layouts (.pptx). Also load for work with PowerPoint speaker notes or comments.
 metadata:
   depends:
   - design-foundations

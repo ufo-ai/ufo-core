@@ -1,6 +1,6 @@
 ---
 name: data-statistical-analysis
-description: Load when applying statistical methods to data — hypothesis tests, regression, correlation, significance, or confidence intervals.
+description: Load before drawing statistical conclusions. E.g. hypothesis tests, regression, correlation, significance, or confidence intervals.
 ---
 # Statistical Analysis
 

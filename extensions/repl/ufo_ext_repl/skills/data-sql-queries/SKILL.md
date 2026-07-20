@@ -1,6 +1,6 @@
 ---
 name: data-sql-queries
-description: Load when querying data with SQL — writing, optimizing, or debugging select/join/aggregation queries against tabular or warehouse data.
+description: Load before writing or tuning SQL — .sql files, schema DDL, or queries against tables.
 ---
 # SQL Queries
 

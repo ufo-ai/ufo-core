@@ -1,6 +1,6 @@
 ---
 name: website-building
-description: Load when building any website, web app, web game, or web experience. Provides design system, typography, motion, layout, CSS/Tailwind, quality standards, and guidance for informational sites, web apps, and browser games.
+description: Load before writing any HTML or frontend code or building a website, web app, web game, or web experience.
 ---
 # Website Building
 
