@@ -497,7 +497,9 @@ class TranscriptRepair:
         """Preserve the member's messages on a non-done terminal — the founding inbound plus every
         arrival this run absorbed — so the next turn still sees them; the assistant's error or
         partial text is never persisted, and the monotonic guard lets a done turn's fuller
-        transcript win over this at the same seq."""
+        transcript win over this at the same seq. Only a run whose turn is over writes here: an
+        executor pre-emption commits no terminal and persists nothing, because DBOS re-runs the
+        turn and the run that finishes it is the seq's sole transcript writer."""
         await self.write_conversation((*await self.load_messages(), *arrivals))
 
     async def load_messages(self) -> tuple[Message, ...]:
@@ -704,10 +706,14 @@ class TurnEngine:
             except TurnParked as parked:
                 await self._park(parked.message, usage_events)
                 raise
-            except (asyncio.CancelledError, DBOSWorkflowCancelledError):
+            except DBOSWorkflowCancelledError:
                 await self._bill_cancelled(usage_events)
                 await self._release_unabsorbed(tuple(absorbed_ids))
                 await self._persist_inbound(tuple(arrival_log))
+                raise
+            except asyncio.CancelledError:
+                await self._bill_cancelled(usage_events)
+                await self._release_unabsorbed(tuple(absorbed_ids))
                 raise
             except Exception as error:
                 await self._commit("failed", usage_events, error=error)

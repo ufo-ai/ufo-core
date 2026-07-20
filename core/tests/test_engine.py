@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
+from dbos._error import DBOSWorkflowCancelledError
 from opentelemetry import trace
 from PIL import Image
 from pydantic import BaseModel
@@ -171,6 +172,26 @@ class EchoModel:
             return
         yield TextDelta(text="answer")
         yield Usage(input_tokens=7, output_tokens=3)
+
+
+@dataclass(frozen=True)
+class ExecutorDeathModel:
+    """Stands in for a model round the executor's shutdown cancels mid-stream — a pod death or
+    deploy roll, not a member cancel: no terminal is committed and DBOS re-runs the turn."""
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        raise asyncio.CancelledError
+        yield TextDelta(text="")
+
+
+@dataclass(frozen=True)
+class WorkflowCancelModel:
+    """Stands in for a model round a deliberate workflow cancel interrupts — DBOS raises once the
+    cancel has landed, and the turn is over for good: it is never re-dispatched."""
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        raise DBOSWorkflowCancelledError("cancelled")
+        yield TextDelta(text="")
 
 
 @dataclass(frozen=True)
@@ -1535,6 +1556,65 @@ async def test_cancel_winning_mid_round_keeps_cancelled_terminal_bills_and_prese
     assert int(row.amount) == 10
     stored = await engine.transcript.read()
     assert stored is not None
+    (inbound,) = stored.messages
+    assert inbound.role == "user"
+    assert isinstance(inbound.content, str) and inbound.content.endswith("\nhi")
+
+
+async def test_preempted_run_writes_nothing_and_the_recovery_run_persists_the_full_transcript(
+    db: None, tmp_path: Path
+) -> None:
+    """A pod death mid-round leaves the turn to DBOS recovery: the dying run must not write
+    conversation state, and the re-run that finishes the turn writes the full exchange."""
+    turn = await _seed_turn("queued", None)
+    with pytest.raises(asyncio.CancelledError):
+        await _engine(turn, ExecutorDeathModel(), tmp_path).run()
+    transcript = Transcript(
+        blob=FilesystemBlobStore(root=tmp_path), conversation_id=turn.conversation_id
+    )
+    assert await transcript.read() is None
+    frame = await _engine(turn, EchoModel(), tmp_path).run()
+    assert frame is not None and frame.status == "done"
+    stored = await transcript.read()
+    assert stored is not None and stored.seq == turn.seq
+    user, answer = stored.messages
+    assert isinstance(user.content, str) and user.content.endswith("\nhi")
+    assert answer.content == "answer"
+
+
+async def test_preempted_mid_conversation_recovery_keeps_prior_history(
+    db: None, tmp_path: Path
+) -> None:
+    """The recovery run rebuilds its context from the prior-seq blob. A premature write at the
+    turn's own seq would self-exclude in `_prior_messages`, so the re-run would answer — and
+    durably persist — with the conversation's whole history missing."""
+    turn = await _seed_turn("queued", None, seq=2)
+    transcript = Transcript(
+        blob=FilesystemBlobStore(root=tmp_path), conversation_id=turn.conversation_id
+    )
+    prior = (Message(role="user", content="q1"), Message(role="assistant", content="a1"))
+    await transcript.write(Conversation(seq=1, messages=prior))
+    with pytest.raises(asyncio.CancelledError):
+        await _engine(turn, ExecutorDeathModel(), tmp_path).run()
+    frame = await _engine(turn, EchoModel(), tmp_path).run()
+    assert frame is not None and frame.status == "done"
+    stored = await transcript.read()
+    assert stored is not None and stored.seq == 2
+    first, second, user, answer = stored.messages
+    assert (first.content, second.content) == ("q1", "a1")
+    assert isinstance(user.content, str) and user.content.endswith("\nhi")
+    assert answer.content == "answer"
+
+
+async def test_workflow_cancel_mid_stream_persists_the_inbound(db: None, tmp_path: Path) -> None:
+    """A deliberate cancel ends the turn for good — DBOS never re-dispatches it — so the member's
+    messages must survive into the next turn's context."""
+    turn = await _seed_turn("queued", None)
+    engine = _engine(turn, WorkflowCancelModel(), tmp_path)
+    with pytest.raises(DBOSWorkflowCancelledError):
+        await engine.run()
+    stored = await engine.transcript.read()
+    assert stored is not None and stored.seq == turn.seq
     (inbound,) = stored.messages
     assert inbound.role == "user"
     assert isinstance(inbound.content, str) and inbound.content.endswith("\nhi")

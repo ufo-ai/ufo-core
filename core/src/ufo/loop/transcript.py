@@ -1,5 +1,6 @@
 """The conversation's one durable transcript writer: monotonic seq guard over the shared blob
-contract in `ufo.transcript`."""
+contract in `ufo.transcript`. Only the run that ends a turn — or the repair flow republishing its
+committed terminal — writes at that turn's seq, so the first write at a seq is authoritative."""
 
 from dataclasses import dataclass
 from uuid import UUID
