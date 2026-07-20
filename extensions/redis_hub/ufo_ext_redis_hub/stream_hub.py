@@ -2,16 +2,24 @@
 a surface tails out, cursor-replayable. Frames flow through Redis — never Postgres or the blob store
 — so a lost frame costs a redrawn token, never correctness; the durable terminal answer lives in the
 turn row. Cross-process fan-out: any serve instance publishes and any tails, so this backend scales
-serve out past the single instance the in-process hub allows."""
+serve out past the single instance the in-process hub allows.
 
+Publishers and subscribers live on different event loops in one process (DBOS runs dequeued
+workflows on its own loop thread, surfaces on the serve loop), and an asyncio Redis client binds
+its futures to the loop that created it — so the hub keeps one client per running loop, minted on
+first use, never shared across loops. A timeout inside the blocking XREAD is the read's designed
+idle outcome, not a fault: the subscribe loop reads again from its cursor, losing nothing."""
+
+import asyncio
 import json
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import cast
 from uuid import UUID
 
 from pydantic import BaseModel
 from redis.asyncio import Redis
+from redis.exceptions import TimeoutError as RedisTimeoutError
 from redis.typing import StreamEntry, XReadResponse
 
 from ufo.sdk.hub import (
@@ -78,9 +86,20 @@ class RedisStreamHub:
     after the last publish. `publish` appends a frame and returns its stream entry id as the cursor;
     `subscribe` blocks-reads forward from a cursor, replaying the retained stream from there before
     streaming new entries; `covers` reports whether the entry a cursor names is still retained (not
-    trimmed away), so a reconnecting tail resumes gaplessly or redraws from the start."""
+    trimmed away), so a reconnecting tail resumes gaplessly or redraws from the start. Clients are
+    per running loop (`_client`), so the DBOS loop's publishes and the serve loop's tails never
+    share loop-bound connection state."""
 
-    client: Redis
+    url: str
+    _clients: dict[asyncio.AbstractEventLoop, Redis] = field(default_factory=dict)
+
+    def _client(self) -> Redis:
+        loop = asyncio.get_running_loop()
+        client = self._clients.get(loop)
+        if client is None:
+            client = Redis.from_url(self.url, decode_responses=True)
+            self._clients[loop] = client
+        return client
 
     def _stream(self, turn_id: UUID) -> str:
         return f"{STREAM_PREFIX}:{turn_id}"
@@ -88,7 +107,7 @@ class RedisStreamHub:
     async def publish(self, turn_id: UUID, frame: LiveFrame) -> str:
         stream = self._stream(turn_id)
         wire = json.dumps(frame_payload(frame), sort_keys=True, separators=(",", ":"))
-        async with self.client.pipeline(transaction=False) as pipe:
+        async with self._client().pipeline(transaction=False) as pipe:
             pipe.xadd(stream, {"frame": wire}, maxlen=STREAM_MAXLEN, approximate=True)
             pipe.expire(stream, STREAM_IDLE_TTL_SECONDS)
             results = await pipe.execute()
@@ -100,17 +119,20 @@ class RedisStreamHub:
         stream = self._stream(turn_id)
         last = cursor or "0"
         while True:
-            entries = _stream_entries(
-                await self.client.xread({stream: last}, count=SUBSCRIBE_BATCH)
-            )
-            if not entries:
+            try:
                 entries = _stream_entries(
-                    await self.client.xread(
-                        {stream: last}, count=SUBSCRIBE_BATCH, block=SUBSCRIBE_BLOCK_MS
-                    )
+                    await self._client().xread({stream: last}, count=SUBSCRIBE_BATCH)
                 )
                 if not entries:
-                    continue
+                    entries = _stream_entries(
+                        await self._client().xread(
+                            {stream: last}, count=SUBSCRIBE_BATCH, block=SUBSCRIBE_BLOCK_MS
+                        )
+                    )
+            except (TimeoutError, RedisTimeoutError):
+                continue
+            if not entries:
+                continue
             for entry_id, fields in entries:
                 if entry_id is None or fields is None:
                     continue
@@ -120,7 +142,7 @@ class RedisStreamHub:
     async def covers(self, turn_id: UUID, cursor: str) -> bool:
         if not cursor:
             return False
-        first = await self.client.xrange(self._stream(turn_id), count=1)
+        first = await self._client().xrange(self._stream(turn_id), count=1)
         if not first:
             return False
         return _stream_id(str(first[0][0])) <= _stream_id(cursor)

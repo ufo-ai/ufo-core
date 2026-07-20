@@ -150,7 +150,7 @@ async def test_maxlen_trims_the_stream_dropping_the_earliest_frames(
     for i in range(1, 300):
         last_cursor = await hub.publish(turn_id, TextDelta(text=str(i)))
 
-    length = await hub.client.xlen(f"{STREAM_PREFIX}:{turn_id}")
+    length = await hub._client().xlen(f"{STREAM_PREFIX}:{turn_id}")
     assert length < 300, "approximate MAXLEN trimming never removed a full node"
     assert await hub.covers(turn_id, first_cursor) is False
     assert await hub.covers(turn_id, last_cursor) is True
