@@ -16,7 +16,7 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from urllib.parse import urlencode
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5
 
 import httpx
 import pytest
@@ -60,6 +60,8 @@ UPLOAD_URL = "https://files.slack.com/upload/session-1"
 RESPONSE_URL = "https://hooks.slack.com/actions/T0000001/123/abc"
 ARTIFACT_SECRET = "artifact-token-secret"
 PUBLIC_BASE_URL = "https://ufo.example.test"
+ADMIN_DOMAIN = "metalcraft.example"
+ADMIN_WORKSPACE_ID = uuid5(NAMESPACE_DNS, ADMIN_DOMAIN)
 
 ASK_QUESTION = AskUserInput(
     title="Need a decision",
@@ -97,6 +99,7 @@ async def _settle_status_tasks(db: None):
 
     patch.setattr(slack.httpx, "AsyncClient", factory)
     patch.setattr(hub_tail, "TERMINAL_POLL_SECONDS", 0.05)
+    patch.delenv(slack.ADMIN_EMAIL_DOMAIN_ENV, raising=False)
     try:
         yield
         await asyncio.gather(*slack._IDENTITY_TASKS.values(), return_exceptions=True)
@@ -217,8 +220,10 @@ async def _write_identity(
     await blob.put(slack.identity_blob_key(workspace_id), identity.model_dump_json().encode())
 
 
-async def _seed(*, member_email: str | None = None) -> tuple[UUID, UUID | None]:
-    workspace_id, agent_id = uuid4(), uuid4()
+async def _seed(
+    *, member_email: str | None = None, workspace_id: UUID | None = None
+) -> tuple[UUID, UUID | None]:
+    workspace_id, agent_id = workspace_id or uuid4(), uuid4()
     member_id = uuid4() if member_email is not None else None
     async with workspace_tx() as connection:
         await connection.execute(
@@ -489,6 +494,8 @@ def test_block_kit_reply_body_renders_markdown_and_degrades() -> None:
         {"type": "markdown", "text": "hi **there**"},
         {"type": "context", "elements": [{"type": "mrkdwn", "text": metadata}]},
     ]
+    without_footer = json.loads(slack.slack_reply_body("C5", "200.0", "hi", None))
+    assert without_footer["blocks"] == [{"type": "markdown", "text": "hi"}]
     big = "x" * (slack.SLACK_MARKDOWN_TEXT_LIMIT + 1)
     degraded = json.loads(slack.slack_reply_body("C5", None, big, metadata))
     assert "blocks" not in degraded
@@ -1962,7 +1969,8 @@ async def test_shared_slack_routes_two_installations_without_crossing_state(
 async def test_writeback_posts_block_kit_reply_and_streams_the_attachment(
     db: None, tmp_path, monkeypatch
 ) -> None:
-    workspace_id, _ = await _seed()
+    monkeypatch.setenv(slack.ADMIN_EMAIL_DOMAIN_ENV, ADMIN_DOMAIN)
+    workspace_id, _ = await _seed(workspace_id=ADMIN_WORKSPACE_ID)
     recorder: list[httpx.Request] = []
     app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
     await blob.put("artifacts/a/report.pdf", b"PDF-CONTENT")
@@ -2013,7 +2021,8 @@ async def test_writeback_posts_block_kit_reply_and_streams_the_attachment(
 async def test_footer_stays_plain_without_a_public_base_url(
     db: None, tmp_path, monkeypatch
 ) -> None:
-    workspace_id, _ = await _seed()
+    monkeypatch.setenv(slack.ADMIN_EMAIL_DOMAIN_ENV, ADMIN_DOMAIN)
+    workspace_id, _ = await _seed(workspace_id=ADMIN_WORKSPACE_ID)
     recorder: list[httpx.Request] = []
     app, _, blob = await _mount_transport(
         monkeypatch,
@@ -2030,6 +2039,25 @@ async def test_footer_stays_plain_without_a_public_base_url(
     assert len(posts) == 1
     footer = json.loads(posts[0].content)["blocks"][-1]
     assert footer == {"type": "context", "elements": [{"type": "mrkdwn", "text": FOOTER_LABEL}]}
+
+
+@pytest.mark.parametrize("admin_domain", [None, ADMIN_DOMAIN])
+async def test_footer_is_absent_without_an_admin_workspace(
+    db: None, tmp_path, monkeypatch, admin_domain: str | None
+) -> None:
+    workspace_id, _ = await _seed()
+    if admin_domain is not None:
+        monkeypatch.setenv(slack.ADMIN_EMAIL_DOMAIN_ENV, admin_domain)
+        assert workspace_id != ADMIN_WORKSPACE_ID
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    await _seed_done_turn(workspace_id, "C5:200.0", "hi", blob, artifact=False)
+
+    await app.state.writeback_poller.drain()
+
+    posts = [r for r in recorder if str(r.url) == slack.SLACK_CHAT_POST_MESSAGE_URL]
+    assert len(posts) == 1
+    assert json.loads(posts[0].content)["blocks"] == [{"type": "markdown", "text": "hi"}]
 
 
 async def test_writeback_persists_slack_retry_after(
@@ -2189,7 +2217,8 @@ async def test_invalid_blocks_reposts_once(
     question: AskUserInput | None,
     connect_request: ConnectRequest | None,
 ) -> None:
-    workspace_id, _ = await _seed()
+    monkeypatch.setenv(slack.ADMIN_EMAIL_DOMAIN_ENV, ADMIN_DOMAIN)
+    workspace_id, _ = await _seed(workspace_id=ADMIN_WORKSPACE_ID)
     recorder: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -2664,7 +2693,8 @@ def test_ask_blocks_render_title_every_question_and_choice_buttons() -> None:
 
 
 async def test_question_writeback_posts_answer_buttons(db: None, tmp_path, monkeypatch) -> None:
-    workspace_id, _ = await _seed()
+    monkeypatch.setenv(slack.ADMIN_EMAIL_DOMAIN_ENV, ADMIN_DOMAIN)
+    workspace_id, _ = await _seed(workspace_id=ADMIN_WORKSPACE_ID)
     recorder: list[httpx.Request] = []
     app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
     await _seed_done_turn(
