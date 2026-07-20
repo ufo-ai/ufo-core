@@ -23,9 +23,18 @@ jobs:
           enable-cache: true
       - run: uv sync
       - run: uv run pre-commit run --all-files --hook-stage pre-push
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node --test infra/modules/edge/*.test.mjs
+      # The debugger app must typecheck and build on every push, BEFORE the wheel gate below: the
+      # bundle image bakes it, so the gated wheel must be the production shape.
+      - run: npm --prefix extensions/debugger/frontend ci
+      - run: npm --prefix extensions/debugger/frontend run build
       - name: Gate production wheel
         run: |
           uv build --wheel --out-dir /tmp/ufo-wheel
+          unzip -l /tmp/ufo-wheel/ufo-*.whl | grep -q "ufo_ext_debugger/static/index.html"
           uv venv --python 3.12 /tmp/ufo-wheel-venv
           uv pip install --python /tmp/ufo-wheel-venv/bin/python /tmp/ufo-wheel/ufo-*.whl
           /tmp/ufo-wheel-venv/bin/ufoctl --help >/dev/null
@@ -38,14 +47,6 @@ jobs:
               for entry in entries:
                   entry.load()()
           PY
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-      - run: node --test infra/modules/edge/*.test.mjs
-      # The debugger app must typecheck and produce its single-file build on every push — the
-      # bundle image bakes it, so a broken build must fail here, not at deploy.
-      - run: npm --prefix extensions/debugger/frontend ci
-      - run: npm --prefix extensions/debugger/frontend run build
       - run: uv run pytest --collect-only -m integration -q
 
   # Parallel unit tests — the per-push bottleneck, on its own runner with the postgres service.
