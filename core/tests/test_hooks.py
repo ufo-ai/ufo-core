@@ -48,7 +48,6 @@ from ufo.loop.compaction import (
     COMPACTED_CONTEXT_PREFIX,
     COMPACTION_KEEP_MESSAGES,
     Compaction,
-    CompactionSummary,
 )
 from ufo.loop.engine import TurnEngine
 from ufo.loop.prompts.render import COMPACTION_SYSTEM_PROMPT, rendered_prompt
@@ -69,6 +68,7 @@ from ufo.schema.records import Agent, Turn
 from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.context import SpawnResult
 from ufo.tools.registry import ToolRegistry
+from ufo.transcript import CompactionSummary
 from ufo.workspace import ws
 
 REWRITTEN_COMMAND = "echo modified"

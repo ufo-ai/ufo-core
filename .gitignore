@@ -1,6 +1,8 @@
 __pycache__/
 *.pyc
 .venv/
+node_modules/
+extensions/debugger/ufo_ext_debugger/static/
 .env
 .local/
 dist/

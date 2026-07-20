@@ -267,6 +267,7 @@ async def _mount_transport(
     transport: httpx.MockTransport,
     hub: InProcessHub | None = None,
     identity: bool = True,
+    public_base_url: str | None = PUBLIC_BASE_URL,
 ):
     _patch_httpx(monkeypatch, transport)
     store = await _store(workspace_id)
@@ -283,7 +284,7 @@ async def _mount_transport(
         hub or InProcessHub(),
         StubDbos(),
         ARTIFACT_SECRET,
-        PUBLIC_BASE_URL,
+        public_base_url,
     )
     client = AsyncClient(transport=ASGITransport(app=app), base_url="http://slack")
     return app, client, blob
@@ -395,6 +396,26 @@ async def _mount(
     )
 
 
+FOOTER_LABEL = "$0.001234 (1,234 tokens, 42% cached) · claude-opus-4-8-[high]"
+
+
+async def _debug_footer(workspace_id: UUID, queue_key: str, turn_id: UUID) -> str:
+    async with workspace_tx() as connection:
+        conversation_id = (
+            await connection.execute(
+                sa.select(tables.conversation.c.id).where(
+                    tables.conversation.c.workspace_id == workspace_id,
+                    tables.conversation.c.queue_key == queue_key,
+                )
+            )
+        ).scalar_one()
+    return (
+        f"{FOOTER_LABEL} · "
+        f"<{PUBLIC_BASE_URL}/surface/debug?ws={workspace_id}&c={conversation_id}&t={turn_id}"
+        f"|debug>"
+    )
+
+
 def test_signature_verify_accepts_valid_and_rejects_tampered() -> None:
     body = b'{"type":"event_callback"}'
     now = int(time.time())
@@ -466,7 +487,7 @@ def test_block_kit_reply_body_renders_markdown_and_degrades() -> None:
     assert body["thread_ts"] == "200.0"
     assert body["blocks"] == [
         {"type": "markdown", "text": "hi **there**"},
-        {"type": "context", "elements": [{"type": "plain_text", "text": metadata}]},
+        {"type": "context", "elements": [{"type": "mrkdwn", "text": metadata}]},
     ]
     big = "x" * (slack.SLACK_MARKDOWN_TEXT_LIMIT + 1)
     degraded = json.loads(slack.slack_reply_body("C5", None, big, metadata))
@@ -1960,8 +1981,8 @@ async def test_writeback_posts_block_kit_reply_and_streams_the_attachment(
             "type": "context",
             "elements": [
                 {
-                    "type": "plain_text",
-                    "text": "$0.001234 (1,234 tokens, 42% cached) · claude-opus-4-8-[high]",
+                    "type": "mrkdwn",
+                    "text": await _debug_footer(workspace_id, "C5:200.0", turn_id),
                 }
             ],
         },
@@ -1987,6 +2008,28 @@ async def test_writeback_posts_block_kit_reply_and_streams_the_attachment(
         ).one()
     assert row.status == WRITEBACK_DELIVERED
     assert row.reply_ref == "C5:999.100"
+
+
+async def test_footer_stays_plain_without_a_public_base_url(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount_transport(
+        monkeypatch,
+        workspace_id,
+        tmp_path,
+        _mock_transport(recorder, {}, frozenset()),
+        public_base_url=None,
+    )
+    await _seed_done_turn(workspace_id, "C5:200.0", "hi", blob, artifact=False)
+
+    await app.state.writeback_poller.drain()
+
+    posts = [r for r in recorder if str(r.url) == slack.SLACK_CHAT_POST_MESSAGE_URL]
+    assert len(posts) == 1
+    footer = json.loads(posts[0].content)["blocks"][-1]
+    assert footer == {"type": "context", "elements": [{"type": "mrkdwn", "text": FOOTER_LABEL}]}
 
 
 async def test_writeback_persists_slack_retry_after(
@@ -2182,9 +2225,8 @@ async def test_invalid_blocks_reposts_once(
     assert first["blocks"][-1]["type"] == "context"
     if question is None and connect_request is None:
         assert "blocks" not in second
-        assert second["text"] == (
-            "hi **there**\n\n$0.001234 (1,234 tokens, 42% cached) · claude-opus-4-8-[high]"
-        )
+        footer = await _debug_footer(workspace_id, "C5:200.0", turn_id)
+        assert second["text"] == f"hi **there**\n\n{footer}"
     else:
         assert second["blocks"][0] == {
             "type": "section",

@@ -11,7 +11,7 @@ from uuid import UUID
 import asyncpg
 import pytest
 from fastapi.testclient import TestClient
-from ufo_ext_ufo.surface import verify_token
+from ufo.bearer import verify_token
 
 import ufo_control.gateway as gateway
 from ufo_control.gateway import TOKEN_SECRET_ENV, WORKSPACE_BASE_URL_ENV, gateway_app
@@ -221,7 +221,7 @@ def test_http_onboarding_joins_and_returns_a_surface_verified_token(
         assert "enter the code" in asked.text
         signed_in = client.post("/v1/onboard/ufo", headers=headers, content=sender.sent[email])
     directives = dict(line.split("\t", 1) for line in signed_in.text.splitlines() if "\t" in line)
-    assert verify_token(TOKEN_SECRET, directives["token"], workspace_id) == email
+    assert verify_token(directives["token"], workspace_id) == email
     assert directives["workspace"] == WORKSPACE_URL
     assert asyncio.run(_member_emails(gateway_postgres, workspace_id)) == [
         "founder@httpco.io",

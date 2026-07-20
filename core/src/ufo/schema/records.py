@@ -180,6 +180,7 @@ class Turn(BaseModel):
     status: TurnStatus
     inbound: str
     created_at: datetime
+    updated_at: datetime | None = None
     admission_source: TurnAdmissionSource = INTERNAL_ADMISSION
     speaker_member_id: UUID | None = None
     context: TurnContext | None = None
@@ -188,11 +189,13 @@ class Turn(BaseModel):
     subagent_profile: str | None = None
     traceparent: str | None = None
 
-    @field_validator("created_at")
+    @field_validator("created_at", "updated_at")
     @classmethod
-    def _aware_utc(cls, value: datetime) -> datetime:
+    def _aware_utc(cls, value: datetime | None) -> datetime | None:
         """The row's timestamp is UTC by construction; a driver that drops the marker (sqlite)
         hands it back naive, which `astimezone` would misread as local time."""
+        if value is None:
+            return None
         return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
     @model_validator(mode="after")

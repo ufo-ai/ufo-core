@@ -1,13 +1,14 @@
-"""The member bearer the client stores in ~/.ufo/credentials and the `ufo` surface verifies.
+"""The member bearer the client stores in ~/.ufo/credentials and surfaces verify.
 
-A self-contained HMAC claim, no server-side state. The codec is a fixed contract with the `ufo`
-surface (`extensions/ufo/ufo_ext_ufo/surface.py`), so it is spelled out exactly:
+A self-contained HMAC claim, no server-side state. The codec is a fixed contract with the verify
+half in core (`ufo/bearer.py`, re-exported through `ufo.sdk.bearer` for the `ufo` and `debug`
+surfaces), so it is spelled out exactly:
 
     payload_json = {"ws": "<workspace uuid>", "email": "<lower email>", "exp": <unix seconds>}
     body         = base64url(payload_json)            # padding stripped
     token        = body + "." + hex(hmac_sha256(secret, body))
 
-`mint_token` produces it; the ufo surface owns verification."""
+`mint_token` produces it; `ufo.bearer` owns verification."""
 
 import base64
 import hashlib

@@ -98,14 +98,22 @@ jobs:
         with:
           python-version: "3.12"
 
+      - uses: actions/setup-node@v4
+        if: github.event_name != 'pull_request'
+        with:
+          node-version: 24
+
       # Bundle image: `ufoctl bundle` freezes the assistant_hosted pack into a build context
       # (Dockerfile + ufo.toml + ufo.lock), then docker build installs the pinned ufo distribution.
+      # The debugger app builds first so its static/index.html rides inside the wheel.
       - name: Build + push bundle image
         if: github.event_name != 'pull_request'
         run: |
           if aws ecr describe-images --repository-name ufo --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
             echo "ufo:$IMAGE_TAG already pushed — skipping"
           else
+            npm --prefix extensions/debugger/frontend ci
+            npm --prefix extensions/debugger/frontend run build
             UFO_CONFIG=hosted.toml uv run ufoctl bundle --out bundle
             docker build -t "$ECR_REGISTRY/ufo:$IMAGE_TAG" bundle
             docker push "$ECR_REGISTRY/ufo:$IMAGE_TAG"

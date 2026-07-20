@@ -24,8 +24,6 @@ from ufo_ext_ufo.surface import (
     directives_for,
     resolve_workspace,
     stream_directives,
-    verify_token,
-    workspace_claim,
 )
 
 from ufo.accounting import CORE_PRICING
@@ -49,6 +47,7 @@ from ufo.models.registry import ModelRegistry
 from ufo.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
 from ufo.schema import tables
 from ufo.schema.records import CredentialPrompt, CredentialRequest, TerminalFrame, Usage
+from ufo.sdk.bearer import verify_token, workspace_claim
 from ufo.sdk.surfaces import ConnectRequest, SurfaceAuth
 from ufo.serve import _mount_shared_surfaces, _mount_surfaces
 
@@ -187,42 +186,52 @@ async def test_stream_privately_renders_a_connect_handoff() -> None:
     ]
 
 
-def test_valid_token_verifies_to_its_lowered_email() -> None:
+def test_valid_token_verifies_to_its_lowered_email(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("UFO_TOKEN_SECRET", SECRET)
     workspace_id = uuid4()
     token = _mint(SECRET, workspace_id, "Owner@Example.com", _future())
-    assert verify_token(SECRET, token, workspace_id) == "owner@example.com"
+    assert verify_token(token, workspace_id) == "owner@example.com"
 
 
-def test_expired_token_is_rejected() -> None:
+def test_expired_token_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("UFO_TOKEN_SECRET", SECRET)
     workspace_id = uuid4()
     token = _mint(SECRET, workspace_id, "owner@example.com", _future() - 7200)
-    assert verify_token(SECRET, token, workspace_id) is None
+    assert verify_token(token, workspace_id) is None
 
 
-def test_token_for_another_workspace_is_rejected() -> None:
+def test_token_for_another_workspace_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("UFO_TOKEN_SECRET", SECRET)
     token = _mint(SECRET, uuid4(), "owner@example.com", _future())
-    assert verify_token(SECRET, token, uuid4()) is None
+    assert verify_token(token, uuid4()) is None
 
 
-def test_tampered_signature_is_rejected() -> None:
+def test_tampered_signature_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("UFO_TOKEN_SECRET", SECRET)
     workspace_id = uuid4()
     token = _mint(SECRET, workspace_id, "owner@example.com", _future())
     payload, _, signature = token.partition(".")
     forged = f"{payload}.{signature[:-1]}{'0' if signature[-1] != '0' else '1'}"
-    assert verify_token(SECRET, forged, workspace_id) is None
-    assert verify_token(SECRET, "not-a-token", workspace_id) is None
-    assert verify_token("other-secret", token, workspace_id) is None
+    assert verify_token(forged, workspace_id) is None
+    assert verify_token("not-a-token", workspace_id) is None
+    assert (
+        verify_token(
+            _mint("other-secret", workspace_id, "owner@example.com", _future()), workspace_id
+        )
+        is None
+    )
 
 
-def test_workspace_claim_returns_the_signed_workspace() -> None:
+def test_workspace_claim_returns_the_signed_workspace(monkeypatch: pytest.MonkeyPatch) -> None:
     """The shared fleet resolves scope from the signed claim itself — no pinned workspace to match
     against. A valid token yields its `ws` uuid; forged, expired, or non-uuid yields None."""
+    monkeypatch.setenv("UFO_TOKEN_SECRET", SECRET)
     workspace_id = uuid4()
     token = _mint(SECRET, workspace_id, "owner@example.com", _future())
-    assert workspace_claim(SECRET, token) == workspace_id
-    assert workspace_claim(SECRET, _mint(SECRET, workspace_id, "o@x.com", _future() - 7200)) is None
-    assert workspace_claim("other-secret", token) is None
-    assert workspace_claim(SECRET, "not-a-token") is None
+    assert workspace_claim(token) == workspace_id
+    assert workspace_claim(_mint(SECRET, workspace_id, "o@x.com", _future() - 7200)) is None
+    assert workspace_claim(_mint("other-secret", workspace_id, "o@x.com", _future())) is None
+    assert workspace_claim("not-a-token") is None
 
 
 def _get_request(headers: dict[str, str]) -> StarletteRequest:

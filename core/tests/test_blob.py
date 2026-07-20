@@ -46,6 +46,30 @@ async def test_filesystem_overwrite_replaces(tmp_path: Path) -> None:
     assert await store.get("key") == b"second"
 
 
+async def test_filesystem_list_scopes_to_the_prefix_sorted(tmp_path: Path) -> None:
+    store = FilesystemBlobStore(root=tmp_path)
+    await store.put("conversations/c1/workspace/b.txt", b"bb")
+    await store.put("conversations/c1/workspace/a/deep.txt", b"d")
+    await store.put("conversations/c1/messages.json.lz4", b"transcript")
+    await store.put("conversations/c2/workspace/other.txt", b"o")
+    entries = await store.list("conversations/c1/workspace/")
+    assert [entry.key for entry in entries] == [
+        "conversations/c1/workspace/a/deep.txt",
+        "conversations/c1/workspace/b.txt",
+    ]
+    assert entries[1].size_bytes == 2
+    assert entries[0].modified_at.tzinfo is not None
+
+
+async def test_filesystem_list_requires_a_prefix(tmp_path: Path) -> None:
+    with pytest.raises(ValueError):
+        await FilesystemBlobStore(root=tmp_path).list("")
+
+
+async def test_filesystem_list_of_absent_prefix_is_empty(tmp_path: Path) -> None:
+    assert await FilesystemBlobStore(root=tmp_path).list("conversations/none/") == ()
+
+
 async def test_filesystem_put_file_streams_from_disk(tmp_path: Path) -> None:
     source = tmp_path / "artifact.bin"
     payload = bytes(range(256)) * 4096
@@ -115,6 +139,20 @@ async def test_s3_delete_removes_and_absent_is_a_noop(s3_store: S3BlobStore) -> 
     await s3_store.delete("artifacts/x/report.txt")
     assert not await s3_store.exists("artifacts/x/report.txt")
     await s3_store.delete("artifacts/x/report.txt")
+
+
+async def test_s3_list_scopes_to_the_prefix_sorted(s3_store: S3BlobStore) -> None:
+    await s3_store.put("listing/c1/workspace/b.txt", b"bb")
+    await s3_store.put("listing/c1/workspace/a/deep.txt", b"d")
+    await s3_store.put("listing/c1/messages.json.lz4", b"transcript")
+    await s3_store.put("listing/c2/workspace/other.txt", b"o")
+    entries = await s3_store.list("listing/c1/workspace/")
+    assert [entry.key for entry in entries] == [
+        "listing/c1/workspace/a/deep.txt",
+        "listing/c1/workspace/b.txt",
+    ]
+    assert entries[1].size_bytes == 2
+    assert entries[0].modified_at.tzinfo is not None
 
 
 async def test_s3_stream_round_trip(s3_store: S3BlobStore) -> None:

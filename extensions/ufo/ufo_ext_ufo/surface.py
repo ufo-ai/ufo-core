@@ -5,9 +5,9 @@ Every screen is decided here and streamed back as tab-separated directive lines 
 it admits without writeback the way the web surface does, and reaches core only through the
 privileged `SurfaceContext` a CI gate pins to `ufo.sdk`.
 
-Auth is a stateless HMAC bearer minted by the gateway extension: `base64url(payload)` `.`
-`hmac_sha256(secret, base64url(payload))` over `{"ws", "email", "exp"}`, the secret in
-`UFO_TOKEN_SECRET`. The token's email is this surface's external id — resolved to a member the first
+Auth is a stateless HMAC bearer minted by the gateway extension over `{"ws", "email", "exp"}` —
+the `ufo.sdk.bearer` codec, secret in `UFO_TOKEN_SECRET`. The token's email is this surface's
+external id — resolved to a member the first
 time they speak; a token whose email names no member still gets a conversation, unlinked.
 
 One POST is one held stream. A body is the member's message, admitted onto the durable queue and
@@ -16,17 +16,12 @@ that outruns the hold ends the stream with `poll` and the shell reconnects with 
 admits nothing and resumes tailing the conversation's latest turn."""
 
 import asyncio
-import base64
-import hashlib
-import hmac
-import json
-import os
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
-from datetime import UTC, datetime
 from functools import partial
 from uuid import UUID
 
 from ufo.sdk.accounting import MICRO_USD_PER_USD
+from ufo.sdk.bearer import verify_token, workspace_claim
 from ufo.sdk.http import PlainTextResponse, Request, Response, StreamingResponse
 from ufo.sdk.hub import CostTick, LiveFrame, Parked, SkillLoad, Terminal, TextDelta, ToolCall
 from ufo.sdk.surfaces import (
@@ -39,8 +34,6 @@ from ufo.sdk.surfaces import (
 )
 
 SURFACE_UFO = "ufo"
-UFO_TOKEN_SECRET_ENV = "UFO_TOKEN_SECRET"
-TOKEN_SEPARATOR = "."
 PROMPT = ">"
 POLL_SECONDS = 1
 MAX_MESSAGE_BYTES = 40_000
@@ -65,59 +58,6 @@ def directive(verb: str, *fields: str) -> bytes:
     return ("\t".join([verb, *escaped]) + "\n").encode()
 
 
-def _verified_claims(secret: str, token: str, now: int | None) -> tuple[str, str] | None:
-    """The `(ws, email)` a bearer proves — signature (constant-time) and expiry checked, else None.
-    Neither field is trusted before the HMAC over this deploy's secret matches, so a forged or
-    expired token yields nothing to scope or identify by."""
-    moment = int(datetime.now(tz=UTC).timestamp()) if now is None else now
-    payload_b64, separator, signature = token.partition(TOKEN_SEPARATOR)
-    if not separator or not signature:
-        return None
-    expected = hmac.new(secret.encode(), payload_b64.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected, signature):
-        return None
-    try:
-        payload = json.loads(_b64url_decode(payload_b64))
-    except (ValueError, json.JSONDecodeError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    ws, email, exp = payload.get("ws"), payload.get("email"), payload.get("exp")
-    if not isinstance(ws, str) or not isinstance(email, str) or not isinstance(exp, int):
-        return None
-    if exp <= moment:
-        return None
-    return ws, email
-
-
-def verify_token(secret: str, token: str, workspace_id: UUID, now: int | None = None) -> str | None:
-    """The lowercased member email a bearer token authenticates for this workspace, or None when its
-    signature, expiry, or workspace claim fails. The claim must equal this deploy's, so a token
-    minted for another tenant is rejected — the per-tenant check, where the deploy pins one
-    workspace; the shared fleet has none pinned and resolves it through `workspace_claim`."""
-    claims = _verified_claims(secret, token, now)
-    if claims is None:
-        return None
-    ws, email = claims
-    if ws != str(workspace_id):
-        return None
-    return email.lower()
-
-
-def workspace_claim(secret: str, token: str, now: int | None = None) -> UUID | None:
-    """The workspace a bearer claims, signature- and expiry-verified — the shared fleet's
-    per-request scope, resolved from the signed claim itself because one process serves every
-    workspace with none pinned to match against. None when verification fails or `ws` is not a
-    uuid."""
-    claims = _verified_claims(secret, token, now)
-    if claims is None:
-        return None
-    try:
-        return UUID(claims[0])
-    except ValueError:
-        return None
-
-
 async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | None:
     """The `SurfaceSpec.identify` the shared fleet calls to scope a request before its handler runs:
     the workspace the request's bearer claims, or None to reject. The same bearer the handler
@@ -125,11 +65,7 @@ async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | None
     scheme, _, token = request.headers.get("authorization", "").partition(" ")
     if scheme.lower() != "bearer" or not token.strip():
         return None
-    return workspace_claim(_token_secret(), token.strip())
-
-
-def _b64url_decode(value: str) -> bytes:
-    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    return workspace_claim(token.strip())
 
 
 def directives_for(
@@ -271,25 +207,18 @@ async def _next(frames: AsyncIterator[tuple[str, LiveFrame]]) -> tuple[str, Live
         return None
 
 
-def _token_secret() -> str:
-    secret = os.environ.get(UFO_TOKEN_SECRET_ENV)
-    if not secret:
-        raise RuntimeError(f"{UFO_TOKEN_SECRET_ENV} must be set for the {SURFACE_UFO!r} surface")
-    return secret
-
-
-def _authenticated_email(secret: str, request: Request, workspace_id: UUID) -> str | None:
+def _authenticated_email(request: Request, workspace_id: UUID) -> str | None:
     scheme, _, token = request.headers.get("authorization", "").partition(" ")
     if scheme.lower() != "bearer" or not token.strip():
         return None
-    return verify_token(secret, token.strip(), workspace_id)
+    return verify_token(token.strip(), workspace_id)
 
 
 async def channel(ctx: SurfaceContext, request: Request) -> Response:
     """One held turn on a channel. The bearer names the member; the channel path scopes their
     conversation. A body admits a turn and streams it; an empty body admits nothing and resumes
     tailing the conversation's latest turn (or prompts when it holds none)."""
-    email = _authenticated_email(_token_secret(), request, ctx.workspace_id)
+    email = _authenticated_email(request, ctx.workspace_id)
     if email is None:
         return PlainTextResponse("unauthorized", status_code=401)
     member_id = await ctx.linked_member(email) or await ctx.link_member(email, email)

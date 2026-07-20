@@ -12,6 +12,12 @@ from ufo.credentials import (
     CredentialSlotUnset as CredentialSlotUnset,
 )
 from ufo.ext.surface import (
+    ConversationSummary as ConversationSummary,
+)
+from ufo.ext.surface import (
+    LedgerEntry as LedgerEntry,
+)
+from ufo.ext.surface import (
     SharedArtifact as SharedArtifact,
 )
 from ufo.ext.surface import (
@@ -34,6 +40,12 @@ from ufo.ext.surface import (
 )
 from ufo.ext.surface import (
     SurfaceWorkspaceUnknown as SurfaceWorkspaceUnknown,
+)
+from ufo.ext.surface import (
+    TurnDetail as TurnDetail,
+)
+from ufo.ext.surface import (
+    WorkspaceFile as WorkspaceFile,
 )
 from ufo.ext.surface import (
     Writeback as Writeback,
@@ -60,5 +72,23 @@ from ufo.schema.records import (
     QuestionOption as QuestionOption,
 )
 from ufo.schema.records import (
+    TerminalFrame as TerminalFrame,
+)
+from ufo.schema.records import (
+    Turn as Turn,
+)
+from ufo.schema.records import (
     TurnContext as TurnContext,
+)
+from ufo.transcript import (
+    CompactionRecord as CompactionRecord,
+)
+from ufo.transcript import (
+    CompactionSummary as CompactionSummary,
+)
+from ufo.transcript import (
+    Conversation as Conversation,
+)
+from ufo.transcript import (
+    TranscriptDecodeError as TranscriptDecodeError,
 )

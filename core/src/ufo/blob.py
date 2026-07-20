@@ -5,6 +5,7 @@ import os
 import shutil
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
@@ -19,10 +20,20 @@ BLOB_STREAM_CHUNK_BYTES = 1024 * 1024
 S3_MULTIPART_PART_BYTES = 8 * 1024 * 1024
 S3_SINGLE_COPY_MAX_BYTES = 5 * 1024 * 1024 * 1024
 S3_COPY_PART_BYTES = 1024 * 1024 * 1024
+BLOB_LIST_MAX_KEYS = 10_000
 
 
 class BlobNotFound(KeyError):
     """Raised by get for a key that does not exist."""
+
+
+@dataclass(frozen=True)
+class BlobEntry:
+    """One stored object as `list` reports it: its full key, byte size, and last-modified time."""
+
+    key: str
+    size_bytes: int
+    modified_at: datetime
 
 
 class BlobStore(Protocol):
@@ -54,6 +65,12 @@ class BlobStore(Protocol):
         the calling process. The workspace-file share path: a produced file already in the
         conversation's workspace prefix is promoted into the artifact prefix of the same store,
         server-side on S3 (`s3:CopyObject`) with no read-through-the-pod."""
+        ...
+
+    async def list(self, prefix: str) -> tuple[BlobEntry, ...]:
+        """Every stored object under a key prefix, sorted by key, capped at `BLOB_LIST_MAX_KEYS`
+        entries — the bounded enumeration a read view (a conversation's workspace files, its
+        compaction records) walks; never a whole-store scan, so the prefix is required."""
         ...
 
 
@@ -131,6 +148,34 @@ class FilesystemBlobStore:
         temp = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
         await asyncio.to_thread(shutil.copyfile, source, temp)
         await asyncio.to_thread(temp.replace, path)
+
+    async def list(self, prefix: str) -> tuple[BlobEntry, ...]:
+        if not prefix:
+            raise ValueError("blob list requires a key prefix")
+        return await asyncio.to_thread(self._walk, prefix)
+
+    def _walk(self, prefix: str) -> tuple[BlobEntry, ...]:
+        root = self.root.resolve()
+        base_dir = self._resolve(prefix) if prefix.endswith("/") else self._resolve(prefix).parent
+        if not base_dir.is_dir():
+            return ()
+        entries: list[BlobEntry] = []
+        for base, _dirs, names in os.walk(base_dir):
+            for name in names:
+                path = Path(base) / name
+                key = path.relative_to(root).as_posix()
+                if not key.startswith(prefix) or name.endswith(".tmp"):
+                    continue
+                stat = path.stat()
+                entries.append(
+                    BlobEntry(
+                        key=key,
+                        size_bytes=stat.st_size,
+                        modified_at=datetime.fromtimestamp(stat.st_mtime, tz=UTC),
+                    )
+                )
+        entries.sort(key=lambda entry: entry.key)
+        return tuple(entries[:BLOB_LIST_MAX_KEYS])
 
     def _resolve(self, key: str) -> Path:
         root = self.root.resolve()
@@ -316,6 +361,25 @@ class S3BlobStore:
                     Bucket=self.bucket, Key=dst_key, UploadId=upload_id
                 )
                 raise
+
+    async def list(self, prefix: str) -> tuple[BlobEntry, ...]:
+        if not prefix:
+            raise ValueError("blob list requires a key prefix")
+        entries: list[BlobEntry] = []
+        async with self._client() as client:
+            paginator = client.get_paginator("list_objects_v2")
+            async for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+                for item in page.get("Contents", ()):
+                    entries.append(
+                        BlobEntry(
+                            key=item["Key"],
+                            size_bytes=item["Size"],
+                            modified_at=item["LastModified"].astimezone(UTC),
+                        )
+                    )
+                if len(entries) >= BLOB_LIST_MAX_KEYS:
+                    break
+        return tuple(entries[:BLOB_LIST_MAX_KEYS])
 
     def _client(self) -> ClientCreatorContext:
         return get_session().create_client(

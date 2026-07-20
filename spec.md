@@ -276,6 +276,13 @@ allocation, delivery registration, and enqueue recovery remain one implementatio
 | CLI | core | live (hub tail) | member token | session (private) |
 | Web | `extensions/web` | live (hub tail) | web session → member (adopted from CLI) | session (private) |
 | Slackbot | `extensions/slack` | durable (writeback) | Slack user → member (linked; a Slack-confirmed same-domain email joins as new) | channel:thread_ts (shared) |
+| Debug | `extensions/debugger` | live (hub tail) | gateway bearer whose email domain is `UFO_ADMIN_EMAIL_DOMAIN`; `?ws=` re-scopes to any workspace | — (read-only; admits nothing) |
+
+The debug surface is the one operator-audience surface — the `ufoctl`-verbs audience, not a member
+action. Its `identify` is the entire authorization: the admin-domain bearer picks the target
+workspace (a UUID or a customer domain via `uuid5(NAMESPACE_DNS, domain)`), core binds it, and every
+read below (conversations, turns with terminal outcomes and subagent children, transcripts,
+compaction records, workspace files, a live SSE tail) is RLS-scoped by construction.
 
 Two-way attachments stream end to end, never buffering a whole file: an inbound Slack file streams
 from `url_private` into the conversation's workspace before the turn runs; a shared file

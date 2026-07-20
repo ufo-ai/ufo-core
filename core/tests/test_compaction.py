@@ -14,8 +14,6 @@ from ufo.loop.compaction import (
     COMPACTION_SUMMARY_MAX_TOKENS,
     DEFAULT_CONTEXT_WINDOW_TOKENS,
     Compaction,
-    CompactionSummary,
-    FileRef,
 )
 from ufo.loop.engine import MAX_OUTPUT_TOKENS, OFFLOAD_NOTICE
 from ufo.models.interface import (
@@ -30,6 +28,7 @@ from ufo.models.interface import (
     ToolUseBlock,
 )
 from ufo.schema.records import Usage
+from ufo.transcript import CompactionSummary, FileRef
 
 HEAD_FACT = "the deploy key is rotated every 30 days HEADSECRET"
 TAIL_FACT = "the customer prefers Tuesday demos TAILSECRET"

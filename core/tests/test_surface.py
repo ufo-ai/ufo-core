@@ -6,10 +6,12 @@ proven by the sample-extension conformance probe and the Slack extension's own t
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
+import lz4.frame
 import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
@@ -41,10 +43,19 @@ from ufo.ext.surface import (
 )
 from ufo.hub import InProcessHub
 from ufo.loop.queue import _load_turn
+from ufo.models.interface import Message, TextBlock, ToolResultBlock, ToolUseBlock
 from ufo.schema import tables
 from ufo.schema.records import WRITEBACK_PENDING, TerminalFrame, TurnContext
 from ufo.surfaces.admission import Admission, MemberAdmission
 from ufo.surfaces.hub_tail import HubTailer
+from ufo.transcript import (
+    CompactionSummary,
+    CompactionWindow,
+    Conversation,
+    compaction_key,
+    encode,
+    transcript_key,
+)
 
 SURFACE = "test_surface"
 
@@ -1009,3 +1020,260 @@ async def test_join_member_auto_seats_while_a_seat_is_open(db: None, tmp_path) -
         }
     assert rows[seated_join] is not None
     assert rows[unseated_join] is None
+
+
+# --- read views: the debug surface's data half ---------------------------------------------------
+
+
+async def _conversation_row(
+    workspace_id: UUID,
+    *,
+    surface: str = SURFACE,
+    queue_key: str,
+    member_id: UUID | None = None,
+    created_at: datetime | None = None,
+) -> UUID:
+    conversation_id = uuid4()
+    moment = created_at or datetime.now(UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                surface=surface,
+                queue_key=queue_key,
+                member_id=member_id,
+                created_at=moment,
+                updated_at=moment,
+            )
+        )
+    return conversation_id
+
+
+async def _turn_row(
+    workspace_id: UUID,
+    conversation_id: UUID,
+    agent_id: UUID,
+    seq: int,
+    *,
+    status: str = "done",
+    parent_turn_id: UUID | None = None,
+    moment: datetime | None = None,
+) -> UUID:
+    turn_id = uuid4()
+    stamp = moment or datetime.now(UTC)
+    terminal = (
+        TerminalFrame(
+            status=status, text="answer", tokens=7, cost_micro_usd=42, model="claude-opus-4-8"
+        ).model_dump(mode="json")
+        if status in ("done", "failed", "cancelled")
+        else None
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=seq,
+                status=status,
+                inbound=f"ask {seq}",
+                parent_turn_id=parent_turn_id,
+                subagent_profile="research" if parent_turn_id is not None else None,
+                terminal=terminal,
+                created_at=stamp,
+                updated_at=stamp,
+            )
+        )
+    return turn_id
+
+
+async def test_list_conversations_orders_by_activity_and_scopes_to_the_workspace(
+    db: None, tmp_path
+) -> None:
+    workspace_id, agent_id, member_id = await _seed(member_email="bee@example.com")
+    foreign_workspace, foreign_agent, _ = await _seed()
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    early = datetime(2026, 7, 1, tzinfo=UTC)
+    late = datetime(2026, 7, 2, tzinfo=UTC)
+    quiet = await _conversation_row(
+        workspace_id, queue_key="quiet", member_id=member_id, created_at=late
+    )
+    busy = await _conversation_row(workspace_id, queue_key="busy", created_at=early)
+    await _turn_row(workspace_id, busy, agent_id, 1, moment=early)
+    await _turn_row(workspace_id, busy, agent_id, 2, moment=datetime(2026, 7, 3, tzinfo=UTC))
+    foreign = await _conversation_row(foreign_workspace, queue_key="foreign")
+    await _turn_row(foreign_workspace, foreign, foreign_agent, 1)
+
+    listed = await context.list_conversations()
+    assert [entry.id for entry in listed] == [busy, quiet]
+    by_id = {entry.id: entry for entry in listed}
+    assert by_id[busy].turn_count == 2
+    assert by_id[busy].last_turn_at == datetime(2026, 7, 3, tzinfo=UTC)
+    assert by_id[busy].member_email is None
+    assert by_id[quiet].turn_count == 0
+    assert by_id[quiet].last_turn_at is None
+    assert by_id[quiet].member_email == "bee@example.com"
+    assert await context.list_conversations(limit=1) == (by_id[busy],)
+
+
+async def test_list_turns_returns_full_rows_oldest_first(db: None, tmp_path) -> None:
+    workspace_id, agent_id, _ = await _seed()
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    conversation_id = await _conversation_row(workspace_id, queue_key="busy")
+    first = await _turn_row(workspace_id, conversation_id, agent_id, 1)
+    second = await _turn_row(workspace_id, conversation_id, agent_id, 2, status="running")
+
+    turns = await context.list_turns(conversation_id)
+    assert [turn.id for turn in turns] == [first, second]
+    assert turns[0].terminal is not None
+    assert turns[0].terminal.cost_micro_usd == 42
+    assert turns[0].updated_at is not None
+    assert turns[1].status == "running"
+    assert turns[1].terminal is None
+    capped = await context.list_turns(conversation_id, limit=1)
+    assert [turn.id for turn in capped] == [second]
+
+
+async def test_turn_detail_includes_ledger_and_subagent_children(db: None, tmp_path) -> None:
+    workspace_id, agent_id, _ = await _seed()
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    conversation_id = await _conversation_row(workspace_id, queue_key="busy")
+    parent = await _turn_row(workspace_id, conversation_id, agent_id, 1)
+    child_conversation = await _conversation_row(workspace_id, queue_key="subagent:1")
+    child = await _turn_row(workspace_id, child_conversation, agent_id, 1, parent_turn_id=parent)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.ledger).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                turn_id=parent,
+                dimension="tokens",
+                amount=1234,
+                priced_micro_usd=42,
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+    detail = await context.turn_detail(parent)
+    assert detail is not None
+    assert detail.turn.id == parent
+    assert detail.turn.terminal is not None
+    assert [entry.dimension for entry in detail.ledger] == ["tokens"]
+    assert detail.ledger[0].amount == 1234
+    assert [turn.id for turn in detail.children] == [child]
+    assert detail.children[0].subagent_profile == "research"
+    assert await context.turn_detail(uuid4()) is None
+    foreign_workspace, _, _ = await _seed()
+    foreign_context = _context(foreign_workspace, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    assert await foreign_context.turn_detail(parent) is None
+
+
+async def test_read_transcript_gates_ownership_before_the_blob(db: None, tmp_path) -> None:
+    workspace_id, _, _ = await _seed()
+    foreign_workspace, _, _ = await _seed()
+    blob = FilesystemBlobStore(root=tmp_path)
+    context = _context(workspace_id, StubDbos(), blob)
+    conversation_id = await _conversation_row(workspace_id, queue_key="busy")
+    stored = Conversation(
+        seq=1,
+        messages=(
+            Message(role="user", content="hi"),
+            Message(
+                role="assistant",
+                content=(
+                    ToolUseBlock(id="t1", name="bash", input={"command": "ls"}),
+                    ToolResultBlock(tool_use_id="t1", content="README.md"),
+                    TextBlock(text="done"),
+                ),
+            ),
+        ),
+    )
+    await blob.put(transcript_key(conversation_id), encode(stored))
+
+    read = await context.read_transcript(conversation_id)
+    assert read == stored
+    empty = await _conversation_row(workspace_id, queue_key="empty")
+    assert await context.read_transcript(empty) is None
+    foreign_context = _context(foreign_workspace, StubDbos(), blob)
+    assert await foreign_context.read_transcript(conversation_id) is None
+
+
+async def test_compaction_records_list_and_read_back(db: None, tmp_path) -> None:
+    workspace_id, _, _ = await _seed()
+    blob = FilesystemBlobStore(root=tmp_path)
+    context = _context(workspace_id, StubDbos(), blob)
+    conversation_id = await _conversation_row(workspace_id, queue_key="busy")
+    summary = CompactionSummary(intent="ship", current_work="reading", next_step="write")
+    window = (Message(role="user", content="hi"),)
+    for index in (1, 2):
+        for half, payload in (
+            ("before", CompactionWindow(messages=window)),
+            ("after", CompactionWindow(messages=window)),
+            ("summary", summary),
+        ):
+            await blob.put(
+                compaction_key(conversation_id, index, half),
+                lz4.frame.compress(payload.model_dump_json().encode()),
+            )
+
+    assert await context.list_compactions(conversation_id) == (1, 2)
+    record = await context.read_compaction(conversation_id, 1)
+    assert record is not None
+    assert record.summary == summary
+    assert record.before == window
+    assert await context.read_compaction(conversation_id, 3) is None
+    foreign_workspace, _, _ = await _seed()
+    foreign_context = _context(foreign_workspace, StubDbos(), blob)
+    assert await foreign_context.list_compactions(conversation_id) == ()
+    assert await foreign_context.read_compaction(conversation_id, 1) is None
+
+
+async def test_workspace_files_list_and_stream_scoped_to_the_conversation(
+    db: None, tmp_path
+) -> None:
+    workspace_id, _, _ = await _seed()
+    blob = FilesystemBlobStore(root=tmp_path)
+    context = _context(workspace_id, StubDbos(), blob)
+    conversation_id = await _conversation_row(workspace_id, queue_key="busy")
+
+    async def _chunks() -> AsyncIterator[bytes]:
+        yield b"hello "
+        yield b"world"
+
+    await context.write_workspace_file(conversation_id, "report/out.txt", _chunks())
+    files = await context.list_workspace_files(conversation_id)
+    assert [entry.path for entry in files] == ["report/out.txt"]
+    assert files[0].size_bytes == 11
+
+    stream = await context.read_workspace_file(conversation_id, "report/out.txt")
+    assert stream is not None
+    body = b"".join([chunk async for chunk in stream])
+    assert body == b"hello world"
+    assert await context.read_workspace_file(conversation_id, "report/absent.txt") is None
+    with pytest.raises(ValueError):
+        await context.read_workspace_file(conversation_id, "../messages.json.lz4")
+    foreign_workspace, _, _ = await _seed()
+    foreign_context = _context(foreign_workspace, StubDbos(), blob)
+    assert await foreign_context.list_workspace_files(conversation_id) == ()
+    assert await foreign_context.read_workspace_file(conversation_id, "report/out.txt") is None
+
+
+async def test_installation_reads_the_peer_surface_identity(db: None, tmp_path) -> None:
+    workspace_id, _, _ = await _seed()
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.surface_installation).values(
+                workspace_id=workspace_id,
+                surface="slack",
+                installation_id="team:T042",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    assert await context.installation("slack") == "team:T042"
+    assert await context.installation("teams") is None

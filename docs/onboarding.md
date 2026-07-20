@@ -1,9 +1,10 @@
 # Onboarding
 
 Onboarding is CLI-first: the apex's public face is a Cloudflare edge worker (landing card,
-waitlist, `/ufo`), and the terminal client is the one onboarding renderer. The gateway serves
+waitlist, `/ufo`), and the terminal client is the primary onboarding renderer. The gateway serves
 the client script and drives every screen server-side as directives over
-`POST /v1/onboard/{channel}`.
+`POST /v1/onboard/{channel}`. A browser sign-in (`GET /login` + `POST /v1/onboard/web`) is a
+second renderer over the identical machine — see "Web login" below.
 
 ## Component map
 
@@ -21,7 +22,8 @@ curl / ------->|  GET /            CLI UA -> landing card   |
                             hosted apex gateway
                +--------------------------------------------+
 ufo client --->|  GET /ufo -> version-stamped POSIX client  |
-               |  POST /v1/onboard/{channel}                |
+browser ------>|  GET /login -> sign-in page (web renderer) |
+               |  POST /v1/onboard/{channel} (web = JSON)   |
                |       |                                    |
                |       v                                    |
                |  Onboarding.advance ---------------------->+--> SharedWorkspaces
@@ -99,6 +101,25 @@ expiry, one live code per object), and redeeming consumes the code and stamps th
 `invite_id` in one transaction, so one code opens exactly one workspace and a resolution retry
 never re-asks for it. `SharedWorkspaces.exists` decides create versus join. An unknown, expired,
 or consumed code re-asks with its exact ledger state; an unknown one points at the waitlist.
+
+## Web login
+
+`GET /login` (gateway; the edge worker's default case passes it through to origin) serves a
+self-contained sign-in page — a second renderer of the identical `Onboarding` machine, never a
+second machine. The page generates a session UUID, sends each answer to `POST /v1/onboard/web`
+(header `x-ufo-session`, channel `web` — the claim index isolates it from a terminal session with
+the same ref), and receives the directive lines as JSON (`gateway_web.parse_directives` inverts the
+wire escaping exactly). It renders `say`/`ask`/`exit` and, on `token` + `workspace`, a signed-in
+home card: the member's email, the workspace URL, the terminal install one-liner. No `install`
+preamble is sent on the web channel, and the token never appears in a human-visible line.
+
+When the claim's channel-verified email domain equals `UFO_ADMIN_EMAIL_DOMAIN`, `_signed_in` adds
+one extra machine-consumed directive — `debugger <workspace-url>/surface/debug` — and the card
+shows a "Session debugger" form that POSTs the token in its body (the debug surface exchanges it
+for an httponly cookie and redirects; the bearer never rides a URL, so no access log captures it —
+`spec.md` "Surfaces" covers that surface). The directive is emitted channel-blind — the terminal
+client drops unknown verbs — and never emitted when the env is unset. The gate is the server's;
+the page merely renders what arrives.
 
 ## Connecting Slack
 
@@ -288,6 +309,7 @@ infra/modules/edge/
 control/src/ufo_control/
   gateway.py              Onboarding machine and apex routes
   gateway_directives.py   the directive wire the client renders
+  gateway_web.py          the /login page + JSON rendering of the same wire
   gateway_claim.py        email -> 6-digit code -> constant-time verify
   gateway_invite.py       one-time invite codes gating workspace creation
   gateway_token.py        bearer minting

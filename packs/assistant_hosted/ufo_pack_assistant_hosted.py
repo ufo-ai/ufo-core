@@ -4,8 +4,8 @@ Activating it (config `[pack] name = "assistant_hosted"`) brings up the assistan
 memory and recall, Exa research, brokered connectors (Composio, plus Pipedream for Gmail) and MCP,
 the browser/computer-use tools,
 website building and the code REPL, document generation, todos, scheduled tasks, member-authored
-skills, the web chat
-surface and the ufo terminal surface, the Bedrock and OpenRouter model providers, Metronome usage
+skills, the ufo terminal
+surface and the admin session debugger, the Bedrock and OpenRouter model providers, Metronome usage
 and seat metering, and the coding
 subagent — but over managed backends instead
 of core's own: the Turbopuffer index (in place of the local index), the Slack surface, the Redis
@@ -25,6 +25,7 @@ EXTENSIONS = (
     "exa",
     "todos",
     "ufo",
+    "debugger",
     "slack",
     "sites",
     "scheduled_tasks",

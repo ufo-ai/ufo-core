@@ -12,6 +12,7 @@ import asyncpg
 import pytest
 import sqlalchemy as sa
 from click.testing import CliRunner
+from ufo.bearer import verify_token
 from ufo.config import DatabaseConfig
 from ufo.db import (
     apply_migrations,
@@ -26,7 +27,6 @@ from ufo.onboarding import DEFAULT_AGENT_MODEL, DEFAULT_AGENT_PROMPT
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME
 from ufo.workspace import ws
-from ufo_ext_ufo.surface import verify_token
 
 from ufo_control import rls
 from ufo_control.gateway import Onboarding
@@ -444,8 +444,9 @@ async def test_shared_domain_lookup_rejects_ambiguous_workspaces(
 
 
 async def test_shared_onboard_creates_then_joins_a_workspace(
-    shared_role_env: SharedRoleEnv,
+    shared_role_env: SharedRoleEnv, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("UFO_TOKEN_SECRET", SHARED_TOKEN_SECRET)
     pool = await asyncpg.create_pool(shared_role_env.owner_dsn)
     store = OnboardStore(pool=pool)
     await store.ensure_table()
@@ -478,19 +479,13 @@ async def test_shared_onboard_creates_then_joins_a_workspace(
     directives = dict(
         line.split("\t", 1) for line in signed_in.decode().splitlines() if "\t" in line
     )
-    assert (
-        verify_token(SHARED_TOKEN_SECRET, directives["token"], UUID(workspace_id))
-        == "boss@sharedtwo.io"
-    )
+    assert verify_token(directives["token"], UUID(workspace_id)) == "boss@sharedtwo.io"
     assert directives["workspace"] == SHARED_WORKSPACE_URL
     joined_directives = dict(
         line.split("\t", 1) for line in joined.decode().splitlines() if "\t" in line
     )
     assert "invite" not in joined.decode()
-    assert (
-        verify_token(SHARED_TOKEN_SECRET, joined_directives["token"], UUID(workspace_id))
-        == "mate@sharedtwo.io"
-    )
+    assert verify_token(joined_directives["token"], UUID(workspace_id)) == "mate@sharedtwo.io"
     assert await _members_in(workspace_id) == ["boss@sharedtwo.io", "mate@sharedtwo.io"]
 
 

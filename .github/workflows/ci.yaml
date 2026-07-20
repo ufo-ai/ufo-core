@@ -42,6 +42,10 @@ jobs:
         with:
           node-version: 24
       - run: node --test infra/modules/edge/*.test.mjs
+      # The debugger app must typecheck and produce its single-file build on every push — the
+      # bundle image bakes it, so a broken build must fail here, not at deploy.
+      - run: npm --prefix extensions/debugger/frontend ci
+      - run: npm --prefix extensions/debugger/frontend run build
       - run: uv run pytest --collect-only -m integration -q
 
   # Parallel unit tests — the per-push bottleneck, on its own runner with the postgres service.

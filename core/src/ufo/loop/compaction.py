@@ -19,7 +19,7 @@ from uuid import UUID
 
 import lz4.frame
 from dbos import DBOS
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
 from ufo.blob import BlobNotFound, BlobStore
 from ufo.ext.loader import HookChain
@@ -36,6 +36,13 @@ from ufo.models.interface import (
     ToolUseBlock,
 )
 from ufo.schema.records import Agent, Turn, Usage
+from ufo.transcript import (
+    CompactionRecord,
+    CompactionSummary,
+    CompactionWindow,
+    compaction_key,
+    decode_compaction,
+)
 
 CHARS_PER_TOKEN = 4
 IMAGE_TOKEN_ESTIMATE = 1_600
@@ -81,49 +88,6 @@ def is_context_overflow(error: Exception) -> bool:
     prompt-too-long recovery and the engine's round recovery share one detector."""
     text = f"{type(error).__name__} {error}".lower()
     return any(marker in text for marker in CONTEXT_OVERFLOW_MARKERS)
-
-
-class FileRef(BaseModel):
-    """A workspace file the head touched — a read source or a `.tool-output/<id>.txt` offload — and
-    one line on why it mattered, so the model can re-read it by path after the boundary."""
-
-    path: str
-    why: str
-
-
-class CompactionSummary(BaseModel):
-    """The structured compression of a summarized head. It crosses a boundary — it re-enters the
-    model context (rendered by `_reconstruct`) and persists in the `after` record — so it is a
-    validated BaseModel, not a freeform blob: every field is a section the reconstruction renders
-    deterministically, so the same summary always yields the same window. Sections adapted from
-    Claude Code's compaction prompt, trimmed for a headless multi-surface agent."""
-
-    intent: str
-    current_work: str
-    next_step: str
-    concepts: tuple[str, ...] = ()
-    files: tuple[FileRef, ...] = ()
-    errors: tuple[str, ...] = ()
-    decisions: tuple[str, ...] = ()
-    pending: tuple[str, ...] = ()
-    loaded_skills: tuple[str, ...] = ()
-
-
-class CompactionWindow(BaseModel):
-    """The codec for a persisted message window — one for the before record, one for the after."""
-
-    messages: tuple[Message, ...]
-
-
-@dataclass(frozen=True)
-class CompactionRecord:
-    """One compaction's durable artifacts, read back from the blob store: the pre-compaction window,
-    the window that replaced it, and the typed summary the head was compressed into."""
-
-    index: int
-    before: tuple[Message, ...]
-    after: tuple[Message, ...]
-    summary: CompactionSummary
 
 
 @dataclass(frozen=True)
@@ -434,14 +398,11 @@ class Compaction:
             summary = await self.blob.get(self._key(index, "summary"))
         except BlobNotFound:
             return None
-        return CompactionRecord(
-            index=index,
-            before=CompactionWindow.model_validate_json(lz4.frame.decompress(before)).messages,
-            after=CompactionWindow.model_validate_json(lz4.frame.decompress(after)).messages,
-            summary=CompactionSummary.model_validate_json(lz4.frame.decompress(summary)),
-        )
+        return decode_compaction(index, before, after, summary)
 
-    async def _write(self, index: int, half: str, messages: tuple[Message, ...]) -> None:
+    async def _write(
+        self, index: int, half: Literal["before", "after"], messages: tuple[Message, ...]
+    ) -> None:
         encoded = json.dumps(
             CompactionWindow(messages=messages).model_dump(),
             separators=(",", ":"),
@@ -449,8 +410,8 @@ class Compaction:
         ).encode()
         await self.blob.put(self._key(index, half), lz4.frame.compress(encoded))
 
-    def _key(self, index: int, half: str) -> str:
-        return f"conversations/{self.conversation_id}/compactions/{index}/{half}.json.lz4"
+    def _key(self, index: int, half: Literal["before", "after", "summary"]) -> str:
+        return compaction_key(self.conversation_id, index, half)
 
     def _tokens(self, messages: tuple[Message, ...]) -> int:
         """Estimate the window's token cost: text length plus a flat cost per inline image. Images

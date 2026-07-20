@@ -269,6 +269,7 @@ MAX_SLACK_BLOCK_MESSAGE_BYTES = 100_000
 SLACK_UPLOAD_MAX_BYTES = 25 * 1024 * 1024
 SLACK_INVALID_BLOCKS_ERROR = "invalid_blocks"
 SLACK_OVERSIZE_HEADING = "**Attachments (too large to upload):**"
+DEBUG_SURFACE_PATH = "/surface/debug"
 
 SLACK_API_TIMEOUT_SECONDS = 20
 MAX_RETRY_AFTER_DIGITS = 9
@@ -495,9 +496,7 @@ def slack_reply_body(
         ]
         if actions is not None:
             block_list.extend(actions)
-        block_list.append(
-            {"type": "context", "elements": [{"type": "plain_text", "text": metadata}]}
-        )
+        block_list.append({"type": "context", "elements": [{"type": "mrkdwn", "text": metadata}]})
         with_blocks = {**base, "blocks": block_list}
         encoded = json.dumps(with_blocks, separators=(",", ":")).encode()
         bound = MAX_SLACK_BLOCK_MESSAGE_BYTES if actions is not None else MAX_SLACK_MESSAGE_BYTES
@@ -1450,12 +1449,28 @@ def _oversize_link_line(ctx: SurfaceContext, artifact: SharedArtifact) -> str:
     return f"- {name} ({artifact.size_bytes} bytes)"
 
 
+async def _debug_link(ctx: SurfaceContext, writeback: Writeback) -> str | None:
+    """The admin session debugger's view of this thread's conversation, the delivered turn
+    selected — the footer's link target. None when the deploy has no public base URL; who may
+    open the link is the debug surface's own admin gate, never this footer's concern."""
+    if ctx.public_base_url is None:
+        return None
+    conversation_id = await ctx.find_conversation(writeback.queue_key)
+    if conversation_id is None:
+        return None
+    return (
+        f"{ctx.public_base_url.rstrip('/')}{DEBUG_SURFACE_PATH}"
+        f"?ws={ctx.workspace_id}&c={conversation_id}&t={writeback.turn_id}"
+    )
+
+
 async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
     """Post the reply to the thread and return its message ref (`channel:ts`), the delivery record.
-    An `invalid_blocks` rejection is deterministic, so the reply re-posts once — as conservative
-    section blocks when it carries an ask or connect handoff (the affordance survives the markdown
-    blocks Slack rejected), as plain text otherwise — rather than the poller retrying the identical
-    Block Kit body until it ages out."""
+    The accounting footer links to the admin session debugger's view of the thread when the deploy
+    has a public base URL. An `invalid_blocks` rejection is deterministic, so the reply re-posts
+    once — as conservative section blocks when it carries an ask or connect handoff (the affordance
+    survives the markdown blocks Slack rejected), as plain text otherwise — rather than the poller
+    retrying the identical Block Kit body until it ages out."""
     channel, separator, thread_ts = writeback.queue_key.partition(":")
     thread = thread_ts if separator else None
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
@@ -1469,7 +1484,11 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
         f"${writeback.cost_micro_usd / 1_000_000:.6f} "
         f"({writeback.tokens:,} tokens, {writeback.cache_percent}% cached) · "
         f"{model}{params}"
-    )[:SLACK_CONTEXT_TEXT_LIMIT]
+    )
+    debug_url = await _debug_link(ctx, writeback)
+    if debug_url is not None:
+        metadata = f"{metadata} · <{debug_url}|debug>"
+    metadata = metadata[:SLACK_CONTEXT_TEXT_LIMIT]
     async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
         payload = await _chat_post(
             client, bot_token, slack_reply_body(channel, thread, text, metadata, actions=actions)

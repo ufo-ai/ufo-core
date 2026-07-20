@@ -264,8 +264,9 @@ def test_shared_fleet_serves_only_extensions_whose_surfaces_all_mount() -> None:
     assert tuple(manifest.name for manifest in kept) == ("capable", "toolbox", "durable")
 
 
-def test_assistant_hosted_keeps_slack_on_shared_serve() -> None:
+def test_assistant_hosted_keeps_slack_and_debugger_on_shared_serve() -> None:
     names = {
         manifest.name for manifest in _shared_fleet_manifests(load_manifests("assistant_hosted"))
     }
     assert "slack" in names
+    assert "debugger" in names

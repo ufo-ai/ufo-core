@@ -43,6 +43,7 @@ browserbase = "ufo_ext_browserbase:manifest"
 coding = "ufo_ext_coding.manifest:manifest"
 composio = "ufo_ext_composio.manifest:manifest"
 connectors = "ufo_ext_connectors.manifest:manifest"
+debugger = "ufo_ext_debugger.manifest:manifest"
 docker = "ufo_ext_docker:manifest"
 documents = "ufo_ext_documents.manifest:manifest"
 e2b = "ufo_ext_e2b:manifest"
@@ -126,6 +127,7 @@ packages = [
     "extensions/coding/ufo_ext_coding",
     "extensions/composio/ufo_ext_composio",
     "extensions/connectors/ufo_ext_connectors",
+    "extensions/debugger/ufo_ext_debugger",
     "extensions/documents/ufo_ext_documents",
     "evals",
     "extensions/eval_env/ufo_ext_eval_env",

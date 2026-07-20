@@ -37,6 +37,7 @@ from typing import Literal, Protocol
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
+from pydantic import BaseModel, field_validator
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from starlette.requests import Request
@@ -48,7 +49,7 @@ from ufo.artifact_token import (
     ARTIFACT_TOKEN_TTL_SECONDS,
     mint_artifact_token,
 )
-from ufo.blob import BlobStore
+from ufo.blob import BlobNotFound, BlobStore
 from ufo.candidates import WorkspaceCandidates, owner_candidates
 from ufo.credentials import (
     CredentialRequestInvalid,
@@ -77,9 +78,18 @@ from ufo.schema.records import (
     ReasoningEffort,
     TerminalFrame,
     TerminalStatus,
+    Turn,
     TurnContext,
 )
 from ufo.seats import create_member
+from ufo.transcript import (
+    CompactionRecord,
+    Conversation,
+    compaction_key,
+    decode,
+    decode_compaction,
+    transcript_key,
+)
 from ufo.workspace import ws, ws_current
 
 WORKSPACE_SEGMENT = "workspace"
@@ -167,6 +177,65 @@ class Writeback:
     question: AskUserInput | None
     credential_request: CredentialRequest | None
     connect_request: ConnectRequest | None
+
+
+LIST_CONVERSATIONS_LIMIT = 200
+LIST_TURNS_LIMIT = 500
+
+
+class ConversationSummary(BaseModel):
+    """One conversation as a read view lists it: identity and keying, the owning member's email,
+    and its activity aggregates — deliberately spanning every surface in the workspace (the
+    context's own `surface` scopes keying and admission, never these reads)."""
+
+    id: UUID
+    surface: str
+    queue_key: str
+    member_email: str | None
+    created_at: datetime
+    turn_count: int
+    last_turn_at: datetime | None
+
+    @field_validator("created_at", "last_turn_at")
+    @classmethod
+    def _aware_utc(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+class LedgerEntry(BaseModel):
+    """One accounting row of a turn — a dimension's metered amount and its priced cost."""
+
+    dimension: str
+    amount: int
+    priced_micro_usd: int
+    model: str
+    created_at: datetime
+
+    @field_validator("created_at")
+    @classmethod
+    def _aware_utc(cls, value: datetime) -> datetime:
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+class TurnDetail(BaseModel):
+    """One turn with everything durable that hangs off it: the row itself (terminal outcome and
+    context included), its accounting, and the subagent turns it spawned (`parent_turn_id`
+    children, each living in its own conversation)."""
+
+    turn: Turn
+    ledger: tuple[LedgerEntry, ...]
+    children: tuple[Turn, ...]
+
+
+class WorkspaceFile(BaseModel):
+    """One file in a conversation's `workspace/` subtree, as the file browser lists it — the
+    relative path inside the subtree, never the blob key."""
+
+    path: str
+    size_bytes: int
+    modified_at: datetime
 
 
 def _fulfilled_marker_key(workspace_id: UUID, sealed: str, slot: str) -> str:
@@ -560,6 +629,263 @@ class SurfaceContext:
         sandbox mounts it already present. The bytes never buffer whole — the surface hands an async
         chunk iterator (a streamed download) straight to the blob store."""
         await self.blob.put_stream(workspace_key(conversation_id, rel), chunks)
+
+    async def list_conversations(
+        self, limit: int = LIST_CONVERSATIONS_LIMIT
+    ) -> tuple[ConversationSummary, ...]:
+        """The workspace's conversations, newest activity first, across every surface — the read
+        half a debug view lists. Bounded, and RLS-scoped like every read on this context."""
+        activity = (
+            sa.select(
+                tables.turn.c.conversation_id,
+                sa.func.count().label("turn_count"),
+                sa.func.max(tables.turn.c.updated_at).label("last_turn_at"),
+            )
+            .where(tables.turn.c.workspace_id == self.workspace_id)
+            .group_by(tables.turn.c.conversation_id)
+            .subquery()
+        )
+        query = (
+            sa.select(
+                tables.conversation.c.id,
+                tables.conversation.c.surface,
+                tables.conversation.c.queue_key,
+                tables.conversation.c.created_at,
+                tables.member.c.email,
+                activity.c.turn_count,
+                activity.c.last_turn_at,
+            )
+            .select_from(
+                tables.conversation.outerjoin(
+                    tables.member, tables.member.c.id == tables.conversation.c.member_id
+                ).outerjoin(activity, activity.c.conversation_id == tables.conversation.c.id)
+            )
+            .where(tables.conversation.c.workspace_id == self.workspace_id)
+            .order_by(
+                sa.func.coalesce(activity.c.last_turn_at, tables.conversation.c.created_at).desc()
+            )
+            .limit(limit)
+        )
+        async with workspace_tx() as connection:
+            rows = (await connection.execute(query)).all()
+        return tuple(
+            ConversationSummary(
+                id=row.id,
+                surface=row.surface,
+                queue_key=row.queue_key,
+                member_email=row.email,
+                created_at=row.created_at,
+                turn_count=row.turn_count or 0,
+                last_turn_at=row.last_turn_at,
+            )
+            for row in rows
+        )
+
+    async def list_turns(
+        self, conversation_id: UUID, limit: int = LIST_TURNS_LIMIT
+    ) -> tuple[Turn, ...]:
+        """The conversation's turns in admission order, oldest first, bounded to the `limit` most
+        recent — each the full durable row (terminal outcome, context, subagent parentage)."""
+        query = (
+            self._turn_query()
+            .where(
+                tables.turn.c.workspace_id == self.workspace_id,
+                tables.turn.c.conversation_id == conversation_id,
+            )
+            .order_by(tables.turn.c.seq.desc())
+            .limit(limit)
+        )
+        async with workspace_tx() as connection:
+            rows = (await connection.execute(query)).all()
+        return tuple(self._turn_record(row) for row in reversed(rows))
+
+    async def turn_detail(self, turn_id: UUID) -> TurnDetail | None:
+        """One turn with its accounting rows and the subagent turns it spawned, or None when no
+        such turn exists in this workspace."""
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    self._turn_query().where(
+                        tables.turn.c.id == turn_id,
+                        tables.turn.c.workspace_id == self.workspace_id,
+                    )
+                )
+            ).one_or_none()
+            if row is None:
+                return None
+            children = (
+                await connection.execute(
+                    self._turn_query()
+                    .where(
+                        tables.turn.c.parent_turn_id == turn_id,
+                        tables.turn.c.workspace_id == self.workspace_id,
+                    )
+                    .order_by(tables.turn.c.created_at)
+                )
+            ).all()
+            ledger = (
+                await connection.execute(
+                    sa.select(
+                        tables.ledger.c.dimension,
+                        tables.ledger.c.amount,
+                        tables.ledger.c.priced_micro_usd,
+                        tables.ledger.c.model,
+                        tables.ledger.c.created_at,
+                    )
+                    .where(tables.ledger.c.turn_id == turn_id)
+                    .order_by(tables.ledger.c.created_at)
+                )
+            ).all()
+        return TurnDetail(
+            turn=self._turn_record(row),
+            ledger=tuple(
+                LedgerEntry(
+                    dimension=entry.dimension,
+                    amount=entry.amount,
+                    priced_micro_usd=entry.priced_micro_usd,
+                    model=entry.model,
+                    created_at=entry.created_at,
+                )
+                for entry in ledger
+            ),
+            children=tuple(self._turn_record(child) for child in children),
+        )
+
+    async def read_transcript(self, conversation_id: UUID) -> Conversation | None:
+        """The conversation's durable message transcript — assistant text and tool_use/tool_result
+        blocks — or None when the conversation is not this workspace's or has no transcript yet.
+        The ownership gate runs first because the blob store is unscoped: a foreign conversation id
+        must yield nothing, never another tenant's transcript."""
+        if not await self._owned_conversation(conversation_id):
+            return None
+        try:
+            body = await self.blob.get(transcript_key(conversation_id))
+        except BlobNotFound:
+            return None
+        return decode(body)
+
+    async def list_compactions(self, conversation_id: UUID) -> tuple[int, ...]:
+        """The indices of the conversation's persisted compaction records, ascending — each one
+        readable via `read_compaction`."""
+        if not await self._owned_conversation(conversation_id):
+            return ()
+        entries = await self.blob.list(f"conversations/{conversation_id}/compactions/")
+        indices = {
+            int(parts[3])
+            for entry in entries
+            if len(parts := entry.key.split("/")) == 5 and parts[3].isdigit()
+        }
+        return tuple(sorted(indices))
+
+    async def read_compaction(self, conversation_id: UUID, index: int) -> CompactionRecord | None:
+        """One compaction's durable record — the pre-compaction window, its replacement, and the
+        typed summary — or None when the conversation is not this workspace's or the index holds
+        no record."""
+        if not await self._owned_conversation(conversation_id):
+            return None
+        try:
+            before = await self.blob.get(compaction_key(conversation_id, index, "before"))
+            after = await self.blob.get(compaction_key(conversation_id, index, "after"))
+            summary = await self.blob.get(compaction_key(conversation_id, index, "summary"))
+        except BlobNotFound:
+            return None
+        return decode_compaction(index, before, after, summary)
+
+    async def list_workspace_files(self, conversation_id: UUID) -> tuple[WorkspaceFile, ...]:
+        """Every file in the conversation's `workspace/` subtree — the sandbox's working files —
+        as subtree-relative paths, sorted, bounded by the blob store's list cap."""
+        if not await self._owned_conversation(conversation_id):
+            return ()
+        prefix = f"conversations/{conversation_id}/{WORKSPACE_SEGMENT}/"
+        entries = await self.blob.list(prefix)
+        return tuple(
+            WorkspaceFile(
+                path=entry.key.removeprefix(prefix),
+                size_bytes=entry.size_bytes,
+                modified_at=entry.modified_at,
+            )
+            for entry in entries
+        )
+
+    async def read_workspace_file(
+        self, conversation_id: UUID, rel: str
+    ) -> AsyncIterator[bytes] | None:
+        """Stream one workspace file's bytes, or None when the conversation is not this
+        workspace's or the path names nothing. The path is validated by `workspace_key`, so it can
+        neither escape the subtree nor reach the transcript above it."""
+        if not await self._owned_conversation(conversation_id):
+            return None
+        key = workspace_key(conversation_id, rel)
+        if not await self.blob.exists(key):
+            return None
+        return self.blob.get_stream(key)
+
+    async def installation(self, peer_surface: str) -> str | None:
+        """The workspace's installation identity on a peer surface (e.g. Slack's `team:<id>`), or
+        None when that surface holds no installation here — how a read view renders deep links
+        into the surface a conversation actually lives on."""
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(tables.surface_installation.c.installation_id).where(
+                        tables.surface_installation.c.workspace_id == self.workspace_id,
+                        tables.surface_installation.c.surface == peer_surface,
+                    )
+                )
+            ).one_or_none()
+        return None if row is None else row.installation_id
+
+    async def _owned_conversation(self, conversation_id: UUID) -> bool:
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(tables.conversation.c.id).where(
+                        tables.conversation.c.id == conversation_id,
+                        tables.conversation.c.workspace_id == self.workspace_id,
+                    )
+                )
+            ).one_or_none()
+        return row is not None
+
+    def _turn_query(self) -> sa.Select:
+        return sa.select(
+            tables.turn.c.id,
+            tables.turn.c.workspace_id,
+            tables.turn.c.conversation_id,
+            tables.turn.c.agent_id,
+            tables.turn.c.seq,
+            tables.turn.c.status,
+            tables.turn.c.inbound,
+            tables.turn.c.admission_source,
+            tables.turn.c.speaker_member_id,
+            tables.turn.c.created_at,
+            tables.turn.c.updated_at,
+            tables.turn.c.context,
+            tables.turn.c.terminal,
+            tables.turn.c.parent_turn_id,
+            tables.turn.c.subagent_profile,
+            tables.turn.c.traceparent,
+        )
+
+    def _turn_record(self, row: sa.Row) -> Turn:
+        return Turn(
+            id=row.id,
+            workspace_id=row.workspace_id,
+            conversation_id=row.conversation_id,
+            agent_id=row.agent_id,
+            seq=row.seq,
+            status=row.status,
+            inbound=row.inbound,
+            admission_source=row.admission_source,
+            speaker_member_id=row.speaker_member_id,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+            context=None if row.context is None else TurnContext.model_validate(row.context),
+            terminal=None if row.terminal is None else TerminalFrame.model_validate(row.terminal),
+            parent_turn_id=row.parent_turn_id,
+            subagent_profile=row.subagent_profile,
+            traceparent=row.traceparent,
+        )
 
 
 class SurfaceWorkspaceUnknown(LookupError):

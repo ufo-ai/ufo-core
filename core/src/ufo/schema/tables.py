@@ -148,6 +148,12 @@ turn = sa.Table(
         postgresql_where=sa.text("status = 'parked'"),
         sqlite_where=sa.text("status = 'parked'"),
     ),
+    sa.Index(
+        "turn_parent",
+        "parent_turn_id",
+        postgresql_where=sa.text("parent_turn_id is not null"),
+        sqlite_where=sa.text("parent_turn_id is not null"),
+    ),
 )
 
 inbound_message = sa.Table(

@@ -1,0 +1,99 @@
+:root {
+  color-scheme: light dark;
+  --line: color-mix(in srgb, CanvasText 15%, transparent);
+  --soft: color-mix(in srgb, CanvasText 6%, transparent);
+  --dim: color-mix(in srgb, CanvasText 60%, transparent);
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font: 14px/1.5 system-ui, sans-serif;
+  background: Canvas;
+  color: CanvasText;
+}
+header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+header h1 { font-size: 15px; margin: 0; font-weight: 650; cursor: pointer; }
+header form { display: flex; gap: 6px; }
+header input {
+  padding: 5px 9px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: Field;
+  color: FieldText;
+  min-width: 220px;
+  font: inherit;
+}
+.meta { font-size: 12px; color: var(--dim); }
+main { padding: 16px; max-width: 1200px; margin: 0 auto; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); }
+th { font-size: 12px; color: var(--dim); font-weight: 600; }
+tr.row { cursor: pointer; }
+tr.row:hover { background: var(--soft); }
+button, .button {
+  padding: 5px 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--soft);
+  color: CanvasText;
+  cursor: pointer;
+  font: inherit;
+  text-decoration: none;
+}
+a { color: inherit; }
+.chip {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid var(--line);
+}
+.chip.done { background: color-mix(in srgb, #2e9e44 18%, transparent); }
+.chip.failed, .chip.cancelled { background: color-mix(in srgb, #d64545 22%, transparent); }
+.chip.running, .chip.queued, .chip.parked { background: color-mix(in srgb, #d6a545 25%, transparent); }
+.chip.subagent { background: color-mix(in srgb, #6b7ddb 22%, transparent); }
+.chip.compaction { background: color-mix(in srgb, #b76bdb 20%, transparent); cursor: pointer; }
+code, pre {
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--soft);
+  border-radius: 6px;
+}
+code { padding: 1px 5px; }
+pre { padding: 10px 12px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+section.panel { border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin: 14px 0; }
+section.panel > h2 { margin: 0 0 10px; font-size: 13px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.04em; }
+.timeline { display: flex; flex-direction: column; gap: 3px; }
+.timeline .lane { display: grid; grid-template-columns: 260px 1fr; align-items: center; gap: 10px; }
+.timeline .label { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.timeline .label.child { padding-left: 18px; }
+.timeline .track { position: relative; height: 16px; background: var(--soft); border-radius: 4px; }
+.timeline .bar { position: absolute; top: 2px; bottom: 2px; border-radius: 3px; min-width: 4px; }
+.bar.done { background: #2e9e44; }
+.bar.failed, .bar.cancelled { background: #d64545; }
+.bar.running, .bar.queued, .bar.parked { background: #d6a545; }
+.bar.child { opacity: 0.65; }
+.turn-card { border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; margin: 8px 0; }
+.turn-card .head { display: flex; align-items: center; gap: 10px; cursor: pointer; flex-wrap: wrap; }
+.turn-card .inbound { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 200px; }
+.turn-card.selected { border-color: color-mix(in srgb, CanvasText 45%, transparent); }
+.kv { display: grid; grid-template-columns: 140px 1fr; gap: 2px 12px; font-size: 13px; margin: 10px 0; }
+.kv dt { color: var(--dim); }
+.kv dd { margin: 0; overflow-wrap: anywhere; }
+.bubble { border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; margin: 8px 0; }
+.bubble.user { background: var(--soft); }
+.bubble .role { font-size: 11px; color: var(--dim); font-weight: 600; text-transform: uppercase; }
+details { margin: 6px 0; }
+summary { cursor: pointer; font-size: 12px; color: var(--dim); }
+.error-text { color: #d64545; }
+.tabs { display: flex; gap: 6px; margin: 14px 0 0; }
+.tabs button.active { background: CanvasText; color: Canvas; border-color: CanvasText; }
+.empty { color: var(--dim); padding: 20px 0; text-align: center; }
+.tail-log { max-height: 320px; overflow-y: auto; }

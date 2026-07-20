@@ -11,7 +11,7 @@ from pathlib import Path
 import asyncpg
 import sqlalchemy as sa
 from fastapi import FastAPI, Request
-from starlette.responses import JSONResponse, PlainTextResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 from ufo.db import dispose_db, init_db, workspace_tx
 
 from ufo_control.gateway_claim import ClaimError, ClaimWorkflow
@@ -33,11 +33,14 @@ from ufo_control.gateway_invite import (
 from ufo_control.gateway_shared import SharedWorkspaces, serve_dsn
 from ufo_control.gateway_store import OnboardClaim, OnboardStore
 from ufo_control.gateway_token import TOKEN_SECRET_ENV, mint_token
+from ufo_control.gateway_web import LOGIN_PAGE, WEB_CHANNEL, parse_directives
 from ufo_control.rls import owner_dsn
 
 logger = logging.getLogger(__name__)
 
 WORKSPACE_BASE_URL_ENV = "UFO_WORKSPACE_BASE_URL"
+ADMIN_EMAIL_DOMAIN_ENV = "UFO_ADMIN_EMAIL_DOMAIN"
+DEBUG_SURFACE_PATH = "/surface/debug"
 SCRIPT_URL_DEFAULT = 'UFO_URL="${UFO_URL:-https://flyingobject.ai}"'
 SHELLSCRIPT_MEDIA_TYPE = "text/x-shellscript"
 MAX_CHANNEL_BYTES = 64
@@ -71,6 +74,7 @@ class Onboarding:
     invites: InviteCodes
     token_secret: str
     apex_host: str
+    admin_email_domain: str | None = None
 
     async def advance(self, channel: str, session: str, body: str, install: bytes) -> bytes:
         claim = await self.store.live_claim(channel, session)
@@ -124,7 +128,7 @@ class Onboarding:
                     )
         workspace_id = await self.workspaces.ensure(claim.email_domain, claim.email)
         await self.store.complete(claim.claim_id, workspace_id)
-        return self._signed_in(claim.email, workspace_id, install, accepted)
+        return self._signed_in(claim, workspace_id, install, accepted)
 
     async def _invite_gate(
         self, claim: OnboardClaim, answer: str | None, install: bytes
@@ -169,14 +173,27 @@ class Onboarding:
                     directive("ask", "enter your invite:"),
                 )
 
-    def _signed_in(self, email: str, workspace_id: str, install: bytes, accepted: bytes) -> bytes:
-        token = mint_token(self.token_secret, workspace_id, email)
+    def _signed_in(
+        self, claim: OnboardClaim, workspace_id: str, install: bytes, accepted: bytes
+    ) -> bytes:
+        """The signed-in cap: token and workspace for every member, plus the `debugger` directive
+        — the admin session debugger's base URL — only when the claim's channel-verified email
+        domain is the deploy's admin domain. The gate is server-side policy; every renderer (the
+        terminal client drops unknown verbs) simply carries or ignores the extra line."""
+        token = mint_token(self.token_secret, workspace_id, claim.email)
+        admin = (
+            self.admin_email_domain is not None
+            and claim.email_domain == self.admin_email_domain.lower()
+        )
         return render(
             install,
             accepted,
             directive("token", token),
             directive("workspace", self.workspaces.workspace_url),
-            directive("say", f"signed in: {email}"),
+            directive("debugger", f"{self.workspaces.workspace_url}{DEBUG_SURFACE_PATH}")
+            if admin
+            else b"",
+            directive("say", f"signed in: {claim.email}"),
             directive("ask", PROMPT),
         )
 
@@ -253,6 +270,7 @@ def gateway_app() -> FastAPI:
                 invites=invites,
                 token_secret=_require_env(TOKEN_SECRET_ENV),
                 apex_host=public_apex_host(),
+                admin_email_domain=os.environ.get(ADMIN_EMAIL_DOMAIN_ENV) or None,
             ),
             owner_role=_dsn_role(owner_url),
             serve_role=_dsn_role(serve_url),
@@ -281,6 +299,28 @@ def gateway_app() -> FastAPI:
         assert state is not None
         craft = await state.pool.fetchval("select count(*) from workspace")
         return JSONResponse({"craft": craft})
+
+    @app.get("/login")
+    async def login() -> Response:
+        return HTMLResponse(LOGIN_PAGE)
+
+    @app.post("/v1/onboard/web")
+    async def onboard_web(request: Request) -> Response:
+        assert state is not None
+        session = request.headers.get("x-ufo-session")
+        if not session:
+            return JSONResponse({"error": "x-ufo-session header is required"}, status_code=400)
+        try:
+            if len(session.encode()) > MAX_SESSION_BYTES:
+                raise _RequestInputError("session is too long")
+            body = await _request_body(request)
+            payload = await state.onboarding.advance(WEB_CHANNEL, session, body, b"")
+        except _RequestInputError as error:
+            payload = render(directive("say", str(error)), directive("exit", "1"))
+        except Exception:
+            logger.exception("onboard.failed channel=%s", WEB_CHANNEL)
+            payload = render(directive("say", "onboarding failed"), directive("exit", "1"))
+        return JSONResponse({"directives": parse_directives(payload)})
 
     @app.post("/v1/onboard/{channel}")
     async def onboard(channel: str, request: Request) -> Response:

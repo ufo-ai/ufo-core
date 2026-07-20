@@ -30,7 +30,6 @@ from ufo.hub import InProcessHub, LiveFrame, SkillLoad, ToolCall
 from ufo.loop.compaction import (
     COMPACTED_CONTEXT_PREFIX,
     Compaction,
-    CompactionSummary,
 )
 from ufo.loop.engine import (
     ASK_USER_TOOL,
@@ -105,7 +104,7 @@ from ufo.tools.context import (
     UntrustedContentError,
 )
 from ufo.tools.registry import ToolDef, ToolRegistry
-from ufo.transcript import Conversation
+from ufo.transcript import CompactionSummary, Conversation
 from ufo.workspace import init_workspace_credentials, ws
 
 
