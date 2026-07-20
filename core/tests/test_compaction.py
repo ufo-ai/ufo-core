@@ -411,6 +411,23 @@ async def test_a_summary_missing_required_fields_fails_loud(tmp_path: Path) -> N
         await compaction.maybe_compact(_history())
 
 
+async def test_a_summary_with_trailing_characters_still_parses(tmp_path: Path) -> None:
+    """The live failure behind #467: the model emits a valid summary object then keeps going — a
+    fence, prose, more JSON. The first balanced object is what validates; the tail (which itself
+    contains braces, so a last-brace slice would swallow it) must not break the parse."""
+    text = (
+        f"```json\n{FIXED_SUMMARY.model_dump_json()}\n```\n"
+        'Trailing note: {"delegation": ["a}b"]}'
+    )
+    compaction = _compaction(
+        tmp_path, model=RawTextModel(text=text), trigger_tokens=1, keep_messages=2
+    )
+    result, _ = await compaction.maybe_compact(_history())
+    rendered = str(result[0].content)
+    assert rendered.startswith(COMPACTED_CONTEXT_PREFIX)
+    assert FIXED_SUMMARY.intent in rendered
+
+
 def test_round_output_budget_fits_under_the_compaction_trigger() -> None:
     """Providers require input + max_tokens <= window and the derived trigger is window less the
     summary reserve and buffer, so with the window cancelled the reserve plus buffer must cover a

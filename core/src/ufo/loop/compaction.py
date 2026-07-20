@@ -300,14 +300,38 @@ class Compaction:
 
     def _parse_summary(self, text: str) -> CompactionSummary:
         """Validate the summarize call's output into the typed CompactionSummary. The model is asked
-        for a single JSON object; the outermost braces are extracted (tolerating a stray fence) and
-        validated. An empty, unparseable, or schema-invalid summary raises the module's own
-        RuntimeError (never pydantic's) — a compaction that cannot produce a usable summary fails
-        the turn loud rather than swapping in a degraded window, and every failure mode of this
-        method shares one exception type an operator can filter on."""
+        for a single JSON object; the first balanced object is extracted (tolerating a stray fence,
+        surrounding prose, and trailing characters) and validated. An empty, unparseable, or
+        schema-invalid summary raises the module's own RuntimeError (never pydantic's) — a
+        compaction that cannot produce a usable summary fails the turn loud rather than swapping in
+        a degraded window, and every failure mode of this method shares one exception type an
+        operator can filter on."""
         start = text.find("{")
-        end = text.rfind("}")
-        if start == -1 or end <= start:
+        if start == -1:
+            raise RuntimeError("compaction produced no JSON summary")
+        end = -1
+        depth = 0
+        in_string = False
+        escaped = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+            elif char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    end = index
+                    break
+        if end == -1:
             raise RuntimeError("compaction produced no JSON summary")
         try:
             summary = CompactionSummary.model_validate_json(text[start : end + 1])
