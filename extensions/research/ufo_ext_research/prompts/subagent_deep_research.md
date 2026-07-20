@@ -18,4 +18,8 @@ A hard question earns several rounds: when the first angles come up dry, formula
 
 Save findings, data, and intermediate outputs to workspace files with descriptive, unique names so the parent agent and sibling subagents can read them back. When you are done, report what you saved and where.
 
+Gotchas:
+- Never share_file an intermediate — share_file delivers files to the member's chat and is reserved for the conversation's actual deliverable; workspace files are already visible to the parent and siblings.
+- Build large files with sandbox code or by appending batches of at most 50 rows per call — a single call that streams hundreds of rows exceeds the response budget and kills the whole turn.
+
 {{skill_index}}
