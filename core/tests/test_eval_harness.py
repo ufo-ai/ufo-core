@@ -18,6 +18,7 @@ from typing import cast
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID, uuid4
 
+import lz4.frame
 import pytest
 import sqlalchemy as sa
 from aiobotocore.session import get_session
@@ -114,7 +115,15 @@ from ufo.models.interface import (
 from ufo.models.registry import ModelRegistry
 from ufo.schema import tables
 from ufo.schema.records import AgentChange, Usage
-from ufo.transcript import Conversation, decode, encode, transcript_key
+from ufo.transcript import (
+    CompactionSummary,
+    CompactionWindow,
+    Conversation,
+    compaction_key,
+    decode,
+    encode,
+    transcript_key,
+)
 from ufo.workspace import ws
 
 MODEL = "claude-opus-4-8"
@@ -823,6 +832,24 @@ async def test_capability_case_runs_through_invoke_and_scores_the_trajectory(
     assert len(cast(list[object], trajectory["messages"])) == len(_research_transcript())
 
 
+async def _persist_compaction(
+    blob: FilesystemBlobStore,
+    conversation_id: UUID,
+    before: tuple[Message, ...],
+    summary: CompactionSummary,
+) -> None:
+    after = (Message(role="user", content="compacted head"),)
+    for half, messages in (("before", before), ("after", after)):
+        await blob.put(
+            compaction_key(conversation_id, 1, half),
+            lz4.frame.compress(CompactionWindow(messages=messages).model_dump_json().encode()),
+        )
+    await blob.put(
+        compaction_key(conversation_id, 1, "summary"),
+        lz4.frame.compress(summary.model_dump_json().encode()),
+    )
+
+
 @pytest.mark.parametrize(("compacted", "expected"), ((False, 0), (True, 1)))
 async def test_in_process_target_reads_durable_compaction_state(
     db: None, tmp_path, compacted: bool, expected: int
@@ -844,14 +871,15 @@ async def test_in_process_target_reads_durable_compaction_state(
     agent_id = await _seed_agent(workspace_id)
     blob = FilesystemBlobStore(root=tmp_path)
     conversation_id = await DbConversations(workspace_id).open("compaction-state")
+    before = _research_transcript()
+    summary = CompactionSummary(
+        intent="find the doc",
+        current_work="reading the report",
+        next_step="answer the member",
+        errors=("the first search timed out",),
+    )
     if compacted:
-        await blob.put(
-            harness_target.COMPACTION_SUMMARY_KEY_TEMPLATE.format(
-                conversation_id=conversation_id,
-                index=harness_target.FIRST_COMPACTION_INDEX,
-            ),
-            b"summary",
-        )
+        await _persist_compaction(blob, conversation_id, before, summary)
     worker = StubWorker(blob, workspace_id, _research_transcript())
     ctx = _context(blob, worker)
     target = InProcessTarget(
@@ -869,6 +897,17 @@ async def test_in_process_target_reads_durable_compaction_state(
 
     assert result.clean
     assert result.output.compactions == expected
+    records = result.output.compaction_records
+    assert len(records) == expected
+    if compacted:
+        record = records[0]
+        assert record.index == 1
+        assert record.summary.intent == "find the doc"
+        assert record.summary.errors == ("the first search timed out",)
+        assert record.before_count == len(before)
+        assert record.after_count == 1
+        assert not record.windows_omitted
+        assert len(record.before) == len(before)
 
 
 async def test_eval_trajectory_omits_images_and_private_handoffs(db: None, tmp_path) -> None:
@@ -2215,9 +2254,39 @@ def _debug_evidence(response: str, tools: tuple[str, ...] = ()) -> dict[str, obj
                 ],
                 "toolErrors": ["boom: tool fell over"],
                 "artifacts": [],
+                "artifactReferences": [
+                    {
+                        "name": "report.pdf",
+                        "blobKey": "conversations/x/artifacts/report.pdf",
+                        "digest": "sha256:dead",
+                        "sizeBytes": 2048,
+                    }
+                ],
                 "artifactError": None,
                 "tokens": 140,
                 "costMicroUsd": 9,
+                "compactions": 1,
+                "compactionRecords": [
+                    {
+                        "index": 1,
+                        "summary": {
+                            "intent": "keep the thread",
+                            "current_work": "summarizing",
+                            "next_step": "answer",
+                            "concepts": [],
+                            "files": [],
+                            "errors": ["a search timed out"],
+                            "decisions": [],
+                            "pending": [],
+                            "loaded_skills": [],
+                        },
+                        "before_count": 2,
+                        "after_count": 1,
+                        "before": [{"role": "user", "content": "old head"}],
+                        "after": [{"role": "user", "content": "compacted head"}],
+                        "windows_omitted": False,
+                    }
+                ],
                 "grader": {"recallRank": 2},
                 "judge": [{"criterion": "finish the work", "passed": True, "reason": "work shown"}],
                 "log": {"event": "memory.recall", "attributes": {"memoryIds": []}},
@@ -2302,6 +2371,12 @@ def test_eval_run_archive_renders_debug_evidence_and_escapes_script_data(tmp_pat
     assert '"toolErrors":["boom: tool fell over"]' in html
     assert '"log":{"event":"memory.recall"' in html
     assert '"memberKey":"member@example.com"' in html
+    assert "Compactions" in html
+    assert "compaction #${record.index}" in html
+    assert '"intent":"keep the thread"' in html
+    assert '"before_count":2' in html
+    assert "report.pdf" in html
+    assert '"sizeBytes":2048' in html
     assert '"webDependent":true' in html
     assert '"suiteSpecificContext":{"snapshotEpoch":4}' in html
     assert "Judge verdicts" in html

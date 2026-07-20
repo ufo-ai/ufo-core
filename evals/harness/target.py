@@ -24,6 +24,7 @@ from evals.harness.capability import (
     EvalTrajectory,
     SharedArtifact,
     SharedArtifactReference,
+    StoredCompaction,
     ToolInvocation,
     TurnLog,
     WorkspaceFile,
@@ -36,7 +37,13 @@ from ufo.schema import tables
 from ufo.schema.records import CredentialRequest, TerminalFrame, TurnStatus
 from ufo.sdk.context import ExtensionContext, Trajectory
 from ufo.sdk.models import ImageBlock, Message, TextBlock, ToolResultBlock, ToolUseBlock
-from ufo.transcript import TranscriptDecodeError, decode, transcript_key
+from ufo.transcript import (
+    CompactionRecord,
+    TranscriptDecodeError,
+    decode,
+    read_compaction_records,
+    transcript_key,
+)
 
 if TYPE_CHECKING:
     from evals.compaction.target import CompactionTarget
@@ -46,15 +53,12 @@ MAX_EVAL_ARTIFACTS = 256
 MAX_EVAL_ARTIFACT_BYTES = 16 * 1024 * 1024
 MAX_EVAL_ARTIFACT_TOTAL_BYTES = 32 * 1024 * 1024
 MAX_EVAL_TRAJECTORY_BYTES = 8 * 1024 * 1024
+MAX_EVAL_COMPACTION_BYTES = 8 * 1024 * 1024
 PRIVATE_HANDOFF_TOOL = "request_credentials"
 PRIVATE_HANDOFF_REDACTED = "[private handoff redacted]"
 TERMINAL_CHILD_STATUSES = frozenset({"done", "failed", "cancelled"})
 CHILD_TRANSCRIPT_POLL_SECONDS = 0.2
 CHILD_TRANSCRIPT_POLL_ATTEMPTS = 25
-FIRST_COMPACTION_INDEX = 1
-COMPACTION_SUMMARY_KEY_TEMPLATE = (
-    "conversations/{conversation_id}/compactions/{index}/summary.json.lz4"
-)
 
 
 @dataclass(frozen=True)
@@ -203,20 +207,14 @@ class InProcessTarget:
             output = replace(output, log=log)
         if self.blob is not None:
             collected = await self._shared_artifacts((turn_id, *settled.descendant_ids))
-            compactions = int(
-                await self.blob.exists(
-                    COMPACTION_SUMMARY_KEY_TEMPLATE.format(
-                        conversation_id=conversation_id,
-                        index=FIRST_COMPACTION_INDEX,
-                    )
-                )
-            )
+            records = await read_compaction_records(self.blob, conversation_id)
             output = replace(
                 output,
                 artifacts=collected.artifacts,
                 artifact_references=collected.references,
                 artifact_error=collected.error,
-                compactions=compactions,
+                compactions=len(records),
+                compaction_records=compaction_snapshots(records),
             )
         return replace(result, output=output)
 
@@ -507,6 +505,40 @@ def trajectory_snapshot(
         error=(
             f"stored transcript snapshot exceeds {MAX_EVAL_TRAJECTORY_BYTES} bytes and was omitted"
         ),
+    )
+
+
+def compaction_snapshots(records: tuple[CompactionRecord, ...]) -> tuple[StoredCompaction, ...]:
+    """The storable form of a conversation's compactions: each summary and window-count kept, each
+    window redacted like a trajectory. Windows are dropped (summaries kept) once their combined size
+    crosses the budget, mirroring `trajectory_snapshot` — the same reason a large transcript is
+    omitted. The live target and the offline reconstruction both store compactions only through
+    this."""
+    snapshots: list[StoredCompaction] = []
+    for record in records:
+        private_results, private_values = _private_handoffs((*record.before, *record.after))
+        snapshots.append(
+            StoredCompaction(
+                index=record.index,
+                summary=record.summary,
+                before_count=len(record.before),
+                after_count=len(record.after),
+                before=_safe_messages(record.before, private_results, private_values),
+                after=_safe_messages(record.after, private_results, private_values),
+            )
+        )
+    total_bytes = sum(len(snapshot.model_dump_json().encode()) for snapshot in snapshots)
+    if total_bytes <= MAX_EVAL_COMPACTION_BYTES:
+        return tuple(snapshots)
+    return tuple(
+        StoredCompaction(
+            index=snapshot.index,
+            summary=snapshot.summary,
+            before_count=snapshot.before_count,
+            after_count=snapshot.after_count,
+            windows_omitted=True,
+        )
+        for snapshot in snapshots
     )
 
 

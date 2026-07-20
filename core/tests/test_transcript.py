@@ -1,5 +1,5 @@
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import lz4.frame
 import pytest
@@ -14,7 +14,15 @@ from ufo.models.interface import (
     TextBlock,
     ToolResultBlock,
 )
-from ufo.transcript import Conversation, decode, transcript_key
+from ufo.transcript import (
+    CompactionSummary,
+    CompactionWindow,
+    Conversation,
+    compaction_key,
+    decode,
+    read_compaction_records,
+    transcript_key,
+)
 
 
 def _transcript(tmp_path: Path) -> Transcript:
@@ -116,3 +124,34 @@ async def test_writer_bytes_decode_through_the_shared_contract(tmp_path: Path) -
     conversation = Conversation(seq=1, messages=(Message(role="user", content="hi"),))
     await Transcript(blob=blob, conversation_id=conversation_id).write(conversation)
     assert decode(await blob.get(transcript_key(conversation_id))) == conversation
+
+
+async def _write_compaction(blob: FilesystemBlobStore, conversation_id: UUID, index: int) -> None:
+    for half, messages in (
+        ("before", (Message(role="user", content=f"before {index}"),)),
+        ("after", (Message(role="user", content=f"after {index}"),)),
+    ):
+        await blob.put(
+            compaction_key(conversation_id, index, half),
+            lz4.frame.compress(CompactionWindow(messages=messages).model_dump_json().encode()),
+        )
+    summary = CompactionSummary(intent=f"intent {index}", current_work="", next_step="")
+    await blob.put(
+        compaction_key(conversation_id, index, "summary"),
+        lz4.frame.compress(summary.model_dump_json().encode()),
+    )
+
+
+async def test_read_compaction_records_walks_every_index(tmp_path: Path) -> None:
+    blob = FilesystemBlobStore(root=tmp_path)
+    conversation_id = uuid4()
+    await _write_compaction(blob, conversation_id, 1)
+    await _write_compaction(blob, conversation_id, 2)
+    records = await read_compaction_records(blob, conversation_id)
+    assert tuple(record.index for record in records) == (1, 2)
+    assert records[0].summary.intent == "intent 1"
+
+
+async def test_read_compaction_records_is_empty_without_compactions(tmp_path: Path) -> None:
+    blob = FilesystemBlobStore(root=tmp_path)
+    assert await read_compaction_records(blob, uuid4()) == ()

@@ -23,9 +23,8 @@ from evals.driver import EVAL_SURFACE
 from evals.harness.capability import EvalTrajectory, recorded_evidence_missing
 from evals.harness.harness import EvalCaseResult, EvalReport, Json, JsonObject
 from evals.harness.target import (
-    COMPACTION_SUMMARY_KEY_TEMPLATE,
-    FIRST_COMPACTION_INDEX,
     capability_output,
+    compaction_snapshots,
     trajectory_snapshot,
 )
 from evals.harness.viewer import EvalRun, render_viewer, write_atomic
@@ -33,7 +32,13 @@ from ufo.blob import BlobNotFound, BlobStore
 from ufo.db import workspace_tx
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame
-from ufo.transcript import Conversation, TranscriptDecodeError, decode, transcript_key
+from ufo.transcript import (
+    Conversation,
+    TranscriptDecodeError,
+    decode,
+    read_compaction_records,
+    transcript_key,
+)
 
 RECONSTRUCTIONS_DIR = "reconstructions"
 
@@ -167,13 +172,7 @@ class RunReconstruction:
         snapshot = trajectory_snapshot(conversation_id, turn.id, turn.status, conversation.messages)
         turn_ids = await self._turn_tree(turn.id)
         tokens, cost_micro_usd = await self._resources(turn_ids)
-        compactions = int(
-            await self.blob.exists(
-                COMPACTION_SUMMARY_KEY_TEMPLATE.format(
-                    conversation_id=conversation_id, index=FIRST_COMPACTION_INDEX
-                )
-            )
-        )
+        records = await read_compaction_records(self.blob, conversation_id)
         calls: list[Json] = [
             {
                 "name": call.name,
@@ -195,7 +194,10 @@ class RunReconstruction:
             "tokens": tokens,
             "costMicroUsd": cost_micro_usd,
             "log": None,
-            "compactions": compactions,
+            "compactions": len(records),
+            "compactionRecords": (
+                [record.model_dump(mode="json") for record in compaction_snapshots(records)] or None
+            ),
             "grader": attempt.grader,
             "trajectory": snapshot.model_dump(mode="json"),
         }

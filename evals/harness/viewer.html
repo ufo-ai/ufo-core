@@ -22,6 +22,8 @@
   --amber-deep: #44371d;
   --blue: #96c7ff;
   --blue-deep: #21374c;
+  --purple: #cbb0ff;
+  --purple-deep: #322549;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 * { box-sizing: border-box; }
@@ -190,8 +192,9 @@ select {
 .pass { color: var(--green); background: var(--green-deep); }
 .fail, .regressed { color: var(--red); background: var(--red-deep); }
 .excluded, .changed { color: var(--amber); background: var(--amber-deep); }
-.fixed, .new { color: var(--blue); background: var(--blue-deep); }
+.fixed, .new, .running { color: var(--blue); background: var(--blue-deep); }
 .missing, .same { color: var(--muted); background: #292f29; }
+.compaction { color: var(--purple); background: var(--purple-deep); }
 .filters { display: flex; gap: 5px; flex-wrap: wrap; padding: 8px 8px 2px; }
 .filter {
   border: 1px solid var(--line);
@@ -504,8 +507,8 @@ function callMarkup(attState) {
   };
 }
 const ATTEMPT_KEYS = new Set(['passed', 'reason', 'response', 'calls', 'toolErrors', 'artifacts',
-  'artifactError', 'tokens', 'costMicroUsd', 'compactions', 'log', 'grader', 'judge', 'turns',
-  'stopped', 'trajectory']);
+  'artifactReferences', 'artifactError', 'tokens', 'costMicroUsd', 'compactions',
+  'compactionRecords', 'log', 'grader', 'judge', 'turns', 'stopped', 'trajectory']);
 const CASE_EVIDENCE_KEYS = new Set(['message', 'grading', 'rubric', 'memberKey', 'webDependent',
   'reconstructed', 'selectedAttempt', 'attempts', 'user', 'maxTurns', 'claims', 'claimVerdicts',
   'claimCoverage', 'enabledTools', 'exposedTools', 'omittedEnabledTools', 'referenceTools',
@@ -568,10 +571,58 @@ function responseMarkup(attempt) {
   if (attempt.response == null) return EVIDENCE_UNRECORDED;
   return attempt.response === '' ? 'The turn recorded no final response text.' : attempt.response;
 }
+const STATUS_CLASS = {done: 'pass', failed: 'fail', cancelled: 'fail', running: 'running',
+  queued: 'running', parked: 'excluded'};
+function statusBadge(status) {
+  const label = status || 'not admitted';
+  return `<span class="badge ${STATUS_CLASS[status] || 'missing'}">${h(label)}</span>`;
+}
+function compactionSummary(summary) {
+  const lines = [];
+  const scalar = [['intent', summary.intent], ['current work', summary.current_work],
+    ['next step', summary.next_step]];
+  for (const [label, value] of scalar) if (value) lines.push(`${label}: ${value}`);
+  const list = [['concepts', summary.concepts], ['errors', summary.errors],
+    ['decisions', summary.decisions], ['pending', summary.pending],
+    ['loaded skills', summary.loaded_skills]];
+  for (const [label, values] of list) {
+    if (Array.isArray(values) && values.length) lines.push(`${label}: ${values.join(' · ')}`);
+  }
+  if (Array.isArray(summary.files) && summary.files.length) {
+    lines.push('files:');
+    for (const file of summary.files) lines.push(`  ${file.path} — ${file.why}`);
+  }
+  return lines.join('\n');
+}
+function compactionMarkup(record) {
+  const windows = record.windows_omitted
+    ? '<div class="empty">Windows omitted to keep the archive bounded.</div>'
+    : `<details class="call"><summary>Before window · ${record.before_count} messages</summary><div class="call-body">${messagesMarkup(record.before || [])}</div></details>
+    <details class="call"><summary>After window · ${record.after_count} messages</summary><div class="call-body">${messagesMarkup(record.after || [])}</div></details>`;
+  return `<details class="call"><summary><span class="badge compaction">compaction #${record.index}</span> · ${record.before_count} → ${record.after_count} messages</summary>
+    <div class="call-body">
+      <div class="section"><div class="section-title">Summary</div><pre>${h(compactionSummary(record.summary))}</pre></div>
+      ${windows}
+    </div></details>`;
+}
+function compactionsMarkup(attempt) {
+  const records = attempt.compactionRecords;
+  if (!records || !records.length) return '';
+  return `<div class="section"><div class="section-title">Compactions · ${records.length}</div>${records.map(compactionMarkup).join('')}</div>`;
+}
+function artifactsMarkup(attempt) {
+  const references = attempt.artifactReferences;
+  const error = attempt.artifactError ? `<pre>${h(attempt.artifactError)}</pre>` : '';
+  if (Array.isArray(references) && references.length) {
+    const rows = references.map(ref => `${ref.name} · ${ref.sizeBytes} bytes · ${ref.digest}`).join('\n');
+    return `<div class="section"><div class="section-title">Artifacts · ${references.length}</div><pre>${h(rows)}</pre>${error}</div>`;
+  }
+  const artifacts = attempt.artifacts || [];
+  return `<div class="section"><div class="section-title">Artifacts</div><pre>${h(artifacts.length ? artifacts.join('\n') : 'None')}</pre>${error}</div>`;
+}
 function attemptMarkup(attempt, index, selected, kind) {
   const attState = attemptState(attempt);
   const calls = attempt.calls || [];
-  const artifacts = attempt.artifacts || [];
   const trajectory = attempt.trajectory
     ? `<a class="trajectory-link" href="${h(stateHash({trajectory: kind + ':' + index}))}">View trajectory →</a>`
     : attState === 'complete' ? '' : `<span class="trajectory-meta">Trajectory: ${h(EVIDENCE_UNRECORDED)}</span>`;
@@ -586,9 +637,10 @@ function attemptMarkup(attempt, index, selected, kind) {
       ${judgeMarkup(attempt.judge)}
       <div class="section"><div class="section-title">Tool trajectory · ${calls.length}</div>${calls.length ? calls.map(callMarkup(attState)).join('') : '<div class="empty">No tool calls.</div>'}</div>
       ${toolErrorsMarkup(attempt.toolErrors)}
+      ${compactionsMarkup(attempt)}
       ${jsonSection('Grader evidence', attempt.grader)}
       ${jsonSection('Turn log', attempt.log)}
-      <div class="section"><div class="section-title">Artifacts</div><pre>${h(artifacts.length ? artifacts.join('\n') : 'None')}${attempt.artifactError ? '\n' + h(attempt.artifactError) : ''}</pre></div>
+      ${artifactsMarkup(attempt)}
       ${jsonSection('Other attempt evidence', unrendered(attempt, ATTEMPT_KEYS))}
     </div></details>`;
 }
@@ -663,11 +715,12 @@ function trajectoryMarkup(kind, run, report, item, attempt, index) {
   return `<section class="detail">
     <div class="trajectory-head"><a class="trajectory-link" href="${h(stateHash({trajectory: ''}))}">← Back to report</a>
       <h2>${h(item.name)} · attempt ${index + 1}</h2>
-      <div class="trajectory-meta">${h(kind)} · run ${h(shortId(run))}<br>conversation ${h(trajectory.conversation_id)}<br>turn ${h(trajectory.turn_id || 'not admitted')} · status ${h(trajectory.status || 'not admitted')}</div>
+      <div class="trajectory-meta">${h(kind)} · run ${h(shortId(run))}<br>conversation ${h(trajectory.conversation_id)}<br>turn ${h(trajectory.turn_id || 'not admitted')} · status ${statusBadge(trajectory.status)}</div>
     </div>
     <div class="trajectory-body">
       ${trajectory.error ? `<div class="reason negative">${h(trajectory.error)}</div>` : ''}
       ${agentPrompt}
+      ${compactionsMarkup(attempt)}
       <div class="section"><div class="section-title">Stored transcript snapshot · ${(trajectory.messages || []).length} messages</div>${messagesMarkup(trajectory.messages || [])}</div>
     </div>
   </section>`;

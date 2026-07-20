@@ -12,6 +12,7 @@ from uuid import UUID
 import lz4.frame
 from pydantic import BaseModel, ConfigDict, Field
 
+from ufo.blob import BlobNotFound, BlobStore
 from ufo.models.interface import Message
 
 
@@ -103,3 +104,30 @@ def decode_compaction(index: int, before: bytes, after: bytes, summary: bytes) -
         )
     except (ValueError, RuntimeError) as error:
         raise TranscriptDecodeError(str(error)) from error
+
+
+async def read_compaction_record(
+    blob: BlobStore, conversation_id: UUID, index: int
+) -> CompactionRecord | None:
+    """One compaction's durable record, or None when that index holds no record — the per-index
+    fetch every read role (the debug surface, the eval harness) shares with the write role."""
+    try:
+        before = await blob.get(compaction_key(conversation_id, index, "before"))
+        after = await blob.get(compaction_key(conversation_id, index, "after"))
+        summary = await blob.get(compaction_key(conversation_id, index, "summary"))
+    except BlobNotFound:
+        return None
+    return decode_compaction(index, before, after, summary)
+
+
+async def read_compaction_records(
+    blob: BlobStore, conversation_id: UUID
+) -> tuple[CompactionRecord, ...]:
+    """Every compaction a conversation persisted, oldest first. Indices are written sequentially
+    from one, so the first absent index ends the walk."""
+    records: list[CompactionRecord] = []
+    index = 1
+    while (record := await read_compaction_record(blob, conversation_id, index)) is not None:
+        records.append(record)
+        index += 1
+    return tuple(records)

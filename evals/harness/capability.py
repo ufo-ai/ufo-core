@@ -20,6 +20,7 @@ from evals.harness.harness import EvalCaseResult, Json, JsonObject, infra_error
 from evals.harness.judge import JUDGE_REVISION, CriterionVerdict, rubric_pass
 from ufo.schema.records import TurnStatus
 from ufo.sdk.models import Message
+from ufo.transcript import CompactionSummary
 
 if TYPE_CHECKING:
     from evals.harness.target import CapabilityTarget
@@ -102,6 +103,23 @@ class EvalTrajectory(BaseModel):
     error: str = ""
 
 
+class StoredCompaction(BaseModel):
+    """One compaction the evaluated turn performed, in its archive form: the typed summary the head
+    was compressed into, the count of messages on each side of the boundary, and the redacted
+    before/after windows. `windows_omitted` marks a record whose windows were dropped to keep the
+    archive bounded — the summary and counts always survive."""
+
+    model_config = ConfigDict(frozen=True)
+
+    index: int
+    summary: CompactionSummary
+    before_count: int
+    after_count: int
+    before: tuple[Message, ...] = ()
+    after: tuple[Message, ...] = ()
+    windows_omitted: bool = False
+
+
 @dataclass(frozen=True)
 class CapabilityOutput:
     """The answer, tool trajectory, artifacts, and allowlisted log visible to a grader."""
@@ -114,6 +132,7 @@ class CapabilityOutput:
     artifact_error: str = ""
     log: TurnLog | None = None
     compactions: int = 0
+    compaction_records: tuple[StoredCompaction, ...] = ()
     tokens: int = 0
     cost_micro_usd: int = 0
 
@@ -274,6 +293,10 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
                     None if sample_output.log is None else sample_output.log.model_dump(mode="json")
                 ),
                 "compactions": sample_output.compactions,
+                "compactionRecords": (
+                    [record.model_dump(mode="json") for record in sample_output.compaction_records]
+                    or None
+                ),
                 "grader": sample_verdict.evidence or None,
                 "judge": (
                     [

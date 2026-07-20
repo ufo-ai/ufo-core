@@ -86,9 +86,8 @@ from ufo.seats import create_member
 from ufo.transcript import (
     CompactionRecord,
     Conversation,
-    compaction_key,
     decode,
-    decode_compaction,
+    read_compaction_record,
     transcript_key,
 )
 from ufo.workspace import ws, ws_current
@@ -797,13 +796,7 @@ class SurfaceContext:
         no record."""
         if not await self._owned_conversation(conversation_id):
             return None
-        try:
-            before = await self.blob.get(compaction_key(conversation_id, index, "before"))
-            after = await self.blob.get(compaction_key(conversation_id, index, "after"))
-            summary = await self.blob.get(compaction_key(conversation_id, index, "summary"))
-        except BlobNotFound:
-            return None
-        return decode_compaction(index, before, after, summary)
+        return await read_compaction_record(self.blob, conversation_id, index)
 
     async def list_workspace_files(self, conversation_id: UUID) -> tuple[WorkspaceFile, ...]:
         """Every file in the conversation's `workspace/` subtree — the sandbox's working files —

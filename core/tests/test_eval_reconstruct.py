@@ -7,10 +7,10 @@ from datetime import UTC, datetime, timedelta
 from json import loads
 from uuid import UUID, uuid4
 
+import lz4.frame
 import sqlalchemy as sa
 
 from evals.harness.harness import EvalCaseResult, EvalReport, JsonObject
-from evals.harness.target import COMPACTION_SUMMARY_KEY_TEMPLATE
 from evals.harness.viewer import EvalRun, load_runs
 from evals.reconstruct import RunReconstruction, write_reconstruction
 from ufo.blob import FilesystemBlobStore
@@ -18,7 +18,12 @@ from ufo.db import workspace_tx
 from ufo.loop.transcript import Transcript
 from ufo.models.interface import Message, ToolResultBlock, ToolUseBlock
 from ufo.schema import tables
-from ufo.transcript import Conversation
+from ufo.transcript import (
+    CompactionSummary,
+    CompactionWindow,
+    Conversation,
+    compaction_key,
+)
 from ufo.workspace import ws
 
 MODEL = "claude-opus-4-8"
@@ -124,9 +129,23 @@ async def _seed_case_conversation(
             ),
         )
     )
+    summary = CompactionSummary(
+        intent="sentinel intent",
+        current_work="sentinel work",
+        next_step="sentinel next",
+    )
+    windows = {
+        "before": (Message(role="user", content="sentinel before"),),
+        "after": (Message(role="user", content="sentinel after"),),
+    }
+    for half, messages in windows.items():
+        await blob.put(
+            compaction_key(conversation_id, 1, half),
+            lz4.frame.compress(CompactionWindow(messages=messages).model_dump_json().encode()),
+        )
     await blob.put(
-        COMPACTION_SUMMARY_KEY_TEMPLATE.format(conversation_id=conversation_id, index=1),
-        b"summary",
+        compaction_key(conversation_id, 1, "summary"),
+        lz4.frame.compress(summary.model_dump_json().encode()),
     )
     return conversation_id, turn_id
 
@@ -226,6 +245,8 @@ async def test_reconstruction_rebuilds_evidence_without_mutating_the_original_ru
         '"confidence": 40',
         '"tokens": 55',
         '"compactions": 1',
+        "sentinel intent",
+        "sentinel before",
         "solution.py",
         "public question",
     ):
@@ -245,6 +266,11 @@ async def test_reconstruction_rebuilds_evidence_without_mutating_the_original_ru
     calls = attempt["calls"]
     assert isinstance(calls, list) and isinstance(calls[0], dict)
     assert calls[0]["input"] == {"command": "sentinel durable command"}
+    records = attempt["compactionRecords"]
+    assert isinstance(records, list) and isinstance(records[0], dict)
+    assert records[0]["index"] == 1
+    assert records[0]["summary"]["intent"] == "sentinel intent"
+    assert records[0]["before_count"] == 1
     assert unmatched.evidence["reconstructed"] is True
     unmatched_attempts = unmatched.evidence["attempts"]
     assert isinstance(unmatched_attempts, list) and isinstance(unmatched_attempts[0], dict)
