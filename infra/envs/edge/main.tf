@@ -39,6 +39,11 @@ resource "cloudflare_zone_setting" "always_use_https" {
   depends_on = [cloudflare_ruleset.https_redirect]
 }
 
+# One live fleet (testing) behind two front doors: both apexes proxy /ufo from the testing
+# gateway, whose stamped script boards clients onto that fleet, and stamp the landing page with
+# its craft count. The apex has no gateway origin of its own — pointing origin_base at
+# flyingobject.ai makes the worker fetch its own originless zone (404). The doors' skies diverge
+# when prod gets its own fleet (repoint origin_base).
 module "prod" {
   source = "../../modules/edge"
 
@@ -46,7 +51,7 @@ module "prod" {
   hostname    = "flyingobject.ai"
   zone_id     = data.cloudflare_zone.flyingobject_ai.id
   account_id  = data.cloudflare_zone.flyingobject_ai.account.id
-  origin_base = "https://flyingobject.ai"
+  origin_base = "https://testing.flyingobject.ai"
 }
 
 module "testing" {
