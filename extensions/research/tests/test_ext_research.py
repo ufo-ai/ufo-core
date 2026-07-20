@@ -45,7 +45,9 @@ SEARCH_WEB_DESCRIPTION = (
 FETCH_URL_DESCRIPTION = (
     "Fetches content from an HTTP/HTTPS URL. Optionally extracts specific information via LLM "
     "prompt. Use to read web pages, documentation, articles, or any publicly accessible URL. "
-    "Results are cached — use force_fetch=true if content appears stale."
+    "Results are cached — use force_fetch=true if content appears stale. Fetches run through a "
+    "crawler whose session is not yours: identity or account context in a response is the "
+    "crawler's, so call APIs from bash instead of fetching them."
 )
 
 
@@ -228,7 +230,12 @@ async def test_fetch_url_maps_the_page_and_passes_the_extraction_prompt() -> Non
         True,
     )
     reply = json.loads(result.content[0].text)
-    assert reply == {"url": "https://ex.test/a", "text": "page text", "summary": "the summary"}
+    assert reply == {
+        "url": "https://ex.test/a",
+        "text": "page text",
+        "provenance": research_tools.CRAWLER_PROVENANCE,
+        "summary": "the summary",
+    }
 
 
 async def test_fetch_url_is_gated_when_the_provider_cannot_fetch() -> None:
@@ -237,6 +244,17 @@ async def test_fetch_url_is_gated_when_the_provider_cannot_fetch() -> None:
     assert result.is_error is True
     assert result.content[0].text == research_tools.FETCH_UNSUPPORTED_MESSAGE
     assert provider.fetches == []
+
+
+async def test_fetch_url_walls_every_page_with_crawler_provenance() -> None:
+    provider = _FakeSearchProvider()
+    result = await _run(
+        "fetch_url", provider, url="https://api.github.com/user", user_description="read it"
+    )
+    assert result.is_error is False
+    reply = json.loads(result.content[0].text)
+    assert reply["provenance"] == research_tools.CRAWLER_PROVENANCE
+    assert "crawler's own session" in reply["provenance"]
 
 
 async def test_web_tools_fail_loud_without_a_search_provider() -> None:

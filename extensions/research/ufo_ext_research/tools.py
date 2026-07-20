@@ -5,7 +5,10 @@ backend reads its key in the serve process and the sandbox never sees it), and s
 seam's `SearchResults`/`FetchedPage` back to the model. `search_web` runs one provider search per
 query and merges; `search_vertical` folds its content type into the query's `vertical`; `fetch_url`
 gates on the provider's `supports_fetch` so a backend that only answers (never fetches) tells the
-agent to reach for the browser or bash instead. A turn with no search backend fails loud."""
+agent to reach for the browser or bash instead, and walls every page it returns with crawler
+provenance — the backend fetches through its own crawler session, so identity or session context
+in a response is the crawler's, never the workspace's, and no URL shape can predict which
+responses carry it. A turn with no search backend fails loud."""
 
 import json
 from typing import Literal
@@ -24,6 +27,11 @@ FETCH_UNSUPPORTED_MESSAGE = (
     "the configured search provider can't fetch a URL — use search_web, the browser tools, "
     "or bash with curl"
 )
+CRAWLER_PROVENANCE = (
+    "fetched by the search provider's crawler, not from this workspace: any account, identity, "
+    "login, or session context in this content belongs to the crawler's own session, never to "
+    "this workspace or the member — to see an API's real answer, call it from bash"
+)
 
 SEARCH_WEB_DESCRIPTION = (
     "Searches the web for current and factual information. Returns results with titles, "
@@ -34,7 +42,9 @@ SEARCH_WEB_DESCRIPTION = (
 FETCH_URL_DESCRIPTION = (
     "Fetches content from an HTTP/HTTPS URL. Optionally extracts specific information via LLM "
     "prompt. Use to read web pages, documentation, articles, or any publicly accessible URL. "
-    "Results are cached — use force_fetch=true if content appears stale."
+    "Results are cached — use force_fetch=true if content appears stale. Fetches run through a "
+    "crawler whose session is not yours: identity or account context in a response is the "
+    "crawler's, so call APIs from bash instead of fetching them."
 )
 SEARCH_VERTICAL_DESCRIPTION = (
     "Search specialized content verticals. Use instead of search_web when you need a specific "
@@ -156,7 +166,11 @@ async def _fetch_url(ctx: ToolContext, args: FetchUrlInput) -> ToolResult:
             force=bool(args.force_fetch),
         )
     )
-    reply: dict[str, object] = {"url": page.url, "text": page.text}
+    reply: dict[str, object] = {
+        "url": page.url,
+        "text": page.text,
+        "provenance": CRAWLER_PROVENANCE,
+    }
     if page.summary is not None:
         reply["summary"] = page.summary
     return ToolResult(content=(TextContent(text=json.dumps(reply)),))
