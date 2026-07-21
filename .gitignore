@@ -19,5 +19,10 @@ eval-reports/
 *.db
 ufo.db-*
 .coverage
-.claude/
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/review-pull-request/
+.claude/skills/review-pull-request/*
+!.claude/skills/review-pull-request/SKILL.md
 .worktrees/
