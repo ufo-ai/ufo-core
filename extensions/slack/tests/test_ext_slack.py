@@ -1317,6 +1317,60 @@ async def test_channel_persists_the_speaker_without_claiming_the_conversation(
     assert row.member_id is None
 
 
+async def test_shared_channel_foreign_team_message_is_guest_skipped(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """A Slack Connect shared channel carries external-org members the app never serves. The
+    top-level `team_id` is the bound, receiving workspace (Slack authorizes the installed app), so
+    only the author's own team — `source_team`/`user_team`, present on shared-channel events —
+    marks them foreign. A foreign author is a bystander: no users.info read, no member resolution,
+    no turn, no error. A same-team author in the very same channel still admits their turn."""
+    workspace_id, _ = await _seed(member_email="owner@example.com")
+    recorder: list[httpx.Request] = []
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    foreign = _event_body(
+        type="app_mention",
+        user="UEXT",
+        channel="C1",
+        ts="100.0",
+        text=f"<@{BOT_USER_ID}> hi from another org",
+        source_team="T0FOREIGN",
+        user_team="T0FOREIGN",
+    )
+    same_team = _event_body(
+        type="app_mention",
+        user="U1",
+        channel="C1",
+        ts="200.0",
+        text=f"<@{BOT_USER_ID}> hi from home",
+        source_team=TEAM_ID,
+        user_team=TEAM_ID,
+    )
+    async with client:
+        skipped = await client.post(
+            EVENTS_PATH, content=foreign, headers=_sign(foreign, int(time.time()))
+        )
+        assert skipped.json() == {"ok": True, "ignored": True}
+        admitted = await client.post(
+            EVENTS_PATH, content=same_team, headers=_sign(same_team, int(time.time()))
+        )
+        assert admitted.json() == {"ok": True}
+    assert not _fetches(recorder, f"{slack.SLACK_USERS_INFO_URL}?user=UEXT")
+    async with workspace_tx() as connection:
+        keys = (
+            (
+                await connection.execute(
+                    sa.select(tables.turn.c.idempotency_key).where(
+                        tables.turn.c.workspace_id == workspace_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert keys == ["C1:200.0"]
+
+
 async def test_first_time_same_domain_dm_speaker_joins_as_a_member(
     db: None, tmp_path, monkeypatch
 ) -> None:

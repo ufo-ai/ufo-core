@@ -707,6 +707,16 @@ async def ingest(ctx: SurfaceContext, request: Request) -> Response:
     return JSONResponse({"ok": True})
 
 
+def _author_is_foreign(event: Mapping[str, object], team_id: str) -> bool:
+    """Whether the message author belongs to another Slack org. True only in a Slack Connect shared
+    channel, where the author's own team rides the event as `source_team`/`user_team` (absent on
+    same-team traffic) while the top-level `team_id` stays the bound, receiving workspace. External
+    Connect members are bystanders the app never serves — Slack returns no email for them, so they
+    resolve to no member — and are skipped before any turn or identity read."""
+    author_team = event.get("source_team") or event.get("user_team")
+    return isinstance(author_team, str) and author_team != team_id
+
+
 async def _to_inbound(
     ctx: SurfaceContext, payload: Mapping[str, object], identity: SlackIdentity
 ) -> Inbound | None:
@@ -718,6 +728,8 @@ async def _to_inbound(
     bot_user_id = identity.bot_user_id
     user = event.get("user")
     if not isinstance(user, str) or not user or user == bot_user_id:
+        return None
+    if _author_is_foreign(event, identity.team_id):
         return None
     is_dm = event.get("channel_type") == "im"
     addressed = slack_message_addressed(event, bot_user_id, is_dm)
