@@ -94,11 +94,15 @@ class AnthropicClient:
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         """Yield text and tool-call events then exactly one Usage as the final event.
 
-        429/5xx responses retry with retry-after-aware exponential backoff, and request timeouts
-        retry on the same backoff and shared attempt budget (each retry logged, exhaustion logged
-        and re-raising the timeout) — both only until the first event is yielded; any failure
-        after that raises immediately. A streamed request surfaces its timeout as a raw httpx
-        timeout during iteration (the SDK wraps only the create call), so the retry catches both.
+        Every provider failure except a deterministic 4xx client error (400-499 other than 429)
+        retries with retry-after-aware exponential backoff, and request timeouts retry on the same
+        backoff and shared attempt budget (each retry logged, exhaustion logged and re-raising the
+        timeout) — both only until the first event is yielded; any failure after that raises
+        immediately. A streamed request surfaces its timeout as a raw httpx timeout during
+        iteration (the SDK wraps only the create call), so the retry catches both. A mid-stream
+        error event (overloaded, or a transient api_error) arrives on the already-200 stream
+        response and so carries status_code 200 — keying retry off the single non-retryable case
+        (a deterministic 4xx) catches it where a 5xx allowlist would let a 200-coded fault through.
         stop_reason=max_tokens is a truncated completion and raises ModelResponseTruncated;
         stop_reason=refusal raises
         ModelRefusal (deterministic per request — never retried, never an empty success).
@@ -203,8 +207,10 @@ class AnthropicClient:
                 continue
             except anthropic.APIStatusError as error:
                 attempt += 1
-                retryable = error.status_code == 429 or error.status_code >= 500
-                if yielded or not retryable or attempt > MAX_PROVIDER_RETRIES:
+                deterministic_client_error = (
+                    400 <= error.status_code < 500 and error.status_code != 429
+                )
+                if yielded or deterministic_client_error or attempt > MAX_PROVIDER_RETRIES:
                     raise
                 header = error.response.headers.get("retry-after")
                 try:

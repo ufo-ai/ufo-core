@@ -591,6 +591,37 @@ async def test_anthropic_iteration_timeout_before_first_event_retries(
     assert isinstance(events[-1], Usage)
 
 
+def anthropic_mid_stream_error() -> anthropic.APIStatusError:
+    """A mid-stream `error` SSE event surfaces as an APIStatusError raised during iteration on the
+    already-200 stream response, so its status_code is 200 — not the logical 5xx of the fault."""
+    body = {"type": "error", "error": {"type": "api_error", "message": "Internal server error"}}
+    response = httpx.Response(
+        status_code=200, request=httpx.Request("POST", "https://provider.invalid/v1")
+    )
+    return anthropic.APIStatusError(f"{body}", response=response, body=body)
+
+
+async def test_anthropic_mid_stream_server_error_retries_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zero_backoff(monkeypatch)
+    create = ScriptedCreate(
+        ([anthropic_message_start(input_tokens=1)], anthropic_mid_stream_error()),
+        (
+            [
+                anthropic_message_start(input_tokens=1),
+                anthropic_text("ok"),
+                anthropic_output(1),
+            ],
+            None,
+        ),
+    )
+    events = await collect(AnthropicClient(client=anthropic_sdk(create)))
+    assert create.calls == 2
+    assert events[0] == TextDelta(text="ok")
+    assert isinstance(events[-1], Usage)
+
+
 async def test_anthropic_iteration_timeout_after_first_event_raises() -> None:
     create = ScriptedCreate(
         (
