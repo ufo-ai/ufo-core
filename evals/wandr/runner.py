@@ -26,7 +26,7 @@ from evals.wandr.models import TIER_BY_DIFFICULTY, SelectionCase, Subset
 from evals.wandr.snapshot import TASKS_ROOT, load_snapshot
 
 WANDR_PACKS = ("assistant", "assistant_hosted")
-ENVELOPE_REVISION = "wandr-share-file-2"
+ENVELOPE_REVISION = "wandr-share-file-1"
 WORKFLOW_WAIT_SECONDS = 7_200.0
 SUBMISSIONS_ROOT = Path(".local/wandr/submissions")
 SUBSETS: tuple[Subset, ...] = ("smoke", "hillclimb", "holdout")
@@ -132,7 +132,9 @@ def _envelope(required_files: tuple[str, ...]) -> str:
         "Build each results file incrementally — append batches of at most 50 rows per call, or "
         "assemble it with sandbox code; never write hundreds of rows in a single call. "
         "When the task is complete, submit each required file with a separate share_file call. "
-        "Submit only these files; only files submitted with share_file are evaluated."
+        "Submit only these files; only files submitted with share_file are evaluated. "
+        "Before ending the turn, confirm every required file was actually submitted — a results "
+        "file that only sits in the workspace scores zero."
     )
 
 

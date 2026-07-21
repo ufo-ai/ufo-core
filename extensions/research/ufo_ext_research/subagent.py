@@ -17,6 +17,7 @@ from ufo_ext_research.tools import FETCH_URL_TOOL, SEARCH_VERTICAL_TOOL, SEARCH_
 RESEARCH_PROFILE_NAME = "research"
 DEEP_RESEARCH_PROFILE_NAME = "deep_research"
 DEEP_RESEARCH_ROUND_LIMIT = 200
+RESEARCH_MODEL = "claude-haiku-4-5"
 RESEARCH_TOOL_NAMES = (
     SEARCH_WEB_TOOL,
     FETCH_URL_TOOL,
@@ -54,6 +55,7 @@ RESEARCH_PROFILE = SubagentProfile(
     tool_names=RESEARCH_TOOL_NAMES,
     input_model=ResearchInput,
     output_model=ResearchOutput,
+    model=RESEARCH_MODEL,
 )
 DEEP_RESEARCH_PROFILE = SubagentProfile(
     name=DEEP_RESEARCH_PROFILE_NAME,
@@ -62,4 +64,5 @@ DEEP_RESEARCH_PROFILE = SubagentProfile(
     input_model=ResearchInput,
     output_model=ResearchOutput,
     max_rounds=DEEP_RESEARCH_ROUND_LIMIT,
+    model=RESEARCH_MODEL,
 )
