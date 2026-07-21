@@ -202,6 +202,7 @@ async def _pages() -> list[sa.RowMapping]:
             (
                 await connection.execute(
                     sa.select(
+                        tables.page.c.source_id,
                         tables.page.c.subject,
                         tables.page.c.digest,
                         tables.page.c.body_ref,
@@ -282,6 +283,11 @@ async def test_folder_syncs_a_page_body_to_blob_no_chunk_until_indexed(
     body = await FilesystemBlobStore(root=tmp_path / "blobs").get(pages[0]["body_ref"])
     assert b"quarterly revenue" in body
     assert await _chunk_count() == 0
+
+    feed = CorePageFeed(blob=FilesystemBlobStore(root=tmp_path / "blobs"))
+    with ws(workspace_id):
+        changes = (await feed.pages_changed_since(None, 50)).changes
+    assert [change.source_id for change in changes] == [pages[0]["source_id"]]
 
     await index_pages()
     assert await _chunk_count() >= 1

@@ -30,6 +30,7 @@ EXTENSIONS = (
     "connectors",
     "composio",
     "pipedream",
+    "sources",
     "coding",
     "browser",
     "sandbox_chrome",

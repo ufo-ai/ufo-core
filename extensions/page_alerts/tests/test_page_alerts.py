@@ -168,6 +168,7 @@ def _page(subject: str, body: str, tombstone: bool = False) -> PageChange:
     now = datetime.now(UTC)
     return PageChange(
         page_id=uuid4(),
+        source_id=uuid4(),
         subject=subject,
         body=body,
         digest=f"digest-{subject}",

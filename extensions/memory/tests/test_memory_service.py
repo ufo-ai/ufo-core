@@ -461,6 +461,7 @@ async def test_page_indexer_writes_the_contexts_workspace_id(clean: None) -> Non
     probe = vec((5, 1.0))
     change = PageChange(
         page_id=uuid4(),
+        source_id=uuid4(),
         subject=SHARED_SUBJECT,
         body="the merger closes in the third quarter",
         digest="sha256:seeded",

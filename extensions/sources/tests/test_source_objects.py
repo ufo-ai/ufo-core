@@ -18,12 +18,15 @@ import yaml
 from cryptography.fernet import Fernet
 from ufo_ext_sources.direct import DirectAuthProxy
 from ufo_ext_sources.manifest import NAME, manifest
+from ufo_ext_sources.pages import PAGE_KIND
 from ufo_ext_sources.registry import CONNECTORS
 from ufo_ext_sources.tools import (
     DIRECT_ACCOUNT,
     SOURCE_KIND,
     _binding_name,
+    _subscribers_map,
     _validated_base_url,
+    on_page_change,
 )
 
 from ufo.credentials import CredentialStore
@@ -35,11 +38,13 @@ from ufo.objects import UnknownObject
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.connectors import ConnectorEntry, ConnectorRegistry
+from ufo.sdk.manifest import HookContext, PageChangeBatch
 from ufo.sdk.objects import OwnerRequired, VerbNotSupported
-from ufo.sdk.sources import ConnectorSourceConfig
+from ufo.sdk.sources import ConnectorSourceConfig, PageChange
 from ufo.sdk.tools import ToolContext
 from ufo.sources.sync import SyncDriver
 from ufo.subjects import SHARED_SUBJECT, member_subject
+from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.tools.registry import ToolDef
 from ufo.workspace import ws
 
@@ -188,6 +193,7 @@ def _manifest_text(
     account_id: str = "",
     base_url: str = "",
     shared: bool = False,
+    subscribers: tuple[str, ...] = (),
 ) -> str:
     spec: dict[str, object] = {"provider": provider, "streams": list(streams)}
     if account_id:
@@ -196,6 +202,8 @@ def _manifest_text(
         spec["base_url"] = base_url
     if shared:
         spec["shared"] = shared
+    if subscribers:
+        spec["subscribers"] = list(subscribers)
     return yaml.safe_dump({"kind": SOURCE_KIND, "name": name, "spec": spec})
 
 
@@ -228,8 +236,9 @@ async def _rows(state: _Workspace, backend: str) -> list[sa.RowMapping]:
 def test_manifest_declares_the_source_kind() -> None:
     declared = manifest()
     assert declared.tools == ()
-    [kind] = declared.objects
-    assert kind.name == SOURCE_KIND
+    assert SOURCE_KIND in {kind.name for kind in declared.objects}
+    [hook] = declared.hooks
+    assert hook.event == "page_change"
     assert {slot.name for slot in declared.credentials} == set(CONNECTORS)
     assert {source.backend for source in declared.sources} == set(CONNECTORS)
 
@@ -271,6 +280,7 @@ async def test_owner_applies_a_binding_and_reads_it_back(db: None) -> None:
         "account_id": "acct-one",
         "base_url": "",
         "shared": False,
+        "subscribers": [],
     }
     assert set(fetched["status"]["streams"]) == {"projects", "workspaces"}
     assert fetched["status"]["streams"]["projects"]["consecutive_errors"] == 0
@@ -877,3 +887,254 @@ async def test_owner_reapplying_a_members_private_source_is_a_noop(
         rows = await _rows(state, GREENHOUSE)
     assert {row["subject"] for row in rows} == {member_subject(state.member_id)}
     assert {row["owner_member_id"] for row in rows} == {state.member_id}
+
+
+# --- subscriptions --------------------------------------------------------------------------
+
+
+@dataclass
+class _StubDbos:
+    async def enqueue_async(self, options: object, workspace_id: str, workflow_id: str) -> None:
+        return None
+
+
+def _admitting(workspace_id: UUID) -> AdmissionInvoker:
+    admission = Admission(dbos=_StubDbos(), durable_surfaces=frozenset({"cli"}))
+    return AdmissionInvoker(admission=admission, workspace_id=workspace_id)
+
+
+async def _register(
+    state: _Workspace,
+    *,
+    subject: str,
+    owner: UUID | None,
+    account: str = "acct-one",
+    stream: str = "tasks",
+) -> tuple[str, UUID]:
+    """Register one (account, stream) source row directly, with the given disclosure, and return
+    its binding name + row id — subscribing is an edit on an existing visible source, so this sets
+    one up without the connect/grant dance registration proper needs."""
+    with ws(state.workspace_id):
+        ext = context_for(NAME, DECLARED_PROVIDERS)
+        source_id = await ext.register_source(
+            ASANA,
+            ConnectorSourceConfig(account=account, stream=stream),
+            subject=subject,
+            owner_member_id=owner,
+        )
+    return _binding_name(ASANA, account, None), source_id
+
+
+async def _stored_subscribers(state: _Workspace, name: str) -> dict[str, str]:
+    with ws(state.workspace_id):
+        return await _subscribers_map(context_for(NAME, DECLARED_PROVIDERS), name)
+
+
+async def _turns(conversation_id: UUID) -> list[sa.RowMapping]:
+    async with workspace_tx() as connection:
+        return list(
+            (
+                await connection.execute(
+                    sa.select(tables.turn).where(tables.turn.c.conversation_id == conversation_id)
+                )
+            )
+            .mappings()
+            .all()
+        )
+
+
+def _subscribe_manifest(name: str, subscribers: tuple[str, ...], *, shared: bool) -> str:
+    return _manifest_text(
+        ASANA, ("tasks",), name, account_id="acct-one", shared=shared, subscribers=subscribers
+    )
+
+
+def _change(
+    source_id: UUID, body: str, changed_at: datetime | None = None, subject: str = SHARED_SUBJECT
+) -> PageChange:
+    now = changed_at or datetime(2026, 7, 20, tzinfo=UTC)
+    return PageChange(
+        page_id=uuid4(),
+        source_id=source_id,
+        subject=subject,
+        body=body,
+        digest=f"sha256:{uuid4().hex}",
+        tombstone=False,
+        created_at=now,
+        changed_at=now,
+    )
+
+
+async def test_subscribe_and_unsubscribe_self_on_a_shared_source(db: None) -> None:
+    state = await _workspace()
+    name, _ = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
+    caller = state.conversation_id.hex
+    with ws(state.workspace_id):
+        subscribed = await _apply(
+            _context(state, None), _subscribe_manifest(name, (caller,), shared=True)
+        )
+        assert subscribed["result"] == "updated"
+        assert await _stored_subscribers(state, name) == {caller: state.agent_id.hex}
+
+        get_tool = _TOOLS["object_get"]
+        fetched = yaml.safe_load(
+            (
+                await get_tool.handler(
+                    _context(state, None),
+                    get_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": name}),
+                )
+            )
+            .content[0]
+            .text
+        )
+        assert fetched["spec"]["subscribers"] == [caller]
+        assert fetched["status"]["subscriber_id"] == caller
+        assert fetched["status"]["subscribed"] is True
+
+        await _apply(_context(state, None), _subscribe_manifest(name, (), shared=True))
+        assert await _stored_subscribers(state, name) == {}
+
+
+async def test_a_non_owner_may_subscribe_to_a_shared_source(db: None) -> None:
+    state = await _workspace()
+    name, _ = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
+    caller = state.conversation_id.hex
+    with ws(state.workspace_id):
+        subscribed = await _apply(
+            _context(state, None, speaker_id=state.member_id),
+            _subscribe_manifest(name, (caller,), shared=True),
+        )
+        assert subscribed["result"] == "updated"
+        assert await _stored_subscribers(state, name) == {caller: state.agent_id.hex}
+
+
+async def test_apply_may_only_toggle_the_callers_own_subscription(db: None) -> None:
+    state = await _workspace()
+    name, _ = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
+    other = uuid4().hex
+    tool = _TOOLS["object_apply"]
+    with ws(state.workspace_id):
+        with pytest.raises(ValueError, match="your own conversation"):
+            await tool.handler(
+                _context(state, None),
+                tool.input_model.model_validate(
+                    {"manifest": _subscribe_manifest(name, (other,), shared=True)}
+                ),
+            )
+        assert await _stored_subscribers(state, name) == {}
+
+
+async def test_cannot_subscribe_to_another_members_private_source(db: None) -> None:
+    """A source private to member M is invisible to a stranger — the base gate hides it, so the
+    subscribers-only fast path is never reached and the stranger cannot subscribe to it."""
+    state = await _workspace()
+    name, _ = await _register(state, subject=member_subject(state.member_id), owner=state.member_id)
+    stranger = await _stranger(state)
+    tool = _TOOLS["object_apply"]
+    with ws(state.workspace_id):
+        with pytest.raises(UnknownObject):
+            await tool.handler(
+                _context(state, None, speaker_id=stranger),
+                tool.input_model.model_validate(
+                    {
+                        "manifest": _subscribe_manifest(
+                            name, (state.conversation_id.hex,), shared=False
+                        )
+                    }
+                ),
+            )
+        assert await _stored_subscribers(state, name) == {}
+
+
+async def test_page_change_alerts_only_subscribed_conversations_idempotently(db: None) -> None:
+    state = await _workspace()
+    name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
+    caller = state.conversation_id.hex
+    with ws(state.workspace_id):
+        await _apply(_context(state, None), _subscribe_manifest(name, (caller,), shared=True))
+        ext = context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id))
+        shipped = _change(source_id, "# asana tasks: Ship the launch list")
+        legal = _change(source_id, "# asana tasks: Follow up with legal")
+        stray = _change(uuid4(), "# folder: untracked")
+        batch = PageChangeBatch(changes=(shipped, legal, stray))
+        await on_page_change(HookContext(ext=ext, payload=batch))
+        (turn,) = await _turns(state.conversation_id)
+        assert name in turn["inbound"]
+        assert "2 synced pages" in turn["inbound"]
+        assert f"{PAGE_KIND}/{shipped.page_id}" in turn["inbound"]
+        assert f"{PAGE_KIND}/{legal.page_id}" in turn["inbound"]
+
+        await on_page_change(HookContext(ext=ext, payload=batch))
+        assert len(await _turns(state.conversation_id)) == 1
+
+
+async def test_multi_stream_binding_alerts_once_per_conversation(db: None) -> None:
+    """Two streams of one binding both changing in a batch is one alert, not two — the hook
+    aggregates by binding, so distinct per-stream `changed_at` neither split into two turns nor
+    collide on one idempotency key and drop a stream."""
+    state = await _workspace()
+    name, tasks_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
+    _, projects_id = await _register(
+        state, subject=SHARED_SUBJECT, owner=state.owner_id, stream="projects"
+    )
+    caller = state.conversation_id.hex
+    with ws(state.workspace_id):
+        await _apply(
+            _context(state, None),
+            _manifest_text(
+                ASANA,
+                ("projects", "tasks"),
+                name,
+                account_id="acct-one",
+                shared=True,
+                subscribers=(caller,),
+            ),
+        )
+        ext = context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id))
+        await on_page_change(
+            HookContext(
+                ext=ext,
+                payload=PageChangeBatch(
+                    changes=(
+                        _change(tasks_id, "# t", changed_at=datetime(2026, 7, 20, 9, tzinfo=UTC)),
+                        _change(
+                            projects_id, "# p", changed_at=datetime(2026, 7, 20, 10, tzinfo=UTC)
+                        ),
+                    )
+                ),
+            )
+        )
+        (turn,) = await _turns(state.conversation_id)
+        assert "2 synced pages" in turn["inbound"]
+
+
+async def test_alert_never_surfaces_a_member_private_page(db: None) -> None:
+    """A subscription to a shared source surfaces only shared changes — a member-private page in
+    the same batch is neither referenced nor counted, so its existence never leaks."""
+    state = await _workspace()
+    name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
+    caller = state.conversation_id.hex
+    with ws(state.workspace_id):
+        await _apply(_context(state, None), _subscribe_manifest(name, (caller,), shared=True))
+        ext = context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id))
+        shared = _change(source_id, "# asana tasks: Ship it")
+        private = _change(source_id, "# secret", subject=member_subject(state.member_id))
+        await on_page_change(
+            HookContext(ext=ext, payload=PageChangeBatch(changes=(shared, private)))
+        )
+        (turn,) = await _turns(state.conversation_id)
+        assert "1 synced page" in turn["inbound"]
+        assert f"{PAGE_KIND}/{shared.page_id}" in turn["inbound"]
+        assert str(private.page_id) not in turn["inbound"]
+
+
+async def test_alert_skipped_when_only_member_private_changes(db: None) -> None:
+    state = await _workspace()
+    name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
+    caller = state.conversation_id.hex
+    with ws(state.workspace_id):
+        await _apply(_context(state, None), _subscribe_manifest(name, (caller,), shared=True))
+        ext = context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id))
+        private = _change(source_id, "# secret", subject=member_subject(state.member_id))
+        await on_page_change(HookContext(ext=ext, payload=PageChangeBatch(changes=(private,))))
+        assert await _turns(state.conversation_id) == []

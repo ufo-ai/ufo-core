@@ -8,7 +8,15 @@ changing streams is delete-and-recreate, and re-applying the identical spec is a
 is private to its registering member by default; the model decides `shared` at registration, and
 only the registrar or the workspace owner may later flip a private source to shared — the
 reverse is delete-and-recreate. Delete is registrar-or-owner too. Validation refuses with the
-valid provider and stream sets, so discovery is error-driven plus `object_explain`."""
+valid provider and stream sets, so discovery is error-driven plus `object_explain`.
+
+The `subscribers` field is the one part any member who can see the source may change: a
+conversation adds its own id (surfaced as `status.subscriber_id`) to be alerted when the source's
+synced content changes, and removes it to stop. That edit is gated on visibility, not ownership,
+and may only toggle the caller's own id — a conversation cannot subscribe or unsubscribe another,
+nor reach a source private to someone else. The `page_change` hook reads a changed binding's
+subscribers and invokes one alert turn per subscribed conversation, referencing the changed pages
+as `page/<id>` objects (only the shared pages a subscriber may read)."""
 
 import hashlib
 import json
@@ -23,6 +31,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from ufo.sdk.connectors import ConnectorRegistry
 from ufo.sdk.context import CredentialSlotUnset, ExtensionContext
+from ufo.sdk.manifest import HookContext, HookOutcome, PageChangeBatch
 from ufo.sdk.objects import (
     MemberOwnedObjects,
     ObjectKind,
@@ -31,14 +40,18 @@ from ufo.sdk.objects import (
     UnknownObject,
     VerbNotSupported,
 )
-from ufo.sdk.sources import SHARED_SUBJECT, ConnectorSourceConfig, member_subject
+from ufo.sdk.sources import SHARED_SUBJECT, ConnectorSourceConfig, PageChange, member_subject
 from ufo.sdk.tools import ConnectUnavailable, ToolContext
+from ufo_ext_sources.pages import PAGE_KIND
 from ufo_ext_sources.registry import CONNECTORS
 
 SOURCE_KIND = "source"
 DIRECT_ACCOUNT = "default"
 NAME_DIGEST_HEX = 8
 SUMMARY_MAX = 120
+SUBSCRIBERS_PREFIX = "subscribers:"
+ALERT_LABELS_MAX = 5
+ALERT_LABEL_CHARS = 60
 DOMAIN_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 TENANT_URL_RULES: dict[str, tuple[re.Pattern[str], re.Pattern[str], str]] = {
     "activecampaign": (
@@ -108,6 +121,12 @@ class SourceSpec(BaseModel):
         description="Sync into the whole workspace's shared memory rather than privately to the "
         "registering member. Set it only when the member's words say the source is for the team.",
     )
+    subscribers: tuple[str, ...] = Field(
+        default=(),
+        description="Conversation ids alerted when this source's synced content changes. Add or "
+        "remove only your own id (shown as status.subscriber_id) to subscribe or unsubscribe; "
+        "this is the one field an apply may change on an existing source you can see.",
+    )
 
 
 def _binding_name(provider: str, account: str, base_url: str | None) -> str:
@@ -140,13 +159,14 @@ class _Binding:
     def name(self) -> str:
         return _binding_name(self.provider, self.account, self.base_url)
 
-    def spec(self) -> SourceSpec:
+    def spec(self, subscribers: tuple[str, ...] = ()) -> SourceSpec:
         return SourceSpec(
             provider=self.provider,
             streams=tuple(stream.name for stream in self.streams),
             account_id="" if self.account == DIRECT_ACCOUNT else self.account,
             base_url=self.base_url or "",
             shared=self.subject == SHARED_SUBJECT,
+            subscribers=subscribers,
         )
 
     def summary(self) -> str:
@@ -164,6 +184,74 @@ def _require_connectors(ctx: ToolContext) -> ConnectorRegistry:
     if ctx.connectors is None:
         raise RuntimeError("source objects dispatched without the turn's connector registry")
     return ctx.connectors
+
+
+async def _bindings_from_ext(ext: ExtensionContext) -> tuple[_Binding, ...]:
+    grouped: dict[tuple[str, str, str | None], list[_Stream]] = {}
+    disclosure: dict[tuple[str, str, str | None], tuple[str, UUID | None]] = {}
+    for record in await ext.sources():
+        if record.backend not in CONNECTORS:
+            continue
+        config = ConnectorSourceConfig.model_validate(record.config)
+        key = (record.backend, config.account, config.base_url)
+        grouped.setdefault(key, []).append(
+            _Stream(
+                name=config.stream,
+                next_sync_at=record.next_sync_at,
+                consecutive_errors=record.consecutive_errors,
+                source_id=record.id,
+            )
+        )
+        disclosure.setdefault(key, (record.subject, record.owner_member_id))
+    return tuple(
+        _Binding(
+            provider=provider,
+            account=account,
+            base_url=base_url,
+            subject=disclosure[(provider, account, base_url)][0],
+            owner_member_id=disclosure[(provider, account, base_url)][1],
+            streams=tuple(sorted(streams, key=lambda stream: stream.name)),
+        )
+        for (provider, account, base_url), streams in grouped.items()
+    )
+
+
+async def _subscribers_map(ext: ExtensionContext, name: str) -> dict[str, str]:
+    """This source's subscribers as a `{conversation_id: agent_id}` map — the agent is captured
+    from the subscribing turn so a change alert re-enters the same conversation and agent."""
+    value = await ext.store.get(SUBSCRIBERS_PREFIX + name)
+    match value:
+        case dict() as stored if all(
+            isinstance(k, str) and isinstance(v, str) for k, v in stored.items()
+        ):
+            return dict(stored)
+        case None:
+            return {}
+        case _:
+            raise RuntimeError(f"malformed subscribers for source {name!r}")
+
+
+async def _store_subscribers(ext: ExtensionContext, name: str, mapping: dict[str, str]) -> None:
+    if mapping:
+        await ext.store.put(
+            SUBSCRIBERS_PREFIX + name, {conv: agent for conv, agent in mapping.items()}
+        )
+    else:
+        await ext.store.delete(SUBSCRIBERS_PREFIX + name)
+
+
+def _binding_identity(spec: SourceSpec) -> tuple[str, tuple[str, ...], str, str, bool]:
+    return (spec.provider, tuple(sorted(spec.streams)), spec.account_id, spec.base_url, spec.shared)
+
+
+def _self_only_change(old: tuple[str, ...], new: tuple[str, ...], caller: str) -> None:
+    """A subscribers edit may only add or remove the caller's own conversation id; any other
+    difference is refused so a conversation cannot subscribe or unsubscribe another."""
+    if (set(old) ^ set(new)) - {caller}:
+        raise ValueError(
+            "you may only add or remove your own conversation (status.subscriber_id) in "
+            "subscribers; leave every other id unchanged"
+        )
 
 
 SHARE_GATE = "only the registering member or the workspace owner may change a source's sharing"
@@ -185,6 +273,36 @@ class SourceObjects(MemberOwnedObjects[SourceSpec]):
     delete_gate: ClassVar[str] = DELETE_GATE
     delete_requires_speaker: ClassVar[bool] = True
 
+    async def apply(
+        self, ctx: ToolContext, name: str, spec: SourceSpec, old: SourceSpec | None
+    ) -> None:
+        """A subscribers-only edit on a source the caller can already see (`old` is non-None only
+        for a visible source, since the base `get` hides the rest) is gated on visibility, not
+        ownership: any member who sees the source may add or remove their own conversation. Every
+        other apply — register, share-flip, recreate — goes through the base's registrar-or-owner
+        gate."""
+        if old is not None and _binding_identity(spec) == _binding_identity(old):
+            caller = ctx.turn.conversation_id.hex
+            _self_only_change(old.subscribers, spec.subscribers, caller)
+            await self._edit_subscribers(
+                _require_ext(ctx), name, spec.subscribers, caller, ctx.turn.agent_id
+            )
+            return
+        await super().apply(ctx, name, spec, old)
+
+    async def _edit_subscribers(
+        self, ext: ExtensionContext, name: str, desired: tuple[str, ...], caller: str, agent: UUID
+    ) -> None:
+        """Toggle only the caller's membership (the self-only rule already held the diff to it):
+        add captures the caller's agent so the alert re-enters the same conversation and agent;
+        remove drops it. Other subscribers' entries are preserved untouched."""
+        mapping = await _subscribers_map(ext, name)
+        if caller in desired:
+            mapping[caller] = agent.hex
+        else:
+            mapping.pop(caller, None)
+        await _store_subscribers(ext, name, mapping)
+
     async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow, ...]:
         return tuple(
             OwnedRow(
@@ -200,15 +318,22 @@ class SourceObjects(MemberOwnedObjects[SourceSpec]):
 
     async def _spec(self, ctx: ToolContext, name: str) -> SourceSpec | None:
         binding = await self._find(ctx, name)
-        return binding.spec() if binding is not None else None
+        if binding is None:
+            return None
+        subscribers = tuple(sorted((await _subscribers_map(_require_ext(ctx), name)).keys()))
+        return binding.spec(subscribers=subscribers)
 
     async def _status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
         binding = await self._find(ctx, name)
         if binding is None:
             return None
         shared = binding.subject == SHARED_SUBJECT
+        caller = ctx.turn.conversation_id.hex
+        subscribers = await _subscribers_map(_require_ext(ctx), name)
         status: dict[str, JsonValue] = {
             "shared": shared,
+            "subscriber_id": caller,
+            "subscribed": caller in subscribers,
             "streams": {
                 stream.name: {
                     "next_sync_at": stream.next_sync_at.isoformat(),
@@ -232,6 +357,11 @@ class SourceObjects(MemberOwnedObjects[SourceSpec]):
         ext = _require_ext(ctx)
         if ctx.speaker_member_id is None:
             raise ValueError("registering a source requires a speaking member")
+        if old is None and spec.subscribers:
+            raise ValueError(
+                "register the source first, then object_apply it again with your subscriber id "
+                "added to subscribers"
+            )
         connector_cls = CONNECTORS.get(spec.provider)
         if connector_cls is None:
             raise ValueError(
@@ -293,6 +423,7 @@ class SourceObjects(MemberOwnedObjects[SourceSpec]):
             raise UnknownObject(f"no {SOURCE_KIND} object named {name!r}")
         for stream in binding.streams:
             await ext.remove_source(stream.source_id)
+        await _store_subscribers(ext, name, {})
 
     async def _resolved_account(self, ctx: ToolContext, spec: SourceSpec) -> str:
         ext = _require_ext(ctx)
@@ -340,33 +471,72 @@ class SourceObjects(MemberOwnedObjects[SourceSpec]):
         )
 
     async def _bindings(self, ctx: ToolContext) -> tuple[_Binding, ...]:
-        grouped: dict[tuple[str, str, str | None], list[_Stream]] = {}
-        disclosure: dict[tuple[str, str, str | None], tuple[str, UUID | None]] = {}
-        for record in await _require_ext(ctx).sources():
-            if record.backend not in CONNECTORS:
-                continue
-            config = ConnectorSourceConfig.model_validate(record.config)
-            key = (record.backend, config.account, config.base_url)
-            grouped.setdefault(key, []).append(
-                _Stream(
-                    name=config.stream,
-                    next_sync_at=record.next_sync_at,
-                    consecutive_errors=record.consecutive_errors,
-                    source_id=record.id,
-                )
+        return await _bindings_from_ext(_require_ext(ctx))
+
+
+async def on_page_change(ctx: HookContext) -> HookOutcome:
+    """Alert each changed source's subscribers: group the batch by binding, and for every binding
+    with subscribers invoke one turn per subscribed conversation, referencing the changed pages as
+    `page/<id>` objects. Only shared changes are surfaced — a page private to some member is never
+    referenced, counted, or cause to alert, so its existence never leaks to a subscriber who
+    cannot read it. Idempotency-keyed on binding + conversation + latest change, so a replayed
+    batch never double-alerts; a changed row no binding claims alerts nothing."""
+    match ctx.payload:
+        case PageChangeBatch(changes=changes):
+            pass
+        case _:
+            raise RuntimeError("sources hook fired on a non-page_change payload")
+    binding_of_source = {
+        stream.source_id: binding
+        for binding in await _bindings_from_ext(ctx.ext)
+        for stream in binding.streams
+    }
+    by_binding: dict[str, tuple[_Binding, list[PageChange]]] = {}
+    for change in changes:
+        binding = binding_of_source.get(change.source_id)
+        if binding is None:
+            continue
+        by_binding.setdefault(binding.name, (binding, []))[1].append(change)
+    for binding, binding_changes in by_binding.values():
+        subscribers = await _subscribers_map(ctx.ext, binding.name)
+        if not subscribers:
+            continue
+        shared = [change for change in binding_changes if change.subject == SHARED_SUBJECT]
+        if not shared:
+            continue
+        latest = max(change.changed_at for change in shared).isoformat()
+        message = _alert_message(binding, shared)
+        for conversation, agent in subscribers.items():
+            await ctx.ext.invoke(
+                UUID(conversation),
+                UUID(agent),
+                message,
+                idempotency_key=f"source-sub:{binding.name}:{conversation}:{latest}",
             )
-            disclosure.setdefault(key, (record.subject, record.owner_member_id))
-        return tuple(
-            _Binding(
-                provider=provider,
-                account=account,
-                base_url=base_url,
-                subject=disclosure[(provider, account, base_url)][0],
-                owner_member_id=disclosure[(provider, account, base_url)][1],
-                streams=tuple(sorted(streams, key=lambda stream: stream.name)),
-            )
-            for (provider, account, base_url), streams in grouped.items()
-        )
+    return None
+
+
+def _alert_message(binding: _Binding, changes: list[PageChange]) -> str:
+    references = [_page_reference(change) for change in changes[:ALERT_LABELS_MAX]]
+    more = len(changes) - len(references)
+    listing = "; ".join(references) + (f"; +{more} more" if more else "")
+    removed = sum(1 for change in changes if change.tombstone)
+    removed_note = f" ({removed} removed)" if removed else ""
+    noun = "page" if len(changes) == 1 else "pages"
+    return (
+        f"The source {binding.name!r} ({binding.summary()}) you subscribed to changed — "
+        f"{len(changes)} synced {noun}{removed_note}. Changed pages (object_get each to read what "
+        f"changed): {listing}. Then tell the member what is new and why it matters."
+    )
+
+
+def _page_reference(change: PageChange) -> str:
+    """The changed page as its `page` object reference, so the alerted agent can object_get it —
+    a label from the body's first line makes the reference legible."""
+    label = "an empty page"
+    if not change.tombstone and change.body:
+        label = change.body.splitlines()[0].lstrip("# ")[:ALERT_LABEL_CHARS]
+    return f"{PAGE_KIND}/{change.page_id} ({label})"
 
 
 def _validated_base_url(provider: str, base_url: str | None) -> str | None:
@@ -424,7 +594,10 @@ SOURCE_OBJECT = ObjectKind(
         "memory instead, only when the member's words say the source is for the team. "
         "Unsharing is delete-and-recreate; a source's identity is otherwise its config, so "
         "changing streams is delete and recreate too. Delete is registrar-or-owner. Reads show "
-        "shared sources plus the member's own — a workspace owner sees all."
+        "shared sources plus the member's own — a workspace owner sees all. To be alerted when a "
+        "source you can see changes, object_get it, then object_apply the same manifest with your "
+        "own conversation id (shown as status.subscriber_id) added to `subscribers`; remove it to "
+        "stop. You may only add or remove your own id, and subscribing is not owner-gated."
     ),
     spec_model=SourceSpec,
     store=SourceObjects(),

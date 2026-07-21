@@ -496,10 +496,12 @@ PAGE_FEED_BATCH_MAX = 50
 
 @dataclass(frozen=True)
 class PageChange:
-    """One page's current state as the feed replays it: the inlined body (empty when tombstoned),
-    the content digest, and `changed_at` — the page's `updated_at`, which is the cursor field."""
+    """One page's current state as the feed replays it: the source row it belongs to, the inlined
+    body (empty when tombstoned), the content digest, and `changed_at` — the page's `updated_at`,
+    which is the cursor field."""
 
     page_id: UUID
+    source_id: UUID
     subject: str
     body: str
     digest: str
@@ -536,6 +538,7 @@ class CorePageFeed:
         query = (
             sa.select(
                 tables.page.c.id,
+                tables.page.c.source_id,
                 tables.page.c.subject,
                 tables.page.c.body_ref,
                 tables.page.c.digest,
@@ -563,6 +566,7 @@ class CorePageFeed:
             changes.append(
                 PageChange(
                     page_id=row["id"],
+                    source_id=row["source_id"],
                     subject=row["subject"],
                     body=body,
                     digest=row["digest"],

@@ -395,6 +395,21 @@ class SourceRecord:
 
 
 @dataclass(frozen=True)
+class PageRecord:
+    """One live synced page as `ExtensionContext.source_pages` reads it: its identity, the source
+    row it belongs to, the visibility subject, the content digest, and the blob reference — the
+    body stays by reference, never inlined. A value object — never leaves the process."""
+
+    id: UUID
+    source_id: UUID
+    subject: str
+    digest: str
+    body_ref: str
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
 class ExtensionContext:
     store: ScopedStore
     credentials: CredentialAccess
@@ -568,6 +583,63 @@ class ExtensionContext:
             )
             for row in rows
         )
+
+    async def source_pages(self, subjects: frozenset[str] | None = None) -> tuple[PageRecord, ...]:
+        """This workspace's live (non-tombstoned) synced pages, optionally narrowed to a set of
+        visibility subjects — the sanctioned read over the core `page` table, scoped by workspace
+        exactly as `sources()` is. A subject-scoped caller passes `{member_subject(audience),
+        shared}` so a member never reads another member's private page; the off-turn producer that
+        wants every page passes None. The body stays by reference in each record."""
+        query = (
+            sa.select(
+                tables.page.c.id,
+                tables.page.c.source_id,
+                tables.page.c.subject,
+                tables.page.c.digest,
+                tables.page.c.body_ref,
+                tables.page.c.created_at,
+                tables.page.c.updated_at,
+            )
+            .where(
+                tables.page.c.workspace_id == self.store.workspace_id,
+                tables.page.c.tombstone.is_(False),
+            )
+            .order_by(tables.page.c.id)
+        )
+        if subjects is not None:
+            query = query.where(tables.page.c.subject.in_(subjects))
+        async with workspace_tx() as connection:
+            rows = (await connection.execute(query)).mappings().all()
+        return tuple(
+            PageRecord(
+                id=row["id"],
+                source_id=row["source_id"],
+                subject=row["subject"],
+                digest=row["digest"],
+                body_ref=row["body_ref"],
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+            )
+            for row in rows
+        )
+
+    async def forget_page(self, page_id: UUID) -> None:
+        """Tombstone one live page so the page-change pipeline reaps its derived index state,
+        exactly as removing its source does — the read-and-forget half of `source_pages`. Fails
+        loud on an unknown or already-tombstoned page in this workspace."""
+        now = datetime.now(UTC)
+        async with workspace_tx() as connection:
+            forgotten = await connection.execute(
+                sa.update(tables.page)
+                .values(tombstone=True, updated_at=now)
+                .where(
+                    tables.page.c.id == page_id,
+                    tables.page.c.workspace_id == self.store.workspace_id,
+                    tables.page.c.tombstone.is_(False),
+                )
+            )
+        if forgotten.rowcount == 0:
+            raise ValueError(f"no live page {page_id} in this workspace")
 
     async def remove_source(self, source_id: UUID) -> None:
         """Remove one registered source: mark the row removed so the sync driver never claims it

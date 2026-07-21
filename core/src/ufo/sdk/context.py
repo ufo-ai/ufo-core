@@ -19,6 +19,9 @@ from ufo.ext.context import (
     ModelAccess as ModelAccess,
 )
 from ufo.ext.context import (
+    PageRecord as PageRecord,
+)
+from ufo.ext.context import (
     ScopedStore as ScopedStore,
 )
 from ufo.ext.context import (
