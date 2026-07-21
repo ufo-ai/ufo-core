@@ -5,6 +5,7 @@ fans frames out across serve instances, which lifts the single-instance boot gua
 `config.hub.url`, carried like `database.url`; an unset URL fails loud when the backend is selected,
 never silently at the first publish."""
 
+from ufo.sdk.hub import Hub
 from ufo.sdk.manifest import HubSpec, Manifest
 from ufo_ext_redis_hub.stream_hub import RedisStreamHub
 
@@ -13,7 +14,7 @@ VERSION = "0.1.0"
 HUB_BACKEND = "redis"
 
 
-def _build_hub(url: str | None) -> RedisStreamHub:
+def _build_hub(url: str | None) -> Hub:
     if url is None:
         raise RuntimeError(
             "hub.url is required for the redis hub backend (e.g. redis://host:6379/0)"

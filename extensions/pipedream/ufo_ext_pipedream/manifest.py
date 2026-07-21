@@ -8,7 +8,7 @@ because Google blocks restricted Gmail scopes on Composio's shared client, while
 Google OAuth client rides Pipedream Connect. Pipedream holds each account's token server-side, so
 no secret ever reaches this deploy."""
 
-from ufo.sdk.connectors import connect_bridge_workspace
+from ufo.sdk.connectors import ConnectorBroker, connect_bridge_workspace
 from ufo.sdk.manifest import ConnectorProvider, Manifest, RouteSpec
 from ufo_ext_pipedream.broker import PipedreamBroker
 from ufo_ext_pipedream.client import CONNECTORS, PIPEDREAM_TRANSFER_HOSTS
@@ -19,7 +19,7 @@ VERSION = "0.1.0"
 
 
 def manifest() -> Manifest:
-    broker = PipedreamBroker()
+    broker: ConnectorBroker = PipedreamBroker()
     return Manifest(
         name=NAME,
         version=VERSION,

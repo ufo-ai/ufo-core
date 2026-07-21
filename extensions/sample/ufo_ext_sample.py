@@ -26,6 +26,7 @@ from ufo.sdk.connectors import (
     BrokerFile,
     BrokerSearch,
     BrokerTool,
+    ConnectorBroker,
     OAuthAccount,
     StagedUpload,
     UnknownBrokerTool,
@@ -923,6 +924,7 @@ class SampleCarrier:
 
 
 def manifest() -> Manifest:
+    broker: ConnectorBroker = _SampleBroker()
     return Manifest(
         name=NAME,
         version=VERSION,
@@ -999,7 +1001,7 @@ def manifest() -> Manifest:
             ConnectorProvider(
                 oauth=_SampleConnectorOAuth(),
                 label=CONNECTOR_LABEL,
-                broker=_SampleBroker(),
+                broker=broker,
                 tools=(
                     ToolDef(
                         name=CONNECTOR_EXECUTE_TOOL_NAME,
