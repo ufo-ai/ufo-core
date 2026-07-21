@@ -1375,7 +1375,8 @@ async def test_sample_source_syncs_a_page_recallable_through_memory(
     assert page.subject == SHARED_SUBJECT
     assert chunks == 0
 
-    await page_indexer.apply((await page_feed.pages_changed_since(None, 50)).changes)
+    with ws(workspace_id):
+        await page_indexer.apply((await page_feed.pages_changed_since(None, 50)).changes)
     matches = await service.search_sources(
         "migrating orbital widget fleet", frozenset({SHARED_SUBJECT}), 5
     )

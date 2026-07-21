@@ -103,14 +103,16 @@ async def test_index_job_derives_chunks_and_stamps_digest(clean: None) -> None:
     await store.commit(MemoryWrite(subject="shared", body="the capital of france is paris"))
     assert await _chunk_count() == 0
 
-    await indexer.run()
+    with ws(workspace_id):
+        await indexer.run()
     derived = await _chunk_count()
     assert derived >= 1
     async with workspace_tx() as connection:
         digest = (await connection.execute(sa.select(memory_item.c.embedding_digest))).scalar_one()
     assert digest is not None and digest.startswith("sha256:")
 
-    await indexer.run()
+    with ws(workspace_id):
+        await indexer.run()
     assert await _chunk_count() == derived
 
 
@@ -131,7 +133,8 @@ async def test_overlapping_index_runs_embed_each_row_once(clean: None) -> None:
         )
         for _ in range(2)
     )
-    await asyncio.gather(*(indexer.run() for indexer in runs))
+    with ws(workspace_id):
+        await asyncio.gather(*(indexer.run() for indexer in runs))
 
     assert embed.calls == len(bodies)
     async with workspace_tx() as connection:
@@ -150,7 +153,8 @@ async def test_committed_fact_recalls_after_indexing(clean: None) -> None:
     probe = vec((4, 1.0))
     store, indexer = _wire(StubEmbed(probe), workspace_id)
     await store.commit(MemoryWrite(subject="shared", body="the mascot is named zoltar"))
-    await indexer.run()
+    with ws(workspace_id):
+        await indexer.run()
 
     hits = await store.recall("zoltar mascot", frozenset({"shared"}), 5)
     assert len(hits) == 1
@@ -165,7 +169,8 @@ async def test_member_memory_is_invisible_to_another_member(clean: None) -> None
     await store.commit(
         MemoryWrite(subject=member_subject(alice), body="alice prefers a window seat")
     )
-    await indexer.run()
+    with ws(workspace_id):
+        await indexer.run()
 
     assert await store.recall("window seat", recall_subjects(bob), 5) == ()
     mine = await store.recall("window seat", recall_subjects(alice), 5)

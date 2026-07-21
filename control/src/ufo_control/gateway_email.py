@@ -7,11 +7,16 @@ speaks SESv2 `SendEmail` over `httpx` with a local SigV4 signer — signing is p
 so it runs inline, and every network call is async: no boto3 network client, no sync HTTP on the
 loop. Credentials are the pod's IRSA web identity (`AWS_ROLE_ARN` + `AWS_WEB_IDENTITY_TOKEN_FILE`,
 injected by the EKS pod identity webhook from the gateway ServiceAccount's annotation), exchanged
-at STS per send. Missing SES configuration fails loud."""
+at STS per send. Missing SES configuration fails loud.
+
+`UFO_CONTROL_EMAIL_MODE` picks the sender: `ses` (the default) is the SES delivery above; `console`
+logs the code instead of sending it, so a local stack reads the code from the process log with no
+SES account. An unrecognized mode fails loud."""
 
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -96,6 +101,12 @@ SES_REGION_ENV = "UFO_SES_REGION"
 AWS_ROLE_ARN_ENV = "AWS_ROLE_ARN"
 AWS_WEB_IDENTITY_TOKEN_FILE_ENV = "AWS_WEB_IDENTITY_TOKEN_FILE"
 DEFAULT_SES_REGION = "us-east-1"
+
+EMAIL_MODE_ENV = "UFO_CONTROL_EMAIL_MODE"
+SES_EMAIL_MODE = "ses"
+CONSOLE_EMAIL_MODE = "console"
+
+logger = logging.getLogger(__name__)
 
 STS_VERSION = "2011-06-15"
 STS_NS = "{https://sts.amazonaws.com/doc/2011-06-15/}"
@@ -290,12 +301,32 @@ def _signing_key(secret_key: str, date_stamp: str, region: str) -> bytes:
     return key
 
 
-def email_sender_from_env() -> SesEmailSender:
-    return SesEmailSender(
-        source=_require_env(SES_SENDER_ENV),
-        region=os.environ.get(SES_REGION_ENV, DEFAULT_SES_REGION),
-        role_arn=_require_env(AWS_ROLE_ARN_ENV),
-        token_file=Path(_require_env(AWS_WEB_IDENTITY_TOKEN_FILE_ENV)),
+@dataclass(frozen=True)
+class ConsoleEmailSender:
+    """A local `EmailSender` that logs the verification code instead of delivering it — the code the
+    SES sender would email is read straight from the process log, so a local stack needs no SES
+    account. Selected by `UFO_CONTROL_EMAIL_MODE=console`; a deploy that delivers real mail never
+    sets it."""
+
+    async def send(self, email: str, code: str, expires_at: datetime, ttl: timedelta) -> None:
+        subject, text = verification_email(code, expires_at, ttl)
+        logger.info("email (console mode) → %s | %s | %s", email, subject, text)
+
+
+def email_sender_from_env() -> EmailSender:
+    mode = os.environ.get(EMAIL_MODE_ENV, SES_EMAIL_MODE)
+    if mode == CONSOLE_EMAIL_MODE:
+        return ConsoleEmailSender()
+    if mode == SES_EMAIL_MODE:
+        return SesEmailSender(
+            source=_require_env(SES_SENDER_ENV),
+            region=os.environ.get(SES_REGION_ENV, DEFAULT_SES_REGION),
+            role_arn=_require_env(AWS_ROLE_ARN_ENV),
+            token_file=Path(_require_env(AWS_WEB_IDENTITY_TOKEN_FILE_ENV)),
+        )
+    raise RuntimeError(
+        f"{EMAIL_MODE_ENV}={mode!r} is not a valid email mode "
+        f"(expected {SES_EMAIL_MODE!r} or {CONSOLE_EMAIL_MODE!r})"
     )
 
 

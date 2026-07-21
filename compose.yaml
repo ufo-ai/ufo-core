@@ -1,3 +1,21 @@
+# The whole local stack, one command: `docker compose up`.
+#
+#   postgres ─┐
+#   redis ────┤
+#   init ─────┤  ufoctl migrate → ufo-control rls-bootstrap → mint a dev invite (one-shot)
+#   gateway ──┤  ufo-control gateway   :8080   onboarding/login (console email)
+#   serve ────┘  ufoctl serve          :8710   surfaces + DBOS workers + embedded egress proxy
+#
+# Postgres keeps the ufo:ufo credentials the test/eval matrix expects; init creates the ufo_owner
+# and (via rls-bootstrap) ufo_serve roles the hosted topology uses. The gateway emails the sign-in
+# code to the console (UFO_CONTROL_EMAIL_MODE=console) — read it from `docker compose logs gateway`.
+
+x-dev-env: &dev-env
+  UFO_CONTROL_POSTGRES_OWNER_DSN: postgresql://ufo:ufo@postgres:5432/ufo
+  UFO_CONTROL_PG_ROLE_SEED: ufo-local-dev
+  PG_HOST: postgres:5432
+  APP_DB: ufo
+
 services:
   postgres:
     image: pgvector/pgvector:pg17
@@ -6,7 +24,9 @@ services:
       POSTGRES_PASSWORD: ufo
       POSTGRES_DB: ufo
     ports:
-      - "127.0.0.1:5541:5432"
+      # Host publish is only for host tooling/tests (the stack talks over the compose network);
+      # override UFO_PG_PORT if 5541 is taken by another local Postgres.
+      - "127.0.0.1:${UFO_PG_PORT:-5541}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -14,15 +34,80 @@ services:
       interval: 2s
       timeout: 2s
       retries: 15
+
   redis:
     image: redis:7-alpine
     ports:
-      - "127.0.0.1:5543:6379"
+      - "127.0.0.1:${UFO_REDIS_PORT:-5543}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s
       timeout: 2s
       retries: 15
 
+  init:
+    build: {context: ., dockerfile: dev/Dockerfile}
+    image: ufo-dev
+    command: ["init"]
+    environment:
+      <<: *dev-env
+      UFO_PUBLIC_BASE_URL: http://localhost:8080
+    volumes:
+      - ./dev:/app/dev:ro
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    restart: "no"
+
+  gateway:
+    image: ufo-dev
+    command: ["gateway"]
+    environment:
+      <<: *dev-env
+      UFO_CONTROL_EMAIL_MODE: console
+      UFO_TOKEN_SECRET: ufo-local-dev-token-secret
+      # Dev onboarding writes workspaces through the owner role (RLS is a serve-side concern); the
+      # hosted gateway uses the RLS-subject ufo_serve role here.
+      UFO_CONTROL_SERVE_DSN: postgresql+asyncpg://ufo:ufo@postgres:5432/ufo
+      UFO_PUBLIC_BASE_URL: http://localhost:8080
+      UFO_WORKSPACE_BASE_URL: http://localhost:8710
+      UFO_ADMIN_EMAIL_DOMAIN: flyingobject.ai
+      UFO_GATEWAY_PORT: "8080"
+    ports:
+      - "127.0.0.1:${UFO_GATEWAY_PORT_HOST:-8080}:8080"
+    volumes:
+      - ./dev:/app/dev:ro
+    depends_on:
+      postgres: {condition: service_healthy}
+      init: {condition: service_completed_successfully}
+    restart: unless-stopped
+
+  serve:
+    image: ufo-dev
+    command: ["serve"]
+    environment:
+      <<: *dev-env
+      UFO_TOKEN_SECRET: ufo-local-dev-token-secret
+      UFO_CREDENTIAL_KEY: b2Adxpv2mSpXfvoBrALyxxePNw-h7N_1mgxzUFVMMFI=
+      UFO_ARTIFACT_TOKEN_SECRET: ufo-local-dev-artifact-secret
+      UFO_ADMIN_EMAIL_DOMAIN: flyingobject.ai
+      AWS_REGION: us-east-1
+      # Shared serve enumerates every workspace for job sweeps through the RLS-bypass owner role.
+      UFO_OWNER_DSN: postgresql://ufo:ufo@postgres:5432/ufo
+      # A model provider key is REQUIRED for serve to boot — the embedded egress proxy needs an
+      # egress route. Set one in your shell (export ANTHROPIC_API_KEY=…) before `docker compose up`.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    ports:
+      - "127.0.0.1:${UFO_SERVE_PORT_HOST:-8710}:8710"
+    volumes:
+      - ./dev:/app/dev:ro
+      - blobs:/data
+    depends_on:
+      postgres: {condition: service_healthy}
+      init: {condition: service_completed_successfully}
+    restart: unless-stopped
+
 volumes:
   pgdata:
+  blobs:

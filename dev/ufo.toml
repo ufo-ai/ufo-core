@@ -1,0 +1,43 @@
+# The local serve fleet's config — the dev mirror of the hosted `ufo.toml` (infra/envs/*/ufo.tf),
+# with every cloud backend swapped for a local one: filesystem blobs, the Redis hub, the Docker
+# sandbox carrier (so the egress proxy runs embedded in serve). `__SERVE_DSN__` is rendered at
+# container start by dev/entrypoint.sh from UFO_CONTROL_PG_ROLE_SEED — the RLS-subject ufo_serve
+# role that rls-bootstrap creates.
+[pack]
+name = "assistant"
+
+# The assistant pack's extensions that require a named seam (the provider must be registered; the
+# API key itself is a per-workspace BYOK credential, fetched lazily, so serve boots without it).
+[research]
+search_provider = "exa"
+
+[browser]
+cdp_provider = "sandbox_chrome"
+
+[serve]
+host = "0.0.0.0"
+port = 8710
+shared_workspace = true
+
+[database]
+url = "__SERVE_DSN__"
+
+[blob]
+backend = "filesystem"
+root = "/data/blobs"
+
+# The assistant pack has no Redis hub (that lives in assistant_hosted); the in-process hub fits a
+# single local serve. Running more than one serve replica would need the redis_hub extension.
+[hub]
+backend = "in_process"
+
+# The built-in `local` carrier ships in every pack (the `docker` carrier is a separate extension not
+# in the assistant pack). Local means in-process sandboxes with the egress proxy embedded in serve.
+[sandbox]
+backend = "local"
+
+# A non-bind placeholder host: the assistant pack's connectors gate on a publicly-reachable base
+# for OAuth redirects (which don't resolve locally anyway). Members still reach serve on
+# localhost:8710 via the gateway's workspace URL; this only names the OAuth redirect base.
+[connect]
+public_base_url = "http://ufo.local:8710"

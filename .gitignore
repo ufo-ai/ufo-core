@@ -10,6 +10,7 @@ dist/
 .ruff_cache/
 implementation-details.md
 ufo.toml
+!dev/ufo.toml
 blobs/
 bundle/
 deploy/

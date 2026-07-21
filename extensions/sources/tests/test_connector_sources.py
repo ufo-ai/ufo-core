@@ -620,6 +620,7 @@ async def test_asana_source_syncs_through_the_driver_into_recallable_memory(
         chunks = (await connection.execute(sa.text("select count(*) from chunk"))).scalar_one()
     assert chunks == 0
 
-    await page_indexer.apply((await page_feed.pages_changed_since(None, 50)).changes)
+    with ws(workspace_id):
+        await page_indexer.apply((await page_feed.pages_changed_since(None, 50)).changes)
     matches = await service.search_sources("Acme HQ workspace", frozenset({SHARED_SUBJECT}), 5)
     assert matches and "Acme HQ workspace" in matches[0].text

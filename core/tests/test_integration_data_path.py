@@ -37,6 +37,7 @@ from ufo.sources.sync import (
     register_sources,
 )
 from ufo.subjects import SHARED_SUBJECT, member_subject
+from ufo.workspace import ws
 
 pytestmark = pytest.mark.integration
 
@@ -210,7 +211,8 @@ async def test_folder_source_syncs_indexes_and_is_recalled(
     assert page_count == 1
     assert await _chunk_count() == 0  # embedding is a job, never inline on the sync write
 
-    await page_indexer.apply((await page_feed.pages_changed_since(None, 50)).changes)
+    with ws(workspace_id):
+        await page_indexer.apply((await page_feed.pages_changed_since(None, 50)).changes)
     assert await _chunk_count() >= 1
 
     pages = await service.search_sources(

@@ -1,3 +1,4 @@
+import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -7,10 +8,13 @@ import pytest
 from ufo_control.gateway_email import (
     AWS_ROLE_ARN_ENV,
     AWS_WEB_IDENTITY_TOKEN_FILE_ENV,
+    CONSOLE_EMAIL_MODE,
     DEFAULT_SES_REGION,
+    EMAIL_MODE_ENV,
     PUBLIC_BASE_URL_ENV,
     SES_REGION_ENV,
     SES_SENDER_ENV,
+    ConsoleEmailSender,
     SesCredentials,
     SesEmailSender,
     _parse_assume_role_credentials,
@@ -206,4 +210,29 @@ def test_email_sender_from_env_fails_loud_without_irsa(
     monkeypatch.setenv(SES_SENDER_ENV, "no-reply@flyingobject.ai")
     monkeypatch.delenv(AWS_ROLE_ARN_ENV, raising=False)
     with pytest.raises(RuntimeError, match=AWS_ROLE_ARN_ENV):
+        email_sender_from_env()
+
+
+async def test_console_mode_logs_the_code_and_needs_no_ses(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv(EMAIL_MODE_ENV, CONSOLE_EMAIL_MODE)
+    monkeypatch.delenv(SES_SENDER_ENV, raising=False)
+    monkeypatch.delenv(AWS_ROLE_ARN_ENV, raising=False)
+    sender = email_sender_from_env()
+    assert isinstance(sender, ConsoleEmailSender)
+    with caplog.at_level(logging.INFO):
+        await sender.send(
+            "boss@webco.io",
+            "424242",
+            datetime(2026, 7, 16, 16, 10, tzinfo=UTC),
+            timedelta(minutes=15),
+        )
+    assert "424242" in caplog.text
+    assert "boss@webco.io" in caplog.text
+
+
+def test_email_sender_from_env_rejects_an_unknown_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(EMAIL_MODE_ENV, "carrier-pigeon")
+    with pytest.raises(RuntimeError, match=EMAIL_MODE_ENV):
         email_sender_from_env()

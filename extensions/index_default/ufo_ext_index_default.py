@@ -66,10 +66,11 @@ def _hit(row: sa.RowMapping, score: float) -> Hit:
 
 UPSERT_PG = sa.text(
     """
-    insert into chunk (chunk_digest, owner_kind, owner_id, subject, ordinal, text, embedding)
-    values (:chunk_digest, :owner_kind, :owner_id, :subject, :ordinal, :text,
-            cast(:embedding as halfvec))
-    on conflict (chunk_digest) do update set
+    insert into chunk
+      (workspace_id, chunk_digest, owner_kind, owner_id, subject, ordinal, text, embedding)
+    values (current_setting('app.workspace_id')::uuid, :chunk_digest, :owner_kind, :owner_id,
+            :subject, :ordinal, :text, cast(:embedding as halfvec))
+    on conflict (workspace_id, chunk_digest) do update set
       owner_kind = excluded.owner_kind, owner_id = excluded.owner_id,
       subject = excluded.subject, ordinal = excluded.ordinal,
       text = excluded.text, embedding = excluded.embedding

@@ -146,7 +146,8 @@ def _wire(
 
     async def index_pages() -> None:
         batch = await feed.pages_changed_since(None, 50)
-        await indexer.apply(batch.changes)
+        with ws(workspace_id):
+            await indexer.apply(batch.changes)
 
     service = MemoryStore(
         index=index, embed=embed, transaction=workspace_tx, workspace_id=workspace_id
@@ -812,19 +813,20 @@ async def test_member_scoped_page_is_invisible_to_another_member(
             )
         )
     _, _, service = _wire(database_url, probe, tmp_path / "blobs", workspace_id)
-    await service.index.upsert(
-        (
-            Chunk(
-                "pg-" + page_id.hex,
-                OWNER_KIND_PAGE,
-                str(page_id),
-                member_subject(alice),
-                0,
-                "alices private onboarding checklist",
-                probe,
-            ),
+    with ws(workspace_id):
+        await service.index.upsert(
+            (
+                Chunk(
+                    "pg-" + page_id.hex,
+                    OWNER_KIND_PAGE,
+                    str(page_id),
+                    member_subject(alice),
+                    0,
+                    "alices private onboarding checklist",
+                    probe,
+                ),
+            )
         )
-    )
 
     mine = await service.search_sources("onboarding checklist", recall_subjects(alice), 8)
     assert len(mine) == 1 and mine[0].page_id == page_id

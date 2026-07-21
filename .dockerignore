@@ -1,0 +1,15 @@
+.git
+.venv
+**/.venv
+.claude/worktrees
+**/__pycache__
+**/*.pyc
+blobs
+dev/blobs
+node_modules
+**/node_modules
+dist
+build
+.pytest_cache
+.ruff_cache
+.mypy_cache

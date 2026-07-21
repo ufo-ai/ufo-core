@@ -206,19 +206,20 @@ async def _seed_aged_fact(
                 updated_at=created,
             )
         )
-    await DefaultIndex(embed=StubEmbed(vector), transaction=workspace_tx).upsert(
-        (
-            Chunk(
-                "d-" + item_id.hex,
-                OWNER_KIND_MEMORY_ITEM,
-                str(item_id),
-                SHARED_SUBJECT,
-                0,
-                body,
-                vector,
-            ),
+    with ws(workspace_id):
+        await DefaultIndex(embed=StubEmbed(vector), transaction=workspace_tx).upsert(
+            (
+                Chunk(
+                    "d-" + item_id.hex,
+                    OWNER_KIND_MEMORY_ITEM,
+                    str(item_id),
+                    SHARED_SUBJECT,
+                    0,
+                    body,
+                    vector,
+                ),
+            )
         )
-    )
     return item_id
 
 

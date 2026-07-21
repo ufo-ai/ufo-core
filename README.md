@@ -20,6 +20,27 @@ Dev is zero-services: SQLite + filesystem blobs + in-process hub. Postgres (the 
 compose or an existing instance) is for deploys and the Postgres half of the test matrix; Docker
 enters for sandboxes (U2+).
 
+## Local hosted stack
+
+To run the whole hosted topology locally — Postgres, the onboarding **gateway** (`/login`), and the
+**serve** fleet (surfaces + DBOS workers + embedded egress proxy) — one command:
+
+```bash
+export ANTHROPIC_API_KEY=...   # required for serve to boot; the gateway/login needs no key
+docker compose up
+```
+
+One image (`dev/Dockerfile`, the whole workspace via uv) runs as four roles (`dev/entrypoint.sh`):
+`init` migrates, runs `rls-bootstrap` (the `ufo_serve` role + RLS policies), and mints a dev invite;
+`gateway` serves `/login` on :8080 with the code emailed to the log (`UFO_CONTROL_EMAIL_MODE=console`
+— read it from `docker compose logs gateway`); `serve` runs the shared fleet on :8710 over the
+`assistant` pack with local backends (filesystem blobs, in-process hub, the built-in `local` sandbox
+carrier). Sign in at `http://localhost:8080/login` with a work email, the code from the gateway log,
+then the invite from the init log. Host ports override via `UFO_PG_PORT` / `UFO_GATEWAY_PORT_HOST` /
+`UFO_SERVE_PORT_HOST` / `UFO_REDIS_PORT`. The dev config (`dev/ufo.toml`) swaps the hosted cloud
+backends for local ones; the Turbopuffer/Exa index, the Redis hub (multi-replica), and the Docker
+sandbox carrier each need their extension added to a local pack — out of scope for this single node.
+
 ## Evals
 
 With `ufoctl serve` running against a disposable workspace:

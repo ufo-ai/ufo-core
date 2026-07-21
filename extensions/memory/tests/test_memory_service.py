@@ -35,6 +35,7 @@ from ufo.indexing import OWNER_KIND_MEMORY_ITEM, OWNER_KIND_PAGE, Chunk, Hit, Te
 from ufo.schema import tables
 from ufo.sources.sync import PageChange
 from ufo.subjects import SHARED_SUBJECT, member_subject
+from ufo.workspace import ws
 
 
 def vec(*axes: tuple[int, float]) -> tuple[float, ...]:
@@ -115,9 +116,11 @@ async def _seed_item(
                 updated_at=sa.func.now(),
             )
         )
-    await DefaultIndex(embed=StubEmbed(vector), transaction=workspace_tx).upsert(
-        (Chunk("d-" + item_id.hex, OWNER_KIND_MEMORY_ITEM, str(item_id), subject, 0, body, vector),)
+    chunk = Chunk(
+        "d-" + item_id.hex, OWNER_KIND_MEMORY_ITEM, str(item_id), subject, 0, body, vector
     )
+    with ws(workspace_id):
+        await DefaultIndex(embed=StubEmbed(vector), transaction=workspace_tx).upsert((chunk,))
     return item_id
 
 
@@ -125,9 +128,9 @@ async def _seed_page_chunk(
     workspace_id: UUID, subject: str, body: str, vector: tuple[float, ...]
 ) -> None:
     page_id = uuid4()
-    await DefaultIndex(embed=StubEmbed(vector), transaction=workspace_tx).upsert(
-        (Chunk("p-" + page_id.hex, OWNER_KIND_PAGE, str(page_id), subject, 0, body, vector),)
-    )
+    chunk = Chunk("p-" + page_id.hex, OWNER_KIND_PAGE, str(page_id), subject, 0, body, vector)
+    with ws(workspace_id):
+        await DefaultIndex(embed=StubEmbed(vector), transaction=workspace_tx).upsert((chunk,))
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(mem_page).values(
@@ -191,9 +194,10 @@ async def test_recommitting_a_fact_updates_in_place_not_duplicated(clean: None) 
         )
     assert confidences == [9]
 
-    await MemoryIndexer(
-        index=store.index, embed=embed, transaction=workspace_tx, chunker=TextChunker()
-    ).run()
+    with ws(workspace_id):
+        await MemoryIndexer(
+            index=store.index, embed=embed, transaction=workspace_tx, chunker=TextChunker()
+        ).run()
     hits = await store.recall("vault code", frozenset({SHARED_SUBJECT}), 10)
     assert len(hits) == 1
     assert "4821" in hits[0].body
@@ -260,9 +264,10 @@ async def test_fresh_fact_recalls_before_indexing_then_via_the_index(clean: None
     assert len(before) == 1
     assert "1234" in before[0].body
 
-    await MemoryIndexer(
-        index=store.index, embed=embed, transaction=workspace_tx, chunker=TextChunker()
-    ).run()
+    with ws(workspace_id):
+        await MemoryIndexer(
+            index=store.index, embed=embed, transaction=workspace_tx, chunker=TextChunker()
+        ).run()
     after = await store.recall("safe combination", frozenset({SHARED_SUBJECT}), 10)
     assert len(after) == 1
     assert "1234" in after[0].body
@@ -469,13 +474,14 @@ async def test_page_indexer_writes_the_contexts_workspace_id(clean: None) -> Non
         created_at=datetime(2025, 1, 1, tzinfo=UTC),
         changed_at=datetime(2025, 1, 1, tzinfo=UTC),
     )
-    await PageIndexer(
-        index=DefaultIndex(embed=StubEmbed(probe), transaction=workspace_tx),
-        embed=StubEmbed(probe),
-        transaction=workspace_tx,
-        chunker=TextChunker(),
-        workspace_id=workspace_id,
-    ).apply((change,))
+    with ws(workspace_id):
+        await PageIndexer(
+            index=DefaultIndex(embed=StubEmbed(probe), transaction=workspace_tx),
+            embed=StubEmbed(probe),
+            transaction=workspace_tx,
+            chunker=TextChunker(),
+            workspace_id=workspace_id,
+        ).apply((change,))
 
     async with workspace_tx() as connection:
         row = (

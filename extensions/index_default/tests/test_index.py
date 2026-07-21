@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+from uuid import UUID
 
 import pytest
 import sqlalchemy as sa
@@ -10,9 +11,10 @@ from ufo_ext_index_default import (
     unpack_embedding,
 )
 
-from ufo.db import workspace_tx
+from ufo.db import current_workspace, workspace_tx
 from ufo.indexing import Chunk, IndexScope
 
+WORKSPACE = UUID("11111111-1111-1111-1111-111111111111")
 SUBJECT = "member:me"
 FOREIGN = "member:other"
 
@@ -37,11 +39,15 @@ class StubEmbed:
 
 @pytest.fixture
 async def clean_chunk(db: None, database_url: str) -> AsyncIterator[None]:
-    async with workspace_tx() as connection:
-        await connection.execute(sa.text("delete from chunk"))
-        if database_url.startswith("sqlite"):
-            await connection.execute(sa.text("delete from chunk_fts"))
-    yield
+    token = current_workspace.set(WORKSPACE)
+    try:
+        async with workspace_tx() as connection:
+            await connection.execute(sa.text("delete from chunk"))
+            if database_url.startswith("sqlite"):
+                await connection.execute(sa.text("delete from chunk_fts"))
+        yield
+    finally:
+        current_workspace.reset(token)
 
 
 async def test_upsert_lexical_and_vector_return_ordered_hits(
@@ -142,9 +148,10 @@ async def test_vector_returns_a_small_owner_kinds_rows_under_a_dominant_corpus(
         await connection.execute(
             sa.text(
                 "insert into chunk"
-                " (chunk_digest, owner_kind, owner_id, subject, ordinal, text, embedding)"
-                " select 'noise-' || n, 'page', 'noise-' || n, :subject, 0, 'noise',"
-                " cast(:embedding as halfvec)"
+                " (workspace_id, chunk_digest, owner_kind, owner_id, subject, ordinal, text,"
+                " embedding)"
+                " select current_setting('app.workspace_id')::uuid, 'noise-' || n, 'page',"
+                " 'noise-' || n, :subject, 0, 'noise', cast(:embedding as halfvec)"
                 " from generate_series(1, 1500) as n"
             ),
             {"subject": SUBJECT, "embedding": pgvector_literal(vec((0, 1.0)))},
