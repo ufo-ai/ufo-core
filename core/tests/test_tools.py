@@ -5,14 +5,16 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from ufo.blob import FilesystemBlobStore
+from ufo.ext.manifest import SubagentProfile
+from ufo.loop.subagents import SubagentRegistry, Subagents
 from ufo.sandbox.session import ExecResult
 from ufo.schema.records import Agent, Turn
 from ufo.skills.runtime import CORE_SKILL_REGISTRY
 from ufo.tools.builtins import BUILTIN_TOOLS
-from ufo.tools.context import SpawnResult, SubagentStatus, ToolContext
+from ufo.tools.context import Spawn, SpawnResult, SubagentStatus, ToolContext
 from ufo.tools.registry import ToolRegistry
 
 REGISTRY = ToolRegistry(BUILTIN_TOOLS)
@@ -82,6 +84,7 @@ def make_context(
     tmp_path: Path,
     artifact_secret: str = ARTIFACT_SECRET,
     subagents: StubSubagentControl | None = None,
+    spawn: Spawn = _unavailable_spawn,
 ) -> ToolContext:
     workspace_id, conversation_id, agent_id = uuid4(), uuid4(), uuid4()
     turn = Turn(
@@ -99,7 +102,7 @@ def make_context(
         blob=FilesystemBlobStore(root=tmp_path),
         turn=turn,
         agent=Agent(prompt="be terse", model="claude-opus-4-8"),
-        spawn=_unavailable_spawn,
+        spawn=spawn,
         speaker_member_id=None,
         audience_member_id=None,
         artifact_token_secret=artifact_secret,
@@ -315,3 +318,56 @@ async def test_message_subagent_forwards_the_message_and_reports_status(tmp_path
     )
     assert control.messaged == [(child, "also check X")]
     assert json.loads(result.content[0].text) == {"subagent_id": str(child), "status": "queued"}
+
+
+class _SpawnTask(BaseModel):
+    task: str
+
+
+class _SpawnOutput(BaseModel):
+    result: str
+
+
+def _spawn_profile(name: str) -> SubagentProfile:
+    return SubagentProfile(
+        name=name,
+        prompt=f"{name} instructions",
+        tool_names=("read",),
+        input_model=_SpawnTask,
+        output_model=_SpawnOutput,
+    )
+
+
+class _IdleSpawnClient:
+    async def enqueue_async(self, options: object, workspace_id: str, turn_id: str) -> None:
+        raise AssertionError("an unknown profile must be rejected before any child is enqueued")
+
+
+async def test_spawn_subagent_unknown_profile_is_an_error_naming_the_valid_profiles(
+    tmp_path: Path,
+) -> None:
+    """A guessed profile name is a recoverable mistake: spawn_subagent returns an is_error result
+    naming the bad profile and the registered ones (resolved through the real registry the live
+    spawn dispatches against), so the model retries against a valid name instead of dead-ending on
+    a bare KeyError."""
+    parent = Turn(
+        id=uuid4(),
+        workspace_id=uuid4(),
+        conversation_id=uuid4(),
+        agent_id=uuid4(),
+        seq=0,
+        status="running",
+        inbound="hi",
+        created_at=datetime(2026, 7, 9, tzinfo=UTC),
+    )
+    subagents = Subagents(
+        client=_IdleSpawnClient(),
+        registry=SubagentRegistry((_spawn_profile("research"), _spawn_profile("coding"))),
+        parent=parent,
+    )
+    ctx = make_context(FakeSandbox(), tmp_path, spawn=subagents.spawn)
+    result = await run("spawn_subagent", ctx, profile="assistant", payload={"task": "x"})
+    assert result.is_error
+    text = result.content[0].text
+    assert "assistant" in text
+    assert "research" in text

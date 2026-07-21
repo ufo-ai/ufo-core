@@ -40,7 +40,12 @@ from ufo.schema.records import (
     turn_id_for,
 )
 from ufo.skills.runtime import CORE_SKILLS, RuntimeSkill
-from ufo.tools.context import SpawnResult, SubagentStatus, UntrustedContentError
+from ufo.tools.context import (
+    SpawnResult,
+    SubagentStatus,
+    UnknownSubagentProfile,
+    UntrustedContentError,
+)
 
 SUBAGENT_SURFACE = "subagent"
 SUBAGENT_POLL_SECONDS = 0.1
@@ -78,7 +83,10 @@ class SubagentRegistry:
         for profile in self.profiles:
             if profile.name == name:
                 return profile
-        raise KeyError(f"unknown subagent profile: {name}")
+        valid = ", ".join(sorted(profile.name for profile in self.profiles))
+        raise UnknownSubagentProfile(
+            f"unknown subagent profile {name!r}; valid profiles are: {valid}"
+        )
 
 
 def subagent_system_prompt(
@@ -152,7 +160,15 @@ class Subagents:
             return SpawnResult(turn_id=turn_id, output=None)
         terminal = await self._await_terminal(turn_id)
         if terminal.status != "done":
-            raise RuntimeError(f"subagent {profile!r} turn ended {terminal.status}")
+            diagnostic = ": ".join(
+                part
+                for part in (terminal.error_class, terminal.error_message or terminal.text)
+                if part
+            )
+            raise RuntimeError(
+                f"subagent {profile!r} turn ended {terminal.status}"
+                + (f" ({diagnostic})" if diagnostic else "")
+            )
         try:
             output = resolved.output_model.model_validate_json(terminal.text)
         except ValidationError as error:
@@ -279,7 +295,7 @@ class Subagents:
         untrusted rather than passing its output through as instructions."""
         try:
             return self.registry.get(profile).untrusted_output
-        except KeyError:
+        except UnknownSubagentProfile:
             return True
 
     async def _require_child(self, turn_id: UUID) -> str:

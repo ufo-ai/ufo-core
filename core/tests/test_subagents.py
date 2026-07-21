@@ -25,7 +25,7 @@ from ufo.schema import tables
 from ufo.schema.records import TerminalFrame, Turn, turn_id_for
 from ufo.skills.runtime import RuntimeSkill
 from ufo.tools.builtins import BUILTIN_TOOLS
-from ufo.tools.context import UntrustedContentError
+from ufo.tools.context import UnknownSubagentProfile, UntrustedContentError
 
 
 class _Task(BaseModel):
@@ -51,9 +51,15 @@ def test_registry_rejects_duplicate_profiles() -> None:
         SubagentRegistry((_profile("dup"), _profile("dup")))
 
 
-def test_registry_get_unknown_raises() -> None:
-    with pytest.raises(KeyError, match="unknown subagent profile: missing"):
-        SubagentRegistry((_profile("a"),)).get("missing")
+def test_registry_get_unknown_names_the_bad_profile_and_lists_the_valid_ones() -> None:
+    """The unknown-profile error is a self-correction signal: it names the bad profile and lists
+    the registered names (from the live registry, not a hardcoded set) so the spawning model can
+    retry against a real one instead of dead-ending."""
+    with pytest.raises(UnknownSubagentProfile) as caught:
+        SubagentRegistry((_profile("research"), _profile("coding"))).get("assistant")
+    message = str(caught.value)
+    assert "assistant" in message
+    assert "coding, research" in message
 
 
 def test_registry_get_returns_named_profile() -> None:
@@ -803,6 +809,37 @@ async def test_spawn_raises_loud_on_a_prose_terminal(db: None, dbos_launched: Co
         )
     with pytest.raises(ValidationError):
         await subagents.spawn("plain", {"task": "acme"}, dedup_key="prose")
+
+
+async def test_spawn_surfaces_a_failed_childs_diagnostic(db: None, dbos_launched: Config) -> None:
+    """A child that reaches a failed terminal carries the diagnostic the terminal recorded — the
+    error class and message — up to the parent, rather than an empty `ended failed` the parent
+    cannot act on."""
+    workspace_id, agent_id = await _workspace_agent()
+    parent = await _parent(workspace_id, agent_id)
+    subagents = Subagents(
+        client=_RecordingClient(), registry=SubagentRegistry((_profile("research"),)), parent=parent
+    )
+    spawned = await subagents.spawn("research", {"task": "acme"}, background=True, dedup_key="boom")
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(
+                status="failed",
+                terminal=TerminalFrame(
+                    status="failed",
+                    error_class="ModelStreamError",
+                    error_message="upstream 529 overloaded",
+                ).model_dump(mode="json"),
+            )
+            .where(tables.turn.c.id == spawned.turn_id)
+        )
+    with pytest.raises(RuntimeError) as caught:
+        await subagents.spawn("research", {"task": "acme"}, dedup_key="boom")
+    message = str(caught.value)
+    assert "failed" in message
+    assert "ModelStreamError" in message
+    assert "upstream 529 overloaded" in message
 
 
 async def test_wait_refuses_a_turn_this_parent_did_not_spawn(

@@ -53,7 +53,13 @@ from ufo.sandbox.session import WORKSPACE_DIR, workspace_path
 from ufo.schema import tables
 from ufo.schema.records import AskUserInput, ConnectRequest, CredentialPrompt, CredentialRequest
 from ufo.skills.runtime import mount_skill
-from ufo.tools.context import ImageContent, TextContent, ToolContext, ToolResult
+from ufo.tools.context import (
+    ImageContent,
+    TextContent,
+    ToolContext,
+    ToolResult,
+    UnknownSubagentProfile,
+)
 from ufo.tools.registry import ToolDef
 from ufo.transcript import TranscriptDecodeError, decode, transcript_key
 
@@ -511,7 +517,10 @@ async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResu
 
 
 async def spawn_subagent_handler(ctx: ToolContext, args: SpawnSubagentInput) -> ToolResult:
-    result = await ctx.spawn(args.profile, args.payload, args.background)
+    try:
+        result = await ctx.spawn(args.profile, args.payload, args.background)
+    except UnknownSubagentProfile as error:
+        return ToolResult(content=(TextContent(text=str(error)),), is_error=True)
     if result.output is None:
         return ToolResult(
             content=(TextContent(text=f"spawned {args.profile} subagent (turn {result.turn_id})"),)

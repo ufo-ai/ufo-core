@@ -69,6 +69,12 @@ class UntrustedContentError(Exception):
     instructions."""
 
 
+class UnknownSubagentProfile(Exception):
+    """A spawn named a profile the registry does not hold. Its message names the bad profile and
+    lists the registered profile names, so the spawning tool surfaces an error the model retries
+    against a valid name instead of dead-ending on a bare KeyError."""
+
+
 class ToolResult(BaseModel):
     content: tuple[ContentBlock, ...]
     is_error: bool = False
