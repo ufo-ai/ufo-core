@@ -51,6 +51,7 @@ MODEL_KNOWLEDGE_CUTOFF: dict[str, str] = {
     "anthropic.claude-sonnet-4-6": "August 2025",
     "openai.gpt-oss-20b": "June 2024",
     "openai.gpt-oss-120b": "June 2024",
+    "gpt-5.6-terra": "February 2026",
     "openai.gpt-5.4": "August 2025",
     "openai.gpt-5.5": "December 2025",
     "google/gemini-2.5-pro": "January 2025",

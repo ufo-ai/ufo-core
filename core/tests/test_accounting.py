@@ -52,6 +52,10 @@ def test_unknown_model_prices_zero_never_raises() -> None:
     assert usage_priced_micro_usd("gpt-4o", FULL_USAGE) == 0
 
 
+def test_gpt_5_6_terra_uses_standard_pricing() -> None:
+    assert usage_priced_micro_usd("gpt-5.6-terra", FULL_USAGE) == 45_750
+
+
 def test_price_digest_is_stable_sha256() -> None:
     assert accounting.PRICE_DIGEST.startswith("sha256:")
     assert len(accounting.PRICE_DIGEST) == len("sha256:") + 64

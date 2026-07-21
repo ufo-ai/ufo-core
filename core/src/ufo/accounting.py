@@ -82,6 +82,7 @@ MODEL_TOKEN_PRICE: dict[str, ModelPrice] = {
     "claude-sonnet-5": ModelPrice(3_000_000, 15_000_000, 300_000, 3_750_000),
     "claude-sonnet-4-6": ModelPrice(3_000_000, 15_000_000, 300_000, 3_750_000),
     "claude-haiku-4-5": ModelPrice(1_000_000, 5_000_000, 100_000, 1_250_000),
+    "gpt-5.6-terra": ModelPrice(2_500_000, 15_000_000, 250_000, 3_125_000),
     "gpt-5.5": ModelPrice(5_000_000, 30_000_000, 500_000, 5_000_000),
     "gpt-5.4": ModelPrice(2_500_000, 15_000_000, 250_000, 2_500_000),
     "gpt-5.4-mini": ModelPrice(750_000, 4_500_000, 75_000, 750_000),

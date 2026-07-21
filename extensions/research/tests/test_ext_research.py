@@ -16,6 +16,7 @@ import ufo_ext_research.tools as research_tools
 from ufo_ext_research.subagent import (
     DEEP_RESEARCH_PROFILE,
     DEEP_RESEARCH_ROUND_LIMIT,
+    RESEARCH_MODEL,
     RESEARCH_PROFILE,
     RESEARCH_TOOL_NAMES,
 )
@@ -277,6 +278,8 @@ def test_web_prompt_section_renders_into_the_shell() -> None:
 
 def test_registers_the_research_and_deep_research_profiles() -> None:
     assert {RESEARCH_PROFILE.name, DEEP_RESEARCH_PROFILE.name} == {"research", "deep_research"}
+    assert RESEARCH_PROFILE.model == DEEP_RESEARCH_PROFILE.model == RESEARCH_MODEL
+    assert RESEARCH_MODEL == "gpt-5.6-terra"
     assert RESEARCH_PROFILE.input_model.model_validate({"objective": "size the market"}).objective
     for tool_name in ("search_web", "search_vertical", "fetch_url"):
         assert tool_name in RESEARCH_TOOL_NAMES

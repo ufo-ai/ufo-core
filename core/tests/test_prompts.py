@@ -58,6 +58,11 @@ def test_knowledge_cutoff_renders_the_models_boundary() -> None:
     assert "{{" not in rendered.content
 
 
+def test_gpt_5_6_terra_renders_its_knowledge_cutoff() -> None:
+    rendered = render_system_prompt("A", (), model="gpt-5.6-terra")
+    assert "February 2026" in rendered.content
+
+
 def test_a_model_without_a_declared_cutoff_fails_loud() -> None:
     with pytest.raises(ValueError, match="no knowledge cutoff declared for model 'gpt-5'"):
         render_system_prompt("A", (), model="gpt-5")
