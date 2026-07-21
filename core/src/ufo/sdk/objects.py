@@ -8,7 +8,13 @@ from ufo.objects import (
     OBJECT_LIST_PAGE as OBJECT_LIST_PAGE,
 )
 from ufo.objects import (
+    MemberOwnedObjects as MemberOwnedObjects,
+)
+from ufo.objects import (
     ObjectKind as ObjectKind,
+)
+from ufo.objects import (
+    ObjectOwner as ObjectOwner,
 )
 from ufo.objects import (
     ObjectPage as ObjectPage,
@@ -20,7 +26,13 @@ from ufo.objects import (
     ObjectStore as ObjectStore,
 )
 from ufo.objects import (
+    OwnedRow as OwnedRow,
+)
+from ufo.objects import (
     OwnerRequired as OwnerRequired,
+)
+from ufo.objects import (
+    UnknownObject as UnknownObject,
 )
 from ufo.objects import (
     VerbNotSupported as VerbNotSupported,

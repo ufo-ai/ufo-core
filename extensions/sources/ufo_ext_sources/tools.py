@@ -4,15 +4,18 @@ A source object is one provider binding — an account (or the workspace's BYOK 
 tenant URL where the provider needs one — carrying the selected streams, each stream a `source`
 row the core sync driver polls. Identity IS the binding, so names derive from it
 (`<provider>-<8-hex digest>`): apply with the wrong name refuses and hands back the exact one,
-changing streams is delete-and-recreate, and re-applying the identical spec is a no-op. Every
-mutation is owner-gated; validation refuses with the valid provider and stream sets, so discovery
-is error-driven plus `object_explain`."""
+changing streams is delete-and-recreate, and re-applying the identical spec is a no-op. A source
+is private to its registering member by default; the model decides `shared` at registration, and
+only the registrar or the workspace owner may later flip a private source to shared — the
+reverse is delete-and-recreate. Delete is registrar-or-owner too. Validation refuses with the
+valid provider and stream sets, so discovery is error-driven plus `object_explain`."""
 
 import hashlib
 import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from typing import ClassVar
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -21,14 +24,14 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue
 from ufo.sdk.connectors import ConnectorRegistry
 from ufo.sdk.context import CredentialSlotUnset, ExtensionContext
 from ufo.sdk.objects import (
-    OBJECT_LIST_PAGE,
+    MemberOwnedObjects,
     ObjectKind,
-    ObjectPage,
-    ObjectRow,
-    OwnerRequired,
+    ObjectOwner,
+    OwnedRow,
+    UnknownObject,
     VerbNotSupported,
 )
-from ufo.sdk.sources import ConnectorSourceConfig
+from ufo.sdk.sources import SHARED_SUBJECT, ConnectorSourceConfig, member_subject
 from ufo.sdk.tools import ConnectUnavailable, ToolContext
 from ufo_ext_sources.registry import CONNECTORS
 
@@ -100,6 +103,11 @@ class SourceSpec(BaseModel):
         description="Tenant API URL, only for providers that require one; the refusal names the "
         "expected shape.",
     )
+    shared: bool = Field(
+        default=False,
+        description="Sync into the whole workspace's shared memory rather than privately to the "
+        "registering member. Set it only when the member's words say the source is for the team.",
+    )
 
 
 def _binding_name(provider: str, account: str, base_url: str | None) -> str:
@@ -124,6 +132,8 @@ class _Binding:
     provider: str
     account: str
     base_url: str | None
+    subject: str
+    owner_member_id: UUID | None
     streams: tuple[_Stream, ...]
 
     @property
@@ -136,6 +146,7 @@ class _Binding:
             streams=tuple(stream.name for stream in self.streams),
             account_id="" if self.account == DIRECT_ACCOUNT else self.account,
             base_url=self.base_url or "",
+            shared=self.subject == SHARED_SUBJECT,
         )
 
     def summary(self) -> str:
@@ -155,50 +166,72 @@ def _require_connectors(ctx: ToolContext) -> ConnectorRegistry:
     return ctx.connectors
 
 
+SHARE_GATE = "only the registering member or the workspace owner may change a source's sharing"
+DELETE_GATE = "only the registering member or the workspace owner may remove a source"
+
+
 @dataclass(frozen=True)
-class SourceObjects:
+class SourceObjects(MemberOwnedObjects[SourceSpec]):
     """The kind's handlers over the workspace's registered source rows: get/list reconstruct
     bindings by grouping rows on (provider, account, base_url); apply validates provider, streams,
     tenant URL, and auth exactly as registration always has, then registers one row per stream
-    (the first sync is scheduled immediately); delete removes the binding's rows and their synced
-    pages follow through the page-tombstone pipeline. Mutations are owner-gated."""
+    (the first sync is scheduled immediately) — private to the registering member unless the
+    model asks for `shared`; delete removes the binding's rows and their synced pages follow
+    through the page-tombstone pipeline. The per-member visibility and registrar-or-owner gate is
+    the base's; this kind supplies the bindings, their specs, and the register/share/remove acts."""
 
-    async def list(self, ctx: ToolContext, query: str, cursor: str) -> ObjectPage:
-        bindings = [
-            binding
+    kind_name: ClassVar[str] = SOURCE_KIND
+    mutate_gate: ClassVar[str] = SHARE_GATE
+    delete_gate: ClassVar[str] = DELETE_GATE
+    delete_requires_speaker: ClassVar[bool] = True
+
+    async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow, ...]:
+        return tuple(
+            OwnedRow(
+                name=binding.name,
+                summary=binding.summary(),
+                owner=ObjectOwner(
+                    member_id=binding.owner_member_id,
+                    shared=binding.subject == SHARED_SUBJECT,
+                ),
+            )
             for binding in await self._bindings(ctx)
-            if query in binding.name or query in binding.summary()
-        ]
-        bindings.sort(key=lambda binding: binding.name)
-        remaining = [b for b in bindings if b.name > cursor] if cursor else bindings
-        page, rest = remaining[:OBJECT_LIST_PAGE], remaining[OBJECT_LIST_PAGE:]
-        rows = tuple(ObjectRow(name=b.name, summary=b.summary()) for b in page)
-        return ObjectPage(rows=rows, next_cursor=page[-1].name if rest else None)
+        )
 
-    async def get(self, ctx: ToolContext, name: str) -> SourceSpec | None:
+    async def _spec(self, ctx: ToolContext, name: str) -> SourceSpec | None:
         binding = await self._find(ctx, name)
-        return None if binding is None else binding.spec()
+        return binding.spec() if binding is not None else None
 
-    async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
+    async def _status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
         binding = await self._find(ctx, name)
         if binding is None:
             return None
-        return {
+        shared = binding.subject == SHARED_SUBJECT
+        status: dict[str, JsonValue] = {
+            "shared": shared,
             "streams": {
                 stream.name: {
                     "next_sync_at": stream.next_sync_at.isoformat(),
                     "consecutive_errors": stream.consecutive_errors,
                 }
                 for stream in binding.streams
-            }
+            },
         }
+        if not shared and binding.owner_member_id is not None:
+            status["owner_member_id"] = str(binding.owner_member_id)
+        return status
 
-    async def apply(
-        self, ctx: ToolContext, name: str, spec: SourceSpec, old: SourceSpec | None
+    async def _apply_owned(
+        self,
+        ctx: ToolContext,
+        name: str,
+        spec: SourceSpec,
+        old: SourceSpec | None,
+        owner: ObjectOwner | None,
     ) -> None:
         ext = _require_ext(ctx)
-        if not await ctx.speaker_is_owner():
-            raise OwnerRequired("only the workspace owner can register shared sources")
+        if ctx.speaker_member_id is None:
+            raise ValueError("registering a source requires a speaking member")
         connector_cls = CONNECTORS.get(spec.provider)
         if connector_cls is None:
             raise ValueError(
@@ -225,24 +258,39 @@ class SourceObjects:
             streams=streams,
             account_id="" if account == DIRECT_ACCOUNT else account,
             base_url=base_url or "",
+            shared=spec.shared,
         )
-        if old is not None and resolved != old:
-            raise VerbNotSupported(
-                "a source's identity is its config — delete the binding and recreate it"
-            )
+        binding = await self._find(ctx, name)
+        if binding is not None:
+            old_spec = binding.spec()
+            if resolved != old_spec:
+                if resolved.model_copy(update={"shared": old_spec.shared}) != old_spec:
+                    raise VerbNotSupported(
+                        "a source's identity is its config — delete the binding and recreate it"
+                    )
+                if not resolved.shared:
+                    raise VerbNotSupported(
+                        "a shared source stays shared — delete the binding and "
+                        "recreate it privately"
+                    )
+                await ext.set_source_subject(
+                    tuple(stream.source_id for stream in binding.streams), SHARED_SUBJECT
+                )
+            return
+        subject = SHARED_SUBJECT if resolved.shared else member_subject(ctx.speaker_member_id)
         for stream in streams:
             await ext.register_source(
                 spec.provider,
                 ConnectorSourceConfig(account=account, stream=stream, base_url=base_url),
+                subject=subject,
+                owner_member_id=ctx.speaker_member_id,
             )
 
-    async def delete(self, ctx: ToolContext, name: str) -> None:
+    async def _delete_owned(self, ctx: ToolContext, name: str, owner: ObjectOwner) -> None:
         ext = _require_ext(ctx)
-        if not await ctx.speaker_is_owner():
-            raise OwnerRequired("only the workspace owner can remove shared sources")
         binding = await self._find(ctx, name)
         if binding is None:
-            raise ValueError(f"no source binding named {name!r}")
+            raise UnknownObject(f"no {SOURCE_KIND} object named {name!r}")
         for stream in binding.streams:
             await ext.remove_source(stream.source_id)
 
@@ -293,11 +341,13 @@ class SourceObjects:
 
     async def _bindings(self, ctx: ToolContext) -> tuple[_Binding, ...]:
         grouped: dict[tuple[str, str, str | None], list[_Stream]] = {}
+        disclosure: dict[tuple[str, str, str | None], tuple[str, UUID | None]] = {}
         for record in await _require_ext(ctx).sources():
             if record.backend not in CONNECTORS:
                 continue
             config = ConnectorSourceConfig.model_validate(record.config)
-            grouped.setdefault((record.backend, config.account, config.base_url), []).append(
+            key = (record.backend, config.account, config.base_url)
+            grouped.setdefault(key, []).append(
                 _Stream(
                     name=config.stream,
                     next_sync_at=record.next_sync_at,
@@ -305,11 +355,14 @@ class SourceObjects:
                     source_id=record.id,
                 )
             )
+            disclosure.setdefault(key, (record.subject, record.owner_member_id))
         return tuple(
             _Binding(
                 provider=provider,
                 account=account,
                 base_url=base_url,
+                subject=disclosure[(provider, account, base_url)][0],
+                owner_member_id=disclosure[(provider, account, base_url)][1],
                 streams=tuple(sorted(streams, key=lambda stream: stream.name)),
             )
             for (provider, account, base_url), streams in grouped.items()
@@ -356,18 +409,22 @@ def _validated_base_url(provider: str, base_url: str | None) -> str | None:
 SOURCE_OBJECT = ObjectKind(
     name=SOURCE_KIND,
     description=(
-        "A registered content-sync binding: one provider account's selected streams syncing "
-        "into shared memory. Owner-only mutations: create and delete; changing streams is "
-        "delete-and-recreate."
+        "A registered content-sync binding: one provider account's selected streams, synced "
+        "privately to its registering member unless shared. Changing streams is "
+        "delete-and-recreate; sharing and delete are gated to the registrar or the owner."
     ),
     guidance=(
-        "Apply a manifest to register selected streams of a content-source provider into "
-        "shared memory; an unknown provider or stream is refused with the valid choices, and "
-        "an unknown name is refused with the exact derived name to re-apply (names derive from "
-        "provider, account, and tenant URL). Brokered providers use this agent's active "
-        "connected-account grant; providers without a broker use their workspace credential. "
-        "Only the workspace owner can register or delete sources; a source's identity is its "
-        "config, so changing one is delete and recreate."
+        "Apply a manifest to register selected streams of a content-source provider; an unknown "
+        "provider or stream is refused with the valid choices, and an unknown name is refused "
+        "with the exact derived name to re-apply (names derive from provider, account, and "
+        "tenant URL). Brokered providers use this agent's active connected-account grant; "
+        "providers without a broker use their workspace credential. A source syncs privately to "
+        "its registering member by default; set `shared: true` at apply — or in a later "
+        "re-apply by the registrar or the workspace owner — to sync it into workspace-shared "
+        "memory instead, only when the member's words say the source is for the team. "
+        "Unsharing is delete-and-recreate; a source's identity is otherwise its config, so "
+        "changing streams is delete and recreate too. Delete is registrar-or-owner. Reads show "
+        "shared sources plus the member's own — a workspace owner sees all."
     ),
     spec_model=SourceSpec,
     store=SourceObjects(),

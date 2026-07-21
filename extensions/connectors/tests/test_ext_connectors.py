@@ -63,6 +63,8 @@ class _Grants(GrantStore):
                 provider=sample.CONNECTOR_PROVIDER,
                 account_id=account,
                 host=sample.CONNECTOR_HOST,
+                grantor_member_id=uuid4(),
+                shared=True,
             )
             for account in self.accounts
         )

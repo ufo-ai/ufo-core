@@ -115,10 +115,12 @@ class CredentialRequest(BaseModel):
 
 
 class ConnectRequest(BaseModel):
-    """The `connect_account` tool's structured terminal handoff. The provider is durable while
+    """The `connect_account` tool's structured terminal handoff; `shared` carries the model's
+    disclosure decision to the grant. The provider is durable while
     the authorization URL is minted only after the speaking member privately claims it."""
 
     provider: str
+    shared: bool = False
 
 
 class TerminalFrame(BaseModel):
@@ -183,6 +185,7 @@ class Turn(BaseModel):
     updated_at: datetime | None = None
     admission_source: TurnAdmissionSource = INTERNAL_ADMISSION
     speaker_member_id: UUID | None = None
+    on_behalf_of_member_id: UUID | None = None
     context: TurnContext | None = None
     terminal: TerminalFrame | None = None
     parent_turn_id: UUID | None = None

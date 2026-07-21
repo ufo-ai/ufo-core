@@ -386,7 +386,7 @@ class SampleSource:
         self, config: SampleSourceConfig, cursor: str | None, auth: SourceAuth
     ) -> SyncResult:
         digest = "sha256:" + hashlib.sha256(config.topic.encode()).hexdigest()
-        page = Page(source_ref=SOURCE_REF, digest=digest, subject=SHARED_SUBJECT, body=config.topic)
+        page = Page(source_ref=SOURCE_REF, digest=digest, body=config.topic)
         return SyncResult(pages=(page,), next_cursor=None)
 
 
@@ -489,7 +489,12 @@ def _hit(chunk: Chunk, score: float) -> Hit:
 
 async def _setup(ctx: ExtensionContext) -> None:
     await ctx.store.put(ONBOARDING_KEY, {"onboarded": True})
-    await ctx.register_source(SOURCE_BACKEND, SampleSourceConfig(topic=SOURCE_TOPIC))
+    await ctx.register_source(
+        SOURCE_BACKEND,
+        SampleSourceConfig(topic=SOURCE_TOPIC),
+        subject=SHARED_SUBJECT,
+        owner_member_id=None,
+    )
 
 
 async def _deny_echo(ctx: HookContext) -> HookOutcome:

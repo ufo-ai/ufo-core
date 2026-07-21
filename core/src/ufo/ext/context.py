@@ -381,11 +381,15 @@ class ModelAccess:
 class SourceRecord:
     """One live content-sync source as `ExtensionContext.sources` reads it: the row's identity,
     the backend's typed per-source parameters as stored, and the timing marks a caller renders as
-    status. A value object — never leaves the process."""
+    status; `subject` is the disclosure every synced page is stamped with, `owner_member_id` the
+    registering member (None for a deploy- or extension-registered feed). A value object — never
+    leaves the process."""
 
     id: UUID
     backend: str
     config: dict[str, JsonValue]
+    subject: str
+    owner_member_id: UUID | None
     next_sync_at: datetime
     consecutive_errors: int
 
@@ -465,30 +469,42 @@ class ExtensionContext:
             raise RuntimeError("invoke requires a turn invoker; none is wired")
         return await self.invoker.invoke(conversation_id, agent_id, message, idempotency_key)
 
-    async def register_source(self, backend: str, config: BaseModel) -> UUID:
+    async def register_source(
+        self, backend: str, config: BaseModel, *, subject: str, owner_member_id: UUID | None
+    ) -> UUID:
         """Register a content-sync source for this workspace under `backend` — a `SourceBackend` an
         extension declared through its Manifest `sources` point — with `config` the backend's typed
-        per-source parameters (the connected account, a folder root). Idempotent on (workspace,
-        backend, config): re-running onboarding or re-connecting the same account settles on the one
-        row, never a duplicate sync. The core sync driver polls the row and lands its pages in
-        memory; embedding stays a job."""
+        per-source parameters (the connected account, a folder root), `subject` the disclosure every
+        page it syncs is stamped with, and `owner_member_id` the registering member (None for a
+        shared feed). Idempotent on (workspace, backend, config): re-running onboarding or
+        re-connecting the same account settles on the one row, never a duplicate sync — but a live
+        row's disclosure is fixed at registration: re-registering it under a different `subject`
+        raises rather than silently reclassifying already-synced pages. The core sync driver polls
+        the row and lands its pages in memory; embedding stays a job."""
         payload = config.model_dump(mode="json")
         source_id = source_row_id(self.store.workspace_id, backend, payload)
         async with workspace_tx() as connection:
             present = (
                 await connection.execute(
-                    sa.select(tables.source.c.id, tables.source.c.removed_at).where(
-                        tables.source.c.id == source_id
-                    )
+                    sa.select(
+                        tables.source.c.id, tables.source.c.removed_at, tables.source.c.subject
+                    ).where(tables.source.c.id == source_id)
                 )
             ).one_or_none()
             if present is not None and present.removed_at is None:
+                if present.subject != subject:
+                    raise ValueError(
+                        "a source with this configuration is already registered; delete it "
+                        "before changing its disclosure"
+                    )
                 return source_id
             if present is not None:
                 await connection.execute(
                     sa.update(tables.source)
                     .values(
                         removed_at=None,
+                        subject=subject,
+                        owner_member_id=owner_member_id,
                         cursor=None,
                         next_sync_at=datetime.now(UTC),
                         consecutive_errors=0,
@@ -505,6 +521,8 @@ class ExtensionContext:
                     workspace_id=self.store.workspace_id,
                     backend=backend,
                     config=payload,
+                    subject=subject,
+                    owner_member_id=owner_member_id,
                     cursor=None,
                     next_sync_at=datetime.now(UTC),
                     claimed_by=None,
@@ -523,6 +541,8 @@ class ExtensionContext:
                 tables.source.c.id,
                 tables.source.c.backend,
                 tables.source.c.config,
+                tables.source.c.subject,
+                tables.source.c.owner_member_id,
                 tables.source.c.next_sync_at,
                 tables.source.c.consecutive_errors,
             )
@@ -541,6 +561,8 @@ class ExtensionContext:
                 id=row["id"],
                 backend=row["backend"],
                 config=row["config"],
+                subject=row["subject"],
+                owner_member_id=row["owner_member_id"],
                 next_sync_at=row["next_sync_at"],
                 consecutive_errors=row["consecutive_errors"],
             )
@@ -576,6 +598,34 @@ class ExtensionContext:
                 .values(tombstone=True, updated_at=now)
                 .where(
                     tables.page.c.source_id == source_id,
+                    tables.page.c.tombstone.is_(False),
+                )
+            )
+
+    async def set_source_subject(self, source_ids: tuple[UUID, ...], subject: str) -> None:
+        """Flip live sources' disclosure and restamp their live pages in one transaction, each page
+        with a fresh microsecond `updated_at` so the page-change replay re-indexes every one under
+        the new subject — exactly as an edit does. Passing a binding's several stream rows settles
+        their new subject atomically, never in torn per-stream commits. Tombstoned pages stay put;
+        their chunks are already gone. Fails loud when no live source matched."""
+        now = datetime.now(UTC)
+        async with workspace_tx() as connection:
+            updated = await connection.execute(
+                sa.update(tables.source)
+                .values(subject=subject, updated_at=sa.func.now())
+                .where(
+                    tables.source.c.id.in_(source_ids),
+                    tables.source.c.workspace_id == self.store.workspace_id,
+                    tables.source.c.removed_at.is_(None),
+                )
+            )
+            if updated.rowcount == 0:
+                raise ValueError(f"no live sources {source_ids} in this workspace")
+            await connection.execute(
+                sa.update(tables.page)
+                .values(subject=subject, updated_at=now)
+                .where(
+                    tables.page.c.source_id.in_(source_ids),
                     tables.page.c.tombstone.is_(False),
                 )
             )

@@ -586,7 +586,10 @@ async def test_asana_source_syncs_through_the_driver_into_recallable_memory(
     context = context_for("sources", frozenset())
     with ws(workspace_id):
         await context.register_source(
-            "asana", ConnectorSourceConfig(account=ACCOUNT, stream="workspaces")
+            "asana",
+            ConnectorSourceConfig(account=ACCOUNT, stream="workspaces"),
+            subject=SHARED_SUBJECT,
+            owner_member_id=None,
         )
 
     handler = _asana_handler({None: {"data": [{"gid": "111", "name": "Acme HQ workspace"}]}})

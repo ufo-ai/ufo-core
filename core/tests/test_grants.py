@@ -3,7 +3,7 @@ import base64
 import hashlib
 import json
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID, uuid4
@@ -116,7 +116,13 @@ async def _member_agent(workspace_id: UUID) -> tuple[UUID, UUID]:
 def test_derive_admits_and_meters_the_granted_host_without_injecting() -> None:
     """A grant admits and meters its host but injects nothing — the broker holds the account's token
     and runs connector tools server-side, so no secret is on the wire."""
-    grant = Grant(provider="stub", account_id="acct-42", host=GRANTED_HOST)
+    grant = Grant(
+        provider="stub",
+        account_id="acct-42",
+        host=GRANTED_HOST,
+        grantor_member_id=uuid4(),
+        shared=False,
+    )
     rules = derive_grant_rules((grant,))
     scope = next(r for r in rules if isinstance(r, ScopeRule))
     assert scope.allowed_hosts == frozenset({GRANTED_HOST})
@@ -134,7 +140,13 @@ TRANSFER_HOST = "stash.broker.test"
 def test_derive_admits_the_providers_transfer_hosts_with_the_grant() -> None:
     """A grant also admits and meters its broker's declared file-store hosts — where the sandbox
     fetches a tool's presigned file outputs and stages its file inputs — still injecting nothing."""
-    grant = Grant(provider="stub", account_id="acct-42", host=GRANTED_HOST)
+    grant = Grant(
+        provider="stub",
+        account_id="acct-42",
+        host=GRANTED_HOST,
+        grantor_member_id=uuid4(),
+        shared=False,
+    )
     rules = derive_grant_rules((grant,), {"stub": (TRANSFER_HOST,)})
     scope = next(r for r in rules if isinstance(r, ScopeRule))
     assert scope.allowed_hosts == frozenset({GRANTED_HOST, TRANSFER_HOST})
@@ -143,7 +155,13 @@ def test_derive_admits_the_providers_transfer_hosts_with_the_grant() -> None:
 
 
 def test_derive_ignores_another_providers_transfer_hosts() -> None:
-    grant = Grant(provider="stub", account_id="acct-42", host=GRANTED_HOST)
+    grant = Grant(
+        provider="stub",
+        account_id="acct-42",
+        host=GRANTED_HOST,
+        grantor_member_id=uuid4(),
+        shared=False,
+    )
     rules = derive_grant_rules((grant,), {"other": (TRANSFER_HOST,)})
     scope = next(r for r in rules if isinstance(r, ScopeRule))
     assert scope.allowed_hosts == frozenset({GRANTED_HOST})
@@ -165,6 +183,7 @@ async def test_resolver_folds_the_transfer_hosts_into_the_turns_rules(db: None) 
         host=GRANTED_HOST,
         grantor_member_id=member_id,
         conversation_id=conversation_id,
+        shared=False,
     )
     resolver = PerAgentRules(base=(), grants=store, transfer_hosts={"stub": (TRANSFER_HOST,)})
     rules = await resolver.resolve(RunToken(workspace_id, turn_id))
@@ -185,9 +204,18 @@ async def test_grant_round_trips_carrying_only_the_account_id(db: None) -> None:
         host=GRANTED_HOST,
         grantor_member_id=member_id,
         conversation_id=conversation_id,
+        shared=False,
     )
     grants = await store.active_grants(workspace_id, agent_id)
-    assert grants == (Grant(provider="stub", account_id="acct-42", host=GRANTED_HOST),)
+    assert grants == (
+        Grant(
+            provider="stub",
+            account_id="acct-42",
+            host=GRANTED_HOST,
+            grantor_member_id=member_id,
+            shared=False,
+        ),
+    )
 
 
 async def test_record_rejects_a_control_char_account_id(db: None) -> None:
@@ -205,6 +233,7 @@ async def test_record_rejects_a_control_char_account_id(db: None) -> None:
             host=GRANTED_HOST,
             grantor_member_id=member_id,
             conversation_id=conversation_id,
+            shared=False,
         )
 
 
@@ -222,6 +251,7 @@ async def test_reconnecting_the_same_account_updates_not_duplicates(db: None) ->
             host=host,
             grantor_member_id=member_id,
             conversation_id=conversation_id,
+            shared=False,
         )
     async with workspace_tx() as connection:
         count = (
@@ -248,6 +278,7 @@ async def test_connect_flow_records_a_durable_grant_with_account_id(db: None) ->
         provider="stub",
         grantor_member_id=member_id,
         conversation_id=conversation_id,
+        shared=False,
     )
     state = parse_qs(urlparse(url).query)["state"][0]
     recorded = await flow.complete(state=state, code="the-code")
@@ -298,6 +329,7 @@ def test_unknown_provider_is_rejected() -> None:
             provider="nope",
             grantor_member_id=uuid4(),
             conversation_id=uuid4(),
+            shared=False,
         )
 
 
@@ -313,6 +345,7 @@ async def test_grant_summaries_expose_the_audit_view(db: None) -> None:
         host=GRANTED_HOST,
         grantor_member_id=member_id,
         conversation_id=conversation_id,
+        shared=False,
     )
     summaries = await grant_summaries(workspace_id)
     assert len(summaries) == 1
@@ -324,7 +357,13 @@ async def test_grant_summaries_expose_the_audit_view(db: None) -> None:
 async def test_proxy_admits_the_granted_host_and_blocks_the_ungranted() -> None:
     """A grant admits its host — the resolved rule set carries a ScopeRule for it — while an
     ungranted host is refused at CONNECT (403). No token is injected."""
-    grant = Grant(provider="stub", account_id="acct-42", host=GRANTED_HOST)
+    grant = Grant(
+        provider="stub",
+        account_id="acct-42",
+        host=GRANTED_HOST,
+        grantor_member_id=uuid4(),
+        shared=False,
+    )
     resolver = PerAgentRules(base=derive_grant_rules((grant,)), grants=None)
     cert, key = await generate_ca()
     proxy = EgressProxy(
@@ -357,6 +396,7 @@ async def test_agent_a_reaches_only_its_own_granted_host(db: None) -> None:
         host=HOST_A,
         grantor_member_id=member_id,
         conversation_id=conversation_id,
+        shared=False,
     )
     await store.record(
         workspace_id=workspace_id,
@@ -366,6 +406,7 @@ async def test_agent_a_reaches_only_its_own_granted_host(db: None) -> None:
         host=HOST_B,
         grantor_member_id=member_id,
         conversation_id=conversation_id,
+        shared=False,
     )
     resolver = PerAgentRules(base=(), grants=store)
     cert, key = await generate_ca()
@@ -410,6 +451,7 @@ async def test_a_grant_recorded_after_start_is_live_for_the_next_turn(db: None) 
             host=HOST_A,
             grantor_member_id=member_id,
             conversation_id=conversation_id,
+            shared=False,
         )
         rules_2 = await proxy._rules_for(RunToken(workspace_id, turn_2))
     finally:
@@ -651,7 +693,7 @@ async def test_cli_stream_privately_opens_the_speakers_connect_handoff(db: None)
         )
     frames = [json.loads(line) for line in response.text.splitlines()]
     assert frames[0]["connect_url"].startswith("https://stub.test/oauth")
-    assert frames[1]["frame"]["connect_request"] == {"provider": "stub"}
+    assert frames[1]["frame"]["connect_request"] == {"provider": "stub", "shared": False}
 
 
 async def test_connect_account_without_a_speaker_is_refused() -> None:
@@ -679,6 +721,98 @@ async def test_the_begin_route_is_gone_and_the_callback_reports_unavailable_with
         callback = await client.get("/v1/connect/callback", params={"state": "s", "code": "c"})
     assert begun.status_code == 404
     assert callback.status_code == 503
+
+
+async def test_connect_flow_records_the_models_shared_decision(db: None) -> None:
+    """The model decides disclosure at connect time: shared=True lands a workspace-shared grant,
+    the default lands one private to its grantor."""
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    store = GrantStore()
+    flow = ConnectFlow(
+        providers={"stub": StubProvider()},
+        fernet=Fernet(Fernet.generate_key()),
+        store=store,
+        redirect_uri=REDIRECT_URI,
+    )
+    url = flow.authorize(
+        workspace_id=workspace_id,
+        agent_id=agent_id,
+        provider="stub",
+        grantor_member_id=member_id,
+        conversation_id=conversation_id,
+        shared=True,
+    )
+    state = parse_qs(urlparse(url).query)["state"][0]
+    await flow.complete(state=state, code="c")
+    (grant,) = await store.active_grants(workspace_id, agent_id)
+    assert grant.shared is True
+    assert grant.grantor_member_id == member_id
+
+
+async def test_a_grant_defaults_private_and_reconnect_updates_shared(db: None) -> None:
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    store = GrantStore()
+    for shared in (False, True):
+        await store.record(
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            provider="stub",
+            account_id="acct-42",
+            host=GRANTED_HOST,
+            grantor_member_id=member_id,
+            conversation_id=conversation_id,
+            shared=shared,
+        )
+    (grant,) = await store.active_grants(workspace_id, agent_id)
+    assert grant.shared is True
+    (summary,) = await grant_summaries(workspace_id)
+    assert summary.shared is True
+
+
+async def test_set_shared_flips_every_agents_row_for_the_account(db: None) -> None:
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    second_agent = await _agent(workspace_id, "reviewer")
+    conversation_id = await _conversation(workspace_id, member_id)
+    store = GrantStore()
+    for target in (agent_id, second_agent):
+        await store.record(
+            workspace_id=workspace_id,
+            agent_id=target,
+            provider="stub",
+            account_id="acct-42",
+            host=GRANTED_HOST,
+            grantor_member_id=member_id,
+            conversation_id=conversation_id,
+            shared=False,
+        )
+    assert await store.set_shared(workspace_id, "stub", "acct-42", True) is True
+    for target in (agent_id, second_agent):
+        (grant,) = await store.active_grants(workspace_id, target)
+        assert grant.shared is True
+    assert await store.set_shared(workspace_id, "stub", "missing", True) is False
+
+
+async def test_connect_account_carries_the_shared_intent(db: None) -> None:
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    install_connect_flow(
+        ConnectFlow(
+            providers={"stub": StubProvider()},
+            fernet=Fernet(Fernet.generate_key()),
+            store=GrantStore(),
+            redirect_uri=REDIRECT_URI,
+        )
+    )
+    ctx = _turn_context(workspace_id, agent_id, conversation_id, member_id)
+    result = await connect_account_handler(ctx, ConnectAccountInput(provider="stub", shared=True))
+    payload = json.loads(result.content[0].text.splitlines()[-1])
+    assert payload == {"provider": "stub", "shared": True}
 
 
 async def _agent(workspace_id: UUID, name: str) -> UUID:
@@ -749,3 +883,78 @@ async def _connect_status(port: int, host: str, run_token: str = "") -> int:
     status_line = await reader.readline()
     writer.close()
     return int(status_line.split()[1])
+
+
+async def test_connector_accounts_admit_only_the_speakers_own_and_shared_grants(db: None) -> None:
+    """The runtime check: a private grant resolves only for its grantor's turns; a shared grant
+    for anyone's; a speakerless (scheduled/internal) turn sees only shared grants."""
+    workspace_id = await _workspace()
+    grantor_id, agent_id = await _member_agent(workspace_id)
+    other_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=other_id,
+                workspace_id=workspace_id,
+                email="other@x.test",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    conversation_id = await _conversation(workspace_id, grantor_id)
+    store = GrantStore()
+    for account_id, member, shared in (
+        ("acct-private", grantor_id, False),
+        ("acct-shared", other_id, True),
+        ("acct-other-private", other_id, False),
+    ):
+        await store.record(
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            provider="stub",
+            account_id=account_id,
+            host=GRANTED_HOST,
+            grantor_member_id=member,
+            conversation_id=conversation_id,
+            shared=shared,
+        )
+    ctx = _turn_context(workspace_id, agent_id, conversation_id, grantor_id)
+    ctx = replace(ctx, grants=store)
+    assert await ctx.connector_accounts("stub") == ("acct-private", "acct-shared")
+    speakerless = replace(
+        _turn_context(workspace_id, agent_id, conversation_id, None), grants=store
+    )
+    assert await speakerless.connector_accounts("stub") == ("acct-shared",)
+    with pytest.raises(ValueError, match="acct-other-private"):
+        await ctx.connector_account("stub", "acct-other-private")
+
+
+async def test_connector_accounts_resolve_the_on_behalf_of_member_for_speakerless_turns(
+    db: None,
+) -> None:
+    """A scheduled fire or subagent carries the initiating member as on_behalf_of, so it keeps that
+    member's private connections even with no live speaker — a turn with no member at all sees only
+    shared grants."""
+    workspace_id = await _workspace()
+    initiator_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, initiator_id)
+    store = GrantStore()
+    await store.record(
+        workspace_id=workspace_id,
+        agent_id=agent_id,
+        provider="stub",
+        account_id="acct-initiator-private",
+        host=GRANTED_HOST,
+        grantor_member_id=initiator_id,
+        conversation_id=conversation_id,
+        shared=False,
+    )
+    on_behalf = replace(
+        _turn_context(workspace_id, agent_id, conversation_id, None),
+        grants=store,
+        on_behalf_of_member_id=initiator_id,
+    )
+    assert on_behalf.speaker_member_id is None
+    assert await on_behalf.connector_accounts("stub") == ("acct-initiator-private",)
+    anonymous = replace(_turn_context(workspace_id, agent_id, conversation_id, None), grants=store)
+    assert await anonymous.connector_accounts("stub") == ()

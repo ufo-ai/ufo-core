@@ -150,6 +150,7 @@ async def _register_grant(
         host=host,
         grantor_member_id=state.member_id,
         conversation_id=state.conversation_id,
+        shared=False,
     )
 
 

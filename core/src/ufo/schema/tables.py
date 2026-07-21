@@ -112,6 +112,7 @@ turn = sa.Table(
     sa.Column("inbound", sa.Text, nullable=False),
     sa.Column("admission_source", sa.Text, nullable=False, server_default="internal"),
     sa.Column("speaker_member_id", sa.Uuid, sa.ForeignKey("member.id"), nullable=True),
+    sa.Column("on_behalf_of_member_id", sa.Uuid, sa.ForeignKey("member.id"), nullable=True),
     sa.Column("connect_authorization_url", sa.Text, nullable=True),
     sa.Column("connect_authorized_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("context", sa.JSON(none_as_null=True), nullable=True),
@@ -275,6 +276,7 @@ grant = sa.Table(
     sa.Column("host", sa.Text, nullable=False),
     sa.Column("grantor_member_id", sa.Uuid, sa.ForeignKey("member.id"), nullable=False),
     sa.Column("conversation_id", sa.Uuid, sa.ForeignKey("conversation.id"), nullable=False),
+    sa.Column("shared", sa.Boolean, nullable=False, server_default=sa.true()),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint(
@@ -371,6 +373,8 @@ source = sa.Table(
     sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
     sa.Column("backend", sa.Text, nullable=False),
     sa.Column("config", sa.JSON, nullable=False),
+    sa.Column("subject", sa.Text, nullable=False, server_default="shared"),
+    sa.Column("owner_member_id", sa.Uuid, sa.ForeignKey("member.id"), nullable=True),
     sa.Column("cursor", sa.Text, nullable=True),
     sa.Column("next_sync_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("consecutive_errors", sa.Integer, nullable=False, server_default="0"),
@@ -380,6 +384,7 @@ source = sa.Table(
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.Index("source_due", "next_sync_at"),
+    sa.CheckConstraint("subject = 'shared' or subject like 'member:%'", name="source_subject"),
 )
 
 scheduled_task = sa.Table(
@@ -390,6 +395,7 @@ scheduled_task = sa.Table(
     sa.Column("conversation_id", sa.Uuid, sa.ForeignKey("conversation.id"), nullable=False),
     sa.Column("agent_id", sa.Uuid, sa.ForeignKey("agent.id"), nullable=False),
     sa.Column("name", sa.Text, nullable=False),
+    sa.Column("created_by_member_id", sa.Uuid, sa.ForeignKey("member.id"), nullable=True),
     sa.Column("schedule", sa.Text, nullable=False),
     sa.Column("prompt", sa.Text, nullable=False),
     sa.Column("description", sa.Text, nullable=False),

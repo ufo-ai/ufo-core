@@ -45,6 +45,7 @@ class ScheduledTask:
     origin_seq: int | None
     resume_turn_id: UUID | None
     claim_id: str | None
+    created_by_member_id: UUID | None = None
 
 
 class ScheduleInvoker(Protocol):
@@ -71,6 +72,7 @@ _COLUMNS = (
     tables.scheduled_task.c.conversation_id,
     tables.scheduled_task.c.agent_id,
     tables.scheduled_task.c.name,
+    tables.scheduled_task.c.created_by_member_id,
     tables.scheduled_task.c.schedule,
     tables.scheduled_task.c.prompt,
     tables.scheduled_task.c.description,
@@ -88,6 +90,7 @@ def _task(row: sa.RowMapping) -> ScheduledTask:
         conversation_id=row["conversation_id"],
         agent_id=row["agent_id"],
         name=row["name"],
+        created_by_member_id=row["created_by_member_id"],
         schedule=row["schedule"],
         prompt=row["prompt"],
         description=row["description"],
@@ -154,6 +157,7 @@ class ScheduleStore:
         prompt: str,
         description: str,
         next_run_at: datetime,
+        created_by_member_id: UUID | None = None,
     ) -> ScheduledTask:
         """Upsert a schedule row by name: an existing name is re-pointed at the new cadence and
         prompt and its claim cleared, while its reporting conversation stays where it was created —
@@ -173,6 +177,7 @@ class ScheduleStore:
             description,
             next_run_at,
             None,
+            created_by_member_id,
         )
         if task is None:
             raise RuntimeError("recurring task upsert produced no task")
@@ -186,6 +191,7 @@ class ScheduleStore:
         description: str,
         next_run_at: datetime,
         origin_seq: int,
+        created_by_member_id: UUID | None = None,
     ) -> ScheduledTask | None:
         """Arm the conversation's one-time pause from the turn sequence that requested it."""
         return await self._upsert(
@@ -197,6 +203,7 @@ class ScheduleStore:
             description,
             next_run_at,
             origin_seq,
+            created_by_member_id,
         )
 
     async def _upsert(
@@ -209,6 +216,7 @@ class ScheduleStore:
         description: str,
         next_run_at: datetime,
         origin_seq: int | None,
+        created_by_member_id: UUID | None,
     ) -> ScheduledTask | None:
         async with workspace_tx() as connection:
             (
@@ -290,6 +298,7 @@ class ScheduleStore:
                         conversation_id=conversation_id,
                         agent_id=effective_agent_id,
                         name=name,
+                        created_by_member_id=created_by_member_id,
                         schedule=schedule,
                         prompt=prompt,
                         description=description,
@@ -313,6 +322,7 @@ class ScheduleStore:
                     .returning(
                         tables.scheduled_task.c.id,
                         tables.scheduled_task.c.conversation_id,
+                        tables.scheduled_task.c.created_by_member_id,
                     )
                 )
             ).one()
@@ -321,6 +331,7 @@ class ScheduleStore:
             conversation_id=row.conversation_id,
             agent_id=effective_agent_id,
             name=name,
+            created_by_member_id=row.created_by_member_id,
             schedule=schedule,
             prompt=prompt,
             description=description,

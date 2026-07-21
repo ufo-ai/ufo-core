@@ -201,6 +201,7 @@ async def test_connector_account_is_scoped_to_the_turn_agents_own_grants(db: Non
             host=sample.CONNECTOR_HOST,
             grantor_member_id=member_id,
             conversation_id=conversation_id,
+            shared=False,
         )
     ctx_a = _turn_context(workspace_id, agent_a, conversation_id, member_id, grants=store)
     assert await ctx_a.connector_account(sample.CONNECTOR_PROVIDER) == "acct-a"
@@ -225,6 +226,7 @@ async def test_connector_account_selects_the_named_account(db: None) -> None:
             host=sample.CONNECTOR_HOST,
             grantor_member_id=member_id,
             conversation_id=conversation_id,
+            shared=False,
         )
     ctx = _turn_context(workspace_id, agent_id, conversation_id, member_id, grants=store)
     with pytest.raises(ValueError, match=r"multiple active.*pass account_id"):
@@ -252,6 +254,7 @@ async def test_connector_accounts_lists_only_the_turn_agents_provider_accounts(d
             host=sample.CONNECTOR_HOST,
             grantor_member_id=member_id,
             conversation_id=conversation_id,
+            shared=False,
         )
     ctx = _turn_context(workspace_id, agent_id, conversation_id, member_id, grants=store)
     assert await ctx.connector_accounts(sample.CONNECTOR_PROVIDER) == ("acct-1", "acct-2")

@@ -306,6 +306,125 @@ async def test_folder_sync_preserves_bare_carriage_returns(
     assert page["digest"] == "sha256:" + hashlib.sha256(body).hexdigest()
 
 
+async def test_the_driver_stamps_pages_with_the_source_rows_subject(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    root = tmp_path / "src"
+    root.mkdir()
+    (root / "note.md").write_text("member scoped note")
+    member_id = uuid4()
+    source_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email="member@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.source).values(
+                id=source_id,
+                workspace_id=workspace_id,
+                backend=FOLDER_BACKEND,
+                config={"root": str(root)},
+                subject=member_subject(member_id),
+                owner_member_id=member_id,
+                cursor=None,
+                next_sync_at=sa.func.now(),
+                claimed_by=None,
+                claim_expires_at=None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    driver, _, _ = _wire(database_url, vec((18, 1.0)), tmp_path / "blobs", workspace_id)
+
+    await _sync(driver)
+
+    pages = await _pages()
+    assert len(pages) == 1
+    assert pages[0]["subject"] == f"member:{member_id}"
+
+
+async def test_register_source_refuses_a_live_row_with_a_different_subject(db: None) -> None:
+    workspace_id = await _workspace()
+    ctx = context_for("probe", frozenset())
+    config = SourceConfig(root="/shared")
+    with ws(workspace_id):
+        first = await ctx.register_source(
+            FOLDER_BACKEND, config, subject=SHARED_SUBJECT, owner_member_id=None
+        )
+        second = await ctx.register_source(
+            FOLDER_BACKEND, config, subject=SHARED_SUBJECT, owner_member_id=None
+        )
+        assert first == second
+
+        with pytest.raises(ValueError, match="already registered"):
+            await ctx.register_source(
+                FOLDER_BACKEND,
+                config,
+                subject=member_subject(uuid4()),
+                owner_member_id=uuid4(),
+            )
+
+
+async def test_register_source_conflict_does_not_leak_the_owner_subject(db: None) -> None:
+    workspace_id = await _workspace()
+    ctx = context_for("probe", frozenset())
+    owner_id = uuid4()
+    config = SourceConfig(root="/private")
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=owner_id,
+                workspace_id=workspace_id,
+                email="owner@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    with ws(workspace_id):
+        await ctx.register_source(
+            FOLDER_BACKEND, config, subject=member_subject(owner_id), owner_member_id=owner_id
+        )
+        with pytest.raises(ValueError) as caught:
+            await ctx.register_source(
+                FOLDER_BACKEND,
+                config,
+                subject=member_subject(uuid4()),
+                owner_member_id=uuid4(),
+            )
+    message = str(caught.value)
+    assert str(owner_id) not in message
+    assert "member:" not in message
+
+
+async def test_boot_registered_folder_sources_are_shared(db: None, tmp_path: Path) -> None:
+    workspace_id = await _workspace()
+    root = tmp_path / "src"
+    root.mkdir()
+    await _register_folder(root)
+
+    async with workspace_tx() as connection:
+        row = (
+            (
+                await connection.execute(
+                    sa.select(tables.source.c.subject, tables.source.c.owner_member_id).where(
+                        tables.source.c.workspace_id == workspace_id
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+    assert row["subject"] == SHARED_SUBJECT
+    assert row["owner_member_id"] is None
+
+
 async def test_synced_page_content_is_found_via_memory_search(
     clean: None, database_url: str, tmp_path: Path
 ) -> None:
@@ -866,7 +985,6 @@ async def test_cursor_expired_clears_stored_cursor_and_next_run_refetches(
     page = Page(
         source_ref="doc",
         digest="sha256:fresh",
-        subject=SHARED_SUBJECT,
         body="the launch window opens at dawn",
     )
     driver, backend = _scripted_driver(
@@ -937,7 +1055,6 @@ async def test_delta_delete_tombstones_only_named_page_never_blanket_sweeps(
     delta = Page(
         source_ref="delta/doc",
         digest="sha256:delta",
-        subject=SHARED_SUBJECT,
         body="the launch window opens at dawn",
     )
     delta_id = page_id_for(source_id, "delta/doc")
@@ -971,7 +1088,6 @@ async def test_snapshot_fetch_tombstones_prior_pages_absent_from_the_fetch(
     kept = Page(
         source_ref="kept/doc",
         digest="sha256:kept",
-        subject=SHARED_SUBJECT,
         body="the mascot is a friendly otter named pip",
     )
     kept_id = page_id_for(source_id, "kept/doc")

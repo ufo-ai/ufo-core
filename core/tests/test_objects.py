@@ -20,6 +20,9 @@ import ufo_ext_sample as sample
 import yaml
 from cryptography.fernet import Fernet
 from pydantic import BaseModel, ConfigDict, SecretStr
+from ufo_ext_connectors.objects import CONNECTOR_OBJECT
+from ufo_ext_scheduled_tasks.tools import SCHEDULED_TASK_OBJECT
+from ufo_ext_sources.tools import SOURCE_OBJECT
 
 from ufo.agents import AGENT_KIND
 from ufo.artifact_token import verify_artifact_token
@@ -27,6 +30,7 @@ from ufo.artifacts import ARTIFACT_KIND, MATERIALIZE_MAX_BYTES, artifact_object_
 from ufo.blob import FilesystemBlobStore
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
+from ufo.ext.context import JsonValue
 from ufo.ext.loader import load_manifests, turn_tools, validate_ext_tools
 from ufo.ext.manifest import Manifest
 from ufo.governance import Governance, prompt_digest
@@ -37,7 +41,10 @@ from ufo.objects import (
     BoundKind,
     InvalidManifest,
     InvalidName,
+    MemberOwnedObjects,
     ObjectKind,
+    ObjectOwner,
+    OwnedRow,
     OwnerRequired,
     SpecValidationFailed,
     UnknownKind,
@@ -320,6 +327,15 @@ async def test_list_pages_with_cursor_and_query(db: None) -> None:
             await _text(tools, "object_list", ctx, kind=sample.WIDGET_KIND, query="w-003")
         )
         assert [row["name"] for row in filtered["objects"]] == ["w-003"]
+
+
+def test_member_owned_kinds_gate_through_the_shared_base() -> None:
+    """A member-owned kind cannot hand-roll its own visibility/ownership gate — it subclasses the
+    core base that owns it. The connector and source kinds are the reference members; a future
+    member-owned kind that reimplements the gate instead of subclassing fails here."""
+    assert isinstance(CONNECTOR_OBJECT.store, MemberOwnedObjects)
+    assert isinstance(SOURCE_OBJECT.store, MemberOwnedObjects)
+    assert isinstance(SCHEDULED_TASK_OBJECT.store, MemberOwnedObjects)
 
 
 def test_boot_fails_on_a_colliding_kind() -> None:
@@ -870,3 +886,48 @@ async def test_same_filename_across_conversations_stays_distinct(db: None) -> No
         assert names == sorted(
             f"{turn.conversation_id.hex[:8]}-report-txt" for turn in (turn_a, turn_b)
         )
+
+
+class _BootSpec(BaseModel):
+    pass
+
+
+class _OwnerOnlyStore(MemberOwnedObjects[_BootSpec]):
+    kind_name = "owner-only-test"
+    mutate_gate = "mutate refused"
+    delete_gate = "delete refused"
+
+    async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow, ...]:
+        return (OwnedRow(name="boot", summary="s", owner=ObjectOwner(member_id=None, shared=True)),)
+
+    async def _spec(self, ctx: ToolContext, name: str) -> _BootSpec | None:
+        return _BootSpec()
+
+    async def _status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
+        return {}
+
+    async def _apply_owned(
+        self,
+        ctx: ToolContext,
+        name: str,
+        spec: _BootSpec,
+        old: _BootSpec | None,
+        owner: ObjectOwner | None,
+    ) -> None:
+        raise AssertionError("gate must refuse before _apply_owned")
+
+    async def _delete_owned(self, ctx: ToolContext, name: str, owner: ObjectOwner) -> None:
+        raise AssertionError("gate must refuse before _delete_owned")
+
+
+async def test_shared_owner_only_row_refuses_a_non_owner_speakerless_turn() -> None:
+    """A shared owner-only row (owner member_id None, shared) is visible to everyone but mutable
+    only by the workspace owner. A speakerless turn has acting member None, which must never
+    collide with the None owner into 'owned' — the gate refuses both its mutation and its
+    deletion, and the domain hooks are never reached."""
+    store = _OwnerOnlyStore()
+    ctx = _tool_context(uuid4())
+    with pytest.raises(OwnerRequired, match="delete refused"):
+        await store.delete(ctx, "boot")
+    with pytest.raises(OwnerRequired, match="mutate refused"):
+        await store.apply(ctx, "boot", _BootSpec(), None)

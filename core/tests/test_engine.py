@@ -546,6 +546,9 @@ async def _seed_turn(
                 status=status,
                 inbound="hi",
                 admission_source=admission_source,
+                on_behalf_of_member_id=(
+                    member_id if admission_source == SCHEDULED_ADMISSION else None
+                ),
                 terminal=None if terminal is None else terminal.model_dump(mode="json"),
                 created_at=ADMITTED_AT,
                 updated_at=sa.func.now(),
@@ -560,6 +563,7 @@ async def _seed_turn(
         status=status,
         inbound="hi",
         admission_source=admission_source,
+        on_behalf_of_member_id=(member_id if admission_source == SCHEDULED_ADMISSION else None),
         created_at=ADMITTED_AT,
         terminal=terminal,
     )

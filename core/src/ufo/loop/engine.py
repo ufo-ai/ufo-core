@@ -618,6 +618,7 @@ class TurnEngine:
                 subagents=self.subagents,
                 speaker_member_id=self.turn.speaker_member_id,
                 audience_member_id=self.audience_member_id,
+                on_behalf_of_member_id=self.turn.on_behalf_of_member_id,
                 artifact_token_secret=self.artifact_token_secret,
                 grants=self.grants,
                 skills=self.skills,
@@ -1097,24 +1098,15 @@ class TurnEngine:
 
         The seat gate re-checks here too, so revoking a seat stops the running turn before its
         next model call — disable latency is bounded by one round — behind its own no-limit
-        fast-path so unlimited deploys pay nothing. A scheduled turn gates on its conversation's
-        member, the same derivation admission and the resume sweep apply."""
+        fast-path so unlimited deploys pay nothing. A scheduled turn gates on the member it acts on
+        behalf of, the same derivation admission and the resume sweep apply."""
         speaker = self.turn.speaker_member_id
         scheduled = self.turn.admission_source == SCHEDULED_ADMISSION
         if (speaker is not None or scheduled) and not seat_gate_absent(self.turn.workspace_id):
             async with workspace_tx() as connection:
-                conversation_member = (
-                    None
-                    if speaker is not None or not scheduled
-                    else (
-                        await connection.execute(
-                            sa.select(tables.conversation.c.member_id).where(
-                                tables.conversation.c.id == self.turn.conversation_id
-                            )
-                        )
-                    ).scalar_one()
+                gate = gate_member(
+                    speaker, self.turn.admission_source, self.turn.on_behalf_of_member_id
                 )
-                gate = gate_member(speaker, self.turn.admission_source, conversation_member)
                 admitted = gate is None or await Seats(self.turn.workspace_id).admits(
                     connection, gate
                 )

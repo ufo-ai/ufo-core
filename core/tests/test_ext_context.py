@@ -1,9 +1,12 @@
+from datetime import UTC, datetime
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 
+from ufo.blob import FilesystemBlobStore
 from ufo.credentials import CredentialSlotUnset, CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import (
@@ -14,6 +17,8 @@ from ufo.ext.context import (
 )
 from ufo.ext.surface import SurfaceInstallationConflict, UndeclaredSurface
 from ufo.schema import tables
+from ufo.sources.sync import CorePageFeed
+from ufo.subjects import SHARED_SUBJECT, member_subject
 from ufo.workspace import WorkspaceUnbound, init_workspace_credentials, ws
 
 
@@ -161,3 +166,230 @@ async def test_installation_access_preserves_fleet_wide_uniqueness(db: None) -> 
         await context.installations.bind("slack", "team-a")
     with ws(second), pytest.raises(SurfaceInstallationConflict, match="slack"):
         await context.installations.bind("slack", "team-a")
+
+
+async def test_set_source_subject_flips_the_row_and_restamps_live_pages(
+    db: None, tmp_path: Path
+) -> None:
+    """The flip restamps every live page with a fresh `updated_at` so a consumer's stored
+    PageFeed cursor — sitting exactly at the page's prior position — replays it; a tombstoned
+    page's chunks are already gone, so it is left untouched."""
+    workspace_id = await _workspace()
+    member_id = uuid4()
+    old = datetime(2026, 7, 1, tzinfo=UTC)
+    much_older = datetime(2026, 6, 1, tzinfo=UTC)
+    source_id, live_id, tombstoned_id = uuid4(), uuid4(), uuid4()
+    blob = FilesystemBlobStore(root=tmp_path)
+    await blob.put("pages/live", b"live body")
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email="member@x.test",
+                created_at=old,
+                updated_at=old,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.source).values(
+                id=source_id,
+                workspace_id=workspace_id,
+                backend="folder",
+                config={"root": "/x"},
+                subject=member_subject(member_id),
+                owner_member_id=member_id,
+                cursor=None,
+                next_sync_at=old,
+                created_at=old,
+                updated_at=old,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.page),
+            [
+                {
+                    "id": live_id,
+                    "workspace_id": workspace_id,
+                    "source_id": source_id,
+                    "digest": "sha256:live",
+                    "body_ref": "pages/live",
+                    "subject": member_subject(member_id),
+                    "tombstone": False,
+                    "created_at": old,
+                    "updated_at": old,
+                },
+                {
+                    "id": tombstoned_id,
+                    "workspace_id": workspace_id,
+                    "source_id": source_id,
+                    "digest": "sha256:gone",
+                    "body_ref": "pages/gone",
+                    "subject": member_subject(member_id),
+                    "tombstone": True,
+                    "created_at": much_older,
+                    "updated_at": much_older,
+                },
+            ],
+        )
+    feed = CorePageFeed(blob=blob)
+    cursor = f"{old.isoformat()}|{live_id}"
+    with ws(workspace_id):
+        stale = await feed.pages_changed_since(cursor, 10)
+        assert stale.changes == ()
+
+        context = context_for("core", frozenset())
+        await context.set_source_subject((source_id,), SHARED_SUBJECT)
+
+        with pytest.raises(ValueError):
+            await context.set_source_subject((uuid4(),), SHARED_SUBJECT)
+
+        replayed = await feed.pages_changed_since(cursor, 10)
+    assert [change.page_id for change in replayed.changes] == [live_id]
+    assert replayed.changes[0].subject == SHARED_SUBJECT
+
+    async with workspace_tx() as connection:
+        source_row = (
+            (
+                await connection.execute(
+                    sa.select(tables.source).where(tables.source.c.id == source_id)
+                )
+            )
+            .mappings()
+            .one()
+        )
+        pages = {
+            row["id"]: row
+            for row in (
+                await connection.execute(
+                    sa.select(tables.page).where(tables.page.c.source_id == source_id)
+                )
+            )
+            .mappings()
+            .all()
+        }
+
+    def _aware(value: datetime) -> datetime:
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+
+    assert source_row["subject"] == SHARED_SUBJECT
+    assert pages[live_id]["subject"] == SHARED_SUBJECT
+    assert _aware(pages[live_id]["updated_at"]) > old
+    assert pages[tombstoned_id]["subject"] == member_subject(member_id)
+    assert _aware(pages[tombstoned_id]["updated_at"]) == much_older
+
+
+async def test_set_source_subject_flips_every_stream_of_a_binding_in_one_transaction(
+    db: None,
+) -> None:
+    """A binding's streams are distinct source rows; one call flips every row and restamps every
+    live page across them in a single transaction, so a multi-stream share can never tear across
+    per-stream commits. A tombstoned page is left untouched."""
+    workspace_id = await _workspace()
+    member_id = uuid4()
+    old = datetime(2026, 7, 1, tzinfo=UTC)
+    much_older = datetime(2026, 6, 1, tzinfo=UTC)
+    first_id, second_id = uuid4(), uuid4()
+    live_a, live_b, tombstoned_id = uuid4(), uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email="member@x.test",
+                created_at=old,
+                updated_at=old,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.source),
+            [
+                {
+                    "id": source_id,
+                    "workspace_id": workspace_id,
+                    "backend": "greenhouse",
+                    "config": {"account": "default", "stream": stream, "base_url": None},
+                    "subject": member_subject(member_id),
+                    "owner_member_id": member_id,
+                    "cursor": None,
+                    "next_sync_at": old,
+                    "created_at": old,
+                    "updated_at": old,
+                }
+                for source_id, stream in ((first_id, "jobs"), (second_id, "candidates"))
+            ],
+        )
+        await connection.execute(
+            sa.insert(tables.page),
+            [
+                {
+                    "id": live_a,
+                    "workspace_id": workspace_id,
+                    "source_id": first_id,
+                    "digest": "sha256:a",
+                    "body_ref": "pages/a",
+                    "subject": member_subject(member_id),
+                    "tombstone": False,
+                    "created_at": old,
+                    "updated_at": old,
+                },
+                {
+                    "id": live_b,
+                    "workspace_id": workspace_id,
+                    "source_id": second_id,
+                    "digest": "sha256:b",
+                    "body_ref": "pages/b",
+                    "subject": member_subject(member_id),
+                    "tombstone": False,
+                    "created_at": old,
+                    "updated_at": old,
+                },
+                {
+                    "id": tombstoned_id,
+                    "workspace_id": workspace_id,
+                    "source_id": second_id,
+                    "digest": "sha256:gone",
+                    "body_ref": "pages/gone",
+                    "subject": member_subject(member_id),
+                    "tombstone": True,
+                    "created_at": much_older,
+                    "updated_at": much_older,
+                },
+            ],
+        )
+    context = context_for("core", frozenset())
+    with ws(workspace_id):
+        await context.set_source_subject((first_id, second_id), SHARED_SUBJECT)
+
+    async with workspace_tx() as connection:
+        sources = {
+            row["id"]: row
+            for row in (
+                await connection.execute(
+                    sa.select(tables.source).where(tables.source.c.id.in_((first_id, second_id)))
+                )
+            )
+            .mappings()
+            .all()
+        }
+        pages = {
+            row["id"]: row
+            for row in (
+                await connection.execute(
+                    sa.select(tables.page).where(tables.page.c.source_id.in_((first_id, second_id)))
+                )
+            )
+            .mappings()
+            .all()
+        }
+
+    def _aware(value: datetime) -> datetime:
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+
+    assert {row["subject"] for row in sources.values()} == {SHARED_SUBJECT}
+    assert pages[live_a]["subject"] == SHARED_SUBJECT
+    assert pages[live_b]["subject"] == SHARED_SUBJECT
+    assert _aware(pages[live_a]["updated_at"]) > old
+    assert _aware(pages[live_b]["updated_at"]) > old
+    assert pages[tombstoned_id]["subject"] == member_subject(member_id)
+    assert _aware(pages[tombstoned_id]["updated_at"]) == much_older

@@ -10,6 +10,7 @@ from ufo.sdk.manifest import (
     SkillSpec,
     SourceProvider,
 )
+from ufo.sdk.sources import SHARED_SUBJECT
 from ufo.sdk.tools import ToolDef
 from ufo_ext_yc.cli import (
     YC_CREDENTIALS_SLOT,
@@ -75,7 +76,12 @@ YC_INDEX_TOOL = ToolDef(
 
 async def setup_sources(ctx: ExtensionContext) -> None:
     for collection in YC_GUIDANCE_COLLECTIONS:
-        await ctx.register_source(YC_SOURCE_BACKEND, YcSourceConfig(collection=collection))
+        await ctx.register_source(
+            YC_SOURCE_BACKEND,
+            YcSourceConfig(collection=collection),
+            subject=SHARED_SUBJECT,
+            owner_member_id=None,
+        )
 
 
 def manifest() -> Manifest:

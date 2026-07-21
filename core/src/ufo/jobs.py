@@ -80,6 +80,7 @@ class _DispatchTurn:
     agent_id: UUID
     member_id: UUID | None
     speaker_member_id: UUID | None
+    on_behalf_of_member_id: UUID | None
     admission_source: TurnAdmissionSource
     status: TurnStatus
 
@@ -93,9 +94,9 @@ class TurnDispatcher:
     QUEUED turn's DBOS workflow id is the turn id, making an ambiguous duplicate offer safe.
 
     PARKED rows share the same scanner and advisory dispatch stamp, but remain spend- and
-    seat-gated: a parked turn stays held while its gate member — the speaker, or the
-    conversation's member for a scheduled fire — holds no seat, and resumes when one is granted
-    again. A row
+    seat-gated: a parked turn stays held while its gate member — the speaker, or the member a
+    scheduled fire acts on behalf of (its schedule's creator) — holds no seat, and resumes when
+    one is granted again. A row
     that has ever been claimed — a PARKED one, or a QUEUED one a fold resumed from park — needs a
     fresh DBOS workflow id because the run that claimed it consumed its original id; the choice
     reads `running_attempt` from the stamping update itself, so a claim-park-requeue racing the
@@ -116,7 +117,9 @@ class TurnDispatcher:
             if turn.status == PARKED:
                 async with workspace_tx() as connection:
                     gate = gate_member(
-                        turn.speaker_member_id, turn.admission_source, turn.member_id
+                        turn.speaker_member_id,
+                        turn.admission_source,
+                        turn.on_behalf_of_member_id,
                     )
                     seated = gate is None or await Seats(turn.workspace_id).admits(connection, gate)
                     decision = await SpendEvaluator(
@@ -148,6 +151,7 @@ class TurnDispatcher:
                         tables.turn.c.agent_id,
                         tables.conversation.c.member_id,
                         tables.turn.c.speaker_member_id,
+                        tables.turn.c.on_behalf_of_member_id,
                         tables.turn.c.admission_source,
                         tables.turn.c.status,
                     )
@@ -169,6 +173,7 @@ class TurnDispatcher:
                 r.agent_id,
                 r.member_id,
                 r.speaker_member_id,
+                r.on_behalf_of_member_id,
                 r.admission_source,
                 r.status,
             )

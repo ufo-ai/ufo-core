@@ -5,6 +5,7 @@ revoke gate — the grantor may revoke their own account, an unrelated member ma
 may revoke anyone's."""
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -19,7 +20,7 @@ from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.loader import turn_tools
 from ufo.grants import GrantStore, grant_summaries
-from ufo.objects import OwnerRequired, VerbNotSupported
+from ufo.objects import OwnerRequired, UnknownObject, VerbNotSupported
 from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
@@ -116,6 +117,7 @@ async def _grant(
         host=f"api.{provider}.test",
         grantor_member_id=grantor_id,
         conversation_id=conversation_id,
+        shared=False,
     )
 
 
@@ -162,7 +164,7 @@ async def test_granted_accounts_list_and_read_through_the_verbs(db: None) -> Non
         await _grant(
             workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
         )
-        ctx = _tool_context(workspace_id)
+        ctx = _tool_context(workspace_id, grantor_id)
         listing = json.loads(await _text(_object_tool("object_list"), ctx, kind=CONNECTOR_KIND))
         assert [row["name"] for row in listing["objects"]] == ["gmail-alice-example-com"]
         assert "alice@example.com" in listing["objects"][0]["summary"]
@@ -175,7 +177,11 @@ async def test_granted_accounts_list_and_read_through_the_verbs(db: None) -> Non
                 name="gmail-alice-example-com",
             )
         )
-        assert fetched["spec"] == {"provider": "gmail", "account_id": "alice@example.com"}
+        assert fetched["spec"] == {
+            "provider": "gmail",
+            "account_id": "alice@example.com",
+            "shared": False,
+        }
         assert fetched["status"]["grantor_member_id"] == str(grantor_id)
         assert fetched["status"]["host"] == "api.gmail.test"
         assert fetched["status"]["agent"] == "assistant"
@@ -209,10 +215,18 @@ async def test_revoke_admits_the_grantor_and_the_owner_only(db: None) -> None:
         args = delete_tool.input_model.model_validate(
             {"kind": CONNECTOR_KIND, "name": "gmail-alice-example-com"}
         )
+        with pytest.raises(UnknownObject):
+            await delete_tool.handler(_tool_context(workspace_id, other_id), args)
+        with pytest.raises(UnknownObject):
+            await delete_tool.handler(_tool_context(workspace_id), args)
+
+        await _text(
+            _object_tool("object_apply"),
+            _tool_context(workspace_id, grantor_id),
+            manifest=_share_manifest("alice@example.com", True),
+        )
         with pytest.raises(OwnerRequired, match="grantor or the workspace owner"):
             await delete_tool.handler(_tool_context(workspace_id, other_id), args)
-        with pytest.raises(OwnerRequired):
-            await delete_tool.handler(_tool_context(workspace_id), args)
 
         revoked = json.loads(
             await _text(
@@ -236,3 +250,180 @@ async def test_revoke_admits_the_grantor_and_the_owner_only(db: None) -> None:
             name="gmail-alice-example-com",
         )
         assert await grant_summaries(workspace_id) == ()
+
+
+def _share_manifest(account_id: str, shared: bool, name: str = "gmail-alice-example-com") -> str:
+    return yaml.safe_dump(
+        {
+            "kind": CONNECTOR_KIND,
+            "name": name,
+            "spec": {"provider": "gmail", "account_id": account_id, "shared": shared},
+        }
+    )
+
+
+async def test_the_grantor_shares_their_account_and_get_reflects_it(db: None) -> None:
+    workspace_id, agent_id, conversation_id, _owner, grantor_id, _other = await _seed()
+    apply_tool = _object_tool("object_apply")
+    with ws(workspace_id):
+        await _grant(
+            workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
+        )
+        await _text(
+            apply_tool,
+            _tool_context(workspace_id, grantor_id),
+            manifest=_share_manifest("alice@example.com", True),
+        )
+
+        summaries = await grant_summaries(workspace_id)
+        assert summaries[0].shared is True
+
+        fetched = yaml.safe_load(
+            await _text(
+                _object_tool("object_get"),
+                _tool_context(workspace_id),
+                kind=CONNECTOR_KIND,
+                name="gmail-alice-example-com",
+            )
+        )
+        assert fetched["spec"]["shared"] is True
+
+
+async def test_an_unrelated_member_may_not_flip_sharing_but_the_owner_may(db: None) -> None:
+    workspace_id, agent_id, conversation_id, owner_id, grantor_id, other_id = await _seed()
+    apply_tool = _object_tool("object_apply")
+    with ws(workspace_id):
+        await _grant(
+            workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
+        )
+        await _text(
+            apply_tool,
+            _tool_context(workspace_id, grantor_id),
+            manifest=_share_manifest("alice@example.com", True),
+        )
+        args = apply_tool.input_model.model_validate(
+            {"manifest": _share_manifest("alice@example.com", False)}
+        )
+        with pytest.raises(OwnerRequired, match="grantor or the workspace owner"):
+            await apply_tool.handler(_tool_context(workspace_id, other_id), args)
+
+        await _text(
+            apply_tool,
+            _tool_context(workspace_id, owner_id),
+            manifest=_share_manifest("alice@example.com", False),
+        )
+        assert (await grant_summaries(workspace_id))[0].shared is False
+
+
+async def test_apply_still_refuses_everything_but_the_shared_flip(db: None) -> None:
+    workspace_id, agent_id, conversation_id, _owner, grantor_id, _other = await _seed()
+    apply_tool = _object_tool("object_apply")
+    with ws(workspace_id):
+        await _grant(
+            workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
+        )
+        different_account = apply_tool.input_model.model_validate(
+            {"manifest": _share_manifest("bob@example.com", False)}
+        )
+        with pytest.raises(VerbNotSupported, match="connect_account"):
+            await apply_tool.handler(_tool_context(workspace_id, grantor_id), different_account)
+
+        create = apply_tool.input_model.model_validate(
+            {"manifest": _share_manifest("bob@example.com", False, name="gmail-bob-example-com")}
+        )
+        with pytest.raises(VerbNotSupported, match="connect_account"):
+            await apply_tool.handler(_tool_context(workspace_id, grantor_id), create)
+
+
+async def test_list_summary_tags_private_and_shared_accounts(db: None) -> None:
+    workspace_id, agent_id, conversation_id, _owner, grantor_id, _other = await _seed()
+    with ws(workspace_id):
+        await _grant(
+            workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
+        )
+        ctx = _tool_context(workspace_id, grantor_id)
+        listing = json.loads(await _text(_object_tool("object_list"), ctx, kind=CONNECTOR_KIND))
+        assert "(private)" in listing["objects"][0]["summary"]
+
+        await _text(
+            _object_tool("object_apply"),
+            _tool_context(workspace_id, grantor_id),
+            manifest=_share_manifest("alice@example.com", True),
+        )
+        listing = json.loads(await _text(_object_tool("object_list"), ctx, kind=CONNECTOR_KIND))
+        assert "(shared)" in listing["objects"][0]["summary"]
+
+
+async def test_read_verbs_hide_other_members_private_connectors(db: None) -> None:
+    workspace_id, agent_id, conversation_id, owner_id, grantor_id, other_id = await _seed()
+    with ws(workspace_id):
+        await _grant(
+            workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
+        )
+        await _grant(
+            workspace_id, agent_id, conversation_id, grantor_id, "asana", "bob@example.com"
+        )
+        await _text(
+            _object_tool("object_apply"),
+            _tool_context(workspace_id, grantor_id),
+            manifest=yaml.safe_dump(
+                {
+                    "kind": CONNECTOR_KIND,
+                    "name": "asana-bob-example-com",
+                    "spec": {"provider": "asana", "account_id": "bob@example.com", "shared": True},
+                }
+            ),
+        )
+        private_name, shared_name = "gmail-alice-example-com", "asana-bob-example-com"
+        get_tool = _object_tool("object_get")
+
+        stranger_ctx = _tool_context(workspace_id, other_id)
+        listing = json.loads(
+            await _text(_object_tool("object_list"), stranger_ctx, kind=CONNECTOR_KIND)
+        )
+        assert [row["name"] for row in listing["objects"]] == [shared_name]
+        with pytest.raises(UnknownObject):
+            await get_tool.handler(
+                stranger_ctx,
+                get_tool.input_model.model_validate({"kind": CONNECTOR_KIND, "name": private_name}),
+            )
+
+        for ctx in (_tool_context(workspace_id, grantor_id), _tool_context(workspace_id, owner_id)):
+            listing = json.loads(await _text(_object_tool("object_list"), ctx, kind=CONNECTOR_KIND))
+            assert {row["name"] for row in listing["objects"]} == {private_name, shared_name}
+            fetched = yaml.safe_load(
+                await _text(get_tool, ctx, kind=CONNECTOR_KIND, name=private_name)
+            )
+            assert fetched["spec"]["account_id"] == "alice@example.com"
+            assert fetched["status"]["grantor_member_id"] == str(grantor_id)
+
+
+async def test_reshare_and_revoke_need_a_live_speaker(db: None) -> None:
+    """Resharing (disclosure) and revoking (destructive) a connector are grant acts: a speakerless
+    scheduled/subagent turn acting on behalf of the grantor cannot perform them, even though it may
+    USE the grantor's private connections. Granting stays speaker-only (RFC 0012)."""
+    workspace_id, agent_id, conversation_id, _owner, grantor_id, _other = await _seed()
+    apply_tool = _object_tool("object_apply")
+    delete_tool = _object_tool("object_delete")
+    with ws(workspace_id):
+        await _grant(
+            workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
+        )
+        speakerless = replace(_tool_context(workspace_id), on_behalf_of_member_id=grantor_id)
+        with pytest.raises(OwnerRequired):
+            await apply_tool.handler(
+                speakerless,
+                apply_tool.input_model.model_validate(
+                    {"manifest": _share_manifest("alice@example.com", True)}
+                ),
+            )
+        with pytest.raises(OwnerRequired):
+            await delete_tool.handler(
+                speakerless,
+                delete_tool.input_model.model_validate(
+                    {"kind": CONNECTOR_KIND, "name": "gmail-alice-example-com"}
+                ),
+            )
+        summaries = await grant_summaries(workspace_id)
+    assert len(summaries) == 1
+    assert summaries[0].shared is False

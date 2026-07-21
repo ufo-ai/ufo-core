@@ -361,8 +361,12 @@ def manifest() -> Manifest:
             ToolDef(
                 name="memory_search",
                 description=(
-                    "Search memory for facts, notes, and synced source documents, over the current "
-                    "member's memory and shared memory. Pass up to "
+                    "Search memory for facts, notes, and synced source documents, over the "
+                    "conversation member's memory and shared memory. In a shared channel (no "
+                    "conversation member) only shared memory is searched — a member's private "
+                    "memory and privately-registered sources are searchable only in that member's "
+                    "own conversation, so don't claim to have searched private memory in a "
+                    "channel. Pass up to "
                     f"{MAX_MEMORY_QUERIES} distinct queries — they run in parallel and their "
                     "results are merged and deduplicated. Optionally restrict to items written "
                     "in a window with start_date/end_date (ISO-8601, e.g. 2026-01-31). Returns the "

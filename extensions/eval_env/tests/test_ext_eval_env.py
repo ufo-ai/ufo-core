@@ -34,7 +34,13 @@ class _Grants(GrantStore):
 
     async def active_grants(self, _workspace_id: UUID, _agent_id: UUID) -> tuple[Grant, ...]:
         return tuple(
-            Grant(provider=provider, account_id=env.ACCOUNT_ID, host=host)
+            Grant(
+                provider=provider,
+                account_id=env.ACCOUNT_ID,
+                host=host,
+                grantor_member_id=uuid4(),
+                shared=True,
+            )
             for provider, host in self.providers
         )
 
@@ -245,7 +251,7 @@ async def test_describe_exposes_the_catalog_schemas() -> None:
 
 
 async def test_call_without_a_grant_fails_loud() -> None:
-    with pytest.raises(ValueError, match="no active"):
+    with pytest.raises(ValueError, match="connect one with connect_account"):
         await call_external_tool(
             _ctx(uuid4(), grants=()),
             CallExternalToolInput(

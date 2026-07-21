@@ -29,6 +29,7 @@ from ufo.ext.context import ExtensionContext, context_for
 from ufo.ext.loader import skill_registry, turn_tools
 from ufo.jobs import JobRunner, bindings_from
 from ufo.loop.engine import _claim_turn
+from ufo.objects import OwnerRequired, UnknownObject
 from ufo.scheduling import ONE_TIME_SCHEDULE, ScheduleStore
 from ufo.schema import tables
 from ufo.schema.records import WRITEBACK_PENDING, Agent, TerminalFrame, Turn
@@ -202,7 +203,8 @@ async def _turns(conversation_id: UUID) -> list[sa.RowMapping]:
 
 async def test_applied_task_writes_durable_row_bound_to_the_turn(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
-    ctx = _tool_ctx(workspace_id, conversation_id, agent_id)
+    creator = await _member(workspace_id)
+    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator)
     with ws(workspace_id):
         applied = json.loads(
             await _dispatch(
@@ -1160,7 +1162,8 @@ def test_pause_and_wait_bounds_the_timer(wait_minutes: int) -> None:
 
 async def test_reapplied_name_updates_in_place(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
-    ctx = _tool_ctx(workspace_id, conversation_id, agent_id)
+    creator = await _member(workspace_id)
+    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator)
     apply = _object_tool("object_apply")
     with ws(workspace_id):
         await _dispatch(ctx=ctx, tool=apply, manifest=_task_manifest("report", DAILY_9AM, "daily"))
@@ -1226,6 +1229,7 @@ async def test_concurrent_first_create_converges_by_workspace_name(db: None) -> 
 
 async def test_runner_fires_due_task_into_a_turn(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
+    creator = await _member(workspace_id)
     store = ScheduleStore()
     due_at = datetime.now(UTC) - timedelta(minutes=1)
     dbos = StubDbos()
@@ -1241,6 +1245,7 @@ async def test_runner_fires_due_task_into_a_turn(db: None) -> None:
             "check inbox",
             "check inbox",
             due_at,
+            created_by_member_id=creator,
         )
         await ScheduledTaskRunner(ctx=_runner_ctx(invoker)).run()
 
@@ -1269,7 +1274,10 @@ async def test_runner_fires_due_task_into_a_turn(db: None) -> None:
         status = yaml.safe_load(
             await _dispatch(
                 _object_tool("object_get"),
-                _tool_ctx(workspace_id, conversation_id, agent_id),
+                replace(
+                    _tool_ctx(workspace_id, conversation_id, agent_id),
+                    speaker_member_id=creator,
+                ),
                 kind=SCHEDULED_TASK_KIND,
                 name="scheduled-daily",
             )
@@ -1306,13 +1314,18 @@ async def test_update_from_another_conversation_keeps_reporting_home(db: None) -
     apply = _object_tool("object_apply")
     with ws(workspace_id):
         await _dispatch(
-            ctx=_tool_ctx(workspace_id, conversation_id, agent_id),
+            ctx=replace(
+                _tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=member_id
+            ),
             tool=apply,
             manifest=_task_manifest("report", DAILY_9AM, "daily"),
         )
         updated = json.loads(
             await _dispatch(
-                ctx=_tool_ctx(workspace_id, second_conversation, agent_id),
+                ctx=replace(
+                    _tool_ctx(workspace_id, second_conversation, agent_id),
+                    speaker_member_id=member_id,
+                ),
                 tool=apply,
                 manifest=_task_manifest("report", "0 17 * * 1", "weekly"),
             )
@@ -1436,7 +1449,8 @@ async def test_next_recurring_fire_admits_a_distinct_turn(db: None) -> None:
 
 async def test_deleted_task_stops_and_leaves_the_listing(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
-    ctx = _tool_ctx(workspace_id, conversation_id, agent_id)
+    creator = await _member(workspace_id)
+    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator)
     with ws(workspace_id):
         await _dispatch(
             _object_tool("object_apply"), ctx, manifest=_task_manifest("watcher", DAILY_9AM, "x")
@@ -1632,3 +1646,186 @@ async def test_pause_resume_retries_the_same_turn_after_enqueue_failure(db: None
     assert remaining == 0
     assert tuple(writeback) == (WRITEBACK_PENDING, None, None, None, None)
     assert dbos.enqueued == [str(failed["id"])]
+
+
+async def _member(workspace_id: UUID, created_at: datetime | None = None) -> UUID:
+    member_id = uuid4()
+    when = created_at or datetime.now(UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email=f"{member_id.hex[:8]}@x.test",
+                created_at=when,
+                updated_at=when,
+            )
+        )
+    return member_id
+
+
+async def test_apply_captures_the_creating_member(db: None) -> None:
+    """The schedule records who created it, so a later fire can run as that member."""
+    workspace_id, agent_id, conversation_id = await _seed()
+    creator = await _member(workspace_id)
+    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator)
+    with ws(workspace_id):
+        await _dispatch(
+            _object_tool("object_apply"),
+            ctx,
+            manifest=_task_manifest("digest", DAILY_9AM, "send the digest"),
+        )
+        tasks = await ScheduleStore().list()
+    assert len(tasks) == 1
+    assert tasks[0].created_by_member_id == creator
+
+
+async def test_scheduled_fire_runs_on_behalf_of_the_creator(db: None) -> None:
+    """A fired task's turn carries the creator as on_behalf_of (never as speaker), so it keeps the
+    creator's private connections without gaining the granting authority a live speaker has."""
+    workspace_id, agent_id, conversation_id = await _seed()
+    creator = await _member(workspace_id)
+    due_at = datetime.now(UTC) - timedelta(minutes=1)
+    dbos = StubDbos()
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
+    )
+    with ws(workspace_id):
+        await ScheduleStore().create(
+            conversation_id,
+            agent_id,
+            "digest",
+            DAILY_9AM,
+            "send the digest",
+            "send the digest",
+            due_at,
+            created_by_member_id=creator,
+        )
+        await ScheduledTaskRunner(ctx=_runner_ctx(invoker)).run()
+        turns = await _turns(conversation_id)
+    assert len(turns) == 1
+    assert turns[0]["admission_source"] == "scheduled"
+    assert turns[0]["speaker_member_id"] is None
+    assert turns[0]["on_behalf_of_member_id"] == creator
+
+
+async def test_a_stranger_cannot_hijack_or_read_another_members_task(db: None) -> None:
+    """A scheduled task is private to its creator: a stranger cannot read it, re-point it (the
+    re-point hijack), or delete it — reads and mutations are the creator's or the workspace
+    owner's, enforced by the object base, so the created_by identity cannot be reassigned by a
+    non-creator."""
+    workspace_id, agent_id, conversation_id = await _seed()
+    creator = await _member(workspace_id, created_at=datetime(2027, 1, 1, tzinfo=UTC))
+    stranger = await _member(workspace_id, created_at=datetime(2027, 1, 2, tzinfo=UTC))
+    creator_ctx = replace(
+        _tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator
+    )
+    stranger_ctx = replace(
+        _tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=stranger
+    )
+    apply = _object_tool("object_apply")
+    get = _object_tool("object_get")
+    listing = _object_tool("object_list")
+    delete = _object_tool("object_delete")
+    with ws(workspace_id):
+        await _dispatch(
+            apply,
+            creator_ctx,
+            manifest=_task_manifest("digest", DAILY_9AM, "creator's private prompt"),
+        )
+        strangers_view = json.loads(
+            await _dispatch(listing, stranger_ctx, kind=SCHEDULED_TASK_KIND)
+        )
+        assert strangers_view["objects"] == []
+        with pytest.raises(UnknownObject):
+            await get.handler(
+                stranger_ctx,
+                get.input_model.model_validate({"kind": SCHEDULED_TASK_KIND, "name": "digest"}),
+            )
+        with pytest.raises(UnknownObject):
+            await apply.handler(
+                stranger_ctx,
+                apply.input_model.model_validate(
+                    {"manifest": _task_manifest("digest", "0 17 * * 1", "hijacked")}
+                ),
+            )
+        with pytest.raises(UnknownObject):
+            await delete.handler(
+                stranger_ctx,
+                delete.input_model.model_validate({"kind": SCHEDULED_TASK_KIND, "name": "digest"}),
+            )
+        creators_view = json.loads(await _dispatch(listing, creator_ctx, kind=SCHEDULED_TASK_KIND))
+        tasks = await ScheduleStore().list()
+    assert [row["name"] for row in creators_view["objects"]] == ["digest"]
+    assert len(tasks) == 1
+    assert tasks[0].prompt == "creator's private prompt"
+    assert tasks[0].created_by_member_id == creator
+
+
+async def test_reapply_preserves_the_original_creator(db: None) -> None:
+    """An update never reassigns who a task runs as: created_by is fixed at creation, so a
+    workspace owner (or anyone) editing a member's task can change its definition but not make it
+    run with a different member's connections."""
+    workspace_id, agent_id, conversation_id = await _seed()
+    creator = await _member(workspace_id)
+    editor = await _member(workspace_id)
+    store = ScheduleStore()
+    when = datetime.now(UTC)
+    with ws(workspace_id):
+        first = await store.create(
+            conversation_id,
+            agent_id,
+            "digest",
+            DAILY_9AM,
+            "v1",
+            "v1",
+            when,
+            created_by_member_id=creator,
+        )
+        second = await store.create(
+            conversation_id,
+            agent_id,
+            "digest",
+            "0 17 * * 1",
+            "v2",
+            "v2",
+            when,
+            created_by_member_id=editor,
+        )
+        tasks = await store.list()
+    assert first.id == second.id
+    assert second.created_by_member_id == creator
+    assert tasks[0].created_by_member_id == creator
+    assert tasks[0].schedule == "0 17 * * 1"
+
+
+async def test_owner_may_delete_but_not_edit_another_members_task(db: None) -> None:
+    """The workspace owner administers a member's task — it stays visible and deletable to the
+    owner — but the owner cannot edit its prompt: an edit would run the owner's prompt as the
+    creator, against the creator's private memory and connections, and read the result back."""
+    workspace_id, agent_id, conversation_id = await _seed()
+    owner = await _member(workspace_id, created_at=datetime(2020, 1, 1, tzinfo=UTC))
+    creator = await _member(workspace_id, created_at=datetime(2027, 1, 1, tzinfo=UTC))
+    creator_ctx = replace(
+        _tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator
+    )
+    owner_ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=owner)
+    apply = _object_tool("object_apply")
+    delete = _object_tool("object_delete")
+    with ws(workspace_id):
+        await _dispatch(
+            apply, creator_ctx, manifest=_task_manifest("digest", DAILY_9AM, "creator's prompt")
+        )
+        with pytest.raises(OwnerRequired, match="creator"):
+            await apply.handler(
+                owner_ctx,
+                apply.input_model.model_validate(
+                    {"manifest": _task_manifest("digest", "0 17 * * 1", "owner's injected prompt")}
+                ),
+            )
+        after_edit = await ScheduleStore().list()
+        await _dispatch(delete, owner_ctx, kind=SCHEDULED_TASK_KIND, name="digest")
+        after_delete = await ScheduleStore().list()
+    assert after_edit[0].prompt == "creator's prompt"
+    assert after_edit[0].created_by_member_id == creator
+    assert after_delete == ()

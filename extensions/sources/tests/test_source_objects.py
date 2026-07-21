@@ -1,13 +1,14 @@
-"""The `source` object kind end to end: owner-gated registration through the object verbs.
+"""The `source` object kind end to end: private-by-default registration through the object verbs.
 
 Every mutation drives the real tool dispatch (`turn_tools` over the extension's manifest), and
 assertions read back through the durable `source` rows and the verbs' own results: derived names,
 error-driven discovery (unknown provider/stream refusals listing the valid sets), the tenant-URL
 safety rules, broker- and direct-auth resolution, delete marking the row removed and tombstoning
-its pages, and revival on an identical re-registration."""
+its pages, and revival on an identical re-registration. A source is private to its registering
+member by default; sharing it and deleting it are gated to the registrar or the workspace owner."""
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -30,12 +31,15 @@ from ufo.db import workspace_tx
 from ufo.ext.context import context_for
 from ufo.ext.loader import turn_tools
 from ufo.grants import GrantStore
+from ufo.objects import UnknownObject
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.connectors import ConnectorEntry, ConnectorRegistry
 from ufo.sdk.objects import OwnerRequired, VerbNotSupported
+from ufo.sdk.sources import ConnectorSourceConfig
 from ufo.sdk.tools import ToolContext
 from ufo.sources.sync import SyncDriver
+from ufo.subjects import SHARED_SUBJECT, member_subject
 from ufo.tools.registry import ToolDef
 from ufo.workspace import ws
 
@@ -130,8 +134,10 @@ def _context(
     brokered: tuple[str, ...] = (),
     speaker_id: UUID | None = None,
     direct_fallback: bool = True,
+    no_speaker: bool = False,
 ) -> ToolContext:
     ext = context_for(NAME, DECLARED_PROVIDERS)
+    speaker = None if no_speaker else (speaker_id or state.owner_id)
     return ToolContext(
         sandbox=None,
         blob=None,
@@ -147,8 +153,8 @@ def _context(
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=None,
-        speaker_member_id=speaker_id or state.owner_id,
-        audience_member_id=speaker_id or state.owner_id,
+        speaker_member_id=speaker,
+        audience_member_id=speaker,
         artifact_token_secret="",
         grants=grants,
         connectors=ConnectorRegistry(
@@ -171,17 +177,25 @@ async def _grant(state: _Workspace, store: GrantStore, provider: str, account: s
         host=ASANA_HOST,
         grantor_member_id=state.owner_id,
         conversation_id=state.conversation_id,
+        shared=False,
     )
 
 
 def _manifest_text(
-    provider: str, streams: tuple[str, ...], name: str, account_id: str = "", base_url: str = ""
+    provider: str,
+    streams: tuple[str, ...],
+    name: str,
+    account_id: str = "",
+    base_url: str = "",
+    shared: bool = False,
 ) -> str:
     spec: dict[str, object] = {"provider": provider, "streams": list(streams)}
     if account_id:
         spec["account_id"] = account_id
     if base_url:
         spec["base_url"] = base_url
+    if shared:
+        spec["shared"] = shared
     return yaml.safe_dump({"kind": SOURCE_KIND, "name": name, "spec": spec})
 
 
@@ -256,10 +270,15 @@ async def test_owner_applies_a_binding_and_reads_it_back(db: None) -> None:
         "streams": ["projects", "workspaces"],
         "account_id": "acct-one",
         "base_url": "",
+        "shared": False,
     }
     assert set(fetched["status"]["streams"]) == {"projects", "workspaces"}
     assert fetched["status"]["streams"]["projects"]["consecutive_errors"] == 0
+    assert fetched["status"]["shared"] is False
+    assert fetched["status"]["owner_member_id"] == str(state.owner_id)
     assert repeated == {"kind": SOURCE_KIND, "name": name, "result": "updated"}
+    assert {row["subject"] for row in rows} == {f"member:{state.owner_id}"}
+    assert {row["owner_member_id"] for row in rows} == {state.owner_id}
 
 
 async def test_wrong_name_refusal_hands_back_the_derived_name(db: None) -> None:
@@ -304,31 +323,303 @@ async def test_unknown_provider_and_stream_refuse_with_the_valid_sets(db: None) 
     assert await _rows(state, ASANA) == []
 
 
-async def test_non_owner_mutations_are_refused(db: None) -> None:
-    state = await _workspace()
-    grants = GrantStore()
-    await _grant(state, grants, ASANA, "acct-one")
-    name = _binding_name(ASANA, "acct-one", None)
-    apply_tool = _TOOLS["object_apply"]
-    delete_tool = _TOOLS["object_delete"]
-    with ws(state.workspace_id):
-        with pytest.raises(OwnerRequired):
-            await apply_tool.handler(
-                _context(state, grants, brokered=(ASANA,), speaker_id=state.member_id),
-                apply_tool.input_model.model_validate(
-                    {"manifest": _manifest_text(ASANA, ("workspaces",), name)}
-                ),
+async def _stranger(state: _Workspace) -> UUID:
+    stranger_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=stranger_id,
+                workspace_id=state.workspace_id,
+                email=f"{stranger_id.hex}@x.test",
+                created_at=datetime(2026, 7, 10, tzinfo=UTC),
+                updated_at=datetime(2026, 7, 10, tzinfo=UTC),
             )
-        await _apply(
-            _context(state, grants, brokered=(ASANA,)),
-            _manifest_text(ASANA, ("workspaces",), name),
         )
-        with pytest.raises(OwnerRequired):
-            await delete_tool.handler(
-                _context(state, grants, brokered=(ASANA,), speaker_id=state.member_id),
-                delete_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": name}),
+    return stranger_id
+
+
+async def test_a_member_registers_a_private_source_by_default(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GREENHOUSE", "secret")
+    state = await _workspace()
+    ctx = _context(state, None, speaker_id=state.member_id)
+    name = _binding_name(GREENHOUSE, DIRECT_ACCOUNT, None)
+    with ws(state.workspace_id):
+        applied = await _apply(ctx, _manifest_text(GREENHOUSE, ("jobs",), name))
+        assert applied == {"kind": SOURCE_KIND, "name": name, "result": "created"}
+        get_tool = _TOOLS["object_get"]
+        fetched = yaml.safe_load(
+            (
+                await get_tool.handler(
+                    ctx, get_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": name})
+                )
             )
-    assert len(await _rows(state, ASANA)) == 1
+            .content[0]
+            .text
+        )
+    rows = await _rows(state, GREENHOUSE)
+    assert {row["subject"] for row in rows} == {member_subject(state.member_id)}
+    assert {row["owner_member_id"] for row in rows} == {state.member_id}
+    assert fetched["spec"]["shared"] is False
+
+
+async def test_the_model_registers_a_shared_source_on_request(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GREENHOUSE", "secret")
+    state = await _workspace()
+    ctx = _context(state, None, speaker_id=state.member_id)
+    name = _binding_name(GREENHOUSE, DIRECT_ACCOUNT, None)
+    with ws(state.workspace_id):
+        await _apply(ctx, _manifest_text(GREENHOUSE, ("jobs",), name, shared=True))
+    rows = await _rows(state, GREENHOUSE)
+    assert {row["subject"] for row in rows} == {SHARED_SUBJECT}
+    assert {row["owner_member_id"] for row in rows} == {state.member_id}
+
+
+async def test_the_registrar_shares_their_source_and_a_stranger_cannot(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GREENHOUSE", "secret")
+    monkeypatch.setenv("FRESHDESK", "secret")
+    state = await _workspace()
+    stranger_id = await _stranger(state)
+    member_ctx = _context(state, None, speaker_id=state.member_id)
+    owner_ctx = _context(state, None)
+    stranger_ctx = _context(state, None, speaker_id=stranger_id)
+    gh_name = _binding_name(GREENHOUSE, DIRECT_ACCOUNT, None)
+    fd_name = _binding_name(FRESHDESK, DIRECT_ACCOUNT, "https://acme.freshdesk.com")
+    with ws(state.workspace_id):
+        await _apply(member_ctx, _manifest_text(GREENHOUSE, ("jobs",), gh_name))
+        await _apply(
+            member_ctx,
+            _manifest_text(FRESHDESK, ("tickets",), fd_name, base_url="https://acme.freshdesk.com"),
+        )
+        [gh_row] = await _rows(state, GREENHOUSE)
+        old = datetime(2026, 7, 1, tzinfo=UTC)
+        page_id = uuid4()
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.page).values(
+                    id=page_id,
+                    workspace_id=state.workspace_id,
+                    source_id=gh_row["id"],
+                    digest="sha256:x",
+                    body_ref="pages/x",
+                    subject=member_subject(state.member_id),
+                    tombstone=False,
+                    created_at=old,
+                    updated_at=old,
+                )
+            )
+
+        await _apply(member_ctx, _manifest_text(GREENHOUSE, ("jobs",), gh_name, shared=True))
+        await _apply(
+            owner_ctx,
+            _manifest_text(
+                FRESHDESK,
+                ("tickets",),
+                fd_name,
+                base_url="https://acme.freshdesk.com",
+                shared=True,
+            ),
+        )
+
+        with pytest.raises(
+            OwnerRequired, match="registering member or the workspace owner"
+        ) as raised:
+            await _apply(stranger_ctx, _manifest_text(GREENHOUSE, ("jobs",), gh_name))
+        assert str(state.member_id) not in str(raised.value)
+    assert {row["subject"] for row in await _rows(state, GREENHOUSE)} == {SHARED_SUBJECT}
+    assert {row["subject"] for row in await _rows(state, FRESHDESK)} == {SHARED_SUBJECT}
+    async with workspace_tx() as connection:
+        page = (
+            (await connection.execute(sa.select(tables.page).where(tables.page.c.id == page_id)))
+            .mappings()
+            .one()
+        )
+    assert page["subject"] == SHARED_SUBJECT
+
+
+async def test_stranger_applying_a_private_source_name_is_not_found(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stranger cannot see another member's private source, so applying its deterministic name is
+    refused as not-found — the same message whether shared=True or shared=False, never a distinct
+    owner gate that would confirm the private binding exists or name its owner."""
+    monkeypatch.setenv("GREENHOUSE", "secret")
+    state = await _workspace()
+    stranger_id = await _stranger(state)
+    member_ctx = _context(state, None, speaker_id=state.member_id)
+    stranger_ctx = _context(state, None, speaker_id=stranger_id)
+    name = _binding_name(GREENHOUSE, DIRECT_ACCOUNT, None)
+    apply_tool = _TOOLS["object_apply"]
+    with ws(state.workspace_id):
+        await _apply(member_ctx, _manifest_text(GREENHOUSE, ("jobs",), name))
+        messages: list[str] = []
+        for shared in (True, False):
+            args = apply_tool.input_model.model_validate(
+                {"manifest": _manifest_text(GREENHOUSE, ("jobs",), name, shared=shared)}
+            )
+            with pytest.raises(UnknownObject) as raised:
+                await apply_tool.handler(stranger_ctx, args)
+            assert "registering member or the workspace owner" not in str(raised.value)
+            assert str(state.member_id) not in str(raised.value)
+            messages.append(str(raised.value))
+        assert messages[0] == messages[1]
+    assert {row["subject"] for row in await _rows(state, GREENHOUSE)} == {
+        member_subject(state.member_id)
+    }
+
+
+async def test_unsharing_is_delete_and_recreate(db: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GREENHOUSE", "secret")
+    state = await _workspace()
+    ctx = _context(state, None, speaker_id=state.member_id)
+    name = _binding_name(GREENHOUSE, DIRECT_ACCOUNT, None)
+    apply_tool = _TOOLS["object_apply"]
+    with ws(state.workspace_id):
+        await _apply(ctx, _manifest_text(GREENHOUSE, ("jobs",), name, shared=True))
+        args = apply_tool.input_model.model_validate(
+            {"manifest": _manifest_text(GREENHOUSE, ("jobs",), name, shared=False)}
+        )
+        with pytest.raises(VerbNotSupported, match="delete"):
+            await apply_tool.handler(ctx, args)
+    assert {row["subject"] for row in await _rows(state, GREENHOUSE)} == {SHARED_SUBJECT}
+
+
+async def test_delete_is_registrar_or_owner(db: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GREENHOUSE", "secret")
+    monkeypatch.setenv("FRESHDESK", "secret")
+    state = await _workspace()
+    stranger_id = await _stranger(state)
+    member_ctx = _context(state, None, speaker_id=state.member_id)
+    owner_ctx = _context(state, None)
+    stranger_ctx = _context(state, None, speaker_id=stranger_id)
+    delete_tool = _TOOLS["object_delete"]
+    member_name = _binding_name(GREENHOUSE, DIRECT_ACCOUNT, None)
+    boot_name = _binding_name(FRESHDESK, DIRECT_ACCOUNT, "https://acme.freshdesk.com")
+    with ws(state.workspace_id):
+        await _apply(member_ctx, _manifest_text(GREENHOUSE, ("jobs",), member_name))
+        with pytest.raises(UnknownObject):
+            await delete_tool.handler(
+                stranger_ctx,
+                delete_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": member_name}),
+            )
+        await delete_tool.handler(
+            member_ctx,
+            delete_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": member_name}),
+        )
+    [row] = await _rows(state, GREENHOUSE)
+    assert row["removed_at"] is not None
+
+    ext = context_for(NAME, DECLARED_PROVIDERS)
+    with ws(state.workspace_id):
+        await ext.register_source(
+            FRESHDESK,
+            ConnectorSourceConfig(
+                account=DIRECT_ACCOUNT, stream="tickets", base_url="https://acme.freshdesk.com"
+            ),
+            subject=SHARED_SUBJECT,
+            owner_member_id=None,
+        )
+        with pytest.raises(OwnerRequired, match="registering member or the workspace owner"):
+            await delete_tool.handler(
+                member_ctx,
+                delete_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": boot_name}),
+            )
+        await delete_tool.handler(
+            owner_ctx,
+            delete_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": boot_name}),
+        )
+    [row] = await _rows(state, FRESHDESK)
+    assert row["removed_at"] is not None
+
+
+async def test_read_verbs_hide_other_members_private_sources(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GREENHOUSE", "secret")
+    monkeypatch.setenv("FRESHDESK", "secret")
+    state = await _workspace()
+    stranger_id = await _stranger(state)
+    member_ctx = _context(state, None, speaker_id=state.member_id)
+    owner_ctx = _context(state, None)
+    stranger_ctx = _context(state, None, speaker_id=stranger_id)
+    private_name = _binding_name(GREENHOUSE, DIRECT_ACCOUNT, None)
+    shared_name = _binding_name(FRESHDESK, DIRECT_ACCOUNT, "https://acme.freshdesk.com")
+    list_tool = _TOOLS["object_list"]
+    get_tool = _TOOLS["object_get"]
+    with ws(state.workspace_id):
+        await _apply(member_ctx, _manifest_text(GREENHOUSE, ("jobs",), private_name))
+        await _apply(
+            member_ctx,
+            _manifest_text(
+                FRESHDESK,
+                ("tickets",),
+                shared_name,
+                base_url="https://acme.freshdesk.com",
+                shared=True,
+            ),
+        )
+
+        listing = json.loads(
+            (
+                await list_tool.handler(
+                    stranger_ctx, list_tool.input_model.model_validate({"kind": SOURCE_KIND})
+                )
+            )
+            .content[0]
+            .text
+        )
+        assert [row["name"] for row in listing["objects"]] == [shared_name]
+        with pytest.raises(UnknownObject):
+            await get_tool.handler(
+                stranger_ctx,
+                get_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": private_name}),
+            )
+
+        for ctx in (member_ctx, owner_ctx):
+            listing = json.loads(
+                (
+                    await list_tool.handler(
+                        ctx, list_tool.input_model.model_validate({"kind": SOURCE_KIND})
+                    )
+                )
+                .content[0]
+                .text
+            )
+            assert {row["name"] for row in listing["objects"]} == {private_name, shared_name}
+            fetched = yaml.safe_load(
+                (
+                    await get_tool.handler(
+                        ctx,
+                        get_tool.input_model.model_validate(
+                            {"kind": SOURCE_KIND, "name": private_name}
+                        ),
+                    )
+                )
+                .content[0]
+                .text
+            )
+            assert fetched["spec"]["provider"] == GREENHOUSE
+            assert set(fetched["status"]["streams"]) == {"jobs"}
+
+
+async def test_registration_requires_a_speaking_member(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GREENHOUSE", "secret")
+    state = await _workspace()
+    ctx = _context(state, None, no_speaker=True)
+    name = _binding_name(GREENHOUSE, DIRECT_ACCOUNT, None)
+    tool = _TOOLS["object_apply"]
+    args = tool.input_model.model_validate(
+        {"manifest": _manifest_text(GREENHOUSE, ("jobs",), name)}
+    )
+    with ws(state.workspace_id), pytest.raises(ValueError, match="speaking member"):
+        await tool.handler(ctx, args)
 
 
 async def test_changing_streams_is_refused_as_an_update(db: None) -> None:
@@ -543,3 +834,46 @@ async def test_invalid_base_url_registers_nothing(db: None) -> None:
             )
     assert await _rows(state, FRESHDESK) == []
     assert await _rows(state, ASANA) == []
+
+
+async def test_source_delete_needs_a_live_speaker(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deleting a source is destructive: a speakerless scheduled/subagent turn acting on behalf of
+    the registrar cannot delete it, even though that turn may sync the source."""
+    monkeypatch.setenv("GREENHOUSE", "secret")
+    state = await _workspace()
+    member_ctx = _context(state, None, speaker_id=state.member_id)
+    speakerless = replace(
+        _context(state, None, no_speaker=True), on_behalf_of_member_id=state.member_id
+    )
+    delete_tool = _TOOLS["object_delete"]
+    member_name = _binding_name(GREENHOUSE, DIRECT_ACCOUNT, None)
+    with ws(state.workspace_id):
+        await _apply(member_ctx, _manifest_text(GREENHOUSE, ("jobs",), member_name))
+        with pytest.raises(OwnerRequired):
+            await delete_tool.handler(
+                speakerless,
+                delete_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": member_name}),
+            )
+    [row] = await _rows(state, GREENHOUSE)
+    assert row["removed_at"] is None
+
+
+async def test_owner_reapplying_a_members_private_source_is_a_noop(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The workspace owner re-applying another member's private source with the identical spec is a
+    no-op: it neither errors nor re-attributes the source to the owner (an existing binding never
+    falls through to the create path, which would stamp the acting caller as owner)."""
+    monkeypatch.setenv("GREENHOUSE", "secret")
+    state = await _workspace()
+    member_ctx = _context(state, None, speaker_id=state.member_id)
+    owner_ctx = _context(state, None)
+    member_name = _binding_name(GREENHOUSE, DIRECT_ACCOUNT, None)
+    with ws(state.workspace_id):
+        await _apply(member_ctx, _manifest_text(GREENHOUSE, ("jobs",), member_name))
+        await _apply(owner_ctx, _manifest_text(GREENHOUSE, ("jobs",), member_name))
+        rows = await _rows(state, GREENHOUSE)
+    assert {row["subject"] for row in rows} == {member_subject(state.member_id)}
+    assert {row["owner_member_id"] for row in rows} == {state.member_id}

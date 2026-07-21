@@ -596,7 +596,15 @@ async def test_connect_binds_a_grant_and_call_external_tool_executes_via_composi
         (connectors_manifest.manifest(), composio_manifest.manifest()), credentials
     )
     tool = next(t for t in tools if t.name == "call_external_tool")
-    ctx = _ctx(workspace_id, agent_id, conversation_id, turn_id, flow.store, ext_by_tool[tool.name])
+    ctx = _ctx(
+        workspace_id,
+        agent_id,
+        conversation_id,
+        turn_id,
+        flow.store,
+        ext_by_tool[tool.name],
+        speaker_member_id=member_id,
+    )
     result = await tool.handler(
         ctx,
         tool.input_model.model_validate(
@@ -708,6 +716,7 @@ async def test_dedicated_oauth_bridge_rejects_another_workspace() -> None:
         provider=PROVIDER,
         grantor_member_id=uuid4(),
         conversation_id=uuid4(),
+        shared=False,
     )
     bridge = urlparse(url)
     params = {key: values[0] for key, values in parse_qs(bridge.query).items()}
@@ -725,7 +734,7 @@ async def test_call_external_tool_without_a_grant_fails_loud(
     executed: list[dict[str, object]] = []
     monkeypatch.setattr(composio, "composio_client", lambda: _mock_client(COMPOSIO_USER, executed))
     ctx = _ctx(workspace_id, agent_id, conversation_id, turn_id, GrantStore())
-    with pytest.raises(ValueError, match="grant"):
+    with pytest.raises(ValueError, match="no 'github' account is available"):
         await call_external_tool(
             ctx,
             CallExternalToolInput(tool_name=GITHUB_SLUG, source_id=PROVIDER, arguments={}),
@@ -751,9 +760,10 @@ async def test_call_external_tool_augments_a_404_with_the_real_slugs(
         host=PROVIDER_HOST,
         grantor_member_id=member_id,
         conversation_id=conversation_id,
+        shared=False,
     )
     monkeypatch.setattr(composio, "composio_client", _mock_client)
-    ctx = _ctx(workspace_id, agent_id, conversation_id, turn_id, store)
+    ctx = _ctx(workspace_id, agent_id, conversation_id, turn_id, store, speaker_member_id=member_id)
     with pytest.raises(composio.ComposioError, match=f"tools available on github: {GITHUB_SLUG}"):
         await call_external_tool(
             ctx,
@@ -780,6 +790,7 @@ async def test_call_external_tool_with_a_stale_account_says_reconnect(
         host=PROVIDER_HOST,
         grantor_member_id=member_id,
         conversation_id=conversation_id,
+        shared=False,
     )
     base = _composio_handler(COMPOSIO_USER)
 
@@ -792,7 +803,7 @@ async def test_call_external_tool_with_a_stale_account_says_reconnect(
 
     client = composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handler))
     monkeypatch.setattr(composio, "composio_client", lambda: client)
-    ctx = _ctx(workspace_id, agent_id, conversation_id, turn_id, store)
+    ctx = _ctx(workspace_id, agent_id, conversation_id, turn_id, store, speaker_member_id=member_id)
     with pytest.raises(composio.ComposioError, match="reconnect with connect_account"):
         await call_external_tool(
             ctx,
@@ -817,6 +828,7 @@ async def test_complete_rejects_an_account_owned_by_a_foreign_composio_user(
         provider=PROVIDER,
         grantor_member_id=uuid4(),
         conversation_id=uuid4(),
+        shared=False,
     )
     state = parse_qs(urlparse(url).query)["state"][0]
     with pytest.raises(composio.ComposioError, match="owned by"):
@@ -871,6 +883,7 @@ def _ctx(
     turn_id: UUID | None,
     grants: GrantStore | None = None,
     ext: object = None,
+    speaker_member_id: UUID | None = None,
 ) -> ToolContext:
     return ToolContext(
         sandbox=None,
@@ -884,10 +897,11 @@ def _ctx(
             status="running",
             inbound="use a connector",
             created_at=datetime(2026, 7, 9, tzinfo=UTC),
+            speaker_member_id=speaker_member_id,
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=None,
-        speaker_member_id=None,
+        speaker_member_id=speaker_member_id,
         audience_member_id=None,
         artifact_token_secret="",
         grants=grants,

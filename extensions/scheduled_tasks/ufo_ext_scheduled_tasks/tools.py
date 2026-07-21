@@ -11,10 +11,11 @@ converges member ingress and timer expiry on one resume turn."""
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
-from ufo.sdk.objects import OBJECT_LIST_PAGE, ObjectKind, ObjectPage, ObjectRow
+from ufo.sdk.objects import MemberOwnedObjects, ObjectKind, ObjectOwner, OwnedRow, OwnerRequired
 from ufo.sdk.scheduling import ScheduledTask, ScheduleStore
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_scheduled_tasks.cron import next_fire, validate_cron
@@ -22,6 +23,8 @@ from ufo_ext_scheduled_tasks.cron import next_fire, validate_cron
 SCHEDULED_TASK_KIND = "scheduled_task"
 SUMMARY_MAX = 120
 RESPONSE_EXCERPT_MAX = 400
+SCHEDULE_GATE = "only the task's creator may change a scheduled task"
+DELETE_GATE = "only the task's creator or the workspace owner may delete a scheduled task"
 MAX_WAIT_MINUTES = 10_080
 PAUSE_DIRECTIVE = (
     "Reply with `ai_response`, then end your turn. The workflow resumes when a new message arrives "
@@ -69,24 +72,28 @@ def _summary(task: ScheduledTask) -> str:
 
 
 @dataclass(frozen=True)
-class ScheduledTaskObjects:
-    """The kind's handlers over `ScheduleStore`: apply validates the cron and upserts the row
-    bound to the applying turn's conversation and agent; list pages the name-ordered rows by
-    keyset; status renders the timing marks beside the spec. Any member may mutate — the kind
-    declares no owner gate, matching the tools it replaces."""
+class ScheduledTaskObjects(MemberOwnedObjects[ScheduledTaskSpec]):
+    """The kind's handlers over `ScheduleStore`: a task is private to the member who created it, so
+    only that member or the workspace owner sees and mutates it — the per-member visibility and
+    ownership gate is the base's. This kind supplies the task rows, their specs and status, and the
+    upsert/cancel domain acts. Each apply binds the applying turn's conversation and agent, so a
+    later fire re-enters that conversation as that agent, acting on behalf of the creator."""
 
-    async def list(self, ctx: ToolContext, query: str, cursor: str) -> ObjectPage:
-        tasks = [
-            task
+    kind_name: ClassVar[str] = SCHEDULED_TASK_KIND
+    mutate_gate: ClassVar[str] = SCHEDULE_GATE
+    delete_gate: ClassVar[str] = DELETE_GATE
+
+    async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow, ...]:
+        return tuple(
+            OwnedRow(
+                name=task.name,
+                summary=_summary(task),
+                owner=ObjectOwner(member_id=task.created_by_member_id, shared=False),
+            )
             for task in await _require_scheduler(ctx).list()
-            if query in task.name or query in _summary(task)
-        ]
-        remaining = [task for task in tasks if task.name > cursor] if cursor else tasks
-        page, rest = remaining[:OBJECT_LIST_PAGE], remaining[OBJECT_LIST_PAGE:]
-        rows = tuple(ObjectRow(name=task.name, summary=_summary(task)) for task in page)
-        return ObjectPage(rows=rows, next_cursor=page[-1].name if rest else None)
+        )
 
-    async def get(self, ctx: ToolContext, name: str) -> ScheduledTaskSpec | None:
+    async def _spec(self, ctx: ToolContext, name: str) -> ScheduledTaskSpec | None:
         task = await self._find(ctx, name)
         if task is None:
             return None
@@ -94,7 +101,7 @@ class ScheduledTaskObjects:
             schedule=task.schedule, prompt=task.prompt, description=task.description
         )
 
-    async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
+    async def _status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
         inspection = await _require_scheduler(ctx).inspect(name)
         if inspection is None:
             return None
@@ -122,13 +129,16 @@ class ScheduledTaskObjects:
             "last_run": last_run,
         }
 
-    async def apply(
+    async def _apply_owned(
         self,
         ctx: ToolContext,
         name: str,
         spec: ScheduledTaskSpec,
         old: ScheduledTaskSpec | None,
+        owner: ObjectOwner | None,
     ) -> None:
+        if owner is not None and owner.member_id != ctx.acting_member_id:
+            raise OwnerRequired(SCHEDULE_GATE)
         schedule = validate_cron(spec.schedule)
         await _require_scheduler(ctx).create(
             conversation_id=ctx.turn.conversation_id,
@@ -138,9 +148,10 @@ class ScheduledTaskObjects:
             prompt=spec.prompt,
             description=spec.description,
             next_run_at=next_fire(schedule, datetime.now(UTC)),
+            created_by_member_id=ctx.acting_member_id,
         )
 
-    async def delete(self, ctx: ToolContext, name: str) -> None:
+    async def _delete_owned(self, ctx: ToolContext, name: str, owner: ObjectOwner) -> None:
         await _require_scheduler(ctx).cancel(name)
 
     async def _find(self, ctx: ToolContext, name: str) -> ScheduledTask | None:
@@ -153,18 +164,21 @@ SCHEDULED_TASK_OBJECT = ObjectKind(
     name=SCHEDULED_TASK_KIND,
     description=(
         "A durable recurring task: a 5-field UTC cron schedule that re-invokes the agent with "
-        "the spec's prompt, reporting into the conversation that created it. Any member may "
-        "create, update, or delete; one-shot scheduling is not supported."
+        "the spec's prompt, reporting into the conversation that created it. Private to its "
+        "creator — only the creator or the workspace owner sees, updates, or deletes it; a fire "
+        "acts on the creator's behalf. One-shot scheduling is not supported."
     ),
     guidance=(
         "Apply a manifest to schedule a recurring task for yourself: give a 5-field cron "
         "schedule and the task prompt. The platform materializes a locked-down recurring task "
         "that searches memory, then invokes you on that schedule in the conversation the task "
         "was created from; re-applying an existing name updates the definition in place and "
-        "never moves where it reports. Delete cancels any managed task in this workspace by "
-        "name — not only ones you created. Listing returns each task's name, schedule, and "
-        "description; get shows where it reports and the latest run's response. Load the "
-        "task-scheduling skill before scheduling."
+        "never moves where it reports. A task is private to its creator: reads, updates, and "
+        "delete are the creator's or the workspace owner's — another member's tasks are not "
+        "visible. A fire acts as the creator and uses the creator's private connections, but "
+        "recalls only the memory its reporting conversation can see (shared-only in a channel). "
+        "Listing returns each task's name, schedule, and description; get shows where it reports "
+        "and the latest run's response. Load the task-scheduling skill before scheduling."
     ),
     spec_model=ScheduledTaskSpec,
     store=ScheduledTaskObjects(),
@@ -187,6 +201,7 @@ async def pause_and_wait(ctx: ToolContext, args: PauseAndWaitInput) -> ToolResul
         description=args.reason,
         next_run_at=resume_at,
         origin_seq=ctx.turn.seq,
+        created_by_member_id=ctx.acting_member_id,
     )
     if pause is None or pause.resume_turn_id is not None:
         payload = {

@@ -7,8 +7,8 @@ member that scopes disclosure, and `artifact_token_secret` with which
 `share_file` mints the signed download URLs the web surface verifies. `read_paths` is the working
 set that lets `edit` refuse to touch a file the turn has not read first. `connector_account` hands
 a connector tool the broker's connected-account id it passes to the broker's server-side execute
-API, resolved strictly from the turn-agent's own grants so a tool reaches only the turn-agent's
-accounts. `skills` is the loadable
+API, resolved from the turn-agent's grants admitted to the speaking member (their own plus shared)
+so a tool reaches only the accounts the speaker may use. `skills` is the loadable
 skill set for the deploy (core plus the active packs') that `load_skill` resolves against; it
 defaults to the core floor so a context built without the loader still resolves the core three.
 `cdp_provider` is the turn's selected browser transport and `find` its host-side element-ranking
@@ -172,6 +172,7 @@ class ToolContext:
     speaker_member_id: UUID | None
     audience_member_id: UUID | None
     artifact_token_secret: str
+    on_behalf_of_member_id: UUID | None = None
     grants: GrantStore | None = None
     subagents: SubagentControl | None = None
     read_paths: set[str] = field(default_factory=set)
@@ -185,6 +186,22 @@ class ToolContext:
     requestable_credentials: CredentialRequests | None = None
     public_base_url: str | None = None
     cleanup: TurnCleanup = field(default_factory=TurnCleanup)
+
+    @property
+    def acting_member_id(self) -> UUID | None:
+        """The member this turn acts on behalf of when using that member's own resources: the
+        speaking member when one authored the turn, otherwise the initiator carried as
+        `on_behalf_of_member_id` — the member who created the schedule a fire re-enters, or who
+        spawned a subagent chain (copied forward at spawn). Capability USE resolves against this
+        so a member's scheduled job or delegated subagent keeps their private connections; the
+        granting acts (connect_account, credential slots) stay speaker-only, so a speakerless turn
+        can use what its member already connected but can never grant anew. A turn with no member
+        at all (an anonymous internal turn) resolves nothing private."""
+        return (
+            self.speaker_member_id
+            if self.speaker_member_id is not None
+            else self.on_behalf_of_member_id
+        )
 
     async def speaker_is_owner(self) -> bool:
         """Whether this turn's speaking member is the workspace owner — the earliest-created member
@@ -238,20 +255,38 @@ class ToolContext:
             if account_id in accounts:
                 return account_id
             raise ValueError(
-                f"agent has no active {provider!r} account {account_id!r} grant to authenticate"
+                f"no active {provider!r} account {account_id!r} is available to this turn"
             )
         if not accounts:
-            raise ValueError(f"agent has no active {provider!r} grant to authenticate")
+            raise ValueError(
+                f"no {provider!r} account is available to this turn — connect one with "
+                "connect_account"
+            )
         if len(accounts) > 1:
             raise ValueError(
-                f"agent has multiple active {provider!r} accounts; pass account_id as one of "
+                f"multiple active {provider!r} accounts; pass account_id as one of "
                 f"{list(accounts)!r}"
             )
         return accounts[0]
 
     async def connector_accounts(self, provider: str) -> tuple[str, ...]:
-        """The active connected-account ids this turn's agent may use for one provider."""
+        """The connected-account ids this turn may use for one provider: the acting member's own
+        grants plus any grant its grantor shared with the workspace — the runtime check that makes
+        a connection private by default. The acting member is the speaker, or the member the turn
+        acts on behalf of (`on_behalf_of_member_id`) for a speakerless scheduled fire or subagent,
+        so a member's own scheduled job and delegated subagents keep their private connections; a
+        turn with no member at all resolves only shared grants."""
         if self.grants is None:
             raise ConnectUnavailable("grants unavailable: no credential key configured")
+        acting = self.acting_member_id
         granted = await self.grants.active_grants(self.turn.workspace_id, self.turn.agent_id)
-        return tuple(sorted({grant.account_id for grant in granted if grant.provider == provider}))
+        return tuple(
+            sorted(
+                {
+                    grant.account_id
+                    for grant in granted
+                    if grant.provider == provider
+                    and (grant.shared or grant.grantor_member_id == acting)
+                }
+            )
+        )

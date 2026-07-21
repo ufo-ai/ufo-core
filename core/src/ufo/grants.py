@@ -82,11 +82,15 @@ class Grant:
     """A grant as the proxy-rule derivation and connector tools read it: the host it admits and
     meters, and the provider account that identifies it. The broker holds the account's token, so a
     grant carries no secret — a connector tool passes its `account_id` to the broker's server-side
-    execute API, and the proxy injects nothing on the wire to `host`."""
+    execute API, and the proxy injects nothing on the wire to `host`. `shared` is the grantor's
+    disclosure decision: a shared grant resolves for every member's turns, a private one only for
+    its grantor's."""
 
     provider: str
     account_id: str
     host: str
+    grantor_member_id: UUID
+    shared: bool
 
 
 @dataclass(frozen=True)
@@ -101,6 +105,7 @@ class GrantSummary:
     grantor_member_id: UUID
     conversation_id: UUID
     granted_at: datetime
+    shared: bool
 
 
 @dataclass(frozen=True)
@@ -122,6 +127,7 @@ class ConnectState(BaseModel):
     provider: str
     grantor_member_id: UUID
     conversation_id: UUID
+    shared: bool = False
 
 
 @dataclass(frozen=True)
@@ -140,6 +146,7 @@ class GrantStore:
         host: str,
         grantor_member_id: UUID,
         conversation_id: UUID,
+        shared: bool,
     ) -> None:
         """Upsert on (workspace, agent, provider, account): re-connecting the same account refreshes
         its audit fields rather than duplicating the grant. One atomic insert-on-conflict, so two
@@ -163,6 +170,7 @@ class GrantStore:
                     host=host,
                     grantor_member_id=grantor_member_id,
                     conversation_id=conversation_id,
+                    shared=shared,
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
@@ -177,6 +185,7 @@ class GrantStore:
                         "host": host,
                         "grantor_member_id": grantor_member_id,
                         "conversation_id": conversation_id,
+                        "shared": shared,
                         "updated_at": sa.func.now(),
                     },
                 )
@@ -194,6 +203,8 @@ class GrantStore:
                         tables.grant.c.provider,
                         tables.grant.c.account_id,
                         tables.grant.c.host,
+                        tables.grant.c.grantor_member_id,
+                        tables.grant.c.shared,
                     ).where(
                         tables.grant.c.workspace_id == workspace_id,
                         tables.grant.c.agent_id == agent_id,
@@ -201,7 +212,14 @@ class GrantStore:
                 )
             ).all()
         return tuple(
-            Grant(provider=row.provider, account_id=row.account_id, host=row.host) for row in rows
+            Grant(
+                provider=row.provider,
+                account_id=row.account_id,
+                host=row.host,
+                grantor_member_id=row.grantor_member_id,
+                shared=row.shared,
+            )
+            for row in rows
         )
 
     async def revoke(self, workspace_id: UUID, provider: str, account_id: str) -> bool:
@@ -218,6 +236,25 @@ class GrantStore:
                 )
             )
         return deleted.rowcount > 0
+
+    async def set_shared(
+        self, workspace_id: UUID, provider: str, account_id: str, shared: bool
+    ) -> bool:
+        """Flip the disclosure of every grant binding this provider account in the workspace —
+        the share/unshare half of the connector object kind. Disclosure is a property of the
+        connected account, not of one agent binding, so all its rows flip together, exactly as
+        `revoke` deletes them together."""
+        async with workspace_tx() as connection:
+            updated = await connection.execute(
+                sa.update(tables.grant)
+                .values(shared=shared, updated_at=sa.func.now())
+                .where(
+                    tables.grant.c.workspace_id == workspace_id,
+                    tables.grant.c.provider == provider,
+                    tables.grant.c.account_id == account_id,
+                )
+            )
+        return updated.rowcount > 0
 
 
 @dataclass(frozen=True)
@@ -241,6 +278,7 @@ class ConnectFlow:
         provider: str,
         grantor_member_id: UUID,
         conversation_id: UUID,
+        shared: bool,
     ) -> str:
         descriptor = self._provider(provider)
         state = ConnectState(
@@ -249,6 +287,7 @@ class ConnectFlow:
             provider=provider,
             grantor_member_id=grantor_member_id,
             conversation_id=conversation_id,
+            shared=shared,
         )
         sealed = self.fernet.encrypt(state.model_dump_json().encode()).decode()
         return descriptor.authorize_url(sealed, self.redirect_uri)
@@ -277,6 +316,7 @@ class ConnectFlow:
                 host=descriptor.host,
                 grantor_member_id=claims.grantor_member_id,
                 conversation_id=claims.conversation_id,
+                shared=claims.shared,
             )
         return GrantRecorded(
             provider=descriptor.provider, account_id=account.account_id, agent_id=claims.agent_id
@@ -359,6 +399,7 @@ class ConnectHandoff:
                 provider=request.provider,
                 grantor_member_id=member_id,
                 conversation_id=row.conversation_id,
+                shared=request.shared,
             )
             updated = await connection.execute(
                 sa.update(tables.turn)
@@ -435,6 +476,7 @@ async def grant_summaries(workspace_id: UUID) -> tuple[GrantSummary, ...]:
                     tables.grant.c.grantor_member_id,
                     tables.grant.c.conversation_id,
                     tables.grant.c.created_at,
+                    tables.grant.c.shared,
                 )
                 .select_from(
                     tables.grant.join(tables.agent, tables.grant.c.agent_id == tables.agent.c.id)
@@ -452,6 +494,7 @@ async def grant_summaries(workspace_id: UUID) -> tuple[GrantSummary, ...]:
             grantor_member_id=row.grantor_member_id,
             conversation_id=row.conversation_id,
             granted_at=row.created_at,
+            shared=row.shared,
         )
         for row in rows
     )

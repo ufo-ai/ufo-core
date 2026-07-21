@@ -18,7 +18,8 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from typing import Protocol, get_args
+from typing import ClassVar, Protocol, get_args
+from uuid import UUID
 
 import yaml
 from pydantic import BaseModel, SecretBytes, SecretStr, ValidationError
@@ -97,6 +98,139 @@ class ObjectStore[SpecT: BaseModel](Protocol):
     async def apply(self, ctx: ToolContext, name: str, spec: SpecT, old: SpecT | None) -> None: ...
 
     async def delete(self, ctx: ToolContext, name: str) -> None: ...
+
+
+@dataclass(frozen=True)
+class ObjectOwner:
+    """Who a member-owned row belongs to and whether the workspace shares it. `member_id` None
+    means owner-only: visible to and mutable by the workspace owner alone."""
+
+    member_id: UUID | None
+    shared: bool
+
+
+@dataclass(frozen=True)
+class OwnedRow:
+    """One row a member-owned kind hands the gate: its name, one-line summary, and owner."""
+
+    name: str
+    summary: str
+    owner: ObjectOwner
+
+
+@dataclass(frozen=True)
+class MemberOwnedObjects[SpecT: BaseModel]:
+    """Base for a member-owned object kind: the per-member visibility and ownership gate lives here
+    once, so a kind cannot ship without it. A subclass supplies only data (`_owned_rows`, `_spec`,
+    `_status`) and domain mutation (`_apply_owned`, `_delete_owned`); the gate hides a row invisible
+    to the acting member (absent from `list`, not-found from `get`/`status`, `UnknownObject` from
+    `apply`/`delete`) and refuses `OwnerRequired` when a visible row is not the actor's to change.
+    A row is visible when it is shared, owned by the acting member, or the speaker is the workspace
+    owner; a row whose owner `member_id` is None is owner-only. A kind whose mutation or deletion is
+    a grant/disclosure act sets `mutate_requires_speaker`/`delete_requires_speaker` so the gate also
+    refuses it on a speakerless (scheduled/subagent) turn — an act that discloses or revokes access
+    needs a live member, never a background turn acting on someone's behalf. The class vars name the
+    kind and the two gate messages the refusals carry."""
+
+    kind_name: ClassVar[str]
+    mutate_gate: ClassVar[str]
+    delete_gate: ClassVar[str]
+    mutate_requires_speaker: ClassVar[bool] = False
+    delete_requires_speaker: ClassVar[bool] = False
+
+    async def list(self, ctx: ToolContext, query: str, cursor: str) -> ObjectPage:
+        is_owner = await ctx.speaker_is_owner()
+        acting = ctx.acting_member_id
+        rows = sorted(
+            (
+                row
+                for row in await self._owned_rows(ctx)
+                if self._visible(row.owner, acting, is_owner)
+                and (query in row.name or query in row.summary)
+            ),
+            key=lambda row: row.name,
+        )
+        remaining = [row for row in rows if row.name > cursor] if cursor else rows
+        page, rest = remaining[:OBJECT_LIST_PAGE], remaining[OBJECT_LIST_PAGE:]
+        return ObjectPage(
+            rows=tuple(ObjectRow(name=row.name, summary=row.summary) for row in page),
+            next_cursor=page[-1].name if rest else None,
+        )
+
+    async def get(self, ctx: ToolContext, name: str) -> SpecT | None:
+        owner = await self._owner(ctx, name)
+        if owner is None or not self._visible(
+            owner, ctx.acting_member_id, await ctx.speaker_is_owner()
+        ):
+            return None
+        return await self._spec(ctx, name)
+
+    async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
+        owner = await self._owner(ctx, name)
+        if owner is None or not self._visible(
+            owner, ctx.acting_member_id, await ctx.speaker_is_owner()
+        ):
+            return None
+        return await self._status(ctx, name)
+
+    async def apply(self, ctx: ToolContext, name: str, spec: SpecT, old: SpecT | None) -> None:
+        owner = await self._owner(ctx, name)
+        if owner is not None:
+            is_owner = await ctx.speaker_is_owner()
+            if not self._visible(owner, ctx.acting_member_id, is_owner):
+                raise UnknownObject(f"no {self.kind_name} object named {name!r}")
+            if not self._owned(owner, ctx.acting_member_id) and not is_owner:
+                raise OwnerRequired(self.mutate_gate)
+            if self.mutate_requires_speaker and ctx.speaker_member_id is None:
+                raise OwnerRequired(self.mutate_gate)
+        await self._apply_owned(ctx, name, spec, old, owner)
+
+    async def delete(self, ctx: ToolContext, name: str) -> None:
+        owner = await self._owner(ctx, name)
+        if owner is None:
+            raise UnknownObject(f"no {self.kind_name} object named {name!r}")
+        is_owner = await ctx.speaker_is_owner()
+        if not self._visible(owner, ctx.acting_member_id, is_owner):
+            raise UnknownObject(f"no {self.kind_name} object named {name!r}")
+        if not self._owned(owner, ctx.acting_member_id) and not is_owner:
+            raise OwnerRequired(self.delete_gate)
+        if self.delete_requires_speaker and ctx.speaker_member_id is None:
+            raise OwnerRequired(self.delete_gate)
+        await self._delete_owned(ctx, name, owner)
+
+    def _owned(self, owner: ObjectOwner, acting: UUID | None) -> bool:
+        """Whether the acting member is the row's member-owner. An owner-only row (`member_id`
+        None) is owned by no member — only the workspace owner (`is_owner`) may touch it — so this
+        is never true for it, even on a turn whose acting member is also None."""
+        return owner.member_id is not None and owner.member_id == acting
+
+    def _visible(self, owner: ObjectOwner, acting: UUID | None, is_owner: bool) -> bool:
+        return owner.shared or self._owned(owner, acting) or is_owner
+
+    async def _owner(self, ctx: ToolContext, name: str) -> ObjectOwner | None:
+        return next((row.owner for row in await self._owned_rows(ctx) if row.name == name), None)
+
+    async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow, ...]:
+        raise NotImplementedError
+
+    async def _spec(self, ctx: ToolContext, name: str) -> SpecT | None:
+        raise NotImplementedError
+
+    async def _status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
+        raise NotImplementedError
+
+    async def _apply_owned(
+        self,
+        ctx: ToolContext,
+        name: str,
+        spec: SpecT,
+        old: SpecT | None,
+        owner: ObjectOwner | None,
+    ) -> None:
+        raise NotImplementedError
+
+    async def _delete_owned(self, ctx: ToolContext, name: str, owner: ObjectOwner) -> None:
+        raise NotImplementedError
 
 
 @dataclass(frozen=True)

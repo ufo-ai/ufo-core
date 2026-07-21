@@ -259,6 +259,9 @@ class Subagents:
                     inbound=text,
                     admission_source=INTERNAL_ADMISSION,
                     speaker_member_id=None,
+                    on_behalf_of_member_id=(
+                        self.parent.on_behalf_of_member_id or self.parent.speaker_member_id
+                    ),
                     terminal=None,
                     parent_turn_id=self.parent.id,
                     subagent_profile=child.subagent_profile,
@@ -353,6 +356,9 @@ class Subagents:
                     inbound=inbound,
                     admission_source=INTERNAL_ADMISSION,
                     speaker_member_id=None,
+                    on_behalf_of_member_id=(
+                        self.parent.on_behalf_of_member_id or self.parent.speaker_member_id
+                    ),
                     terminal=None,
                     parent_turn_id=self.parent.id,
                     subagent_profile=profile,

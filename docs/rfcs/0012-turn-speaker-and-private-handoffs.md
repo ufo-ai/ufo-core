@@ -57,7 +57,10 @@ it through an ephemeral interaction response. Long replies split into bounded bl
 A different clicker or stale request receives an ephemeral refusal. CLI, the `ufo` terminal surface,
 and web use the same workflow with their authenticated member. The OAuth callback records the
 sealed speaker as grantor and directs the member back to chat; it does not fabricate an inbound
-turn. Later connector use begins with the member's next message and remains agent-grant-bound.
+turn. Later connector use begins with the member's next message and is scoped to the acting
+member — the speaker, or the initiator a speakerless scheduled fire or subagent acts on behalf
+of — so a grant is private to its grantor unless shared. The granting act is speaker-only; the
+use scoping narrows use, never widens grant authority.
 
 Interactive continuations find their existing conversation before admission. A DM click may then
 bind a newly resolved member to that private conversation; a channel click never calls

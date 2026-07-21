@@ -86,11 +86,9 @@ async def turn_status_frame(turn_id: UUID) -> LiveFrame | None:
                     tables.turn.c.terminal,
                     tables.turn.c.workspace_id,
                     tables.turn.c.speaker_member_id,
+                    tables.turn.c.on_behalf_of_member_id,
                     tables.turn.c.admission_source,
-                    tables.conversation.c.member_id,
-                )
-                .select_from(tables.turn.join(tables.conversation))
-                .where(tables.turn.c.id == turn_id)
+                ).where(tables.turn.c.id == turn_id)
             )
         ).one_or_none()
         if row is None:
@@ -99,7 +97,7 @@ async def turn_status_frame(turn_id: UUID) -> LiveFrame | None:
             return Terminal(frame=TerminalFrame.model_validate(row.terminal))
         if row.status != PARKED:
             return None
-        gate = gate_member(row.speaker_member_id, row.admission_source, row.member_id)
+        gate = gate_member(row.speaker_member_id, row.admission_source, row.on_behalf_of_member_id)
         if (
             gate is not None
             and not seat_gate_absent(row.workspace_id)

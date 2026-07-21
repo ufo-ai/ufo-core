@@ -329,6 +329,17 @@ async def test_message_admits_the_running_childs_next_turn_and_enqueues_it(
     the child's subagent profile so the continuation runs as the subagent, and lands on the turn
     queue — the running child receives it once the turn in flight ends."""
     workspace_id, agent_id = await _workspace_agent()
+    member_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email=f"{member_id.hex[:8]}@x.test",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
     parent = Turn(
         id=uuid4(),
         workspace_id=workspace_id,
@@ -338,7 +349,7 @@ async def test_message_admits_the_running_childs_next_turn_and_enqueues_it(
         status="running",
         inbound="parent",
         created_at=datetime(2026, 7, 9, tzinfo=UTC),
-        speaker_member_id=uuid4(),
+        speaker_member_id=member_id,
     )
     child_id, child_conversation = await _running_child(workspace_id, agent_id, parent.id)
     client = _RecordingClient()
@@ -540,12 +551,17 @@ async def test_spawn_with_a_dedup_key_reconnects_to_a_finished_child_without_res
     async with workspace_tx() as connection:
         child = (
             await connection.execute(
-                sa.select(tables.turn.c.speaker_member_id, sa.func.count().label("count"))
+                sa.select(
+                    tables.turn.c.speaker_member_id,
+                    tables.turn.c.on_behalf_of_member_id,
+                    sa.func.count().label("count"),
+                )
                 .where(tables.turn.c.parent_turn_id == parent.id)
-                .group_by(tables.turn.c.speaker_member_id)
+                .group_by(tables.turn.c.speaker_member_id, tables.turn.c.on_behalf_of_member_id)
             )
         ).one()
     assert child.speaker_member_id is None
+    assert child.on_behalf_of_member_id == speaker
     assert child.count == 1
 
 

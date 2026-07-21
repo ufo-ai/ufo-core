@@ -542,6 +542,7 @@ async def test_scheduled_fire_into_an_unseated_members_conversation_is_refused(d
                 description="daily report",
                 next_run_at=next_run_at,
                 claimed_by="claim-1",
+                created_by_member_id=_member_id,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -559,6 +560,7 @@ async def test_scheduled_fire_into_an_unseated_members_conversation_is_refused(d
         origin_seq=None,
         resume_turn_id=None,
         claim_id="claim-1",
+        created_by_member_id=_member_id,
     )
     dbos = StubDbos()
     turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset()).invoke_scheduled(

@@ -137,6 +137,7 @@ class Admission:
                 None,
                 None,
                 task,
+                task.created_by_member_id,
             )
         except _ScheduledInvocationSuperseded:
             return None
@@ -152,6 +153,7 @@ class Admission:
         context: TurnContext | None,
         pending_pause: _PendingPause | None,
         scheduled_task: ScheduledTask | None,
+        on_behalf_of_member_id: UUID | None = None,
     ) -> UUID:
         dispatch_now = False
         folded_parked_turn: UUID | None = None
@@ -368,6 +370,7 @@ class Admission:
                             tables.turn.c.status,
                             tables.turn.c.speaker_member_id,
                             tables.turn.c.admission_source,
+                            tables.turn.c.on_behalf_of_member_id,
                         )
                         .where(
                             tables.turn.c.workspace_id == workspace_id,
@@ -385,7 +388,7 @@ class Admission:
                     else gate_member(
                         live_turn.speaker_member_id,
                         live_turn.admission_source,
-                        conversation.member_id,
+                        live_turn.on_behalf_of_member_id,
                     )
                 )
                 fold_admitted = (
@@ -514,7 +517,7 @@ class Admission:
                     if scheduled_task is not None
                     else INTERNAL_ADMISSION
                 )
-                gate = gate_member(speaker_member_id, admission_source, conversation.member_id)
+                gate = gate_member(speaker_member_id, admission_source, on_behalf_of_member_id)
                 if (
                     gate is None
                     and pending_pause is not None
@@ -548,6 +551,7 @@ class Admission:
                         inbound=body,
                         admission_source=admission_source,
                         speaker_member_id=speaker_member_id,
+                        on_behalf_of_member_id=on_behalf_of_member_id,
                         context=None if context is None else context.model_dump(mode="json"),
                         terminal=None if terminal is None else terminal.model_dump(mode="json"),
                         idempotency_key=idempotency_key,

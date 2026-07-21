@@ -23,7 +23,6 @@ from pydantic import BaseModel
 
 from ufo.sources.connector import Connector, StreamPage, StreamSpec
 from ufo.sources.sync import Page, SourceAuth, SyncResult
-from ufo.subjects import SHARED_SUBJECT
 
 
 class ConnectorSourceConfig(BaseModel):
@@ -108,7 +107,6 @@ class ConnectorBackend:
         return Page(
             source_ref=f"{stream.name}/{ref}",
             digest="sha256:" + hashlib.sha256(body.encode()).hexdigest(),
-            subject=SHARED_SUBJECT,
             body=body,
         )
 

@@ -779,6 +779,7 @@ async def test_connector_execute_tool_resolves_the_bound_account_without_the_san
         host=sample.CONNECTOR_HOST,
         grantor_member_id=member_id,
         conversation_id=conversation_id,
+        shared=False,
     )
     manifest = _sample_manifest()
     tools, ext_by_tool = turn_tools((manifest,), _credential_store())

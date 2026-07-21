@@ -476,7 +476,15 @@ async def test_connect_binds_a_grant_and_call_external_tool_executes_via_pipedre
         (connectors_manifest.manifest(), pipedream_manifest.manifest()), credentials
     )
     tool = next(t for t in tools if t.name == "call_external_tool")
-    ctx = _ctx(workspace_id, agent_id, conversation_id, turn_id, flow.store, ext_by_tool[tool.name])
+    ctx = _ctx(
+        workspace_id,
+        agent_id,
+        conversation_id,
+        turn_id,
+        flow.store,
+        ext_by_tool[tool.name],
+        speaker_member_id=member_id,
+    )
     result = await tool.handler(
         ctx,
         tool.input_model.model_validate(
@@ -514,12 +522,13 @@ async def test_call_external_tool_executes_a_workspace_owned_grant(
         host=PROVIDER_HOST,
         grantor_member_id=member_id,
         conversation_id=conversation_id,
+        shared=False,
     )
     owner = f"{pipedream.EXTERNAL_USER_PREFIX}{workspace_id}"
     executed: list[dict[str, object]] = []
     _install_transport(monkeypatch, _pipedream_handler(owner, executed=executed))
     result = await call_external_tool(
-        _ctx(workspace_id, agent_id, conversation_id, turn_id, store),
+        _ctx(workspace_id, agent_id, conversation_id, turn_id, store, speaker_member_id=member_id),
         CallExternalToolInput(
             tool_name=GMAIL_ACTION,
             source_id=PROVIDER,
@@ -593,12 +602,13 @@ async def test_call_external_tool_augments_an_unknown_key_with_the_real_actions(
         host=PROVIDER_HOST,
         grantor_member_id=member_id,
         conversation_id=conversation_id,
+        shared=False,
     )
     _install_transport(
         monkeypatch,
         _pipedream_handler(pipedream.connection_user_id(workspace_id, "unknown-key")),
     )
-    ctx = _ctx(workspace_id, agent_id, conversation_id, turn_id, store)
+    ctx = _ctx(workspace_id, agent_id, conversation_id, turn_id, store, speaker_member_id=member_id)
     with pytest.raises(pipedream.PipedreamError, match=f"actions available: {GMAIL_ACTION}"):
         await call_external_tool(
             ctx,
@@ -625,6 +635,7 @@ async def test_call_external_tool_with_a_stale_grant_says_reconnect(
         host=PROVIDER_HOST,
         grantor_member_id=member_id,
         conversation_id=conversation_id,
+        shared=False,
     )
     base = _pipedream_handler(pipedream.connection_user_id(workspace_id, "stale"))
 
@@ -634,7 +645,7 @@ async def test_call_external_tool_with_a_stale_grant_says_reconnect(
         return base(request)
 
     _install_transport(monkeypatch, handler)
-    ctx = _ctx(workspace_id, agent_id, conversation_id, turn_id, store)
+    ctx = _ctx(workspace_id, agent_id, conversation_id, turn_id, store, speaker_member_id=member_id)
     with pytest.raises(pipedream.PipedreamError, match="reconnect with connect_account"):
         await call_external_tool(
             ctx,
@@ -662,6 +673,7 @@ async def test_an_in_band_action_error_says_reconnect_only_for_a_stale_account(
         host=PROVIDER_HOST,
         grantor_member_id=member_id,
         conversation_id=conversation_id,
+        shared=False,
     )
     base = _pipedream_handler(pipedream.connection_user_id(workspace_id, "in-band"))
     in_band_error: dict[str, object] = {}
@@ -672,7 +684,7 @@ async def test_an_in_band_action_error_says_reconnect_only_for_a_stale_account(
         return base(request)
 
     _install_transport(monkeypatch, handler)
-    ctx = _ctx(workspace_id, agent_id, conversation_id, turn_id, store)
+    ctx = _ctx(workspace_id, agent_id, conversation_id, turn_id, store, speaker_member_id=member_id)
 
     in_band_error.update({"name": "Error", "message": "External user not found"})
     with pytest.raises(pipedream.PipedreamError, match="reconnect with connect_account"):
@@ -709,6 +721,7 @@ async def test_complete_rejects_a_forged_success_marker(
         provider=PROVIDER,
         grantor_member_id=uuid4(),
         conversation_id=uuid4(),
+        shared=False,
     )
     state = parse_qs(urlparse(url).query)["state"][0]
     with pytest.raises(pipedream.PipedreamError, match=provider.OUTCOME_CONNECTED):
@@ -743,6 +756,7 @@ async def test_overlapping_connect_flows_cannot_cross_bind_accounts(
                 provider=PROVIDER,
                 grantor_member_id=member_a,
                 conversation_id=conversation_a,
+                shared=False,
             )
         ).query
     )["state"][0]
@@ -754,6 +768,7 @@ async def test_overlapping_connect_flows_cannot_cross_bind_accounts(
                 provider=PROVIDER,
                 grantor_member_id=member_b,
                 conversation_id=conversation_b,
+                shared=False,
             )
         ).query
     )["state"][0]
@@ -852,6 +867,7 @@ def _ctx(
     turn_id: UUID | None,
     grants: GrantStore | None = None,
     ext: object = None,
+    speaker_member_id: UUID | None = None,
 ) -> ToolContext:
     return ToolContext(
         sandbox=None,
@@ -865,10 +881,11 @@ def _ctx(
             status="running",
             inbound="use a connector",
             created_at=datetime(2026, 7, 9, tzinfo=UTC),
+            speaker_member_id=speaker_member_id,
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=None,
-        speaker_member_id=None,
+        speaker_member_id=speaker_member_id,
         audience_member_id=None,
         artifact_token_secret="",
         grants=grants,

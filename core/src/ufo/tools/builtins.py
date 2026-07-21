@@ -225,6 +225,11 @@ class ConnectAccountInput(BaseModel):
     provider: str = Field(
         description="The provider to connect an account for, e.g. 'github', 'google'."
     )
+    shared: bool = Field(
+        default=False,
+        description="Connect the account for the whole workspace rather than privately to the "
+        "speaking member. Set it only when the member's words say the account is for the team.",
+    )
 
 
 class RequestCredentialsInput(BaseModel):
@@ -634,7 +639,7 @@ async def connect_account_handler(ctx: ToolContext, args: ConnectAccountInput) -
     if ctx.speaker_member_id is None:
         raise ValueError("connect requires a speaking member to gate the grant")
     installed_connect_flow().validate_provider(args.provider)
-    request = ConnectRequest(provider=args.provider)
+    request = ConnectRequest(provider=args.provider, shared=args.shared)
     return ToolResult(
         content=(TextContent(text=f"{CONNECT_ACCOUNT_DIRECTIVE}\n{request.model_dump_json()}"),)
     )
@@ -856,9 +861,11 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         name="connect_account",
         description=(
             "Connect an external account to this agent through OAuth when the member asks in chat "
-            "to connect a provider (for example their Gmail or GitHub). This creates a private "
-            "connection control for the member who asked; tell them to use it and end your turn. "
-            "Never invent or expose an authorization URL in the conversation."
+            "to connect a provider (for example their Gmail or GitHub). The account is connected "
+            "privately to the asking member by default — only their own turns (and their scheduled "
+            "jobs) can use it; set `shared` only when they say it is for the team. This leaves a "
+            "private connection control for the member who asked; tell them to use it and end your "
+            "turn. Never invent or expose an authorization URL in the conversation."
         ),
         input_model=ConnectAccountInput,
         handler=connect_account_handler,

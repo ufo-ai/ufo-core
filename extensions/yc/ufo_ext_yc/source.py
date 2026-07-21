@@ -230,7 +230,6 @@ class YcSource:
                 Page(
                     source_ref=f"{collection}/{row.record_id}",
                     digest="sha256:" + hashlib.sha256(rendered.encode()).hexdigest(),
-                    subject=SHARED_SUBJECT,
                     body=rendered,
                 )
             )
@@ -262,7 +261,6 @@ class YcSource:
                 Page(
                     source_ref=f"{collection}/{row.record_id}",
                     digest="sha256:" + hashlib.sha256(rendered.encode()).hexdigest(),
-                    subject=SHARED_SUBJECT,
                     body=rendered,
                 )
             )
@@ -287,6 +285,8 @@ async def yc_index(ctx: ToolContext, args: YcIndexInput) -> ToolResult:
             query=args.query,
             max_results=args.max_results,
         ),
+        subject=SHARED_SUBJECT,
+        owner_member_id=None,
     )
     return ToolResult(
         content=(

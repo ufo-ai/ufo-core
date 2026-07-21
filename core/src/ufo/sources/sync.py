@@ -49,11 +49,11 @@ SOURCE_BLOB_PREFIX = "sources"
 
 class Page(BaseModel):
     """One fetched document: its stable key within the source, a content digest for change
-    detection, the subject that scopes its recall, and the body the driver stores in the blob."""
+    detection, and the body the driver stores in the blob; the source row's subject scopes its
+    recall — a backend never declares disclosure."""
 
     source_ref: str
     digest: str
-    subject: str
     body: str
 
 
@@ -144,7 +144,6 @@ class FolderSource:
             Page(
                 source_ref=source_ref,
                 digest="sha256:" + hashlib.sha256(text.encode()).hexdigest(),
-                subject=SHARED_SUBJECT,
                 body=text,
             )
             for source_ref, text in entries
@@ -203,6 +202,8 @@ async def register_sources(configured: tuple[SourceEntry, ...]) -> None:
                     workspace_id=workspace_id,
                     backend=entry.backend,
                     config=config,
+                    subject=SHARED_SUBJECT,
+                    owner_member_id=None,
                     cursor=None,
                     next_sync_at=now,
                     claimed_by=None,
@@ -219,6 +220,7 @@ class ClaimedSource:
     workspace_id: UUID
     backend: str
     config: Mapping[str, object]
+    subject: str
     cursor: str | None
     consecutive_errors: int
 
@@ -292,6 +294,7 @@ class SyncDriver:
                 tables.source.c.workspace_id,
                 tables.source.c.backend,
                 tables.source.c.config,
+                tables.source.c.subject,
                 tables.source.c.cursor,
                 tables.source.c.consecutive_errors,
             )
@@ -322,6 +325,7 @@ class SyncDriver:
                 workspace_id=row["workspace_id"],
                 backend=row["backend"],
                 config=row["config"],
+                subject=row["subject"],
                 cursor=row["cursor"],
                 consecutive_errors=row["consecutive_errors"],
             )
@@ -339,7 +343,7 @@ class SyncDriver:
     async def _commit(self, source: ClaimedSource, result: SyncResult) -> None:
         prior = await self._prior_pages(source.source_id)
         fetched: list[UUID] = []
-        changed: list[tuple[UUID, str, str, str]] = []
+        changed: list[tuple[UUID, str, str]] = []
         for page in result.pages:
             page_id = page_id_for(source.source_id, page.source_ref)
             fetched.append(page_id)
@@ -347,7 +351,7 @@ class SyncDriver:
             if existing is None or existing[0] != page.digest or existing[1]:
                 body_ref = f"{SOURCE_BLOB_PREFIX}/{source.source_id}/{page_id}"
                 await self.blob.put(body_ref, page.body.encode())
-                changed.append((page_id, body_ref, page.digest, page.subject))
+                changed.append((page_id, body_ref, page.digest))
         deleted = [page_id_for(source.source_id, ref) for ref in result.deletes]
         await self._write(source, result.next_cursor, changed, fetched, deleted, result.snapshot)
 
@@ -370,7 +374,7 @@ class SyncDriver:
         self,
         source: ClaimedSource,
         next_cursor: str | None,
-        changed: list[tuple[UUID, str, str, str]],
+        changed: list[tuple[UUID, str, str]],
         fetched: list[UUID],
         deleted: list[UUID],
         snapshot: bool,
@@ -382,13 +386,13 @@ class SyncDriver:
         now = datetime.now(UTC)
         async with workspace_tx() as connection:
             workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
-            for page_id, body_ref, digest, subject in changed:
+            for page_id, body_ref, digest in changed:
                 updated = await connection.execute(
                     sa.update(tables.page)
                     .values(
                         digest=digest,
                         body_ref=body_ref,
-                        subject=subject,
+                        subject=source.subject,
                         tombstone=False,
                         updated_at=now,
                     )
@@ -402,7 +406,7 @@ class SyncDriver:
                             source_id=source.source_id,
                             digest=digest,
                             body_ref=body_ref,
-                            subject=subject,
+                            subject=source.subject,
                             tombstone=False,
                             created_at=now,
                             updated_at=now,

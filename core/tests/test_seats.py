@@ -223,6 +223,7 @@ async def _parked_turn(
     speaker_member_id: UUID | None,
     conversation_member_id: UUID | None = None,
     admission_source: str = INTERNAL_ADMISSION,
+    on_behalf_of_member_id: UUID | None = None,
 ) -> UUID:
     agent_id, conversation_id, turn_id = uuid4(), uuid4(), uuid4()
     async with workspace_tx() as connection:
@@ -262,6 +263,7 @@ async def _parked_turn(
                 status="parked",
                 inbound="hello",
                 speaker_member_id=speaker_member_id,
+                on_behalf_of_member_id=on_behalf_of_member_id,
                 admission_source=admission_source,
                 created_at=sa.func.now() - timedelta(hours=1),
                 updated_at=sa.func.now() - timedelta(hours=1),
@@ -339,21 +341,25 @@ def test_migration_backfills_existing_members_as_seated(tmp_path: Path) -> None:
     assert row.seat_limit is None
 
 
-def test_gate_member_is_the_speaker_else_the_scheduled_conversations_member() -> None:
-    speaker, conversation_member = uuid4(), uuid4()
-    assert gate_member(speaker, MEMBER_ADMISSION, conversation_member) == speaker
-    assert gate_member(speaker, SCHEDULED_ADMISSION, conversation_member) == speaker
-    assert gate_member(None, SCHEDULED_ADMISSION, conversation_member) == conversation_member
+def test_gate_member_is_the_speaker_else_the_scheduled_acting_member() -> None:
+    speaker, acting = uuid4(), uuid4()
+    assert gate_member(speaker, MEMBER_ADMISSION, acting) == speaker
+    assert gate_member(speaker, SCHEDULED_ADMISSION, acting) == speaker
+    assert gate_member(None, SCHEDULED_ADMISSION, acting) == acting
     assert gate_member(None, SCHEDULED_ADMISSION, None) is None
-    assert gate_member(None, INTERNAL_ADMISSION, conversation_member) is None
+    assert gate_member(None, INTERNAL_ADMISSION, acting) is None
 
 
-async def test_sweep_holds_a_scheduled_turn_for_an_unseated_conversation_member(db: None) -> None:
+async def test_sweep_holds_a_scheduled_turn_for_an_unseated_creator(db: None) -> None:
     workspace_id = await _workspace(limit=2)
     await _member(workspace_id, OWNER_EMAIL, offset_seconds=0)
     member = await _member(workspace_id, TEAMMATE_EMAIL, seated=False, offset_seconds=1)
     turn_id = await _parked_turn(
-        workspace_id, None, conversation_member_id=member, admission_source=SCHEDULED_ADMISSION
+        workspace_id,
+        None,
+        conversation_member_id=None,
+        admission_source=SCHEDULED_ADMISSION,
+        on_behalf_of_member_id=member,
     )
     dbos = _StubDbos()
     with ws(workspace_id):
@@ -479,3 +485,78 @@ async def test_owner_conversation_is_the_owners_latest_with_the_earliest_agent(d
     async with workspace_tx() as connection:
         venue = await owner_conversation(connection, workspace_id)
     assert venue == (conversation_id, agent_id)
+
+
+def test_migration_backfills_the_scheduled_initiator(tmp_path: Path) -> None:
+    """A scheduled task and a parked scheduled turn that predate the initiator columns take the
+    conversation's member, so the seat gate keying on that member still holds."""
+    url = f"sqlite+aiosqlite:///{tmp_path / 'initiator.db'}"
+    config = AlembicConfig()
+    config.set_main_option("script_location", str(MIGRATIONS_DIR))
+    config.set_main_option(
+        "version_locations",
+        os.pathsep.join((str(MIGRATIONS_DIR / "versions"), *migration_locations())),
+    )
+    config.set_main_option("path_separator", "os")
+    config.set_main_option("sqlalchemy.url", url)
+    command.upgrade(config, "0044")
+    engine = sa.create_engine(f"sqlite:///{tmp_path / 'initiator.db'}")
+    ws_id, member_id, agent_id, conv_id, task_id, turn_id = (uuid4() for _ in range(6))
+    when = datetime(2026, 7, 1, tzinfo=UTC)
+    binds = {"w": ws_id.hex, "m": member_id.hex, "a": agent_id.hex, "c": conv_id.hex, "t": when}
+    with engine.connect() as connection:
+        connection.execute(
+            sa.text("insert into workspace (id, created_at, updated_at) values (:w, :t, :t)"), binds
+        )
+        connection.execute(
+            sa.text(
+                "insert into member (id, workspace_id, email, created_at, updated_at) "
+                "values (:m, :w, 'm@example.com', :t, :t)"
+            ),
+            binds,
+        )
+        connection.execute(
+            sa.text(
+                "insert into agent (id, workspace_id, name, prompt, model, created_at, updated_at) "
+                "values (:a, :w, 'assistant', 'p', 'claude-opus-4-8', :t, :t)"
+            ),
+            binds,
+        )
+        connection.execute(
+            sa.text(
+                "insert into conversation "
+                "(id, workspace_id, surface, queue_key, member_id, created_at, updated_at) "
+                "values (:c, :w, 'cli', 'session', :m, :t, :t)"
+            ),
+            binds,
+        )
+        connection.execute(
+            sa.text(
+                "insert into scheduled_task (id, workspace_id, conversation_id, agent_id, name, "
+                "schedule, prompt, description, next_run_at, created_at, updated_at) "
+                "values (:id, :w, :c, :a, 'digest', '0 9 * * *', 'go', 'd', :t, :t, :t)"
+            ),
+            {**binds, "id": task_id.hex},
+        )
+        connection.execute(
+            sa.text(
+                "insert into turn (id, workspace_id, conversation_id, agent_id, seq, status, "
+                "inbound, admission_source, created_at, updated_at) "
+                "values (:id, :w, :c, :a, 1, 'parked', 'go', 'scheduled', :t, :t)"
+            ),
+            {**binds, "id": turn_id.hex},
+        )
+        connection.commit()
+    command.upgrade(config, "heads")
+    with engine.connect() as connection:
+        task_creator = connection.execute(
+            sa.text("select created_by_member_id from scheduled_task where id = :id"),
+            {"id": task_id.hex},
+        ).scalar_one()
+        turn_initiator = connection.execute(
+            sa.text("select on_behalf_of_member_id from turn where id = :id"),
+            {"id": turn_id.hex},
+        ).scalar_one()
+    engine.dispose()
+    assert task_creator == member_id.hex
+    assert turn_initiator == member_id.hex

@@ -602,7 +602,10 @@ def grants() -> None:
         return
     for summary in summaries:
         granted = summary.granted_at.strftime("%Y-%m-%d")
-        click.echo(f"{summary.agent:<20}{summary.provider:<16}{summary.account_id:<28}{granted}")
+        scope = "shared" if summary.shared else "private"
+        click.echo(
+            f"{summary.agent:<20}{summary.provider:<16}{summary.account_id:<28}{scope:<8}{granted}"
+        )
 
 
 async def _read_grants(config: Config) -> tuple[GrantSummary, ...]:
