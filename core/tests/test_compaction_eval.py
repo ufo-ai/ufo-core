@@ -12,7 +12,7 @@ from evals.compaction.models import CompactionCase, PlantedFact, estimate_tokens
 from evals.compaction.runner import SEED_MESSAGE, CompactionSuite, _grade_probe, load_compaction
 from evals.compaction.snapshot import load_snapshot, write_snapshot
 from evals.compaction.target import CompactionTarget
-from evals.harness.capability import CapabilityOutput, ToolInvocation
+from evals.harness.capability import CapabilityOutput, EvalTrajectory, ToolInvocation
 from evals.harness.target import TargetResult
 from ufo.blob import FilesystemBlobStore
 from ufo.loop.compaction import MAX_REFERENCE_PATHS, TOOL_OUTPUT_PATH_RE
@@ -490,10 +490,103 @@ async def test_grade_probe_reports_unclean_turns(snapshot_dir: Path) -> None:
     snapshot = load_snapshot(snapshot_dir)
     case = next(case for case in snapshot.cases if case.leaf == "behavior")
     probe = case.probes[0]
-    outcome = TargetResult(CapabilityOutput("", ()), clean=False, failure_reason="turn failed")
+    conversation_id = uuid4()
+    outcome = TargetResult(
+        CapabilityOutput("", ()),
+        clean=False,
+        failure_reason="turn failed",
+        trajectory=EvalTrajectory(
+            conversation_id=conversation_id,
+            turn_id=None,
+            status=None,
+            messages=(Message(role="user", content=probe.question),),
+        ),
+    )
     result = _grade_probe(case, probe, outcome)
     assert not result.passed
     assert result.reason == "turn failed"
+    attempt = result.evidence["attempts"][0]
+    assert attempt["passed"] is False
+    assert attempt["reason"] == "turn failed"
+    assert attempt["trajectory"]["conversation_id"] == str(conversation_id)
+
+
+async def test_grade_probe_carries_the_turn_trajectory(snapshot_dir: Path) -> None:
+    """The probe turn's stored transcript rides in the viewer's attempt shape, so a behavior case
+    surfaces a `View trajectory` link the same way a capability case does."""
+    snapshot = load_snapshot(snapshot_dir)
+    case = next(case for case in snapshot.cases if case.leaf == "behavior")
+    probe = next(probe for probe in case.probes if probe.expect_read_path)
+    conversation_id, turn_id = uuid4(), uuid4()
+    call = ToolInvocation(
+        name="bash",
+        input={"command": f"cat {probe.expect_read_path}"},
+        result="report",
+        has_result=True,
+    )
+    messages = (
+        Message(role="user", content=probe.question),
+        Message(role="assistant", content=f"The peak was {probe.expect_literals[0]}."),
+    )
+    outcome = TargetResult(
+        CapabilityOutput(f"The peak was {probe.expect_literals[0]}.", (call,)),
+        clean=True,
+        trajectory=EvalTrajectory(
+            conversation_id=conversation_id, turn_id=turn_id, status=None, messages=messages
+        ),
+    )
+    result = _grade_probe(case, probe, outcome)
+    assert result.passed
+    attempts = result.evidence["attempts"]
+    assert isinstance(attempts, list) and len(attempts) == 1
+    attempt = attempts[0]
+    assert attempt["trajectory"]["conversation_id"] == str(conversation_id)
+    assert attempt["trajectory"]["turn_id"] == str(turn_id)
+    assert len(attempt["trajectory"]["messages"]) == len(messages)
+    assert attempt["calls"][0] == {
+        "name": "bash",
+        "input": {"command": f"cat {probe.expect_read_path}"},
+        "result": "report",
+        "hasResult": True,
+        "isError": False,
+    }
+    assert attempt["grader"]["readPathTouched"] is True
+    assert result.evidence["question"] == probe.question
+    assert isinstance(result.evidence["grading"], str)
+
+
+async def test_seed_failure_carries_the_failed_seed_trajectory(
+    snapshot_dir: Path, tmp_path: Path
+) -> None:
+    """A seed turn that never terminates cleanly still records the failed turn's trajectory on every
+    probe result, so the viewer links straight to the transcript that explains the failure."""
+    snapshot = load_snapshot(snapshot_dir)
+    case = next(case for case in snapshot.cases if case.leaf == "behavior")
+    conversation_id = uuid4()
+    seed = TargetResult(
+        CapabilityOutput("", ()),
+        clean=False,
+        failure_reason="boom",
+        trajectory=EvalTrajectory(
+            conversation_id=conversation_id,
+            turn_id=None,
+            status=None,
+            messages=(Message(role="user", content=SEED_MESSAGE),),
+        ),
+    )
+    target = ScriptedStepTarget(_lab(tmp_path, _summary()), conversation_id, {SEED_MESSAGE: seed})
+    suite = CompactionSuite(
+        leaf="behavior", cases=(case,), digest="test", trigger_tokens=TEST_TRIGGER_TOKENS
+    )
+    report = await suite.run(target, asyncio.Semaphore(1))  # type: ignore[arg-type]
+    assert not report.passed
+    assert len(report.cases) == len(case.probes)
+    for result in report.cases:
+        assert result.reason == "seed turn failed: boom"
+        attempt = result.evidence["attempts"][0]
+        assert attempt["passed"] is False
+        assert attempt["reason"] == "seed turn failed: boom"
+        assert attempt["trajectory"]["conversation_id"] == str(conversation_id)
 
 
 async def test_materialize_rejects_paths_outside_the_workspace(tmp_path: Path) -> None:

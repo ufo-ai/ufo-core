@@ -399,12 +399,18 @@ class CompactionSuite:
         conversation_id = await target.conversations.open(case.id)
         seed = await target.step(conversation_id, SEED_MESSAGE, f"{case.id}:{conversation_id}:seed")
         if not seed.clean:
+            reason = f"seed turn failed: {seed.failure_reason}"
             return [
                 EvalCaseResult(
                     name=f"{case.id}.{probe.id}",
                     passed=False,
-                    reason=f"seed turn failed: {seed.failure_reason}",
-                    evidence={"question": probe.question, "grading": _probe_grading(probe)},
+                    reason=reason,
+                    evidence={
+                        "question": probe.question,
+                        "grading": _probe_grading(probe),
+                        "attempts": [_turn_attempt(seed, False, reason, None)],
+                        "selectedAttempt": 0,
+                    },
                 )
                 for probe in case.probes
             ]
@@ -527,20 +533,51 @@ def _probe_grading(probe: CompactionProbe) -> str:
     return "; ".join(parts)
 
 
+def _turn_attempt(
+    outcome: TargetResult, passed: bool, reason: str, grader: JsonObject | None
+) -> Json:
+    """One probe turn in the viewer's attempt shape: the answer, its tool calls, the deterministic
+    literal-survival grader evidence, and the stored transcript the trajectory link opens."""
+    return {
+        "passed": passed,
+        "reason": reason,
+        "response": outcome.output.response,
+        "calls": [
+            {
+                "name": call.name,
+                "input": call.input,
+                "result": call.result,
+                "hasResult": call.has_result,
+                "isError": call.is_error,
+            }
+            for call in outcome.output.calls
+        ],
+        "toolErrors": list(outcome.output.tool_errors),
+        "tokens": outcome.output.tokens,
+        "costMicroUsd": outcome.output.cost_micro_usd,
+        "compactions": outcome.output.compactions,
+        "grader": grader,
+        "trajectory": (
+            None if outcome.trajectory is None else outcome.trajectory.model_dump(mode="json")
+        ),
+    }
+
+
 def _grade_probe(
     case: CompactionCase, probe: CompactionProbe, outcome: TargetResult
 ) -> EvalCaseResult:
     name = f"{case.id}.{probe.id}"
-    calls: list[Json] = [call.name for call in outcome.output.calls]
-    evidence: JsonObject = {
-        "question": probe.question,
-        "grading": _probe_grading(probe),
-        "response": outcome.output.response,
-        "calls": calls,
-    }
+    base: JsonObject = {"question": probe.question, "grading": _probe_grading(probe)}
     if not outcome.clean:
         return EvalCaseResult(
-            name=name, passed=False, reason=outcome.failure_reason, evidence=evidence
+            name=name,
+            passed=False,
+            reason=outcome.failure_reason,
+            evidence={
+                **base,
+                "attempts": [_turn_attempt(outcome, False, outcome.failure_reason, None)],
+                "selectedAttempt": 0,
+            },
         )
     answer = outcome.output.response
     missing = [literal for literal in probe.expect_literals if literal not in answer]
@@ -549,32 +586,28 @@ def _grade_probe(
         probe.expect_read_path in json.dumps(call.input, sort_keys=True)
         for call in outcome.output.calls
     )
-    evidence["missingLiterals"] = cast(list[Json], list(missing))
-    evidence["forbiddenLiterals"] = cast(list[Json], list(forbidden))
-    evidence["readPathTouched"] = read_touched
     if missing:
-        return EvalCaseResult(
-            name=name,
-            passed=False,
-            reason=f"answer omits the planted value(s): {', '.join(missing)}",
-            evidence=evidence,
-        )
-    if forbidden:
-        return EvalCaseResult(
-            name=name,
-            passed=False,
-            reason=f"answer repeats the superseded value(s): {', '.join(forbidden)}",
-            evidence=evidence,
-        )
-    if not read_touched:
-        return EvalCaseResult(
-            name=name,
-            passed=False,
-            reason=f"trajectory never re-read {probe.expect_read_path}",
-            evidence=evidence,
-        )
+        passed, reason = False, f"answer omits the planted value(s): {', '.join(missing)}"
+    elif forbidden:
+        passed, reason = False, f"answer repeats the superseded value(s): {', '.join(forbidden)}"
+    elif not read_touched:
+        passed, reason = False, f"trajectory never re-read {probe.expect_read_path}"
+    else:
+        passed, reason = True, "answer carries the surviving value"
+    grader: JsonObject = {
+        "missingLiterals": cast(list[Json], list(missing)),
+        "forbiddenLiterals": cast(list[Json], list(forbidden)),
+        "readPathTouched": read_touched,
+    }
     return EvalCaseResult(
-        name=name, passed=True, reason="answer carries the surviving value", evidence=evidence
+        name=name,
+        passed=passed,
+        reason=reason,
+        evidence={
+            **base,
+            "attempts": [_turn_attempt(outcome, passed, reason, grader)],
+            "selectedAttempt": 0,
+        },
     )
 
 
