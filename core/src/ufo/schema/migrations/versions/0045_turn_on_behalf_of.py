@@ -3,9 +3,6 @@
 The initiator a non-member turn acts as: a scheduled fire runs as the member who
 created the schedule, a subagent as the member who spawned its chain. Distinct from
 speaker_member_id (a live message, gates granting) and the conversation's disclosure member.
-
-A scheduled task and a scheduled turn without an explicit initiator take the conversation's
-member — the same member the seat gate keys on.
 """
 
 import sqlalchemy as sa
@@ -28,21 +25,6 @@ def upgrade() -> None:
         batch.create_foreign_key(
             "scheduled_task_created_by_member_id_fkey", "member", ["created_by_member_id"], ["id"]
         )
-    op.execute(
-        sa.text(
-            "UPDATE scheduled_task SET created_by_member_id = "
-            "(SELECT member_id FROM conversation WHERE conversation.id = "
-            "scheduled_task.conversation_id) "
-            "WHERE created_by_member_id IS NULL"
-        )
-    )
-    op.execute(
-        sa.text(
-            "UPDATE turn SET on_behalf_of_member_id = "
-            "(SELECT member_id FROM conversation WHERE conversation.id = turn.conversation_id) "
-            "WHERE admission_source = 'scheduled' AND on_behalf_of_member_id IS NULL"
-        )
-    )
 
 
 def downgrade() -> None:
