@@ -67,6 +67,7 @@ from ufo.models.interface import (
     Message,
     ModelClient,
     ModelRequest,
+    ModelResponseTruncated,
     TextBlock,
     TextDelta,
     ToolCallDelta,
@@ -117,6 +118,16 @@ MAX_PARALLEL_TOOL_CALLS = 8
 DELTA_FLUSH_BYTES = 2048
 DELTA_FLUSH_SECONDS = 0.2
 EMPTY_RESPONSE_NUDGE = "Previous model response was empty. Answer now."
+MODEL_TRUNCATED_ERROR_CLASS = ModelResponseTruncated.__name__
+TRUNCATION_FEEDBACK = (
+    "Your previous response exceeded the output budget and was cut off. Produce large content "
+    "by writing files with sandbox code or by emitting it in small parts across calls; keep any "
+    "single response well under the budget."
+)
+TRUNCATION_SALVAGE_NOTICE = (
+    " The cut-off response (its text and tool-call arguments as raw JSON) was saved to {path} — "
+    "read it and salvage what it already contains instead of regenerating it."
+)
 CONTEXT_TIME_FORMAT = "%A %Y-%m-%d %H:%M %Z"
 FORCE_FINAL_PROMPT = (
     "You have reached the maximum number of tool-use rounds. Do not call any more tools. "
@@ -288,13 +299,17 @@ class StreamResult(BaseModel):
     `error_message` rather than raised: a raised step records only the exception, losing the round's
     already-consumed usage, so instead the round returns, its `usages` ride the recorded output (and
     bill even on a failed or replayed turn), and the caller re-raises the error after accumulating
-    them — preserving the model's own error class and its message for context-overflow detection."""
+    them — preserving the model's own error class and its message for context-overflow detection.
+    `partial_output` rides an errored round for the same reason: the deltas the stream yielded
+    before dying are already paid for, so they survive in the recorded output for the truncation
+    recovery to salvage into a workspace file."""
 
     text: str = ""
     tool_calls: tuple[ToolUseBlock, ...] = ()
     usages: tuple[Usage, ...] = ()
     error_class: str | None = None
     error_message: str | None = None
+    partial_output: str = ""
 
 
 class Arrival(BaseModel):
@@ -337,25 +352,31 @@ class DispatchResult(BaseModel):
 class ModelStreamError(Exception):
     """A model stream that raised mid-round, re-raised by the caller once the round's usage is
     accumulated so a failed turn bills the partial burn and the terminal records the model's own
-    error class and message. `args` carries both parts, so the pickle DBOS persists for a failed
+    error class and message. `args` carries all parts, so the pickle DBOS persists for a failed
     workflow reconstructs the exception on retrieval; str() re-embeds the class so context-overflow
-    detection still matches."""
+    detection still matches, and leaves out `partial_output` — the deltas the stream yielded
+    before dying, carried for the truncation recovery to salvage, never for the terminal."""
 
-    def __init__(self, error_class: str, message: str) -> None:
-        super().__init__(error_class, message)
+    def __init__(self, error_class: str, message: str, partial_output: str = "") -> None:
+        super().__init__(error_class, message, partial_output)
 
     def __str__(self) -> str:
-        error_class, message = self.args
+        error_class, message, _ = self.args
         return f"{error_class}: {message}"
 
     @property
     def model_error_class(self) -> str:
-        error_class, _ = self.args
+        error_class, _, _ = self.args
         return error_class
 
     @property
+    def partial_output(self) -> str:
+        _, _, partial_output = self.args
+        return partial_output
+
+    @property
     def model_error_message(self) -> str:
-        _, message = self.args
+        _, message, _ = self.args
         return message
 
 
@@ -790,6 +811,14 @@ class TurnEngine:
         final act — each round overwrites all three, so a turn that asked and then worked on
         carries none.
 
+        A round whose stream dies at the max_tokens budget is dropped from the window — its
+        partial tool calls cannot be replayed as a valid assistant message — but its already-paid
+        deltas are salvaged to a workspace file, and the corrective user message fed back carries
+        the path, so the retried round continues from the partial instead of regenerating it. The
+        retries draw on the same round budget as every other fed-back failure; a turn that keeps
+        truncating exhausts its rounds and fails when the forced final round truncates too. Any
+        other mid-stream model error fails immediately.
+
         A subagent turn (`output_model` set) ends only through the finish tool: a lone finish call
         whose args validate is the terminal, and its canonical JSON — never its narration — is
         the answer the parent validates. A finish call with a bad payload or sharing its round
@@ -800,7 +829,7 @@ class TurnEngine:
         question: AskUserInput | None = None
         credential_request: CredentialRequest | None = None
         connect_request: ConnectRequest | None = None
-        for _round in range(self.max_rounds):
+        for round_index in range(self.max_rounds):
             absorbed = await self._absorb_arrivals(messages, arrival_log, absorbed_ids)
             if len(absorbed) > len(messages):
                 question = credential_request = connect_request = None
@@ -808,9 +837,27 @@ class TurnEngine:
             await self._enforce_spend(usage_events)
             messages, compaction_usage = await self.compaction.maybe_compact(messages)
             usage_events.extend(compaction_usage)
-            messages, text, tool_calls = await self._stream_recovering_overflow(
-                messages, usage_events, system
-            )
+            try:
+                messages, text, tool_calls = await self._stream_recovering_overflow(
+                    messages, usage_events, system
+                )
+            except ModelStreamError as error:
+                if error.model_error_class != MODEL_TRUNCATED_ERROR_CLASS:
+                    raise
+                emit_metric("turn_truncation_recovered_total")
+                log(
+                    "turn.truncation_recovered",
+                    turn_id=str(self.turn.id),
+                    round=round_index,
+                    salvaged_chars=len(error.partial_output),
+                )
+                feedback = TRUNCATION_FEEDBACK
+                if error.partial_output:
+                    path = f"{TOOL_OUTPUT_DIR}/truncated-{self.turn.id}-{round_index}.txt"
+                    await self.sandbox.write_file(path, error.partial_output.encode())
+                    feedback += TRUNCATION_SALVAGE_NOTICE.format(path=path)
+                messages = (*messages, Message(role="user", content=feedback))
+                continue
             await self._publish_cost(usage_events)
             if not tool_calls:
                 if text.strip():
@@ -1068,7 +1115,9 @@ class TurnEngine:
             result = await self._stream_once(messages, system, offer_tools, force_finish)
             usage_events.extend(result.usages)
             if result.error_class is not None:
-                raise ModelStreamError(result.error_class, result.error_message or "")
+                raise ModelStreamError(
+                    result.error_class, result.error_message or "", result.partial_output
+                )
             return messages, result.text, result.tool_calls
         except Exception as error:
             if not is_context_overflow(error):
@@ -1082,7 +1131,9 @@ class TurnEngine:
             result = await self._stream_once(compacted, system, offer_tools, force_finish)
             usage_events.extend(result.usages)
             if result.error_class is not None:
-                raise ModelStreamError(result.error_class, result.error_message or "") from None
+                raise ModelStreamError(
+                    result.error_class, result.error_message or "", result.partial_output
+                ) from None
             return compacted, result.text, result.tool_calls
 
     async def _enforce_spend(self, usage_events: list[Usage]) -> None:
@@ -1138,7 +1189,8 @@ class TurnEngine:
         returns this recorded output without re-calling the model (no tokens re-spent, the same tool
         ids), and the per-tool `_dispatch` steps that follow key off those frozen ids. A mid-stream
         model error is caught and carried on the result, never raised out of the step, so the
-        already-consumed usage survives in the recorded output; the caller re-raises it.
+        already-consumed usage — and the partial deltas, for the truncation salvage — survive in
+        the recorded output; the caller re-raises it.
 
         A subagent turn offers the finish tool beside the registry's set — its input schema is the
         profile's output model, so the return shape is a tool contract the model corrects against,
@@ -1211,10 +1263,17 @@ class TurnEngine:
             error = caught
         await flush()
         if error is not None:
+            partial_calls = tuple(
+                f"[tool call: {call_names[call_id]}]\n{''.join(call_json[call_id])}"
+                for call_id in call_order
+            )
             return StreamResult(
                 usages=tuple(usages),
                 error_class=type(error).__name__,
                 error_message=str(error),
+                partial_output="\n\n".join(
+                    segment for segment in ("".join(parts), *partial_calls) if segment
+                ),
             )
         if not usages:
             raise RuntimeError("model stream produced no usage")

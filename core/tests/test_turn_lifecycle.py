@@ -31,7 +31,12 @@ from ufo.ext.manifest import EmbedBackendSpec, IndexBackendSpec, Manifest, Model
 from ufo.hub import Hub, InProcessHub
 from ufo.jobs import TurnDispatcher
 from ufo.loop import queue as loop_queue
-from ufo.loop.engine import EMPTY_RESPONSE_NUDGE, FINISH_TOOL, ModelStreamError
+from ufo.loop.engine import (
+    EMPTY_RESPONSE_NUDGE,
+    FINISH_TOOL,
+    TRUNCATION_FEEDBACK,
+    ModelStreamError,
+)
 from ufo.loop.subagents import SubagentProfile, SubagentRegistry, Subagents
 from ufo.loop.transcript import Transcript
 from ufo.models.interface import (
@@ -268,7 +273,10 @@ class StandInModel:
             raise RuntimeError("late boom")
         if "explode" in inbound:
             raise RuntimeError("boom")
-        if "truncate" in inbound:
+        if (
+            any(isinstance(content, str) and "truncate" in content for content in contents)
+            and TRUNCATION_FEEDBACK not in contents
+        ):
             raise ModelResponseTruncated(TRUNCATION_MESSAGE)
         if "slow" in inbound:
             await asyncio.sleep(30)
@@ -990,21 +998,33 @@ async def test_empty_response_twice_fails_loud(surface: AsyncClient) -> None:
     assert terminal["tokens"] == 10
 
 
-async def test_truncated_response_fails_durably_and_round_trips_through_dbos(
-    surface: AsyncClient, dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore]
-) -> None:
-    """A stream dying at max_tokens leaves ONE durable failed terminal carrying the provider's
-    error class AND message, and the workflow error DBOS pickled reconstructs through a client
-    handle — the eval driver's retrieval leg — instead of failing deserialization."""
-    config, _, _ = dbos_runtime
+async def test_a_truncated_round_recovers_and_the_turn_completes(surface: AsyncClient) -> None:
+    """A stream dying at max_tokens is recovered: the correction is fed back as a user message
+    and the retried round answers the turn — through the full surface/DBOS runtime."""
     headers = await _bootstrap()
     turn_id = (await surface.post("/v1/chat", content=b"truncate", headers=headers)).json()[
         "turn_id"
     ]
     _, terminal = await _consume(surface, headers, turn_id)
+    assert terminal["status"] == "done"
+    assert terminal["text"] == "echo:2"
+
+
+async def test_a_model_stream_error_fails_durably_and_round_trips_through_dbos(
+    surface: AsyncClient, dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore]
+) -> None:
+    """A fatal mid-stream model error leaves ONE durable failed terminal carrying the model's
+    error class AND message, and the workflow error DBOS pickled reconstructs through a client
+    handle — the eval driver's retrieval leg — instead of failing deserialization."""
+    config, _, _ = dbos_runtime
+    headers = await _bootstrap()
+    turn_id = (await surface.post("/v1/chat", content=b"explode", headers=headers)).json()[
+        "turn_id"
+    ]
+    _, terminal = await _consume(surface, headers, turn_id)
     assert terminal["status"] == "failed"
-    assert terminal["error_class"] == "ModelResponseTruncated"
-    assert terminal["error_message"] == TRUNCATION_MESSAGE
+    assert terminal["error_class"] == "RuntimeError"
+    assert terminal["error_message"] == "boom"
     async with workspace_tx() as connection:
         row = (
             await connection.execute(
@@ -1015,8 +1035,8 @@ async def test_truncated_response_fails_durably_and_round_trips_through_dbos(
         ).one()
     assert row.status == "failed"
     durable = TerminalFrame.model_validate(row.terminal)
-    assert durable.error_class == "ModelResponseTruncated"
-    assert durable.error_message == TRUNCATION_MESSAGE
+    assert durable.error_class == "RuntimeError"
+    assert durable.error_message == "boom"
     client = DBOSClient(system_database_url=config.database.system_url)
     try:
         handle = await client.retrieve_workflow_async(turn_id)
@@ -1025,8 +1045,8 @@ async def test_truncated_response_fails_durably_and_round_trips_through_dbos(
                 await handle.get_result(polling_interval_sec=0.05)
     finally:
         client.destroy()
-    assert caught.value.model_error_class == "ModelResponseTruncated"
-    assert str(caught.value) == f"ModelResponseTruncated: {TRUNCATION_MESSAGE}"
+    assert caught.value.model_error_class == "RuntimeError"
+    assert str(caught.value) == "RuntimeError: boom"
 
 
 async def test_concurrent_admissions_land_every_message_once(surface: AsyncClient) -> None:

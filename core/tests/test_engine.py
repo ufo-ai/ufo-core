@@ -40,12 +40,15 @@ from ufo.loop.engine import (
     FORCE_FINISH_PROMPT,
     MAX_PARALLEL_TOOL_CALLS,
     MAX_TOOL_RESULT_CHARS,
+    MODEL_TRUNCATED_ERROR_CLASS,
     OFFLOAD_NOTICE,
     REQUEST_CREDENTIALS_TOOL,
     TOOL_IMAGE_BLOB_DIR,
     TOOL_IMAGE_EDGE_LIMIT,
     TOOL_OUTPUT_DIR,
     TOOL_RESULT_PREVIEW_CHARS,
+    TRUNCATION_FEEDBACK,
+    TRUNCATION_SALVAGE_NOTICE,
     UNTRUSTED_RESULT_CLOSE,
     UNTRUSTED_RESULT_CLOSE_ESCAPE,
     UNTRUSTED_RESULT_NOTICE,
@@ -68,6 +71,7 @@ from ufo.models.interface import (
     Message,
     ModelEvent,
     ModelRequest,
+    ModelResponseTruncated,
     TextBlock,
     TextDelta,
     ToolCallDelta,
@@ -422,6 +426,48 @@ class OverflowThenAnswerModel:
         if self.calls == 1:
             raise RuntimeError("input is too long for the context window")
         yield TextDelta(text="recovered")
+        yield Usage(input_tokens=1, output_tokens=1)
+
+
+TRUNCATION_MESSAGE = (
+    "Anthropic completion truncated at the max_tokens budget (stop_reason=max_tokens)"
+)
+
+
+@dataclass
+class TruncateThenAnswerModel:
+    """Yields `partial` deltas then raises a max_tokens truncation on its first `truncations`
+    calls, then answers — so the engine's truncation recovery (salvage the partial to a workspace
+    file, feed the correction back, retry) runs end to end. Records the answering call's messages
+    so a test reads back that the correction was in front of the model on the retry."""
+
+    truncations: int
+    partial: tuple[ModelEvent, ...] = ()
+    calls: int = 0
+    answered_with: tuple[Message, ...] = ()
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.calls += 1
+        if self.calls <= self.truncations:
+            for event in self.partial:
+                yield event
+            raise ModelResponseTruncated(TRUNCATION_MESSAGE)
+        self.answered_with = request.messages
+        yield TextDelta(text="recovered")
+        yield Usage(input_tokens=1, output_tokens=1)
+
+
+@dataclass
+class StreamErrorModel:
+    """Raises a non-truncation mid-stream error on its first call — the truncation recovery
+    passes it straight through, so the turn fails immediately on the provider's error class."""
+
+    calls: int = 0
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("stream boom")
         yield Usage(input_tokens=1, output_tokens=1)
 
 
@@ -1540,6 +1586,113 @@ async def test_context_overflow_forces_a_compaction_then_completes(
     assert await compaction.read_record(2) is None
 
 
+async def test_a_truncation_salvages_the_partial_to_a_workspace_file_and_feeds_the_path_back(
+    db: None, tmp_path: Path
+) -> None:
+    """A round dying at the max_tokens budget keeps its paid-for deltas: the text and the partial
+    tool-call JSON land in a workspace file, the corrective user message carries the path, and the
+    retried round answers — the turn completes with the correction durable in the transcript and
+    in front of the model on the retry."""
+    turn = await _seed_turn("queued", None)
+    model = TruncateThenAnswerModel(
+        truncations=1,
+        partial=(
+            TextDelta(text="Writing the report now."),
+            ToolCallStart(id="t1", name="write_report"),
+            ToolCallDelta(id="t1", partial_json='{"content": "chapter one'),
+        ),
+    )
+    carrier = RecordingCarrier()
+    engine = _engine(turn, model, tmp_path, carrier=carrier)
+    frame = await engine.run()
+    assert frame.status == "done"
+    assert frame.text == "recovered"
+    assert model.calls == 2
+    path = f"{TOOL_OUTPUT_DIR}/truncated-{turn.id}-0.txt"
+    feedback = TRUNCATION_FEEDBACK + TRUNCATION_SALVAGE_NOTICE.format(path=path)
+    assert Message(role="user", content=feedback) in model.answered_with
+    stored = await engine.transcript.read()
+    assert stored is not None
+    assert Message(role="user", content=feedback) in stored.messages
+    assert stored.messages[-1] == Message(role="assistant", content="recovered")
+    writes = [
+        (argv, stdin)
+        for argv, stdin in zip(carrier.calls, carrier.stdins, strict=True)
+        if len(argv) >= 3 and "cat >" in argv[2]
+    ]
+    assert len(writes) == 1
+    write_argv, write_stdin = writes[0]
+    assert write_argv[-1] == path
+    salvaged = 'Writing the report now.\n\n[tool call: write_report]\n{"content": "chapter one'
+    assert write_stdin == salvaged.encode()
+
+
+async def test_a_truncation_with_no_partial_feeds_the_plain_correction_back(
+    db: None, tmp_path: Path
+) -> None:
+    """A truncation whose stream yielded nothing (the budget burned in reasoning) salvages no
+    file — the corrective user message carries no path and no workspace write happens."""
+    turn = await _seed_turn("queued", None)
+    model = TruncateThenAnswerModel(truncations=1)
+    carrier = RecordingCarrier()
+    engine = _engine(turn, model, tmp_path, carrier=carrier)
+    frame = await engine.run()
+    assert frame.status == "done"
+    assert frame.text == "recovered"
+    assert Message(role="user", content=TRUNCATION_FEEDBACK) in model.answered_with
+    assert not [argv for argv in carrier.calls if len(argv) >= 3 and "cat >" in argv[2]]
+
+
+async def test_a_turn_that_keeps_truncating_exhausts_its_rounds_and_fails(
+    db: None, tmp_path: Path
+) -> None:
+    """Truncation retries draw on the round budget, not a dedicated counter: a turn that truncates
+    every round burns its rounds on fed-back corrections, then fails when the forced final round
+    truncates too — on the provider's own error class."""
+    turn = await _seed_turn("queued", None)
+    rounds = 3
+    model = TruncateThenAnswerModel(truncations=rounds + 1)
+    engine = replace(_engine(turn, model, tmp_path), max_rounds=rounds)
+    with pytest.raises(ModelStreamError) as caught:
+        await engine.run()
+    assert caught.value.model_error_class == MODEL_TRUNCATED_ERROR_CLASS
+    assert model.calls == rounds + 1
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.turn.c.status, tables.turn.c.terminal).where(
+                    tables.turn.c.id == turn.id
+                )
+            )
+        ).one()
+    assert row.status == "failed"
+    assert TerminalFrame.model_validate(row.terminal).error_class == MODEL_TRUNCATED_ERROR_CLASS
+
+
+async def test_a_non_truncation_stream_error_still_fails_the_turn_immediately(
+    db: None, tmp_path: Path
+) -> None:
+    """The truncation recovery is truncation-only: any other mid-stream model error keeps the
+    fatal behavior — one call, then a failed terminal carrying that error's class."""
+    turn = await _seed_turn("queued", None)
+    model = StreamErrorModel()
+    engine = _engine(turn, model, tmp_path)
+    with pytest.raises(ModelStreamError) as caught:
+        await engine.run()
+    assert caught.value.model_error_class == "RuntimeError"
+    assert model.calls == 1
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.turn.c.status, tables.turn.c.terminal).where(
+                    tables.turn.c.id == turn.id
+                )
+            )
+        ).one()
+    assert row.status == "failed"
+    assert TerminalFrame.model_validate(row.terminal).error_class == "RuntimeError"
+
+
 async def test_cancel_winning_mid_round_keeps_cancelled_terminal_bills_and_preserves_inbound(
     db: None, tmp_path: Path
 ) -> None:
@@ -2417,10 +2570,11 @@ def test_model_stream_error_survives_a_pickle_round_trip() -> None:
     """DBOS persists a failed workflow's exception as a pickle and reconstructs it as
     `cls(*args)` on retrieval — the exact round-trip a failed turn's error takes before an eval
     driver or client handle re-raises it."""
-    revived = pickle.loads(pickle.dumps(ModelStreamError("APIStatusError", "boom")))
+    revived = pickle.loads(pickle.dumps(ModelStreamError("APIStatusError", "boom", "partial")))
     assert type(revived) is ModelStreamError
     assert revived.model_error_class == "APIStatusError"
     assert revived.model_error_message == "boom"
+    assert revived.partial_output == "partial"
     assert str(revived) == "APIStatusError: boom"
 
 
