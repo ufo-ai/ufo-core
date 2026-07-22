@@ -13,6 +13,7 @@ import sqlalchemy as sa
 from fastapi import FastAPI, Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 from ufo.db import dispose_db, init_db, workspace_tx
+from ufo.ext.surface import OPERATOR_EMAIL_DOMAIN
 
 from ufo_control.gateway_claim import ClaimError, ClaimWorkflow
 from ufo_control.gateway_directives import PROMPT, directive, first_run_install, render
@@ -39,7 +40,6 @@ from ufo_control.rls import owner_dsn
 logger = logging.getLogger(__name__)
 
 WORKSPACE_BASE_URL_ENV = "UFO_WORKSPACE_BASE_URL"
-ADMIN_EMAIL_DOMAIN_ENV = "UFO_ADMIN_EMAIL_DOMAIN"
 INVITE_REQUIRED_ENV = "UFO_INVITE_REQUIRED"
 DEBUG_SURFACE_PATH = "/surface/debug"
 SCRIPT_URL_DEFAULT = 'UFO_URL="${UFO_URL:-https://flyingobject.ai}"'
@@ -76,7 +76,6 @@ class Onboarding:
     token_secret: str
     apex_host: str
     invite_required: bool
-    admin_email_domain: str | None = None
 
     async def advance(self, channel: str, session: str, body: str, install: bytes) -> bytes:
         claim = await self.store.live_claim(channel, session)
@@ -179,21 +178,18 @@ class Onboarding:
         self, claim: OnboardClaim, workspace_id: str, install: bytes, accepted: bytes
     ) -> bytes:
         """The signed-in cap: token and workspace for every member, plus the `debugger` directive
-        — the admin session debugger's base URL — only when the claim's channel-verified email
-        domain is the deploy's admin domain. The gate is server-side policy; every renderer (the
-        terminal client drops unknown verbs) simply carries or ignores the extra line."""
+        — the operator session debugger's base URL — only when the claim's channel-verified email
+        domain is the operator's. The gate is server-side policy; every renderer (the terminal
+        client drops unknown verbs) simply carries or ignores the extra line."""
         token = mint_token(self.token_secret, workspace_id, claim.email)
-        admin = (
-            self.admin_email_domain is not None
-            and claim.email_domain == self.admin_email_domain.lower()
-        )
+        operator = claim.email_domain == OPERATOR_EMAIL_DOMAIN
         return render(
             install,
             accepted,
             directive("token", token),
             directive("workspace", self.workspaces.workspace_url),
             directive("debugger", f"{self.workspaces.workspace_url}{DEBUG_SURFACE_PATH}")
-            if admin
+            if operator
             else b"",
             directive("say", f"signed in: {claim.email}"),
             directive("ask", PROMPT),
@@ -288,7 +284,6 @@ def gateway_app() -> FastAPI:
                 token_secret=_require_env(TOKEN_SECRET_ENV),
                 apex_host=public_apex_host(),
                 invite_required=invite_required,
-                admin_email_domain=os.environ.get(ADMIN_EMAIL_DOMAIN_ENV) or None,
             ),
             owner_role=_dsn_role(owner_url),
             serve_role=_dsn_role(serve_url),

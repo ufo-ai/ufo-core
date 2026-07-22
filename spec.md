@@ -276,10 +276,10 @@ allocation, delivery registration, and enqueue recovery remain one implementatio
 | CLI | core | live (hub tail) | member token | session (private) |
 | Web | `extensions/web` | live (hub tail) | web session → member (adopted from CLI) | session (private) |
 | Slackbot | `extensions/slack` | durable (writeback) | Slack user → member (linked; a Slack-confirmed same-domain email joins as new) | channel:thread_ts (shared) |
-| Debug | `extensions/debugger` | live (hub tail) | gateway bearer whose email domain is `UFO_ADMIN_EMAIL_DOMAIN`; `?ws=` re-scopes to any workspace | — (read-only; admits nothing) |
+| Debug | `extensions/debugger` | live (hub tail) | gateway bearer whose email domain is `OPERATOR_EMAIL_DOMAIN`; `?ws=` re-scopes to any workspace | — (read-only; admits nothing) |
 
 The debug surface is the one operator-audience surface — the `ufoctl`-verbs audience, not a member
-action. Its `identify` is the entire authorization: the admin-domain bearer picks the target
+action. Its `identify` is the entire authorization: the operator-domain bearer picks the target
 workspace (a UUID or a customer domain via `uuid5(NAMESPACE_DNS, domain)`), core binds it, and every
 read below (conversations, turns with terminal outcomes and subagent children, transcripts,
 compaction records, workspace files, a live SSE tail) is RLS-scoped by construction.
@@ -290,8 +290,8 @@ from `url_private` into the conversation's workspace before the turn runs; a sha
 external-upload API, into the conversation's thread (Slack forbids threading on a reply's ts). `surface_identity` and `conversation.surface`
 are open namespaces validated by surface registration, not a fixed enum.
 Slack renders terminal accounting and model metadata as the reply's final context block only in
-the admin workspace — the workspace whose owner's email domain is `UFO_ADMIN_EMAIL_DOMAIN`; an
-unset domain renders none.
+the operator's own workspace — the one whose owner's email domain is `OPERATOR_EMAIL_DOMAIN`, the
+fleet-level constant naming us, never a tenant-level role.
 
 Slack installs by either of two paths in chat, both landing the same per-workspace bot token and
 identity. **Preferred — OAuth on the deploy's own app**: its client id, client secret, and signing

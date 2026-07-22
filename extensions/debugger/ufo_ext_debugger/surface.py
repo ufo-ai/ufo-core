@@ -1,9 +1,9 @@
-"""The admin session debugger: a read-only operator surface over one workspace's sessions.
+"""The operator session debugger: a read-only operator surface over one workspace's sessions.
 
-Authorization is entirely in `resolve_admin_workspace`, the surface's shared-fleet `identify`: the
-request's gateway bearer must verify against this deploy's `UFO_TOKEN_SECRET` AND carry an email in
-`UFO_ADMIN_EMAIL_DOMAIN`, and only then does `?ws=` pick the workspace the request is scoped to — a
-raw workspace UUID, or a customer domain (the shared fleet derives a workspace id as
+Authorization is entirely in `resolve_operator_workspace`, the surface's shared-fleet `identify`:
+the request's gateway bearer must verify against this deploy's `UFO_TOKEN_SECRET` AND carry an
+email in `OPERATOR_EMAIL_DOMAIN`, and only then does `?ws=` pick the workspace the request is
+scoped to — a raw workspace UUID, or a customer domain (the shared fleet derives a workspace id as
 `uuid5(NAMESPACE_DNS, domain)`, so the domain IS the address). Whatever the resolver returns becomes
 the request's RLS binding and `SurfaceContext.workspace_id`, so every read below is
 workspace-scoped by construction; without `?ws=` the bearer's own workspace claim is the scope.
@@ -15,7 +15,6 @@ starts with `POST /surface/debug` carrying the bearer in its form body — never
 access log ever records it — which lands it as the httponly session cookie and redirects to the
 app."""
 
-import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 from uuid import NAMESPACE_DNS, UUID, uuid5
@@ -31,23 +30,15 @@ from ufo.sdk.http import (
     set_session_cookie,
 )
 from ufo.sdk.hub import CostTick, LiveFrame, Parked, SkillLoad, Terminal, TextDelta, ToolCall
-from ufo.sdk.surfaces import SurfaceAuth, SurfaceContext, SurfaceRoute
+from ufo.sdk.surfaces import OPERATOR_EMAIL_DOMAIN, SurfaceAuth, SurfaceContext, SurfaceRoute
 
 SURFACE_DEBUG = "debug"
 DEBUG_COOKIE = "ufo_debug"
 TOKEN_FIELD = "token"
-ADMIN_EMAIL_DOMAIN_ENV = "UFO_ADMIN_EMAIL_DOMAIN"
 SLACK_SURFACE = "slack"
 SLACK_TEAM_PREFIX = "team:"
 APP_FILE = Path(__file__).parent / "static" / "index.html"
 APP_HTML = APP_FILE.read_text() if APP_FILE.is_file() else None
-
-
-def _require_env(name: str) -> str:
-    value = os.environ.get(name)
-    if not value:
-        raise RuntimeError(f"{name} must be set for the {SURFACE_DEBUG!r} surface")
-    return value
 
 
 def _email_domain(email: str) -> str:
@@ -72,11 +63,10 @@ async def _bearer(request: Request) -> str:
     return ""
 
 
-async def resolve_admin_workspace(request: Request, _auth: SurfaceAuth) -> UUID | None:
-    """The workspace this admin request is scoped to, or None to reject. The domain gate is the
-    whole authorization: the verified bearer's email domain must equal the deploy's admin domain
+async def resolve_operator_workspace(request: Request, _auth: SurfaceAuth) -> UUID | None:
+    """The workspace this operator request is scoped to, or None to reject. The domain gate is
+    the whole authorization: the verified bearer's email domain must equal the operator's domain
     before `?ws=` may re-scope the request to any workspace in the fleet."""
-    admin_domain = _require_env(ADMIN_EMAIL_DOMAIN_ENV).lower()
     token = await _bearer(request)
     if not token:
         return None
@@ -84,7 +74,7 @@ async def resolve_admin_workspace(request: Request, _auth: SurfaceAuth) -> UUID 
     if claims is None:
         return None
     claimed_workspace, email = claims
-    if _email_domain(email) != admin_domain:
+    if _email_domain(email) != OPERATOR_EMAIL_DOMAIN:
         return None
     target = request.query_params.get("ws", "").strip()
     if not target:

@@ -71,9 +71,6 @@ spec:
             # The workspace serve host the member's `ufo` surface talks to (has the `/surface` route),
             # distinct from the onboarding apex above — signed in, the member's turns go here.
             - {name: UFO_WORKSPACE_BASE_URL, value: "https://${shared_host}"}
-            # The email domain whose sign-ins get the `debugger` directive — the same domain the
-            # serve fleet's debug surface enforces.
-            - {name: UFO_ADMIN_EMAIL_DOMAIN, value: "${admin_email_domain}"}
             - {name: UFO_SES_SENDER, value: "${ses_sender}"}
             - {name: UFO_SES_REGION, value: "${ses_region}"}
             - name: UFO_CONTROL_POSTGRES_OWNER_DSN
@@ -235,9 +232,6 @@ spec:
             - secretRef: {name: ufo-platform-secrets}
           env:
             - {name: AWS_REGION, value: "${region}"}
-            # The operator email domain the debug surface admits — a gateway bearer whose email is
-            # outside it never reaches a debugger read.
-            - {name: UFO_ADMIN_EMAIL_DOMAIN, value: "${admin_email_domain}"}
             # The fleet's platform Fernet key (seals hosted credential rows) and artifact-delivery
             # secret — minted for the fleet, in the ufo-serve Secret.
             - name: UFO_CREDENTIAL_KEY

@@ -1,8 +1,8 @@
 """The web renderer of the onboarding machine: the JSON directive wire, the sign-in page's
 self-containment, and the full email → code → invite walk over the real `onboard_claim` table and
 `SharedWorkspaces` through `POST /v1/onboard/web` — one machine, a second renderer. The `debugger`
-directive is asserted at both poles: emitted with the exact URL for an admin-domain email, absent
-for everyone else."""
+directive is asserted at both poles: emitted with the exact URL for an operator-domain email,
+absent for everyone else."""
 
 import asyncio
 import uuid
@@ -16,11 +16,11 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.routing import Route
 from ufo.bearer import verify_token
+from ufo.ext.surface import OPERATOR_EMAIL_DOMAIN
 from ufo.serve import RESERVED_HOST_PREFIXES
 
 import ufo_control.gateway as gateway
 from ufo_control.gateway import (
-    ADMIN_EMAIL_DOMAIN_ENV,
     INVITE_REQUIRED_ENV,
     TOKEN_SECRET_ENV,
     WORKSPACE_BASE_URL_ENV,
@@ -38,7 +38,6 @@ from ufo_control.gateway_web import LOGIN_PAGE, parse_directives
 
 TOKEN_SECRET = "web-token-secret"
 WORKSPACE_URL = "https://app.testing.flyingobject.ai"
-ADMIN_DOMAIN = "metalcraft.test"
 
 
 @dataclass
@@ -57,7 +56,6 @@ def _configure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, gateway_postgres
     )
     monkeypatch.setenv(TOKEN_SECRET_ENV, TOKEN_SECRET)
     monkeypatch.setenv(WORKSPACE_BASE_URL_ENV, WORKSPACE_URL)
-    monkeypatch.setenv(ADMIN_EMAIL_DOMAIN_ENV, ADMIN_DOMAIN)
     monkeypatch.setenv(SES_SENDER_ENV, "no-reply@flyingobject.ai")
     monkeypatch.setenv(AWS_ROLE_ARN_ENV, "arn:aws:iam::123456789012:role/gateway-ses")
     monkeypatch.setenv(AWS_WEB_IDENTITY_TOKEN_FILE_ENV, str(token_file))
@@ -195,7 +193,7 @@ def test_web_and_terminal_sessions_never_share_a_claim(
         assert "enter your work email:" in terminal.text
 
 
-def test_debugger_directive_lands_only_for_the_admin_domain(
+def test_debugger_directive_lands_only_for_the_operator_domain(
     gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _configure(monkeypatch, tmp_path, gateway_postgres)
@@ -203,7 +201,7 @@ def test_debugger_directive_lands_only_for_the_admin_domain(
     monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
     invite = _mint_invite(gateway_postgres, 72)
     session = str(uuid.uuid4())
-    email = f"alex@{ADMIN_DOMAIN}"
+    email = f"alex@{OPERATOR_EMAIL_DOMAIN}"
     with TestClient(gateway_app()) as client:
         _advance(client, session, "")
         _advance(client, session, email)
@@ -213,16 +211,15 @@ def test_debugger_directive_lands_only_for_the_admin_domain(
     assert _fields(signed_in, "debugger") == [f"{WORKSPACE_URL}/surface/debug"]
 
 
-def test_debugger_directive_never_lands_when_the_admin_domain_is_unset(
+def test_debugger_directive_never_lands_outside_the_operator_domain(
     gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _configure(monkeypatch, tmp_path, gateway_postgres)
-    monkeypatch.delenv(ADMIN_EMAIL_DOMAIN_ENV)
     sender = RecordingSender()
     monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
     invite = _mint_invite(gateway_postgres, 73)
     session = str(uuid.uuid4())
-    email = "pilot@unsetco.io"
+    email = "pilot@customerco.io"
     with TestClient(gateway_app()) as client:
         _advance(client, session, "")
         _advance(client, session, email)

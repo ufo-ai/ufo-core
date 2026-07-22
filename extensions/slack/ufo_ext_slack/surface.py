@@ -1873,9 +1873,9 @@ def _oversize_link_line(ctx: SurfaceContext, artifact: SharedArtifact) -> str:
 
 
 async def _debug_link(ctx: SurfaceContext, writeback: Writeback) -> str | None:
-    """The admin session debugger's view of this thread's conversation, the delivered turn
+    """The operator session debugger's view of this thread's conversation, the delivered turn
     selected — the footer's link target. None when the deploy has no public base URL; who may
-    open the link is the debug surface's own admin gate, never this footer's concern."""
+    open the link is the debug surface's own operator gate, never this footer's concern."""
     if ctx.public_base_url is None:
         return None
     conversation_id = await ctx.find_conversation(writeback.queue_key)
@@ -1889,7 +1889,7 @@ async def _debug_link(ctx: SurfaceContext, writeback: Writeback) -> str | None:
 
 async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
     """Post the reply to the thread and return its message ref (`channel:ts`), the delivery record.
-    Only the admin workspace's replies carry the accounting footer, linking to the session
+    Only the operator workspace's replies carry the accounting footer, linking to the session
     debugger's view of the thread when the deploy has a public base URL — internals never render
     in a customer's thread. An `invalid_blocks` rejection is deterministic, so the reply re-posts
     once — as conservative section blocks when it carries an ask or connect handoff (the affordance
@@ -1903,7 +1903,7 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
         writeback.connect_request, writeback.turn_id
     )
     metadata = None
-    if await ctx.is_admin_workspace():
+    if await ctx.is_operator_workspace():
         model = writeback.model or "no-model"
         params = f"-[{writeback.reasoning}]" if writeback.reasoning is not None else ""
         metadata = (

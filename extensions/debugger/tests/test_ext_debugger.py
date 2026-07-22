@@ -1,7 +1,7 @@
-"""The debug surface end to end through the shared-fleet mount: the `identify` gate (admin domain,
-`?ws=` re-scoping, forged/missing bearers), the cookie bind, and every read route against real rows
-and blobs — the same seam a hosted admin hits, no runtime engine needed because the surface admits
-nothing and a completed turn tails from its durable terminal row."""
+"""The debug surface end to end through the shared-fleet mount: the `identify` gate (operator
+domain, `?ws=` re-scoping, forged/missing bearers), the cookie bind, and every read route against
+real rows and blobs — the same seam the operator hits, no runtime engine needed because the
+surface admits nothing and a completed turn tails from its durable terminal row."""
 
 import base64
 import hashlib
@@ -25,6 +25,7 @@ from ufo.hub import InProcessHub
 from ufo.models.interface import Message, TextBlock, ToolResultBlock, ToolUseBlock
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame
+from ufo.sdk.surfaces import OPERATOR_EMAIL_DOMAIN
 from ufo.serve import _mount_shared_surfaces
 from ufo.transcript import (
     CompactionSummary,
@@ -36,7 +37,6 @@ from ufo.transcript import (
 )
 
 SECRET = "debug-token-secret"
-ADMIN_DOMAIN = "metalcraft.test"
 
 
 class _StubDbos:
@@ -62,7 +62,6 @@ async def debug(
     db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> AsyncIterator[tuple[AsyncClient, FilesystemBlobStore]]:
     monkeypatch.setenv("UFO_TOKEN_SECRET", SECRET)
-    monkeypatch.setenv("UFO_ADMIN_EMAIL_DOMAIN", ADMIN_DOMAIN)
     blob = FilesystemBlobStore(root=tmp_path)
     app = FastAPI()
     _mount_shared_surfaces(
@@ -154,14 +153,14 @@ def _auth(token: str) -> dict[str, str]:
     return {"authorization": f"Bearer {token}"}
 
 
-async def test_identify_gates_on_the_admin_domain(debug) -> None:
+async def test_identify_gates_on_the_operator_domain(debug) -> None:
     client, _ = debug
     workspace_id, _ = await _seed_workspace()
-    admin = _mint(SECRET, workspace_id, f"alex@{ADMIN_DOMAIN}")
+    operator = _mint(SECRET, workspace_id, f"alex@{OPERATOR_EMAIL_DOMAIN}")
     member = _mint(SECRET, workspace_id, "member@acme.com")
-    forged = _mint("wrong-secret", workspace_id, f"alex@{ADMIN_DOMAIN}")
+    forged = _mint("wrong-secret", workspace_id, f"alex@{OPERATOR_EMAIL_DOMAIN}")
 
-    granted = await client.get("/surface/debug/api/workspace", headers=_auth(admin))
+    granted = await client.get("/surface/debug/api/workspace", headers=_auth(operator))
     assert granted.status_code == 200
     assert granted.json()["workspace_id"] == str(workspace_id)
     denied_member = await client.get("/surface/debug/api/workspace", headers=_auth(member))
@@ -173,11 +172,11 @@ async def test_identify_gates_on_the_admin_domain(debug) -> None:
 
 async def test_ws_param_rescopes_to_any_workspace_by_uuid_or_domain(debug) -> None:
     client, _ = debug
-    admin_workspace, _ = await _seed_workspace()
+    operator_workspace, _ = await _seed_workspace()
     target_workspace, target_agent = await _seed_workspace()
     conversation_id = await _seed_conversation(target_workspace)
     await _seed_turn(target_workspace, conversation_id, target_agent, 1)
-    token = _mint(SECRET, admin_workspace, f"alex@{ADMIN_DOMAIN}")
+    token = _mint(SECRET, operator_workspace, f"alex@{OPERATOR_EMAIL_DOMAIN}")
 
     by_uuid = await client.get(
         "/surface/debug/api/conversations",
@@ -194,19 +193,10 @@ async def test_ws_param_rescopes_to_any_workspace_by_uuid_or_domain(debug) -> No
     assert by_domain.json()["workspace_id"] == str(uuid5(NAMESPACE_DNS, "acme.com"))
 
 
-async def test_unset_admin_domain_is_a_loud_config_error(debug, monkeypatch) -> None:
-    client, _ = debug
-    workspace_id, _ = await _seed_workspace()
-    token = _mint(SECRET, workspace_id, f"alex@{ADMIN_DOMAIN}")
-    monkeypatch.delenv("UFO_ADMIN_EMAIL_DOMAIN")
-    with pytest.raises(RuntimeError, match="UFO_ADMIN_EMAIL_DOMAIN"):
-        await client.get("/surface/debug/api/workspace", headers=_auth(token))
-
-
 async def test_posted_token_binds_the_cookie_and_redirects(debug) -> None:
     client, _ = debug
     workspace_id, _ = await _seed_workspace()
-    token = _mint(SECRET, workspace_id, f"alex@{ADMIN_DOMAIN}")
+    token = _mint(SECRET, workspace_id, f"alex@{OPERATOR_EMAIL_DOMAIN}")
     response = await client.post(
         "/surface/debug",
         params={"ws": "acme.com"},
@@ -231,7 +221,7 @@ async def test_query_tokens_are_never_accepted(debug) -> None:
     session, so access logs and histories cannot capture a working credential."""
     client, _ = debug
     workspace_id, _ = await _seed_workspace()
-    token = _mint(SECRET, workspace_id, f"alex@{ADMIN_DOMAIN}")
+    token = _mint(SECRET, workspace_id, f"alex@{OPERATOR_EMAIL_DOMAIN}")
     read = await client.get("/surface/debug/api/workspace", params={"token": token})
     assert read.status_code == 401
     bind = await client.get("/surface/debug", params={"token": token}, follow_redirects=False)
@@ -243,7 +233,7 @@ async def test_query_tokens_are_never_accepted(debug) -> None:
 async def test_app_page_serves_the_built_app_and_fails_loud_unbuilt(debug, monkeypatch) -> None:
     client, _ = debug
     workspace_id, _ = await _seed_workspace()
-    token = _mint(SECRET, workspace_id, f"alex@{ADMIN_DOMAIN}")
+    token = _mint(SECRET, workspace_id, f"alex@{OPERATOR_EMAIL_DOMAIN}")
     monkeypatch.setattr(debugger_surface, "APP_HTML", "<!doctype html><title>debug</title>")
     page = await client.get("/surface/debug", headers=_auth(token))
     assert page.status_code == 200
@@ -266,7 +256,7 @@ async def test_workspace_meta_carries_the_slack_team(debug) -> None:
                 updated_at=sa.func.now(),
             )
         )
-    token = _mint(SECRET, workspace_id, f"alex@{ADMIN_DOMAIN}")
+    token = _mint(SECRET, workspace_id, f"alex@{OPERATOR_EMAIL_DOMAIN}")
     meta = await client.get("/surface/debug/api/workspace", headers=_auth(token))
     assert meta.json() == {"workspace_id": str(workspace_id), "slack_team": "T042"}
 
@@ -292,7 +282,7 @@ async def test_turns_and_detail_read_terminal_ledger_and_children(debug) -> None
                 updated_at=sa.func.now(),
             )
         )
-    token = _mint(SECRET, workspace_id, f"alex@{ADMIN_DOMAIN}")
+    token = _mint(SECRET, workspace_id, f"alex@{OPERATOR_EMAIL_DOMAIN}")
 
     turns = await client.get(
         f"/surface/debug/api/conversations/{conversation_id}/turns", headers=_auth(token)
@@ -342,7 +332,7 @@ async def test_transcript_compactions_and_files_read_the_blobs(debug) -> None:
             lz4.frame.compress(payload.model_dump_json().encode()),
         )
     await blob.put(f"conversations/{conversation_id}/workspace/report/out.txt", b"hello world")
-    token = _mint(SECRET, workspace_id, f"alex@{ADMIN_DOMAIN}")
+    token = _mint(SECRET, workspace_id, f"alex@{OPERATOR_EMAIL_DOMAIN}")
 
     transcript = await client.get(
         f"/surface/debug/api/conversations/{conversation_id}/transcript", headers=_auth(token)
@@ -396,7 +386,7 @@ async def test_stream_tails_a_completed_turn_from_its_durable_terminal(debug) ->
     workspace_id, agent_id = await _seed_workspace()
     conversation_id = await _seed_conversation(workspace_id)
     turn_id = await _seed_turn(workspace_id, conversation_id, agent_id, 1)
-    token = _mint(SECRET, workspace_id, f"alex@{ADMIN_DOMAIN}")
+    token = _mint(SECRET, workspace_id, f"alex@{OPERATOR_EMAIL_DOMAIN}")
     response = await client.get(f"/surface/debug/api/turns/{turn_id}/stream", headers=_auth(token))
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")

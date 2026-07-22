@@ -26,7 +26,7 @@ from ufo.credentials import (
 )
 from ufo.db import workspace_tx
 from ufo.ext.surface import (
-    ADMIN_EMAIL_DOMAIN_ENV,
+    OPERATOR_EMAIL_DOMAIN,
     WRITEBACK_CLAIMED,
     WRITEBACK_DELIVERED,
     WRITEBACK_FAILED,
@@ -559,43 +559,41 @@ async def test_join_member_refuses_without_a_domain_match(db: None, tmp_path) ->
     assert members == 1
 
 
-async def test_is_admin_workspace_matches_the_owner_email_domain(
-    db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    workspace_id, _, _ = await _seed(member_email="owner@metalcraft.example")
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-    monkeypatch.delenv(ADMIN_EMAIL_DOMAIN_ENV, raising=False)
-    assert await context.is_admin_workspace() is False
-    monkeypatch.setenv(ADMIN_EMAIL_DOMAIN_ENV, " Metalcraft.Example ")
-    assert await context.is_admin_workspace() is True
-    monkeypatch.setenv(ADMIN_EMAIL_DOMAIN_ENV, "elsewhere.example")
-    assert await context.is_admin_workspace() is False
+async def test_is_operator_workspace_matches_the_owner_email_domain(db: None, tmp_path) -> None:
+    operator_id, _, _ = await _seed(member_email=f"owner@{OPERATOR_EMAIL_DOMAIN}")
+    operator = _context(operator_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    assert await operator.is_operator_workspace() is True
+    customer_id, _, _ = await _seed(member_email="owner@customer.example")
+    customer = _context(customer_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    assert await customer.is_operator_workspace() is False
     ownerless_id, _, _ = await _seed()
     ownerless = _context(ownerless_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-    monkeypatch.setenv(ADMIN_EMAIL_DOMAIN_ENV, "metalcraft.example")
-    assert await ownerless.is_admin_workspace() is False
+    assert await ownerless.is_operator_workspace() is False
 
 
-async def test_is_admin_workspace_keys_on_the_earliest_member(
-    db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    workspace_id, _, _ = await _seed(member_email="joiner@elsewhere.example")
+async def test_is_operator_workspace_keys_on_the_earliest_member(db: None, tmp_path) -> None:
     early = datetime(2026, 1, 1, tzinfo=UTC)
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.member).values(
-                id=uuid4(),
-                workspace_id=workspace_id,
-                email="owner@metalcraft.example",
-                created_at=early,
-                updated_at=early,
+
+    async def _backdated_member(workspace_id: UUID, email: str) -> None:
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.member).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    email=email,
+                    created_at=early,
+                    updated_at=early,
+                )
             )
-        )
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-    monkeypatch.setenv(ADMIN_EMAIL_DOMAIN_ENV, "metalcraft.example")
-    assert await context.is_admin_workspace() is True
-    monkeypatch.setenv(ADMIN_EMAIL_DOMAIN_ENV, "elsewhere.example")
-    assert await context.is_admin_workspace() is False
+
+    operator_id, _, _ = await _seed(member_email="joiner@customer.example")
+    await _backdated_member(operator_id, f"owner@{OPERATOR_EMAIL_DOMAIN}")
+    operator = _context(operator_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    assert await operator.is_operator_workspace() is True
+    customer_id, _, _ = await _seed(member_email=f"support@{OPERATOR_EMAIL_DOMAIN}")
+    await _backdated_member(customer_id, "owner@customer.example")
+    customer = _context(customer_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    assert await customer.is_operator_workspace() is False
 
 
 def test_public_base_url_is_the_wired_connect_base(tmp_path) -> None:

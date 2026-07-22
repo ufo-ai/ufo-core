@@ -15,6 +15,9 @@ from ufo.credentials import (
     CredentialSlotUnset as CredentialSlotUnset,
 )
 from ufo.ext.surface import (
+    OPERATOR_EMAIL_DOMAIN as OPERATOR_EMAIL_DOMAIN,
+)
+from ufo.ext.surface import (
     ConversationSummary as ConversationSummary,
 )
 from ufo.ext.surface import (

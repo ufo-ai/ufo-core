@@ -40,7 +40,7 @@ from ufo.credentials import (
 from ufo.db import current_workspace, workspace_tx
 from ufo.ext.loader import turn_tools
 from ufo.ext.surface import (
-    ADMIN_EMAIL_DOMAIN_ENV,
+    OPERATOR_EMAIL_DOMAIN,
     WRITEBACK_DELIVERED,
     workspace_key,
 )
@@ -68,8 +68,7 @@ UPLOAD_URL = "https://files.slack.com/upload/session-1"
 RESPONSE_URL = "https://hooks.slack.com/actions/T0000001/123/abc"
 ARTIFACT_SECRET = "artifact-token-secret"
 PUBLIC_BASE_URL = "https://ufo.example.test"
-ADMIN_DOMAIN = "metalcraft.example"
-ADMIN_OWNER_EMAIL = f"owner@{ADMIN_DOMAIN}"
+OPERATOR_OWNER_EMAIL = f"owner@{OPERATOR_EMAIL_DOMAIN}"
 
 ASK_QUESTION = AskUserInput(
     title="Need a decision",
@@ -125,7 +124,6 @@ async def _settle_status_tasks(db: None):
 
     patch.setattr(slack.httpx, "AsyncClient", factory)
     patch.setattr(hub_tail, "TERMINAL_POLL_SECONDS", 0.05)
-    patch.delenv(ADMIN_EMAIL_DOMAIN_ENV, raising=False)
     try:
         yield
         await asyncio.gather(*slack._IDENTITY_TASKS.values(), return_exceptions=True)
@@ -2166,8 +2164,7 @@ async def test_shared_slack_routes_two_installations_without_crossing_state(
 async def test_writeback_posts_block_kit_reply_and_streams_the_attachment(
     db: None, tmp_path, monkeypatch
 ) -> None:
-    monkeypatch.setenv(ADMIN_EMAIL_DOMAIN_ENV, ADMIN_DOMAIN)
-    workspace_id, _ = await _seed(member_email=ADMIN_OWNER_EMAIL)
+    workspace_id, _ = await _seed(member_email=OPERATOR_OWNER_EMAIL)
     recorder: list[httpx.Request] = []
     app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
     await blob.put("artifacts/a/report.pdf", b"PDF-CONTENT")
@@ -2218,8 +2215,7 @@ async def test_writeback_posts_block_kit_reply_and_streams_the_attachment(
 async def test_footer_stays_plain_without_a_public_base_url(
     db: None, tmp_path, monkeypatch
 ) -> None:
-    monkeypatch.setenv(ADMIN_EMAIL_DOMAIN_ENV, ADMIN_DOMAIN)
-    workspace_id, _ = await _seed(member_email=ADMIN_OWNER_EMAIL)
+    workspace_id, _ = await _seed(member_email=OPERATOR_OWNER_EMAIL)
     recorder: list[httpx.Request] = []
     app, _, blob = await _mount_transport(
         monkeypatch,
@@ -2238,12 +2234,10 @@ async def test_footer_stays_plain_without_a_public_base_url(
     assert footer == {"type": "context", "elements": [{"type": "mrkdwn", "text": FOOTER_LABEL}]}
 
 
-@pytest.mark.parametrize("member_email", [ADMIN_OWNER_EMAIL, "owner@customer.example", None])
-async def test_footer_is_absent_outside_the_admin_workspace(
+@pytest.mark.parametrize("member_email", ["owner@customer.example", None])
+async def test_footer_is_absent_outside_the_operator_workspace(
     db: None, tmp_path, monkeypatch, member_email: str | None
 ) -> None:
-    if member_email != ADMIN_OWNER_EMAIL:
-        monkeypatch.setenv(ADMIN_EMAIL_DOMAIN_ENV, ADMIN_DOMAIN)
     workspace_id, _ = await _seed(member_email=member_email)
     recorder: list[httpx.Request] = []
     app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
@@ -2413,8 +2407,7 @@ async def test_invalid_blocks_reposts_once(
     question: AskUserInput | None,
     connect_request: ConnectRequest | None,
 ) -> None:
-    monkeypatch.setenv(ADMIN_EMAIL_DOMAIN_ENV, ADMIN_DOMAIN)
-    workspace_id, _ = await _seed(member_email=ADMIN_OWNER_EMAIL)
+    workspace_id, _ = await _seed(member_email=OPERATOR_OWNER_EMAIL)
     recorder: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -2889,8 +2882,7 @@ def test_ask_blocks_render_title_every_question_and_choice_buttons() -> None:
 
 
 async def test_question_writeback_posts_answer_buttons(db: None, tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv(ADMIN_EMAIL_DOMAIN_ENV, ADMIN_DOMAIN)
-    workspace_id, _ = await _seed(member_email=ADMIN_OWNER_EMAIL)
+    workspace_id, _ = await _seed(member_email=OPERATOR_OWNER_EMAIL)
     recorder: list[httpx.Request] = []
     app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
     await _seed_done_turn(

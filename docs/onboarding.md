@@ -127,7 +127,7 @@ and, on `token` + `workspace`, a signed-in home card: the member's email, the wo
 the terminal install one-liner. No `install` preamble is sent on the web channel, and the token
 never appears in a human-visible line.
 
-When the claim's channel-verified email domain equals `UFO_ADMIN_EMAIL_DOMAIN`, `_signed_in` adds
+When the claim's channel-verified email domain equals `OPERATOR_EMAIL_DOMAIN`, `_signed_in` adds
 one extra machine-consumed directive — `debugger <workspace-url>/surface/debug` — and the card
 also shows a "Session debugger" form that POSTs the token in its body (the debug surface exchanges
 it for its `ufo_debug` cookie and redirects; the bearer never rides a URL into the debugger,

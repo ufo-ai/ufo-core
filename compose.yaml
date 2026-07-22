@@ -71,7 +71,6 @@ services:
       UFO_CONTROL_SERVE_DSN: postgresql+asyncpg://ufo:ufo@postgres:5432/ufo
       UFO_PUBLIC_BASE_URL: http://localhost:8080
       UFO_WORKSPACE_BASE_URL: http://localhost:8710
-      UFO_ADMIN_EMAIL_DOMAIN: flyingobject.ai
       # Local signup opens without an invite; the hosted gateway leaves this unset (required).
       UFO_INVITE_REQUIRED: "false"
       UFO_GATEWAY_PORT: "8080"
@@ -92,7 +91,6 @@ services:
       UFO_TOKEN_SECRET: ufo-local-dev-token-secret
       UFO_CREDENTIAL_KEY: b2Adxpv2mSpXfvoBrALyxxePNw-h7N_1mgxzUFVMMFI=
       UFO_ARTIFACT_TOKEN_SECRET: ufo-local-dev-artifact-secret
-      UFO_ADMIN_EMAIL_DOMAIN: flyingobject.ai
       AWS_REGION: us-east-1
       # Shared serve enumerates every workspace for job sweeps through the RLS-bypass owner role.
       UFO_OWNER_DSN: postgresql://ufo:ufo@postgres:5432/ufo

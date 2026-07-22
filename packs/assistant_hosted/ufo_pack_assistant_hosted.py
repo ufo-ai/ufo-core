@@ -5,8 +5,8 @@ memory and recall, Exa research, brokered connectors (Composio, plus Pipedream f
 the browser/computer-use tools,
 website building and the code REPL, document generation, todos, scheduled tasks, member-authored
 skills, the ufo terminal
-surface and the admin session debugger, the Bedrock and OpenRouter model providers, Metronome usage
-and seat metering, and the coding
+surface and the operator session debugger, the Bedrock and OpenRouter model providers, Metronome
+usage and seat metering, and the coding
 subagent — but over managed backends instead
 of core's own: the Turbopuffer index (in place of the local index), the Slack surface, the Redis
 live-frame hub, the E2B sandbox carrier, and Chrome driven inside each conversation's sandbox (the

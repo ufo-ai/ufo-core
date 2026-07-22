@@ -5,8 +5,8 @@
 directive lines as JSON — a second renderer, never a second machine. The page renders `say` as
 transcript lines, `ask` as the next input, and `token`+`workspace` as the signed-in home card:
 the member's email, their workspace URL, the terminal install line — and, when the gateway's
-`debugger` directive arrived (an admin-domain email only), a form that POSTs the token to the
-admin session debugger, which exchanges it for its session cookie — the bearer never rides a
+`debugger` directive arrived (an operator-domain email only), a form that POSTs the token to the
+operator session debugger, which exchanges it for its session cookie — the bearer never rides a
 URL."""
 
 WEB_CHANNEL = "web"
