@@ -122,48 +122,50 @@ def vector_score(row: dict[str, Any], position: int, total: int) -> float:
 @dataclass(frozen=True)
 class TurbopufferIndex:
     """The `IndexBackend` over Turbopuffer's HTTP API. Holds the deploy embed client (for reindex
-    re-embedding), the credential reader for the BYOK key, and an optional transport (a test injects
-    a stub; production leaves it None for real egress). Its namespace is derived from the workspace,
-    so the deploy's one workspace owns one namespace."""
+    re-embedding), the credential reader for the BYOK key, and the process-lifetime `api` client
+    whose connection pool every operation shares (a test builds one over a stub transport). The
+    Bearer key rides each request, not the client — the ambient workspace scopes the key, and one
+    boot-built index serves them all. Its namespace is derived from the workspace, so the deploy's
+    one workspace owns one namespace."""
 
     embed: EmbedClient
     credentials: CredentialAccess
-    transport: httpx.AsyncBaseTransport | None = None
+    api: httpx.AsyncClient
 
     async def upsert(self, chunks: tuple[Chunk, ...]) -> None:
         embeddable = tuple(chunk for chunk in chunks if chunk.embedding)
         if not embeddable:
             return
-        async with await self._client() as api:
-            for start in range(0, len(embeddable), WRITE_BATCH):
-                response = await api.post(
-                    self._path(), json=upsert_body(embeddable[start : start + WRITE_BATCH])
-                )
-                response.raise_for_status()
+        headers = await self._auth()
+        for start in range(0, len(embeddable), WRITE_BATCH):
+            response = await self.api.post(
+                self._path(),
+                json=upsert_body(embeddable[start : start + WRITE_BATCH]),
+                headers=headers,
+            )
+            response.raise_for_status()
 
     async def delete(self, scope: IndexScope) -> None:
-        async with await self._client() as api:
-            chunks = await self._scope_chunks(api, scope)
-            ids = [turbopuffer_id(chunk.chunk_digest) for chunk in chunks]
-            for start in range(0, len(ids), WRITE_BATCH):
-                response = await api.post(
-                    self._path(), json={"deletes": ids[start : start + WRITE_BATCH]}
-                )
-                response.raise_for_status()
+        headers = await self._auth()
+        chunks = await self._scope_chunks(scope, headers)
+        ids = [turbopuffer_id(chunk.chunk_digest) for chunk in chunks]
+        for start in range(0, len(ids), WRITE_BATCH):
+            response = await self.api.post(
+                self._path(), json={"deletes": ids[start : start + WRITE_BATCH]}, headers=headers
+            )
+            response.raise_for_status()
 
     async def prune(self, scope: IndexScope, keep: frozenset[str]) -> None:
-        async with await self._client() as api:
-            chunks = await self._scope_chunks(api, scope)
-            ids = [
-                turbopuffer_id(chunk.chunk_digest)
-                for chunk in chunks
-                if chunk.chunk_digest not in keep
-            ]
-            for start in range(0, len(ids), WRITE_BATCH):
-                response = await api.post(
-                    self._path(), json={"deletes": ids[start : start + WRITE_BATCH]}
-                )
-                response.raise_for_status()
+        headers = await self._auth()
+        chunks = await self._scope_chunks(scope, headers)
+        ids = [
+            turbopuffer_id(chunk.chunk_digest) for chunk in chunks if chunk.chunk_digest not in keep
+        ]
+        for start in range(0, len(ids), WRITE_BATCH):
+            response = await self.api.post(
+                self._path(), json={"deletes": ids[start : start + WRITE_BATCH]}, headers=headers
+            )
+            response.raise_for_status()
 
     async def lexical(
         self, query: str, subjects: frozenset[str], owner_kind: str, limit: int
@@ -187,8 +189,7 @@ class TurbopufferIndex:
         return tuple(hit_from_row(row, score) for row, score in scored if score > 0)
 
     async def reindex(self, scope: IndexScope) -> None:
-        async with await self._client() as api:
-            chunks = await self._scope_chunks(api, scope)
+        chunks = await self._scope_chunks(scope, await self._auth())
         if not chunks:
             return
         vectors = await self.embed.embed(tuple(chunk.text for chunk in chunks))
@@ -208,14 +209,13 @@ class TurbopufferIndex:
             "include_attributes": list(ATTRIBUTES),
             "filters": query_filters(owner_kind, subjects),
         }
-        async with await self._client() as api:
-            response = await api.post(self._path("/query"), json=body)
-            if response.status_code == httpx.codes.NOT_FOUND:
-                return []
-            response.raise_for_status()
-            return list(response.json().get("rows") or [])
+        response = await self.api.post(self._path("/query"), json=body, headers=await self._auth())
+        if response.status_code == httpx.codes.NOT_FOUND:
+            return []
+        response.raise_for_status()
+        return list(response.json().get("rows") or [])
 
-    async def _scope_chunks(self, api: httpx.AsyncClient, scope: IndexScope) -> list[Chunk]:
+    async def _scope_chunks(self, scope: IndexScope, headers: dict[str, str]) -> list[Chunk]:
         chunks: list[Chunk] = []
         after_id: str | None = None
         while True:
@@ -225,7 +225,7 @@ class TurbopufferIndex:
                 "include_attributes": list(ATTRIBUTES),
                 "filters": scope_filters(scope, after_id),
             }
-            response = await api.post(self._path("/query"), json=body)
+            response = await self.api.post(self._path("/query"), json=body, headers=headers)
             if response.status_code == httpx.codes.NOT_FOUND:
                 return chunks
             response.raise_for_status()
@@ -245,14 +245,9 @@ class TurbopufferIndex:
                 return chunks
             after_id = str(rows[-1]["id"])
 
-    async def _client(self) -> httpx.AsyncClient:
+    async def _auth(self) -> dict[str, str]:
         api_key = await self.credentials.get(API_KEY_SLOT)
-        return httpx.AsyncClient(
-            base_url=BASE_URL,
-            timeout=TIMEOUT_SECONDS,
-            headers={"Authorization": f"Bearer {api_key}"},
-            transport=self.transport,
-        )
+        return {"Authorization": f"Bearer {api_key}"}
 
     def _path(self, suffix: str = "") -> str:
         return f"/namespaces/{NAMESPACE_PREFIX}{self.credentials.workspace_id}{suffix}"
@@ -273,7 +268,9 @@ def manifest() -> Manifest:
             IndexBackendSpec(
                 name=INDEX_BACKEND,
                 factory=lambda embed, ctx: TurbopufferIndex(
-                    embed=embed, credentials=ctx.credentials
+                    embed=embed,
+                    credentials=ctx.credentials,
+                    api=httpx.AsyncClient(base_url=BASE_URL, timeout=TIMEOUT_SECONDS),
                 ),
             ),
         ),

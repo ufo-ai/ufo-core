@@ -61,6 +61,13 @@ async def _access(workspace_id: UUID) -> CredentialAccess:
     return context_for(tpuf.NAME, frozenset({tpuf.API_KEY_SLOT})).credentials
 
 
+def _api(transport: httpx.AsyncBaseTransport) -> httpx.AsyncClient:
+    """The process-lifetime client the boot factory builds, over the test's stub transport."""
+    return httpx.AsyncClient(
+        base_url=tpuf.BASE_URL, timeout=tpuf.TIMEOUT_SECONDS, transport=transport
+    )
+
+
 def _recorder(
     rows: list[dict[str, object]] | None = None,
 ) -> tuple[httpx.MockTransport, list[tuple[httpx.Request, dict[str, object]]]]:
@@ -101,7 +108,7 @@ async def test_upsert_posts_columnar_batches_under_the_bearer_key(db: None) -> N
     workspace_id = await _workspace()
     transport, seen = _recorder()
     index = tpuf.TurbopufferIndex(
-        embed=_StubEmbed((1.0, 0.0)), credentials=await _access(workspace_id), transport=transport
+        embed=_StubEmbed((1.0, 0.0)), credentials=await _access(workspace_id), api=_api(transport)
     )
     d1, d2 = _digest("a"), _digest("b")
     with ws(workspace_id):
@@ -149,7 +156,7 @@ async def test_lexical_and_vector_queries_filter_and_parse_hits(db: None) -> Non
     ]
     transport, seen = _recorder(rows)
     index = tpuf.TurbopufferIndex(
-        embed=_StubEmbed((1.0, 0.0)), credentials=await _access(workspace_id), transport=transport
+        embed=_StubEmbed((1.0, 0.0)), credentials=await _access(workspace_id), api=_api(transport)
     )
 
     with ws(workspace_id):
@@ -185,7 +192,7 @@ async def test_delete_enumerates_a_scope_then_posts_id_deletes(db: None) -> None
     }
     transport, seen = _recorder([row])
     index = tpuf.TurbopufferIndex(
-        embed=_StubEmbed((1.0, 0.0)), credentials=await _access(workspace_id), transport=transport
+        embed=_StubEmbed((1.0, 0.0)), credentials=await _access(workspace_id), api=_api(transport)
     )
     with ws(workspace_id):
         await index.delete(IndexScope(OWNER_KIND, "m1"))
@@ -209,7 +216,7 @@ async def test_query_on_a_missing_namespace_returns_no_hits(db: None) -> None:
     index = tpuf.TurbopufferIndex(
         embed=_StubEmbed((1.0, 0.0)),
         credentials=await _access(workspace_id),
-        transport=httpx.MockTransport(handle),
+        api=_api(httpx.MockTransport(handle)),
     )
     with ws(workspace_id):
         assert await index.lexical("x", frozenset({SHARED}), OWNER_KIND, 5) == ()
