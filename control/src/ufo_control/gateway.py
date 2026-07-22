@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 WORKSPACE_BASE_URL_ENV = "UFO_WORKSPACE_BASE_URL"
 ADMIN_EMAIL_DOMAIN_ENV = "UFO_ADMIN_EMAIL_DOMAIN"
+INVITE_REQUIRED_ENV = "UFO_INVITE_REQUIRED"
 DEBUG_SURFACE_PATH = "/surface/debug"
 SCRIPT_URL_DEFAULT = 'UFO_URL="${UFO_URL:-https://flyingobject.ai}"'
 SHELLSCRIPT_MEDIA_TYPE = "text/x-shellscript"
@@ -74,6 +75,7 @@ class Onboarding:
     invites: InviteCodes
     token_secret: str
     apex_host: str
+    invite_required: bool
     admin_email_domain: str | None = None
 
     async def advance(self, channel: str, session: str, body: str, install: bytes) -> bytes:
@@ -115,7 +117,7 @@ class Onboarding:
 
     async def _resolve(self, claim: OnboardClaim, answer: str | None, install: bytes) -> bytes:
         accepted = b""
-        if not await self.workspaces.exists(claim.email_domain):
+        if self.invite_required and not await self.workspaces.exists(claim.email_domain):
             gate = await self._invite_gate(claim, answer, install)
             match gate:
                 case bytes():
@@ -223,6 +225,18 @@ def _require_env(name: str) -> str:
     return value
 
 
+def _invite_required() -> bool:
+    """New-workspace invites gate signup unless a deploy explicitly opts out (local dev). Unset =
+    required, so forgetting the knob never opens signup; garbage fails loud, never defaults."""
+    match os.environ.get(INVITE_REQUIRED_ENV, "true").strip().lower():
+        case "true" | "1":
+            return True
+        case "false" | "0":
+            return False
+        case other:
+            raise RuntimeError(f"{INVITE_REQUIRED_ENV}={other!r} is not a boolean (true/false)")
+
+
 def _dsn_role(dsn: str) -> str:
     role = sa.engine.make_url(dsn).username
     if role is None:
@@ -255,6 +269,9 @@ def gateway_app() -> FastAPI:
         invites = InviteCodes(pool=pool)
         await invites.ensure_table()
         init_db(serve_url)
+        invite_required = _invite_required()
+        if not invite_required:
+            logger.warning("gateway.invite_gate.disabled")
         state = GatewayState(
             pool=pool,
             onboarding=Onboarding(
@@ -270,6 +287,7 @@ def gateway_app() -> FastAPI:
                 invites=invites,
                 token_secret=_require_env(TOKEN_SECRET_ENV),
                 apex_host=public_apex_host(),
+                invite_required=invite_required,
                 admin_email_domain=os.environ.get(ADMIN_EMAIL_DOMAIN_ENV) or None,
             ),
             owner_role=_dsn_role(owner_url),

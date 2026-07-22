@@ -31,9 +31,6 @@ case "${1:-}" in
     UFO_OWNER_DSN="$UFO_CONTROL_POSTGRES_OWNER_DSN" ufoctl migrate
     echo "[dev] bootstrapping the ufo_serve role, ufo_dbos database, and RLS policies …"
     ufo-control rls-bootstrap
-    echo "[dev] minting a dev invite (use its code to create a workspace at sign-in) …"
-    # A fresh object number each run so re-running `docker compose up` always prints a usable code.
-    ufo-control invite "$(date +%s)"
     echo "[dev] init complete."
     ;;
   gateway)

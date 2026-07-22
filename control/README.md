@@ -43,6 +43,10 @@ workspace and default agent, and returns the bearer consumed by the `ufo` surfac
 Email delivery requires `UFO_SES_SENDER`, `AWS_ROLE_ARN`, and
 `AWS_WEB_IDENTITY_TOKEN_FILE`; `UFO_SES_REGION` defaults to `us-east-1`.
 
+`UFO_INVITE_REQUIRED` defaults to `true`: creating a new workspace demands a one-time invite. The
+local hosted stack (root README) sets it `false` so signup needs no code; unset means required, so
+a deploy never opens signup by forgetting the knob.
+
 ## Validation
 
 ```bash

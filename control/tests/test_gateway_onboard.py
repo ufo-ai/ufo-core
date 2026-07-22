@@ -2,7 +2,7 @@ import re
 
 import pytest
 
-from ufo_control.gateway import STAMPED_SCRIPT, _stamp_script
+from ufo_control.gateway import INVITE_REQUIRED_ENV, STAMPED_SCRIPT, _invite_required, _stamp_script
 from ufo_control.gateway_invite import CODE_ALPHABET, hash_invite, mint_code
 
 RAW_SCRIPT = 'UFO_SCRIPT_VERSION=dev\nUFO_URL="${UFO_URL:-https://flyingobject.ai}"\n'
@@ -20,6 +20,20 @@ def test_shipped_script_is_stamped_and_targets_chat() -> None:
     assert "UFO_SCRIPT_VERSION=dev" not in STAMPED_SCRIPT
     assert re.search(r"UFO_SCRIPT_VERSION=[0-9a-f]{12}", STAMPED_SCRIPT) is not None
     assert "surface/ufo/" in STAMPED_SCRIPT
+
+
+def test_invite_required_defaults_on_and_fails_loud_on_non_boolean(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(INVITE_REQUIRED_ENV, raising=False)
+    assert _invite_required() is True
+    monkeypatch.setenv(INVITE_REQUIRED_ENV, "1")
+    assert _invite_required() is True
+    monkeypatch.setenv(INVITE_REQUIRED_ENV, "false")
+    assert _invite_required() is False
+    monkeypatch.setenv(INVITE_REQUIRED_ENV, "yes")
+    with pytest.raises(RuntimeError, match="not a boolean"):
+        _invite_required()
 
 
 def test_minted_codes_are_grouped_and_hash_ignores_case_and_whitespace() -> None:

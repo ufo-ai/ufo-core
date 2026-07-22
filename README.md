@@ -29,12 +29,13 @@ docker compose up
 ```
 
 One image (`dev/Dockerfile`, the whole workspace via uv) runs as four roles (`dev/entrypoint.sh`):
-`init` migrates, runs `rls-bootstrap` (the `ufo_serve` role + RLS policies), and mints a dev invite;
+`init` migrates and runs `rls-bootstrap` (the `ufo_serve` role + RLS policies);
 `gateway` serves `/login` on :8080 with the code emailed to the log (`UFO_CONTROL_EMAIL_MODE=console`
 — read it from `docker compose logs gateway`); `serve` runs the shared fleet on :8710 over the
 `assistant` pack with local backends (filesystem blobs, in-process hub, the built-in `local` sandbox
-carrier). Sign in at `http://localhost:8080/login` with a work email, the code from the gateway log,
-then the invite from the init log. Host ports override via `UFO_PG_PORT` / `UFO_GATEWAY_PORT_HOST` /
+carrier). Sign in at `http://localhost:8080/login` with a work email and the code from the gateway
+log (local signup needs no invite — `UFO_INVITE_REQUIRED=false`). Host ports override via
+`UFO_PG_PORT` / `UFO_GATEWAY_PORT_HOST` /
 `UFO_SERVE_PORT_HOST` / `UFO_REDIS_PORT`. The dev config (`dev/ufo.toml`) swaps the hosted cloud
 backends for local ones; the Turbopuffer/Exa index, the Redis hub (multi-replica), and the Docker
 sandbox carrier each need their extension added to a local pack — out of scope for this single node.

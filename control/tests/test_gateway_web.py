@@ -19,6 +19,7 @@ from ufo.bearer import verify_token
 import ufo_control.gateway as gateway
 from ufo_control.gateway import (
     ADMIN_EMAIL_DOMAIN_ENV,
+    INVITE_REQUIRED_ENV,
     TOKEN_SECRET_ENV,
     WORKSPACE_BASE_URL_ENV,
     gateway_app,
@@ -153,6 +154,24 @@ def test_web_channel_walks_email_code_invite_to_the_signed_in_card(
     assert workspace == WORKSPACE_URL
     assert not _fields(signed_in, "debugger")
     assert all(token not in text for text in _fields(signed_in, "say"))
+
+
+def test_disabled_invite_gate_opens_a_new_workspace_without_a_code(
+    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _configure(monkeypatch, tmp_path, gateway_postgres)
+    monkeypatch.setenv(INVITE_REQUIRED_ENV, "false")
+    sender = RecordingSender()
+    monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
+    session = str(uuid.uuid4())
+    email = "founder@nogate.io"
+    with TestClient(gateway_app()) as client:
+        _advance(client, session, "")
+        _advance(client, session, email)
+        signed_in = _advance(client, session, sender.sent[email])
+    assert not any("invite" in text for text in _fields(signed_in, "say"))
+    (token,) = _fields(signed_in, "token")
+    assert verify_token(token, UUID(str(uuid5(NAMESPACE_DNS, "nogate.io")))) == email
 
 
 def test_web_and_terminal_sessions_never_share_a_claim(

@@ -463,6 +463,7 @@ async def test_shared_onboard_creates_then_joins_a_workspace(
         invites=invites,
         token_secret=SHARED_TOKEN_SECRET,
         apex_host="flyingobject.ai",
+        invite_required=True,
     )
     try:
         await flow.advance("ufo", "sess", "", b"")
