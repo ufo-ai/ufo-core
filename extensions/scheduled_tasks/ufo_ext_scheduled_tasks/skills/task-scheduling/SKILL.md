@@ -122,3 +122,18 @@ Example: "Check @potus's tweets every hour"
 
 - Timer triggers → you check tweets → no new tweets → end the run silently
 - Timer triggers → you check tweets → new tweet found → reply with the tweet details and a link
+
+## Memory hygiene for scheduled runs
+
+A scheduled run's per-run output is NOT durable memory. The reply you post to the conversation is
+already the durable record of what this run found, so do not also save that run's digest, flagged
+items, or snapshot summary as a `fact` — that piles up single-execution snapshots that crowd out
+relevant context on unrelated later turns.
+
+- Keep in-task working state (progress, an "already covered" ledger, intermediate results) in
+  workspace files or todo items, not memory.
+- Only durable, cross-task facts belong in memory: a genuine config change the run made (universe
+  edits, an approve/reject decision, a posting change). Write those as a single canonical item and
+  update it in place — never re-emit a cumulative note as a fresh near-duplicate each run.
+- If a run must record a per-run snapshot at all, prefer `event` kind (short half-life) over `fact`,
+  so it decays instead of accumulating.

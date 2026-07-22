@@ -178,7 +178,9 @@ SCHEDULED_TASK_OBJECT = ObjectKind(
         "visible. A fire acts as the creator and uses the creator's private connections, but "
         "recalls only the memory its reporting conversation can see (shared-only in a channel). "
         "Listing returns each task's name, schedule, and description; get shows where it reports "
-        "and the latest run's response. Load the task-scheduling skill before scheduling."
+        "and the latest run's response. A run's per-run output is not durable memory — it belongs "
+        "in the reply the run posts, not in a saved fact; keep in-task state in files or todo "
+        "items. Load the task-scheduling skill before scheduling."
     ),
     spec_model=ScheduledTaskSpec,
     store=ScheduledTaskObjects(),

@@ -386,7 +386,10 @@ def manifest() -> Manifest:
                     "communication style. Set `memory_kind` (fact/preference/decision/event/task) "
                     "so recency decay matches how fast the fact goes stale, and `confidence` "
                     "(1-10) for how sure you are. Do NOT store ephemeral instructions (e.g. 'make "
-                    "it shorter'); only store persistent information."
+                    "it shorter'); only store persistent information. Task-execution state and "
+                    "per-run/scheduled-run output are NOT durable memory — keep in-task working "
+                    "state in workspace files or todo items, and let per-run output live in the "
+                    "delivered post or artifact, not here."
                 ),
                 input_model=MemoryUpdateInput,
                 handler=memory_update_handler,
