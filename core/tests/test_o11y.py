@@ -100,16 +100,28 @@ def test_otlp_signal_urls_append_the_per_signal_paths():
     assert logs_url == "http://otel-collector.ufo-system.svc.cluster.local:4318/v1/logs"
 
 
-def test_log_exports_redacted_otel_record():
+def test_structured_logs_export_one_otel_record_each():
     exporter = InMemoryLogRecordExporter()
     provider = LoggerProvider()
     provider.add_log_record_processor(SimpleLogRecordProcessor(exporter))
     _logs.set_logger_provider(provider)
-    o11y.log("turn.started", turn_id="abc", prompt="leak")
-    (record,) = (item.log_record for item in exporter.get_finished_logs())
-    assert record.body == "turn.started"
-    assert record.severity_number == SeverityNumber.INFO
-    assert dict(record.attributes) == {"turn_id": "abc"}
+    o11y._bridge_warning_logs(provider)
+    handler = logging.getLogger().handlers[-1]
+    try:
+        o11y.log("turn.started", turn_id="abc", prompt="leak")
+        o11y.log_error("jobs.failed", job="core:broken", error_class="TimeoutError")
+        records = [item.log_record for item in exporter.get_finished_logs()]
+        assert [(record.body, record.severity_number) for record in records] == [
+            ("turn.started", SeverityNumber.INFO),
+            ("jobs.failed", SeverityNumber.ERROR),
+        ]
+        assert dict(records[0].attributes) == {"turn_id": "abc"}
+        assert dict(records[1].attributes) == {
+            "job": "core:broken",
+            "error_class": "TimeoutError",
+        }
+    finally:
+        logging.getLogger().removeHandler(handler)
 
 
 def test_stdlib_warnings_export_through_the_logs_pipeline():

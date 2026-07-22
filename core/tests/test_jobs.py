@@ -1,6 +1,8 @@
 import asyncio
+import logging
 from uuid import UUID, uuid4
 
+import pytest
 import sqlalchemy as sa
 from dbos import DBOS
 
@@ -91,6 +93,34 @@ async def test_fire_with_empty_candidates_never_invokes_the_handler(db: None) ->
     spec = JobSpec(name="idle", schedule="* * * * * *", handler=_count, candidates=_none)
     await _runner((spec,)).fire(f"{CORE_EXTENSION}:idle")
     assert calls == 0
+
+
+async def test_fire_logs_the_exact_failed_job_and_reraises(
+    db: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    workspace_id = await _workspace()
+    key = f"{CORE_EXTENSION}:broken"
+
+    async def _fail(context: ExtensionContext) -> None:
+        raise TimeoutError("database connect timed out")
+
+    async def _candidate() -> tuple[UUID, ...]:
+        return (workspace_id,)
+
+    spec = JobSpec(name="broken", schedule="* * * * * *", handler=_fail, candidates=_candidate)
+    with (
+        caplog.at_level(logging.ERROR, logger="ufo"),
+        pytest.raises(TimeoutError, match="database connect timed out"),
+    ):
+        await _runner((spec,)).fire(key)
+
+    record = next(record for record in caplog.records if record.message == "jobs.failed")
+    assert record.levelno == logging.ERROR
+    assert record.__dict__["ufo"] == {
+        "workspace_id": str(workspace_id),
+        "job": key,
+        "error_class": "TimeoutError",
+    }
 
 
 async def test_recurring_core_job_registers_at_boot_and_fires(

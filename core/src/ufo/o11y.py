@@ -82,10 +82,15 @@ def init_o11y(otlp_endpoint: str | None) -> None:
 def _bridge_warning_logs(logger_provider: LoggerProvider) -> None:
     """Root-logger handler exporting WARNING-and-up stdlib records through the logs pipeline, so a
     warning from any module — an extension surface's swallowed delivery failure, a library fault —
-    reaches the collector instead of dying in an unhandled stdlib logger. OTel's own exporter logs
-    are excluded so export failures report locally instead of feeding the failing pipeline."""
+    reaches the collector instead of dying in an unhandled stdlib logger. Direct structured records
+    from `ufo` and OTel's own exporter logs are excluded: the former already emit through OTel, and
+    export failures report locally instead of feeding the failing pipeline."""
     handler = LoggingHandler(level=logging.WARNING, logger_provider=logger_provider)
-    handler.addFilter(lambda record: not record.name.startswith("opentelemetry"))
+    handler.addFilter(
+        lambda record: (
+            record.name != INSTRUMENTATION_NAME and not record.name.startswith("opentelemetry")
+        )
+    )
     logging.getLogger().addHandler(handler)
 
 
@@ -169,10 +174,28 @@ def log(event: str, **fields: object) -> None:
     — to stdlib logging and the OTel logs pipeline; the OTel record correlates to the active span.
     The workspace is read from the `with ws(...)` scope, never passed, so every record inside a turn
     or job carries the workspace it ran under."""
+    _emit_log(event, SeverityNumber.INFO, "INFO", logging.INFO, fields)
+
+
+def log_error(event: str, **fields: object) -> None:
+    """Emit a structured error record with the same scoping and redaction as `log`."""
+    _emit_log(event, SeverityNumber.ERROR, "ERROR", logging.ERROR, fields)
+
+
+def _emit_log(
+    event: str,
+    severity_number: SeverityNumber,
+    severity_text: str,
+    level: int,
+    fields: Mapping[str, object],
+) -> None:
     redacted = redact_payload({**_ambient_scope(), **fields})
-    logging.getLogger(INSTRUMENTATION_NAME).info(event, extra={"ufo": redacted})
+    logging.getLogger(INSTRUMENTATION_NAME).log(level, event, extra={"ufo": redacted})
     _logs.get_logger(INSTRUMENTATION_NAME).emit(
-        severity_number=SeverityNumber.INFO, severity_text="INFO", body=event, attributes=redacted
+        severity_number=severity_number,
+        severity_text=severity_text,
+        body=event,
+        attributes=redacted,
     )
 
 

@@ -25,7 +25,7 @@ from ufo.ext.context import ExtensionContext, TurnInvoker, context_for
 from ufo.ext.manifest import HookContext, HookSpec, JobSpec, Manifest, PageChangeBatch
 from ufo.indexing import EmbedClient, IndexBackend
 from ufo.models.registry import ModelRegistry
-from ufo.o11y import log
+from ufo.o11y import log, log_error
 from ufo.sandbox.session import Carrier, SandboxHandle, sandbox_handle_id
 from ufo.scheduling import ScheduleInvoker
 from ufo.schema import tables
@@ -721,7 +721,11 @@ class JobRunner:
                     self.registry,
                     schedule_invoker=invoker,
                 )
-                await binding.spec.handler(context)
+                try:
+                    await binding.spec.handler(context)
+                except Exception as error:
+                    log_error("jobs.failed", job=key, error_class=type(error).__name__)
+                    raise
 
 
 _firing: JobRunner | None = None
