@@ -15,6 +15,8 @@ WORKSPACE_GUC = "app.workspace_id"
 OWNER_ROLE = "ufo_owner"
 SERVE_ROLE = "ufo_serve"
 LOCK_TIMEOUT = "10s"
+IDLE_IN_TRANSACTION_TIMEOUT = "60s"
+EXPECTED_POLICY_EXPR = "({column} = (current_setting('{guc}'::text))::uuid)"
 
 
 def owner_dsn() -> str:
@@ -48,6 +50,11 @@ async def ensure_serve_role(admin_dsn: str) -> None:
                 f"alter role \"{SERVE_ROLE}\" with login password '{password}'"
             )
         await connection.execute(f'grant set on parameter {WORKSPACE_GUC} to "{SERVE_ROLE}"')
+        for role in (SERVE_ROLE, OWNER_ROLE):
+            await connection.execute(
+                f'alter role "{role}" set idle_in_transaction_session_timeout = '
+                f"'{IDLE_IN_TRANSACTION_TIMEOUT}'"
+            )
         await _grant_serve_role(connection)
         app_database = await connection.fetchval("select current_database()")
         await _ensure_database(connection, f"{app_database}_dbos", owner=SERVE_ROLE)
@@ -56,9 +63,11 @@ async def ensure_serve_role(admin_dsn: str) -> None:
 
 
 async def bootstrap_policies(dsn: str) -> None:
-    """Enable and refresh the workspace policy on every public table, one short transaction per
-    table: a blocked ALTER fails after LOCK_TIMEOUT naming its lock holders instead of wedging the
-    database behind the locks it already acquired."""
+    """Enable and refresh the workspace policy on every public table. A table whose policy already
+    matches costs only the ACCESS SHARE lock `_conformant`'s catalog read takes; a table that
+    genuinely needs DDL takes it in one short transaction. Either way, a table wedged behind a
+    holder's ACCESS EXCLUSIVE fails after LOCK_TIMEOUT naming its lock holders instead of wedging
+    the whole bootstrap behind it."""
     connection = await asyncpg.connect(dsn)
     try:
         await connection.execute(f"set lock_timeout = '{LOCK_TIMEOUT}'")
@@ -70,6 +79,8 @@ async def bootstrap_policies(dsn: str) -> None:
             if table == ALEMBIC_VERSION_TABLE:
                 continue
             try:
+                if await _conformant(connection, table):
+                    continue
                 async with connection.transaction():
                     await _policy_for(connection, table)
             except asyncpg.exceptions.LockNotAvailableError as error:
@@ -79,6 +90,37 @@ async def bootstrap_policies(dsn: str) -> None:
                 ) from error
     finally:
         await connection.close()
+
+
+async def _conformant(connection: asyncpg.Connection, table: str) -> bool:
+    """RLS enabled and the managed policy already carrying this table's exact predicate. Reads
+    catalogs only, so it never takes the ACCESS EXCLUSIVE the DDL path needs — but `pg_policies`
+    resolves `qual`/`with_check` via `pg_get_expr`, which takes an ACCESS SHARE lock on the table,
+    so this call still waits (and can time out) behind a holder's ACCESS EXCLUSIVE. The caller
+    wraps this in the same LOCK_TIMEOUT handling as the DDL path for that reason. The expected
+    expression is Postgres's own normalization of the predicate `_policy_for` creates; a drift (a
+    version upgrade changing normalization, a template change) reads as non-conformant and costs
+    one re-create — degradation is an extra DDL pass, never a skipped policy."""
+    row = await connection.fetchrow(
+        "select rel.relrowsecurity, pol.qual, pol.with_check, pol.permissive, pol.roles, pol.cmd "
+        "from pg_class rel join pg_namespace ns on ns.oid = rel.relnamespace "
+        "left join pg_policies pol on pol.schemaname = ns.nspname "
+        "and pol.tablename = rel.relname and pol.policyname = $2 "
+        "where ns.nspname = 'public' and rel.relname = $1",
+        table,
+        POLICY_NAME,
+    )
+    if row is None or not row["relrowsecurity"] or row["qual"] is None:
+        return False
+    column = await _scope_column(connection, table)
+    expected = EXPECTED_POLICY_EXPR.format(column=column, guc=WORKSPACE_GUC)
+    return (
+        row["qual"] == expected
+        and row["with_check"] == expected
+        and row["permissive"] == "PERMISSIVE"
+        and row["cmd"] == "ALL"
+        and list(row["roles"]) == ["public"]
+    )
 
 
 async def _lock_holders(connection: asyncpg.Connection, table: str) -> str:

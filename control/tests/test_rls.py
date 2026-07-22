@@ -55,6 +55,8 @@ APP_DATABASE = "ufo_rls_test"
 ADMIN_APP_DSN = f"postgresql://admin:admin@{POSTGRES_HOST}/{APP_DATABASE}"
 FAILLOUD_DATABASE = "ufo_rls_failloud"
 LOCKWEDGE_DATABASE = "ufo_rls_lockwedge"
+DRIFT_DATABASE = "ufo_rls_drift"
+CONFORMANT_LOCK_DATABASE = "ufo_rls_conformant_lock"
 OWNER_ROLE = "ufo_owner"
 OWNER_PASSWORD = "ownerpw"
 SEED = "rls-test-seed"
@@ -542,3 +544,142 @@ async def test_owner_tx_enumerates_every_workspace(shared_role_env: SharedRoleEn
     async with owner_tx() as connection:
         rows = (await connection.execute(sa.select(tables.workspace.c.id))).all()
     assert set(shared_role_env.workspaces) <= {str(row.id) for row in rows}
+
+
+async def test_bootstrap_skips_conformant_tables_without_locking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A table whose policy already matches is never locked: the second bootstrap succeeds while a
+    held ACCESS SHARE lock would block any DDL — the routine no-delta deploy stops racing the live
+    fleet entirely."""
+    monkeypatch.setattr(rls, "LOCK_TIMEOUT", "200ms")
+    reset = await asyncpg.connect(ADMIN_DSN)
+    try:
+        await reset.execute(f'drop database if exists "{LOCKWEDGE_DATABASE}" with (force)')
+        await reset.execute(f'create database "{LOCKWEDGE_DATABASE}"')
+    finally:
+        await reset.close()
+    dsn = f"postgresql://admin:admin@{POSTGRES_HOST}/{LOCKWEDGE_DATABASE}"
+    setup = await asyncpg.connect(dsn)
+    try:
+        await setup.execute("create table workspace (id uuid primary key)")
+    finally:
+        await setup.close()
+    await bootstrap_policies(dsn)
+    holder = await asyncpg.connect(dsn)
+    transaction = holder.transaction()
+    await transaction.start()
+    try:
+        await holder.execute("lock table workspace in access share mode")
+        await bootstrap_policies(dsn)
+    finally:
+        await transaction.rollback()
+        await holder.close()
+        cleanup = await asyncpg.connect(ADMIN_DSN)
+        try:
+            await cleanup.execute(f'drop database if exists "{LOCKWEDGE_DATABASE}" with (force)')
+        finally:
+            await cleanup.close()
+
+
+async def test_bootstrap_fails_fast_when_the_conformant_check_itself_is_locked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_conformant`'s catalog read resolves `pg_policies.qual`/`with_check` via `pg_get_expr`,
+    which takes an ACCESS SHARE lock on the table — so a conformant table blocked behind a
+    concurrent ACCESS EXCLUSIVE (a second in-flight bootstrap, a live migration) must surface the
+    same `_lock_holders`-backed RuntimeError as the DDL path, not a raw LockNotAvailableError."""
+    monkeypatch.setattr(rls, "LOCK_TIMEOUT", "200ms")
+    reset = await asyncpg.connect(ADMIN_DSN)
+    try:
+        await reset.execute(f'drop database if exists "{CONFORMANT_LOCK_DATABASE}" with (force)')
+        await reset.execute(f'create database "{CONFORMANT_LOCK_DATABASE}"')
+    finally:
+        await reset.close()
+    dsn = f"postgresql://admin:admin@{POSTGRES_HOST}/{CONFORMANT_LOCK_DATABASE}"
+    setup = await asyncpg.connect(dsn)
+    try:
+        await setup.execute("create table workspace (id uuid primary key)")
+    finally:
+        await setup.close()
+    await bootstrap_policies(dsn)
+    holder = await asyncpg.connect(dsn)
+    transaction = holder.transaction()
+    await transaction.start()
+    try:
+        await holder.execute("lock table workspace in access exclusive mode")
+        with pytest.raises(RuntimeError, match="lock on table 'workspace' timed out") as caught:
+            await bootstrap_policies(dsn)
+        assert "idle in transaction" in str(caught.value)
+    finally:
+        await transaction.rollback()
+        await holder.close()
+        cleanup = await asyncpg.connect(ADMIN_DSN)
+        try:
+            await cleanup.execute(
+                f'drop database if exists "{CONFORMANT_LOCK_DATABASE}" with (force)'
+            )
+        finally:
+            await cleanup.close()
+
+
+async def test_bootstrap_recreates_a_drifted_policy() -> None:
+    """A policy present with the right predicate but the wrong `cmd` (drift, not absence) is not
+    conformant and gets re-created — proving `_conformant`'s False branch actually fires instead of
+    silently leaving a stale predicate in place forever."""
+    reset = await asyncpg.connect(ADMIN_DSN)
+    try:
+        await reset.execute(f'drop database if exists "{DRIFT_DATABASE}" with (force)')
+        await reset.execute(f'create database "{DRIFT_DATABASE}"')
+    finally:
+        await reset.close()
+    dsn = f"postgresql://admin:admin@{POSTGRES_HOST}/{DRIFT_DATABASE}"
+    predicate = f"id = current_setting('{rls.WORKSPACE_GUC}')::uuid"
+    connection = await asyncpg.connect(dsn)
+    try:
+        await connection.execute("create table workspace (id uuid primary key)")
+        await connection.execute("alter table workspace enable row level security")
+        await connection.execute(
+            f"create policy {rls.POLICY_NAME} on workspace for update "
+            f"using ({predicate}) with check ({predicate})"
+        )
+        assert not await rls._conformant(connection, "workspace")
+    finally:
+        await connection.close()
+    try:
+        await bootstrap_policies(dsn)
+        inspection = await asyncpg.connect(dsn)
+        try:
+            row = await inspection.fetchrow(
+                "select cmd from pg_policies where tablename = 'workspace'"
+            )
+            assert row["cmd"] == "ALL"
+        finally:
+            await inspection.close()
+    finally:
+        cleanup = await asyncpg.connect(ADMIN_DSN)
+        try:
+            await cleanup.execute(f'drop database if exists "{DRIFT_DATABASE}" with (force)')
+        finally:
+            await cleanup.close()
+
+
+def test_roles_carry_the_idle_in_transaction_timeout(shared_role_env: SharedRoleEnv) -> None:
+    """`ensure_serve_role` stamps both fleet roles so Postgres itself terminates a session holding
+    a transaction idle past the bound — no convoy head can hold table locks for minutes again."""
+
+    async def _settings() -> dict[str, list[str]]:
+        connection = await asyncpg.connect(ADMIN_APP_DSN)
+        try:
+            rows = await connection.fetch(
+                "select rol.rolname, setting.setconfig from pg_db_role_setting setting "
+                "join pg_roles rol on rol.oid = setting.setrole"
+            )
+            return {row["rolname"]: list(row["setconfig"] or []) for row in rows}
+        finally:
+            await connection.close()
+
+    settings = asyncio.run(_settings())
+    expected = f"idle_in_transaction_session_timeout={rls.IDLE_IN_TRANSACTION_TIMEOUT}"
+    assert expected in settings.get(rls.SERVE_ROLE, [])
+    assert expected in settings.get(OWNER_ROLE, [])
