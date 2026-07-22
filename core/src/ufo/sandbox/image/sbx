@@ -21,7 +21,7 @@ import urllib3
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_MODEL = "claude-opus-4-8"
-DEFAULT_MAX_TOKENS = 1024
+DEFAULT_MAX_TOKENS = 8192
 REQUEST_TIMEOUT_SECONDS = 60.0
 
 

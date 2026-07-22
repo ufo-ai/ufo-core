@@ -76,7 +76,7 @@ from ufo.sandbox.proxy.rules import Rule, connector_transfer_hosts, derive_crede
 from ufo.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
 from ufo.sandbox.session import EGRESS_CA_CERT_ENV, Carrier, ProxyEndpoint
 from ufo.schema import tables
-from ufo.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION
+from ufo.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION, DBOS_MAX_EXECUTOR_THREADS
 from ufo.search import SearchProvider
 from ufo.sources.sync import (
     FOLDER_BACKEND,
@@ -168,6 +168,7 @@ def run() -> None:
             "system_database_url": config.database.system_url,
             "executor_id": str(instance_id),
             "run_admin_server": False,
+            "max_executor_threads": DBOS_MAX_EXECUTOR_THREADS,
         }
     )
     DBOS.launch()

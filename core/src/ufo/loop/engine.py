@@ -110,7 +110,7 @@ from ufo.tools.registry import ToolRegistry
 from ufo.transcript import Conversation
 
 MAX_OUTPUT_TOKENS = 32_768
-FIND_MAX_TOKENS = 2_000
+FIND_MAX_TOKENS = 8_192
 MAIN_ROUND_LIMIT = 200
 MAX_PARALLEL_TOOL_CALLS = 8
 DELTA_FLUSH_BYTES = 2048

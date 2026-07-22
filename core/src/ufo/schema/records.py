@@ -35,6 +35,7 @@ TURN_QUEUE_NAME = "turns"
 TURN_WORKFLOW_NAME = "turn"
 DBOS_APP_NAME = "ufo"
 DBOS_APP_VERSION = "ufo"
+DBOS_MAX_EXECUTOR_THREADS = 8192
 
 
 def turn_id_for(workspace_id: UUID, conversation_id: UUID, seq: int) -> UUID:
