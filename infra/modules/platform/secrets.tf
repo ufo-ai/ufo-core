@@ -161,6 +161,9 @@ resource "aws_secretsmanager_secret_version" "api_keys" {
     "turbopuffer-api-key"          = ""
     "datadog-api-key"              = ""
     "metronome-bearer-token"       = ""
+    "slack-client-id"              = ""
+    "slack-client-secret"          = ""
+    "slack-signing-secret"         = ""
   })
 
   lifecycle {
