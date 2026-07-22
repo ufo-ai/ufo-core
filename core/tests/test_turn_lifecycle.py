@@ -704,6 +704,67 @@ async def test_failure_commits_terminal_bills_nothing_preserves_inbound(
     assert _bodies(stored) == ["explode"]
 
 
+async def test_backstop_terminal_carries_class_and_message(db: None) -> None:
+    """A failure outside the engine commits a terminal carrying the class AND the message — a bare
+    class name gives the debugger and CLI nothing to act on (the 2026-07-21 wedge surfaced as a
+    naked \"RuntimeError\")."""
+    workspace_id, agent_id, conversation_id, turn_id = uuid4(), uuid4(), uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="assistant",
+                prompt="be brief",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                surface="cli",
+                queue_key="session",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="running",
+                inbound="explode",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    await loop_queue._commit_failed_terminal(
+        InProcessHub(), turn_id, RuntimeError("boom outside the engine")
+    )
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.turn.c.status, tables.turn.c.terminal).where(
+                    tables.turn.c.id == turn_id
+                )
+            )
+        ).one()
+    assert row.status == "failed"
+    assert row.terminal["error_class"] == "RuntimeError"
+    assert row.terminal["error_message"] == "boom outside the engine"
+
+
 async def test_next_turn_sees_a_failed_turns_inbound(surface: AsyncClient) -> None:
     headers = await _bootstrap()
     first = (await surface.post("/v1/chat", content=b"explode", headers=headers)).json()["turn_id"]

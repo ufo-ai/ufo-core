@@ -124,6 +124,9 @@ class ConnectRequest(BaseModel):
     shared: bool = False
 
 
+TERMINAL_ERROR_MESSAGE_MAX_CHARS = 2_000
+
+
 class TerminalFrame(BaseModel):
     status: TerminalStatus
     text: str = ""

@@ -51,6 +51,7 @@ from ufo.sandbox.session import (
 from ufo.schema import tables
 from ufo.schema.records import (
     DBOS_APP_VERSION,
+    TERMINAL_ERROR_MESSAGE_MAX_CHARS,
     TURN_QUEUE_NAME,
     TURN_WORKFLOW_NAME,
     Agent,
@@ -309,13 +310,17 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
     except asyncio.CancelledError:
         raise
     except Exception as error:
-        await _commit_failed_terminal(runtime.hub, UUID(turn_id), type(error).__name__)
+        await _commit_failed_terminal(runtime.hub, UUID(turn_id), error)
         raise
 
 
-async def _commit_failed_terminal(hub: Hub, turn_id: UUID, error_class: str) -> None:
+async def _commit_failed_terminal(hub: Hub, turn_id: UUID, error: BaseException) -> None:
     """The backstop for failures outside the engine: retries until the wait can end."""
-    frame = TerminalFrame(status="failed", error_class=error_class)
+    frame = TerminalFrame(
+        status="failed",
+        error_class=type(error).__name__,
+        error_message=str(error)[:TERMINAL_ERROR_MESSAGE_MAX_CHARS] or None,
+    )
     delay = FAILED_TERMINAL_RETRY_SECONDS
     while True:
         try:
