@@ -21,7 +21,7 @@ from starlette.responses import Response
 from ufo.accounting import ModelPrice
 from ufo.browser import CdpProvider
 from ufo.candidates import WorkspaceCandidates
-from ufo.connectors import AuthProxy, ConnectorBroker
+from ufo.connectors import AuthProxy, CliCredential, ConnectorBroker
 from ufo.ext.context import CredentialAccess, ExtensionContext
 from ufo.ext.surface import SurfaceSpec
 from ufo.grants import OAuthProvider
@@ -101,13 +101,16 @@ class ConnectorProvider:
     additionally admits and meters (tunnelled, never injected), so the sandbox itself fetches a
     tool's presigned file outputs and stages its file inputs — bytes never cross the serve
     process. The tools join the turn's tool set scoped to the extension, so a connector call
-    reaches the provider host only for an agent the grant covers."""
+    reaches the provider host only for an agent the grant covers. `cli` authenticates the
+    provider's CLI at the egress proxy: the sandbox exports its env var with the grant's sentinel
+    and the proxy forwards a matching request through the broker under the granted account."""
 
     oauth: OAuthProvider
     label: str
     broker: ConnectorBroker
     tools: tuple[ToolDef, ...] = ()
     transfer_hosts: tuple[str, ...] = ()
+    cli: CliCredential | None = None
 
 
 @dataclass(frozen=True)

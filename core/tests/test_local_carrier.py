@@ -7,6 +7,7 @@ workspace. The last test proves the payoff — the sbxfs-backed file tools run t
 carrier with only a Python interpreter present, no container."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
 
@@ -120,3 +121,21 @@ async def test_file_tools_run_through_sbxfs_locally(tmp_path: Path) -> None:
 
     read = await session.run_sbxfs("read", {"path": "notes.txt"})
     assert "alpha" in json.dumps(read)
+
+
+async def test_exec_env_rides_the_handle_not_the_conversation(tmp_path: Path) -> None:
+    """Two turns can hold one conversation's workspace at once (a subagent beside its parent): each
+    exec runs under its own handle's run token and the spec's per-turn sentinel entries, so a later
+    create never re-points an earlier turn's egress attribution."""
+    carrier = LocalCarrier()
+    conversation = uuid4()
+    base = replace(_spec(tmp_path / "workspace"), conversation_id=conversation)
+    first = await carrier.create(replace(base, run_token="turn-a"))
+    second = await carrier.create(replace(base, run_token="turn-b", env={"GH_TOKEN": "sent-b"}))
+
+    probe = ("bash", "-lc", 'printf "%s|%s" "$HTTPS_PROXY" "${GH_TOKEN:-none}"')
+    result_a = await carrier.exec(first, probe, b"", 30)
+    result_b = await carrier.exec(second, probe, b"", 30)
+
+    assert result_a.stdout == f"http://turn-a:@127.0.0.1:{PROXY_PORT}|none"
+    assert result_b.stdout == f"http://turn-b:@127.0.0.1:{PROXY_PORT}|sent-b"

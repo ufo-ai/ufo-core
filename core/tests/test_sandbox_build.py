@@ -6,8 +6,10 @@ expected sets and the rendered Dockerfile is asserted to carry the whole install
 render targets (E2B template, Docker image) share `apply_layers`, so this offline check over the
 Dockerfile render also covers what the E2B template bakes."""
 
+import sandbox.build_template as build_template
 from sandbox.build_template import (
     APT_PACKAGES,
+    GH_INSTALL_COMMAND,
     NPM_PACKAGES,
     PIP_PACKAGES,
     RUNTIME_USER,
@@ -98,6 +100,7 @@ def test_ready_probe_checks_every_baked_entrypoint() -> None:
         "pdftotext",
         "pdftoppm",
         "soffice",
+        "gh",
     ):
         assert f"command -v {tool}" in SANDBOX_TEMPLATE_READY_COMMAND
     assert "chromium" in SANDBOX_TEMPLATE_READY_COMMAND
@@ -137,3 +140,18 @@ def test_build_definition_digest_is_stable_and_prefixed() -> None:
     digest = build_definition_digest()
     assert digest.startswith("sha256:")
     assert digest == build_definition_digest()
+
+
+def test_gh_installs_from_the_official_cli_repo() -> None:
+    """`gh` is the sandboxed GitHub CLI behind the grant-sentinel GH_TOKEN; it installs from
+    GitHub's own apt repo (the distro archives lag years behind), and pytest also imports this via
+    the drift digest so a dropped layer fails the publish gate."""
+    dockerfile = pod_dockerfile()
+    assert "cli.github.com/packages" in dockerfile
+    assert GH_INSTALL_COMMAND in dockerfile
+
+
+def test_gh_install_is_covered_by_the_drift_digest(monkeypatch) -> None:
+    before = build_definition_digest()
+    monkeypatch.setattr(build_template, "GH_INSTALL_COMMAND", "changed")
+    assert build_definition_digest() != before

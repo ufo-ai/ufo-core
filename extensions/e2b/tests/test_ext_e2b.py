@@ -687,3 +687,37 @@ def test_e2b_backend_with_plaintext_proxy_public_url_fails_closed(
 
     with pytest.raises(RuntimeError, match="HTTPS"):
         _select_carrier(config, (e2b_ext.manifest(),))
+
+
+async def test_exec_env_rides_the_handle_not_the_conversation() -> None:
+    """Two turns can hold the same conversation's sandbox at once (a subagent beside its parent):
+    each exec runs under its own handle's run token, so egress attribution never leaks across turns
+    and a later create never re-points an earlier turn's env."""
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    conversation = uuid4()
+    first = await carrier.create(replace(_spec(conversation), run_token="turn-a"))
+    second = await carrier.create(replace(_spec(conversation), run_token="turn-b"))
+
+    await carrier.exec(first, ("bash", "-lc", "true"), b"", 60)
+    await carrier.exec(second, ("bash", "-lc", "true"), b"", 60)
+
+    envs = sdk.sandboxes["sbx-1"].commands.envs
+    assert envs[-2] is not None and envs[-2]["HTTPS_PROXY"] == "https://turn-a:@sandbox-proxy.test"
+    assert envs[-1] is not None and envs[-1]["HTTPS_PROXY"] == "https://turn-b:@sandbox-proxy.test"
+
+
+async def test_spec_env_joins_the_exec_env() -> None:
+    """The engine's per-turn sentinel entries (a grant CLI credential like GH_TOKEN) ride the spec
+    onto the handle and into every exec of that turn."""
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    handle = await carrier.create(
+        replace(_spec(uuid4()), env={"GH_TOKEN": "UFO_SENTINEL_GRANT_acct-1"})
+    )
+
+    await carrier.exec(handle, ("bash", "-lc", "gh api user"), b"", 60)
+
+    envs = sdk.sandboxes["sbx-1"].commands.envs[-1]
+    assert envs is not None
+    assert envs["GH_TOKEN"] == "UFO_SENTINEL_GRANT_acct-1"

@@ -42,11 +42,15 @@ FILE_UPLOADABLE_KEY = "file_uploadable"
 class ConnectorSpec:
     """One brokered connector: the member-facing label, the Composio toolkit slug whose managed or
     custom OAuth config grants the account, and the provider's own API `host` the derived grant
-    admits and injects at the egress proxy — direct-provider-host, never Composio's backend."""
+    admits and injects at the egress proxy — direct-provider-host, never Composio's backend.
+    `cli_env` names the env var a provider CLI reads its token from (github's `GH_TOKEN`): the
+    sandbox exports the grant's sentinel there and the proxy forwards the matching request through
+    proxy-execute, so the CLI authenticates without the token ever existing on this deploy."""
 
     label: str
     toolkit: str
     host: str
+    cli_env: str | None = None
 
 
 @dataclass(frozen=True)
@@ -71,7 +75,7 @@ class ComposioUpload:
 
 
 CONNECTORS: dict[str, ConnectorSpec] = {
-    "github": ConnectorSpec("GitHub", "github", "api.github.com"),
+    "github": ConnectorSpec("GitHub", "github", "api.github.com", cli_env="GH_TOKEN"),
     "google_calendar": ConnectorSpec("Google Calendar", "googlecalendar", "www.googleapis.com"),
     "google_sheets": ConnectorSpec("Google Sheets", "googlesheets", "sheets.googleapis.com"),
     "google_drive": ConnectorSpec("Google Drive", "googledrive", "www.googleapis.com"),

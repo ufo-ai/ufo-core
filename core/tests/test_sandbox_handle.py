@@ -6,6 +6,7 @@ one a prior process created. Persist-on-create is proven against the real local 
 resume-read (the id core seeds and the write it skips when nothing changed) is asserted through the
 conversation row, with a stand-in carrier recording the spec core built for it."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,7 +15,9 @@ from uuid import UUID, uuid4
 import sqlalchemy as sa
 
 from ufo.blob import FilesystemBlobStore
+from ufo.connectors import CliCredential, ForwardedResponse
 from ufo.db import workspace_tx
+from ufo.grants import GrantStore, grant_sentinel
 from ufo.loop.queue import _open_sandbox
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint, SandboxHandle, SandboxSpec
@@ -102,7 +105,7 @@ async def test_open_sandbox_persists_the_backend_prefixed_handle(db: None, tmp_p
     blob = FilesystemBlobStore(root=tmp_path)
 
     handle = await _open_sandbox(
-        LocalCarrier(), "local", blob, None, PROXY, _turn(workspace_id, conversation_id)
+        LocalCarrier(), "local", blob, None, PROXY, _turn(workspace_id, conversation_id), None, {}
     )
 
     assert handle.container_id == "local"
@@ -118,7 +121,9 @@ async def test_open_sandbox_resumes_from_the_stored_handle_without_rewriting(
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
     blob = FilesystemBlobStore(root=tmp_path)
 
-    await _open_sandbox(carrier, "e2b", blob, None, PROXY, _turn(workspace_id, conversation_id))
+    await _open_sandbox(
+        carrier, "e2b", blob, None, PROXY, _turn(workspace_id, conversation_id), None, {}
+    )
 
     assert carrier.specs[0].resume_id == "sbx-1"
     assert await _stored_handle(conversation_id) == "e2b:sbx-1"
@@ -133,7 +138,123 @@ async def test_open_sandbox_ignores_a_handle_another_backend_wrote_and_overwrite
     carrier = _ResumeRecordingCarrier(container_id="sbx-9")
     blob = FilesystemBlobStore(root=tmp_path)
 
-    await _open_sandbox(carrier, "e2b", blob, None, PROXY, _turn(workspace_id, conversation_id))
+    await _open_sandbox(
+        carrier, "e2b", blob, None, PROXY, _turn(workspace_id, conversation_id), None, {}
+    )
 
     assert carrier.specs[0].resume_id is None
     assert await _stored_handle(conversation_id) == "e2b:sbx-9"
+
+
+@dataclass(frozen=True)
+class _NeverForwarder:
+    async def forward(
+        self, account_id: str, method: str, url: str, headers: Mapping[str, str], body: bytes
+    ) -> ForwardedResponse:
+        raise AssertionError("open_sandbox never forwards")
+
+
+HUB_CLI = CliCredential(env="HUB_TOKEN", header="authorization", forward=_NeverForwarder())
+
+
+async def _seed_grant(workspace_id: UUID, conversation_id: UUID, shared: bool) -> tuple[UUID, UUID]:
+    agent_id, member_id = uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="assistant",
+                prompt="p",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email="a@b.c",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    await GrantStore().record(
+        workspace_id=workspace_id,
+        agent_id=agent_id,
+        provider="hub",
+        account_id="acct-1",
+        host="api.hub.test",
+        grantor_member_id=member_id,
+        conversation_id=conversation_id,
+        shared=shared,
+    )
+    return agent_id, member_id
+
+
+async def test_open_sandbox_exports_the_acting_members_grant_sentinels(
+    db: None, tmp_path: Path
+) -> None:
+    """A turn whose acting member may use a connector-CLI grant gets that grant's sentinel in the
+    spec env (`HUB_TOKEN=<sentinel>`), so the CLI inside the sandbox authenticates and the proxy
+    forwards by the same sentinel. The engine and the proxy derive it independently from the grant —
+    no shared registration."""
+    workspace_id, conversation_id = await _conversation()
+    agent_id, member_id = await _seed_grant(workspace_id, conversation_id, shared=False)
+    carrier = _ResumeRecordingCarrier(container_id="sbx-1")
+    blob = FilesystemBlobStore(root=tmp_path)
+    turn = _turn(workspace_id, conversation_id).model_copy(
+        update={"agent_id": agent_id, "speaker_member_id": member_id}
+    )
+
+    await _open_sandbox(carrier, "e2b", blob, None, PROXY, turn, GrantStore(), {"hub": HUB_CLI})
+
+    assert carrier.specs[0].env == {"HUB_TOKEN": grant_sentinel("acct-1")}
+
+
+async def test_open_sandbox_exports_nothing_for_a_foreign_private_grant(
+    db: None, tmp_path: Path
+) -> None:
+    """A private grant of another member is not the turn's to use: a speakerless turn with no
+    on-behalf-of member exports no sentinel, so the CLI runs unauthenticated rather than drawing a
+    foreign account."""
+    workspace_id, conversation_id = await _conversation()
+    agent_id, _ = await _seed_grant(workspace_id, conversation_id, shared=False)
+    carrier = _ResumeRecordingCarrier(container_id="sbx-1")
+    blob = FilesystemBlobStore(root=tmp_path)
+    turn = _turn(workspace_id, conversation_id).model_copy(update={"agent_id": agent_id})
+
+    await _open_sandbox(carrier, "e2b", blob, None, PROXY, turn, GrantStore(), {"hub": HUB_CLI})
+
+    assert carrier.specs[0].env == {}
+
+
+async def test_open_sandbox_exports_nothing_when_the_account_is_ambiguous(
+    db: None, tmp_path: Path
+) -> None:
+    """A static env var names no account, so two usable accounts for one provider cannot be
+    disambiguated per request. Rather than silently pick one — diverging from `connector_account`,
+    which fails loud on ambiguity — the export is skipped, so the CLI fails visibly to authenticate
+    instead of acting as whichever account sorts first."""
+    workspace_id, conversation_id = await _conversation()
+    agent_id, member_id = await _seed_grant(workspace_id, conversation_id, shared=False)
+    await GrantStore().record(
+        workspace_id=workspace_id,
+        agent_id=agent_id,
+        provider="hub",
+        account_id="acct-2",
+        host="api.hub.test",
+        grantor_member_id=member_id,
+        conversation_id=conversation_id,
+        shared=False,
+    )
+    carrier = _ResumeRecordingCarrier(container_id="sbx-1")
+    blob = FilesystemBlobStore(root=tmp_path)
+    turn = _turn(workspace_id, conversation_id).model_copy(
+        update={"agent_id": agent_id, "speaker_member_id": member_id}
+    )
+
+    await _open_sandbox(carrier, "e2b", blob, None, PROXY, turn, GrantStore(), {"hub": HUB_CLI})
+
+    assert carrier.specs[0].env == {}

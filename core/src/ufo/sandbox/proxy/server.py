@@ -2,20 +2,24 @@
 
 The sandbox reaches the network solely through this proxy (its HTTP(S)_PROXY). The rule set is
 resolved per request from the run token in the `Proxy-Authorization` header — the turn, hence the
-turn's agent — so a sandbox sees only its own agent's egress: the workspace's model and credential
-rules plus that agent's OAuth grants, derived fresh (never registered) and cached per turn. A run
-with no or unknown token resolves to the model and credential base alone — never a broad allow.
+turn's agent and acting member — so a sandbox sees only its own agent's egress: the workspace's
+model and credential rules plus that agent's OAuth grants, derived fresh (never registered) and
+cached per turn. A run with no or unknown token resolves to the model and credential base alone —
+never a broad allow.
 
 Default-deny is a CONNECT the proxy refuses: a host no resolved ScopeRule admits gets a 403 and
-never leaves the machine. An admitted host carrying an InjectionRule is MITM'd — but only for a
-turn the DB still reports running: the injection swaps in the real model or credential key, so a
-tokenless, unknown-turn, or terminal-turn CONNECT to a keyed host is refused (403) and the key
-never reaches the wire (the gate the local carrier leans on — a host process can reach the proxy
-directly). Authorized, the proxy terminates TLS with a leaf minted from the per-process CA (in the
-container's trust store), swaps the sentinel Authorization value the sandbox sees for the real
-credential (selecting by the exact sentinel, so two accounts on one host each draw only their own
-token and a foreign sentinel is passed upstream untouched), and re-originates over its own verified
-TLS, so the raw key is never inside the sandbox. An admitted host with no InjectionRule is tunnelled
+never leaves the machine. An admitted host carrying an InjectionRule or ForwardRule is MITM'd — but
+only for a turn the DB still reports running: the injection swaps in the real model or credential
+key, so a tokenless, unknown-turn, or terminal-turn CONNECT to a keyed host is refused (403) and
+the key never reaches the wire (the gate the local carrier leans on — a host process can reach the
+proxy directly). Authorized, the proxy terminates TLS with a leaf minted from the per-process CA
+(in the container's trust store) and dispatches on what the request carries: a grant sentinel in a
+ForwardRule's header executes through the grant's broker under the granted account (the credential
+exists only broker-side — the wire analog of a connector tool call); otherwise the sentinel
+Authorization value is swapped for the real credential (selecting by the exact sentinel, so two
+accounts on one host each draw only their own token and a foreign sentinel is passed upstream
+untouched) and the request re-originates over its own verified TLS, so the raw key is never inside
+the sandbox. An admitted host with neither rule kind is tunnelled
 opaquely — a grant injects nothing, so its host is reached opaquely yet still counted. Each metered
 host emits an egress metric and, off the relay path, writes an `egress` request row to the ledger
 keyed to the turn — per CONNECT for a tunnelled host, per MITM'd request otherwise — except the
@@ -29,6 +33,7 @@ import ssl
 import tempfile
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from http import HTTPStatus
 from pathlib import Path
 from uuid import UUID
 
@@ -41,16 +46,19 @@ from ufo.accounting import (
     record_egress_request,
     record_sandbox_tokens,
 )
+from ufo.connectors import CliCredential, ForwardedResponse
 from ufo.db import workspace_tx
 from ufo.grants import GrantStore
 from ufo.o11y import emit_metric, log
 from ufo.sandbox.proxy.rules import (
     ANTHROPIC_HOST,
     OPENAI_HOST,
+    ForwardRule,
     InjectionRule,
     MeterRule,
     Rule,
     ScopeRule,
+    derive_cli_rules,
     derive_grant_rules,
 )
 from ufo.sandbox.session import ProxyEndpoint, RunToken
@@ -66,6 +74,7 @@ CA_VALID_DAYS = "3650"
 LEAF_VALID_DAYS = "365"
 RULE_CACHE_MAX = 4096
 MAX_SSE_BUFFER_BYTES = 1_048_576
+MAX_FORWARD_BODY_BYTES = 1_048_576
 
 RuleResolver = Callable[["RunToken | None"], Awaitable[tuple[Rule, ...]]]
 TurnAuthorizer = Callable[["RunToken"], Awaitable[bool]]
@@ -120,26 +129,48 @@ class PerAgentRules:
     base: tuple[Rule, ...]
     grants: GrantStore | None
     transfer_hosts: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    clis: Mapping[str, CliCredential] = field(default_factory=dict)
 
     async def resolve(self, run: RunToken | None) -> tuple[Rule, ...]:
         if run is None or self.grants is None:
             return self.base
-        agent_id = await self._agent_of(run)
-        if agent_id is None:
+        turn = await self._turn_of(run)
+        if turn is None:
             return self.base
+        agent_id, acting_member_id = turn
         granted = await self.grants.active_grants(run.workspace_id, agent_id)
-        return (*self.base, *derive_grant_rules(granted, self.transfer_hosts))
+        return (
+            *self.base,
+            *derive_grant_rules(granted, self.transfer_hosts),
+            *derive_cli_rules(granted, acting_member_id, self.clis),
+        )
 
-    async def _agent_of(self, run: RunToken) -> UUID | None:
+    async def _turn_of(self, run: RunToken) -> tuple[UUID, UUID | None] | None:
+        """The turn's agent and acting member — the speaker when one authored the turn, else the
+        member it acts on behalf of (a scheduled fire, a subagent chain) — in one indexed read.
+        CLI-credential use gates on the acting member exactly as connector tools do, so a member's
+        private grant forwards only on their own turns."""
         async with workspace_tx() as connection:
-            return (
+            row = (
                 await connection.execute(
-                    sa.select(tables.turn.c.agent_id).where(
+                    sa.select(
+                        tables.turn.c.agent_id,
+                        tables.turn.c.speaker_member_id,
+                        tables.turn.c.on_behalf_of_member_id,
+                    ).where(
                         tables.turn.c.id == run.turn_id,
                         tables.turn.c.workspace_id == run.workspace_id,
                     )
                 )
-            ).scalar_one_or_none()
+            ).one_or_none()
+        if row is None:
+            return None
+        acting = (
+            row.speaker_member_id
+            if row.speaker_member_id is not None
+            else row.on_behalf_of_member_id
+        )
+        return row.agent_id, acting
 
     async def turn_live(self, run: RunToken) -> bool:
         """The egress-authorization gate: True only while the run token names a turn the DB still
@@ -228,12 +259,15 @@ class EgressProxy:
                 return
             port = int(port_text or DEFAULT_HTTPS_PORT)
             injections = [r for r in rules if isinstance(r, InjectionRule) and r.host == host]
-            if not injections:
+            forwards = [r for r in rules if isinstance(r, ForwardRule) and r.host == host]
+            if not injections and not forwards:
                 await self._tunnel(reader, writer, host, port, proxy_auth, rules)
             elif run is None or not await self.authorize(run):
                 await _respond(writer, 403, f"egress to {host} requires a live turn")
             else:
-                await self._mitm(reader, writer, host, port, injections, proxy_auth, rules)
+                await self._mitm(
+                    reader, writer, host, port, injections, forwards, proxy_auth, rules
+                )
         finally:
             writer.close()
 
@@ -293,16 +327,26 @@ class EgressProxy:
         host: str,
         port: int,
         injections: list[InjectionRule],
+        forwards: list[ForwardRule],
         proxy_auth: str,
         rules: tuple[Rule, ...],
     ) -> None:
-        """Terminate the sandbox's TLS with a minted leaf, swap the sentinel the sandbox sent for
-        its account's real key (selected among this host's injections by the exact sentinel), and
-        re-originate the request upstream over verified TLS — the response streams straight back."""
+        """Terminate the sandbox's TLS with a minted leaf and dispatch on what the request carries:
+        a grant sentinel in a ForwardRule's header executes through that grant's broker (the
+        credential is injected server-side, never here); otherwise the sentinel Authorization value
+        is swapped for its account's real key (selected among this host's injections by the exact
+        sentinel) and the request re-originates upstream over verified TLS — the response streams
+        straight back."""
         leaf_context = await self._leaf_context(host)
         client_reader, client_writer = await _start_tls_server(reader, writer, leaf_context)
         request = await _read_request_head(client_reader)
         if request is None:
+            return
+        matched = _forward_match(request[1], forwards)
+        if matched is not None:
+            await self._forward_broker(
+                client_reader, client_writer, matched, request, host, proxy_auth, rules
+            )
             return
         try:
             upstream_reader, upstream_writer = await asyncio.wait_for(
@@ -330,6 +374,50 @@ class EgressProxy:
             client_reader, client_writer, upstream_reader, upstream_writer, accumulator.feed
         )
         self._meter_tokens(proxy_auth, accumulator)
+
+    async def _forward_broker(
+        self,
+        client_reader: asyncio.StreamReader,
+        client_writer: asyncio.StreamWriter,
+        rule: ForwardRule,
+        request: tuple[bytes, list[bytes]],
+        host: str,
+        proxy_auth: str,
+        rules: tuple[Rule, ...],
+    ) -> None:
+        """Execute one sentinel-carrying request through the grant's broker instead of
+        re-originating it — the wire analog of a connector tool call, so the account's credential
+        exists only broker-side. The body is read whole and bounded (the broker call is one
+        enveloped API request, never a stream), the sentinel header stays here, and the provider's
+        reconstructed response is written back with `connection: close` so the next request is a
+        fresh MITM that re-matches its own sentinel. A broker fault answers 502 — the client's
+        wait always ends."""
+        request_line, headers = request
+        method, _, rest = request_line.decode(errors="replace").partition(" ")
+        path = rest.split(" ", 1)[0]
+        body = await _read_request_body(client_reader, headers)
+        if body is None:
+            await _respond(client_writer, 413, "forwarded request body is chunked or too large")
+            return
+        self._meter(host, rules)
+        self._meter_ledger(host, proxy_auth, rules)
+        try:
+            response = await rule.forward.forward(
+                rule.account_id,
+                method,
+                f"https://{host}{path}",
+                _forward_headers(headers, rule),
+                body,
+            )
+        except Exception as error:
+            log("egress.forward_failed", host=host, error_class=type(error).__name__)
+            await _respond(client_writer, 502, "broker forward failed")
+            return
+        try:
+            client_writer.write(_forward_response_bytes(response))
+            await client_writer.drain()
+        except OSError:
+            pass
 
     async def _leaf_context(self, host: str) -> ssl.SSLContext:
         cached = self._contexts.get(host)
@@ -467,6 +555,90 @@ async def _read_request_head(
             return None
         headers.append(line)
     return request_line, headers
+
+
+def _forward_match(headers: list[bytes], candidates: list[ForwardRule]) -> ForwardRule | None:
+    """The ForwardRule whose grant sentinel this request carries: the rule's header holds the
+    sentinel exactly, or scheme-prefixed (`token <sentinel>`, `Bearer <sentinel>`) as CLIs send
+    auth. Selection is by the exact sentinel, so two accounts on one host each draw only their own
+    grant, and a request with no sentinel falls through to the direct upstream path."""
+    for line in headers:
+        name, _, value = line.partition(b":")
+        header = name.strip().lower()
+        tokens = value.split()
+        if not tokens or len(tokens) > 2:
+            continue
+        for rule in candidates:
+            if header == rule.header.encode().lower() and tokens[-1] == rule.sentinel.encode():
+                return rule
+    return None
+
+
+async def _read_request_body(reader: asyncio.StreamReader, headers: list[bytes]) -> bytes | None:
+    """The whole body of a broker-forwarded request, bounded next to the one external call that
+    sends it — the broker takes an enveloped API request, never a stream. A chunked, over-bound,
+    negative-length, or truncated body answers None and the request is refused, never silently
+    clipped — a negative length would otherwise reach `readexactly`, whose ValueError escapes the
+    caller's IncompleteReadError guard and drops the connection with no response."""
+    length = 0
+    for line in headers:
+        name, _, value = line.partition(b":")
+        match name.strip().lower():
+            case b"content-length":
+                try:
+                    length = int(value.strip())
+                except ValueError:
+                    return None
+            case b"transfer-encoding":
+                return None
+    if length == 0:
+        return b""
+    if length < 0 or length > MAX_FORWARD_BODY_BYTES:
+        return None
+    try:
+        return await reader.readexactly(length)
+    except asyncio.IncompleteReadError:
+        return None
+
+
+def _forward_headers(headers: list[bytes], rule: ForwardRule) -> dict[str, str]:
+    """The request headers the broker forwards on: everything the client sent minus the
+    sentinel-bearing header (the broker injects the real credential), the hop-by-hop connection
+    headers this proxy owns, and host/content-length, which the broker's own client re-derives."""
+    dropped = {b"connection", b"proxy-connection", b"host", b"content-length"}
+    dropped.add(rule.header.encode().lower())
+    forwarded: dict[str, str] = {}
+    for line in headers:
+        name, _, value = line.partition(b":")
+        if name.strip().lower() in dropped:
+            continue
+        forwarded[name.strip().decode("latin-1")] = value.strip().decode("latin-1")
+    return forwarded
+
+
+def _forward_response_bytes(response: ForwardedResponse) -> bytes:
+    """The provider response as one HTTP/1.1 exchange: the broker's reconstructed status and
+    headers, the body length this proxy measured, and `connection: close` so the client re-CONNECTs
+    for its next request. The broker's headers come from the provider's JSON envelope with no wire
+    validation, so any header whose name or value carries a CR or LF is dropped — it would otherwise
+    split the response written back into the sandbox's TLS stream (header injection)."""
+    try:
+        reason = HTTPStatus(response.status).phrase
+    except ValueError:
+        reason = ""
+    dropped = {"content-length", "transfer-encoding", "content-encoding", "connection"}
+    head = bytearray(f"HTTP/1.1 {response.status} {reason}".rstrip().encode() + b"\r\n")
+    for name, value in response.headers.items():
+        if name.lower() in dropped or _has_crlf(name) or _has_crlf(value):
+            continue
+        head += f"{name}: {value}".encode() + b"\r\n"
+    head += b"content-length: " + str(len(response.body)).encode() + b"\r\n"
+    head += b"connection: close\r\n\r\n"
+    return bytes(head) + response.body
+
+
+def _has_crlf(value: str) -> bool:
+    return "\r" in value or "\n" in value
 
 
 def _run_token(proxy_auth: str) -> RunToken | None:

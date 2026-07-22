@@ -187,6 +187,39 @@ class ConnectorBroker(Protocol):
 
 
 @dataclass(frozen=True)
+class ForwardedResponse:
+    """What a broker answered for one forwarded provider request: the provider's status, headers,
+    and body, reconstructed for the egress proxy to write back to the sandbox verbatim."""
+
+    status: int
+    headers: Mapping[str, str]
+    body: bytes
+
+
+class RequestForwarder(Protocol):
+    """Executes one provider HTTP request through the broker under a granted account — the broker
+    injects the account's credential server-side, so no token ever reaches this deploy or the wire
+    the sandbox sees. The egress proxy calls this for a MITM'd request whose auth header carries
+    the grant's sentinel."""
+
+    async def forward(
+        self, account_id: str, method: str, url: str, headers: Mapping[str, str], body: bytes
+    ) -> ForwardedResponse: ...
+
+
+@dataclass(frozen=True)
+class CliCredential:
+    """A provider CLI authenticated at the egress proxy, declared by the connector that knows the
+    provider: `env` is the variable the sandbox exports with the grant's sentinel so the CLI sends
+    it as ordinary auth, `header` is the request header that carries it on the wire, and `forward`
+    executes the matched request through the broker under the granted account."""
+
+    env: str
+    header: str
+    forward: RequestForwarder
+
+
+@dataclass(frozen=True)
 class ConnectorEntry:
     """One installed connector as the registry holds it: the provider name that keys it, the
     member-facing label the discovery tool lists, and the broker that serves it."""

@@ -17,7 +17,15 @@ from ufo_ext_docker import DockerCarrier
 from ufo.blob import FilesystemBlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
 from ufo.sandbox.fs_creds import SandboxFsCredentials
-from ufo.sdk.sandbox import WORKSPACE_DIR, MountSpec, SandboxHandle, mount_health_check
+from ufo.sdk.sandbox import (
+    SENTINEL_MODEL_KEY,
+    WORKSPACE_DIR,
+    MountSpec,
+    ProxyEndpoint,
+    SandboxHandle,
+    SandboxSpec,
+    mount_health_check,
+)
 from ufo.serve import _select_carrier
 
 _S3_CREDS = SandboxFsCredentials("AKIASBX", "sbx-secret", "sbx-token")
@@ -151,12 +159,14 @@ async def test_attach_skips_the_remount_only_when_the_shared_probe_passes(
     assert calls == [("exec", "-i", "c1", "sh", "-c", mount_health_check(WORKSPACE_DIR))]
 
 
-async def test_s3fs_mount_exec_clears_the_proxy_env_but_the_health_check_does_not(
+async def test_s3fs_mount_execs_run_without_the_agent_egress_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """s3fs is framework infrastructure, not agent egress: the container-wide default-deny proxy
-    would fail its S3 CONNECT, so the mount exec (only) clears HTTP(S)_PROXY. The scoped credential,
-    not the proxy, confines the mount — as in metalcraft's `run s3fs without the egress proxy`."""
+    """s3fs is framework infrastructure, not agent egress: the default-deny proxy would fail its S3
+    CONNECT, so no exec in the mount path carries the agent's egress env — the scoped credential,
+    not the proxy, confines the mount. The handle here carries a populated egress env, so the
+    assertion is non-vacuous: it would fail if `_mount_s3` ever threaded `handle.egress_env` onto a
+    mount exec the way `exec` does."""
     calls: list[tuple[str, ...]] = []
 
     async def fake_docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60):
@@ -174,12 +184,110 @@ async def test_s3fs_mount_exec_clears_the_proxy_env_but_the_health_check_does_no
         region="us-east-1",
         path_style=True,
     )
-    handle = SandboxHandle(conversation_id=conversation, container_id="c1", mount=mount)
+    handle = SandboxHandle(
+        conversation_id=conversation,
+        container_id="c1",
+        mount=mount,
+        egress_env={
+            "HTTPS_PROXY": "http://turn-a:@host.docker.internal:8080",
+            "GH_TOKEN": "UFO_SENTINEL_GRANT_acct-1",
+        },
+    )
 
     await DockerCarrier()._mount_s3(handle, mount)
 
-    proxy_cleared = ("HTTP_PROXY=", "HTTPS_PROXY=", "http_proxy=", "https_proxy=")
-    mount_exec = next(argv for argv in calls if any("s3fs" in arg for arg in argv))
-    assert all(cleared in mount_exec for cleared in proxy_cleared)
-    health_check = next(argv for argv in calls if any("mountpoint" in arg for arg in argv))
-    assert not any(cleared in health_check for cleared in proxy_cleared)
+    flat = [arg for argv in calls for arg in argv]
+    assert any("s3fs" in arg for arg in flat)
+    assert "--env" not in flat
+    assert not any("HTTPS_PROXY" in arg or "GH_TOKEN" in arg for arg in flat)
+
+
+async def test_exec_carries_the_turn_env_and_run_bakes_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The run token and sentinel env belong to the turn, not the container: `docker run` bakes no
+    egress env (a container outliving its first turn must not pin that turn's token), and every
+    `docker exec` carries its own handle's env — proxy URL with the turn's token, model sentinels,
+    and the spec's per-turn sentinel entries."""
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60):
+        calls.append(argv)
+        if argv[0] == "run":
+            return 0, b"cid1\n", b""
+        return 0, b"", b""
+
+    monkeypatch.setattr(docker_ext, "_docker", fake_docker)
+    spec = SandboxSpec(
+        conversation_id=uuid4(),
+        image_ref="ufo-sandbox:latest",
+        mount=MountSpec(kind="filesystem", host_path="/tmp/ws"),
+        proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem"),
+        run_token="turn-a",
+        env={"GH_TOKEN": "UFO_SENTINEL_GRANT_acct-1"},
+    )
+    carrier = DockerCarrier()
+    handle = await carrier.create(spec)
+
+    run_argv = next(argv for argv in calls if argv[0] == "run")
+    assert "--env" not in run_argv
+
+    await carrier.exec(handle, ("bash", "-lc", "gh api user"), b"", 30)
+
+    exec_argv = calls[-1]
+    proxy_url = "http://turn-a:@host.docker.internal:8080"
+    assert f"HTTPS_PROXY={proxy_url}" in exec_argv
+    assert f"https_proxy={proxy_url}" in exec_argv
+    assert f"ANTHROPIC_API_KEY={SENTINEL_MODEL_KEY}" in exec_argv
+    assert "GH_TOKEN=UFO_SENTINEL_GRANT_acct-1" in exec_argv
+    assert exec_argv.index("cid1") > exec_argv.index(f"HTTPS_PROXY={proxy_url}")
+
+
+async def test_attach_to_a_running_container_carries_the_second_turns_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The #507 bug lived in the attach branch: a later turn reusing a still-running container ran
+    under the first turn's baked env. Now the second `create` (which hits `running is not None`)
+    returns a handle whose `exec` carries the second turn's token and sentinels, not the first's —
+    the env lives on the per-turn handle, never on the container."""
+    running: list[str] = []
+
+    async def fake_docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60):
+        if argv[0] == "run":
+            running.append("cid1")
+            return 0, b"cid1\n", b""
+        if argv[0] == "ps":
+            return 0, (b"cid1\n" if running else b""), b""
+        return 0, b"", b""
+
+    monkeypatch.setattr(docker_ext, "_docker", fake_docker)
+    conversation = uuid4()
+
+    def _spec(run_token: str, env: dict[str, str]) -> SandboxSpec:
+        return SandboxSpec(
+            conversation_id=conversation,
+            image_ref="ufo-sandbox:latest",
+            mount=MountSpec(kind="filesystem", host_path="/tmp/ws"),
+            proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem"),
+            run_token=run_token,
+            env=env,
+        )
+
+    carrier = DockerCarrier()
+    await carrier.create(_spec("turn-a", {"GH_TOKEN": "UFO_SENTINEL_GRANT_acct-a"}))
+    second = await carrier.create(_spec("turn-b", {"GH_TOKEN": "UFO_SENTINEL_GRANT_acct-b"}))
+
+    exec_calls: list[tuple[str, ...]] = []
+
+    async def record_docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60):
+        exec_calls.append(argv)
+        return 0, b"", b""
+
+    monkeypatch.setattr(docker_ext, "_docker", record_docker)
+    await carrier.exec(second, ("bash", "-lc", "gh api user"), b"", 30)
+
+    exec_argv = exec_calls[-1]
+    assert "HTTPS_PROXY=http://turn-b:@host.docker.internal:8080" in exec_argv
+    assert "GH_TOKEN=UFO_SENTINEL_GRANT_acct-b" in exec_argv
+    assert "HTTPS_PROXY=http://turn-a:@host.docker.internal:8080" not in exec_argv
+    assert "GH_TOKEN=UFO_SENTINEL_GRANT_acct-a" not in exec_argv

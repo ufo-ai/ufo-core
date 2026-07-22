@@ -174,7 +174,6 @@ class E2BCarrier:
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
     sdk: E2BSdk = E2B_SDK
     _live: dict[UUID, E2BSandbox] = field(default_factory=dict)
-    _egress: dict[UUID, dict[str, str]] = field(default_factory=dict)
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         live = self._live.get(spec.conversation_id)
@@ -197,18 +196,14 @@ class E2BCarrier:
             )
             await asyncio.to_thread(sandbox.files.make_dir, WORKSPACE_DIR)
         self._live[spec.conversation_id] = sandbox
-        # Write the proxy CA and (re)build the turn's egress env on every create — a resume (in this
-        # process or a prior one's, reconnected from spec.resume_id) picks up the configured CA and
-        # this turn's run token, so exec never reads a missing _egress: create is the one place that
-        # seeds it and every turn opens through create.
         await self._install_ca(sandbox, spec.proxy.ca_cert)
-        self._egress[spec.conversation_id] = _egress_env(spec.proxy, spec.run_token)
         await self._mount_s3(sandbox, spec.mount)
         return SandboxHandle(
             conversation_id=spec.conversation_id,
             container_id=sandbox.sandbox_id,
             mount=spec.mount,
             traffic_token=sandbox.traffic_access_token,
+            egress_env={**_egress_env(spec.proxy, spec.run_token), **spec.env},
         )
 
     async def _install_ca(self, sandbox: E2BSandbox, ca_cert: str) -> None:
@@ -233,7 +228,7 @@ class E2BCarrier:
         the root `prepare` and the agent `mount` through the sync SDK off the loop — the privileged
         prepare runs as root, the s3fs mount as the agent. These steps pass no egress env, so s3fs
         reaches S3 directly with its own scoped credential — never through the agent's egress proxy,
-        whose default-deny rules would refuse the S3 host at CONNECT (docker's PROXY_CLEAR_ARGS)."""
+        whose default-deny rules would refuse the S3 host at CONNECT."""
         if mount.kind != "s3":
             return
         if await self._mount_healthy(sandbox):
@@ -298,7 +293,7 @@ class E2BCarrier:
                 sandbox.commands.run,
                 command,
                 cwd=WORKSPACE_DIR,
-                envs={**SANDBOX_ENV, **self._egress[handle.conversation_id]},
+                envs={**SANDBOX_ENV, **handle.egress_env},
                 timeout=timeout_s,
             )
         except CommandExitException as error:
@@ -338,7 +333,6 @@ class E2BCarrier:
         no-container reap) connects to nothing and is a no-op that never raises. A sandbox already
         gone (paused past e2b's own retention, or reaped by a concurrent process) raises
         SandboxNotFoundException on reconnect — also a no-op, since nothing is left to pause."""
-        self._egress.pop(handle.conversation_id, None)
         live = self._live.pop(handle.conversation_id, None)
         if live is None and handle.container_id:
             try:

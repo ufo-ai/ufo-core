@@ -7,7 +7,8 @@ tool. The invariant the session exists to hold: a tool reaches only the conversa
 
 import base64
 import json
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Protocol
 from uuid import UUID
@@ -107,20 +108,24 @@ class SandboxSpec:
     proxy: ProxyEndpoint
     run_token: str
     resume_id: str | None = None
+    env: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class SandboxHandle:
     """An opaque reference to a created-or-attached container; the carrier reads it, not tools. It
     carries the workspace `mount` so the carrier can stream a produced file straight out of the
-    mount on `export` without a whole-file read across the boundary, and the `traffic_token` a
+    mount on `export` without a whole-file read across the boundary, the `traffic_token` a
     carrier that gates its public per-port host behind one (e2b) sets at create so a caller dialing
-    `host` carries it as a connection header."""
+    `host` carries it as a connection header, and the turn's `egress_env` — the run-token proxy URL
+    and sentinel entries the carrier built from the spec at create — applied to every exec, so a
+    container shared across turns never runs a command under another turn's token."""
 
     conversation_id: UUID
     container_id: str
     mount: MountSpec | None = None
     traffic_token: str | None = None
+    egress_env: Mapping[str, str] = field(default_factory=dict)
 
 
 SANDBOX_HANDLE_SEP = ":"

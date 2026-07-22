@@ -1,22 +1,37 @@
 import asyncio
 import base64
 import socket
+import ssl
 import struct
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import NamedTuple
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from cryptography import x509
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from ufo.connectors import CliCredential, ForwardedResponse
 from ufo.db import workspace_tx
-from ufo.sandbox.proxy.rules import OPENAI_HOST, InjectionRule, MeterRule, ScopeRule
+from ufo.grants import GrantStore, grant_sentinel
+from ufo.sandbox.proxy.rules import (
+    OPENAI_HOST,
+    ForwardRule,
+    InjectionRule,
+    MeterRule,
+    ScopeRule,
+)
 from ufo.sandbox.proxy.server import (
     EgressProxy,
     PerAgentRules,
     SseTokenUsage,
+    _forward_match,
+    _forward_response_bytes,
     _inject,
+    _read_request_body,
     _relay,
     generate_ca,
 )
@@ -136,7 +151,17 @@ async def test_a_resolution_error_fails_closed_to_base_and_is_not_cached() -> No
     assert await proxy._rules_for(run) == granted
 
 
-async def _seed_turn(connection: AsyncConnection, status: str = "running") -> tuple[UUID, UUID]:
+class _Seeded(NamedTuple):
+    workspace_id: UUID
+    turn_id: UUID
+    agent_id: UUID
+    member_id: UUID
+    conversation_id: UUID
+
+
+async def _seed_turn(
+    connection: AsyncConnection, status: str = "running", speaker: bool = False
+) -> _Seeded:
     workspace_id, member_id, agent_id, conversation_id, turn_id = (uuid4() for _ in range(5))
     await connection.execute(
         sa.insert(tables.workspace).values(
@@ -184,12 +209,13 @@ async def _seed_turn(connection: AsyncConnection, status: str = "running") -> tu
             seq=1,
             status=status,
             inbound="hi",
+            speaker_member_id=member_id if speaker else None,
             terminal=terminal,
             created_at=sa.func.now(),
             updated_at=sa.func.now(),
         )
     )
-    return workspace_id, turn_id
+    return _Seeded(workspace_id, turn_id, agent_id, member_id, conversation_id)
 
 
 async def test_concurrent_first_contact_mints_one_leaf_per_host() -> None:
@@ -244,7 +270,7 @@ async def test_the_ca_and_leaf_outlive_a_long_running_process() -> None:
 
 async def test_egress_write_attributes_a_row_to_the_turn(db: None) -> None:
     async with workspace_tx() as connection:
-        workspace_id, turn_id = await _seed_turn(connection)
+        workspace_id, turn_id, *_ = await _seed_turn(connection)
     proxy = _egress(_fixed())
     await proxy._write_egress(SEARCH_HOST, _basic(RunToken(workspace_id, turn_id).encode()))
     async with workspace_tx() as connection:
@@ -260,7 +286,7 @@ async def test_egress_write_attributes_a_row_to_the_turn(db: None) -> None:
 
 async def test_meter_ledger_meters_credential_host_and_skips_model_host(db: None) -> None:
     async with workspace_tx() as connection:
-        workspace_id, turn_id = await _seed_turn(connection)
+        workspace_id, turn_id, *_ = await _seed_turn(connection)
     rules = (
         MeterRule(host=SEARCH_HOST, dimension="search"),
         MeterRule(host=MODEL_HOST, dimension="tokens"),
@@ -364,8 +390,8 @@ async def test_keyed_host_connect_denied_without_a_live_turn(db: None) -> None:
     for a turn that has ended, and a token for a turn that never existed are each refused at 403 and
     never reach `_mitm`, so the real key never leaves the proxy."""
     async with workspace_tx() as connection:
-        workspace_id, running_turn = await _seed_turn(connection)
-        _, ended_turn = await _seed_turn(connection, status="done")
+        workspace_id, running_turn, *_ = await _seed_turn(connection)
+        _, ended_turn, *_ = await _seed_turn(connection, status="done")
     base = (
         ScopeRule(allowed_hosts=frozenset({MODEL_HOST})),
         InjectionRule(host=MODEL_HOST, header="x-api-key", sentinel="s", real="REAL-KEY"),
@@ -392,7 +418,7 @@ async def test_tunnel_meters_a_granted_host(db: None) -> None:
     ledger row keyed to the turn, metered at CONNECT granularity since the opaque tunnel hides the
     individual requests inside it."""
     async with workspace_tx() as connection:
-        workspace_id, turn_id = await _seed_turn(connection)
+        workspace_id, turn_id, *_ = await _seed_turn(connection)
 
     async def upstream(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         writer.close()
@@ -533,7 +559,7 @@ async def test_relay_tees_the_full_body_to_the_client_while_metering_usage() -> 
 
 async def test_model_host_relay_meters_sandbox_tokens_to_the_turn(db: None) -> None:
     async with workspace_tx() as connection:
-        workspace_id, turn_id = await _seed_turn(connection)
+        workspace_id, turn_id, *_ = await _seed_turn(connection)
     proxy = _egress(_fixed())
     accumulator = SseTokenUsage(MODEL_HOST)
     accumulator.feed(ANTHROPIC_SSE)
@@ -563,7 +589,7 @@ async def test_model_host_relay_meters_a_non_streaming_json_body(db: None) -> No
     """A non-streaming single-JSON completion is metered through the same path as an SSE stream: the
     teed body's top-level usage is parsed and written under `sandbox_tokens`, so it is not free."""
     async with workspace_tx() as connection:
-        workspace_id, turn_id = await _seed_turn(connection)
+        workspace_id, turn_id, *_ = await _seed_turn(connection)
     proxy = _egress(_fixed())
     accumulator = SseTokenUsage(MODEL_HOST)
     accumulator.feed(ANTHROPIC_JSON_BODY)
@@ -591,7 +617,7 @@ async def test_model_host_relay_meters_a_non_streaming_json_body(db: None) -> No
 
 async def test_model_host_relay_skips_when_no_usage_is_reported(db: None) -> None:
     async with workspace_tx() as connection:
-        workspace_id, turn_id = await _seed_turn(connection)
+        workspace_id, turn_id, *_ = await _seed_turn(connection)
     proxy = _egress(_fixed())
     accumulator = SseTokenUsage(MODEL_HOST)
     accumulator.feed(b'data: {"type":"content_block_delta","delta":{"text":"hi"}}\n\n')
@@ -607,3 +633,197 @@ async def test_model_host_relay_skips_when_no_usage_is_reported(db: None) -> Non
             )
         ).scalar_one()
     assert count == 0
+
+
+FORWARD_HOST = "api.hub.test"
+
+
+@dataclass
+class _RecordingForwarder:
+    """A real RequestForwarder standing in for the broker dependency: it records the one call the
+    proxy makes and answers a canned provider response, so the assertion reads what crossed the
+    seam — never a mock's own bookkeeping."""
+
+    calls: list[tuple[str, str, str, dict[str, str], bytes]] = field(default_factory=list)
+
+    async def forward(
+        self, account_id: str, method: str, url: str, headers: Mapping[str, str], body: bytes
+    ) -> ForwardedResponse:
+        self.calls.append((account_id, method, url, dict(headers), body))
+        return ForwardedResponse(
+            status=201,
+            headers={"content-type": "application/json", "x-hub": "yes"},
+            body=b'{"login":"me"}',
+        )
+
+
+def _forward_rule(forwarder: _RecordingForwarder, account: str = "acct-1") -> ForwardRule:
+    return ForwardRule(
+        host=FORWARD_HOST,
+        header="authorization",
+        sentinel=grant_sentinel(account),
+        account_id=account,
+        forward=forwarder,
+    )
+
+
+async def test_a_sentinel_cli_request_forwards_through_the_broker(db: None) -> None:
+    """The wire analog of a connector tool call, end to end over real sockets: the sandbox CONNECTs
+    with its live turn's token, the proxy MITMs the granted host, and the request whose auth header
+    carries the grant sentinel is executed through the broker under the granted account — the
+    provider response streams back, the auth header never leaves the proxy, and the request is
+    metered to the turn."""
+    async with workspace_tx() as connection:
+        workspace_id, turn_id, *_ = await _seed_turn(connection)
+    forwarder = _RecordingForwarder()
+    sentinel = grant_sentinel("acct-1")
+    rules = (
+        ScopeRule(allowed_hosts=frozenset({FORWARD_HOST})),
+        MeterRule(host=FORWARD_HOST, dimension="requests"),
+        _forward_rule(forwarder),
+    )
+    cert, key = await generate_ca()
+    proxy = _egress(_fixed(rules), ca_cert=cert, ca_key=key)
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    token = RunToken(workspace_id, turn_id).encode()
+    body = b'{"title":"hi"}'
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", endpoint.port)
+        writer.write(
+            f"CONNECT {FORWARD_HOST}:443 HTTP/1.1\r\n"
+            f"Proxy-Authorization: {_basic(token)}\r\n\r\n".encode()
+        )
+        await writer.drain()
+        assert b"200" in await reader.readline()
+        while (await reader.readline()) not in (b"\r\n", b""):
+            pass
+        context = ssl.create_default_context(cadata=cert)
+        await writer.start_tls(context, server_hostname=FORWARD_HOST)
+        writer.write(
+            b"POST /repos/o/r/issues HTTP/1.1\r\n"
+            b"host: " + FORWARD_HOST.encode() + b"\r\n"
+            b"authorization: token " + sentinel.encode() + b"\r\n"
+            b"content-type: application/json\r\n"
+            b"content-length: " + str(len(body)).encode() + b"\r\n\r\n" + body
+        )
+        await writer.drain()
+        response = await reader.read()
+        writer.close()
+    finally:
+        await proxy.stop()
+    assert response.startswith(b"HTTP/1.1 201")
+    assert b'{"login":"me"}' in response
+    assert b"x-hub: yes" in response
+    account, method, url, headers, sent_body = forwarder.calls[0]
+    assert account == "acct-1"
+    assert method == "POST"
+    assert url == f"https://{FORWARD_HOST}/repos/o/r/issues"
+    assert sent_body == body
+    assert "authorization" not in {name.lower() for name in headers}
+    assert headers.get("content-type") == "application/json"
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.ledger.c.dimension, tables.ledger.c.amount).where(
+                    tables.ledger.c.turn_id == turn_id
+                )
+            )
+        ).one()
+    assert (row.dimension, int(row.amount)) == ("egress", 1)
+
+
+async def test_a_forward_host_connect_requires_a_live_turn(db: None) -> None:
+    """A ForwardRule draws a real credential broker-side, so its host gates on turn liveness exactly
+    as a keyed host does: a token for an ended turn is refused at CONNECT."""
+    async with workspace_tx() as connection:
+        workspace_id, ended_turn, *_ = await _seed_turn(connection, status="done")
+    rules = (
+        ScopeRule(allowed_hosts=frozenset({FORWARD_HOST})),
+        _forward_rule(_RecordingForwarder()),
+    )
+    cert, key = await generate_ca()
+    proxy = _egress(_fixed(rules), ca_cert=cert, ca_key=key)
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    try:
+        ended = RunToken(workspace_id, ended_turn).encode()
+        assert await _connect(endpoint.port, FORWARD_HOST, ended) == 403
+    finally:
+        await proxy.stop()
+
+
+def test_forward_match_selects_by_exact_or_scheme_prefixed_sentinel() -> None:
+    forwarder = _RecordingForwarder()
+    rule = _forward_rule(forwarder)
+    sentinel = rule.sentinel.encode()
+    assert _forward_match([b"authorization: token " + sentinel + b"\r\n"], [rule]) is rule
+    assert _forward_match([b"Authorization: " + sentinel + b"\r\n"], [rule]) is rule
+    assert _forward_match([b"authorization: token other\r\n"], [rule]) is None
+    assert _forward_match([b"x-api-key: " + sentinel + b"\r\n"], [rule]) is None
+    assert _forward_match([b"authorization:\r\n"], [rule]) is None
+
+
+async def test_read_request_body_refuses_a_negative_content_length() -> None:
+    """A negative Content-Length parses as an int and clears the upper bound, but `readexactly` on
+    it raises ValueError (not IncompleteReadError) — which would escape uncaught and drop the
+    connection with no response. It is refused up front (None), so the forward path answers the
+    client instead of dying silently."""
+    body = await _read_request_body(asyncio.StreamReader(), [b"content-length: -1\r\n"])
+    assert body is None
+
+
+def test_forward_response_bytes_drops_headers_carrying_crlf() -> None:
+    """The broker's response headers come straight from Composio's JSON envelope with no wire
+    validation, so a value (or name) carrying an embedded CR/LF would split the response written
+    back into the sandbox's TLS stream. Such a header is dropped, never emitted — the safe ones
+    still pass, and the framing headers this proxy owns are always present."""
+    response = ForwardedResponse(
+        status=200,
+        headers={
+            "x-ok": "fine",
+            "x-split": "v\r\nInjected: evil",
+            "x-newline": "a\nb",
+            "bad\r\nname": "x",
+        },
+        body=b"{}",
+    )
+    raw = _forward_response_bytes(response)
+    assert b"x-ok: fine\r\n" in raw
+    assert b"Injected: evil" not in raw
+    assert b"x-newline" not in raw
+    assert b"bad" not in raw
+    assert b"content-length: 2\r\n" in raw
+    assert raw.endswith(b"connection: close\r\n\r\n{}")
+
+
+async def test_resolve_derives_forward_rules_for_the_acting_member(db: None) -> None:
+    """The per-turn resolver joins the turn's acting member to its agent's grants: the speaker's own
+    private grant forwards, and a speakerless turn (no on-behalf-of) resolves no private forward —
+    the wire-side mirror of `connector_accounts`."""
+    async with workspace_tx() as connection:
+        spoken = await _seed_turn(connection, speaker=True)
+    store = GrantStore()
+    await store.record(
+        workspace_id=spoken.workspace_id,
+        agent_id=spoken.agent_id,
+        provider="hub",
+        account_id="acct-1",
+        host=FORWARD_HOST,
+        grantor_member_id=spoken.member_id,
+        conversation_id=spoken.conversation_id,
+        shared=False,
+    )
+    cli = CliCredential(env="HUB_TOKEN", header="authorization", forward=_RecordingForwarder())
+    resolver = PerAgentRules(base=(), grants=store, clis={"hub": cli})
+    rules = await resolver.resolve(RunToken(spoken.workspace_id, spoken.turn_id))
+    forward = next(rule for rule in rules if isinstance(rule, ForwardRule))
+    assert forward.sentinel == grant_sentinel("acct-1")
+    assert forward.account_id == "acct-1"
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(speaker_member_id=None)
+            .where(tables.turn.c.id == spoken.turn_id)
+        )
+    resolver = PerAgentRules(base=(), grants=store, clis={"hub": cli})
+    silent = await resolver.resolve(RunToken(spoken.workspace_id, spoken.turn_id))
+    assert not any(isinstance(rule, ForwardRule) for rule in silent)

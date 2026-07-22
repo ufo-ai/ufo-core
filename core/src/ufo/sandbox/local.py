@@ -19,7 +19,6 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from uuid import UUID
 
 from ufo.blob import BlobStore
 from ufo.sandbox.session import (
@@ -56,7 +55,6 @@ def _provision_scratch() -> Path:
 @dataclass(frozen=True)
 class LocalCarrier:
     _scratch: Path = field(default_factory=_provision_scratch)
-    _env: dict[UUID, dict[str, str]] = field(default_factory=dict)
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         root = _root(spec.mount.host_path)
@@ -64,25 +62,28 @@ class LocalCarrier:
         ca_path = self._scratch / CA_FILENAME
         await asyncio.to_thread(ca_path.write_bytes, spec.proxy.ca_cert.encode())
         proxy_url = f"http://{spec.run_token}:@{LOCAL_PROXY_HOST}:{spec.proxy.port}"
-        self._env[spec.conversation_id] = {
-            **os.environ,
-            "HOME": str(self._scratch / "home"),
-            "PATH": f"{self._scratch / 'bin'}:{Path(sys.executable).parent}:{os.environ['PATH']}",
-            "HTTP_PROXY": proxy_url,
-            "HTTPS_PROXY": proxy_url,
-            "http_proxy": proxy_url,
-            "https_proxy": proxy_url,
-            "ANTHROPIC_API_KEY": SENTINEL_MODEL_KEY,
-            "OPENAI_API_KEY": SENTINEL_MODEL_KEY,
-            "SSL_CERT_FILE": str(ca_path),
-            "REQUESTS_CA_BUNDLE": str(ca_path),
-            "CURL_CA_BUNDLE": str(ca_path),
-            "NODE_EXTRA_CA_CERTS": str(ca_path),
-        }
         return SandboxHandle(
             conversation_id=spec.conversation_id,
             container_id=LOCAL_CONTAINER_ID,
             mount=spec.mount,
+            egress_env={
+                **os.environ,
+                "HOME": str(self._scratch / "home"),
+                "PATH": (
+                    f"{self._scratch / 'bin'}:{Path(sys.executable).parent}:{os.environ['PATH']}"
+                ),
+                "HTTP_PROXY": proxy_url,
+                "HTTPS_PROXY": proxy_url,
+                "http_proxy": proxy_url,
+                "https_proxy": proxy_url,
+                "ANTHROPIC_API_KEY": SENTINEL_MODEL_KEY,
+                "OPENAI_API_KEY": SENTINEL_MODEL_KEY,
+                "SSL_CERT_FILE": str(ca_path),
+                "REQUESTS_CA_BUNDLE": str(ca_path),
+                "CURL_CA_BUNDLE": str(ca_path),
+                "NODE_EXTRA_CA_CERTS": str(ca_path),
+                **spec.env,
+            },
         )
 
     async def exec(
@@ -96,7 +97,7 @@ class LocalCarrier:
         process = await asyncio.create_subprocess_exec(
             *rewritten,
             cwd=str(root),
-            env=self._env[handle.conversation_id],
+            env=dict(handle.egress_env),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -122,7 +123,8 @@ class LocalCarrier:
         await blob.put_file(key, root / rel)
 
     async def destroy(self, handle: SandboxHandle) -> None:
-        self._env.pop(handle.conversation_id, None)
+        """The workspace is the durable bind mount and the egress env lives on each turn's handle,
+        so there is no per-conversation state to reclaim."""
 
     async def host(self, handle: SandboxHandle, port: int) -> str:
         """The local carrier runs commands as host subprocesses, not a network-addressable sandbox,

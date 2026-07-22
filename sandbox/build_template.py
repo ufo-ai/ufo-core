@@ -84,6 +84,20 @@ APT_PACKAGES = (
     "qpdf",
     "tesseract-ocr",
 )
+# gh is the sandboxed GitHub CLI behind the grant-sentinel GH_TOKEN (the egress proxy forwards its
+# sentinel-carrying requests through the connector broker). It installs from GitHub's own apt repo —
+# the distro archives lag years behind.
+GH_INSTALL_COMMAND = (
+    "mkdir -p -m 755 /etc/apt/keyrings && "
+    "curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg "
+    "-o /etc/apt/keyrings/githubcli-archive-keyring.gpg && "
+    "chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && "
+    'echo "deb [arch=$(dpkg --print-architecture) '
+    "signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] "
+    'https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list && '
+    "apt-get update && apt-get install -y --no-install-recommends gh && "
+    "rm -rf /var/lib/apt/lists/*"
+)
 # Skill runtimes the office/pdf/media/document-review scripts assume pre-installed.
 PIP_PACKAGES = (
     "urllib3",
@@ -132,6 +146,7 @@ command -v s3fs >/dev/null
 command -v pdftotext >/dev/null
 command -v pdftoppm >/dev/null
 command -v soffice >/dev/null
+command -v gh >/dev/null
 browser="$(command -v chromium || command -v chromium-browser)"
 browser="${browser:-$(command -v google-chrome || command -v google-chrome-stable)}"
 test -n "$browser"
@@ -149,6 +164,7 @@ def build_definition_digest() -> str:
         "start": START_COMMAND,
         "ready": SANDBOX_TEMPLATE_READY_COMMAND,
         "apt": list(APT_PACKAGES),
+        "gh": GH_INSTALL_COMMAND,
         "pip": list(PIP_PACKAGES),
         "npm": list(NPM_PACKAGES),
         "env": SANDBOX_ENV,
@@ -173,6 +189,7 @@ def apply_layers(builder: object) -> object:
         + " && rm -rf /var/lib/apt/lists/*"
     )
     builder.run_cmd("apt-get remove -y sudo || true; rm -rf /etc/sudoers /etc/sudoers.d")
+    builder.run_cmd(GH_INSTALL_COMMAND)
     builder.run_cmd("python3 -m pip install --no-cache-dir " + " ".join(PIP_PACKAGES))
     builder.run_cmd(
         f"npm install -g --prefix /usr/local --no-fund --no-audit {' '.join(NPM_PACKAGES)}"

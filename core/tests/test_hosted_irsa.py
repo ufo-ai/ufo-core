@@ -25,3 +25,15 @@ def test_hosted_serve_receives_the_bedrock_mantle_api_key() -> None:
         "remoteRef: {key: ${secret_api_keys}, property: bedrock-api-key}}"
         in CLUSTER_SERVICES_TEMPLATE.read_text()
     )
+
+
+def test_hosted_proxy_receives_the_composio_broker_key() -> None:
+    """The shared egress proxy forwards sentinel CLI requests through Composio's proxy-execute, so
+    its pod needs the broker key exactly as it needs the model keys it swaps."""
+    proxy = (
+        HOSTED_TEMPLATE.read_text()
+        .split("name: ufo-sandbox-proxy", maxsplit=1)[1]
+        .split("---", maxsplit=1)[0]
+    )
+    assert "name: COMPOSIO_API_KEY" in proxy
+    assert "secretKeyRef: {name: ufo-platform-secrets, key: COMPOSIO_API_KEY}" in proxy

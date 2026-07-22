@@ -174,6 +174,10 @@ spec:
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef: {name: ufo-platform-secrets, key: OPENAI_API_KEY}
+            # The broker key the proxy forwards sentinel CLI requests with (Composio proxy-execute).
+            - name: COMPOSIO_API_KEY
+              valueFrom:
+                secretKeyRef: {name: ufo-platform-secrets, key: COMPOSIO_API_KEY}
           # No /healthz on the raw CONNECT proxy; a TCP probe confirms the bind after fail-loud boot.
           readinessProbe:
             tcpSocket: {port: proxy}

@@ -33,6 +33,7 @@ from ufo.db import current_workspace, init_db, init_owner_db, workspace_tx
 from ufo.ext.context import CredentialAccess, context_for
 from ufo.ext.loader import (
     NotRegisteredError,
+    connector_clis,
     durable_surfaces,
     embed_backend,
     index_backend,
@@ -949,6 +950,7 @@ def _local_egress_proxy(
         base=asyncio.run(_local_rule_base(config, manifests, credentials)),
         grants=GrantStore() if credentials is not None else None,
         transfer_hosts=connector_transfer_hosts(manifests),
+        clis=connector_clis(manifests),
     )
     loop = asyncio.new_event_loop()
     threading.Thread(target=loop.run_forever, daemon=True).start()

@@ -28,6 +28,7 @@ from pydantic import BaseModel, ConfigDict
 
 from ufo.agents import AGENT_OBJECT
 from ufo.artifacts import ARTIFACT_OBJECT
+from ufo.connectors import CliCredential
 from ufo.credential_kind import (
     CREDENTIAL_DESCRIPTION,
     CREDENTIAL_GUIDANCE,
@@ -288,6 +289,18 @@ def _pack_manifests(pack: str, active: dict[str, Manifest]) -> tuple[Manifest, .
         )
     )
     return tuple(manifests)
+
+
+def connector_clis(manifests: tuple[Manifest, ...]) -> dict[str, CliCredential]:
+    """Each installed connector's declared CLI credential, keyed by provider — the map the engine
+    reads to export each usable grant's sentinel env and the egress proxy's per-turn resolver folds
+    into its forward rules, both live from the current deploy's manifests."""
+    return {
+        connector.oauth.provider: connector.cli
+        for manifest in manifests
+        for connector in manifest.connectors
+        if connector.cli is not None
+    }
 
 
 def turn_tools(

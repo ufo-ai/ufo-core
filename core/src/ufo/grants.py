@@ -28,6 +28,14 @@ from ufo.schema.records import TerminalFrame
 from ufo.workspace import ws
 
 CONNECT_STATE_TTL_SECONDS = 600
+GRANT_SENTINEL_PREFIX = "UFO_SENTINEL_GRANT_"
+
+
+def grant_sentinel(account_id: str) -> str:
+    """The sentinel a grant's CLI credential rides the wire as — deterministic from the connected
+    account, so the engine (exporting it into the sandbox env) and the egress proxy (matching it to
+    forward through the broker) agree without a shared registration."""
+    return f"{GRANT_SENTINEL_PREFIX}{account_id}"
 
 
 class UnknownProvider(KeyError):

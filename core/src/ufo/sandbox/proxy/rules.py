@@ -11,9 +11,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from uuid import UUID
 
+from ufo.connectors import CliCredential, RequestForwarder
 from ufo.credentials import CredentialSlotUnset, CredentialStore
 from ufo.ext.manifest import Manifest
-from ufo.grants import Grant
+from ufo.grants import Grant, grant_sentinel
 from ufo.sandbox.session import SENTINEL_MODEL_KEY
 
 GRANT_METER_DIMENSION = "requests"
@@ -61,7 +62,21 @@ class MeterRule:
     dimension: str
 
 
-Rule = ScopeRule | InjectionRule | MeterRule
+@dataclass(frozen=True)
+class ForwardRule:
+    """On the wire to `host`, a request whose `header` carries `sentinel` is not re-originated
+    upstream — it is executed through the broker's `forward` under the granted `account_id`, which
+    injects the real credential server-side. The wire analog of a connector tool call: the token
+    never exists on this deploy, so there is nothing to inject."""
+
+    host: str
+    header: str
+    sentinel: str
+    account_id: str
+    forward: RequestForwarder
+
+
+Rule = ScopeRule | InjectionRule | MeterRule | ForwardRule
 
 
 def provider_host(model: str) -> str:
@@ -104,6 +119,29 @@ def derive_grant_rules(
         rules.append(ScopeRule(allowed_hosts=frozenset(hosts)))
         rules.extend(MeterRule(host=host, dimension=GRANT_METER_DIMENSION) for host in hosts)
     return tuple(rules)
+
+
+def derive_cli_rules(
+    grants: tuple[Grant, ...],
+    acting_member_id: UUID | None,
+    clis: Mapping[str, CliCredential],
+) -> tuple[Rule, ...]:
+    """Each grant whose connector declares a CLI credential and whose account the acting member may
+    use — their own grant, or one shared with the workspace — forwards its sentinel-carrying
+    requests through the broker. Use gates on the acting member exactly as connector tools do: a
+    foreign private grant derives nothing, and a memberless turn forwards only shared grants."""
+    return tuple(
+        ForwardRule(
+            host=grant.host,
+            header=cli.header,
+            sentinel=grant_sentinel(grant.account_id),
+            account_id=grant.account_id,
+            forward=cli.forward,
+        )
+        for grant in grants
+        if (cli := clis.get(grant.provider)) is not None
+        and (grant.shared or grant.grantor_member_id == acting_member_id)
+    )
 
 
 def connector_transfer_hosts(manifests: tuple[Manifest, ...]) -> dict[str, tuple[str, ...]]:

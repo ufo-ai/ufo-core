@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -12,12 +13,12 @@ from dbos import DBOS, DBOSClient, EnqueueOptions, Queue
 from ufo.blob import BlobStore, FilesystemBlobStore, S3BlobStore
 from ufo.browser import CdpProvider
 from ufo.config import Config
-from ufo.connectors import ConnectorRegistry
+from ufo.connectors import CliCredential, ConnectorRegistry
 from ufo.credentials import CredentialRequests, CredentialStore
 from ufo.db import workspace_tx
-from ufo.ext.loader import turn_hooks, turn_runtime_skills, turn_tools
+from ufo.ext.loader import connector_clis, turn_hooks, turn_runtime_skills, turn_tools
 from ufo.ext.manifest import Manifest
-from ufo.grants import GrantStore
+from ufo.grants import GrantStore, grant_sentinel
 from ufo.hub import Hub, Terminal
 from ufo.indexing import EmbedClient, IndexBackend
 from ufo.loop.compaction import Compaction
@@ -249,6 +250,8 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             runtime.workspace_fs,
             runtime.proxy,
             turn,
+            GrantStore() if runtime.credentials is not None else None,
+            connector_clis(runtime.manifests),
         )
         sandbox = SandboxSession(carrier=runtime.carrier, handle=handle)
         for skill in preload:
@@ -415,6 +418,8 @@ async def _open_sandbox(
     workspace_fs: SandboxFsCredentialMinter | None,
     proxy: ProxyEndpoint,
     turn: Turn,
+    grants: GrantStore | None,
+    clis: Mapping[str, CliCredential],
 ) -> SandboxHandle:
     """Create-or-resume the conversation's sandbox and keep its durable handle on the conversation
     row. A prior process's handle survives there, so a fresh serve reattaches the same sandbox from
@@ -433,12 +438,52 @@ async def _open_sandbox(
             proxy=proxy,
             run_token=RunToken(workspace_id=turn.workspace_id, turn_id=turn.id).encode(),
             resume_id=resume_id,
+            env=await _grant_cli_env(grants, clis, turn),
         )
     )
     persisted = format_sandbox_handle(backend, handle.container_id)
     if persisted != stored:
         await _persist_sandbox_handle(turn.conversation_id, turn.workspace_id, persisted)
     return handle
+
+
+async def _grant_cli_env(
+    grants: GrantStore | None, clis: Mapping[str, CliCredential], turn: Turn
+) -> dict[str, str]:
+    """Each connector-declared CLI env var whose provider this turn may use — the acting member's
+    own grant or one shared with the workspace — set to that grant's sentinel, so the CLI inside
+    the sandbox authenticates and the proxy forwards by the same sentinel (engine and proxy derive
+    it independently from the grant, no shared registration). The acting member is the speaker, else
+    the member the turn acts on behalf of, mirroring `connector_accounts`. A static env var names no
+    account, so two usable accounts cannot be disambiguated per request: rather than silently pick
+    one — `connector_account` fails loud on the same ambiguity — the export is skipped and logged,
+    so the CLI fails visibly to authenticate instead of acting as an unintended account."""
+    if grants is None or not clis:
+        return {}
+    acting = (
+        turn.speaker_member_id
+        if turn.speaker_member_id is not None
+        else turn.on_behalf_of_member_id
+    )
+    granted = await grants.active_grants(turn.workspace_id, turn.agent_id)
+    env: dict[str, str] = {}
+    for provider, cli in clis.items():
+        accounts = sorted(
+            grant.account_id
+            for grant in granted
+            if grant.provider == provider and (grant.shared or grant.grantor_member_id == acting)
+        )
+        if len(accounts) > 1:
+            log(
+                "sandbox.cli_grant_ambiguous",
+                provider=provider,
+                turn_id=str(turn.id),
+                accounts=len(accounts),
+            )
+            continue
+        if accounts:
+            env[cli.env] = grant_sentinel(accounts[0])
+    return env
 
 
 async def _stored_sandbox_handle(conversation_id: UUID, workspace_id: UUID) -> str | None:

@@ -20,6 +20,9 @@ from ufo.connectors import (
     BrokerTool as BrokerTool,
 )
 from ufo.connectors import (
+    CliCredential as CliCredential,
+)
+from ufo.connectors import (
     ConnectorBroker as ConnectorBroker,
 )
 from ufo.connectors import (
@@ -27,6 +30,12 @@ from ufo.connectors import (
 )
 from ufo.connectors import (
     ConnectorRegistry as ConnectorRegistry,
+)
+from ufo.connectors import (
+    ForwardedResponse as ForwardedResponse,
+)
+from ufo.connectors import (
+    RequestForwarder as RequestForwarder,
 )
 from ufo.connectors import (
     StagedUpload as StagedUpload,

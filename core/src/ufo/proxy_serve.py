@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from ufo.accounting import Pricing
 from ufo.config import Config, load_config
 from ufo.db import init_db
-from ufo.ext.loader import load_manifests
+from ufo.ext.loader import connector_clis, load_manifests
 from ufo.ext.manifest import Manifest
 from ufo.grants import GrantStore
 from ufo.models.registry import model_registry
@@ -125,6 +125,7 @@ class ProxyServe:
             base=self._base(),
             grants=GrantStore(),
             transfer_hosts=connector_transfer_hosts(self.manifests),
+            clis=connector_clis(self.manifests),
         )
         proxy = EgressProxy(
             resolve=resolver.resolve,

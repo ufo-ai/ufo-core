@@ -3,11 +3,13 @@
 Core's default is the local carrier; a deploy that sets `[sandbox] backend = "docker"` runs its
 sandboxes as sibling containers. Create-or-attach keeps the container a disposable cache over
 the durable workspace — a killed container is recreated on the next turn from the same bind-mounted
-`workspace/` subtree, and the turn notices only latency. Every command runs through `docker exec`.
-The container's HTTP(S)_PROXY points at the egress proxy running on the host, reached at
-`host.docker.internal`, and carries the turn's run token as its basic-auth username so the proxy
+`workspace/` subtree, and the turn notices only latency. Every command runs through `docker exec`
+under its turn's egress env: HTTP(S)_PROXY points at the egress proxy running on the host, reached
+at `host.docker.internal`, and carries the turn's run token as its basic-auth username so the proxy
 attributes each metered request to the turn; the proxy refuses any host its rules do not allow and
-swaps the sentinel for the real key on the wire, so the raw credential never enters the sandbox."""
+swaps the sentinel for the real key on the wire, so the raw credential never enters the sandbox.
+The env is per-exec, never baked into the container — a container outlives its first turn, and a
+later turn must not run under an earlier turn's token."""
 
 import asyncio
 import shlex
@@ -50,21 +52,6 @@ FUSE_RUN_ARGS = (
     "--security-opt",
     "apparmor=unconfined",
 )
-# The s3fs daemon is framework infrastructure, not agent egress: it talks straight to the object
-# store with the mount's prefix-scoped credential. The container-wide HTTP(S)_PROXY (set for the
-# agent's metered egress) is default-deny and does not allow the S3 host, and libcurl — which s3fs
-# uses — would honor it and fail the mount at CONNECT. So the mount exec clears the proxy env for
-# the s3fs process; the scoped credential, not the proxy, confines it to the conversation workspace.
-PROXY_CLEAR_ARGS = (
-    "--env",
-    "HTTP_PROXY=",
-    "--env",
-    "HTTPS_PROXY=",
-    "--env",
-    "http_proxy=",
-    "--env",
-    "https_proxy=",
-)
 
 
 async def _docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60) -> tuple[int, bytes, bytes]:
@@ -89,16 +76,32 @@ class DockerCarrier:
     network: str = DEFAULT_NETWORK
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
+        """Create-or-attach the conversation's container. The egress env is never baked into the
+        container — a container outliving its first turn must not pin that turn's run token — it
+        rides the returned handle and every exec carries it, so each turn's commands run under its
+        own token and sentinel entries."""
         name = f"{CONTAINER_NAME_PREFIX}{spec.conversation_id}"
+        proxy_url = f"http://{spec.run_token}:@{HOST_GATEWAY_NAME}:{spec.proxy.port}"
+        egress_env = {
+            "HTTP_PROXY": proxy_url,
+            "HTTPS_PROXY": proxy_url,
+            "http_proxy": proxy_url,
+            "https_proxy": proxy_url,
+            "ANTHROPIC_API_KEY": SENTINEL_MODEL_KEY,
+            "OPENAI_API_KEY": SENTINEL_MODEL_KEY,
+            **spec.env,
+        }
         running = await self._running_id(name)
         if running is not None:
             handle = SandboxHandle(
-                conversation_id=spec.conversation_id, container_id=running, mount=spec.mount
+                conversation_id=spec.conversation_id,
+                container_id=running,
+                mount=spec.mount,
+                egress_env=egress_env,
             )
             await self._mount_s3(handle, spec.mount)
             return handle
         await self._ensure_network()
-        proxy_url = f"http://{spec.run_token}:@{HOST_GATEWAY_NAME}:{spec.proxy.port}"
         argv = [
             "run",
             "-d",
@@ -110,18 +113,6 @@ class DockerCarrier:
             "--add-host",
             HOST_GATEWAY_MAPPING,
             *(FUSE_RUN_ARGS if spec.mount.kind == "s3" else ()),
-            "--env",
-            f"HTTP_PROXY={proxy_url}",
-            "--env",
-            f"HTTPS_PROXY={proxy_url}",
-            "--env",
-            f"http_proxy={proxy_url}",
-            "--env",
-            f"https_proxy={proxy_url}",
-            "--env",
-            f"ANTHROPIC_API_KEY={SENTINEL_MODEL_KEY}",
-            "--env",
-            f"OPENAI_API_KEY={SENTINEL_MODEL_KEY}",
         ]
         if spec.mount.kind == "filesystem" and spec.mount.host_path is not None:
             argv += ["-v", f"{spec.mount.host_path}:/workspace"]
@@ -132,7 +123,10 @@ class DockerCarrier:
         container_id = stdout.decode().strip()
         await self._install_ca(container_id, spec.proxy.ca_cert)
         handle = SandboxHandle(
-            conversation_id=spec.conversation_id, container_id=container_id, mount=spec.mount
+            conversation_id=spec.conversation_id,
+            container_id=container_id,
+            mount=spec.mount,
+            egress_env=egress_env,
         )
         await self._mount_s3(handle, spec.mount)
         return handle
@@ -140,8 +134,11 @@ class DockerCarrier:
     async def exec(
         self, handle: SandboxHandle, argv: tuple[str, ...], stdin: bytes, timeout_s: int
     ) -> ExecResult:
+        env_args = tuple(
+            arg for name, value in handle.egress_env.items() for arg in ("--env", f"{name}={value}")
+        )
         code, stdout, stderr = await _docker(
-            "exec", "-i", handle.container_id, *argv, stdin=stdin, timeout_s=timeout_s
+            "exec", "-i", *env_args, handle.container_id, *argv, stdin=stdin, timeout_s=timeout_s
         )
         return ExecResult(
             stdout=stdout.decode(errors="replace"),
@@ -176,8 +173,10 @@ class DockerCarrier:
         another's in-flight reads), while a stale or aged-out mount is torn down and remounted with
         this bring-up's fresh credential. Writes the prefix-scoped credential, then runs
         the root `prepare` (open /dev/fuse, enable user_allow_other, detach any stale mount) and the
-        agent `mount` (s3fs, with the proxy env cleared) through the two docker-exec users — the
-        privileged prepare never runs as the agent."""
+        agent `mount` through the two docker-exec users — the privileged prepare never runs as the
+        agent, and neither step carries the agent's egress env, so s3fs talks straight to the
+        object store with its scoped credential (the default-deny proxy would refuse the S3 host
+        at CONNECT)."""
         if mount.kind != "s3":
             return
         if await self._mount_healthy(handle):
@@ -223,7 +222,6 @@ class DockerCarrier:
         code, _, stderr = await _docker(
             "exec",
             "-i",
-            *PROXY_CLEAR_ARGS,
             handle.container_id,
             "sh",
             "-c",
