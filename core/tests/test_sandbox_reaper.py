@@ -42,7 +42,8 @@ async def _reap(carrier: object) -> None:
         candidates=reaper.candidate_workspaces,
     )
     runner = JobRunner(bindings=bindings_from((), (spec,)))
-    await runner.fire(f"{CORE_EXTENSION}:{SANDBOX_REAP_JOB}")
+    for workspace_id in await runner.candidates(f"{CORE_EXTENSION}:{SANDBOX_REAP_JOB}"):
+        await runner.fire(f"{CORE_EXTENSION}:{SANDBOX_REAP_JOB}", workspace_id)
 
 
 @dataclass

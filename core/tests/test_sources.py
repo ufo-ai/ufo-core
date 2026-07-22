@@ -176,7 +176,8 @@ async def _sync(driver: SyncDriver) -> None:
         candidates=driver.candidate_workspaces,
     )
     runner = JobRunner(bindings=bindings_from((), (spec,)))
-    await runner.fire(f"{CORE_EXTENSION}:{SOURCE_SYNC_JOB}")
+    for workspace_id in await runner.candidates(f"{CORE_EXTENSION}:{SOURCE_SYNC_JOB}"):
+        await runner.fire(f"{CORE_EXTENSION}:{SOURCE_SYNC_JOB}", workspace_id)
 
 
 async def _fire_page_change(runner: PageChangeRunner, consumer: PageChangeConsumer) -> None:
@@ -194,7 +195,8 @@ async def _fire_page_change(runner: PageChangeRunner, consumer: PageChangeConsum
     name = f"{PAGE_CHANGE_JOB}:{consumer.extension}:{consumer.discriminator}"
     spec = JobSpec(name=name, schedule=None, handler=_handler, candidates=_candidates)
     job_runner = JobRunner(bindings=bindings_from((), (spec,)))
-    await job_runner.fire(f"{CORE_EXTENSION}:{name}")
+    for workspace_id in await job_runner.candidates(f"{CORE_EXTENSION}:{name}"):
+        await job_runner.fire(f"{CORE_EXTENSION}:{name}", workspace_id)
 
 
 async def _pages() -> list[sa.RowMapping]:

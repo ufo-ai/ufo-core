@@ -200,7 +200,9 @@ async def test_memory_index_job_fires_bound_only_on_workspaces_with_unindexed_it
     assert set(await job.candidates()) == {ws_with_work}
 
     runner = JobRunner(bindings=bindings_from((manifest,), ()), index=index, embed=embed)
-    await runner.fire(f"{memory_manifest.NAME}:{memory_manifest.MEMORY_INDEX_JOB}")
+    index_key = f"{memory_manifest.NAME}:{memory_manifest.MEMORY_INDEX_JOB}"
+    for workspace_id in await runner.candidates(index_key):
+        await runner.fire(index_key, workspace_id)
 
     with ws(ws_with_work):
         async with workspace_tx() as connection:

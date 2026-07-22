@@ -110,18 +110,30 @@ def test_structured_logs_export_one_otel_record_each():
     try:
         o11y.log("turn.started", turn_id="abc", prompt="leak")
         o11y.log_error("jobs.failed", job="core:broken", error_class="TimeoutError")
+        o11y.warn("jobs.tick_skipped", key="core:slow", prompt="leak")
         records = [item.log_record for item in exporter.get_finished_logs()]
         assert [(record.body, record.severity_number) for record in records] == [
             ("turn.started", SeverityNumber.INFO),
             ("jobs.failed", SeverityNumber.ERROR),
+            ("jobs.tick_skipped", SeverityNumber.WARN),
         ]
         assert dict(records[0].attributes) == {"turn_id": "abc"}
         assert dict(records[1].attributes) == {
             "job": "core:broken",
             "error_class": "TimeoutError",
         }
+        assert dict(records[2].attributes) == {"key": "core:slow"}
     finally:
         logging.getLogger().removeHandler(handler)
+
+
+def test_warn_carries_redacted_fields(caplog):
+    with caplog.at_level(logging.WARNING, logger="ufo"):
+        o11y.warn("jobs.tick_skipped", key="core:slow", prompt="leak")
+    record = caplog.records[-1]
+    assert record.levelno == logging.WARNING
+    assert record.getMessage() == "jobs.tick_skipped"
+    assert record.ufo == {"key": "core:slow"}
 
 
 def test_stdlib_warnings_export_through_the_logs_pipeline():

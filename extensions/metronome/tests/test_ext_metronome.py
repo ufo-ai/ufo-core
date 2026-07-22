@@ -467,7 +467,8 @@ async def test_manifest_job_fires_through_job_runner(
     async with workspace_tx() as connection:
         await record_workspace_usage(connection, workspace_id, MODEL, Usage(input_tokens=100))
     runner = JobRunner(bindings=bindings_from((metronome.manifest(),), ()), registry=_registry())
-    await runner.fire(f"{metronome.NAME}:{metronome.JOB_NAME}")
+    for workspace_id in await runner.candidates(f"{metronome.NAME}:{metronome.JOB_NAME}"):
+        await runner.fire(f"{metronome.NAME}:{metronome.JOB_NAME}", workspace_id)
     (request,) = recorder.requests
     (event,) = _events(request)
     assert event["customer_id"] == str(workspace_id)
@@ -653,7 +654,8 @@ async def test_seat_job_establishes_the_limit_and_ships_one_daily_snapshot(
             .where(tables.member.c.workspace_id == workspace_id)
         )
     runner = JobRunner(bindings=bindings_from((metronome.manifest(),), ()), registry=_registry())
-    await runner.fire(f"{metronome.NAME}:{metronome.SEAT_JOB_NAME}")
+    for workspace_id in await runner.candidates(f"{metronome.NAME}:{metronome.SEAT_JOB_NAME}"):
+        await runner.fire(f"{metronome.NAME}:{metronome.SEAT_JOB_NAME}", workspace_id)
     assert await _workspace_limit(workspace_id) == metronome.SEAT_LIMIT_DEFAULT
     async with workspace_tx() as connection:
         included = (
@@ -675,7 +677,8 @@ async def test_seat_job_establishes_the_limit_and_ships_one_daily_snapshot(
         "seat_limit": str(metronome.SEAT_LIMIT_DEFAULT),
     }
     assert all(isinstance(value, str) for value in event["properties"].values())
-    await runner.fire(f"{metronome.NAME}:{metronome.SEAT_JOB_NAME}")
+    for workspace_id in await runner.candidates(f"{metronome.NAME}:{metronome.SEAT_JOB_NAME}"):
+        await runner.fire(f"{metronome.NAME}:{metronome.SEAT_JOB_NAME}", workspace_id)
     assert len(recorder.requests) == 1
 
 

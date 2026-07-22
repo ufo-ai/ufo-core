@@ -1531,7 +1531,8 @@ async def test_manifest_job_fires_through_job_runner(db: None) -> None:
         invoker_factory=lambda wid: AdmissionInvoker(admission=admission, workspace_id=wid),
     )
     with ws(workspace_id):
-        await runner.fire(f"{NAME}:{RUNNER_JOB}")
+        for workspace_id in await runner.candidates(f"{NAME}:{RUNNER_JOB}"):
+            await runner.fire(f"{NAME}:{RUNNER_JOB}", workspace_id)
     turns = await _turns(conversation_id)
     assert len(turns) == 1
     assert turns[0]["inbound"] == "check inbox"

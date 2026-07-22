@@ -5,8 +5,16 @@ import-time `@DBOS.scheduled` decorator, because jobs are discovered from the in
 at boot, not known when this module is imported; `apply_schedules` upserts, so re-registration on
 every restart is idempotent. Registration is the synchronous DBOS API: the async variants repoint
 the running loop's default executor at DBOS's shared pool, so a short-lived boot loop closing would
-shut that pool down. One durable workflow fires each handler with the extension's scoped
-ExtensionContext, so a core job and an extension job run the identical path."""
+shut that pool down. Two durable workflows carry every fire: `job_tick` fans out one queued
+`job_workflow` per candidate workspace, deduplicated on (job key, workspace) held from enqueue to
+terminal — a workspace still running its previous execution absorbs the tick alone, never stacked,
+never stalling its neighbors, and twin replica boots start a one-shot once — and each
+`job_workflow` runs exactly one workspace's handler through the extension's scoped
+ExtensionContext, so a core job and an extension job ride the identical path. `JOB_QUEUE` runs at
+most `JOB_WORKER_CONCURRENCY` `job_workflow` executions per process, bounded backpressure in
+Postgres, never a thread bloom; the tick itself rides DBOS's internal queue — one durable insert
+per candidate workspace, milliseconds — so a tick never waits behind a slow job for a worker
+slot."""
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -15,7 +23,8 @@ from typing import Protocol
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
-from dbos import DBOS, DBOSClient, EnqueueOptions, Queue, ScheduleInput
+from dbos import DBOS, DBOSClient, EnqueueOptions, Queue, ScheduleInput, SetEnqueueOptions
+from dbos import error as dbos_error
 
 from ufo.accounting import ALLOW, SpendEvaluator
 from ufo.blob import BlobStore
@@ -25,7 +34,7 @@ from ufo.ext.context import ExtensionContext, TurnInvoker, context_for
 from ufo.ext.manifest import HookContext, HookSpec, JobSpec, Manifest, PageChangeBatch
 from ufo.indexing import EmbedClient, IndexBackend
 from ufo.models.registry import ModelRegistry
-from ufo.o11y import log, log_error
+from ufo.o11y import log, log_error, warn
 from ufo.sandbox.session import Carrier, SandboxHandle, sandbox_handle_id
 from ufo.scheduling import ScheduleInvoker
 from ufo.schema import tables
@@ -56,6 +65,7 @@ InvokerFactory = Callable[[UUID], JobInvoker]
 
 JOB_QUEUE_NAME = "jobs"
 JOB_WORKFLOW_NAME = "job"
+JOB_TICK_WORKFLOW_NAME = "job_tick"
 CORE_EXTENSION = "core"
 TURN_DISPATCH_JOB = "turn_dispatch"
 TURN_DISPATCH_SCHEDULE = "0 * * * * *"
@@ -68,7 +78,8 @@ PAGE_CHANGE_JOB = "page_change"
 PAGE_CHANGE_SCHEDULE = "0 * * * * *"
 PAGE_CHANGE_CURSOR_KEY = "page_change_cursor"
 PAGE_CHANGE_BATCH = 50
-JOB_QUEUE = Queue(JOB_QUEUE_NAME)
+JOB_WORKER_CONCURRENCY = 8
+JOB_QUEUE = Queue(JOB_QUEUE_NAME, worker_concurrency=JOB_WORKER_CONCURRENCY)
 QUEUED: TurnStatus = "queued"
 
 
@@ -663,13 +674,13 @@ def bindings_from(
 @dataclass(frozen=True)
 class JobRunner:
     """Boot registration for the deploy: publish the firing table, then register each cron job and
-    enqueue each one-shot. `fire` is the per-execution dispatch the durable workflow calls; it is
-    the sole path a handler runs on: it names the job's candidate workspaces (one `owner_tx` read
-    returning only the ids with work) and, for each, opens `with ws(id)` and runs the handler
-    scoped to it. There is no branch that runs a handler outside a bound workspace — an empty
-    candidate set runs the handler zero times, and every core and extension job rides the identical
-    fan-and-bind, so an unbound handler call cannot exist. On a per-tenant deploy the candidate read
-    resolves to the single workspace, unchanged."""
+    enqueue each one-shot tick. `candidates` names the workspaces holding work (one `owner_tx`
+    read); the tick fans them out and `fire` — the per-execution dispatch the durable workflow
+    calls, the sole path a handler runs on — opens `with ws(id)` for its one workspace and runs the
+    handler scoped to it. There is no branch that runs a handler outside a bound workspace — an
+    empty candidate set enqueues zero executions, and every core and extension job rides the
+    identical fan-and-bind, so an unbound handler call cannot exist. On a per-tenant deploy the
+    candidate read resolves to the single workspace, unchanged."""
 
     bindings: tuple[_Binding, ...]
     invoker_factory: InvokerFactory | None = None
@@ -685,55 +696,85 @@ class JobRunner:
         schedules: list[ScheduleInput] = []
         for binding in self.bindings:
             if binding.spec.schedule is None:
-                JOB_QUEUE.enqueue(job_workflow, datetime.now(UTC), binding.key)
+                with SetEnqueueOptions(deduplication_id=binding.key):
+                    try:
+                        JOB_QUEUE.enqueue(job_tick, datetime.now(UTC), binding.key)
+                    except dbos_error.DBOSQueueDeduplicatedError:
+                        warn("jobs.enqueue_skipped", key=binding.key)
+                        continue
                 log("jobs.enqueued", key=binding.key)
             else:
                 schedules.append(
                     ScheduleInput(
                         schedule_name=binding.key,
-                        workflow_fn=job_workflow,
+                        workflow_fn=job_tick,
                         schedule=binding.spec.schedule,
                         context=binding.key,
-                        queue_name=JOB_QUEUE_NAME,
                     )
                 )
                 log("jobs.scheduled", key=binding.key, schedule=binding.spec.schedule)
         if schedules:
             DBOS.apply_schedules(schedules)
 
-    async def fire(self, key: str) -> None:
+    async def tick(self, scheduled_time: datetime, key: str) -> None:
+        """One fire of a job: fan out to the workspaces holding work, one queued execution per
+        workspace under a (job, workspace) deduplication id held from enqueue to terminal — a
+        workspace still running its previous execution absorbs the tick alone, never stalling its
+        neighbors, and the first tick after it completes starts its next one."""
+        for workspace_id in await self.candidates(key):
+            with SetEnqueueOptions(deduplication_id=f"{key}:{workspace_id}"):
+                try:
+                    await JOB_QUEUE.enqueue_async(
+                        job_workflow, scheduled_time, key, str(workspace_id)
+                    )
+                except dbos_error.DBOSQueueDeduplicatedError:
+                    warn("jobs.tick_skipped", key=key, workspace_id=str(workspace_id))
+
+    async def candidates(self, key: str) -> tuple[UUID, ...]:
+        return await self._binding(key).spec.candidates()
+
+    async def fire(self, key: str, workspace_id: UUID) -> None:
+        binding = self._binding(key)
+        with ws(workspace_id):
+            invoker = None if self.invoker_factory is None else self.invoker_factory(workspace_id)
+            context = context_for(
+                binding.extension,
+                binding.declared,
+                self.index,
+                self.embed,
+                self.pages,
+                self.blob,
+                invoker,
+                self.registry,
+                schedule_invoker=invoker,
+            )
+            try:
+                await binding.spec.handler(context)
+            except Exception as error:
+                log_error("jobs.failed", job=key, error_class=type(error).__name__)
+                raise
+
+    def _binding(self, key: str) -> _Binding:
         binding = next((b for b in self.bindings if b.key == key), None)
         if binding is None:
             raise RuntimeError(f"no job registered for key {key!r}")
-        for workspace_id in await binding.spec.candidates():
-            with ws(workspace_id):
-                invoker = (
-                    None if self.invoker_factory is None else self.invoker_factory(workspace_id)
-                )
-                context = context_for(
-                    binding.extension,
-                    binding.declared,
-                    self.index,
-                    self.embed,
-                    self.pages,
-                    self.blob,
-                    invoker,
-                    self.registry,
-                    schedule_invoker=invoker,
-                )
-                try:
-                    await binding.spec.handler(context)
-                except Exception as error:
-                    log_error("jobs.failed", job=key, error_class=type(error).__name__)
-                    raise
+        return binding
 
 
 _firing: JobRunner | None = None
 
 
-@DBOS.workflow(name=JOB_WORKFLOW_NAME)
-async def job_workflow(scheduled_time: datetime, key: str) -> None:
+@DBOS.workflow(name=JOB_TICK_WORKFLOW_NAME)
+async def job_tick(scheduled_time: datetime, key: str) -> None:
     runner = _firing
     if runner is None:
         raise RuntimeError("jobs not registered (JobRunner.launch runs in serve)")
-    await runner.fire(key)
+    await runner.tick(scheduled_time, key)
+
+
+@DBOS.workflow(name=JOB_WORKFLOW_NAME)
+async def job_workflow(scheduled_time: datetime, key: str, workspace_id: str) -> None:
+    runner = _firing
+    if runner is None:
+        raise RuntimeError("jobs not registered (JobRunner.launch runs in serve)")
+    await runner.fire(key, UUID(workspace_id))

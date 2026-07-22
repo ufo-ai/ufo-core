@@ -195,7 +195,8 @@ async def test_an_installed_extension_fires_through_the_loader(
     await _seed_note(workspace_id)
     runner = JobRunner(bindings=bindings_from(load_manifests(), ()))
     with ws(workspace_id):
-        await runner.fire(f"{sample.NAME}:{sample.JOB_NAME}")
+        for workspace_id in await runner.candidates(f"{sample.NAME}:{sample.JOB_NAME}"):
+            await runner.fire(f"{sample.NAME}:{sample.JOB_NAME}", workspace_id)
         scoped = ScopedStore(extension=sample.NAME)
         assert await scoped.get(sample.JOB_KEY) == {"ran": True}
 
@@ -237,6 +238,7 @@ async def test_a_bundle_boots_its_pinned_extension_on_a_clean_lockfile(
     await _seed_note(workspace_id)
     runner = JobRunner(bindings=bindings_from(load_manifests(), ()))
     with ws(workspace_id):
-        await runner.fire(f"{sample.NAME}:{sample.JOB_NAME}")
+        for workspace_id in await runner.candidates(f"{sample.NAME}:{sample.JOB_NAME}"):
+            await runner.fire(f"{sample.NAME}:{sample.JOB_NAME}", workspace_id)
         scoped = ScopedStore(extension=sample.NAME)
         assert await scoped.get(sample.JOB_KEY) == {"ran": True}

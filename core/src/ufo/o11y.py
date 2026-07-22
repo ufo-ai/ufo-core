@@ -182,6 +182,11 @@ def log_error(event: str, **fields: object) -> None:
     _emit_log(event, SeverityNumber.ERROR, "ERROR", logging.ERROR, fields)
 
 
+def warn(event: str, **fields: object) -> None:
+    """`log` at warning severity, for expected-but-notable conditions worth an operator's eye."""
+    _emit_log(event, SeverityNumber.WARN, "WARN", logging.WARNING, fields)
+
+
 def _emit_log(
     event: str,
     severity_number: SeverityNumber,
