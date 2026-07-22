@@ -1,5 +1,7 @@
+import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -219,3 +221,70 @@ async def test_s3_copy_multipart_within_bucket(
     await s3_store.put("workspace/big.bin", payload)
     await s3_store.copy("workspace/big.bin", "artifacts/big/big.bin")
     assert await s3_store.get("artifacts/big/big.bin") == payload
+
+
+async def test_s3_client_is_built_once_per_loop() -> None:
+    store = S3BlobStore(bucket="b", endpoint_url="http://localhost:1", region="us-east-1")
+    first = await store._client()
+    assert await store._client() is first
+
+
+def test_s3_clients_are_loop_affine() -> None:
+    store = S3BlobStore(bucket="b", endpoint_url="http://localhost:1", region="us-east-1")
+    first = asyncio.run(store._client())
+    second = asyncio.run(store._client())
+    assert first is not second
+
+
+class _StubClient:
+    def __init__(self, close_error: Exception | None = None) -> None:
+        self.closed = False
+        self.close_error = close_error
+
+    async def __aexit__(self, *exc: object) -> None:
+        self.closed = True
+        if self.close_error is not None:
+            raise self.close_error
+
+
+class _StubCreator:
+    """Stands in for aiobotocore's ClientCreatorContext: yields once before producing the client,
+    so two concurrent first calls both pass the cache-miss check and the setdefault race runs."""
+
+    def __init__(self, made: list[_StubClient], close_error: Exception | None = None) -> None:
+        self.made = made
+        self.close_error = close_error
+
+    async def __aenter__(self) -> _StubClient:
+        await asyncio.sleep(0)
+        client = _StubClient(close_error=self.close_error)
+        self.made.append(client)
+        return client
+
+
+async def test_concurrent_first_calls_share_one_client_and_close_the_loser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    made: list[_StubClient] = []
+    session = SimpleNamespace(create_client=lambda *args, **kwargs: _StubCreator(made))
+    monkeypatch.setattr(blob, "get_session", lambda: session)
+    store = S3BlobStore(bucket="b")
+    first, second = await asyncio.gather(store._client(), store._client())
+    assert first is second
+    assert len(made) == 2
+    assert sum(1 for client in made if client.closed) == 1
+    assert not first.closed
+
+
+async def test_losers_failing_close_does_not_mask_the_won_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    made: list[_StubClient] = []
+    session = SimpleNamespace(
+        create_client=lambda *args, **kwargs: _StubCreator(made, close_error=RuntimeError("boom"))
+    )
+    monkeypatch.setattr(blob, "get_session", lambda: session)
+    store = S3BlobStore(bucket="b")
+    first, second = await asyncio.gather(store._client(), store._client())
+    assert first is second is made[0]
+    assert made[1].closed

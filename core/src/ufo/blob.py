@@ -4,16 +4,18 @@ import asyncio
 import os
 import shutil
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
 
-from aiobotocore.session import ClientCreatorContext, get_session
+from aiobotocore.client import AioBaseClient
+from aiobotocore.session import get_session
 from botocore.exceptions import ClientError
 
 from ufo.config import BlobConfig
+from ufo.o11y import log
 
 MISSING_KEY_CODES = ("404", "NoSuchKey", "NotFound")
 BLOB_STREAM_CHUNK_BYTES = 1024 * 1024
@@ -191,116 +193,111 @@ def _is_missing_key(error: ClientError) -> bool:
 
 @dataclass(frozen=True)
 class S3BlobStore:
-    """Single-shot object storage over aiobotocore; a fresh client per call."""
+    """Single-shot object storage over aiobotocore; one client per event loop, held for the
+    process's life. Building a client parses the whole botocore service model on the calling
+    loop — tens of milliseconds of CPU — so a per-call client starves every task sharing the
+    loop under per-page blob traffic. Blob ops run on both the serve loop and the DBOS
+    background loop, and an aiohttp-backed client is loop-affine, so the cache keys by the
+    running loop."""
 
     bucket: str
     endpoint_url: str | None = None
     region: str | None = None
+    _clients: dict[asyncio.AbstractEventLoop, AioBaseClient] = field(
+        default_factory=dict, compare=False
+    )
 
     async def put(self, key: str, data: bytes) -> None:
-        async with self._client() as client:
-            await client.put_object(Bucket=self.bucket, Key=key, Body=data)
+        client = await self._client()
+        await client.put_object(Bucket=self.bucket, Key=key, Body=data)
 
     async def put_file(self, key: str, source: Path) -> None:
         stat = await asyncio.to_thread(source.stat)
         size = stat.st_size
-        async with self._client() as client:
-            if size == 0:
-                await client.put_object(Bucket=self.bucket, Key=key, Body=b"")
-                return
-            created = await client.create_multipart_upload(Bucket=self.bucket, Key=key)
-            upload_id = created["UploadId"]
-            fd = await asyncio.to_thread(os.open, source, os.O_RDONLY)
-            try:
-                parts: list[dict[str, object]] = []
-                for number, offset in enumerate(range(0, size, S3_MULTIPART_PART_BYTES), start=1):
-                    chunk = await asyncio.to_thread(os.pread, fd, S3_MULTIPART_PART_BYTES, offset)
-                    part = await client.upload_part(
-                        Bucket=self.bucket,
-                        Key=key,
-                        PartNumber=number,
-                        UploadId=upload_id,
-                        Body=chunk,
-                    )
-                    parts.append({"ETag": part["ETag"], "PartNumber": number})
-                await client.complete_multipart_upload(
+        client = await self._client()
+        if size == 0:
+            await client.put_object(Bucket=self.bucket, Key=key, Body=b"")
+            return
+        created = await client.create_multipart_upload(Bucket=self.bucket, Key=key)
+        upload_id = created["UploadId"]
+        fd = await asyncio.to_thread(os.open, source, os.O_RDONLY)
+        try:
+            parts: list[dict[str, object]] = []
+            for number, offset in enumerate(range(0, size, S3_MULTIPART_PART_BYTES), start=1):
+                chunk = await asyncio.to_thread(os.pread, fd, S3_MULTIPART_PART_BYTES, offset)
+                part = await client.upload_part(
                     Bucket=self.bucket,
                     Key=key,
+                    PartNumber=number,
                     UploadId=upload_id,
-                    MultipartUpload={"Parts": parts},
+                    Body=chunk,
                 )
-            except Exception:
-                await client.abort_multipart_upload(Bucket=self.bucket, Key=key, UploadId=upload_id)
-                raise
-            finally:
-                await asyncio.to_thread(os.close, fd)
+                parts.append({"ETag": part["ETag"], "PartNumber": number})
+            await client.complete_multipart_upload(
+                Bucket=self.bucket,
+                Key=key,
+                UploadId=upload_id,
+                MultipartUpload={"Parts": parts},
+            )
+        except Exception:
+            await client.abort_multipart_upload(Bucket=self.bucket, Key=key, UploadId=upload_id)
+            raise
+        finally:
+            await asyncio.to_thread(os.close, fd)
 
     async def get(self, key: str) -> bytes:
-        async with self._client() as client:
-            try:
-                response = await client.get_object(Bucket=self.bucket, Key=key)
-            except ClientError as error:
-                if _is_missing_key(error):
-                    raise BlobNotFound(key) from error
-                raise
-            body = response["Body"]
-            async with body:
-                return await body.read()
+        client = await self._client()
+        try:
+            response = await client.get_object(Bucket=self.bucket, Key=key)
+        except ClientError as error:
+            if _is_missing_key(error):
+                raise BlobNotFound(key) from error
+            raise
+        body = response["Body"]
+        async with body:
+            return await body.read()
 
     async def exists(self, key: str) -> bool:
-        async with self._client() as client:
-            try:
-                await client.head_object(Bucket=self.bucket, Key=key)
-            except ClientError as error:
-                if _is_missing_key(error):
-                    return False
-                raise
-            return True
+        client = await self._client()
+        try:
+            await client.head_object(Bucket=self.bucket, Key=key)
+        except ClientError as error:
+            if _is_missing_key(error):
+                return False
+            raise
+        return True
 
     async def delete(self, key: str) -> None:
-        async with self._client() as client:
-            await client.delete_object(Bucket=self.bucket, Key=key)
+        client = await self._client()
+        await client.delete_object(Bucket=self.bucket, Key=key)
 
     async def get_stream(self, key: str) -> AsyncIterator[bytes]:
-        async with self._client() as client:
-            try:
-                response = await client.get_object(Bucket=self.bucket, Key=key)
-            except ClientError as error:
-                if _is_missing_key(error):
-                    raise BlobNotFound(key) from error
-                raise
-            body = response["Body"]
-            async with body:
-                async for chunk in body.iter_chunks(BLOB_STREAM_CHUNK_BYTES):
-                    yield chunk
+        client = await self._client()
+        try:
+            response = await client.get_object(Bucket=self.bucket, Key=key)
+        except ClientError as error:
+            if _is_missing_key(error):
+                raise BlobNotFound(key) from error
+            raise
+        body = response["Body"]
+        async with body:
+            async for chunk in body.iter_chunks(BLOB_STREAM_CHUNK_BYTES):
+                yield chunk
 
     async def put_stream(self, key: str, chunks: AsyncIterator[bytes]) -> None:
-        async with self._client() as client:
-            buffer = bytearray()
-            upload_id: str | None = None
-            parts: list[dict[str, object]] = []
-            part_number = 1
-            try:
-                async for chunk in chunks:
-                    buffer += chunk
-                    if len(buffer) < S3_MULTIPART_PART_BYTES:
-                        continue
-                    if upload_id is None:
-                        started = await client.create_multipart_upload(Bucket=self.bucket, Key=key)
-                        upload_id = started["UploadId"]
-                    uploaded = await client.upload_part(
-                        Bucket=self.bucket,
-                        Key=key,
-                        PartNumber=part_number,
-                        UploadId=upload_id,
-                        Body=bytes(buffer),
-                    )
-                    parts.append({"ETag": uploaded["ETag"], "PartNumber": part_number})
-                    part_number += 1
-                    buffer = bytearray()
+        client = await self._client()
+        buffer = bytearray()
+        upload_id: str | None = None
+        parts: list[dict[str, object]] = []
+        part_number = 1
+        try:
+            async for chunk in chunks:
+                buffer += chunk
+                if len(buffer) < S3_MULTIPART_PART_BYTES:
+                    continue
                 if upload_id is None:
-                    await client.put_object(Bucket=self.bucket, Key=key, Body=bytes(buffer))
-                    return
+                    started = await client.create_multipart_upload(Bucket=self.bucket, Key=key)
+                    upload_id = started["UploadId"]
                 uploaded = await client.upload_part(
                     Bucket=self.bucket,
                     Key=key,
@@ -309,82 +306,104 @@ class S3BlobStore:
                     Body=bytes(buffer),
                 )
                 parts.append({"ETag": uploaded["ETag"], "PartNumber": part_number})
-                await client.complete_multipart_upload(
-                    Bucket=self.bucket,
-                    Key=key,
-                    UploadId=upload_id,
-                    MultipartUpload={"Parts": parts},
-                )
-            except BaseException:
-                if upload_id is not None:
-                    await client.abort_multipart_upload(
-                        Bucket=self.bucket, Key=key, UploadId=upload_id
-                    )
-                raise
+                part_number += 1
+                buffer = bytearray()
+            if upload_id is None:
+                await client.put_object(Bucket=self.bucket, Key=key, Body=bytes(buffer))
+                return
+            uploaded = await client.upload_part(
+                Bucket=self.bucket,
+                Key=key,
+                PartNumber=part_number,
+                UploadId=upload_id,
+                Body=bytes(buffer),
+            )
+            parts.append({"ETag": uploaded["ETag"], "PartNumber": part_number})
+            await client.complete_multipart_upload(
+                Bucket=self.bucket,
+                Key=key,
+                UploadId=upload_id,
+                MultipartUpload={"Parts": parts},
+            )
+        except BaseException:
+            if upload_id is not None:
+                await client.abort_multipart_upload(Bucket=self.bucket, Key=key, UploadId=upload_id)
+            raise
 
     async def copy(self, src_key: str, dst_key: str) -> None:
         source = {"Bucket": self.bucket, "Key": src_key}
-        async with self._client() as client:
-            try:
-                head = await client.head_object(Bucket=self.bucket, Key=src_key)
-            except ClientError as error:
-                if _is_missing_key(error):
-                    raise BlobNotFound(src_key) from error
-                raise
-            size = head["ContentLength"]
-            if size <= S3_SINGLE_COPY_MAX_BYTES:
-                await client.copy_object(CopySource=source, Bucket=self.bucket, Key=dst_key)
-                return
-            created = await client.create_multipart_upload(Bucket=self.bucket, Key=dst_key)
-            upload_id = created["UploadId"]
-            try:
-                parts: list[dict[str, object]] = []
-                for number, offset in enumerate(range(0, size, S3_COPY_PART_BYTES), start=1):
-                    last = min(offset + S3_COPY_PART_BYTES, size) - 1
-                    copied = await client.upload_part_copy(
-                        Bucket=self.bucket,
-                        Key=dst_key,
-                        PartNumber=number,
-                        UploadId=upload_id,
-                        CopySource=source,
-                        CopySourceRange=f"bytes={offset}-{last}",
-                    )
-                    parts.append({"ETag": copied["CopyPartResult"]["ETag"], "PartNumber": number})
-                await client.complete_multipart_upload(
+        client = await self._client()
+        try:
+            head = await client.head_object(Bucket=self.bucket, Key=src_key)
+        except ClientError as error:
+            if _is_missing_key(error):
+                raise BlobNotFound(src_key) from error
+            raise
+        size = head["ContentLength"]
+        if size <= S3_SINGLE_COPY_MAX_BYTES:
+            await client.copy_object(CopySource=source, Bucket=self.bucket, Key=dst_key)
+            return
+        created = await client.create_multipart_upload(Bucket=self.bucket, Key=dst_key)
+        upload_id = created["UploadId"]
+        try:
+            parts: list[dict[str, object]] = []
+            for number, offset in enumerate(range(0, size, S3_COPY_PART_BYTES), start=1):
+                last = min(offset + S3_COPY_PART_BYTES, size) - 1
+                copied = await client.upload_part_copy(
                     Bucket=self.bucket,
                     Key=dst_key,
+                    PartNumber=number,
                     UploadId=upload_id,
-                    MultipartUpload={"Parts": parts},
+                    CopySource=source,
+                    CopySourceRange=f"bytes={offset}-{last}",
                 )
-            except BaseException:
-                await client.abort_multipart_upload(
-                    Bucket=self.bucket, Key=dst_key, UploadId=upload_id
-                )
-                raise
+                parts.append({"ETag": copied["CopyPartResult"]["ETag"], "PartNumber": number})
+            await client.complete_multipart_upload(
+                Bucket=self.bucket,
+                Key=dst_key,
+                UploadId=upload_id,
+                MultipartUpload={"Parts": parts},
+            )
+        except BaseException:
+            await client.abort_multipart_upload(Bucket=self.bucket, Key=dst_key, UploadId=upload_id)
+            raise
 
     async def list(self, prefix: str) -> tuple[BlobEntry, ...]:
         if not prefix:
             raise ValueError("blob list requires a key prefix")
         entries: list[BlobEntry] = []
-        async with self._client() as client:
-            paginator = client.get_paginator("list_objects_v2")
-            async for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
-                for item in page.get("Contents", ()):
-                    entries.append(
-                        BlobEntry(
-                            key=item["Key"],
-                            size_bytes=item["Size"],
-                            modified_at=item["LastModified"].astimezone(UTC),
-                        )
+        client = await self._client()
+        paginator = client.get_paginator("list_objects_v2")
+        async for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+            for item in page.get("Contents", ()):
+                entries.append(
+                    BlobEntry(
+                        key=item["Key"],
+                        size_bytes=item["Size"],
+                        modified_at=item["LastModified"].astimezone(UTC),
                     )
-                if len(entries) >= BLOB_LIST_MAX_KEYS:
-                    break
+                )
+            if len(entries) >= BLOB_LIST_MAX_KEYS:
+                break
         return tuple(entries[:BLOB_LIST_MAX_KEYS])
 
-    def _client(self) -> ClientCreatorContext:
-        return get_session().create_client(
-            "s3", endpoint_url=self.endpoint_url, region_name=self.region
+    async def _client(self) -> AioBaseClient:
+        loop = asyncio.get_running_loop()
+        client = self._clients.get(loop)
+        if client is not None:
+            return client
+        created = (
+            await get_session()
+            .create_client("s3", endpoint_url=self.endpoint_url, region_name=self.region)
+            .__aenter__()
         )
+        client = self._clients.setdefault(loop, created)
+        if client is not created:
+            try:
+                await created.__aexit__(None, None, None)
+            except Exception:
+                log("blob.redundant_client_close_failed", bucket=self.bucket)
+        return client
 
 
 def blob_store_for(config: BlobConfig) -> FilesystemBlobStore | S3BlobStore:
