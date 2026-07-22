@@ -46,6 +46,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Literal
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID
 
@@ -226,6 +227,210 @@ SLACK_CHAT_POST_EPHEMERAL_URL = "https://slack.com/api/chat.postEphemeral"
 SLACK_ASSISTANT_STATUS_URL = "https://slack.com/api/assistant.threads.setStatus"
 SLACK_FILES_GET_UPLOAD_URL = "https://slack.com/api/files.getUploadURLExternal"
 SLACK_FILES_COMPLETE_UPLOAD = "https://slack.com/api/files.completeUploadExternal"
+SLACK_CONVERSATIONS_LIST_URL = "https://slack.com/api/conversations.list"
+SLACK_CONVERSATIONS_MEMBERS_URL = "https://slack.com/api/conversations.members"
+
+SLACK_CONVERSATION_TYPES = "public_channel,private_channel,mpim,im"
+SLACK_CONVERSATIONS_PAGE_SIZE = 200
+SLACK_CONVERSATIONS_MAX_PAGES = 5
+SLACK_MPIM_MEMBERS_LIMIT = 50
+SLACK_PEOPLE_RESOLVE_MAX = 100
+
+SlackConversationKind = Literal["channel", "private", "mpim", "im"]
+
+
+@dataclass(frozen=True)
+class SlackUser:
+    """The sender facts one users.info read yields: the display fields for the turn's <context>
+    tag and the email the DM member resolution needs. The email anchors member identity, so it is
+    carried only when Slack has confirmed it (`is_email_confirmed`) — an unconfirmed address is no
+    email at all."""
+
+    name: str | None
+    email: str | None
+    timezone: str | None
+
+
+class SlackConversation(BaseModel):
+    """One conversation from conversations.list, reduced to what a member searching for it needs:
+    the id to act on, its `kind` (public channel / private channel / group DM / 1:1 DM), and the
+    text to match on. A channel is matched by `name`/`purpose`/`topic`; a DM has no name, so it
+    carries `people` — the resolved display names/emails of its members (the bot dropped) — and is
+    found by who is in it. Untrusted — every text field is authored by a workspace member."""
+
+    id: str
+    kind: SlackConversationKind
+    name: str
+    people: tuple[str, ...]
+    purpose: str
+    topic: str
+    is_member: bool
+
+
+@dataclass(frozen=True)
+class SlackConversationMatches:
+    """Conversations matching a search, plus whether a bound was hit before the workspace was fully
+    covered — the list paged past its ceiling, or more DMs existed than people-resolution covers —
+    so the agent tells "no such conversation" from "not within what was scanned" and re-runs with a
+    tighter query rather than trusting an empty result."""
+
+    conversations: tuple[SlackConversation, ...]
+    truncated: bool
+
+
+@dataclass(frozen=True)
+class SlackConversationSearch:
+    """List the workspace's conversations through conversations.list — public and private channels,
+    group DMs, and 1:1 DMs — and keep those matching a query. A DM has no name, so it is matched and
+    disambiguated by its people: the search resolves each DM's and group DM's members to their
+    display name/email (dropping the bot itself) so "the dm with alice" finds it. Bounded by
+    construction on the app's own bot token: at most SLACK_CONVERSATIONS_MAX_PAGES list requests and
+    SLACK_PEOPLE_RESOLVE_MAX DMs resolved, so a workspace that keeps handing back a cursor, a
+    malformed page, or a flood of DMs can never spin it unbounded. An empty query keeps everything
+    listed; a non-empty one is a case-insensitive substring over name, purpose, topic, and the
+    people."""
+
+    bot_token: str
+    bot_user_id: str
+    query: str
+
+    async def run(self) -> SlackConversationMatches:
+        needle = self.query.strip().lower()
+        async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
+            listed, paged_out = await self._list(client)
+            people, capped = await self._people(client, listed)
+        matches: list[SlackConversation] = []
+        for raw in listed:
+            conversation = self._conversation(raw, people)
+            if conversation is None:
+                continue
+            fields = (conversation.name, conversation.purpose, conversation.topic)
+            haystack = "\n".join((*fields, *conversation.people)).lower()
+            if not needle or needle in haystack:
+                matches.append(conversation)
+        return SlackConversationMatches(tuple(matches), truncated=paged_out or capped)
+
+    async def _list(self, client: httpx.AsyncClient) -> tuple[list[object], bool]:
+        """Every conversation across the paged list, and whether a cursor still remained at the page
+        ceiling (more the search never saw)."""
+        listed: list[object] = []
+        cursor = ""
+        for _page in range(SLACK_CONVERSATIONS_MAX_PAGES):
+            payload = await _slack_ok(
+                client.get(
+                    SLACK_CONVERSATIONS_LIST_URL,
+                    params=self._params(cursor),
+                    headers={"Authorization": f"Bearer {self.bot_token}"},
+                )
+            )
+            page = payload.get("channels")
+            if isinstance(page, list):
+                listed.extend(page)
+            cursor = self._next_cursor(payload)
+            if not cursor:
+                return listed, False
+        return listed, True
+
+    def _params(self, cursor: str) -> dict[str, str]:
+        params = {
+            "types": SLACK_CONVERSATION_TYPES,
+            "exclude_archived": "true",
+            "limit": str(SLACK_CONVERSATIONS_PAGE_SIZE),
+        }
+        if cursor:
+            params["cursor"] = cursor
+        return params
+
+    def _next_cursor(self, payload: dict[str, object]) -> str:
+        metadata = payload.get("response_metadata")
+        cursor = metadata.get("next_cursor") if isinstance(metadata, dict) else None
+        return cursor if isinstance(cursor, str) else ""
+
+    async def _people(
+        self, client: httpx.AsyncClient, listed: list[object]
+    ) -> tuple[dict[str, tuple[str, ...]], bool]:
+        """The display labels of each DM's and group DM's members, keyed by conversation id — the
+        bot's own id dropped. Bounded: at most SLACK_PEOPLE_RESOLVE_MAX DMs are resolved (more marks
+        the result capped), and each user is looked up once and cached across conversations."""
+        member_ids: dict[str, tuple[str, ...]] = {}
+        capped = False
+        for raw in listed:
+            if not isinstance(raw, dict) or self._kind(raw) not in ("im", "mpim"):
+                continue
+            convo_id = raw.get("id")
+            if not isinstance(convo_id, str):
+                continue
+            if len(member_ids) >= SLACK_PEOPLE_RESOLVE_MAX:
+                capped = True
+                break
+            member_ids[convo_id] = await self._members(client, raw, convo_id)
+        labels: dict[str, str] = {}
+        for user_id in {uid for ids in member_ids.values() for uid in ids}:
+            if user_id == self.bot_user_id:
+                continue
+            resolved = await _slack_user(self.bot_token, user_id)
+            labels[user_id] = self._label(resolved, user_id)
+        people = {
+            convo_id: tuple(labels[uid] for uid in ids if uid in labels)
+            for convo_id, ids in member_ids.items()
+        }
+        return people, capped
+
+    def _kind(self, raw: dict[str, object]) -> SlackConversationKind:
+        if raw.get("is_im"):
+            return "im"
+        if raw.get("is_mpim"):
+            return "mpim"
+        if raw.get("is_private"):
+            return "private"
+        return "channel"
+
+    async def _members(
+        self, client: httpx.AsyncClient, raw: dict[str, object], convo_id: str
+    ) -> tuple[str, ...]:
+        if self._kind(raw) == "im":
+            user = raw.get("user")
+            return (user,) if isinstance(user, str) else ()
+        payload = await _slack_ok(
+            client.get(
+                SLACK_CONVERSATIONS_MEMBERS_URL,
+                params={"channel": convo_id, "limit": str(SLACK_MPIM_MEMBERS_LIMIT)},
+                headers={"Authorization": f"Bearer {self.bot_token}"},
+            )
+        )
+        members = payload.get("members")
+        return tuple(m for m in members if isinstance(m, str)) if isinstance(members, list) else ()
+
+    def _label(self, user: SlackUser | None, user_id: str) -> str:
+        if user is None:
+            return user_id
+        if user.name and user.email:
+            return f"{user.name} ({user.email})"
+        return user.name or user.email or user_id
+
+    def _conversation(
+        self, raw: object, people: dict[str, tuple[str, ...]]
+    ) -> SlackConversation | None:
+        if not isinstance(raw, dict):
+            return None
+        convo_id = raw.get("id")
+        if not isinstance(convo_id, str):
+            return None
+        name = raw.get("name")
+        return SlackConversation(
+            id=convo_id,
+            kind=self._kind(raw),
+            name=name if isinstance(name, str) else "",
+            people=people.get(convo_id, ()),
+            purpose=self._nested_value(raw.get("purpose")),
+            topic=self._nested_value(raw.get("topic")),
+            is_member=bool(raw.get("is_member")),
+        )
+
+    def _nested_value(self, field: object) -> str:
+        value = field.get("value") if isinstance(field, dict) else None
+        return value if isinstance(value, str) else ""
+
 
 STATUS_THINKING_TEXT = "Thinking…"
 STATUS_WORKING_TEXT = "Working… ({tool})"
@@ -767,18 +972,6 @@ async def _participating_conversation(ctx: SurfaceContext, queue_key: str) -> UU
     if await ctx.latest_turn(conversation_id) is None:
         return None
     return conversation_id
-
-
-@dataclass(frozen=True)
-class SlackUser:
-    """The sender facts one users.info read yields: the display fields for the turn's <context>
-    tag and the email the DM member resolution needs. The email anchors member identity, so it is
-    carried only when Slack has confirmed it (`is_email_confirmed`) — an unconfirmed address is no
-    email at all."""
-
-    name: str | None
-    email: str | None
-    timezone: str | None
 
 
 async def _slack_user(bot_token: str, slack_user_id: str) -> SlackUser | None:

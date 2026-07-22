@@ -9,7 +9,10 @@ app manifest for this deploy so the member creates the app with the right scopes
 The two secrets (bot token,
 signing secret) travel through `request_credentials` fulfillment — the member's terminal prompts
 privately — and never through chat. The manifest template below is pinned to the skill's YAML by a
-test, so the scopes and events can never drift apart."""
+test, so the scopes and events can never drift apart. `slack_channels` is the one runtime tool here:
+it spends the manifest's `*:read` scopes, paging conversations.list on that same bot token so the
+agent can discover a channel by name — or a DM by who is in it — instead of only acting on an id it
+was handed."""
 
 import json
 import re
@@ -23,6 +26,7 @@ from ufo_ext_slack.surface import (
     SLACK_BOT_TOKEN_SLOT,
     SLACK_SIGNING_SECRET_SLOT,
     SURFACE_SLACK,
+    SlackConversationSearch,
     SlackIdentityError,
     SlackIdentityResolver,
     read_identity,
@@ -54,12 +58,16 @@ oauth_config:
       - app_mentions:read
       - assistant:write
       - channels:history
+      - channels:read
       - chat:write
       - files:read
       - files:write
       - groups:history
+      - groups:read
       - im:history
+      - im:read
       - mpim:history
+      - mpim:read
       - users:read
       - users:read.email
 settings:
@@ -88,6 +96,14 @@ class SlackConnectInput(BaseModel):
 class SlackManifestInput(BaseModel):
     name: str = Field(
         default="ufo", description="The bot's display name shown in Slack, 1-35 plain characters."
+    )
+
+
+class SlackChannelsInput(BaseModel):
+    query: str = Field(
+        default="",
+        description="Case-insensitive text matched against each conversation's name, purpose, "
+        "topic, and — for DMs and group DMs — the people in it. Leave empty to list from the top.",
     )
 
 
@@ -207,6 +223,32 @@ async def slack_manifest_handler(ctx: ToolContext, args: SlackManifestInput) -> 
     return ToolResult(content=(TextContent(text=manifest),))
 
 
+async def slack_channels_handler(ctx: ToolContext, args: SlackChannelsInput) -> ToolResult:
+    """List and search the workspace's Slack conversations — channels, group DMs, and DMs — by
+    name, purpose, topic, or the people in a DM, so the agent can act on one it discovered rather
+    than only an id it was handed. Reads the app's own bot token — the surface's Slack credential —
+    and pages conversations.list host-side, resolving each DM's members through the bot's own
+    identity; the text it returns is member-authored, so the result is walled untrusted."""
+    assert ctx.ext is not None
+    try:
+        bot_token = await ctx.ext.credentials.get(SLACK_BOT_TOKEN_SLOT)
+    except CredentialSlotUnset as unset:
+        raise ValueError(
+            "Slack is not connected — set the bot token with slack_connect first."
+        ) from unset
+    identity = await read_identity(ctx.blob, ctx.turn.workspace_id, bot_token)
+    if identity is None:
+        raise ValueError("Slack identity is not resolved yet — run slack_connect first.")
+    found = await SlackConversationSearch(
+        bot_token=bot_token, bot_user_id=identity.bot_user_id, query=args.query
+    ).run()
+    payload = {
+        "conversations": [conversation.model_dump() for conversation in found.conversations],
+        "truncated": found.truncated,
+    }
+    return ToolResult(content=(TextContent(text=json.dumps(payload)),), untrusted=True)
+
+
 def _token_diagnosis(error: str) -> str:
     if error in TOKEN_REJECTED_ERRORS:
         return (
@@ -239,5 +281,19 @@ TOOLS = (
         ),
         input_model=SlackManifestInput,
         handler=slack_manifest_handler,
+    ),
+    ToolDef(
+        name="slack_channels",
+        description=(
+            "List and search the connected workspace's Slack conversations — public and private "
+            "channels, group DMs, and 1:1 DMs — by name, purpose, topic, or (for DMs) the people "
+            "in them. Use it to find the conversation to post in or read from when you were given "
+            "a name or a person rather than an id. Returns each match's id, kind, name, people, "
+            "purpose, topic, and membership; `truncated` is true when the workspace has more than "
+            "one scan covers — search again with a more specific query."
+        ),
+        input_model=SlackChannelsInput,
+        handler=slack_channels_handler,
+        untrusted=True,
     ),
 )

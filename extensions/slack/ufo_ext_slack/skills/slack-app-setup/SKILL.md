@@ -67,12 +67,16 @@ oauth_config:
       - app_mentions:read
       - assistant:write
       - channels:history
+      - channels:read
       - chat:write
       - files:read
       - files:write
       - groups:history
+      - groups:read
       - im:history
+      - im:read
       - mpim:history
+      - mpim:read
       - users:read
       - users:read.email
 settings:
@@ -94,8 +98,11 @@ settings:
 ```
 
 Why each piece: `app_mentions:read` + the `message.*` events and matching `*:history` scopes let
-the surface see the messages it's added to and the mentions it must answer; `chat:write` posts the
-reply in-thread; the `agent_view` block enables Slack's Agents & AI Apps experience and
+the surface see the messages it's added to and the mentions it must answer; the `*:read` scopes
+(`channels:read`, `groups:read`, `im:read`, `mpim:read`) back the `slack_channels` tool, which pages
+`conversations.list` on the bot token so the agent can find a public or private channel by name, or
+a DM/group DM by the people in it, instead of only acting on an id it was handed; `chat:write` posts
+the reply in-thread; the `agent_view` block enables Slack's Agents & AI Apps experience and
 `assistant:write` lets the surface set the thread's native status while a turn runs — Slack's
 validator pairs `agent_view` with the `app_home_opened` event, which the surface receives and
 ignores; `files:read` downloads a message's attachments into the workspace and `files:write`
@@ -139,6 +146,17 @@ On a self-managed deploy the operator can fill the two secret slots out-of-band 
 `ufoctl credential set <slot>` prompts with hidden input, and a cold start can carry
 `SLACK_BOT_TOKEN` and `SLACK_SIGNING_SECRET` in the environment before `ufoctl init` — init seeds
 every declared slot from its upper-cased env var. `slack_connect` still derives the identity.
+
+## Discovering channels
+
+The `channels:read`/`groups:read` scopes (channels) and `im:read`/`mpim:read` scopes (DMs and group
+DMs) back the `slack_channels` tool: it pages `conversations.list` on the app's own bot token
+host-side and returns the conversations matching a query — a channel by its `name`/`purpose`/`topic`,
+or a DM by the people in it. A DM has no name, so the tool resolves each DM's members to their
+display name/email (using the same `users:read` the surface already relies on) and matches on those.
+Pass a specific `query` to search, or leave it empty to list from the top; the scan is bounded, and a
+`truncated` result means the workspace has more than one scan covers — narrow the query and search
+again.
 
 ## Updating an existing app
 
