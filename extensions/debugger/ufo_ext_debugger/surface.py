@@ -28,6 +28,7 @@ from ufo.sdk.http import (
     Request,
     Response,
     StreamingResponse,
+    set_session_cookie,
 )
 from ufo.sdk.hub import CostTick, LiveFrame, Parked, SkillLoad, Terminal, TextDelta, ToolCall
 from ufo.sdk.surfaces import SurfaceAuth, SurfaceContext, SurfaceRoute
@@ -108,7 +109,7 @@ async def bind_session(ctx: SurfaceContext, request: Request) -> Response:
     if not isinstance(posted, str) or not posted.strip():
         return JSONResponse({"error": "token form field is required"}, status_code=400)
     response = RedirectResponse(str(request.url), status_code=303)
-    response.set_cookie(DEBUG_COOKIE, posted.strip(), httponly=True, samesite="lax")
+    set_session_cookie(response, DEBUG_COOKIE, posted.strip(), samesite="lax")
     return response
 
 

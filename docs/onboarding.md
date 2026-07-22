@@ -9,20 +9,21 @@ second renderer over the identical machine — see "Web login" below.
 ## Component map
 
 ```text
-                     Cloudflare edge (infra/modules/edge)
+                Cloudflare edge — apex (infra/modules/edge)
                +--------------------------------------------+
 curl / ------->|  GET /            CLI UA -> landing card   |
-               |                   other UA -> prod site    |
+browser ------>|                   other UA -> prod site    |
                |  POST /waitlist   email -> D1 + mail queue |
                |  queue consumer   confirmation email       |
                |  GET /ufo         proxy of gateway /ufo    |
+               |  GET /login       302 -> app.<host>/login  |
                +----------------------+---------------------+
-                                      | origin
+                                      | origin (apex ingress)
                                       v
-                            hosted apex gateway
+                    hosted gateway (apex + app-host ingress)
                +--------------------------------------------+
 ufo client --->|  GET /ufo -> version-stamped POSIX client  |
-browser ------>|  GET /login -> sign-in page (web renderer) |
+browser ------>|  GET /login -> sign-in page (app host)     |
                |  POST /v1/onboard/{channel} (web = JSON)   |
                |       |                                    |
                |       v                                    |
@@ -34,18 +35,19 @@ browser ------>|  GET /login -> sign-in page (web renderer) |
                +--------------------------------------------+
                                       |
                                       | token + workspace directives -> ~/.ufo/
+                                      | browser: host-only cookie (app host)
                                       v
-                         shared workspace runtime
+                    shared workspace runtime (app host)
                +--------------------------------------------+
-ufo client --->| ufo surface                                |
-               |  verify bearer · bind workspace            |
-               |  admit turns · stream frames               |
+ufo client --->| ufo surface        verify bearer · admit   |
+browser ------>| web (ufo_session) · debug (ufo_debug)      |
+               |  bind workspace · admit turns · stream     |
                +--------------------------------------------+
 ```
 
 ## The apex edge
 
-One worker fronts both apexes (`flyingobject.ai`, `testing.flyingobject.ai`), claiming only three
+One worker fronts both apexes (`flyingobject.ai`, `testing.flyingobject.ai`), claiming only four
 paths — every other request passes through to what the host serves:
 
 - `GET /` — curl/wget/httpie get the text landing card (saucer, waitlist counter, install
@@ -58,6 +60,8 @@ paths — every other request passes through to what the host serves:
   objects" counter reads D1 (≤1h stale per isolate, busted on join).
 - `GET /ufo` — proxies the gateway's stamped `/ufo` from the module's `origin_base`; both apexes
   point at the one live fleet.
+- `GET /login` — 302 to `app.<host>/login`. Sign-in lives on the app host (the sole authenticated
+  host), so the apex carries no signed-in state and the session cookie is set and read same-origin.
 
 ## Terminal onboarding flow
 
@@ -104,22 +108,32 @@ or consumed code re-asks with its exact ledger state; an unknown one points at t
 
 ## Web login
 
-`GET /login` (gateway; the edge worker's default case passes it through to origin) serves a
-self-contained sign-in page — a second renderer of the identical `Onboarding` machine, never a
-second machine. The page generates a session UUID, sends each answer to `POST /v1/onboard/web`
-(header `x-ufo-session`, channel `web` — the claim index isolates it from a terminal session with
-the same ref), and receives the directive lines as JSON (`gateway_web.parse_directives` inverts the
-wire escaping exactly). It renders `say`/`ask`/`exit` and, on `token` + `workspace`, a signed-in
-home card: the member's email, the workspace URL, the terminal install one-liner. No `install`
-preamble is sent on the web channel, and the token never appears in a human-visible line.
+The whole browser sign-in flow is same-origin on the **app host** (`app.<env>`), the sole
+authenticated host. The apex `GET /login` 302s there (edge worker); on the app host the ingress
+routes the front-door prefixes (`ufo.serve.RESERVED_HOST_PREFIXES`: `/login`, `/v1/onboard`,
+`/ufo`) to `ufo-gateway`, while `/` and `/surface/*` stay on `ufo-serve` (nginx longest-prefix).
+Two invariants hold this up by construction rather than by convention: the serve fleet **fails its
+boot** if it mounts any route under a reserved prefix (`_assert_no_reserved_routes`), and every
+session cookie is set through `ufo.sdk.http.set_session_cookie`, which takes no `Domain` — so a
+cookie is always host-only and a session can never cross a subdomain, environment, or preview host
+(a repo gate forbids raw `set_cookie` elsewhere).
+
+`GET /login` serves a self-contained sign-in page — a second renderer of the identical
+`Onboarding` machine, never a second machine. The page generates a session UUID, sends each answer
+to the same-origin `POST /v1/onboard/web` (header `x-ufo-session`, channel `web` — the claim index
+isolates it from a terminal session with the same ref), and receives the directive lines as JSON
+(`gateway_web.parse_directives` inverts the wire escaping exactly). It renders `say`/`ask`/`exit`
+and, on `token` + `workspace`, a signed-in home card: the member's email, the workspace URL, and
+the terminal install one-liner. No `install` preamble is sent on the web channel, and the token
+never appears in a human-visible line.
 
 When the claim's channel-verified email domain equals `UFO_ADMIN_EMAIL_DOMAIN`, `_signed_in` adds
 one extra machine-consumed directive — `debugger <workspace-url>/surface/debug` — and the card
-shows a "Session debugger" form that POSTs the token in its body (the debug surface exchanges it
-for an httponly cookie and redirects; the bearer never rides a URL, so no access log captures it —
-`spec.md` "Surfaces" covers that surface). The directive is emitted channel-blind — the terminal
-client drops unknown verbs — and never emitted when the env is unset. The gate is the server's;
-the page merely renders what arrives.
+also shows a "Session debugger" form that POSTs the token in its body (the debug surface exchanges
+it for its `ufo_debug` cookie and redirects; the bearer never rides a URL into the debugger,
+so no access log captures it — `spec.md` "Surfaces" covers that surface). The directive is emitted
+channel-blind — the terminal client drops unknown verbs — and never emitted when the env is unset.
+The gate is the server's; the page merely renders what arrives.
 
 ## Connecting Slack
 

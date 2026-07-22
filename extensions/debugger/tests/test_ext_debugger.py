@@ -68,7 +68,7 @@ async def debug(
     _mount_shared_surfaces(
         app, (debugger_manifest(),), None, blob, InProcessHub(), _StubDbos(), "", None
     )
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://fleet") as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="https://fleet") as client:
         yield client, blob
 
 
@@ -219,7 +219,9 @@ async def test_posted_token_binds_the_cookie_and_redirects(debug) -> None:
     cookie = response.headers["set-cookie"]
     assert cookie.startswith("ufo_debug=")
     assert "HttpOnly" in cookie
+    assert "Secure" in cookie
     assert "SameSite=lax" in cookie
+    assert "Domain" not in cookie
     listed = await client.get("/surface/debug/api/conversations")
     assert listed.status_code == 200
 

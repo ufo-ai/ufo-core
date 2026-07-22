@@ -16,6 +16,7 @@ from dbos import DBOS, DBOSClient
 from fastapi import FastAPI
 from starlette.requests import Request
 from starlette.responses import Response
+from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ufo.accounting import Pricing
@@ -94,6 +95,26 @@ from ufo.surfaces.hub_tail import HubTailer
 from ufo.workspace import init_workspace_credentials, ws
 
 PROXY_STARTUP_TIMEOUT_SECONDS = 30
+RESERVED_HOST_PREFIXES = ("/login", "/v1/onboard", "/ufo")
+
+
+def _assert_no_reserved_routes(app: FastAPI) -> None:
+    """On the shared host one ingress hands `/login`, `/v1/onboard`, and `/ufo` to the onboarding
+    gateway and everything else to this fleet, so the sign-in flow is same-origin with the product.
+    The fleet must therefore mount nothing under those prefixes — otherwise the ingress silently
+    shadows it. Asserting it at boot makes the split a fail-loud invariant, not a hand-kept
+    property of the ingress template."""
+    conflicts = [
+        route.path
+        for route in app.routes
+        if isinstance(route, Route)
+        and any(route.path.startswith(prefix) for prefix in RESERVED_HOST_PREFIXES)
+    ]
+    if conflicts:
+        raise RuntimeError(
+            f"shared fleet mounts routes under gateway-reserved prefixes "
+            f"{RESERVED_HOST_PREFIXES}: {conflicts}"
+        )
 
 
 def run() -> None:
@@ -222,6 +243,7 @@ def run() -> None:
             artifact_secret,
             config.connect.public_base_url,
         )
+        _assert_no_reserved_routes(app)
     log("serve.started", host=config.serve.host, port=config.serve.port, shared_workspace=shared)
     try:
         uvicorn.run(app, host=config.serve.host, port=config.serve.port, log_level="warning")

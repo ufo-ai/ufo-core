@@ -213,7 +213,7 @@ async def web(
     workspace_id = await _seed_workspace()
     app = FastAPI()
     _mount_surfaces(app, (web_manifest(),), workspace_id, None, blob, hub, dbos_client, "", None)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://web") as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
         yield client, workspace_id
     dbos_client.destroy()
 
@@ -463,3 +463,19 @@ def test_chat_page_is_self_contained_and_binds_a_session_cookie() -> None:
     assert "http://" not in CHAT_PAGE
     assert "https://" not in CHAT_PAGE
     assert "//cdn" not in CHAT_PAGE
+
+
+async def test_chat_page_query_token_binds_a_host_only_secure_cookie(
+    web: tuple[AsyncClient, UUID],
+) -> None:
+    """`?token=` binds the session through the shared `set_session_cookie` factory: host-only (no
+    `Domain`, so it never crosses an environment or preview host), plus HttpOnly, Secure, and
+    SameSite=strict."""
+    client, _ = web
+    response = await client.get("/surface/web?token=member-token")
+    cookie = response.headers["set-cookie"]
+    assert cookie.startswith("ufo_session=member-token")
+    assert "HttpOnly" in cookie
+    assert "Secure" in cookie
+    assert "SameSite=strict" in cookie
+    assert "Domain" not in cookie

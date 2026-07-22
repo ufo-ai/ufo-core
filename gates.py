@@ -19,6 +19,7 @@ FORBIDDEN_MODULE_NAMES = {"utils", "helpers", "common"}
 DB_MODULE = CORE_SRC / "db.py"
 ENGINE_TOKENS = ("create_async_engine", "async_sessionmaker", ".begin(")
 SDK_EXEMPT_PART = "sdk"
+SESSION_COOKIE_FACTORY = CORE_SRC / "sdk" / "http.py"
 COMPOSITION_ROOTS = (CORE_SRC / "serve.py", CORE_SRC / "proxy_serve.py")
 ROLE_PACKAGES = ("ufo.surfaces", "ufo.loop", "ufo.jobs", "ufo.sandbox.proxy")
 ENVELOPE_COLUMNS = {"workspace_id", "created_at", "updated_at"}
@@ -87,6 +88,17 @@ def _call_names(tree: ast.Module) -> list[str]:
             case ast.Call(func=ast.Name(id=name)) | ast.Call(func=ast.Attribute(attr=name)):
                 names.append(name)
     return names
+
+
+def _set_cookie_failures(trees: dict[Path, ast.Module]) -> list[str]:
+    """A session cookie stays host-only by construction: `ufo.sdk.http.set_session_cookie` takes no
+    `domain`, so it is the only sanctioned setter. A raw `Response.set_cookie` anywhere else could
+    add a parent `Domain` and leak a session across a subdomain, environment, or preview host."""
+    return [
+        f"{rel}: raw set_cookie is banned outside {SESSION_COOKIE_FACTORY} — use set_session_cookie"
+        for rel, tree in trees.items()
+        if rel != SESSION_COOKIE_FACTORY and "set_cookie" in _call_names(tree)
+    ]
 
 
 def _module_name(rel: Path) -> str:
@@ -614,6 +626,7 @@ def main() -> int:
     failures.extend(_wiring_failures(trees))
     failures.extend(_live_frame_failures(trees))
     failures.extend(_to_thread_failures(trees))
+    failures.extend(_set_cookie_failures(trees))
     failures.extend(_skill_failures())
     skill_trees = {
         path.relative_to(ROOT): ast.parse(path.read_text(), filename=str(path))

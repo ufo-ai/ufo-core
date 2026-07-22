@@ -17,7 +17,14 @@ from collections.abc import AsyncIterator
 from uuid import UUID
 
 from ufo.sdk.accounting import MICRO_USD_PER_USD, SpendReport, SubjectTotal
-from ufo.sdk.http import HTMLResponse, JSONResponse, Request, Response, StreamingResponse
+from ufo.sdk.http import (
+    HTMLResponse,
+    JSONResponse,
+    Request,
+    Response,
+    StreamingResponse,
+    set_session_cookie,
+)
 from ufo.sdk.hub import CostTick, LiveFrame, Parked, SkillLoad, Terminal, ToolCall
 from ufo.sdk.surfaces import ConnectRequestInvalid, SurfaceContext, SurfaceRoute
 
@@ -46,7 +53,7 @@ async def chat_page(ctx: SurfaceContext, request: Request) -> Response:
     response = HTMLResponse(CHAT_PAGE)
     token = request.query_params.get("token", "")
     if token:
-        response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="strict")
+        set_session_cookie(response, SESSION_COOKIE, token, samesite="strict")
     return response
 
 

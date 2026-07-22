@@ -177,6 +177,8 @@ export default {
         return request.method === "POST" ? join(request, env, url) : text(usage(url.hostname));
       case "/ufo":
         return fetch(`${env.ORIGIN_BASE}/ufo`);
+      case "/login":
+        return Response.redirect(`https://app.${url.hostname}/login`, 302);
       default:
         return fetch(request);
     }

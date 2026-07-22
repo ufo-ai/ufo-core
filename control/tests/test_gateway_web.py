@@ -14,7 +14,9 @@ from uuid import NAMESPACE_DNS, UUID, uuid5
 import asyncpg
 import pytest
 from fastapi.testclient import TestClient
+from starlette.routing import Route
 from ufo.bearer import verify_token
+from ufo.serve import RESERVED_HOST_PREFIXES
 
 import ufo_control.gateway as gateway
 from ufo_control.gateway import (
@@ -244,3 +246,12 @@ def test_login_page_and_session_header_requirements(
         missing = client.post("/v1/onboard/web", content="")
         assert missing.status_code == 400
         assert missing.json() == {"error": "x-ufo-session header is required"}
+
+
+def test_gateway_serves_every_reserved_host_prefix() -> None:
+    """The single-app-host ingress routes the reserved prefixes to this gateway (`RESERVED_HOST_
+    PREFIXES`, the same constant the serve fleet forbids). The gateway must serve a route under
+    each, or the split aims a path at a 404."""
+    paths = [route.path for route in gateway_app().routes if isinstance(route, Route)]
+    for prefix in RESERVED_HOST_PREFIXES:
+        assert any(path.startswith(prefix) for path in paths), prefix

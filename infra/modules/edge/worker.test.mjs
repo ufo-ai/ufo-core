@@ -399,6 +399,14 @@ test("any other path passes through untouched", async () => {
   assert.equal(await reply.text(), "origin:https://flyingobject.ai/v1/onboard/ufo");
 });
 
+test("apex /login 302s to the app host, the sole authenticated origin", async () => {
+  const prod = await request("https://flyingobject.ai/login", { ua: "Mozilla/5.0" });
+  assert.equal(prod.status, 302);
+  assert.equal(prod.headers.get("location"), "https://app.flyingobject.ai/login");
+  const testing = await request("https://testing.flyingobject.ai/login", { ua: "Mozilla/5.0" });
+  assert.equal(testing.headers.get("location"), "https://app.testing.flyingobject.ai/login");
+});
+
 test("/ufo serves byte-identical content to every user agent", async () => {
   const cli = await (await request("https://flyingobject.ai/ufo")).text();
   const browser = await (

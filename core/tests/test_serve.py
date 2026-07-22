@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fastapi import FastAPI
 
 from ufo import serve
 from ufo.accounting import CORE_PRICING
@@ -239,3 +240,20 @@ async def test_local_rule_base_fails_loud_on_an_injecting_slot_without_a_key(
     manifest = Manifest(name="inj", version="1", credentials=(slot,))
     with pytest.raises(RuntimeError, match="UFO_CREDENTIAL_KEY"):
         await serve._local_rule_base(_local_config(), (manifest,), None)
+
+
+def test_reserved_host_prefixes_guard_fails_loud_on_a_gateway_route() -> None:
+    """The shared fleet shares the app host with the onboarding gateway via one ingress; the boot
+    guard rejects any fleet route under a gateway-reserved prefix before the ingress can shadow it.
+    Product paths (`/surface`, the OAuth callback, artifacts) are clear; a `/v1/onboard` route is
+    not."""
+
+    def _endpoint(_request: object) -> None: ...
+
+    app = FastAPI()
+    for path in ("/surface/web", "/v1/connect/callback", "/artifacts/download"):
+        app.add_route(path, _endpoint)
+    serve._assert_no_reserved_routes(app)
+    app.add_route("/v1/onboard/web", _endpoint)
+    with pytest.raises(RuntimeError, match="reserved"):
+        serve._assert_no_reserved_routes(app)

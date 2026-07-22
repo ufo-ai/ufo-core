@@ -159,3 +159,22 @@ def test_job_selector_gate_rejects_a_none_selector() -> None:
 def test_job_selector_gate_allows_a_declared_selector() -> None:
     trees = {CORE_FILE: ast.parse("JobSpec(name='x', schedule=None, handler=h, candidates=sel)\n")}
     assert gates._job_selector_failures(trees) == []
+
+
+WEB_SURFACE = Path("extensions/web/ufo_ext_web/surface.py")
+
+
+def test_set_cookie_gate_flags_raw_set_cookie_outside_the_factory() -> None:
+    trees = {WEB_SURFACE: ast.parse("response.set_cookie('s', token)\n")}
+    failures = gates._set_cookie_failures(trees)
+    assert failures and "set_session_cookie" in failures[0]
+
+
+def test_set_cookie_gate_exempts_the_factory_module() -> None:
+    trees = {gates.SESSION_COOKIE_FACTORY: ast.parse("response.set_cookie('s', token)\n")}
+    assert gates._set_cookie_failures(trees) == []
+
+
+def test_set_cookie_gate_allows_the_factory_helper_at_call_sites() -> None:
+    trees = {WEB_SURFACE: ast.parse("set_session_cookie(response, 's', token, samesite='lax')\n")}
+    assert gates._set_cookie_failures(trees) == []
