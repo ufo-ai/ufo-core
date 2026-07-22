@@ -18,8 +18,10 @@ Rather than implement `SourceBackend` from scratch, a REST provider subclasses `
 declaring its `StreamSpec`s and a `Pagination` strategy (or overriding `paginate`) — and wraps it in
 `ConnectorBackend`, the adapter that drives one stream to completion per run and collapses its pages
 into a `SyncResult`. The pagination helpers (`get_path`, `list_or_empty`, `records_at`,
-`with_context`) are the shared record-shaping primitives a provider reaches for. The concrete shapes
-live in `ufo.sources`, reached only here."""
+`with_context`) are the shared record-shaping primitives a provider reaches for. A stream that fans
+out over partitions (one cursor per repo, channel) drives `PartitionWalk` with an `Ordering` and a
+per-partition page factory, so the per-partition cursor-map codec and bounded-backfill resume live
+once here, not in each connector. The concrete shapes live in `ufo.sources`, reached only here."""
 
 from ufo.sources.backend import (
     ConnectorBackend as ConnectorBackend,
@@ -31,16 +33,31 @@ from ufo.sources.connector import (
     Connector as Connector,
 )
 from ufo.sources.connector import (
+    Ordering as Ordering,
+)
+from ufo.sources.connector import (
     Pagination as Pagination,
 )
 from ufo.sources.connector import (
     PaginationStrategy as PaginationStrategy,
 )
 from ufo.sources.connector import (
+    PartitionBound as PartitionBound,
+)
+from ufo.sources.connector import (
+    PartitionSkipped as PartitionSkipped,
+)
+from ufo.sources.connector import (
+    PartitionWalk as PartitionWalk,
+)
+from ufo.sources.connector import (
     StreamPage as StreamPage,
 )
 from ufo.sources.connector import (
     StreamSpec as StreamSpec,
+)
+from ufo.sources.connector import (
+    WalkPage as WalkPage,
 )
 from ufo.sources.rest import (
     RestConnector as RestConnector,

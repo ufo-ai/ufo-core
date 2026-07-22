@@ -16,10 +16,12 @@ shapes are internal value objects: they never cross a wire, so they are frozen d
 
 import json
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, ClassVar
+
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ufo.connectors import Credential
 
@@ -60,6 +62,24 @@ class Pagination:
     extra_params: Mapping[str, Any] | None = None
 
 
+class Ordering(StrEnum):
+    """How a partitioned stream's records are ordered relative to its `cursor_field`, which decides
+    how `PartitionWalk` checkpoints and resumes each partition. `ascending`: the provider returns
+    records oldest-first (a `?since` walk), so the running max value is a sound resume watermark —
+    everything before it is already seen. `newest_first`: an append-only feed returned newest-first,
+    so a first backfill walks a descending `{high, until}` window and resumes downward from `until`
+    (loss-free under prepend, because `high` is frozen at the record the backfill started from and
+    anything newer is caught by the next steady-state pass), then steady-state stops early once a
+    page sits strictly below the synced watermark — a page tying it still yields, so a tied-but-new
+    record lands and the repeats dedup downstream. `none`: no `cursor_field`, so only a partition
+    boundary is checkpointed — a finished partition is skipped on resume, an in-progress one is
+    redone."""
+
+    ascending = "ascending"
+    newest_first = "newest_first"
+    none = "none"
+
+
 @dataclass(frozen=True)
 class StreamSpec:
     """One stream a connector knows how to sync: its registry `name`, the source-side object, the
@@ -67,9 +87,10 @@ class StreamSpec:
     `cursor_field` an incremental stream advances a watermark over. `delete_missing` marks a stream
     whose run enumerates the complete current collection — the adapter returns it as an
     authoritative snapshot so vanished records are tombstoned; left False, the stream is incremental
-    and the adapter only upserts and names explicit removals. `pagination` routes a declared
-    strategy; None
-    means the connector's `paginate` handles the stream directly."""
+    and the adapter only upserts and names explicit removals. `ordering` tells `PartitionWalk` how
+    a partitioned stream's `cursor_field` is ordered, so a fan-out over repos/channels checkpoints
+    and resumes each partition soundly. `pagination` routes a declared strategy; None means the
+    connector's `paginate` handles the stream directly."""
 
     name: str
     source_object: str
@@ -77,6 +98,7 @@ class StreamSpec:
     cursor_field: str | None = None
     delete_missing: bool = False
     canonical: bool = True
+    ordering: Ordering = Ordering.none
     pagination: Pagination | None = None
 
 
@@ -90,6 +112,229 @@ class StreamPage:
     records: list[dict[str, Any]] = field(default_factory=list)
     deletes: tuple[str, ...] = ()
     next_cursor: str | None = None
+
+
+@dataclass(frozen=True)
+class PartitionBound:
+    """Where a partition's page factory resumes, handed down by `PartitionWalk`. `after` is the
+    highest `cursor_field` value already synced — fetch strictly newer records (steady-state
+    incremental). `before` is the upper bound for continuing a newest-first backfill downward —
+    fetch records at or below it: the bound is *inclusive*, so records tied at the boundary value
+    (which a capped page split may have left half-landed) are re-fetched rather than dropped, and
+    the repeat of the ones already landed is absorbed by the driver's digest-skip. Both None means
+    the partition is fresh: walk it whole from the newest record. A connector translates these into
+    its own API — a `since`/`oldest` lower bound, an inclusive `until`/`latest` upper bound, or a
+    client-side filter for an API that supports neither (and wraps any record filter of its own,
+    like GitHub's pull-request exclusion, here too)."""
+
+    after: str | None = None
+    before: str | None = None
+
+
+@dataclass(frozen=True)
+class WalkPage:
+    """One page a partition's factory hands `PartitionWalk`: the `records` to land, the highest
+    and lowest `cursor_field` values they carry, and any provider-reported `deletes`. `high`/`low`
+    are reported by the connector rather than read off the records because a derived record may not
+    carry the ordering field itself (a Slack thread row orders by its source message `ts`); they
+    drive watermark/window tracking and stop-early, and an unordered (`none`) page leaves them
+    None."""
+
+    records: list[dict[str, Any]]
+    high: str | None = None
+    low: str | None = None
+    deletes: tuple[str, ...] = ()
+
+
+class _Window(BaseModel):
+    """One partition's in-flight backfill window — persisted inside the source row's cursor map, so
+    a validated model that rejects anything but its two bounds."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    high: str
+    until: str
+
+
+class PartitionSkipped(Exception):
+    """A page factory raises this when the provider refuses one partition in a non-data way — a
+    repo gone 404 mid-walk, a channel the grant lost. The walk keeps the partition's stored cursor
+    state exactly as it stands (a mid-backfill `{high, until}` window survives to resume downward)
+    and moves to the next partition; a silent generator end means genuine exhaustion and is the
+    only path that dissolves a window."""
+
+
+Partitions = Callable[[], AsyncIterator[str]]
+PageFactory = Callable[[str, PartitionBound], AsyncIterator[WalkPage]]
+
+
+@dataclass(frozen=True)
+class PartitionWalk:
+    """Drive a stream that fans out over partitions (a repo, a channel), each carrying its own
+    cursor, onto the one-cursor source seam. Owns the per-partition cursor map — a single JSON
+    object `{partition: <watermark> | {"high", "until"}}` threaded through `StreamPage.next_cursor`,
+    so a capped run resumes without re-reading a finished partition or skipping an unvisited one —
+    and the resume state machine per `ordering`; the connector only enumerates `partitions` and
+    yields each partition's already-bounded `pages`.
+
+    `ascending`: checkpoint the running max `cursor_field` value after every page; resume re-drives
+    the factory with `after` set to that watermark. `newest_first`: a first backfill has no bound,
+    walks the partition newest-first, and checkpoints `{high: newest seen, until: oldest seen}`
+    after each page; a capped resume re-drives with `before` set to `until` (inclusive) and
+    continues the window downward until the walk exhausts, when the entry dissolves to the plain
+    `high` watermark — no record is lost even if rows were prepended between slices (since `high` is
+    frozen and the window descends by value, never by position) nor when a tie in the cursor value
+    straddles a capped page split (the inclusive boundary re-fetches it, and the repeat is deduped).
+    Once dissolved, steady-state resumes with `after` set to `high` and stops early once a whole
+    page sits strictly below it — a page tying `high` still yields, so a new record sharing the
+    watermark's exact value lands and the re-fetched repeats dedup downstream. `none`: checkpoint
+    the partition boundary so an in-progress capped pass skips the partitions it already
+    finished — but that marker only holds within one pass; when
+    the pass runs to completion the entries dissolve, so the next pass re-walks every partition in
+    full (a `none` stream has no cursor to filter on, so a full re-walk is how it picks up new and
+    changed rows). A pass that runs to completion prunes the map to the partitions it enumerated, so
+    a dropped partition's watermark cannot outlive it — though a partition deleted and recreated
+    under the same name between two syncs (no completed pass observing the absence) inherits the
+    old watermark, the residual trade of name-keyed partitions. The other trade is that a factory
+    whose API cannot bound server-side re-fetches the walked prefix each slice."""
+
+    ordering: Ordering
+    partitions: Partitions
+    pages: PageFactory
+
+    async def stream(self, cursor: str | None) -> AsyncIterator[StreamPage]:
+        stored = self._decode(cursor)
+        checkpoint: dict[str, str | _Window] = dict(stored)
+        seen: set[str] = set()
+        partition_iter = self.partitions()
+        try:
+            async for partition in partition_iter:
+                seen.add(partition)
+                if self.ordering is Ordering.none:
+                    if partition in stored:
+                        continue
+                    page_iter = self.pages(partition, PartitionBound())
+                    try:
+                        async for page in page_iter:
+                            yield StreamPage(
+                                records=page.records,
+                                deletes=page.deletes,
+                                next_cursor=self._encode(checkpoint),
+                            )
+                    except PartitionSkipped:
+                        continue
+                    finally:
+                        if isinstance(page_iter, AsyncGenerator):
+                            await page_iter.aclose()
+                    checkpoint[partition] = ""
+                    yield StreamPage(records=[], next_cursor=self._encode(checkpoint))
+                    continue
+                high: str | None
+                until: str | None
+                synced: str | None
+                match stored.get(partition):
+                    case _Window(high=high, until=until):
+                        bound, synced, backfill = (
+                            PartitionBound(before=until),
+                            None,
+                            True,
+                        )
+                    case str() as synced:
+                        bound, high, until, backfill = (
+                            PartitionBound(after=synced),
+                            synced,
+                            None,
+                            False,
+                        )
+                    case _:
+                        bound, high, until, synced = PartitionBound(), None, None, None
+                        backfill = self.ordering is Ordering.newest_first
+                page_iter = self.pages(partition, bound)
+                try:
+                    async for page in page_iter:
+                        if (
+                            self.ordering is Ordering.newest_first
+                            and not backfill
+                            and synced is not None
+                            and page.high is not None
+                            and page.high < synced
+                        ):
+                            break
+                        if page.high is not None and (high is None or page.high > high):
+                            high = page.high
+                        if (
+                            backfill
+                            and page.low is not None
+                            and (until is None or page.low < until)
+                        ):
+                            until = page.low
+                        if backfill and high is not None and until is not None:
+                            checkpoint[partition] = _Window(high=high, until=until)
+                        elif not backfill and high is not None:
+                            checkpoint[partition] = high
+                        yield StreamPage(
+                            records=page.records,
+                            deletes=page.deletes,
+                            next_cursor=self._encode(checkpoint),
+                        )
+                except PartitionSkipped:
+                    continue
+                finally:
+                    if isinstance(page_iter, AsyncGenerator):
+                        await page_iter.aclose()
+                if backfill and high is not None:
+                    checkpoint[partition] = high
+                    yield StreamPage(records=[], next_cursor=self._encode(checkpoint))
+        finally:
+            if isinstance(partition_iter, AsyncGenerator):
+                await partition_iter.aclose()
+        completed: dict[str, str | _Window] = (
+            {}
+            if self.ordering is Ordering.none
+            else {key: value for key, value in checkpoint.items() if key in seen}
+        )
+        if completed != checkpoint:
+            yield StreamPage(records=[], next_cursor=self._encode(completed))
+
+    @staticmethod
+    def _decode(cursor: str | None) -> dict[str, str | _Window]:
+        """A stored cursor as the per-partition map. A cursor that is not a JSON object at all —
+        absent, non-JSON, or a bare JSON scalar — is a plain watermark another cursor shape wrote,
+        so it reads as empty and the partitions re-walk. A JSON object is the walk's own map: a
+        value that is neither a watermark string nor a `{high, until}` window is corruption the
+        walk alone could have written, so it raises rather than silently dropping the
+        partition."""
+        if not cursor:
+            return {}
+        try:
+            parsed = json.loads(cursor)
+        except ValueError:
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        result: dict[str, str | _Window] = {}
+        for key, value in parsed.items():
+            match value:
+                case str():
+                    result[key] = value
+                case dict():
+                    try:
+                        result[key] = _Window.model_validate(value)
+                    except ValidationError as error:
+                        raise RuntimeError(
+                            f"malformed partition cursor entry {key!r}: {value!r}"
+                        ) from error
+                case _:
+                    raise RuntimeError(f"malformed partition cursor entry {key!r}: {value!r}")
+        return result
+
+    @staticmethod
+    def _encode(partition_map: Mapping[str, "str | _Window"]) -> str:
+        raw: dict[str, Any] = {
+            key: value.model_dump() if isinstance(value, _Window) else value
+            for key, value in partition_map.items()
+        }
+        return json.dumps(raw, sort_keys=True)
 
 
 class Connector(ABC):

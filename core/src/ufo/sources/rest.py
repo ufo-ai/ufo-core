@@ -14,7 +14,7 @@ path (CRUD, field discovery) is deliberately absent — the source seam only rea
 
 import asyncio
 import re
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from typing import Any, ClassVar
 
 import httpx
@@ -229,19 +229,24 @@ class RestConnector(Connector):
         if not url:
             raise RuntimeError(f"{type(self).__name__}: no base_url available")
         async with self._make_client(url, credential) as client:
-            async for page in self.paginate(client, stream, cursor=cursor):
-                if not page:
-                    continue
-                if isinstance(page, StreamPage):
-                    self._validate_page(page.records, stream)
-                    yield StreamPage(
-                        records=[self.flatten(record, stream) for record in page.records],
-                        deletes=page.deletes,
-                        next_cursor=page.next_cursor,
-                    )
-                    continue
-                self._validate_page(page, stream)
-                yield [self.flatten(record, stream) for record in page]
+            source = self.paginate(client, stream, cursor=cursor)
+            try:
+                async for page in source:
+                    if not page:
+                        continue
+                    if isinstance(page, StreamPage):
+                        self._validate_page(page.records, stream)
+                        yield StreamPage(
+                            records=[self.flatten(record, stream) for record in page.records],
+                            deletes=page.deletes,
+                            next_cursor=page.next_cursor,
+                        )
+                        continue
+                    self._validate_page(page, stream)
+                    yield [self.flatten(record, stream) for record in page]
+            finally:
+                if isinstance(source, AsyncGenerator):
+                    await source.aclose()
 
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None

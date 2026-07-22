@@ -10,6 +10,7 @@ proof), the `direct` BYOK backend reading a member-added key host-side, and the 
 honouring each `Credential` shape. These live in `extensions/sources/tests` so the framework evolves
 without colliding with the composio broker's auth-proxy proof in `extensions/connectors/tests`."""
 
+import json
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -435,12 +436,15 @@ async def test_github_repositories_fan_out_over_granted_orgs() -> None:
 
 async def test_github_issues_fan_out_link_pagination_and_pr_filter() -> None:
     """Issues are incremental: fan out over granted repos, follow the Link header, drop pull
-    requests, and advance the watermark — snapshot=False, no deletes (GitHub has no delete)."""
+    requests, and checkpoint the repo's watermark into the per-repo cursor map — snapshot=False,
+    no deletes (GitHub has no delete)."""
     result = await _fetch(GitHubConnector(), "issues", _github_handler([]))
     assert {p.source_ref for p in result.pages} == {"issues/1", "issues/3"}
     assert any("Bug" in p.body for p in result.pages)
     assert result.snapshot is False
-    assert result.next_cursor == "2026-01-05T00:00:00Z"
+    assert result.next_cursor == json.dumps(
+        {"acme/widgets": "2026-01-05T00:00:00Z"}, sort_keys=True
+    )
     assert result.deletes == ()
 
 
@@ -448,7 +452,7 @@ async def test_github_issues_send_since_and_state_when_a_cursor_is_stored() -> N
     seen: list[tuple[str, dict[str, str]]] = []
     await ConnectorBackend(connector=GitHubConnector()).fetch(
         ConnectorSourceConfig(account=ACCOUNT, stream="issues"),
-        "2026-01-01T00:00:00Z",
+        json.dumps({"acme/widgets": "2026-01-01T00:00:00Z"}, sort_keys=True),
         _auth(_github_handler(seen)),
     )
     issue_calls = [params for path, params in seen if path.endswith("/issues")]

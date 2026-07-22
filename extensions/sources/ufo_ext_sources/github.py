@@ -9,28 +9,47 @@ and the API version) layered on whichever client the base built from the resolve
 Most streams hit a per-repo path, but the repo catalog is derived from the organizations the grant
 exposes: the connector walks `/user/orgs`, then `/orgs/{org}/repos`, and fans repo-scoped streams
 out over that org-owned repo set, so a fresh issue lands on the next sync with no manual repo
-config. `issues` and `comments` fetch incrementally with `?since`; every stream advances a watermark
-over its `cursor_field` where it has one (GitHub surfaces no delete signal, so the sync runner's
-row-level cursor skips already-seen rows). A grant that can't enumerate orgs at all (`/user/orgs`
-refused with a 403) can read no stream, so the walk raises `StreamSkipped` and the run records a
-skip, not a failure. The write path is intentionally absent — the source seam only reads."""
+config. Each repo is a partition of the SDK's `PartitionWalk`, which owns the cursor map and resume
+state; this connector only enumerates repos and produces one repo's bounded pages per stream
+`Ordering`. `issues`/`comments` are `ascending` — a `sort=updated&direction=asc&since` walk whose
+running watermark is a sound resume point. `commits`/`events`/`issue_events` are `newest_first`
+append-only feeds: a first backfill walks the repo newest-first as a descending `{high, until}`
+window (`commits` bounds it server-side with `?until`, `events`/`issue_events` client-side since
+their API takes no time filter), so a capped run resumes downward without the position drift that
+would lose records prepended between slices; steady-state stops early once a page sits strictly
+below the repo watermark (a tying page re-yields, so a tied-but-new record lands and the repeats
+dedup downstream). Every other repo-scoped stream is `none` — checkpointed at the repo boundary
+only. GitHub surfaces no delete signal, so the sync runner's row-level cursor skips already-seen
+rows. A grant that can't enumerate orgs at all (`/user/orgs` refused with a 403) can read no stream,
+so the walk raises `StreamSkipped` and the run records a skip, not a failure. The write path is
+intentionally absent — the source seam only reads."""
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Any
 
 import httpx
 
 from ufo.sdk.authproxy import Credential
-from ufo.sdk.sources import RestConnector, StreamPage, StreamSkipped, StreamSpec
+from ufo.sdk.sources import (
+    Ordering,
+    PartitionBound,
+    PartitionSkipped,
+    PartitionWalk,
+    RestConnector,
+    StreamPage,
+    StreamSkipped,
+    StreamSpec,
+    WalkPage,
+)
 
 PAGE_SIZE = 100
 _REPO_LIST_PARAMS = {"per_page": PAGE_SIZE, "type": "all", "sort": "pushed", "direction": "desc"}
 _USERS_ENRICH_CONCURRENCY = 8
 _GITHUB_ACCEPT = "application/vnd.github+json"
 _GITHUB_API_VERSION = "2022-11-28"
-_SINCE_STREAMS = frozenset({"issues", "comments"})
 _STATE_ALL_STREAMS = frozenset({"issues", "pull_requests"})
+_UNTIL_STREAMS = frozenset({"commits"})
 _REPO_SKIP_STATUS = frozenset({404, 409, 410})
 _ORG_SKIP_STATUS = frozenset({403, 404, 410})
 _ORG_SCOPE_GATE_STATUS = frozenset({403})
@@ -42,6 +61,7 @@ def _stream(
     source_object: str | None = None,
     primary_key: str = "id",
     cursor_field: str | None = None,
+    ordering: Ordering = Ordering.none,
     canonical: bool = False,
 ) -> StreamSpec:
     return StreamSpec(
@@ -49,6 +69,7 @@ def _stream(
         source_object=source_object or name,
         primary_key=primary_key,
         cursor_field=cursor_field,
+        ordering=ordering,
         canonical=canonical,
     )
 
@@ -59,21 +80,23 @@ def _stream(
 # are the two GitHub reads with a server-side `?since` filter.
 ALL_STREAMS: list[StreamSpec] = [
     _stream("repositories", cursor_field="updated_at", canonical=True),
-    _stream("issues", cursor_field="updated_at", canonical=True),
+    _stream("issues", cursor_field="updated_at", ordering=Ordering.ascending, canonical=True),
     _stream("issue_milestones", cursor_field="updated_at", canonical=True),
-    _stream("comments", cursor_field="updated_at", canonical=True),
+    _stream("comments", cursor_field="updated_at", ordering=Ordering.ascending, canonical=True),
     _stream("users", cursor_field=None, canonical=True),
     _stream("assignees", cursor_field=None),
     _stream("branches", primary_key="name", cursor_field=None),
     _stream("collaborators", cursor_field=None),
     _stream("commit_comment_reactions", cursor_field=None),
     _stream("commit_comments", cursor_field="updated_at"),
-    _stream("commits", primary_key="sha", cursor_field="created_at"),
+    _stream(
+        "commits", primary_key="sha", cursor_field="created_at", ordering=Ordering.newest_first
+    ),
     _stream("contributor_activity", cursor_field=None),
     _stream("deployments", cursor_field="updated_at"),
-    _stream("events", cursor_field="created_at"),
+    _stream("events", cursor_field="created_at", ordering=Ordering.newest_first),
     _stream("issue_comment_reactions", cursor_field=None),
-    _stream("issue_events", cursor_field="created_at"),
+    _stream("issue_events", cursor_field="created_at", ordering=Ordering.newest_first),
     _stream("issue_labels", cursor_field=None),
     _stream("issue_reactions", cursor_field=None),
     _stream("issue_timeline_events", cursor_field="created_at"),
@@ -156,8 +179,6 @@ class GitHubConnector(RestConnector):
             raise NotImplementedError(f"github: stream {stream.name!r} has no paginate dispatch")
 
         params: dict[str, Any] = {"per_page": PAGE_SIZE}
-        if cursor and stream.name in _SINCE_STREAMS:
-            params["since"] = cursor
         if stream.name in _STATE_ALL_STREAMS:
             params["state"] = "all"
 
@@ -167,25 +188,23 @@ class GitHubConnector(RestConnector):
             return
 
         if "{owner}" in path and "{repo}" in path:
-            issue_cursor: str | None = None
-            async for owner, repo in self._iter_user_repos(client):
-                scoped = path.format(owner=owner, repo=repo)
-                try:
-                    async for page in self._paginate_link_header(
-                        client, scoped, params=dict(params)
-                    ):
-                        if stream.name == "issues":
-                            issue_cursor = _max_cursor_value(
-                                issue_cursor, page, stream.cursor_field
-                            )
-                            issues = [record for record in page if "pull_request" not in record]
-                            yield StreamPage(records=issues, next_cursor=issue_cursor)
-                            continue
-                        yield page
-                except httpx.HTTPStatusError as error:
-                    if error.response.status_code in _REPO_SKIP_STATUS:
-                        continue
-                    raise
+
+            async def repos() -> AsyncIterator[str]:
+                async for owner, repo in self._iter_user_repos(client):
+                    yield f"{owner}/{repo}"
+
+            def repo_pages(repo_key: str, bound: PartitionBound) -> AsyncIterator[WalkPage]:
+                return self._repo_pages(client, stream, path, repo_key, bound)
+
+            walk = PartitionWalk(
+                ordering=stream.ordering, partitions=repos, pages=repo_pages
+            ).stream(cursor)
+            try:
+                async for repo_page in walk:
+                    yield repo_page
+            finally:
+                if isinstance(walk, AsyncGenerator):
+                    await walk.aclose()
             return
 
         if "{org}" in path:
@@ -209,6 +228,56 @@ class GitHubConnector(RestConnector):
 
         async for page in self._paginate_link_header(client, path, params=params):
             yield page
+
+    async def _repo_pages(
+        self,
+        client: httpx.AsyncClient,
+        stream: StreamSpec,
+        path: str,
+        repo_key: str,
+        bound: PartitionBound,
+    ) -> AsyncIterator[WalkPage]:
+        """One repo's bounded page slice for `PartitionWalk`, applying the resume `bound` in
+        GitHub's own terms: an ascending `?since` walk sends `sort=updated&direction=asc&since`;
+        `commits` bounds a newest-first backfill server-side with `?until`; `events`/`issue_events`
+        expose no time filter, so a backfill is bounded client-side by dropping records at or above
+        `before`. Each page reports its cursor-value span so the walk tracks the watermark/window;
+        a repo the grant can't read (404/409/410) drops out without failing the run."""
+        owner, _, repo = repo_key.partition("/")
+        scoped = path.format(owner=owner, repo=repo)
+        params: dict[str, Any] = {"per_page": PAGE_SIZE}
+        if stream.name in _STATE_ALL_STREAMS:
+            params["state"] = "all"
+        if stream.ordering is Ordering.ascending:
+            params |= {"sort": "updated", "direction": "asc"}
+            if bound.after:
+                params["since"] = bound.after
+        elif stream.name in _UNTIL_STREAMS and bound.before:
+            params["until"] = bound.before
+        try:
+            async for page in self._paginate_link_header(client, scoped, params=dict(params)):
+                if stream.name == "issues":
+                    page = [record for record in page if "pull_request" not in record]
+                if (
+                    stream.ordering is Ordering.newest_first
+                    and stream.name not in _UNTIL_STREAMS
+                    and bound.before
+                ):
+                    before = bound.before
+                    field = stream.cursor_field
+                    page = [
+                        record
+                        for record in page
+                        if field and isinstance(record.get(field), str) and record[field] <= before
+                    ]
+                if not page:
+                    continue
+                high, low = _cursor_bounds(page, stream.cursor_field)
+                yield WalkPage(records=page, high=high, low=low)
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code in _REPO_SKIP_STATUS:
+                raise PartitionSkipped(f"github: {repo_key} refused") from error
+            raise
 
     async def _iter_user_repos(self, client: httpx.AsyncClient) -> AsyncIterator[tuple[str, str]]:
         """Yield `(owner, repo)` from granted-org repos. `/user/repos` is too broad (personal,
@@ -322,14 +391,14 @@ def _repo_identity(
     return None
 
 
-def _max_cursor_value(
-    current: str | None, page: list[dict[str, Any]], cursor_field: str | None
-) -> str | None:
+def _cursor_bounds(
+    page: list[dict[str, Any]], cursor_field: str | None
+) -> tuple[str | None, str | None]:
+    """The highest and lowest `cursor_field` values on a page, for the walk's watermark/window
+    tracking. None when the stream carries no cursor field."""
     if not cursor_field:
-        return current
-    highest = current
-    for record in page:
-        value = record.get(cursor_field)
-        if isinstance(value, str) and (highest is None or value > highest):
-            highest = value
-    return highest
+        return None, None
+    values = [record[cursor_field] for record in page if isinstance(record.get(cursor_field), str)]
+    if not values:
+        return None, None
+    return max(values), min(values)
