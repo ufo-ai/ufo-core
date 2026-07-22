@@ -9,6 +9,10 @@ system for everything else (connectors, data sources, tools, subagents, onboardi
 - `docs/plan.md` — build order. `docs/salvage.md` — file-level port map from the previous repo.
 - `core/` — the axiomatic unit. `extensions/` — first-party extensions. `packs/` — skill packs.
 
+## Run it
+
+**Zero services** — SQLite, filesystem blobs, in-process hub; one process, no Docker:
+
 ```bash
 export ANTHROPIC_API_KEY=...
 uv run ufoctl init --email you@example.com  # writes ufo.toml; SQLite — zero services
@@ -16,14 +20,8 @@ uv run ufoctl serve                         # one process: surfaces + workers
 uv run ufoctl chat                          # second terminal; sessions persist across runs
 ```
 
-Dev is zero-services: SQLite + filesystem blobs + in-process hub. Postgres (the checked-in
-compose or an existing instance) is for deploys and the Postgres half of the test matrix; Docker
-enters for sandboxes (U2+).
-
-## Local hosted stack
-
-To run the whole hosted topology locally — Postgres, the onboarding **gateway** (`/login`), and the
-**serve** fleet (surfaces + DBOS workers + embedded egress proxy) — one command:
+**Full hosted stack** — the whole hosted topology in one command: Postgres, the onboarding
+**gateway** (`/login`), and the **serve** fleet (surfaces + DBOS workers + embedded egress proxy):
 
 ```bash
 export ANTHROPIC_API_KEY=...   # required for serve to boot; the gateway/login needs no key
@@ -40,6 +38,9 @@ then the invite from the init log. Host ports override via `UFO_PG_PORT` / `UFO_
 `UFO_SERVE_PORT_HOST` / `UFO_REDIS_PORT`. The dev config (`dev/ufo.toml`) swaps the hosted cloud
 backends for local ones; the Turbopuffer/Exa index, the Redis hub (multi-replica), and the Docker
 sandbox carrier each need their extension added to a local pack — out of scope for this single node.
+
+Postgres (this compose, or an existing instance) also backs the Postgres half of the test matrix;
+Docker enters for sandboxes (U2+).
 
 ## Evals
 
