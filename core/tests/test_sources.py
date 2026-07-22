@@ -128,7 +128,7 @@ def _wire(
     database_url: str, vector: tuple[float, ...], blob_root: Path, workspace_id: UUID
 ) -> tuple[SyncDriver, Callable[[], Awaitable[None]], MemoryStore]:
     embed = StubEmbed(vector)
-    index = DefaultIndex(embed=embed, transaction=workspace_tx)
+    index = DefaultIndex(transaction=workspace_tx)
     blob = FilesystemBlobStore(root=blob_root)
     feed = CorePageFeed(blob=blob)
     driver = SyncDriver(
@@ -583,7 +583,7 @@ async def test_page_change_runner_cursor_resumes_across_ticks(
     runner = PageChangeRunner(
         manifests=(memory_manifest.manifest(),),
         pages=CorePageFeed(blob=blob),
-        index=DefaultIndex(embed=embed, transaction=workspace_tx),
+        index=DefaultIndex(transaction=workspace_tx),
         embed=embed,
     )
     consumer = next(c for c in runner.consumers() if c.discriminator == "index_pages")

@@ -97,7 +97,7 @@ STUB_BACKENDS = Manifest(
     indexes=(
         IndexBackendSpec(
             name="default",
-            factory=lambda embed, ctx: DefaultIndex(embed=embed, transaction=workspace_tx),
+            factory=lambda ctx: DefaultIndex(transaction=workspace_tx),
         ),
     ),
     tools=(
@@ -331,7 +331,7 @@ def dbos_runtime(
     proxy = ProxyEndpoint(port=0, ca_cert="test-ca")
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
     embed = embed_backend((STUB_BACKENDS,), None, None)
-    index = index_backend((STUB_BACKENDS,), None, embed, None)
+    index = index_backend((STUB_BACKENDS,), None, None)
     loop_queue.reset_runtime()
     loop_queue.init_runtime(
         loop_queue.Runtime(

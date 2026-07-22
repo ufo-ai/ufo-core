@@ -82,7 +82,7 @@ async def _workspace() -> UUID:
 
 
 def _wire(embed: object, workspace_id: UUID) -> tuple[MemoryStore, MemoryIndexer]:
-    index = DefaultIndex(embed=embed, transaction=workspace_tx)
+    index = DefaultIndex(transaction=workspace_tx)
     store = MemoryStore(
         index=index, embed=embed, transaction=workspace_tx, workspace_id=workspace_id
     )
@@ -126,7 +126,7 @@ async def test_overlapping_index_runs_embed_each_row_once(clean: None) -> None:
 
     runs = tuple(
         MemoryIndexer(
-            index=DefaultIndex(embed=embed, transaction=workspace_tx),
+            index=DefaultIndex(transaction=workspace_tx),
             embed=embed,
             transaction=workspace_tx,
             chunker=TextChunker(),
@@ -186,7 +186,7 @@ async def test_memory_index_job_fires_bound_only_on_workspaces_with_unindexed_it
     scoped to that workspace as the fleet fires it. A workspace with nothing pending is not a
     candidate and is never opened."""
     embed = StubEmbed(vec((0, 1.0)))
-    index = DefaultIndex(embed=embed, transaction=workspace_tx)
+    index = DefaultIndex(transaction=workspace_tx)
     ws_with_work = await _workspace()
     ws_empty = await _workspace()
     with ws(ws_with_work):

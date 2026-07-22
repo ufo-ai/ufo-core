@@ -598,7 +598,7 @@ async def test_asana_source_syncs_through_the_driver_into_recallable_memory(
 
     handler = _asana_handler({None: {"data": [{"gid": "111", "name": "Acme HQ workspace"}]}})
     embed = _StubEmbed(_vec((6, 1.0)))
-    index = DefaultIndex(embed=embed, transaction=workspace_tx)
+    index = DefaultIndex(transaction=workspace_tx)
     blob = FilesystemBlobStore(root=tmp_path)
     postgres = database_url.startswith("postgresql")
     driver = SyncDriver(

@@ -84,7 +84,7 @@ async def _workspace() -> UUID:
 
 def _store(embed: object, workspace_id: UUID) -> MemoryStore:
     return MemoryStore(
-        index=DefaultIndex(embed=embed, transaction=workspace_tx),
+        index=DefaultIndex(transaction=workspace_tx),
         embed=embed,
         transaction=workspace_tx,
         workspace_id=workspace_id,
@@ -120,7 +120,7 @@ async def _seed_item(
         "d-" + item_id.hex, OWNER_KIND_MEMORY_ITEM, str(item_id), subject, 0, body, vector
     )
     with ws(workspace_id):
-        await DefaultIndex(embed=StubEmbed(vector), transaction=workspace_tx).upsert((chunk,))
+        await DefaultIndex(transaction=workspace_tx).upsert((chunk,))
     return item_id
 
 
@@ -130,7 +130,7 @@ async def _seed_page_chunk(
     page_id = uuid4()
     chunk = Chunk("p-" + page_id.hex, OWNER_KIND_PAGE, str(page_id), subject, 0, body, vector)
     with ws(workspace_id):
-        await DefaultIndex(embed=StubEmbed(vector), transaction=workspace_tx).upsert((chunk,))
+        await DefaultIndex(transaction=workspace_tx).upsert((chunk,))
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(mem_page).values(
@@ -476,7 +476,7 @@ async def test_page_indexer_writes_the_contexts_workspace_id(clean: None) -> Non
     )
     with ws(workspace_id):
         await PageIndexer(
-            index=DefaultIndex(embed=StubEmbed(probe), transaction=workspace_tx),
+            index=DefaultIndex(transaction=workspace_tx),
             embed=StubEmbed(probe),
             transaction=workspace_tx,
             chunker=TextChunker(),

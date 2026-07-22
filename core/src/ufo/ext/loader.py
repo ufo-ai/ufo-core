@@ -456,7 +456,6 @@ DEFAULT_BACKEND = "default"
 def index_backend(
     manifests: tuple[Manifest, ...],
     configured: str | None,
-    embed: EmbedClient,
     credential_store: CredentialStore | None,
 ) -> IndexBackend:
     """The workspace's index backend: the named backend an extension contributes through its
@@ -473,7 +472,7 @@ def index_backend(
             if declared and credential_store is None:
                 raise RuntimeError(f"index backend {name!r} needs a credential key but none is set")
             context = context_for(manifest.name, declared)
-            return spec.factory(embed, context)
+            return spec.factory(context)
     raise NotRegisteredError(f"config selects index backend {name!r} but no extension registers it")
 
 

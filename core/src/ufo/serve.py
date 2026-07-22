@@ -135,7 +135,7 @@ def run() -> None:
     carrier = _select_carrier(config, manifests)
     registry = model_registry(config, manifests)
     embed = embed_backend(manifests, config.memory.embed_backend, credentials)
-    index = index_backend(manifests, config.memory.index_backend, embed, credentials)
+    index = index_backend(manifests, config.memory.index_backend, credentials)
     memory = memory_search(manifests, credentials, index, embed)
     connectors = _connector_registry(config, manifests, credentials)
     runtime = Runtime(

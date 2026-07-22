@@ -11,7 +11,7 @@ undeclared slot is refused."""
 
 import hashlib
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import ClassVar
@@ -40,7 +40,7 @@ from ufo.sdk.http import (
     StreamingResponse,
 )
 from ufo.sdk.hub import InProcessHub
-from ufo.sdk.index import Chunk, EmbedClient, Hit, IndexScope
+from ufo.sdk.index import Chunk, Hit, IndexScope
 from ufo.sdk.jobs import JobSpec, owner_candidates
 from ufo.sdk.manifest import (
     CdpProviderSpec,
@@ -395,12 +395,10 @@ class SampleSource:
 class SampleIndex:
     """A trivial in-process IndexBackend the probe registers through the `indexes` Manifest point:
     it stores chunks in a dict, ranks lexical by term count and vector by dot product, each filtered
-    to the queried owner kind and subjects, prunes a scope's chunks outside a keep-set, and reindex
-    re-embeds a scope through the embed client core hands the factory. A real backend consumed
-    through the protocol, so a test drives it
-    exactly as core does; the dialect-native backends keep their own retrieval proofs."""
+    to the queried owner kind and subjects, and prunes a scope's chunks outside a keep-set. A real
+    backend consumed through the protocol, so a test drives it exactly as core does; the
+    dialect-native backends keep their own retrieval proofs."""
 
-    embed: EmbedClient
     chunks: dict[str, Chunk] = field(default_factory=dict)
 
     async def upsert(self, chunks: tuple[Chunk, ...]) -> None:
@@ -439,14 +437,6 @@ class SampleIndex:
             if (score := _dot(chunk.embedding, embedding)) > 0
         ]
         return tuple(sorted(scored, key=lambda hit: hit.score, reverse=True)[:limit])
-
-    async def reindex(self, scope: IndexScope) -> None:
-        scoped = [chunk for chunk in self.chunks.values() if _in_scope(chunk, scope)]
-        if not scoped:
-            return
-        vectors = await self.embed.embed(tuple(chunk.text for chunk in scoped))
-        for chunk, vector in zip(scoped, vectors, strict=True):
-            self.chunks[chunk.chunk_digest] = replace(chunk, embedding=vector)
 
     def _scoped(self, subjects: frozenset[str], owner_kind: str) -> list[Chunk]:
         return [
@@ -1047,11 +1037,7 @@ def manifest() -> Manifest:
         sources=(
             SourceProvider(backend=SOURCE_BACKEND, build=lambda _credentials: SampleSource()),
         ),
-        indexes=(
-            IndexBackendSpec(
-                name=INDEX_BACKEND, factory=lambda embed, ctx: SampleIndex(embed=embed)
-            ),
-        ),
+        indexes=(IndexBackendSpec(name=INDEX_BACKEND, factory=lambda ctx: SampleIndex()),),
         embeds=(EmbedBackendSpec(name=EMBED_BACKEND, factory=lambda ctx: SampleEmbed()),),
         models=(
             ModelProviderSpec(

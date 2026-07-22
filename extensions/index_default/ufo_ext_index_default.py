@@ -5,9 +5,8 @@ name `"default"` — the backend core resolves when `memory.index_backend` is un
 `DefaultIndex` selects its SQL by the connection dialect: Postgres tsvector/GIN + pgvector
 halfvec/HNSW, SQLite FTS5 + brute-force cosine. Dialect-only types (halfvec, tsvector, FTS5) never
 leave this module — `Chunk`/`Hit`/`IndexScope` stay dialect-neutral. It owns the `chunk`/`chunk_fts`
-tables (its migration), reached through the workspace-scoped `transaction()` core hands the factory,
-prunes a scope's chunks outside a keep-set so a re-chunked owner leaves no orphan, and re-embeds a
-scope through the deploy `EmbedClient` on reindex.
+tables (its migration), reached through the workspace-scoped `transaction()` core hands the
+factory, and prunes a scope's chunks outside a keep-set so a re-chunked owner leaves no orphan.
 """
 
 import math
@@ -19,7 +18,7 @@ from dataclasses import dataclass
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ufo.sdk.index import Chunk, EmbedClient, Hit, IndexScope
+from ufo.sdk.index import Chunk, Hit, IndexScope
 from ufo.sdk.manifest import IndexBackendSpec, Manifest
 
 NAME = "index_default"
@@ -102,13 +101,6 @@ PRUNE_PG = sa.text(
     "delete from chunk where owner_kind = :owner_kind and owner_id = :owner_id "
     "and chunk_digest <> all(:keep)"
 )
-SCOPE_TEXT_PG = sa.text(
-    "select chunk_digest, text from chunk where owner_kind = :owner_kind and owner_id = :owner_id"
-)
-REEMBED_PG = sa.text(
-    "update chunk set embedding = cast(:embedding as halfvec) where chunk_digest = :chunk_digest"
-)
-
 UPSERT_SQLITE = sa.text(
     """
     insert into chunk (chunk_digest, owner_kind, owner_id, subject, ordinal, text, embedding)
@@ -159,12 +151,6 @@ PRUNE_SQLITE = sa.text(
     "delete from chunk where owner_kind = :owner_kind and owner_id = :owner_id "
     "and chunk_digest not in :keep"
 ).bindparams(sa.bindparam("keep", expanding=True))
-SCOPE_TEXT_SQLITE = sa.text(
-    "select chunk_digest, text from chunk where owner_kind = :owner_kind and owner_id = :owner_id"
-)
-REEMBED_SQLITE = sa.text(
-    "update chunk set embedding = :embedding where chunk_digest = :chunk_digest"
-)
 
 
 @dataclass(frozen=True)
@@ -174,11 +160,9 @@ class DefaultIndex:
     structurally exact on every plan: an HNSW scan under a selective subject/owner filter starves
     before reaching a small subject's vectors (approximate search post-filters, so a two-row
     subject can return nothing at all), and this backend's corpus scale is sized for a full scan.
-    Holds the deploy embed client (for reindex re-embedding)
-    and the workspace-scoped `transaction()` opener core hands the factory; each operation opens one
-    transaction and selects Postgres or SQLite SQL by the connection dialect."""
+    Holds the workspace-scoped `transaction()` opener; each operation opens one transaction and
+    selects Postgres or SQLite SQL by the connection dialect."""
 
-    embed: EmbedClient
     transaction: Transaction
 
     async def upsert(self, chunks: tuple[Chunk, ...]) -> None:
@@ -318,31 +302,6 @@ class DefaultIndex:
         )
         return tuple(_hit(row, score) for row, score in scored[:limit])
 
-    async def reindex(self, scope: IndexScope) -> None:
-        params = {"owner_kind": scope.owner_kind, "owner_id": scope.owner_id}
-        async with self.transaction() as connection:
-            postgres = connection.dialect.name == "postgresql"
-            rows = (
-                (await connection.execute(SCOPE_TEXT_PG if postgres else SCOPE_TEXT_SQLITE, params))
-                .mappings()
-                .all()
-            )
-        if not rows:
-            return
-        vectors = await self.embed.embed(tuple(row["text"] for row in rows))
-        async with self.transaction() as connection:
-            postgres = connection.dialect.name == "postgresql"
-            for row, vector in zip(rows, vectors, strict=True):
-                await connection.execute(
-                    REEMBED_PG if postgres else REEMBED_SQLITE,
-                    {
-                        "embedding": (
-                            pgvector_literal(vector) if postgres else pack_embedding(vector)
-                        ),
-                        "chunk_digest": row["chunk_digest"],
-                    },
-                )
-
 
 def manifest() -> Manifest:
     return Manifest(
@@ -351,7 +310,7 @@ def manifest() -> Manifest:
         indexes=(
             IndexBackendSpec(
                 name=INDEX_BACKEND,
-                factory=lambda embed, ctx: DefaultIndex(embed=embed, transaction=ctx.transaction),
+                factory=lambda ctx: DefaultIndex(transaction=ctx.transaction),
             ),
         ),
     )

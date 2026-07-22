@@ -87,7 +87,7 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   gbrain richness: per-kind recency decay (fact/preference/decision/event/task half-lives, fact
   items only), a type-diversity cap so no class dominates, supersession suppression, and an
   episodic→topic pointer excluded from auto-injection. It rides two core selection seams: the
-  **index backend** behind one lexical/vector/reindex interface and the **embed backend** behind
+  **index backend** behind one lexical/vector interface and the **embed backend** behind
   one batched-embed interface. The dialect-native index (SQLite FTS5 + local cosine, Postgres
   tsvector + pgvector) ships as the base-pinned `index_default` extension and OpenAI embedding as
   the base-pinned `embed_openai` extension; turbopuffer is a drop-in index alternative. Source

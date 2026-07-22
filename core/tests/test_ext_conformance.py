@@ -1346,7 +1346,7 @@ async def test_sample_source_syncs_a_page_recallable_through_memory(
     await run_onboarding_steps((manifest,), workspace_id, _credential_store())
 
     embed = _StubEmbed(_vec((3, 1.0)))
-    index = DefaultIndex(embed=embed, transaction=workspace_tx)
+    index = DefaultIndex(transaction=workspace_tx)
     blob = FilesystemBlobStore(root=tmp_path)
     postgres = database_url.startswith("postgresql")
     driver = SyncDriver(
@@ -1393,10 +1393,9 @@ async def test_core_selects_a_manifest_index_backend_by_name(db: None, database_
     credential key each fail loud."""
     workspace_id = await _workspace()
     manifest = _sample_manifest()
-    embed = _StubEmbed(_vec((0, 1.0)))
     store = _credential_store()
 
-    selected = index_backend((manifest,), sample.INDEX_BACKEND, embed, store)
+    selected = index_backend((manifest,), sample.INDEX_BACKEND, store)
     assert isinstance(selected, sample.SampleIndex)
     with ws(workspace_id):
         await selected.upsert(
@@ -1411,13 +1410,13 @@ async def test_core_selects_a_manifest_index_backend_by_name(db: None, database_
         )
     assert [hit.chunk_digest for hit in hits] == ["d1"]
 
-    default = index_backend((manifest, index_default.manifest()), None, embed, store)
+    default = index_backend((manifest, index_default.manifest()), None, store)
     assert isinstance(default, DefaultIndex)
 
     with pytest.raises(RuntimeError, match="no extension registers"):
-        index_backend((manifest,), "nonesuch", embed, store)
+        index_backend((manifest,), "nonesuch", store)
     with pytest.raises(RuntimeError, match="needs a credential key"):
-        index_backend((manifest,), sample.INDEX_BACKEND, embed, None)
+        index_backend((manifest,), sample.INDEX_BACKEND, None)
 
 
 async def test_core_selects_a_manifest_embed_backend_by_name(db: None, database_url: str) -> None:

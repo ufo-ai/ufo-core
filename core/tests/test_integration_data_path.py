@@ -184,7 +184,7 @@ async def test_folder_source_syncs_indexes_and_is_recalled(
     root.mkdir()
     (root / "runbook.md").write_text("the incident escalation contact is the on-call captain")
     embed = StubEmbed(axis=1)
-    index = DefaultIndex(embed=embed, transaction=workspace_tx)
+    index = DefaultIndex(transaction=workspace_tx)
     blob = FilesystemBlobStore(root=tmp_path / "blobs")
     postgres = database_url.startswith("postgresql")
     driver = SyncDriver(backends={FOLDER_BACKEND: FolderSource()}, blob=blob, postgres=postgres)
@@ -231,7 +231,7 @@ async def test_member_fact_recall_is_isolated_from_other_members(
     workspace_id = await _workspace()
     alice, bob = uuid4(), uuid4()
     embed = StubEmbed(axis=2)
-    index = DefaultIndex(embed=embed, transaction=workspace_tx)
+    index = DefaultIndex(transaction=workspace_tx)
     service = MemoryStore(
         index=index, embed=embed, transaction=workspace_tx, workspace_id=workspace_id
     )
@@ -241,11 +241,11 @@ async def test_member_fact_recall_is_isolated_from_other_members(
     await service.commit(
         MemoryWrite(subject=member_subject(alice), body="alice keeps the vault combination")
     )
-    await indexer.run()
-
-    mine = await service.recall("vault combination", recall_subjects(alice), 5)
-    assert len(mine) == 1 and "alice" in mine[0].body
-    assert await service.recall("vault combination", recall_subjects(bob), 5) == ()
+    with ws(workspace_id):
+        await indexer.run()
+        mine = await service.recall("vault combination", recall_subjects(alice), 5)
+        assert len(mine) == 1 and "alice" in mine[0].body
+        assert await service.recall("vault combination", recall_subjects(bob), 5) == ()
 
 
 async def test_metered_sandbox_tokens_breach_a_member_cap_and_park(db: None) -> None:

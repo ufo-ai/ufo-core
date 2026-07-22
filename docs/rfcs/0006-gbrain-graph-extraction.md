@@ -88,7 +88,7 @@ loop that `salvage.md:38` planned as a "Condenser" was **not** ported either —
 
 **Recall/search** (`store.py:323-393`): lexical + vector RRF fusion, recency decay, diversity cap,
 episodic→topic pointer — gbrain's *recall richness* (spec.md:75-85) but no graph. `IndexBackend`
-(`indexing.py:67-82`) exposes only `upsert/delete/prune/lexical/vector/reindex` — **no adjacency or
+(`indexing.py:67-80`) exposes only `upsert/delete/prune/lexical/vector` — **no adjacency or
 traversal method**.
 
 **Pipeline shape:** `source sync → page row + blob body → PageIndexer → chunks+embeddings + mem_page

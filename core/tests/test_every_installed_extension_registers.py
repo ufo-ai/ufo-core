@@ -101,15 +101,6 @@ def _config(
     )
 
 
-class _StubEmbed:
-    """A stand-in EmbedClient handed to the index selection seam; index factories store it but never
-    embed at construction, so its body is never reached — the seam resolution is what is asserted.
-    """
-
-    async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
-        return tuple(() for _ in texts)
-
-
 class _StubDbos:
     """Stands in for the DBOS client the surface mount threads into member admission; mounting
     only registers routes, so no method is called — the mounted route is what is asserted."""
@@ -157,9 +148,7 @@ def _check_connectors(manifest: Manifest, store: CredentialStore) -> None:
 
 def _check_indexes(manifest: Manifest, store: CredentialStore) -> None:
     for spec in manifest.indexes:
-        _resolve_backend(
-            lambda spec=spec: index_backend((manifest,), spec.name, _StubEmbed(), store)
-        )
+        _resolve_backend(lambda spec=spec: index_backend((manifest,), spec.name, store))
 
 
 def _check_embeds(manifest: Manifest, store: CredentialStore) -> None:

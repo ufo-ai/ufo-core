@@ -182,7 +182,7 @@ async def test_failed_database_precheck_leaves_no_stage_and_retry_materializes(
         snapshot_root,
         tmp_path / "state",
         blob=FilesystemBlobStore(root=tmp_path / "blobs"),
-        index=DefaultIndex(embed=embed, transaction=workspace_tx),
+        index=DefaultIndex(transaction=workspace_tx),
         embed=embed,
     )
     blocking_workspace_id = uuid4()
@@ -219,7 +219,7 @@ async def test_post_stage_database_failure_rolls_back_and_retry_reuses_stage(
         snapshot_root,
         tmp_path / "state",
         blob=FilesystemBlobStore(root=tmp_path / "blobs"),
-        index=DefaultIndex(embed=embed, transaction=workspace_tx),
+        index=DefaultIndex(transaction=workspace_tx),
         embed=embed,
     )
     async with workspace_tx() as connection:
@@ -252,7 +252,7 @@ async def test_materializes_snapshot_through_real_memory_and_page_pipelines(
     _snapshot(snapshot_root)
     blob = FilesystemBlobStore(root=tmp_path / "blobs")
     embed = DeterministicEmbed()
-    index = DefaultIndex(embed=embed, transaction=workspace_tx)
+    index = DefaultIndex(transaction=workspace_tx)
     materializer = Memory100Materializer.from_snapshot(
         snapshot_root,
         tmp_path / "state",

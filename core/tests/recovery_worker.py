@@ -214,7 +214,7 @@ def _install_runtime(env: _Env, model: _CrashModel | _AnswerModel) -> None:
             registry=registry,
             skills=skill_registry(()),
             credentials=None,
-            index=DefaultIndex(embed=_StubEmbed(), transaction=workspace_tx),
+            index=DefaultIndex(transaction=workspace_tx),
             embed=_StubEmbed(),
             artifact_token_secret="",
         )

@@ -180,7 +180,7 @@ async def _sync_and_search(
         await driver.run()
 
         embed = StubEmbed()
-        index = DefaultIndex(embed=embed, transaction=workspace_tx)
+        index = DefaultIndex(transaction=workspace_tx)
         feed = CorePageFeed(blob=driver.blob)
         indexer = PageIndexer(
             index=index,

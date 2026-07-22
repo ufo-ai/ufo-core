@@ -484,7 +484,7 @@ def chat_server(
             registry=STANDIN_REGISTRY,
             skills=skill_registry(()),
             credentials=None,
-            index=DefaultIndex(embed=StubEmbed(), transaction=workspace_tx),
+            index=DefaultIndex(transaction=workspace_tx),
             embed=StubEmbed(),
             artifact_token_secret="",
         )

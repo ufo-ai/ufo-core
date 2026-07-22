@@ -304,7 +304,7 @@ async def _run(config: Config, snapshot: Path, state_root: Path) -> CorpusReadin
     try:
         manifests = load_manifests(config.pack.name)
         embed = embed_backend(manifests, config.memory.embed_backend, credentials)
-        index = index_backend(manifests, config.memory.index_backend, embed, credentials)
+        index = index_backend(manifests, config.memory.index_backend, credentials)
         return await Memory100Materializer.from_snapshot(
             snapshot,
             state_root,

@@ -176,7 +176,7 @@ def _install_runtime(config: Config, registry: ModelRegistry, carrier: _Counting
             registry=registry,
             skills=skill_registry(()),
             credentials=None,
-            index=DefaultIndex(embed=_StubEmbed(), transaction=workspace_tx),
+            index=DefaultIndex(transaction=workspace_tx),
             embed=_StubEmbed(),
             artifact_token_secret="",
         )

@@ -207,7 +207,7 @@ async def _seed_aged_fact(
             )
         )
     with ws(workspace_id):
-        await DefaultIndex(embed=StubEmbed(vector), transaction=workspace_tx).upsert(
+        await DefaultIndex(transaction=workspace_tx).upsert(
             (
                 Chunk(
                     "d-" + item_id.hex,
@@ -246,7 +246,7 @@ async def _facts(workspace_id: UUID) -> list[sa.Row]:
 def _store(workspace_id: UUID, vector: tuple[float, ...]) -> MemoryStore:
     embed = StubEmbed(vector)
     return MemoryStore(
-        index=DefaultIndex(embed=embed, transaction=workspace_tx),
+        index=DefaultIndex(transaction=workspace_tx),
         embed=embed,
         transaction=workspace_tx,
         workspace_id=workspace_id,
@@ -262,7 +262,7 @@ def _runner(
     return PageChangeRunner(
         manifests=(memory_manifest.manifest(),),
         pages=CorePageFeed(blob=blob),
-        index=DefaultIndex(embed=embed, transaction=workspace_tx),
+        index=DefaultIndex(transaction=workspace_tx),
         embed=embed,
         registry=registry,
     )

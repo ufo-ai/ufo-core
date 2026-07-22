@@ -159,15 +159,15 @@ class SourceProvider:
 class IndexBackendSpec:
     """One vector-index backend an extension registers: the `name` a deploy selects it by (config
     `memory.index_backend`, default `"default"`) and the `factory` core calls at boot to build the
-    `IndexBackend`, given the deploy embed client and the extension's workspace-scoped
-    `ExtensionContext` — from which it opens transactions for a table-owning backend or reads a BYOK
-    key through `context.credentials`. The index runs in the jobs/serve role, never in the sandbox,
+    `IndexBackend`, given the extension's workspace-scoped `ExtensionContext` — from which it opens
+    transactions for a table-owning backend or reads a BYOK key through `context.credentials`. The
+    index runs in the jobs/serve role, never in the sandbox,
     so a BYOK backend reads its key in-process rather than through the egress proxy. Every deploy
     ships the base-pinned `index_default` extension registering name `"default"` (SQLite FTS5 +
     local cosine, Postgres tsvector + pgvector), which core resolves when the knob is unset."""
 
     name: str
-    factory: Callable[[EmbedClient, ExtensionContext], IndexBackend]
+    factory: Callable[[ExtensionContext], IndexBackend]
 
 
 @dataclass(frozen=True)

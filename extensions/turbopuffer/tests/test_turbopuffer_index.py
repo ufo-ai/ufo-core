@@ -33,16 +33,6 @@ def _digest(tag: str) -> str:
     return "sha256:" + hashlib.sha256(tag.encode()).hexdigest()
 
 
-class _StubEmbed:
-    """A dependency the backend re-embeds through in reindex, never the asserted thing."""
-
-    def __init__(self, vector: tuple[float, ...]) -> None:
-        self._vector = vector
-
-    async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
-        return tuple(self._vector for _ in texts)
-
-
 async def _workspace() -> UUID:
     workspace_id = uuid4()
     async with workspace_tx() as connection:
@@ -107,9 +97,7 @@ def test_query_filters_scope_owner_kind_and_subjects() -> None:
 async def test_upsert_posts_columnar_batches_under_the_bearer_key(db: None) -> None:
     workspace_id = await _workspace()
     transport, seen = _recorder()
-    index = tpuf.TurbopufferIndex(
-        embed=_StubEmbed((1.0, 0.0)), credentials=await _access(workspace_id), api=_api(transport)
-    )
+    index = tpuf.TurbopufferIndex(credentials=await _access(workspace_id), api=_api(transport))
     d1, d2 = _digest("a"), _digest("b")
     with ws(workspace_id):
         await index.upsert(
@@ -155,9 +143,7 @@ async def test_lexical_and_vector_queries_filter_and_parse_hits(db: None) -> Non
         },
     ]
     transport, seen = _recorder(rows)
-    index = tpuf.TurbopufferIndex(
-        embed=_StubEmbed((1.0, 0.0)), credentials=await _access(workspace_id), api=_api(transport)
-    )
+    index = tpuf.TurbopufferIndex(credentials=await _access(workspace_id), api=_api(transport))
 
     with ws(workspace_id):
         lexical = await index.lexical("orbital", frozenset({SHARED}), OWNER_KIND, 10)
@@ -191,9 +177,7 @@ async def test_delete_enumerates_a_scope_then_posts_id_deletes(db: None) -> None
         "text": "x",
     }
     transport, seen = _recorder([row])
-    index = tpuf.TurbopufferIndex(
-        embed=_StubEmbed((1.0, 0.0)), credentials=await _access(workspace_id), api=_api(transport)
-    )
+    index = tpuf.TurbopufferIndex(credentials=await _access(workspace_id), api=_api(transport))
     with ws(workspace_id):
         await index.delete(IndexScope(OWNER_KIND, "m1"))
     query_request, query_body = seen[0]
@@ -214,7 +198,6 @@ async def test_query_on_a_missing_namespace_returns_no_hits(db: None) -> None:
         return httpx.Response(404, json={"error": "namespace not found"})
 
     index = tpuf.TurbopufferIndex(
-        embed=_StubEmbed((1.0, 0.0)),
         credentials=await _access(workspace_id),
         api=_api(httpx.MockTransport(handle)),
     )

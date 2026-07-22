@@ -26,17 +26,6 @@ def vec(*axes: tuple[int, float]) -> tuple[float, ...]:
     return tuple(values)
 
 
-class StubEmbed:
-    """Deterministic stand-in EmbedClient the backend re-embeds through in reindex. A dependency,
-    never the asserted thing — tests assert the index's Hit ordering read back through vector()."""
-
-    def __init__(self, vector: tuple[float, ...]) -> None:
-        self._vector = vector
-
-    async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
-        return tuple(self._vector for _ in texts)
-
-
 @pytest.fixture
 async def clean_chunk(db: None, database_url: str) -> AsyncIterator[None]:
     token = current_workspace.set(WORKSPACE)
@@ -53,7 +42,7 @@ async def clean_chunk(db: None, database_url: str) -> AsyncIterator[None]:
 async def test_upsert_lexical_and_vector_return_ordered_hits(
     clean_chunk: None, database_url: str
 ) -> None:
-    backend = DefaultIndex(embed=StubEmbed(vec((0, 1.0))), transaction=workspace_tx)
+    backend = DefaultIndex(transaction=workspace_tx)
     e0 = vec((0, 1.0))
     e01 = vec((0, 1.0), (1, 1.0))
     await backend.upsert(
@@ -90,7 +79,7 @@ LITERAL_MISS_QUERIES = ('vel"vet', "NEAR(wild rumpus)", "wild*", "^wild", "title
 async def test_lexical_recalls_through_punctuated_queries(
     clean_chunk: None, database_url: str
 ) -> None:
-    backend = DefaultIndex(embed=StubEmbed(vec((0, 1.0))), transaction=workspace_tx)
+    backend = DefaultIndex(transaction=workspace_tx)
     await backend.upsert(
         (
             Chunk(
@@ -114,7 +103,7 @@ async def test_lexical_recalls_through_punctuated_queries(
 
 
 async def test_foreign_subject_is_excluded(clean_chunk: None, database_url: str) -> None:
-    backend = DefaultIndex(embed=StubEmbed(vec((0, 1.0))), transaction=workspace_tx)
+    backend = DefaultIndex(transaction=workspace_tx)
     await backend.upsert(
         (
             Chunk("mine", "memory_item", "m1", SUBJECT, 0, "shared secret token", vec((0, 1.0))),
@@ -137,7 +126,7 @@ async def test_vector_returns_a_small_owner_kinds_rows_under_a_dominant_corpus(
     exact on every plan; this pins the contract at real-database scale the suite can afford."""
     if database_url.startswith("sqlite"):
         pytest.skip("the starvation shape is Postgres-only")
-    backend = DefaultIndex(embed=StubEmbed(vec((0, 1.0))), transaction=workspace_tx)
+    backend = DefaultIndex(transaction=workspace_tx)
     await backend.upsert(
         (
             Chunk("target-0", "memory_item", "t0", SUBJECT, 0, "ledger decision", vec((1, 1.0))),
@@ -162,7 +151,7 @@ async def test_vector_returns_a_small_owner_kinds_rows_under_a_dominant_corpus(
 
 
 async def test_delete_removes_only_its_scope(clean_chunk: None, database_url: str) -> None:
-    backend = DefaultIndex(embed=StubEmbed(vec((0, 1.0))), transaction=workspace_tx)
+    backend = DefaultIndex(transaction=workspace_tx)
     await backend.upsert(
         (
             Chunk("keep", "memory_item", "keep-owner", SUBJECT, 0, "apple", vec((0, 1.0))),
@@ -179,7 +168,7 @@ async def test_delete_removes_only_its_scope(clean_chunk: None, database_url: st
 async def test_prune_drops_the_scopes_chunks_outside_the_keep_set(
     clean_chunk: None, database_url: str
 ) -> None:
-    backend = DefaultIndex(embed=StubEmbed(vec((0, 1.0))), transaction=workspace_tx)
+    backend = DefaultIndex(transaction=workspace_tx)
     await backend.upsert(
         (
             Chunk("stale", "page", "p1", SUBJECT, 0, "apple", vec((0, 1.0))),
@@ -197,7 +186,7 @@ async def test_prune_drops_the_scopes_chunks_outside_the_keep_set(
 async def test_prune_with_an_empty_keep_set_drops_the_whole_scope(
     clean_chunk: None, database_url: str
 ) -> None:
-    backend = DefaultIndex(embed=StubEmbed(vec((0, 1.0))), transaction=workspace_tx)
+    backend = DefaultIndex(transaction=workspace_tx)
     await backend.upsert(
         (
             Chunk("gone-a", "page", "p1", SUBJECT, 0, "apple", vec((0, 1.0))),
@@ -208,17 +197,6 @@ async def test_prune_with_an_empty_keep_set_drops_the_whole_scope(
     await backend.prune(IndexScope("page", "p1"), frozenset())
     lexical = await backend.lexical("apple", frozenset({SUBJECT}), "page", 10)
     assert [hit.chunk_digest for hit in lexical] == ["kept"]
-
-
-async def test_reindex_reembeds_scope_through_client(clean_chunk: None, database_url: str) -> None:
-    backend = DefaultIndex(embed=StubEmbed(vec((5, 1.0))), transaction=workspace_tx)
-    await backend.upsert((Chunk("c", "memory_item", "o", SUBJECT, 0, "apple", vec((0, 1.0))),))
-    probe = vec((5, 1.0))
-    before = await backend.vector(probe, frozenset({SUBJECT}), "memory_item", 10)
-    assert before[0].score == pytest.approx(0.0, abs=1e-2)
-    await backend.reindex(IndexScope("memory_item", "o"))
-    after = await backend.vector(probe, frozenset({SUBJECT}), "memory_item", 10)
-    assert after[0].score == pytest.approx(1.0, abs=1e-2)
 
 
 def test_pack_unpack_embedding_roundtrips() -> None:

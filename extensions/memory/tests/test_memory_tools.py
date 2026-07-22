@@ -95,7 +95,7 @@ def _ext(index: object, embed: object) -> ExtensionContext:
 
 def _indexer(embed: object) -> MemoryIndexer:
     return MemoryIndexer(
-        index=DefaultIndex(embed=embed, transaction=workspace_tx),
+        index=DefaultIndex(transaction=workspace_tx),
         embed=embed,
         transaction=workspace_tx,
         chunker=TextChunker(),
@@ -143,7 +143,7 @@ async def test_memory_update_then_search_recalls_in_a_new_conversation(
     workspace_id = await _workspace()
     member = uuid4()
     embed = StubEmbed(vec((6, 1.0)))
-    ext = _ext(DefaultIndex(embed=embed, transaction=workspace_tx), embed)
+    ext = _ext(DefaultIndex(transaction=workspace_tx), embed)
 
     with ws(workspace_id):
         stored = await _run(
@@ -161,7 +161,7 @@ async def test_memory_update_then_search_recalls_in_a_new_conversation(
 async def test_memory_search_provider_rejects_an_empty_query_set() -> None:
     (spec,) = memory.manifest().memory_search
     embed = StubEmbed(vec((0, 1.0)))
-    provider = spec.build(_ext(DefaultIndex(embed=embed, transaction=workspace_tx), embed))
+    provider = spec.build(_ext(DefaultIndex(transaction=workspace_tx), embed))
     with pytest.raises(ValueError, match="requires 1-3 queries"):
         await provider.search((), None)
 
@@ -176,7 +176,7 @@ async def test_user_prompt_submit_hook_injects_and_observes_a_recalled_fact(
     workspace_id = await _workspace()
     member = uuid4()
     embed = StubEmbed(vec((7, 1.0)))
-    ext = _ext(DefaultIndex(embed=embed, transaction=workspace_tx), embed)
+    ext = _ext(DefaultIndex(transaction=workspace_tx), embed)
     with ws(workspace_id):
         await MEMORY_TOOLS["memory_update"].handler(
             ToolContext(
@@ -312,7 +312,7 @@ async def test_recall_hook_excludes_episodic_topic_pointers(
     workspace_id = await _workspace()
     member = uuid4()
     embed = StubEmbed(vec((9, 1.0)))
-    ext = _ext(DefaultIndex(embed=embed, transaction=workspace_tx), embed)
+    ext = _ext(DefaultIndex(transaction=workspace_tx), embed)
     with ws(workspace_id):
         await _run(
             "memory_update", _tool_ctx(ext, member, tmp_path), body="the api key rotates monthly"
@@ -366,7 +366,7 @@ async def test_recall_hook_excludes_episodic_topic_pointers(
 async def test_recall_hook_ignores_a_non_prompt_payload(clean: None) -> None:
     workspace_id = await _workspace()
     embed = StubEmbed(vec((0, 1.0)))
-    ext = _ext(DefaultIndex(embed=embed, transaction=workspace_tx), embed)
+    ext = _ext(DefaultIndex(transaction=workspace_tx), embed)
     with ws(workspace_id):
         outcome = await memory.recall_hook(
             HookContext(
@@ -396,7 +396,7 @@ async def test_memory_update_scopes_to_member_by_default_and_shared_on_flag(
     workspace_id = await _workspace()
     member = uuid4()
     embed = StubEmbed(vec((0, 1.0)))
-    ext = _ext(DefaultIndex(embed=embed, transaction=workspace_tx), embed)
+    ext = _ext(DefaultIndex(transaction=workspace_tx), embed)
     ctx = _tool_ctx(ext, member, tmp_path)
     with ws(workspace_id):
         await _run("memory_update", ctx, body="a private note")
@@ -412,7 +412,7 @@ async def test_memory_update_scopes_to_member_by_default_and_shared_on_flag(
 async def test_memory_search_reports_no_match_on_empty_memory(clean: None, tmp_path: Path) -> None:
     workspace_id = await _workspace()
     embed = StubEmbed(vec((0, 1.0)))
-    ext = _ext(DefaultIndex(embed=embed, transaction=workspace_tx), embed)
+    ext = _ext(DefaultIndex(transaction=workspace_tx), embed)
     with ws(workspace_id):
         result = await _run(
             "memory_search", _tool_ctx(ext, uuid4(), tmp_path), queries=["anything"]
@@ -433,7 +433,7 @@ async def test_memory_search_merges_and_dedups_across_queries(clean: None, tmp_p
     workspace_id = await _workspace()
     member = uuid4()
     working = StubEmbed(vec((0, 1.0)))
-    index = DefaultIndex(embed=working, transaction=workspace_tx)
+    index = DefaultIndex(transaction=workspace_tx)
     ext = _ext(index, BrokenEmbed())
     ctx = _tool_ctx(ext, member, tmp_path)
     with ws(workspace_id):
@@ -454,7 +454,7 @@ async def test_memory_search_bounds_the_merged_result_across_queries(
     workspace_id = await _workspace()
     member = uuid4()
     working = StubEmbed(vec((0, 1.0)))
-    index = DefaultIndex(embed=working, transaction=workspace_tx)
+    index = DefaultIndex(transaction=workspace_tx)
     ext = _ext(index, BrokenEmbed())
     ctx = _tool_ctx(ext, member, tmp_path)
     with ws(workspace_id):

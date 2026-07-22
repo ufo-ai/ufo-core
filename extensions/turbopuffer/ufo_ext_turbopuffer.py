@@ -1,30 +1,28 @@
 """Turbopuffer index backend as an extension: cosine ANN + BM25 lexical over one namespace.
 
 Registered through the `indexes` Manifest point and selected by `memory.index_backend =
-"turbopuffer"`. Core builds it at boot with the deploy embed client and a credential reader for the
-`turbopuffer_api_key` slot; the index runs in the jobs/serve role, never in the sandbox, so every
-request is a direct httpx call under a Bearer key read from the slot in-process, not injected at the
-egress proxy.
+"turbopuffer"`. Core builds it at boot with a credential reader for the `turbopuffer_api_key` slot;
+the index runs in the jobs/serve role, never in the sandbox, so every request is a direct httpx call
+under a Bearer key read from the slot in-process, not injected at the egress proxy.
 
 Chunks store as documents in a per-workspace namespace keyed by chunk_digest (base64url-shortened),
 with the embedding as the vector and owner_kind/owner_id/subject/ordinal/text as attributes; queries
 filter by owner_kind and the recall subject set and return `Hit`s. `delete` drops a scope by
 enumerating its ids; `prune` drops only the scope's ids outside a keep-set so a re-chunked owner
-leaves no orphan; `reindex` re-embeds a scope's stored text and re-upserts. This adapts
-metalcraft's page-based `TurbopufferIndex` to ufo's chunk-based `IndexBackend` protocol
-(owner_kind/subject filter, `Chunk`/`Hit`/`IndexScope` value objects); the base URL is the default
-region endpoint rather than a per-deploy override."""
+leaves no orphan. This adapts metalcraft's page-based `TurbopufferIndex` to ufo's chunk-based
+`IndexBackend` protocol (owner_kind/subject filter, `Chunk`/`Hit`/`IndexScope` value objects); the
+base URL is the default region endpoint rather than a per-deploy override."""
 
 import base64
 import binascii
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
 from ufo.sdk.context import CredentialAccess
-from ufo.sdk.index import Chunk, EmbedClient, Hit, IndexScope
+from ufo.sdk.index import Chunk, Hit, IndexScope
 from ufo.sdk.manifest import CredentialSlot, IndexBackendSpec, Manifest
 
 NAME = "turbopuffer"
@@ -121,14 +119,12 @@ def vector_score(row: dict[str, Any], position: int, total: int) -> float:
 
 @dataclass(frozen=True)
 class TurbopufferIndex:
-    """The `IndexBackend` over Turbopuffer's HTTP API. Holds the deploy embed client (for reindex
-    re-embedding), the credential reader for the BYOK key, and the process-lifetime `api` client
-    whose connection pool every operation shares (a test builds one over a stub transport). The
-    Bearer key rides each request, not the client — the ambient workspace scopes the key, and one
-    boot-built index serves them all. Its namespace is derived from the workspace, so the deploy's
-    one workspace owns one namespace."""
+    """The `IndexBackend` over Turbopuffer's HTTP API. Holds the credential reader for the BYOK key
+    and the process-lifetime `api` client whose connection pool every operation shares (a test
+    builds one over a stub transport). The Bearer key rides each request, not the client — the
+    ambient workspace scopes the key, and one boot-built index serves them all. Its namespace is
+    derived from the workspace, so the deploy's one workspace owns one namespace."""
 
-    embed: EmbedClient
     credentials: CredentialAccess
     api: httpx.AsyncClient
 
@@ -187,18 +183,6 @@ class TurbopufferIndex:
             (row, vector_score(row, position, len(rows))) for position, row in enumerate(rows)
         )
         return tuple(hit_from_row(row, score) for row, score in scored if score > 0)
-
-    async def reindex(self, scope: IndexScope) -> None:
-        chunks = await self._scope_chunks(scope, await self._auth())
-        if not chunks:
-            return
-        vectors = await self.embed.embed(tuple(chunk.text for chunk in chunks))
-        await self.upsert(
-            tuple(
-                replace(chunk, embedding=vector)
-                for chunk, vector in zip(chunks, vectors, strict=True)
-            )
-        )
 
     async def _query(
         self, rank_by: list[Any], owner_kind: str, subjects: frozenset[str], limit: int
@@ -267,8 +251,7 @@ def manifest() -> Manifest:
         indexes=(
             IndexBackendSpec(
                 name=INDEX_BACKEND,
-                factory=lambda embed, ctx: TurbopufferIndex(
-                    embed=embed,
+                factory=lambda ctx: TurbopufferIndex(
                     credentials=ctx.credentials,
                     api=httpx.AsyncClient(base_url=BASE_URL, timeout=TIMEOUT_SECONDS),
                 ),
