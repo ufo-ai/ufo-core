@@ -1,9 +1,14 @@
-"""The Slack extension's manifest: one surface on the core seam, its two secret slots — the bot
-token and signing secret, read in-process — and the setup tools the agent drives in chat. The
-app's identity (team and bot-user ids) is derived metadata, not a credential: `slack_connect`
-proves it with auth.test and custodies it as the surface's own record. Neither slot carries a
-wire-injection target: a surface authenticates to Slack itself, never through the sandbox egress
-proxy. The `slack-app-setup` skill walks a member through the whole connection."""
+"""The Slack extension's manifest: one surface on the core seam — its ingest, interactivity, and
+OAuth-install routes — the per-workspace secret slots, and the setup tools the agent drives in chat.
+
+Install has two paths. The preferred one is OAuth on the deploy's own Slack app, whose client id,
+client secret, and signing secret are read from the deploy's env in-process (`SLACK_CLIENT_ID`,
+`SLACK_CLIENT_SECRET`, `SLACK_SIGNING_SECRET`) — never per-workspace, never the sandbox, so they are
+not credential slots; the OAuth callback mints the per-workspace bot token. The alternative is a
+bring-your-own Slack app (the `slack-app-setup` skill): the member creates an app from
+`slack_app_manifest` and fills the two per-workspace slots — the bot token and the app's own signing
+secret — privately. A surface authenticates to Slack directly, never through the sandbox egress
+proxy, so neither slot carries a wire-injection target."""
 
 from pathlib import Path
 
@@ -11,11 +16,13 @@ from ufo.sdk.manifest import CredentialSlot, Manifest, SkillSpec
 from ufo.sdk.surfaces import SurfaceRoute, SurfaceSpec
 from ufo_ext_slack.surface import (
     SLACK_BOT_TOKEN_SLOT,
+    SLACK_OAUTH_CALLBACK_PATH,
     SLACK_SIGNING_SECRET_SLOT,
     SURFACE_SLACK,
     attach,
     ingest,
     interactive,
+    oauth_callback,
     post,
     resolve_workspace,
 )
@@ -32,9 +39,13 @@ def manifest() -> Manifest:
         version=VERSION,
         credentials=(
             CredentialSlot(
-                name=SLACK_BOT_TOKEN_SLOT, description="Slack bot OAuth token (xoxb-...)."
+                name=SLACK_BOT_TOKEN_SLOT,
+                description="Slack bot token (xoxb-...): OAuth-minted, or pasted for a BYO app.",
             ),
-            CredentialSlot(name=SLACK_SIGNING_SECRET_SLOT, description="Slack app signing secret."),
+            CredentialSlot(
+                name=SLACK_SIGNING_SECRET_SLOT,
+                description="A bring-your-own Slack app's signing secret (unused for OAuth).",
+            ),
         ),
         surfaces=(
             SurfaceSpec(
@@ -42,6 +53,9 @@ def manifest() -> Manifest:
                 routes=(
                     SurfaceRoute(method="POST", path="", handler=ingest),
                     SurfaceRoute(method="POST", path="interactive", handler=interactive),
+                    SurfaceRoute(
+                        method="GET", path=SLACK_OAUTH_CALLBACK_PATH, handler=oauth_callback
+                    ),
                 ),
                 post=post,
                 attach=attach,

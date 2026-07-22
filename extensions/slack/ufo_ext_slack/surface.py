@@ -28,10 +28,22 @@ as the conversation's next turn (idempotent per question — the first click on 
 wins), and rewrites that row into the chosen answer with who gave it via `chat.update`, echoing the
 message's own delivered blocks so the rewrite never re-renders content Slack already accepted.
 
-Everything Slack-specific lives here — signature verification, thread keying, Block Kit rendering,
-the chunked external-upload flow, the `url_private` download — reaching core only through the
-privileged `SurfaceContext` (admit, identity, workspace write, credential read, tail) and the
-streaming `BlobStore`. Attachments move without ever buffering a whole file: an inbound file
+Install has two paths, both landing the same per-workspace bot token and identity record. The
+preferred one is OAuth on the deploy's own Slack app: its client id, client secret, and signing
+secret are read from the deploy's env in-process (never the sandbox), the owner clicks an "Add to
+Slack" link whose sealed state names them and the workspace, and `oauth_callback` exchanges the code
+for that workspace's bot token, binding the team and recording the identity. The alternative is a
+bring-your-own Slack app (the `slack-app-setup` skill): the owner creates an app from
+`slack_app_manifest`, fills the per-workspace `slack_bot_token` and `slack_signing_secret` slots
+privately, and `slack_connect` derives the identity with `auth.test`. Every inbound request is
+verified against the workspace's own signing-secret slot when it has one, else the deploy's env
+secret, before any workspace is bound.
+
+Everything Slack-specific lives here — signature verification, the OAuth install exchange, thread
+keying, Block Kit rendering, the chunked external-upload flow, the `url_private` download — reaching
+core only through the privileged `SurfaceContext` (admit, identity, workspace write, credential read
+and OAuth-install write, installation binding, tail) and the streaming `BlobStore`. Attachments move
+without ever buffering a whole file: an inbound file
 streams from `url_private` straight into the workspace before the turn runs, and a shared file
 streams from the blob store straight to Slack's external-upload URL. Uploads fan out with
 `asyncio.gather` on the one event loop — never a thread pool."""
@@ -39,15 +51,17 @@ streams from the blob store straight to Slack's external-upload URL. Uploads fan
 import asyncio
 import hashlib
 import hmac
+import html
 import json
 import logging
+import os
 import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 from uuid import UUID
 
 import httpx
@@ -61,11 +75,14 @@ from ufo.sdk.surfaces import (
     AskUserInput,
     ConnectRequest,
     ConnectRequestInvalid,
+    CredentialRequestInvalid,
+    CredentialRequestState,
     CredentialSlotUnset,
     SharedArtifact,
     SurfaceAuth,
     SurfaceContext,
     SurfaceDeliveryError,
+    SurfaceInstallationConflict,
     SurfaceWorkspaceUnknown,
     TurnContext,
     Writeback,
@@ -74,11 +91,93 @@ from ufo.sdk.surfaces import (
 SURFACE_SLACK = "slack"
 SLACK_BOT_TOKEN_SLOT = "slack_bot_token"
 SLACK_SIGNING_SECRET_SLOT = "slack_signing_secret"
+SLACK_CLIENT_ID_ENV = "SLACK_CLIENT_ID"
+SLACK_CLIENT_SECRET_ENV = "SLACK_CLIENT_SECRET"
+SLACK_SIGNING_SECRET_ENV = "SLACK_SIGNING_SECRET"
 SLACK_AUTH_TEST_URL = "https://slack.com/api/auth.test"
-SLACK_IDENTITY_TIMEOUT_SECONDS = 20
+SLACK_OAUTH_AUTHORIZE_URL = "https://slack.com/oauth/v2/authorize"
+SLACK_OAUTH_ACCESS_URL = "https://slack.com/api/oauth.v2.access"
+SLACK_OAUTH_CALLBACK_PATH = "oauth"
+SLACK_INSTALL_PAYLOAD = "slack-oauth-install"
+SLACK_INSTALL_TIMEOUT_SECONDS = 20
+SLACK_BOT_SCOPES = (
+    "app_mentions:read",
+    "assistant:write",
+    "channels:history",
+    "chat:write",
+    "files:read",
+    "files:write",
+    "groups:history",
+    "im:history",
+    "mpim:history",
+    "users:read",
+    "users:read.email",
+)
 TEAM_ID_PATTERN = r"^T[A-Z0-9]+$"
 BOT_USER_ID_PATTERN = r"^[UW][A-Z0-9]+$"
 MALFORMED_IDENTITY_ERROR = "malformed identity"
+
+
+def _env_signing_secret() -> str | None:
+    """The deploy's Slack app signing secret from env, or None when unset — the verification secret
+    for an OAuth-installed workspace, and the fallback when a workspace holds no per-workspace
+    signing-secret slot of its own (a bring-your-own-app install)."""
+    return os.environ.get(SLACK_SIGNING_SECRET_ENV) or None
+
+
+async def _ctx_signing_secret(ctx: SurfaceContext) -> str | None:
+    """The signing secret to verify this workspace's inbound requests against: its own stored slot
+    (a BYOK manifest app) if set, else the deploy's env secret (an OAuth install). None when neither
+    is configured — the request cannot be verified."""
+    try:
+        return await ctx.credential(SLACK_SIGNING_SECRET_SLOT)
+    except CredentialSlotUnset:
+        return _env_signing_secret()
+
+
+async def _auth_signing_secret(auth: SurfaceAuth, workspace_id: UUID) -> str | None:
+    """`_ctx_signing_secret` for the pre-binding shared resolver: the workspace's own slot if set,
+    else the deploy env; None for an unknown workspace or when neither secret is configured."""
+    try:
+        return await auth.credential(workspace_id, SLACK_SIGNING_SECRET_SLOT)
+    except CredentialSlotUnset:
+        return _env_signing_secret()
+    except SurfaceWorkspaceUnknown:
+        return None
+
+
+def slack_client_id() -> str:
+    client_id = os.environ.get(SLACK_CLIENT_ID_ENV)
+    if not client_id:
+        raise RuntimeError(f"{SLACK_CLIENT_ID_ENV} is unset; the Slack surface cannot authorize")
+    return client_id
+
+
+def slack_client_secret() -> str:
+    secret = os.environ.get(SLACK_CLIENT_SECRET_ENV)
+    if not secret:
+        raise RuntimeError(f"{SLACK_CLIENT_SECRET_ENV} is unset; the Slack surface cannot install")
+    return secret
+
+
+def slack_oauth_redirect_uri(public_base_url: str) -> str:
+    """The one Redirect URL the deploy's Slack app is set with; both authorize legs use it."""
+    return f"{public_base_url.rstrip('/')}/surface/{SURFACE_SLACK}/{SLACK_OAUTH_CALLBACK_PATH}"
+
+
+def slack_authorize_url(client_id: str, redirect_uri: str, state: str) -> str:
+    """The "Add to Slack" link: the deploy app's authorize endpoint carrying its client id, the
+    bot scopes, the deploy's redirect, and the sealed install state that binds the callback to this
+    workspace and owner."""
+    query = urlencode(
+        {
+            "client_id": client_id,
+            "scope": ",".join(SLACK_BOT_SCOPES),
+            "redirect_uri": redirect_uri,
+            "state": state,
+        }
+    )
+    return f"{SLACK_OAUTH_AUTHORIZE_URL}?{query}"
 
 
 class SlackIdentityError(RuntimeError):
@@ -88,10 +187,10 @@ class SlackIdentityError(RuntimeError):
 
 
 class SlackIdentity(BaseModel):
-    """The app's derived identity — the team and bot-user ids `auth.test` proved for the stored
-    bot token, pinned to that token's fingerprint so a rotation reads as absent until
-    `slack_connect` re-derives. Not credentials: derived metadata, custodied as the surface's own
-    record beside its url-verified marker."""
+    """The app's identity in one workspace — the team and bot-user ids the OAuth install returned,
+    pinned to the installed bot token's fingerprint so a reinstall (a new token) reads as absent
+    until the callback rewrites it. Not a credential: derived metadata the events path reads to
+    route and to recognize the bot's own messages, custodied as the surface's own record."""
 
     bot_token_fingerprint: str
     team_id: str
@@ -109,7 +208,7 @@ def bot_token_fingerprint(bot_token: str) -> str:
 async def read_identity(
     blob: BlobStore, workspace_id: UUID, bot_token: str
 ) -> SlackIdentity | None:
-    """The stored identity record, or None when absent, unreadable, or derived from a since-rotated
+    """The stored identity record, or None when absent, unreadable, or derived from a since-replaced
     token — never a stale team/bot id gating events for the wrong app."""
     key = identity_blob_key(workspace_id)
     if not await blob.exists(key):
@@ -123,14 +222,26 @@ async def read_identity(
     return identity
 
 
+async def _identity(ctx: SurfaceContext) -> SlackIdentity | None:
+    try:
+        bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
+    except CredentialSlotUnset:
+        return None
+    return await read_identity(ctx.blob, ctx.workspace_id, bot_token)
+
+
 @dataclass(frozen=True)
 class SlackIdentityResolver:
+    """Derive and persist the app identity for a bring-your-own-app (manifest) install, whose bot
+    token is pasted rather than OAuth-minted: `auth.test` proves the team and bot-user ids the
+    token belongs to. The OAuth path never needs this — its callback records the identity straight
+    from the `oauth.v2.access` response."""
+
     blob: BlobStore
     workspace_id: UUID
     bot_token: str
 
     async def resolve(self) -> SlackIdentity:
-        """Return the app identity bound to the bot token, proving and persisting it when absent."""
         identity = await read_identity(self.blob, self.workspace_id, self.bot_token)
         if identity is not None:
             return identity
@@ -142,7 +253,7 @@ class SlackIdentityResolver:
 
     async def _prove(self) -> SlackIdentity:
         try:
-            async with httpx.AsyncClient(timeout=SLACK_IDENTITY_TIMEOUT_SECONDS) as client:
+            async with httpx.AsyncClient(timeout=SLACK_INSTALL_TIMEOUT_SECONDS) as client:
                 response = await client.post(
                     SLACK_AUTH_TEST_URL,
                     headers={"authorization": f"Bearer {self.bot_token}"},
@@ -168,18 +279,13 @@ class SlackIdentityResolver:
         )
 
 
-async def _identity(ctx: SurfaceContext) -> SlackIdentity | None:
-    try:
-        bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
-    except CredentialSlotUnset:
-        return None
-    return await read_identity(ctx.blob, ctx.workspace_id, bot_token)
-
-
 _IDENTITY_TASKS: dict[UUID, asyncio.Task[None]] = {}
 
 
 def _prove_identity_in_background(ctx: SurfaceContext) -> None:
+    """A manifest-app workspace whose secrets are filled but whose identity was never derived (the
+    owner never re-ran `slack_connect`) proves it off the first inbound event, so the retry admits.
+    One task per workspace; the OAuth path never reaches here (its callback wrote the identity)."""
     if ctx.workspace_id in _IDENTITY_TASKS:
         return
     task = asyncio.create_task(_run_identity_proof(ctx))
@@ -204,18 +310,58 @@ async def _run_identity_proof(ctx: SurfaceContext) -> None:
 
 def url_verified_blob_key(workspace_id: UUID) -> str:
     """The marker written on a signature-verified inbound request — proof Slack reached this deploy
-    with the signing secret currently stored, whether by the `url_verification` handshake or a real
-    event. Keyed by workspace because hosted tenants share one blob bucket: a fixed key would let
-    every tenant's marker overwrite every other's. The body records a fingerprint of the verifying
-    secret, so after a rotation `slack_connect` reads the workspace as pending until Slack's next
-    signed request — never a stale "connected"."""
+    with the signing secret currently in force, whether the `url_verification` handshake or a real
+    event. Keyed by workspace because tenants share one blob bucket. The body records a fingerprint
+    of the verifying secret, so `slack_connect` reads a manifest workspace as pending until Slack's
+    next signed request after a rotation — never a stale "connected"."""
     return f"workspaces/{workspace_id}/surfaces/slack/url_verified"
 
 
 def signing_secret_fingerprint(signing_secret: str) -> str:
-    """A non-reversible fingerprint of the signing secret — stamped into the url-verified marker so
-    `slack_connect` can tell a live verification from one left over from a rotated-out secret."""
+    """A non-reversible fingerprint of the verifying secret — stamped into the url-verified marker
+    so `slack_connect` can tell a live verification from one left over from a rotated-out secret."""
     return hashlib.sha256(signing_secret.encode()).hexdigest()
+
+
+@dataclass(frozen=True)
+class SlackInstall:
+    """What one OAuth `oauth.v2.access` exchange yields: the workspace's own bot token and the team
+    and bot-user ids Slack minted it for. The token is the credential; the ids become the surface's
+    identity record, proven by the exchange itself — no `auth.test` round-trip."""
+
+    bot_token: str
+    team_id: str
+    bot_user_id: str
+
+
+async def slack_oauth_exchange(code: str, redirect_uri: str) -> SlackInstall:
+    """Exchange an authorization code for a workspace's bot token at the deploy app's
+    `oauth.v2.access`, presenting the same redirect the authorize link did. A malformed response or
+    an `ok:false` (a reused or expired code) raises, so the callback shows a retry rather than
+    storing a broken install."""
+    async with httpx.AsyncClient(timeout=SLACK_INSTALL_TIMEOUT_SECONDS) as client:
+        payload = await _slack_ok(
+            client.post(
+                SLACK_OAUTH_ACCESS_URL,
+                data={
+                    "client_id": slack_client_id(),
+                    "client_secret": slack_client_secret(),
+                    "code": code,
+                    "redirect_uri": redirect_uri,
+                },
+            )
+        )
+    access_token = payload.get("access_token")
+    team = payload.get("team")
+    team_id = team.get("id") if isinstance(team, dict) else None
+    bot_user_id = payload.get("bot_user_id")
+    if not isinstance(access_token, str) or not access_token:
+        raise SlackIdentityError(MALFORMED_IDENTITY_ERROR)
+    if not isinstance(team_id, str) or not re.match(TEAM_ID_PATTERN, team_id):
+        raise SlackIdentityError(MALFORMED_IDENTITY_ERROR)
+    if not isinstance(bot_user_id, str) or not re.match(BOT_USER_ID_PATTERN, bot_user_id):
+        raise SlackIdentityError(MALFORMED_IDENTITY_ERROR)
+    return SlackInstall(bot_token=access_token, team_id=team_id, bot_user_id=bot_user_id)
 
 
 SLACK_USERS_INFO_URL = "https://slack.com/api/users.info"
@@ -617,10 +763,23 @@ def slack_installation_id(team_id: str) -> str:
 
 
 async def resolve_workspace(request: Request, auth: SurfaceAuth) -> UUID | Response | None:
-    """Resolve a canonical Slack callback through its registered team, then authenticate the exact
-    bytes with that workspace's signing secret before core binds its RLS scope. The team id is only
-    a lookup hint; unknown teams and bad signatures share the same rejection. URL verification has
-    no team id, so its bounded challenge echoes without binding or storing state."""
+    """The shared-fleet workspace resolution for every Slack route, dispatched by request shape.
+
+    The OAuth callback (a GET carrying the sealed install `state`) has no team yet — the browser
+    carries the Fernet-sealed handoff that names the installing workspace, so the seal itself
+    resolves it, exactly as the connect callback trusts its own sealed state.
+
+    An event or interactivity POST resolves through its team: the untrusted team id selects one
+    `surface_installation`, and that workspace's signing secret — its own slot (a bring-your-own-app
+    install) if set, else the deploy's env secret (an OAuth install) — verifies the original bytes
+    before core binds any tenant. Unknown teams, workspaces with no signing secret, and bad
+    signatures share the same rejection. The `url_verification` handshake carries no team, so its
+    bounded challenge echoes without binding a workspace."""
+    if request.method == "GET":
+        claims = auth.open_credential_authorization(request.query_params.get("state", ""))
+        if claims is None or not _is_install_state(claims):
+            return None
+        return claims.workspace_id
     try:
         raw = await _slack_request_body(request)
     except SlackBodyTooLarge:
@@ -634,17 +793,20 @@ async def resolve_workspace(request: Request, auth: SurfaceAuth) -> UUID | Respo
     workspace_id = await auth.workspace(slack_installation_id(team_id))
     if workspace_id is None:
         return None
-    try:
-        signing_secret = await auth.credential(workspace_id, SLACK_SIGNING_SECRET_SLOT)
-    except SurfaceWorkspaceUnknown:
-        return None
-    except CredentialSlotUnset:
+    secret = await _auth_signing_secret(auth, workspace_id)
+    if secret is None:
         return None
     try:
-        verify_slack_signature(request.headers, raw, signing_secret)
+        verify_slack_signature(request.headers, raw, secret)
     except SlackSignatureError:
         return None
     return workspace_id
+
+
+def _is_install_state(claims: CredentialRequestState) -> bool:
+    """Whether a sealed handoff is a Slack install: our payload marker for the bot-token slot. A
+    seal for any other slot or purpose never resolves the OAuth callback's workspace."""
+    return claims.payload == SLACK_INSTALL_PAYLOAD and claims.slots == (SLACK_BOT_TOKEN_SLOT,)
 
 
 def slack_thread_key(channel: str, root_ts: str, is_dm: bool) -> str:
@@ -823,17 +985,71 @@ def _inbound_files(event: Mapping[str, object]) -> tuple[InboundFile, ...]:
     return tuple(files)
 
 
+async def oauth_callback(ctx: SurfaceContext, request: Request) -> Response:
+    """Complete an "Add to Slack" install: verify the sealed install `state` the owner minted names
+    this workspace, exchange the returned code for the workspace's bot token, and land the three
+    pieces the events path needs — the token in the credential store, the team→workspace binding,
+    and the identity record — before showing the owner a success page. State-verified (Fernet), not
+    signature-verified: it is a browser redirect, and the seal is the trust. The team binding runs
+    first so a team already connected to another workspace is refused before any token is stored;
+    the identity write is mandatory, since events cannot route without it. Idempotent: re-running a
+    fresh install link overwrites token and identity and re-binds the same team."""
+    error = request.query_params.get("error")
+    if error:
+        _LOG.info("slack oauth authorization declined: %s", error)
+        return _install_page("Slack authorization was cancelled.", 400)
+    state = request.query_params.get("state", "")
+    code = request.query_params.get("code", "")
+    if not state or not code:
+        return _install_page("This install link is missing its authorization.", 400)
+    try:
+        claims = ctx.open_credential_authorization(state)
+    except CredentialRequestInvalid:
+        return _install_page("This install link has expired — ask ufo to connect Slack again.", 400)
+    if not _is_install_state(claims) or claims.workspace_id != ctx.workspace_id:
+        return _install_page("This install link is not valid for this workspace.", 400)
+    if ctx.public_base_url is None:
+        return _install_page("This deploy has no public URL configured.", 500)
+    redirect_uri = slack_oauth_redirect_uri(ctx.public_base_url)
+    try:
+        install = await slack_oauth_exchange(code, redirect_uri)
+    except (SlackApiError, SlackIdentityError, httpx.HTTPError) as exchange_error:
+        _LOG.warning("slack oauth exchange failed: %s", exchange_error)
+        return _install_page("Slack rejected the authorization — ask ufo to connect again.", 502)
+    try:
+        await ctx.bind_installation(slack_installation_id(install.team_id))
+    except SurfaceInstallationConflict:
+        return _install_page("This Slack workspace is already connected to another ufo.", 409)
+    identity = SlackIdentity(
+        bot_token_fingerprint=bot_token_fingerprint(install.bot_token),
+        team_id=install.team_id,
+        bot_user_id=install.bot_user_id,
+    )
+    await ctx.fulfill_credential_request(
+        state, SLACK_BOT_TOKEN_SLOT, install.bot_token, member_id=claims.member_id
+    )
+    await ctx.blob.put(identity_blob_key(ctx.workspace_id), identity.model_dump_json().encode())
+    return _install_page("ufo is installed — return to chat and talk to it.", 200)
+
+
+def _install_page(message: str, status: int) -> Response:
+    return Response(
+        f"<!doctype html><meta charset=utf-8><title>ufo · Slack</title>"
+        f"<body style='font:16px system-ui;margin:4rem auto;max-width:32rem;text-align:center'>"
+        f"<p>{html.escape(message)}</p></body>",
+        status_code=status,
+        media_type="text/html",
+    )
+
+
 _URL_VERIFIED_WRITTEN: dict[UUID, str] = {}
 
 
 async def _mark_url_verified(ctx: SurfaceContext, signing_secret: str) -> None:
-    """Record that Slack reached this deploy with a request the stored secret verified — the signal
-    the `slack_connect` tool's `connected` state reads. Callers gate what counts as proof: the
-    `url_verification` handshake (Slack's own URL check, which carries no team) or a request from
-    the configured team — never a stray on-team-mismatch event, which would read as connected while
-    the team gate drops everything. The cache holds the fingerprint this process last wrote, so the
-    write stays off the hot path yet any rotation — including back to an earlier secret — re-stamps
-    on the next proof. Best effort: a blob hiccup must not fail the request Slack needs answered."""
+    """Record that Slack reached this deploy with a request the current secret verified — the signal
+    a manifest workspace's `slack_connect` reads as `connected`. Best effort with a per-process
+    fingerprint cache so the write stays off the hot path yet a rotation re-stamps on the next
+    proof; a blob hiccup must not fail the request Slack needs answered."""
     fingerprint = signing_secret_fingerprint(signing_secret)
     if _URL_VERIFIED_WRITTEN.get(ctx.workspace_id) == fingerprint:
         return
@@ -847,18 +1063,17 @@ async def _mark_url_verified(ctx: SurfaceContext, signing_secret: str) -> None:
 
 
 async def ingest(ctx: SurfaceContext, request: Request) -> Response:
+    """The events route: verify the request against the workspace's signing secret (its own slot,
+    else the deploy env), then admit a member turn. Before any secret exists — a manifest app being
+    created probes its request URL before the owner fills the signing-secret slot, on a deploy with
+    no env secret — the caller's own `url_verification` challenge echoes: it stores and grants
+    nothing, so app creation verifies clean while real events stay 401 until a secret is set."""
     try:
         raw = await _slack_request_body(request)
     except SlackBodyTooLarge:
         return Response("Slack event too large", status_code=413)
-    try:
-        signing_secret = await ctx.credential(SLACK_SIGNING_SECRET_SLOT)
-    except CredentialSlotUnset:
-        # Slack probes the Request URL the moment the app is created from the manifest — before the
-        # owner can hold the secret Slack only mints with the app. Echoing the caller's own
-        # challenge stores nothing and grants nothing, so it is safe unsigned, and app creation
-        # verifies clean instead of showing a failed handshake. Real events stay 401 until the
-        # slots are filled.
+    signing_secret = await _ctx_signing_secret(ctx)
+    if signing_secret is None:
         challenge = url_verification_challenge(raw)
         if challenge is not None:
             return JSONResponse({"challenge": challenge})
@@ -1404,9 +1619,8 @@ async def interactive(ctx: SurfaceContext, request: Request) -> Response:
         raw = await _slack_request_body(request)
     except SlackBodyTooLarge:
         return Response("Slack payload too large", status_code=413)
-    try:
-        signing_secret = await ctx.credential(SLACK_SIGNING_SECRET_SLOT)
-    except CredentialSlotUnset:
+    signing_secret = await _ctx_signing_secret(ctx)
+    if signing_secret is None:
         return Response("Slack signing secret is not configured yet", status_code=401)
     try:
         verify_slack_signature(request.headers, raw, signing_secret)

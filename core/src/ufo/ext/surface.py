@@ -54,6 +54,7 @@ from ufo.blob import BlobNotFound, BlobStore
 from ufo.candidates import WorkspaceCandidates, owner_candidates
 from ufo.credentials import (
     CredentialRequestInvalid,
+    CredentialRequestState,
     CredentialStore,
     open_credential_request,
 )
@@ -254,6 +255,37 @@ def _email_domain(email: str) -> str:
     return domain if local and domain else ""
 
 
+async def _bind_surface_installation(
+    workspace_id: UUID, surface: str, installation_id: str
+) -> None:
+    """Upsert one surface's installation binding for a workspace, replacing any prior binding for
+    that (workspace, surface). The fleet-wide uniqueness on (surface, installation_id) raises
+    `SurfaceInstallationConflict` when the installation already belongs to another workspace. The
+    one place the binding is written — a tool (`SurfaceInstallationAccess.bind`) and a surface's own
+    OAuth callback (`SurfaceContext.bind_installation`) both land it here."""
+    if not installation_id:
+        raise ValueError("surface installation id is empty")
+    try:
+        async with workspace_tx() as connection:
+            insert = postgres_insert if connection.dialect.name == "postgresql" else sqlite_insert
+            await connection.execute(
+                insert(tables.surface_installation)
+                .values(
+                    workspace_id=workspace_id,
+                    surface=surface,
+                    installation_id=installation_id,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+                .on_conflict_do_update(
+                    index_elements=("workspace_id", "surface"),
+                    set_={"installation_id": installation_id, "updated_at": sa.func.now()},
+                )
+            )
+    except sa.exc.IntegrityError as error:
+        raise SurfaceInstallationConflict(surface) from error
+
+
 @dataclass(frozen=True)
 class SurfaceContext:
     """The privileged handle a surface's route handlers receive — one context spanning both delivery
@@ -294,6 +326,16 @@ class SurfaceContext:
             return False
         return not await self.blob.exists(_fulfilled_marker_key(self.workspace_id, sealed, slot))
 
+    def open_credential_authorization(self, sealed: str) -> CredentialRequestState:
+        """Open a sealed credential-authorization handoff, returning its claims (workspace, member,
+        slot, provider state). The Fernet's authenticity and TTL are the trust — a surface that
+        completes a provider handoff at a browser callback (a Slack OAuth install) recovers the
+        sealed member and slot to fulfill against, having no turn to bind them from. Raises
+        `CredentialRequestInvalid` on a tampered or expired seal."""
+        if self._credentials is None:
+            raise RuntimeError(f"surface {self.surface!r} opens a seal but holds no store")
+        return open_credential_request(self._credentials.fernet, sealed)
+
     async def fulfill_credential_request(
         self, sealed: str, slot: str, value: str, member_id: UUID | None
     ) -> None:
@@ -318,6 +360,14 @@ class SurfaceContext:
             _fulfilled_marker_key(self.workspace_id, sealed, slot),
             json.dumps({"at": datetime.now(UTC).timestamp()}).encode(),
         )
+
+    async def bind_installation(self, installation_id: str) -> None:
+        """Bind this surface's external installation identity (a Slack team) to this workspace,
+        replacing any prior binding for this workspace's surface. A surface completing its own OAuth
+        install at a callback records the team→workspace mapping shared ingress later resolves by;
+        the fleet-wide uniqueness on (surface, installation_id) rejects a team already bound to
+        another workspace with `SurfaceInstallationConflict`."""
+        await _bind_surface_installation(self.workspace_id, self.surface, installation_id)
 
     @property
     def public_base_url(self) -> str | None:
@@ -918,60 +968,7 @@ class SurfaceInstallationAccess:
         this workspace's binding; the fleet-wide identity constraint rejects another workspace."""
         if surface not in self.declared:
             raise UndeclaredSurface(surface)
-        if not installation_id:
-            raise ValueError("surface installation id is empty")
-        workspace_id = ws_current().workspace_id
-        try:
-            async with workspace_tx() as connection:
-                match connection.dialect.name:
-                    case "postgresql":
-                        bound = (
-                            await connection.execute(
-                                postgres_insert(tables.surface_installation)
-                                .values(
-                                    workspace_id=workspace_id,
-                                    surface=surface,
-                                    installation_id=installation_id,
-                                    created_at=sa.func.now(),
-                                    updated_at=sa.func.now(),
-                                )
-                                .on_conflict_do_update(
-                                    index_elements=("workspace_id", "surface"),
-                                    set_={
-                                        "installation_id": installation_id,
-                                        "updated_at": sa.func.now(),
-                                    },
-                                )
-                                .returning(tables.surface_installation.c.installation_id)
-                            )
-                        ).scalar_one()
-                    case "sqlite":
-                        bound = (
-                            await connection.execute(
-                                sqlite_insert(tables.surface_installation)
-                                .values(
-                                    workspace_id=workspace_id,
-                                    surface=surface,
-                                    installation_id=installation_id,
-                                    created_at=sa.func.now(),
-                                    updated_at=sa.func.now(),
-                                )
-                                .on_conflict_do_update(
-                                    index_elements=("workspace_id", "surface"),
-                                    set_={
-                                        "installation_id": installation_id,
-                                        "updated_at": sa.func.now(),
-                                    },
-                                )
-                                .returning(tables.surface_installation.c.installation_id)
-                            )
-                        ).scalar_one()
-                    case name:
-                        raise RuntimeError(f"surface installation binding does not support {name}")
-                if bound != installation_id:
-                    raise RuntimeError("surface installation binding returned another identity")
-        except sa.exc.IntegrityError as error:
-            raise SurfaceInstallationConflict(surface) from error
+        await _bind_surface_installation(ws_current().workspace_id, surface, installation_id)
 
 
 @dataclass(frozen=True)
@@ -994,6 +991,18 @@ class SurfaceAuth:
                 )
             ).one_or_none()
         return None if row is None else row.workspace_id
+
+    def open_credential_authorization(self, sealed: str) -> CredentialRequestState | None:
+        """Recover a sealed credential-authorization handoff's claims before any workspace is bound,
+        or None when the seal is tampered or expired. A shared resolver completing a surface's own
+        OAuth install reads the sealed workspace from the `state` the browser carries — the Fernet's
+        authenticity is the trust, exactly as the connect callback verifies its own sealed state."""
+        if self._credentials is None:
+            return None
+        try:
+            return open_credential_request(self._credentials.fernet, sealed)
+        except CredentialRequestInvalid:
+            return None
 
     async def credential(self, workspace_id: UUID, slot: str) -> str:
         if slot not in self._declared:

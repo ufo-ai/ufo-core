@@ -11,7 +11,8 @@ say exactly what to do and wait for it.
 
 ## 1 — Slack front door
 
-Load `slack-app-setup` and follow it. Then have the member create a private channel with just
+Have the owner say "connect Slack": call `slack_connect` and give them the "Add to Slack" link it
+returns; approving it installs the bot. Then have the member create a private channel with just
 them and the bot — the inbox where stray thoughts, dictated notes, and the sync runs live.
 
 ## 2 — Feeds

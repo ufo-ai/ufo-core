@@ -71,6 +71,11 @@ spec:
     - {secretKey: TURBOPUFFER_API_KEY, remoteRef: {key: ${secret_api_keys}, property: turbopuffer-api-key}}
     - {secretKey: EXA_API, remoteRef: {key: ${secret_api_keys}, property: exa-api-key}}
     - {secretKey: METRONOME_BEARER_TOKEN, remoteRef: {key: ${secret_api_keys}, property: metronome-bearer-token}}
+    # This deploy's one Slack app: client id/secret run the OAuth install exchange, the signing
+    # secret verifies every inbound event — all read in-process by serve, never injected at the proxy.
+    - {secretKey: SLACK_CLIENT_ID, remoteRef: {key: ${secret_api_keys}, property: slack-client-id}}
+    - {secretKey: SLACK_CLIENT_SECRET, remoteRef: {key: ${secret_api_keys}, property: slack-client-secret}}
+    - {secretKey: SLACK_SIGNING_SECRET, remoteRef: {key: ${secret_api_keys}, property: slack-signing-secret}}
     # Serve trusts the proxy certificate; only the proxy receives the key.
     - {secretKey: UFO_EGRESS_CA_CERT, remoteRef: {key: ${secret_platform}, property: egress-ca-cert}}
     - {secretKey: UFO_TOKEN_SECRET, remoteRef: {key: ${secret_platform}, property: ufo-token-secret}}

@@ -15,7 +15,7 @@ import time
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode
 from uuid import UUID, uuid4
 
 import httpx
@@ -31,9 +31,14 @@ from ufo_ext_slack.manifest import manifest as slack_manifest
 import ufo.surfaces.hub_tail as hub_tail
 from ufo.artifact_token import verify_artifact_token
 from ufo.blob import BlobNotFound, FilesystemBlobStore
-from ufo.credentials import CredentialStore
+from ufo.credentials import (
+    CredentialRequestState,
+    CredentialSlotUnset,
+    CredentialStore,
+    seal_credential_request,
+)
 from ufo.db import current_workspace, workspace_tx
-from ufo.ext.loader import skill_registry, turn_tools
+from ufo.ext.loader import turn_tools
 from ufo.ext.surface import (
     ADMIN_EMAIL_DOMAIN_ENV,
     WRITEBACK_DELIVERED,
@@ -56,6 +61,8 @@ from ufo.workspace import ws
 TEAM_ID = "T0000001"
 BOT_USER_ID = "UBOT00000"
 SIGNING_SECRET = "signing-secret"
+CLIENT_ID = "112233.445566"
+CLIENT_SECRET = "client-secret"
 BOT_TOKEN = "xoxb-test"
 UPLOAD_URL = "https://files.slack.com/upload/session-1"
 RESPONSE_URL = "https://hooks.slack.com/actions/T0000001/123/abc"
@@ -79,6 +86,24 @@ REAL_ASYNC_CLIENT = httpx.AsyncClient
 
 EVENTS_PATH = "/surface/slack"
 INTERACTIVE_PATH = f"{EVENTS_PATH}/interactive"
+
+
+@pytest.fixture(autouse=True)
+def _deploy_secrets():
+    """The deploy Slack app's env-sourced secrets — inbound requests are verified and the OAuth
+    exchange runs against these, so every surface test runs with them set. Uses its own
+    MonkeyPatch rather than the shared `monkeypatch` fixture: depending on `monkeypatch` here would
+    pull it into the autouse setup phase ahead of `_settle_status_tasks`, flipping teardown order so
+    the shared fixture restores `httpx.AsyncClient` to the Slack fallback last — leaking it into the
+    next test in the xdist worker."""
+    patch = pytest.MonkeyPatch()
+    patch.setenv(slack.SLACK_SIGNING_SECRET_ENV, SIGNING_SECRET)
+    patch.setenv(slack.SLACK_CLIENT_ID_ENV, CLIENT_ID)
+    patch.setenv(slack.SLACK_CLIENT_SECRET_ENV, CLIENT_SECRET)
+    try:
+        yield
+    finally:
+        patch.undo()
 
 
 @pytest.fixture(autouse=True)
@@ -151,6 +176,16 @@ def _mock_transport(
                     "is_email_confirmed": user_id not in unconfirmed,
                 }
             return httpx.Response(200, json={"ok": True, "user": user})
+        if url == slack.SLACK_OAUTH_ACCESS_URL:
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "access_token": BOT_TOKEN,
+                    "team": {"id": TEAM_ID, "name": "acme"},
+                    "bot_user_id": BOT_USER_ID,
+                },
+            )
         if url == slack.SLACK_AUTH_TEST_URL:
             return httpx.Response(
                 200, json={"ok": True, "team_id": TEAM_ID, "user_id": BOT_USER_ID}
@@ -191,7 +226,6 @@ def _patch_httpx(monkeypatch: pytest.MonkeyPatch, transport: httpx.MockTransport
 
 async def _store(workspace_id: UUID) -> CredentialStore:
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    await store.put(workspace_id, slack.SLACK_SIGNING_SECRET_SLOT, SIGNING_SECRET)
     await store.put(workspace_id, slack.SLACK_BOT_TOKEN_SLOT, BOT_TOKEN)
     return store
 
@@ -297,6 +331,9 @@ async def _mount_transport(
 async def test_first_signed_event_proves_identity_and_retry_admits(
     db: None, tmp_path, monkeypatch
 ) -> None:
+    """A manifest-app workspace whose identity was never derived proves it off the first signed
+    event (`auth.test`) and returns 503 so Slack retries; the retry finds the identity and admits.
+    Verification here uses the deploy env signing secret when the workspace holds no slot."""
     workspace_id, _ = await _seed()
     recorder: list[httpx.Request] = []
     _, client, blob = await _mount_transport(
@@ -307,11 +344,7 @@ async def test_first_signed_event_proves_identity_and_retry_admits(
         identity=False,
     )
     body = _event_body(
-        type="app_mention",
-        user="U1",
-        channel="C1",
-        ts="100.5",
-        text=f"<@{BOT_USER_ID}> hi",
+        type="app_mention", user="U1", channel="C1", ts="100.5", text=f"<@{BOT_USER_ID}> hi"
     )
     async with client:
         first = await client.post(EVENTS_PATH, content=body, headers=_sign(body, int(time.time())))
@@ -337,49 +370,43 @@ async def test_first_signed_event_proves_identity_and_retry_admits(
         ).scalar_one() == 1
 
 
-async def test_identity_proof_failure_returns_before_slack_ack_deadline(
-    db: None, tmp_path, monkeypatch, caplog
+async def test_manifest_workspace_verifies_with_its_own_signing_slot(
+    db: None, tmp_path, monkeypatch
 ) -> None:
+    """A bring-your-own-app workspace holds its own `slack_signing_secret` slot; its events verify
+    against that slot, not the deploy env secret — the slot wins the slot-else-env resolution."""
     workspace_id, _ = await _seed()
-
-    def rejected(request: httpx.Request) -> httpx.Response:
-        if str(request.url) == slack.SLACK_AUTH_TEST_URL:
-            return httpx.Response(200, json={"ok": False, "error": "invalid_auth"})
-        return httpx.Response(404, json={"ok": False, "error": "not_mocked"})
-
-    _, client, blob = await _mount_transport(
-        monkeypatch,
+    own_secret = "byo-app-signing-secret"
+    recorder: list[httpx.Request] = []
+    _patch_httpx(monkeypatch, _mock_transport(recorder, {}))
+    store = await _store(workspace_id)
+    await store.put(workspace_id, slack.SLACK_SIGNING_SECRET_SLOT, own_secret)
+    blob = FilesystemBlobStore(root=tmp_path)
+    await _write_identity(blob, workspace_id)
+    app = FastAPI()
+    _mount_surfaces(
+        app,
+        (slack_manifest(),),
         workspace_id,
-        tmp_path,
-        httpx.MockTransport(rejected),
-        identity=False,
+        store,
+        blob,
+        InProcessHub(),
+        StubDbos(),
+        ARTIFACT_SECRET,
+        PUBLIC_BASE_URL,
     )
     body = _event_body(
-        type="app_mention",
-        user="U1",
-        channel="C1",
-        ts="100.5",
-        text=f"<@{BOT_USER_ID}> hi",
+        type="app_mention", user="U1", channel="C1", ts="100.5", text=f"<@{BOT_USER_ID}> hi"
     )
-    with caplog.at_level(logging.ERROR, logger="ufo_ext_slack"):
-        async with client:
-            response = await client.post(
-                EVENTS_PATH, content=body, headers=_sign(body, int(time.time()))
-            )
-        assert response.status_code == 503
-        await asyncio.gather(*slack._IDENTITY_TASKS.values())
-    assert [
-        record.getMessage() for record in caplog.records if record.levelno == logging.ERROR
-    ] == ["slack identity proof failed: invalid_auth"]
-    assert await slack.read_identity(blob, workspace_id, BOT_TOKEN) is None
-    async with workspace_tx() as connection:
-        assert (
-            await connection.execute(
-                sa.select(sa.func.count())
-                .select_from(tables.turn)
-                .where(tables.turn.c.workspace_id == workspace_id)
-            )
-        ).scalar_one() == 0
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://slack") as client:
+        with_slot = await client.post(
+            EVENTS_PATH, content=body, headers=_sign_with(own_secret, body)
+        )
+        with_env = await client.post(
+            EVENTS_PATH, content=body, headers=_sign(body, int(time.time()))
+        )
+    assert with_slot.status_code == 200
+    assert with_env.status_code == 401
 
 
 async def _mount(
@@ -574,23 +601,6 @@ def test_turn_context_composes_the_sender_line_and_drops_an_unknown_timezone() -
     )
 
 
-def test_slack_app_setup_skill_parses_indexes_and_names_the_real_tools_and_slots() -> None:
-    registry = skill_registry((slack_manifest(),))
-    index = dict(registry.index())
-    assert "slack-app-setup" in index
-    body = registry.named("slack-app-setup").instructions
-    assert "request_url: <public_base_url>/surface/slack" in body
-    assert "request_url: <public_base_url>/surface/slack/interactive" in body
-    assert "<workspace_id>" not in body
-    for tool in ("slack_connect", "slack_app_manifest", "request_credentials"):
-        assert f"`{tool}`" in body
-    assert "slack_status" not in body
-    for slot in (slack.SLACK_BOT_TOKEN_SLOT, slack.SLACK_SIGNING_SECRET_SLOT):
-        assert f"`{slot}`" in body
-    operator_alternative = "ufoctl credential set"
-    assert operator_alternative in body
-
-
 async def test_bad_signature_is_rejected(db: None, tmp_path, monkeypatch) -> None:
     workspace_id, _ = await _seed()
     _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, [])
@@ -631,66 +641,31 @@ async def test_dedicated_surface_accepts_unqualified_event_and_interactive_route
     assert interactive_response.json() == {"ok": True, "ignored": True}
 
 
-async def test_url_verification_answers_the_challenge_and_marks_verified(
+async def test_url_verification_answers_the_signed_challenge(
     db: None, tmp_path, monkeypatch
 ) -> None:
+    """Slack's `url_verification` handshake is signed like any request: the deploy's one signing
+    secret verifies it and the bounded challenge echoes; an unsigned probe is a clean 401."""
     workspace_id, _ = await _seed()
-    _, client, blob = await _mount(monkeypatch, workspace_id, tmp_path, [])
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, [])
     body = json.dumps({"type": "url_verification", "challenge": "chal-1"}).encode()
     async with client:
         unsigned = await client.post(EVENTS_PATH, content=body)
         assert unsigned.status_code == 401
-        assert not await blob.exists(slack.url_verified_blob_key(workspace_id))
         answered = await client.post(
             EVENTS_PATH, content=body, headers=_sign(body, int(time.time()))
         )
     assert answered.status_code == 200
     assert answered.json() == {"challenge": "chal-1"}
-    assert await blob.exists(slack.url_verified_blob_key(workspace_id))
-
-
-async def test_handshake_before_the_secret_exists_echoes_and_events_stay_401(
-    db: None, tmp_path, monkeypatch
-) -> None:
-    # Slack probes the Request URL the instant the app is created from the manifest — before the
-    # owner can hold the secret Slack mints with the app. The challenge echoes unsigned (nothing
-    # stored, no verified marker), so creation verifies clean; a real event is still a clean 401.
-    workspace_id, _ = await _seed()
-    _patch_httpx(monkeypatch, _mock_transport([], {}))
-    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))  # no slots set
-    blob = FilesystemBlobStore(root=tmp_path)
-    app = FastAPI()
-    _mount_surfaces(
-        app,
-        (slack_manifest(),),
-        workspace_id,
-        store,
-        blob,
-        InProcessHub(),
-        StubDbos(),
-        ARTIFACT_SECRET,
-        PUBLIC_BASE_URL,
-    )
-    client = AsyncClient(transport=ASGITransport(app=app), base_url="http://slack")
-    handshake = json.dumps({"type": "url_verification", "challenge": "c"}).encode()
-    event = _event_body(type="app_mention", user="U1", channel="C1", ts="1.0", text="hi")
-    async with client:
-        echoed = await client.post(EVENTS_PATH, content=handshake)
-        rejected = await client.post(
-            EVENTS_PATH,
-            content=event,
-            headers={"x-slack-request-timestamp": "1", "x-slack-signature": "v0=x"},
-        )
-    assert echoed.status_code == 200
-    assert echoed.json() == {"challenge": "c"}
-    assert rejected.status_code == 401
-    assert not await blob.exists(slack.url_verified_blob_key(workspace_id))
 
 
 async def test_shared_handshake_echoes_without_binding_a_workspace(
     db: None, tmp_path, monkeypatch
 ) -> None:
-    workspace_id, _ = await _seed()
+    """On the shared fleet the url_verification handshake echoes its challenge and binds no
+    workspace — it carries no team, so it is answered before any team lookup or verification. An
+    event for an unregistered team is rejected."""
+    await _seed()
     _patch_httpx(monkeypatch, _mock_transport([], {}))
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     blob = FilesystemBlobStore(root=tmp_path)
@@ -709,20 +684,12 @@ async def test_shared_handshake_echoes_without_binding_a_workspace(
     event = _event_body(type="app_mention", user="U1", channel="C1", ts="1.0", text="hi")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://fleet") as client:
         echoed = await client.post(EVENTS_PATH, content=handshake)
-        unknown_event = await client.post(EVENTS_PATH, content=event)
-        await store.put(workspace_id, slack.SLACK_SIGNING_SECRET_SLOT, SIGNING_SECRET)
-        unsigned_after_secret = await client.post(EVENTS_PATH, content=handshake)
-        signed_after_secret = await client.post(
-            EVENTS_PATH,
-            content=handshake,
-            headers=_sign(handshake, int(time.time())),
+        unknown_team = await client.post(
+            EVENTS_PATH, content=event, headers=_sign(event, int(time.time()))
         )
     assert echoed.json() == {"challenge": "shared-c"}
-    assert unknown_event.status_code == 401
-    assert unsigned_after_secret.json() == {"challenge": "shared-c"}
-    assert signed_after_secret.json() == {"challenge": "shared-c"}
+    assert unknown_team.status_code == 401
     assert current_workspace.get() is None
-    assert not await blob.exists(slack.url_verified_blob_key(workspace_id))
     async with workspace_tx() as connection:
         bindings = (
             await connection.execute(
@@ -732,17 +699,56 @@ async def test_shared_handshake_echoes_without_binding_a_workspace(
     assert bindings == 0
 
 
-async def test_first_signed_event_marks_verified_and_a_rotated_secret_re_proves(
-    db: None, tmp_path, monkeypatch
-) -> None:
-    # Any signature-verified request proves Slack reached this deploy with the stored secret — the
-    # first real event flips setup to connected with no manual Request-URL re-save, and a rotated
-    # secret's next signed event re-stamps the marker despite the per-process write cache.
+def _sign_with(secret: str, body: bytes) -> dict[str, str]:
+    ts = int(time.time())
+    base = b"v0:" + str(ts).encode() + b":" + body
+    return {
+        "x-slack-request-timestamp": str(ts),
+        "x-slack-signature": "v0=" + hmac.new(secret.encode(), base, hashlib.sha256).hexdigest(),
+    }
+
+
+async def test_foreign_team_event_is_ignored(db: None, tmp_path, monkeypatch) -> None:
+    """A signed event whose team is not the installed one is acked and dropped — one deploy app,
+    but each workspace answers only for its own team."""
     workspace_id, _ = await _seed()
-    _patch_httpx(monkeypatch, _mock_transport([], {}))
-    store = await _store(workspace_id)
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, [])
+    foreign = json.dumps(
+        {
+            "team_id": "T0FOREIGN",
+            "event": {"type": "app_mention", "user": "U1", "channel": "C1", "ts": "1.0"},
+        }
+    ).encode()
+    async with client:
+        ignored = await client.post(
+            EVENTS_PATH, content=foreign, headers=_sign(foreign, int(time.time()))
+        )
+    assert ignored.json() == {"ok": True, "ignored": True}
+
+
+def _install_state(store: CredentialStore, workspace_id: UUID, member_id: UUID) -> str:
+    """A Fernet-sealed install handoff the surface's callback opens — the same seal the owner's
+    `slack_connect` mints, carrying the workspace, owner, bot-token slot, and install marker."""
+    return seal_credential_request(
+        store.fernet,
+        CredentialRequestState(
+            workspace_id=workspace_id,
+            member_id=member_id,
+            slots=(slack.SLACK_BOT_TOKEN_SLOT,),
+            payload=slack.SLACK_INSTALL_PAYLOAD,
+        ),
+    )
+
+
+async def test_oauth_callback_installs_the_workspace(db: None, tmp_path, monkeypatch) -> None:
+    """The "Add to Slack" callback exchanges the code for the workspace's bot token and lands all
+    three pieces the events path needs: the token in the store, the team→workspace binding, and the
+    identity record — presenting the deploy app's client id/secret and the redirect to Slack."""
+    workspace_id, member_id = await _seed(member_email="owner@acme.com")
+    recorder: list[httpx.Request] = []
+    _patch_httpx(monkeypatch, _mock_transport(recorder, {}))
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     blob = FilesystemBlobStore(root=tmp_path)
-    await _write_identity(blob, workspace_id)
     app = FastAPI()
     _mount_surfaces(
         app,
@@ -755,67 +761,210 @@ async def test_first_signed_event_marks_verified_and_a_rotated_secret_re_proves(
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
     )
-    client = AsyncClient(transport=ASGITransport(app=app), base_url="http://slack")
-    body = _event_body(type="app_mention", user="U1", channel="C1", ts="1.0", text="<@UBOT00000>")
-    async with client:
-        response = await client.post(
-            EVENTS_PATH, content=body, headers=_sign(body, int(time.time()))
+    sealed = _install_state(store, workspace_id, member_id)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://slack") as client:
+        response = await client.get(
+            f"{EVENTS_PATH}/{slack.SLACK_OAUTH_CALLBACK_PATH}",
+            params={"code": "the-code", "state": sealed},
         )
-        assert response.status_code == 200
-        marker = json.loads(await blob.get(slack.url_verified_blob_key(workspace_id)))
-        assert marker["fingerprint"] == slack.signing_secret_fingerprint(SIGNING_SECRET)
-        rotated = "rotated-secret"
-        await store.put(workspace_id, slack.SLACK_SIGNING_SECRET_SLOT, rotated)
-        response = await client.post(EVENTS_PATH, content=body, headers=_sign_with(rotated, body))
-        assert response.status_code == 200
-        marker = json.loads(await blob.get(slack.url_verified_blob_key(workspace_id)))
-        assert marker["fingerprint"] == slack.signing_secret_fingerprint(rotated)
-        # Rotating back to an earlier secret must re-stamp too — the process cache holds the last
-        # written fingerprint, not every fingerprint ever written.
-        await store.put(workspace_id, slack.SLACK_SIGNING_SECRET_SLOT, SIGNING_SECRET)
-        response = await client.post(
-            EVENTS_PATH, content=body, headers=_sign_with(SIGNING_SECRET, body)
-        )
-        assert response.status_code == 200
-    marker = json.loads(await blob.get(slack.url_verified_blob_key(workspace_id)))
-    assert marker["fingerprint"] == slack.signing_secret_fingerprint(SIGNING_SECRET)
+    assert response.status_code == 200
+    assert "installed" in response.text
+    assert await store.get(workspace_id, slack.SLACK_BOT_TOKEN_SLOT) == BOT_TOKEN
+    assert await slack.read_identity(blob, workspace_id, BOT_TOKEN) == slack.SlackIdentity(
+        bot_token_fingerprint=slack.bot_token_fingerprint(BOT_TOKEN),
+        team_id=TEAM_ID,
+        bot_user_id=BOT_USER_ID,
+    )
+    async with workspace_tx() as connection:
+        binding = (
+            await connection.execute(
+                sa.select(tables.surface_installation.c.installation_id).where(
+                    tables.surface_installation.c.workspace_id == workspace_id,
+                    tables.surface_installation.c.surface == slack.SURFACE_SLACK,
+                )
+            )
+        ).scalar_one()
+    assert binding == slack.slack_installation_id(TEAM_ID)
+    exchange = _fetches(recorder, slack.SLACK_OAUTH_ACCESS_URL)[0]
+    form = {key: value[0] for key, value in parse_qs(exchange.content.decode()).items()}
+    assert form["client_id"] == CLIENT_ID
+    assert form["client_secret"] == CLIENT_SECRET
+    assert form["code"] == "the-code"
+    assert form["redirect_uri"] == slack.slack_oauth_redirect_uri(PUBLIC_BASE_URL)
 
 
-def _sign_with(secret: str, body: bytes) -> dict[str, str]:
-    ts = int(time.time())
-    base = b"v0:" + str(ts).encode() + b":" + body
-    return {
-        "x-slack-request-timestamp": str(ts),
-        "x-slack-signature": "v0=" + hmac.new(secret.encode(), base, hashlib.sha256).hexdigest(),
-    }
-
-
-async def test_marker_needs_the_configured_team_but_a_click_counts(
+async def test_oauth_callback_declined_page_does_not_reflect_the_error_param(
     db: None, tmp_path, monkeypatch
 ) -> None:
-    # A signed event from another team is dropped by the team gate and must not read as connected —
-    # a mixed-app config (secret from one app, token from another) stays pending, never green and
-    # dead. A decoded answer click is team-gated too, so it proves the secret like an event does.
+    """The declined-authorization page never reflects the attacker-controllable `error` query param
+    into its HTML — no unescaped markup reaches the response body."""
     workspace_id, _ = await _seed()
-    _, client, blob = await _mount(monkeypatch, workspace_id, tmp_path, [])
-    foreign = json.dumps(
-        {
-            "team_id": "T0FOREIGN",
-            "event": {"type": "app_mention", "user": "U1", "channel": "C1", "ts": "1.0"},
-        }
-    ).encode()
-    click = _click_body()
-    async with client:
-        ignored = await client.post(
-            EVENTS_PATH, content=foreign, headers=_sign(foreign, int(time.time()))
+    _patch_httpx(monkeypatch, _mock_transport([], {}))
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    blob = FilesystemBlobStore(root=tmp_path)
+    app = FastAPI()
+    _mount_surfaces(
+        app,
+        (slack_manifest(),),
+        workspace_id,
+        store,
+        blob,
+        InProcessHub(),
+        StubDbos(),
+        ARTIFACT_SECRET,
+        PUBLIC_BASE_URL,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://slack") as client:
+        response = await client.get(
+            f"{EVENTS_PATH}/{slack.SLACK_OAUTH_CALLBACK_PATH}",
+            params={"error": "<script>alert(1)</script>"},
         )
-        assert ignored.json() == {"ok": True, "ignored": True}
-        assert not await blob.exists(slack.url_verified_blob_key(workspace_id))
-        answered = await client.post(INTERACTIVE_PATH, content=click, headers=_signed_form(click))
-        assert answered.status_code == 200
-        await asyncio.gather(*slack._REWRITE_TASKS)
-    marker = json.loads(await blob.get(slack.url_verified_blob_key(workspace_id)))
-    assert marker["fingerprint"] == slack.signing_secret_fingerprint(SIGNING_SECRET)
+    assert response.status_code == 400
+    assert "<script>" not in response.text
+
+
+async def test_oauth_callback_refuses_a_team_bound_elsewhere(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """Installing a Slack team already connected to another workspace is refused (409) before any
+    token is stored — the fleet-wide team↔workspace uniqueness holds through the callback's bind."""
+    other_workspace, _ = await _seed()
+    workspace_id, member_id = await _seed(member_email="owner@acme.com")
+    _patch_httpx(monkeypatch, _mock_transport([], {}))
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    await _register_slack(store, other_workspace, TEAM_ID)
+    blob = FilesystemBlobStore(root=tmp_path)
+    app = FastAPI()
+    _mount_surfaces(
+        app,
+        (slack_manifest(),),
+        workspace_id,
+        store,
+        blob,
+        InProcessHub(),
+        StubDbos(),
+        ARTIFACT_SECRET,
+        PUBLIC_BASE_URL,
+    )
+    sealed = _install_state(store, workspace_id, member_id)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://slack") as client:
+        response = await client.get(
+            f"{EVENTS_PATH}/{slack.SLACK_OAUTH_CALLBACK_PATH}",
+            params={"code": "the-code", "state": sealed},
+        )
+    assert response.status_code == 409
+    with pytest.raises(CredentialSlotUnset):
+        await store.get(workspace_id, slack.SLACK_BOT_TOKEN_SLOT)
+
+
+async def test_oauth_callback_refuses_a_tampered_state(db: None, tmp_path, monkeypatch) -> None:
+    """A callback whose state does not open — tampered or expired — installs nothing."""
+    workspace_id, _ = await _seed()
+    _patch_httpx(monkeypatch, _mock_transport([], {}))
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    blob = FilesystemBlobStore(root=tmp_path)
+    app = FastAPI()
+    _mount_surfaces(
+        app,
+        (slack_manifest(),),
+        workspace_id,
+        store,
+        blob,
+        InProcessHub(),
+        StubDbos(),
+        ARTIFACT_SECRET,
+        PUBLIC_BASE_URL,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://slack") as client:
+        response = await client.get(
+            f"{EVENTS_PATH}/{slack.SLACK_OAUTH_CALLBACK_PATH}",
+            params={"code": "c", "state": "not-a-real-seal"},
+        )
+    assert response.status_code == 400
+    async with workspace_tx() as connection:
+        bindings = (
+            await connection.execute(
+                sa.select(sa.func.count()).select_from(tables.surface_installation)
+            )
+        ).scalar_one()
+    assert bindings == 0
+
+
+async def test_oauth_callback_reports_a_rejected_code(db: None, tmp_path, monkeypatch) -> None:
+    """An `oauth.v2.access` that returns `ok:false` (a reused or expired code) stores nothing and
+    shows a retry rather than a broken install."""
+    workspace_id, member_id = await _seed(member_email="owner@acme.com")
+
+    def rejecting(request: httpx.Request) -> httpx.Response:
+        if str(request.url).split("?")[0] == slack.SLACK_OAUTH_ACCESS_URL:
+            return httpx.Response(200, json={"ok": False, "error": "invalid_code"})
+        return httpx.Response(404, json={"ok": False, "error": "not_mocked"})
+
+    _patch_httpx(monkeypatch, httpx.MockTransport(rejecting))
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    blob = FilesystemBlobStore(root=tmp_path)
+    app = FastAPI()
+    _mount_surfaces(
+        app,
+        (slack_manifest(),),
+        workspace_id,
+        store,
+        blob,
+        InProcessHub(),
+        StubDbos(),
+        ARTIFACT_SECRET,
+        PUBLIC_BASE_URL,
+    )
+    sealed = _install_state(store, workspace_id, member_id)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://slack") as client:
+        response = await client.get(
+            f"{EVENTS_PATH}/{slack.SLACK_OAUTH_CALLBACK_PATH}",
+            params={"code": "stale", "state": sealed},
+        )
+    assert response.status_code == 502
+    with pytest.raises(CredentialSlotUnset):
+        await store.get(workspace_id, slack.SLACK_BOT_TOKEN_SLOT)
+
+
+async def test_shared_oauth_callback_binds_the_sealed_workspace(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """On the shared fleet the callback resolves its workspace from the sealed state alone — no
+    team, no signature — and installs into exactly that workspace."""
+    workspace_id, member_id = await _seed(member_email="owner@acme.com")
+    _patch_httpx(monkeypatch, _mock_transport([], {}))
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    blob = FilesystemBlobStore(root=tmp_path)
+    app = FastAPI()
+    _mount_shared_surfaces(
+        app,
+        (slack_manifest(),),
+        store,
+        blob,
+        InProcessHub(),
+        StubDbos(),
+        ARTIFACT_SECRET,
+        PUBLIC_BASE_URL,
+    )
+    sealed = _install_state(store, workspace_id, member_id)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://fleet") as client:
+        response = await client.get(
+            f"{EVENTS_PATH}/{slack.SLACK_OAUTH_CALLBACK_PATH}",
+            params={"code": "the-code", "state": sealed},
+        )
+    assert response.status_code == 200
+    assert await store.get(workspace_id, slack.SLACK_BOT_TOKEN_SLOT) == BOT_TOKEN
+    assert current_workspace.get() is None
+    async with workspace_tx() as connection:
+        binding = (
+            await connection.execute(
+                sa.select(tables.surface_installation.c.workspace_id).where(
+                    tables.surface_installation.c.installation_id
+                    == slack.slack_installation_id(TEAM_ID)
+                )
+            )
+        ).scalar_one()
+    assert binding == workspace_id
 
 
 async def test_one_mention_admits_exactly_one_turn(db: None, tmp_path, monkeypatch) -> None:
@@ -1831,16 +1980,11 @@ async def test_shared_slack_routes_two_installations_without_crossing_state(
 ) -> None:
     workspace_a, member_a = await _seed(member_email="shared@example.com")
     workspace_b, member_b = await _seed(member_email="shared@example.com")
-    secret_a, secret_b = "secret-a", "secret-b"
     token_a, token_b = "xoxb-a", "xoxb-b"
     team_a, team_b = "TA000001", "TB000001"
     bot_a, bot_b = "UA000001", "UB000001"
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    for workspace_id, signing_secret, bot_token in (
-        (workspace_a, secret_a, token_a),
-        (workspace_b, secret_b, token_b),
-    ):
-        await store.put(workspace_id, slack.SLACK_SIGNING_SECRET_SLOT, signing_secret)
+    for workspace_id, bot_token in ((workspace_a, token_a), (workspace_b, token_b)):
         await store.put(workspace_id, slack.SLACK_BOT_TOKEN_SLOT, bot_token)
     blob = FilesystemBlobStore(root=tmp_path)
     await _write_identity(blob, workspace_a, token_a, team_a, bot_a)
@@ -1894,17 +2038,17 @@ async def test_shared_slack_routes_two_installations_without_crossing_state(
     ).encode()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://fleet") as client:
         accepted_a = await client.post(
-            EVENTS_PATH, content=body_a, headers=_sign_with(secret_a, body_a)
+            EVENTS_PATH, content=body_a, headers=_sign(body_a, int(time.time()))
         )
-        cross_signed = await client.post(
-            EVENTS_PATH, content=body_a, headers=_sign_with(secret_b, body_a)
+        bad_signature = await client.post(
+            EVENTS_PATH, content=body_a, headers=_sign_with("not-the-deploy-secret", body_a)
         )
         accepted_b = await client.post(
-            EVENTS_PATH, content=body_b, headers=_sign_with(secret_b, body_b)
+            EVENTS_PATH, content=body_b, headers=_sign(body_b, int(time.time()))
         )
     assert accepted_a.status_code == 200
-    assert cross_signed.status_code == 401
-    assert cross_signed.text == "unauthorized"
+    assert bad_signature.status_code == 401
+    assert bad_signature.text == "unauthorized"
     assert accepted_b.status_code == 200
     assert current_workspace.get() is None
     deadline = time.monotonic() + 5
@@ -3081,9 +3225,9 @@ async def test_shared_interactive_routes_by_registered_team(
     assert routed.member_id is None
 
 
-async def test_first_signed_click_proves_identity_and_retry_admits(
-    db: None, tmp_path, monkeypatch
-) -> None:
+async def test_interactive_before_install_is_refused(db: None, tmp_path, monkeypatch) -> None:
+    """An interactivity click for a workspace with no installed identity is refused (503) and admits
+    no turn — the install writes identity, the click never derives it."""
     workspace_id, _ = await _seed()
     await _seed_answer_conversation(workspace_id)
     recorder: list[httpx.Request] = []
@@ -3096,17 +3240,9 @@ async def test_first_signed_click_proves_identity_and_retry_admits(
     )
     click = _click_body()
     async with client:
-        first = await client.post(INTERACTIVE_PATH, content=click, headers=_signed_form(click))
-        assert first.status_code == 503
-        await asyncio.gather(*slack._IDENTITY_TASKS.values())
         response = await client.post(INTERACTIVE_PATH, content=click, headers=_signed_form(click))
-    assert response.status_code == 200
-    assert await slack.read_identity(blob, workspace_id, BOT_TOKEN) == slack.SlackIdentity(
-        bot_token_fingerprint=slack.bot_token_fingerprint(BOT_TOKEN),
-        team_id=TEAM_ID,
-        bot_user_id=BOT_USER_ID,
-    )
-    assert len(_fetches(recorder, slack.SLACK_AUTH_TEST_URL)) == 1
+    assert response.status_code == 503
+    assert await slack.read_identity(blob, workspace_id, BOT_TOKEN) is None
     async with workspace_tx() as connection:
         assert (
             await connection.execute(
@@ -3114,7 +3250,7 @@ async def test_first_signed_click_proves_identity_and_retry_admits(
                 .select_from(tables.turn)
                 .where(tables.turn.c.workspace_id == workspace_id)
             )
-        ).scalar_one() == 1
+        ).scalar_one() == 0
 
 
 async def test_first_click_wins_and_alone_rewrites_the_message(

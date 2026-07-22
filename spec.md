@@ -147,7 +147,7 @@ Manifest registers (each optional):
 | `jobs` | Recurring/one-time background work. |
 | `routes` | HTTP endpoints under `/ext/<name>/` (webhooks, OAuth callbacks, plugin UIs). |
 | `surfaces` | A chat surface on the one privileged surface seam: its `SurfaceRoute`s mounted under `/surface/<name>`. A **durable** surface (Slack) declares two-phase delivery (`post` then `attach`) the poller drives — declaring `post` is what marks it durable, and admission registers every turn entering its conversations for delivery, whoever admits it; a **live** surface (web) tails the hub over SSE in its own route. Core's CLI is the built-in live twin. |
-| `credentials` | Named BYOK slots the workspace must fill (drives onboarding); `ufoctl init` seeds a slot from its upper-cased env var (`SLACK_BOT_TOKEN` → `slack_bot_token`), and the operator fills or rotates one anytime with `ufoctl credential set <slot>`. A member fills one in chat through `request_credentials`: the owner's ask seals which slots they will fill, a capable surface prompts for each value privately, and fulfillment verifies the seal before the encrypted store takes it — the plaintext never enters the transcript or the sandbox. An extension tool may instead seal provider authorization state to its own declared slot and the speaking owner, then fulfill that seal with the resulting credential; URL/code handoffs therefore stay in chat while provider secrets do not. Extensions may read their declared slots and compare-and-swap an existing value when an upstream client refreshes it; only an owner-sealed or operator path creates a value. |
+| `credentials` | Named BYOK slots the workspace must fill (drives onboarding); `ufoctl init` seeds a slot from its upper-cased env var (`ACME_API_KEY` → `acme_api_key`), and the operator fills or rotates one anytime with `ufoctl credential set <slot>`. A member fills one in chat through `request_credentials`: the owner's ask seals which slots they will fill, a capable surface prompts for each value privately, and fulfillment verifies the seal before the encrypted store takes it — the plaintext never enters the transcript or the sandbox. An extension tool may instead seal provider authorization state to its own declared slot and the speaking owner, then fulfill that seal with the resulting credential (the Slack OAuth install mints the bot token this way at its callback); URL/code handoffs therefore stay in chat while provider secrets do not. Extensions may read their declared slots and compare-and-swap an existing value when an upstream client refreshes it; only an owner-sealed or operator path creates a value. |
 | `onboarding` | Steps contributed to the workspace/pack onboarding flow. |
 | `models` | Model providers behind `ModelClient` (OpenRouter, local runtimes). |
 | `carriers` | Sandbox carriers — Docker, E2B, remote runners; core's default is a local temp-dir carrier. |
@@ -293,14 +293,24 @@ Slack renders terminal accounting and model metadata as the reply's final contex
 the admin workspace — the workspace whose owner's email domain is `UFO_ADMIN_EMAIL_DOMAIN`; an
 unset domain renders none.
 
-Shared surface requests authenticate their workspace before core binds it. Slack uses canonical
-event and interactive URLs: the untrusted team id selects one unique `surface_installation`, its
-workspace's signing secret verifies the original bounded bytes, and only then does the request bind
-that workspace. Unknown installations and bad signatures share one rejection. URL verification has
-no team id, so its bounded challenge echoes without binding a workspace or marking it connected.
-Surface identities and conversation keys include `workspace_id`. Durable writeback enumerates a
-bounded set of workspace ids through the owner connection, then binds each before reading or
-delivering any tenant data.
+Slack installs by either of two paths in chat, both landing the same per-workspace bot token and
+identity. **Preferred — OAuth on the deploy's own app**: its client id, client secret, and signing
+secret are read from the deploy's env (never the sandbox), `slack_connect` (default) returns an
+**"Add to Slack" link** whose sealed state names the owner and workspace, and the state-verified
+OAuth callback exchanges the code for that workspace's `xoxb` bot token, binds the team, and records
+the identity. **Alternative — bring-your-own app** (`slack_connect method="manifest"` + the
+`slack-app-setup` skill): the owner creates an app from `slack_app_manifest`, fills the per-workspace
+`slack_bot_token` and `slack_signing_secret` slots privately, and `slack_connect` derives the
+identity with `auth.test`.
+
+Shared surface requests authenticate their workspace before core binds it. The untrusted team id
+selects one unique `surface_installation`, and that workspace's signing secret — its own slot (a
+bring-your-own app) if set, else the deploy's env secret (an OAuth install) — verifies the original
+bytes before core binds it. Unknown installations, workspaces with no signing secret, and bad
+signatures share one rejection. The `url_verification` handshake carries no team, so its bounded
+challenge echoes without binding a workspace. Surface identities and conversation keys include
+`workspace_id`. Durable writeback enumerates a bounded set of workspace ids through the owner
+connection, then binds each before reading or delivering any tenant data.
 
 Onboarding flow engine is core (steps are contributed by extensions/packs); first-run creates the
 workspace and its first `owner`.

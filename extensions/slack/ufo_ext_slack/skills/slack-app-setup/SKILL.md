@@ -4,6 +4,12 @@ description: Load when the user wants to create a Slack app, make a Slack bot, o
 ---
 # Slack app setup — connect Slack to this assistant
 
+**Prefer the one-click OAuth install.** When the deploy has its own Slack app configured,
+`slack_connect` (default `method="oauth"`) returns an "Add to Slack" link the owner clicks — no app
+to build, no secrets to paste. This skill is the **bring-your-own-app** alternative: use it when the
+owner wants their own Slack app, or when `slack_connect` reports OAuth is not configured on this
+deploy. Reach it explicitly with `slack_connect(method="manifest")`.
+
 Stand up a Slack bot and wire it into the slack surface this deploy already runs. There is no new
 server to build: the surface is mounted and listening, and you drive every step with three tools —
 `slack_connect`, `slack_app_manifest`, `request_credentials`. The member only clicks through

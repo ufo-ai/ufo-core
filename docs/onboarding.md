@@ -124,96 +124,66 @@ the page merely renders what arrives.
 ## Connecting Slack
 
 The `assistant_hosted` shared fleet activates the `slack` extension alongside the ufo chat surface.
-The member says "connect slack"; the agent loads the `slack-app-setup` skill and drives every step
-with tools — there is no setup page and no bespoke endpoint:
+There are two install paths — both land the same per-workspace bot token and identity record, and
+the agent drives either in chat with `slack_connect` (default `method="oauth"`).
+
+**Preferred — OAuth on the deploy's own app.** The deploy holds one Slack app; its client id, client
+secret, and signing secret are read from env in-process (never per-workspace BYOK, never the
+sandbox). The owner installs it with one click:
 
 ```text
-member: connect slack
+owner: connect slack
   |
   v
-slack_connect ---------------> not_configured / pending / connected, + events_url
+slack_connect ---------------> not_installed + an "Add to Slack" link. The link's state is a
+  |                            Fernet-sealed handoff to the owner and the bot-token slot
+  |                            (begin_credential_authorization), TTL-bound.
   |
-slack_app_manifest(name) ----> the exact app YAML; member creates the app at api.slack.com
+owner opens the link --------> slack.com/oauth/v2/authorize?client_id=…&scope=…
+  |                            &redirect_uri=<base>/surface/slack/oauth&state=<sealed>
   |
-request_credentials ---------> seals {workspace, owner, slots}; turn ends
-  |                            terminal renders one `secret` line per still-
-  |                            unanswered slot; shell prompts with hidden input,
-  |                            POSTs each value with the seal — fulfillment
-  |                            verifies workspace, member, slot, freshness, then
-  |                            writes the encrypted slot and that slot's marker;
-  |                            NO turn admitted, transcript never sees a byte
-  |
-slack_connect ---------------> auth.test proves the token; the derived team and
-  |                            bot-user ids persist as the surface's own identity
-  |                            record, pinned to the token's fingerprint, and the
-  |                            team uniquely registers to this UFO workspace
+Slack redirects -------------> GET /surface/slack/oauth?code=…&state=…
+  |                            oauth_callback: open the seal (it names this workspace + owner),
+  |                            exchange the code at oauth.v2.access for this workspace's xoxb bot
+  |                            token, store it, bind team:<team_id>, write the identity record
   v
-first DM / @mention ---------> url-verified marker flips slack_connect to connected
+first DM / @mention ---------> writes the url-verified marker; slack_connect reads connected
 ```
 
-Only the workspace owner can fill or finish (slots are workspace-global — the one bot every member
-shares); the seal binds fulfillment to the member who asked, and each fulfilled or expired prompt
-stops rendering individually (a per-slot blob marker gates it), so a disconnect mid-entry re-asks
-only what is missing and a token rotation stales the identity record automatically. On Slack
-itself the same frame renders as a hint to open the terminal — no surface ever collects a secret
-in chat.
+Only the owner mints the link (the bot is shared); the seal binds the install to the owner and the
+workspace, so a forged callback cannot bind another team to this workspace. The bot token is
+per-workspace, minted by the callback rather than pasted; the client and signing secrets belong to
+the deploy's app and live in env.
+
+**Alternative — bring-your-own app** (`slack_connect method="manifest"`, driven by the
+`slack-app-setup` skill). Used when the owner wants their own Slack app, or when the deploy has no
+OAuth app configured (`slack_connect` says so and points here). `slack_app_manifest` renders the
+exact app YAML; the owner creates the app at api.slack.com and fills the per-workspace
+`slack_bot_token` and `slack_signing_secret` slots through `request_credentials` (privately, never
+in chat); `slack_connect` derives the identity with `auth.test`.
 
 ## Slack setup state machine
 
-```text
-       +-----------------+
-       | not_configured  |
-       +-----------------+
-              |
-              | request_credentials fulfillment stores
-              | the bot token + signing secret;
-              | slack_connect or a signed request derives
-              | the identity record (auth.test,
-              | fingerprint-pinned)
-              v
-       +-----------------+
-       |     pending     |<------------------------+
-       +-----------------+                         |
-              |                                    |
-              | first signed event or click with   |
-              | current signing secret writes      |
-              | marker blob                        |
-              v                                    |
-       +-----------------+                         |
-       |    connected    |-------------------------+
-       +-----------------+   signing secret rotation
-                             makes marker stale
-```
-
-`slack_connect` reads two workspace-global secret slots — `slack_bot_token` and
-`slack_signing_secret` — plus the surface's identity record:
+Both paths converge on the same downstream states — `pending` once identity is proven, `connected`
+once a signature-verified request has stamped the url-verified marker:
 
 ```text
-missing a secret slot
-  -> not_configured
-
-secrets set, identity absent or from a rotated token
-  -> identity resolution derives + persists {token fingerprint, team_id, bot_user_id}
-
-identity valid, but no matching url_verified marker
-  -> pending
-
-marker fingerprint matches current signing secret
-  -> connected
+   OAuth: not_installed --(callback)--> pending --(first verified event)--> connected
+manifest: not_configured --(secrets + auth.test)--> pending --(first verified event)--> connected
 ```
 
-`slack_connect` runs `auth.test` when its identity is absent or stale, persists that identity, and
-uniquely registers the derived team to the workspace. A registered request with no cached identity
-starts the same proof after its response and asks Slack to retry; the retry continues through
-normal admission.
-`slack_app_manifest` renders the app manifest from `[connect] public_base_url`; its events request
-URL is `<public_base_url>/surface/slack`. The owner enters only the Bot User OAuth Token and Signing
-Secret; the team and bot-user ids are derived metadata, never entered and never slots.
+```text
+no bot token / identity mismatch, method=oauth   -> not_installed + "Add to Slack" link (owner)
+no bot token / identity mismatch, method=manifest -> not_configured + manifest instructions
+identity present, no matching url-verified marker  -> pending
+marker fingerprint matches the verifying secret    -> connected
+```
 
-## URL verification signal
+## Request verification
 
-Slack proves it reached the deploy with the stored signing secret on every signature-verified
-event or interactive request:
+The untrusted team id selects one `surface_installation`; that workspace's signing secret — its own
+`slack_signing_secret` slot (a bring-your-own app) if set, else the deploy env secret (an OAuth
+install) — verifies the original bytes before any workspace is bound:
 
 ```text
 Slack callback
@@ -223,39 +193,17 @@ Slack callback
   v
 slack surface
   |
-  +-- url_verification -> echo the challenge unbound (nothing stored, no marker)
+  +-- url_verification -> echo the challenge (unbound; it carries no team)
   +-- parse team id as an untrusted routing hint
-  +-- lookup unique team registration -> candidate workspace
-  +-- read that workspace's slack_signing_secret
-  +-- verify HMAC and replay window over the original bytes
-  +-- bind the workspace only after verification
-  +-- event / click -> write marker, admit turn
+  +-- lookup the unique team registration -> candidate workspace
+  +-- verifying secret = workspace's own slot, else the deploy env secret
+  +-- verify HMAC + replay window over the original bytes; bind only after
+  +-- event / click -> write the url-verified marker, admit the turn
 ```
 
-The marker (best-effort, written once per stored secret per process):
-
-```text
-workspaces/<workspace_id>/surfaces/slack/url_verified
-{"fingerprint": sha256(signing_secret), "at": <seconds>}
-```
-
-The unsigned echo exists because Slack probes the request URL the instant the app is created from
-the manifest — before the owner can hold the secret Slack mints with the app. Echoing the caller's
-own challenge stores and grants nothing, and it spares the owner a failed-verification banner with
-no reliable retry. The handshake carries no team, so it cannot select a workspace or mark one
-connected. The member's first signed DM, @mention, or click writes the marker and flips setup to
-connected.
-
-`slack_connect` binds `team:<team_id>` to one UFO workspace under a database uniqueness constraint.
-The request's team id selects only a candidate secret; the HMAC authorizes the request. An unknown
-team and a mismatched signature return the same rejection, and URL verification creates no binding.
-
-`slack_connect` trusts the marker only while its fingerprint matches the currently stored
-signing secret. Rotating the signing secret therefore reads as pending until Slack's next signed
-request.
-
-If the marker write fails, the request still succeeds; the marker is only setup status, not the
-Slack contract.
+An unknown team, a workspace with no signing secret, and a bad signature return the same rejection.
+The OAuth callback is the one route not signature-verified: it is a browser redirect authenticated
+by its Fernet-sealed state, and it resolves its workspace from that state alone.
 
 ## The seams underneath
 
@@ -270,22 +218,33 @@ ufo surface fulfillment (POST /surface/ufo/{channel} + x-ufo-secret headers)
   SurfaceContext.fulfill_credential_request(...)            verify seal -> encrypted store
                                                             + that slot's own marker
 
-slack tools (ToolContext)
-  ext.credentials.get       own declared slots only (the two secrets)
-  ext.installations.bind    own declared surface only (the unique Slack team)
-  ctx.speaker_is_owner()    the owner gate on the identity-deriving step
-  ctx.public_base_url       renders the Events request URL
-  ctx.blob                  the identity record + url-verified marker
+slack_connect tool (ToolContext) — OAuth path
+  ctx.begin_credential_authorization  seals the install handoff to the owner + bot-token slot
+  ctx.speaker_is_owner()              the owner gate on minting the link / deriving identity
+  ctx.public_base_url                 renders the OAuth redirect / authorize URL
+
+slack_connect tool (ToolContext) — manifest path
+  ctx.ext.credentials.get(slot)       the two per-workspace slots (bot token, signing secret)
+  SlackIdentityResolver (auth.test)   derives + persists the identity for a pasted token
+  ctx.ext.installations.bind          binds the unique Slack team to this workspace
+
+slack oauth_callback (SurfaceContext)
+  ctx.open_credential_authorization   recovers the sealed {workspace, owner, slot}
+  ctx.fulfill_credential_request      verify seal -> encrypted bot-token slot
+  ctx.bind_installation               binds the unique Slack team to this workspace
+  ctx.blob                            writes the identity record
 ```
 
-Credential slots are keyed by workspace and slot name, not by extension, so fulfillment fills the
-Slack surface's slots without the Slack surface needing a separate setup API.
+Credential slots are keyed by workspace and slot name, not by extension, so the callback (OAuth) and
+`request_credentials` fulfillment (manifest) both fill the Slack surface's slots without a separate
+setup API.
 
 ## Pack placement
 
 The `assistant_hosted` pack includes the slack extension — its durable member surface
-(`/surface/slack`), its two credential slots, and its setup tools; connecting it is a conversation,
-not a separate setup surface.
+(`/surface/slack`, with the OAuth callback at `/surface/slack/oauth`), its two per-workspace slots,
+the deploy Slack app's env secrets, and its `slack_connect` / `slack_app_manifest` tools plus the
+`slack-app-setup` skill; connecting it is a conversation, not a separate setup surface.
 
 ## Operational edges
 
@@ -293,9 +252,9 @@ not a separate setup surface.
 - The `flyingobject.ai` domain is onboarded in Cloudflare Email Sending; the edge binding permits
   only `no-reply@flyingobject.ai` as its sender.
 - The ufo surface requires `UFO_TOKEN_SECRET`; a missing secret is a configuration error, not a 401.
-- Only the owner (the earliest workspace member) can request Slack credential entry or derive a
-  missing Slack identity. Once derived, a teammate may call `slack_connect`; it idempotently
-  refreshes the team registration and returns status without another `auth.test` call.
+- Only the owner (the earliest workspace member) can mint the "Add to Slack" link or derive a
+  bring-your-own-app identity; the OAuth callback installs into the workspace the sealed state names.
+  A teammate may call `slack_connect` to read the install status but never installs.
 - A secret value is bounded (4 KiB) and travels bearer-authenticated on the existing chat
   transport; the fulfillment response is a `say` line, never a turn.
 
@@ -319,8 +278,8 @@ control/src/ufo_control/
   client/ufo              the POSIX terminal client (renders `secret` prompts)
 
 extensions/slack/ufo_ext_slack/
-  surface.py              workspace-qualified Slack ingest, identity record, URL marker
-  tools.py                slack_connect and slack_app_manifest tools
+  surface.py              Slack ingest, OAuth install callback, identity record + url marker
+  tools.py                slack_connect (oauth + manifest) and slack_app_manifest tools
 
 extensions/ufo/ufo_ext_ufo/
   surface.py              the terminal wire: secret rendering + fulfillment

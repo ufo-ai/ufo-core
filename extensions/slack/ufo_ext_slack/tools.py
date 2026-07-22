@@ -1,21 +1,24 @@
-"""Slack setup as chat tools: the member connects Slack in conversation and the agent drives it.
+"""Slack setup as chat tools: the owner connects Slack in conversation and the agent drives it.
 
-`slack_connect` is the idempotent state machine — missing secrets read as `not_configured`; stored
-secrets with an absent or rotation-staled identity run `auth.test` (Slack's authentication-and-
-identity check), persist the derived team/bot ids, and uniquely register that Slack team to this
-workspace; a valid identity awaiting Slack's first signed event reads `pending`; a
-fingerprint-matching url-verified marker reads `connected`. `slack_app_manifest` renders the exact
-app manifest for this deploy so the member creates the app with the right scopes and request URLs.
-The two secrets (bot token,
-signing secret) travel through `request_credentials` fulfillment — the member's terminal prompts
-privately — and never through chat. The manifest template below is pinned to the skill's YAML by a
-test, so the scopes and events can never drift apart. `slack_channels` is the one runtime tool here:
-it spends the manifest's `*:read` scopes, paging conversations.list on that same bot token so the
-agent can discover a channel by name — or a DM by who is in it — instead of only acting on an id it
-was handed."""
+Two install paths converge on the same per-workspace bot token and identity record. `slack_connect`
+defaults to `method="oauth"`: when the deploy has its own Slack app configured, it seals an install
+handoff to the owner and the bot-token slot and returns an "Add to Slack" link; the OAuth callback
+lands the token, team binding, and identity. `method="manifest"` is the bring-your-own-app path —
+`slack_app_manifest` renders the exact app YAML the member creates the app from, the two secrets
+(bot token, signing secret) travel through `request_credentials` fulfillment into per-workspace
+slots (never through chat), and `slack_connect` derives the identity with `auth.test`. Both paths
+report the same downstream states: `pending` once identity is proven, `connected` once a
+signature-verified request writes the url-verified marker. The manifest template below is pinned to
+the skill's YAML by a test, so the scopes and events never drift apart.
+
+`slack_channels` is the one runtime tool here: it spends the manifest's `*:read` scopes, paging
+conversations.list on the bot token so the agent can discover a channel by name — or a DM by who is
+in it — instead of only acting on an id it was handed."""
 
 import json
+import os
 import re
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -24,14 +27,21 @@ from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_slack.surface import (
     MALFORMED_IDENTITY_ERROR,
     SLACK_BOT_TOKEN_SLOT,
+    SLACK_CLIENT_ID_ENV,
+    SLACK_CLIENT_SECRET_ENV,
+    SLACK_INSTALL_PAYLOAD,
     SLACK_SIGNING_SECRET_SLOT,
     SURFACE_SLACK,
     SlackConversationSearch,
+    SlackIdentity,
     SlackIdentityError,
     SlackIdentityResolver,
     read_identity,
     signing_secret_fingerprint,
+    slack_authorize_url,
+    slack_client_id,
     slack_installation_id,
+    slack_oauth_redirect_uri,
     url_verified_blob_key,
 )
 
@@ -90,7 +100,14 @@ settings:
 
 
 class SlackConnectInput(BaseModel):
-    pass
+    method: Literal["oauth", "manifest"] = Field(
+        default="oauth",
+        description=(
+            "How to install Slack: 'oauth' (preferred) returns a one-click Add to Slack link for "
+            "the deploy's own app; 'manifest' is the bring-your-own-app path (create an app from "
+            "slack_app_manifest and enter its secrets privately)."
+        ),
+    )
 
 
 class SlackManifestInput(BaseModel):
@@ -117,49 +134,29 @@ def _state(state: str, hint: str, events_url: str | None, **extra: object) -> To
 
 
 async def slack_connect_handler(ctx: ToolContext, args: SlackConnectInput) -> ToolResult:
-    """One idempotent walk of the connection state machine, reporting where it stopped:
-    `not_configured` (a secret is missing or the token is rejected), `pending` (identity proven,
-    awaiting Slack's first signed event), or `connected`. Deriving identity here is owner-gated —
-    the bot is shared by every member; a signed Slack request proves the same record itself, the
-    signature gating what the owner gates here."""
+    """One idempotent walk of the install state machine. Once identity exists (either path) it
+    reports `pending`, or `connected` once a signature-verified request has marked the deploy
+    reachable. Otherwise it installs by `method`: `oauth` mints the owner an Add to Slack link;
+    `manifest` reports `not_configured` until the secrets are entered, then derives the identity
+    with `auth.test`. Minting the link and deriving identity are owner-only — the bot is shared."""
     assert ctx.ext is not None
     events_url = None if ctx.public_base_url is None else _events_url(ctx.public_base_url)
-    missing = []
-    for slot in SLACK_SECRET_SLOTS:
-        try:
-            await ctx.ext.credentials.get(slot)
-        except CredentialSlotUnset:
-            missing.append(slot)
-    if missing:
-        return _state(
-            "not_configured",
-            "use slack_app_manifest to create the app, then request_credentials for "
-            f"{', '.join(missing)}, then slack_connect again.",
-            events_url,
-            missing=missing,
-        )
-    bot_token = await ctx.ext.credentials.get(SLACK_BOT_TOKEN_SLOT)
-    identity = await read_identity(ctx.blob, ctx.turn.workspace_id, bot_token)
+    try:
+        bot_token = await ctx.ext.credentials.get(SLACK_BOT_TOKEN_SLOT)
+    except CredentialSlotUnset:
+        bot_token = None
+    identity = (
+        await read_identity(ctx.blob, ctx.turn.workspace_id, bot_token)
+        if bot_token is not None
+        else None
+    )
     if identity is None:
-        if not await ctx.speaker_is_owner():
-            raise ValueError("only the workspace owner can connect Slack")
-        try:
-            identity = await SlackIdentityResolver(
-                ctx.blob, ctx.turn.workspace_id, bot_token
-            ).resolve()
-        except SlackIdentityError as error:
-            if error.error == MALFORMED_IDENTITY_ERROR:
-                return _state(
-                    "not_configured",
-                    "Slack auth.test did not return a usable team/bot id — re-copy the Bot User "
-                    "OAuth Token from OAuth & Permissions and collect it again.",
-                    events_url,
-                )
-            return _state(
-                "not_configured",
-                _token_diagnosis(error.error),
-                events_url,
-            )
+        if args.method == "oauth":
+            return await _oauth_link(ctx, events_url)
+        derived = await _derive_manifest_identity(ctx, events_url)
+        if isinstance(derived, ToolResult):
+            return derived
+        identity = derived
     try:
         await ctx.ext.installations.bind(SURFACE_SLACK, slack_installation_id(identity.team_id))
     except SurfaceInstallationConflict:
@@ -184,10 +181,81 @@ async def slack_connect_handler(ctx: ToolContext, args: SlackConnectInput) -> To
     )
 
 
+async def _oauth_link(ctx: ToolContext, events_url: str | None) -> ToolResult:
+    """Mint the owner an Add to Slack link for the deploy's own app; the OAuth callback completes
+    the install. Falls back to the manifest path when the deploy has no app configured."""
+    if not (os.environ.get(SLACK_CLIENT_ID_ENV) and os.environ.get(SLACK_CLIENT_SECRET_ENV)):
+        return _state(
+            "not_configured",
+            "This deploy has no Slack app for one-click install — connect Slack with "
+            "method='manifest' to bring your own app.",
+            events_url,
+        )
+    if not await ctx.speaker_is_owner():
+        return _state(
+            "not_installed",
+            "Ask the workspace owner to connect Slack — only they can install it.",
+            events_url,
+        )
+    if not ctx.public_base_url:
+        raise ValueError(
+            "no public base URL — set [connect] public_base_url and restart the deploy"
+        )
+    sealed = await ctx.begin_credential_authorization(SLACK_BOT_TOKEN_SLOT, SLACK_INSTALL_PAYLOAD)
+    authorize_url = slack_authorize_url(
+        slack_client_id(), slack_oauth_redirect_uri(ctx.public_base_url), sealed
+    )
+    return _state(
+        "not_installed",
+        "Open this Add to Slack link to install ufo in your Slack workspace; the link expires "
+        "shortly, so ask again for a fresh one if it lapses.",
+        events_url,
+        authorize_url=authorize_url,
+    )
+
+
+async def _derive_manifest_identity(
+    ctx: ToolContext, events_url: str | None
+) -> SlackIdentity | ToolResult:
+    """The bring-your-own-app path: report `not_configured` until both secret slots are filled, then
+    prove and persist the identity with `auth.test` (owner-only), returning it for the common tail —
+    or a `not_configured` diagnosis when Slack rejects the token."""
+    assert ctx.ext is not None
+    missing = []
+    for slot in SLACK_SECRET_SLOTS:
+        try:
+            await ctx.ext.credentials.get(slot)
+        except CredentialSlotUnset:
+            missing.append(slot)
+    if missing:
+        return _state(
+            "not_configured",
+            "use slack_app_manifest to create the app, then request_credentials for "
+            f"{', '.join(missing)}, then slack_connect again.",
+            events_url,
+            missing=missing,
+        )
+    bot_token = await ctx.ext.credentials.get(SLACK_BOT_TOKEN_SLOT)
+    if not await ctx.speaker_is_owner():
+        raise ValueError("only the workspace owner can connect Slack")
+    try:
+        return await SlackIdentityResolver(ctx.blob, ctx.turn.workspace_id, bot_token).resolve()
+    except SlackIdentityError as error:
+        if error.error == MALFORMED_IDENTITY_ERROR:
+            return _state(
+                "not_configured",
+                "Slack auth.test did not return a usable team/bot id — re-copy the Bot User "
+                "OAuth Token from OAuth & Permissions and collect it again.",
+                events_url,
+            )
+        return _state("not_configured", _token_diagnosis(error.error), events_url)
+
+
 async def _verified(ctx: ToolContext) -> bool:
-    """Whether Slack has reached this deploy with the signing secret currently stored — the marker
-    the slack surface writes on a signature-verified request, trusted only while its fingerprint
-    matches the stored secret, so a rotation reads as pending again."""
+    """Whether Slack has reached this deploy with the signing secret currently in force — the
+    marker the slack surface writes on a signature-verified request, trusted only while its
+    fingerprint matches the workspace's verifying secret (its own slot, else the deploy env), so a
+    rotation reads as pending again."""
     assert ctx.ext is not None
     key = url_verified_blob_key(ctx.turn.workspace_id)
     if not await ctx.blob.exists(key):
@@ -262,11 +330,11 @@ TOOLS = (
     ToolDef(
         name="slack_connect",
         description=(
-            "Walk the Slack connection state machine and report where it stands "
-            "(not_configured / pending / connected, plus this deploy's Events request URL). "
-            "Idempotent — call it before, during, and after setup. When the secrets are stored "
-            "it verifies the bot token live and derives the app's identity itself; that step is "
-            "owner-only."
+            "Walk the Slack install state machine and report where it stands (not_configured / "
+            "not_installed / pending / connected). Idempotent — call it before, during, and after "
+            "setup. Defaults to the one-click OAuth install (returns an 'Add to Slack' link for "
+            "the owner); pass method='manifest' for the bring-your-own-app path. Minting the link "
+            "and deriving identity are owner-only."
         ),
         input_model=SlackConnectInput,
         handler=slack_connect_handler,
@@ -277,7 +345,7 @@ TOOLS = (
         description=(
             "The exact Slack app manifest for this deploy, ready to paste at api.slack.com "
             "(Create New App → From a manifest). Show it to the member verbatim in a code block "
-            "when they are connecting Slack."
+            "when they are connecting Slack with the bring-your-own-app (manifest) path."
         ),
         input_model=SlackManifestInput,
         handler=slack_manifest_handler,

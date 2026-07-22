@@ -9,6 +9,9 @@ from ufo.credentials import (
     CredentialRequestInvalid as CredentialRequestInvalid,
 )
 from ufo.credentials import (
+    CredentialRequestState as CredentialRequestState,
+)
+from ufo.credentials import (
     CredentialSlotUnset as CredentialSlotUnset,
 )
 from ufo.ext.surface import (
