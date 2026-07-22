@@ -49,8 +49,12 @@ jobs:
           PY
       - run: uv run pytest --collect-only -m integration -q
 
-  # Parallel unit tests — the per-push bottleneck, on its own runner with the postgres service.
-  test:
+  test-shard:
+    name: test shard ${{ matrix.shard }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ["1/6", "2/6", "3/6", "4/6", "5/6", "6/6"]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     services:
@@ -74,13 +78,27 @@ jobs:
           python-version: "3.12"
           enable-cache: true
       - run: uv sync
-      # Parallel unit pass: the process-parallel-safe tests fan out across xdist workers. Each worker
-      # is its own process (so the process-singleton DBOS executor is fine per worker) with its own
-      # sqlite temp dir and its own worker-suffixed postgres database, so no two workers touch one
-      # store. The container/image-build/live turns (`serial`/`integration`/`docker`) run in the
-      # nightly `integration` workflow, off this per-push hot path.
-      - run: uv run pytest -n auto -m "not serial and not integration and not docker" -q
+      - run: uv run pytest -n auto --shard "${{ matrix.shard }}" -m "not serial and not integration and not docker" -q
+
+  control-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync
       - run: uv run --project control pytest control/tests --ignore=control/tests/test_rls.py -q
+
+  test:
+    if: always()
+    needs: [test-shard, control-test]
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.test-shard.result }}" = success
+      - run: test "${{ needs.control-test.result }}" = success
 
   # The workspace RLS proof uses its own SUPERUSER Postgres on :5544 (never the parallel
   # suite's :5541). Setup CREATEs roles + databases, applies RLS

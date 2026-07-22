@@ -11,6 +11,7 @@ integration` selects the whole live suite wherever it lives and each live module
 dependency gate it needs."""
 
 import asyncio
+import hashlib
 import os
 import socket
 from collections.abc import AsyncIterator, Iterator
@@ -31,6 +32,10 @@ POSTGRES_TEST_URL = os.environ.get(
     "UFO_TEST_POSTGRES_URL",
     "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo_test",
 )
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption("--shard", help="Run one deterministic INDEX/COUNT shard")
 
 
 def postgres_reachable() -> bool:
@@ -119,7 +124,7 @@ def dbos_launched(database_url: str, tmp_path_factory: pytest.TempPathFactory) -
     DBOS.destroy()
 
 
-def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """Stamp every test under a `tests/integration/` path `integration` + `serial` so `-m
     integration` selects the whole live suite and `-m "not integration"` excludes it, without each
     module repeating the two markers — the per-module `pytestmark` then adds only the dependency
@@ -128,3 +133,23 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         if "tests/integration/" in item.nodeid or "tests\\integration\\" in item.nodeid:
             item.add_marker(pytest.mark.integration)
             item.add_marker(pytest.mark.serial)
+    shard = config.getoption("--shard")
+    if shard is None:
+        return
+    try:
+        index_text, count_text = shard.split("/", maxsplit=1)
+        index = int(index_text)
+        count = int(count_text)
+    except (AttributeError, ValueError) as error:
+        raise pytest.UsageError("--shard must be INDEX/COUNT") from error
+    if count < 2 or index < 1 or index > count:
+        raise pytest.UsageError(
+            "--shard must be INDEX/COUNT with COUNT >= 2 and 1 <= INDEX <= COUNT"
+        )
+    selected: list[pytest.Item] = []
+    deselected: list[pytest.Item] = []
+    for item in items:
+        digest = int.from_bytes(hashlib.sha256(item.nodeid.encode()).digest())
+        (selected if digest % count == index - 1 else deselected).append(item)
+    items[:] = selected
+    config.hook.pytest_deselected(items=deselected)
