@@ -86,7 +86,7 @@ DETERMINISTIC_CONFIDENCE = 1.0
 PAGE_ANCHOR_PREFIX = "page:"
 
 TIER_B_MAX_BODY_CHARS = 8_000
-TIER_B_MAX_TOKENS = 1_024
+TIER_B_MAX_TOKENS = 4_000
 TIER_B_REASONING: Literal["off"] = "off"
 TIER_B_SYSTEM = (
     "You extract typed relationships about a document's main subject. Reply with ONLY a JSON "
