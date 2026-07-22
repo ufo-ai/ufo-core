@@ -6,6 +6,7 @@ from evals import (
     basics,
     browser_nav,
     coding_subagent,
+    memory_hygiene,
     object_tools,
     pdf_build,
     scenario_smoke,
@@ -59,6 +60,7 @@ TASKS: tuple[EvalTask, ...] = (
         simulator_model=SCENARIO_SIMULATOR_MODEL,
     ),
     skill_loading_task(SKILL_LOADING_CASES),
+    scenario_task("memory_hygiene", memory_hygiene.CASES, simulator_model=SCENARIO_SIMULATOR_MODEL),
     capability_task("yc_recall", yc_recall.CASES),
     capability_task("yc_workflows", yc_workflows.CASES),
 )

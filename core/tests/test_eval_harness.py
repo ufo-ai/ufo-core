@@ -150,6 +150,8 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
     assert tasks["scenario_smoke"].simulator_model == SCENARIO_SIMULATOR_MODEL
     assert tasks["scenario_smoke"].simulator_reasoning == "off"
     assert tasks["scenario_env"].simulator_model == SCENARIO_SIMULATOR_MODEL
+    assert tasks["memory_hygiene"].judge_model is None
+    assert tasks["memory_hygiene"].simulator_model == SCENARIO_SIMULATOR_MODEL
     assert tasks["object_tools"].judge_model == SEMANTIC_JUDGE_MODEL
     assert tasks["object_tools"].simulator_model is None
     assert tasks["object_tools_flows"].judge_model == SEMANTIC_JUDGE_MODEL
@@ -162,6 +164,7 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
             "semantic_quality",
             "scenario_smoke",
             "scenario_env",
+            "memory_hygiene",
             "object_tools",
             "object_tools_flows",
         }
@@ -172,7 +175,16 @@ def test_scenario_tasks_are_exclusive() -> None:
     exclusive = {task.name for task in TASKS if task.exclusive}
     scenario = {task.name for task in TASKS if task.suite == "scenario"}
 
-    assert exclusive == scenario == {"object_tools_flows", "scenario_smoke", "scenario_env"}
+    assert (
+        exclusive
+        == scenario
+        == {
+            "object_tools_flows",
+            "scenario_smoke",
+            "scenario_env",
+            "memory_hygiene",
+        }
+    )
 
 
 async def test_task_reports_overlaps_tasks_and_isolates_exclusive_ones() -> None:
