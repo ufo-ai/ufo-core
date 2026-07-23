@@ -69,6 +69,26 @@ async def test_round_trip_preserves_image_blocks(tmp_path: Path) -> None:
     assert await transcript.read() == conversation
 
 
+async def test_round_trip_preserves_system_and_injected(tmp_path: Path) -> None:
+    transcript = _transcript(tmp_path)
+    conversation = Conversation(
+        seq=1,
+        messages=(Message(role="user", content="hi"),),
+        system="you are the agent",
+        injected="<system-reminder>recalled fact</system-reminder>",
+    )
+    await transcript.write(conversation)
+    assert await transcript.read() == conversation
+
+
+def test_decode_accepts_a_blob_without_system_or_injected() -> None:
+    conversation = decode(
+        lz4.frame.compress(b'{"messages":[{"content":"hi","role":"user"}],"seq":1}')
+    )
+    assert conversation.system is None
+    assert conversation.injected is None
+
+
 async def test_read_missing_returns_none(tmp_path: Path) -> None:
     assert await _transcript(tmp_path).read() is None
 
@@ -115,7 +135,9 @@ async def test_stored_bytes_are_lz4_compact_json(tmp_path: Path) -> None:
     await transcript.write(Conversation(seq=1, messages=(Message(role="user", content="hi"),)))
     raw = await blob.get(transcript_key(conversation_id))
     decoded = lz4.frame.decompress(raw).decode()
-    assert decoded == '{"messages":[{"content":"hi","role":"user"}],"seq":1}'
+    assert decoded == (
+        '{"injected":null,"messages":[{"content":"hi","role":"user"}],"seq":1,"system":null}'
+    )
 
 
 async def test_writer_bytes_decode_through_the_shared_contract(tmp_path: Path) -> None:

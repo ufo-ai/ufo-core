@@ -24,7 +24,8 @@ from ufo.connectors import ConnectorRegistry
 from ufo.credentials import CredentialRequests, CredentialStore, open_credential_request
 from ufo.db import workspace_tx
 from ufo.ext.context import context_for
-from ufo.ext.loader import HookChain
+from ufo.ext.loader import BoundHook, HookChain
+from ufo.ext.manifest import HookContext, HookOutcome, HookSpec, InjectContext
 from ufo.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
 from ufo.hub import InProcessHub, LiveFrame, SkillLoad, ToolCall
 from ufo.loop.compaction import (
@@ -1994,6 +1995,48 @@ async def test_member_turn_carries_the_context_tag_and_a_subagent_turn_does_not(
     child_model = CapturingModel()
     await _engine(child, child_model, tmp_path).run()
     assert child_model.seen[0][-1].content == "hi"
+
+
+async def test_done_turn_persists_the_system_string_and_injected_context(
+    db: None, tmp_path: Path
+) -> None:
+    """The transcript blob carries the exact system string the model ran with plus the
+    user_prompt_submit injection on its own, so the debug surface renders both without
+    re-deriving either."""
+    recalled = "<recalled_memory>the vault code is 4821</recalled_memory>"
+
+    async def recall(ctx: HookContext) -> HookOutcome:
+        return InjectContext(text=recalled)
+
+    chain = HookChain(
+        hooks={
+            "user_prompt_submit": (
+                BoundHook(
+                    spec=HookSpec(event="user_prompt_submit", handler=recall),
+                    ext=context_for("probe", frozenset()),
+                ),
+            )
+        }
+    )
+    turn = await _seed_turn("queued", None)
+    model = CapturingModel()
+    engine = replace(_engine(turn, model, tmp_path), hooks=chain)
+    frame = await engine.run()
+    assert frame is not None and frame.status == "done"
+    stored = await engine.transcript.read()
+    assert stored is not None
+    assert stored.system == model.seen_system[0]
+    assert stored.system is not None and stored.system.endswith(f"\n\n{recalled}")
+    assert stored.injected == recalled
+
+    bare = await _seed_turn("queued", None)
+    bare_model = CapturingModel()
+    bare_engine = _engine(bare, bare_model, tmp_path)
+    assert (await bare_engine.run()) is not None
+    bare_stored = await bare_engine.transcript.read()
+    assert bare_stored is not None
+    assert bare_stored.system == bare_model.seen_system[0]
+    assert bare_stored.injected is None
 
 
 class _NoArgs(BaseModel):

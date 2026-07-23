@@ -509,8 +509,14 @@ class TranscriptRepair:
             )
         return frame
 
-    async def persist_transcript(self, messages: tuple[Message, ...], answer: str) -> None:
-        await self.write_conversation((*messages, Message(role="assistant", content=answer)))
+    async def persist_transcript(
+        self, messages: tuple[Message, ...], answer: str, system: str, injected: str
+    ) -> None:
+        await self.write_conversation(
+            (*messages, Message(role="assistant", content=answer)),
+            system=system,
+            injected=injected or None,
+        )
 
     async def persist_inbound(self, arrivals: tuple[Message, ...] = ()) -> None:
         """Preserve the member's messages on a non-done terminal — the founding inbound plus every
@@ -539,8 +545,15 @@ class TranscriptRepair:
             return ()
         return stored.messages
 
-    async def write_conversation(self, messages: tuple[Message, ...]) -> None:
-        conversation = Conversation(seq=self.turn.seq, messages=messages)
+    async def write_conversation(
+        self,
+        messages: tuple[Message, ...],
+        system: str | None = None,
+        injected: str | None = None,
+    ) -> None:
+        conversation = Conversation(
+            seq=self.turn.seq, messages=messages, system=system, injected=injected
+        )
         for attempt in range(TRANSCRIPT_WRITE_ATTEMPTS):
             try:
                 await self.transcript.write(conversation)
@@ -672,7 +685,9 @@ class TurnEngine:
                         absorbed=tuple(absorbed_ids),
                     )
                     if denial is not None:
-                        await self._persist_transcript(await self._load_messages(), inbound.denied)
+                        await self._persist_transcript(
+                            await self._load_messages(), inbound.denied, system, inbound.injected
+                        )
                         return denial
                     messages = (
                         *await self._load_messages(),
@@ -719,7 +734,9 @@ class TurnEngine:
                         messages = (*final_messages, Message(role="assistant", content=answer))
                         continue
                     if frame.status == "done":
-                        await self._persist_transcript(final_messages, answer)
+                        await self._persist_transcript(
+                            final_messages, answer, system, inbound.injected
+                        )
                     else:
                         await self._persist_inbound(tuple(arrival_log))
                     return frame
@@ -1738,8 +1755,10 @@ class TurnEngine:
         stays the sole authority and this duplicate never clobbers it with a spurious terminal."""
         return await self._repair().resolve()
 
-    async def _persist_transcript(self, messages: tuple[Message, ...], answer: str) -> None:
-        await self._repair().persist_transcript(messages, answer)
+    async def _persist_transcript(
+        self, messages: tuple[Message, ...], answer: str, system: str, injected: str
+    ) -> None:
+        await self._repair().persist_transcript(messages, answer, system, injected)
 
     async def _persist_inbound(self, arrivals: tuple[Message, ...] = ()) -> None:
         await self._repair().persist_inbound(arrivals)

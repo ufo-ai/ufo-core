@@ -322,6 +322,8 @@ async def test_transcript_compactions_and_files_read_the_blobs(debug) -> None:
                 ),
             ),
         ),
+        system="you are the agent\n\n<recalled_memory>fact</recalled_memory>",
+        injected="<recalled_memory>fact</recalled_memory>",
     )
     await blob.put(transcript_key(conversation_id), encode(stored))
     summary = CompactionSummary(intent="ship", current_work="reading", next_step="write")
@@ -338,6 +340,8 @@ async def test_transcript_compactions_and_files_read_the_blobs(debug) -> None:
         f"/surface/debug/api/conversations/{conversation_id}/transcript", headers=_auth(token)
     )
     assert transcript.status_code == 200
+    assert transcript.json()["system"] == stored.system
+    assert transcript.json()["injected"] == stored.injected
     blocks = transcript.json()["messages"][1]["content"]
     assert [block["type"] for block in blocks] == ["tool_use", "tool_result", "text"]
 

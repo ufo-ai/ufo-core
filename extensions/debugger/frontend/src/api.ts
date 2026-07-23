@@ -61,7 +61,12 @@ export type ContentBlock =
     };
 
 export type TranscriptMessage = { role: "user" | "assistant"; content: string | ContentBlock[] };
-export type Transcript = { seq: number; messages: TranscriptMessage[] };
+export type Transcript = {
+  seq: number;
+  messages: TranscriptMessage[];
+  system: string | null;
+  injected: string | null;
+};
 
 export type CompactionSummary = {
   intent: string;

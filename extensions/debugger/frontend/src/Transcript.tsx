@@ -18,10 +18,23 @@ export function Transcript(props: { conversationId: string }) {
       <h2>
         transcript · seq {transcript.seq} · {transcript.messages.length} messages
       </h2>
+      {transcript.system && <Prelude label="system prompt" text={transcript.system} />}
+      {transcript.injected && <Prelude label="injected context" text={transcript.injected} />}
       {transcript.messages.map((message, index) => (
         <Bubble key={index} message={message} />
       ))}
     </section>
+  );
+}
+
+function Prelude(props: { label: string; text: string }) {
+  return (
+    <div className="bubble">
+      <details>
+        <summary>{props.label}</summary>
+        <pre>{props.text}</pre>
+      </details>
+    </div>
   );
 }
 

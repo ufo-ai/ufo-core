@@ -17,9 +17,16 @@ from ufo.models.interface import Message
 
 
 class Conversation(BaseModel):
+    """The durable transcript: the message window at `seq`, plus — on a completed turn's write —
+    the exact `system` string that turn's model calls ran with and the `injected` context its
+    user_prompt_submit hooks contributed, so the debug surface can show the full model input, not
+    just the messages."""
+
     model_config = ConfigDict(strict=True)
     seq: int = Field(ge=1)
     messages: tuple[Message, ...]
+    system: str | None = None
+    injected: str | None = None
 
 
 class TranscriptDecodeError(ValueError):
