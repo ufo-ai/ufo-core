@@ -23,6 +23,8 @@ outside the bounded vocabulary is rejected (`UnknownEdgeType`), never persisted 
 no-op; the model call and its metering happen before the write transaction, never holding the
 transaction open across the provider round-trip."""
 
+import json
+import logging
 import re
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
@@ -31,14 +33,16 @@ from typing import Literal, cast
 from uuid import UUID, uuid5
 
 import sqlalchemy as sa
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.sdk.context import ModelAccess
-from ufo.sdk.models import Message, ModelRequest
+from ufo.sdk.models import Message, ModelRequest, ToolSchema, ToolUseBlock
 from ufo.sdk.sources import SHARED_SUBJECT, PageChange, member_subject
+
+logger = logging.getLogger(__name__)
 
 EdgeType = Literal[
     "mentions",
@@ -89,12 +93,11 @@ TIER_B_MAX_BODY_CHARS = 8_000
 TIER_B_MAX_TOKENS = 4_000
 TIER_B_REASONING: Literal["off"] = "off"
 TIER_B_SYSTEM = (
-    "You extract typed relationships about a document's main subject. Reply with ONLY a JSON "
-    'object of the form {"relations": [{"edge_type": "<type>", "target": "<entity name>", '
-    '"confidence": <number 0..1>}]}. Each relation runs from the document\'s subject to the named '
-    "target entity. Use ONLY these edge types: "
+    "You extract typed relationships about a document's main subject and record them with the "
+    "record_relations tool. Each relation runs from the document's subject to the named target "
+    "entity. Use ONLY these edge types: "
     + ", ".join(sorted(EDGE_TYPES))
-    + ". Omit any relationship you are unsure of rather than inventing an edge type, and return an "
+    + ". Omit any relationship you are unsure of rather than inventing an edge type, and record an "
     "empty list when the prose asserts no such relationship."
 )
 
@@ -173,10 +176,17 @@ class ExtractedRelation(BaseModel):
 
 
 class ExtractedGraph(BaseModel):
-    """The Tier-B model's whole response — untrusted model output parsed and validated at this
-    boundary before any of it reaches the graph tables."""
+    """The Tier-B model's whole response — untrusted model output validated at this boundary
+    before any of it reaches the graph tables."""
 
     relations: tuple[ExtractedRelation, ...] = ()
+
+
+TIER_B_TOOL = ToolSchema(
+    name="record_relations",
+    description="Record every typed relation extracted from the document.",
+    input_schema=ExtractedGraph.model_json_schema(),
+)
 
 
 def normalize_name(name: str) -> str:
@@ -374,17 +384,37 @@ class GraphExtractor:
 
     async def _tier_b(self, model: ModelAccess, body: str) -> tuple[ExtractedRelation, ...]:
         """Read typed relations out of the page's prose with one metered model call — bounded body
-        in, bounded tokens out. Every extracted edge type is validated against the closed vocabulary
-        (`to_edge_type` raises on an unknown type rather than persisting a silent no-op), and an
-        empty-target relation is dropped."""
+        in, bounded tokens out. The request forces the `record_relations` tool, so the extraction
+        arrives as schema-shaped tool input rather than free text to be parsed. A reply carrying no
+        tool call, tool JSON the provider truncated or malformed, or input that fails validation
+        degrades to zero relations with a warning — Tier B augments the deterministic Tier A
+        backbone, it does not gate it. Every extracted edge type is validated against the closed
+        vocabulary (`to_edge_type` raises on an unknown type rather than persisting a silent
+        no-op), and an empty-target relation is dropped."""
         request = ModelRequest(
             model=model.model,
             system=TIER_B_SYSTEM,
             messages=(Message(role="user", content=body[:TIER_B_MAX_BODY_CHARS]),),
             max_tokens=TIER_B_MAX_TOKENS,
+            tools=(TIER_B_TOOL,),
+            tool_choice=TIER_B_TOOL.name,
             reasoning=TIER_B_REASONING,
         )
-        extraction = ExtractedGraph.model_validate_json(await model.complete(request))
+        try:
+            response = await model.turn(request)
+        except (ValidationError, json.JSONDecodeError):
+            logger.warning("knowledge_graph.tier_b.malformed_tool_call", exc_info=True)
+            return ()
+        blocks = response.content if isinstance(response.content, tuple) else ()
+        call = next((block for block in blocks if isinstance(block, ToolUseBlock)), None)
+        if call is None:
+            logger.warning("knowledge_graph.tier_b.no_tool_call")
+            return ()
+        try:
+            extraction = ExtractedGraph.model_validate(call.input)
+        except ValidationError:
+            logger.warning("knowledge_graph.tier_b.invalid_extraction", exc_info=True)
+            return ()
         relations: list[ExtractedRelation] = []
         for relation in extraction.relations:
             to_edge_type(relation.edge_type)

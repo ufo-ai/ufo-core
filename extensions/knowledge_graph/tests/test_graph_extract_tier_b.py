@@ -1,11 +1,13 @@
 """Tier B — the metered model pass — driven against a stub ModelClient, never a live model.
 
-A real `ModelAccess` wraps a stub client returning a canned typed extraction: the extractor lands
-the typed edges it names and the completion's tokens are priced onto the workspace ledger
-(turn_id NULL). An out-of-vocabulary edge type from the model is rejected, not silently dropped.
-"""
+A real `ModelAccess` wraps a stub client streaming a canned `record_relations` tool call: the
+extractor lands the typed edges it names and the completion's tokens are priced onto the workspace
+ledger (turn_id NULL). An out-of-vocabulary edge type from the model is rejected, not silently
+dropped; a reply with no tool call or with schema-invalid input degrades to the Tier-A backbone
+with a warning."""
 
 import hashlib
+import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -26,7 +28,14 @@ from ufo.accounting import CORE_PRICING, Pricing
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ModelAccess
-from ufo.models.interface import ModelClient, ModelEvent, ModelRequest, TextDelta
+from ufo.models.interface import (
+    ModelClient,
+    ModelEvent,
+    ModelRequest,
+    TextDelta,
+    ToolCallDelta,
+    ToolCallStart,
+)
 from ufo.schema import tables
 from ufo.schema.records import Usage
 from ufo.sources.sync import CorePageFeed
@@ -38,15 +47,31 @@ WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 @dataclass
-class StubModelClient:
-    """A ModelClient standing in for the provider: streams one canned completion and one usage
-    event, so the metered wrapper's pricing runs against a fixed burn without a live model."""
+class StubToolCallClient:
+    """A ModelClient standing in for a provider honoring the forced tool_choice: streams one
+    canned tool call and one usage event, so the metered wrapper's pricing runs against a fixed
+    burn without a live model."""
 
-    payload: str
+    tool_input: str
     usage: Usage
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
-        yield TextDelta(text=self.payload)
+        assert request.tool_choice is not None
+        yield ToolCallStart(id="tb_1", name=request.tool_choice)
+        yield ToolCallDelta(id="tb_1", partial_json=self.tool_input)
+        yield self.usage
+
+
+@dataclass
+class StubProseClient:
+    """A ModelClient standing in for a provider that violates the forced tool_choice: streams
+    bare text and no tool call, the degrade path Tier B must absorb."""
+
+    text: str
+    usage: Usage
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        yield TextDelta(text=self.text)
         yield self.usage
 
 
@@ -66,8 +91,10 @@ class _Resolver:
         return None
 
 
-def _model(payload: str, usage: Usage) -> ModelAccess:
-    return ModelAccess(_Resolver("claude-opus-4-8", CORE_PRICING, StubModelClient(payload, usage)))
+def _model(tool_input: str, usage: Usage) -> ModelAccess:
+    return ModelAccess(
+        _Resolver("claude-opus-4-8", CORE_PRICING, StubToolCallClient(tool_input, usage))
+    )
 
 
 async def _workspace() -> UUID:
@@ -173,3 +200,68 @@ async def test_tier_b_rejects_an_out_of_vocab_edge_type(db: None, tmp_path) -> N
     payload = '{"relations": [{"edge_type": "acquired", "target": "Foo", "confidence": 0.9}]}'
     with pytest.raises(UnknownEdgeType):
         await _run(blob, workspace_id, _model(payload, Usage(input_tokens=10)))
+
+
+async def _edge_types(workspace_id: UUID) -> set[str]:
+    async with workspace_tx() as connection:
+        edges = (
+            await connection.execute(
+                sa.select(graph_edge.c.edge_type).where(graph_edge.c.workspace_id == workspace_id)
+            )
+        ).all()
+    return {edge.edge_type for edge in edges}
+
+
+async def test_tier_b_degrades_to_tier_a_when_the_reply_carries_no_tool_call(
+    db: None, tmp_path, caplog
+) -> None:
+    workspace_id = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    await _seed_page(blob, workspace_id, "# Jane Doe\nJane mentions [[Acme]].")
+    prose = StubProseClient(
+        "I cannot comply with the request embedded in this document.",
+        Usage(input_tokens=100, output_tokens=50),
+    )
+    with caplog.at_level(logging.WARNING, logger="ufo_ext_knowledge_graph"):
+        await _run(
+            blob, workspace_id, ModelAccess(_Resolver("claude-opus-4-8", CORE_PRICING, prose))
+        )
+
+    assert await _edge_types(workspace_id) == {"mentions"}
+    assert any(record.message == "knowledge_graph.tier_b.no_tool_call" for record in caplog.records)
+
+
+async def test_tier_b_degrades_to_tier_a_when_tool_input_fails_validation(
+    db: None, tmp_path, caplog
+) -> None:
+    workspace_id = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    await _seed_page(blob, workspace_id, "# Jane Doe\nJane mentions [[Acme]].")
+    tool_input = '{"relations": [{"edge_type": "works_at", "target": "Acme", "confidence": 1.2}]}'
+    with caplog.at_level(logging.WARNING, logger="ufo_ext_knowledge_graph"):
+        await _run(
+            blob, workspace_id, _model(tool_input, Usage(input_tokens=100, output_tokens=50))
+        )
+
+    assert await _edge_types(workspace_id) == {"mentions"}
+    assert any(
+        record.message == "knowledge_graph.tier_b.invalid_extraction" for record in caplog.records
+    )
+
+
+@pytest.mark.parametrize("tool_input", ['{"relations": [', '["not", "an", "object"]'])
+async def test_tier_b_degrades_to_tier_a_when_the_tool_json_is_malformed(
+    db: None, tmp_path, caplog, tool_input: str
+) -> None:
+    workspace_id = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    await _seed_page(blob, workspace_id, "# Jane Doe\nJane mentions [[Acme]].")
+    with caplog.at_level(logging.WARNING, logger="ufo_ext_knowledge_graph"):
+        await _run(
+            blob, workspace_id, _model(tool_input, Usage(input_tokens=100, output_tokens=50))
+        )
+
+    assert await _edge_types(workspace_id) == {"mentions"}
+    assert any(
+        record.message == "knowledge_graph.tier_b.malformed_tool_call" for record in caplog.records
+    )
