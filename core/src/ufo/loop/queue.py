@@ -314,7 +314,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
         raise
     except Exception as error:
         await _commit_failed_terminal(runtime.hub, UUID(turn_id), error)
-        raise
+        return "failed"
 
 
 async def _commit_failed_terminal(hub: Hub, turn_id: UUID, error: BaseException) -> None:

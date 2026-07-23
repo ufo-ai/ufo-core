@@ -35,7 +35,6 @@ from ufo.loop.engine import (
     EMPTY_RESPONSE_NUDGE,
     FINISH_TOOL,
     TRUNCATION_FEEDBACK,
-    ModelStreamError,
 )
 from ufo.loop.subagents import SubagentProfile, SubagentRegistry, Subagents
 from ufo.loop.transcript import Transcript
@@ -1010,12 +1009,16 @@ async def test_a_truncated_round_recovers_and_the_turn_completes(surface: AsyncC
     assert terminal["text"] == "echo:2"
 
 
-async def test_a_model_stream_error_fails_durably_and_round_trips_through_dbos(
+async def test_a_model_round_error_commits_a_terminal_without_leaking_an_orphaned_future(
     surface: AsyncClient, dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore]
 ) -> None:
-    """A fatal mid-stream model error leaves ONE durable failed terminal carrying the model's
-    error class AND message, and the workflow error DBOS pickled reconstructs through a client
-    handle — the eval driver's retrieval leg — instead of failing deserialization."""
+    """A fatal mid-stream model error commits ONE durable failed terminal carrying the model's
+    error class AND message, and the turn workflow completes cleanly — it does NOT re-raise into
+    the queue runner's discarded workflow task, where the exception is retrieved by no one and
+    surfaces only as an asyncio "Future exception was never retrieved" that never reaches the
+    client (issue #568). The client's wait ends on the committed terminal; DBOS records the
+    workflow SUCCESS with the turn's terminal status as its output, so the retrieval leg returns
+    that status instead of raising a pickled exception nobody consumes."""
     config, _, _ = dbos_runtime
     headers = await _bootstrap()
     turn_id = (await surface.post("/v1/chat", content=b"explode", headers=headers)).json()[
@@ -1040,13 +1043,13 @@ async def test_a_model_stream_error_fails_durably_and_round_trips_through_dbos(
     client = DBOSClient(system_database_url=config.database.system_url)
     try:
         handle = await client.retrieve_workflow_async(turn_id)
-        with pytest.raises(ModelStreamError) as caught:
-            async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
-                await handle.get_result(polling_interval_sec=0.05)
+        async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+            outcome = await handle.get_result(polling_interval_sec=0.05)
+        workflow = await handle.get_status()
     finally:
         client.destroy()
-    assert caught.value.model_error_class == "RuntimeError"
-    assert str(caught.value) == "RuntimeError: boom"
+    assert outcome == "failed"
+    assert workflow.status == "SUCCESS"
 
 
 async def test_concurrent_admissions_land_every_message_once(surface: AsyncClient) -> None:
