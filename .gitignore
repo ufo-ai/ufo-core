@@ -25,4 +25,7 @@ ufo.db-*
 !.claude/skills/review-pull-request/
 .claude/skills/review-pull-request/*
 !.claude/skills/review-pull-request/SKILL.md
+!.claude/skills/babysit-prs/
+.claude/skills/babysit-prs/*
+!.claude/skills/babysit-prs/SKILL.md
 .worktrees/
