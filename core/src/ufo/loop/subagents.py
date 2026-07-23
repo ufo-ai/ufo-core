@@ -19,6 +19,7 @@ from pydantic import ValidationError
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+from ufo.cancellation import cancel_one_turn
 from ufo.db import workspace_tx
 from ufo.ext.manifest import SubagentProfile
 from ufo.loop.prompts.render import (
@@ -201,11 +202,13 @@ class Subagents:
         return tuple(statuses)
 
     async def cancel(self, turn_id: UUID) -> SubagentStatus:
-        """Cancel a running child by cancelling its durable workflow, then report the turn's current
-        status. A child that has already finished is a no-op — the cancel is idempotent and the
-        committed terminal stands. Refuses a turn id that is not a child of this parent."""
+        """Cancel a running child through the shared `cancel_one_turn` primitive — cancel its
+        durable workflow, then commit its cancelled terminal — and report the turn's status. A child
+        that already finished keeps its own terminal. Any turns the child itself spawned are
+        cancelled by the reconciler once this child's cancelled terminal lands. Refuses a turn id
+        not a child of this parent."""
         await self._require_child(turn_id)
-        await self.client.cancel_workflow_async(str(turn_id))
+        await cancel_one_turn(self.client, turn_id)
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(

@@ -21,12 +21,13 @@ from dbos import error as dbos_error
 
 from evals.harness.capability import WorkspaceFile
 from ufo.blob import BlobNotFound, BlobStore
+from ufo.cancellation import cancel_one_turn
 from ufo.db import workspace_tx
 from ufo.ext.context import Trajectory
 from ufo.ext.surface import workspace_key
 from ufo.governance import prompt_digest
 from ufo.schema import tables
-from ufo.schema.records import PENDING, TerminalFrame
+from ufo.schema.records import PENDING
 from ufo.sdk.models import Message
 from ufo.transcript import Conversation, TranscriptDecodeError, decode, encode, transcript_key
 from ufo.workspace import ws
@@ -271,39 +272,15 @@ class WorkspaceDriver:
         return await self._trajectory(conversation_id, row.seq)
 
     async def cancel(self, turn_id: UUID) -> bool:
-        """Terminalize a live turn and every live descendant: commit the cancelled terminal (the
-        same pattern as the surface cancel endpoint; the engine's terminal commits guard on a
-        queued/running row and can no longer overwrite it), then durably cancel the DBOS workflow —
-        dequeuing a queued run and preempting a streaming model round. A delegated child turn is
-        its own workflow and would otherwise run to completion after its parent's cancel, so the
-        sweep recurses through children after the parent's workflow dies, regardless of this
-        turn's own state. False when the turn already reached its own terminal."""
-        frame = TerminalFrame(status="cancelled")
-        async with workspace_tx() as connection:
-            cancelled = await connection.execute(
-                sa.update(tables.turn)
-                .values(
-                    status="cancelled",
-                    terminal=frame.model_dump(mode="json"),
-                    updated_at=sa.func.now(),
-                )
-                .where(tables.turn.c.id == turn_id, tables.turn.c.status.in_(WORKFLOW_STATUSES))
-            )
-        if cancelled.rowcount == 1:
-            await self.dbos.cancel_workflow_async(str(turn_id))
-        async with workspace_tx() as connection:
-            children = (
-                (
-                    await connection.execute(
-                        sa.select(tables.turn.c.id).where(tables.turn.c.parent_turn_id == turn_id)
-                    )
-                )
-                .scalars()
-                .all()
-            )
-        for child_id in children:
-            await self.cancel(child_id)
-        return cancelled.rowcount == 1
+        """Terminalize a live turn through the shared `cancel_one_turn` primitive: cancel its DBOS
+        workflow — dequeuing a queued run, preempting a streaming model round — then commit its
+        cancelled terminal. Returns False when the turn already reached its own terminal (the
+        deadline racing its own done commit), which the primitive leaves untouched. The research
+        subagents a delegated turn spawned are cancelled by the serve process's cancel reconciler,
+        which sweeps any turn left live under a cancelled ancestor; the primitive's
+        cancel-before-commit ordering keeps a crash mid-cancel from orphaning this root, which the
+        reconciler never re-examines."""
+        return await cancel_one_turn(self.dbos, turn_id)
 
     async def _cancel_overdue(self, conversation_id: UUID, turn_id: UUID) -> Trajectory | None:
         """The wait's deadline fired: terminalize the turn before the runner advances. A turn that

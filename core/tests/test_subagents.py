@@ -252,13 +252,18 @@ def test_a_profile_can_pin_a_distinct_model() -> None:
 
 @dataclass
 class _RecordingClient:
-    """Records the workflow argument (the follow-up turn id) each enqueue carries, so the message
-    test reads back which turn the workflow placed on the queue — never asserting DBOS itself."""
+    """Records the workflow argument each enqueue carries (the message test reads back which turn
+    the workflow placed on the queue) and each turn id a cancel targets (the cancel test reads back
+    what the tool asked DBOS to cancel) — never asserting DBOS itself."""
 
     enqueued: list[str] = field(default_factory=list)
+    cancelled: list[str] = field(default_factory=list)
 
     async def enqueue_async(self, options: object, workspace_id: str, turn_id: str) -> None:
         self.enqueued.append(turn_id)
+
+    async def cancel_workflow_async(self, workflow_id: str) -> None:
+        self.cancelled.append(workflow_id)
 
 
 class _FailingClient:
@@ -878,3 +883,37 @@ async def test_wait_refuses_a_turn_this_parent_did_not_spawn(
     subagents = Subagents(client=client, registry=SubagentRegistry(()), parent=parent)
     with pytest.raises(ValueError, match="not a subagent this turn spawned"):
         await subagents.wait((child, stranger))
+
+
+async def _turn_status(turn_id: UUID) -> str:
+    async with workspace_tx() as connection:
+        return (
+            await connection.execute(
+                sa.select(tables.turn.c.status).where(tables.turn.c.id == turn_id)
+            )
+        ).scalar_one()
+
+
+async def test_cancel_cancels_the_childs_workflow_and_commits_its_terminal(db: None) -> None:
+    """`cancel_subagent` cancels the child's workflow and commits its cancelled terminal through the
+    shared primitive, then reports the child's status. Turns the child itself spawned are left for
+    the cancel reconciler."""
+    workspace_id, agent_id = await _workspace_agent()
+    parent = await _parent(workspace_id, agent_id)
+    child, _ = await _running_child(workspace_id, agent_id, parent.id)
+    client = _RecordingClient()
+    subagents = Subagents(client=client, registry=SubagentRegistry(()), parent=parent)
+    status = await subagents.cancel(child)
+    assert (status.turn_id, status.status) == (child, "cancelled")
+    assert client.cancelled == [str(child)]
+    assert await _turn_status(child) == "cancelled"
+
+
+async def test_cancel_refuses_a_turn_this_parent_did_not_spawn(db: None) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    parent = await _parent(workspace_id, agent_id)
+    stranger, _ = await _running_child(workspace_id, agent_id, uuid4())
+    subagents = Subagents(client=_RecordingClient(), registry=SubagentRegistry(()), parent=parent)
+    with pytest.raises(ValueError, match="not a subagent this turn spawned"):
+        await subagents.cancel(stranger)
+    assert await _turn_status(stranger) == "running"

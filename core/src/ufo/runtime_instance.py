@@ -1,5 +1,5 @@
-"""The shared fleet's seat, its heartbeat, and the executor-recovery sweep — the only
-instance-aware code in core.
+"""The shared fleet's seat, its heartbeat, the executor-recovery sweep, and the cancel reconciler —
+the fleet-wide background sweeps every serve process runs.
 
 Every live serve process holds a bare `runtime_instance` seat it heartbeats — the shared fleet has
 no single workspace to pin. The heartbeat is a per-process loop, not a shared job, so each instance
@@ -18,16 +18,20 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import sqlalchemy as sa
-from dbos import DBOS
+from dbos import DBOS, DBOSClient
 from dbos import error as dbos_error
 
+from ufo.cancellation import cancel_one_turn
 from ufo.db import owner_tx
 from ufo.o11y import log
 from ufo.schema import tables
+from ufo.schema.records import CANCELLED, NON_TERMINAL_STATUSES
+from ufo.workspace import ws
 
 HEARTBEAT_INTERVAL_SECONDS = 2
 STALE_AFTER_SECONDS = 10
 EXECUTOR_RECOVERY_INTERVAL_SECONDS = 5
+CANCEL_RECONCILE_INTERVAL_SECONDS = 5
 PENDING_WORKFLOW_SCAN_LIMIT = 1000
 
 
@@ -152,3 +156,79 @@ class ExecutorRecovery:
                 )
             ).all()
         return {str(row.id) for row in rows}
+
+
+@dataclass(frozen=True)
+class CancelReconciler:
+    """Cascade a cancel to the descendant turns it spawned — the sole mechanism that carries a
+    cancel down the tree. Cancelling a turn (the eval driver's deadline, the `cancel_subagent` tool)
+    is a local act through `cancel_one_turn`: it terminalizes just that turn. This sweep cancels
+    everything beneath it. On an interval it finds every non-terminal turn with a cancelled
+    ancestor — climbing the `parent_turn_id` chain, so a live grandchild beneath a child that
+    already finished on its own (`done`) is still reached — and cancels each through the same
+    `cancel_one_turn` primitive, cancelling its workflow before committing its terminal.
+
+    Interval-driven rather than pushed from the canceller: the cost is paid only when a cancel
+    actually happens, the sweep is inherently crash-safe (a descendant left live by a fault or
+    re-dispatched by DBOS recovery is simply re-selected next tick and converges), and cancellation
+    stays off the realtime turn loop. A running descendant therefore stops within one interval
+    rather than instantly — bounded and, since a model round usually outlasts the interval, under a
+    round of extra burn. Every serve process runs it, so any survivor reconciles a crashed peer's
+    cancels; a failed tick is logged and the loop continues, mirroring the recovery sweep."""
+
+    client: DBOSClient
+    interval_seconds: float = CANCEL_RECONCILE_INTERVAL_SECONDS
+
+    async def run(self) -> None:
+        while True:
+            await asyncio.sleep(self.interval_seconds)
+            try:
+                await self.sweep()
+            except (sa.exc.SQLAlchemyError, dbos_error.DBOSException) as error:
+                log("instance.cancel_reconcile_failed", error_class=type(error).__name__)
+
+    async def sweep(self) -> None:
+        async with owner_tx() as connection:
+            orphans = (await connection.execute(self._orphans_query())).all()
+        for orphan in orphans:
+            with ws(orphan.workspace_id):
+                cancelled = await cancel_one_turn(self.client, orphan.id)
+            if cancelled:
+                log("instance.cancel_reconciled", turn_id=str(orphan.id))
+
+    def _orphans_query(self) -> sa.Select:
+        """Every non-terminal turn that has a cancelled ancestor, with its workspace. Climbs the
+        `parent_turn_id` chain from each live turn: a turn is an orphan the moment any turn above it
+        is cancelled, whatever the statuses in between — so a live grandchild under an intermediate
+        that finished `done` is caught, not only a direct child of the cancelled turn. Bounded by
+        the live-turn count and depth; it stops climbing once a cancelled ancestor is hit."""
+        turn = tables.turn
+        chain = (
+            sa.select(
+                turn.c.id.label("orphan"),
+                turn.c.workspace_id.label("orphan_workspace"),
+                turn.c.parent_turn_id.label("ancestor_parent"),
+                turn.c.status.label("ancestor_status"),
+            )
+            .where(turn.c.status.in_(NON_TERMINAL_STATUSES))
+            .cte("cancel_orphan_chain", recursive=True)
+        )
+        ancestor = turn.alias("ancestor")
+        chain = chain.union_all(
+            sa.select(
+                chain.c.orphan,
+                chain.c.orphan_workspace,
+                ancestor.c.parent_turn_id,
+                ancestor.c.status,
+            )
+            .select_from(chain.join(ancestor, ancestor.c.id == chain.c.ancestor_parent))
+            .where(chain.c.ancestor_status != CANCELLED)
+        )
+        return (
+            sa.select(
+                chain.c.orphan.label("id"),
+                chain.c.orphan_workspace.label("workspace_id"),
+            )
+            .where(chain.c.ancestor_status == CANCELLED)
+            .distinct()
+        )

@@ -2052,19 +2052,17 @@ async def test_workspace_driver_deadline_cancels_a_running_turn(db: None, tmp_pa
     assert row.terminal["status"] == "cancelled"
 
 
-async def test_workspace_driver_cancel_sweeps_live_descendants(db: None, tmp_path) -> None:
-    """A delegated child turn is its own workflow: cancelling only the parent leaves the child
-    running to completion unobserved, so cancel recurses through descendants — the grandchild of a
-    cancelled turn dies with it, and every cancelled row carries its terminal."""
+async def test_workspace_driver_cancel_terminalizes_only_the_turn(db: None, tmp_path) -> None:
+    """Cancel is a local act through the shared primitive: the driver terminalizes the target turn
+    and cancels only its workflow. A delegated child turn is its own workflow, left live for the
+    serve process's cancel reconciler, which sweeps any turn under a cancelled ancestor — the driver
+    never recurses to descendants."""
     workspace_id = await _workspace()
     agent_id = await _seed_agent(workspace_id)
     conversations = DbConversations(workspace_id)
     parent_id = await _seed_running_turn(workspace_id, agent_id, await conversations.open("parent"))
     child_id = await _seed_running_turn(
         workspace_id, agent_id, await conversations.open("child"), parent_turn_id=parent_id
-    )
-    grandchild_id = await _seed_running_turn(
-        workspace_id, agent_id, await conversations.open("grandchild"), parent_turn_id=child_id
     )
     dbos = CancellingDbos()
     driver = WorkspaceDriver(
@@ -2075,17 +2073,20 @@ async def test_workspace_driver_cancel_sweeps_live_descendants(db: None, tmp_pat
         cancelled = await driver.cancel(parent_id)
 
     assert cancelled
-    assert dbos.cancelled == [str(parent_id), str(child_id), str(grandchild_id)]
+    assert dbos.cancelled == [str(parent_id)]
     async with workspace_tx() as connection:
-        rows = (
-            await connection.execute(
-                sa.select(tables.turn.c.status, tables.turn.c.terminal).where(
-                    tables.turn.c.id.in_([parent_id, child_id, grandchild_id])
+        statuses = {
+            row.id: row.status
+            for row in (
+                await connection.execute(
+                    sa.select(tables.turn.c.id, tables.turn.c.status).where(
+                        tables.turn.c.id.in_([parent_id, child_id])
+                    )
                 )
-            )
-        ).all()
-    assert [row.status for row in rows] == ["cancelled"] * 3
-    assert all(row.terminal["status"] == "cancelled" for row in rows)
+            ).all()
+        }
+    assert statuses[parent_id] == "cancelled"
+    assert statuses[child_id] == "running"
 
 
 async def test_workspace_driver_deadline_race_settles_the_turns_own_terminal(

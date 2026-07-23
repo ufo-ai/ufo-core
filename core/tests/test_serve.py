@@ -113,13 +113,17 @@ async def test_serve_lifespan_waits_for_background_shutdown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     recovery = ShutdownProbe()
+    reconciler = ShutdownProbe()
     poller = ShutdownProbe()
     monkeypatch.setattr(serve, "ExecutorRecovery", lambda: recovery)
-    app = SimpleNamespace(state=SimpleNamespace(writeback_poller=poller))
+    monkeypatch.setattr(serve, "CancelReconciler", lambda client: reconciler)
+    app = SimpleNamespace(state=SimpleNamespace(dbos=object(), writeback_poller=poller))
     async with serve._serve_lifespan(app):
         await recovery.started.wait()
+        await reconciler.started.wait()
         await poller.started.wait()
     assert recovery.stopped.is_set()
+    assert reconciler.stopped.is_set()
     assert poller.stopped.is_set()
 
 
@@ -127,8 +131,10 @@ async def test_serve_lifespan_propagates_a_background_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     recovery = FailureProbe()
+    reconciler = ShutdownProbe()
     monkeypatch.setattr(serve, "ExecutorRecovery", lambda: recovery)
-    app = SimpleNamespace(state=SimpleNamespace(writeback_poller=None))
+    monkeypatch.setattr(serve, "CancelReconciler", lambda client: reconciler)
+    app = SimpleNamespace(state=SimpleNamespace(dbos=object(), writeback_poller=None))
     with pytest.raises(ExceptionGroup) as raised:
         async with serve._serve_lifespan(app):
             await recovery.started.wait()
