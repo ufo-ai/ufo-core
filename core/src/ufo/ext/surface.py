@@ -1064,14 +1064,14 @@ class SurfaceSpec:
 
     name: str
     routes: tuple[SurfaceRoute, ...]
-    post: PostHandler | None = None
-    attach: AttachHandler | None = None
-    identify: WorkspaceResolver | None = None
-    """How shared serve resolves a request's workspace before binding it. The async resolver
+    identify: WorkspaceResolver
+    """How the shared fleet resolves a request's workspace before binding it. The async resolver
     uses `SurfaceAuth` to map an installation and verify that workspace's credential. A UUID binds
     that workspace, None rejects the request, and a Response completes a bounded side-effect-free
-    pre-binding handshake. A dedicated deploy pins one workspace and never calls this; a surface
-    that omits it is not mounted on shared serve."""
+    pre-binding handshake. Required because the shared fleet is the only runtime and every request
+    must resolve its workspace before touching any data — a surface cannot mount without it."""
+    post: PostHandler | None = None
+    attach: AttachHandler | None = None
 
 
 def _writeback_due(now: datetime) -> sa.ColumnElement[bool]:

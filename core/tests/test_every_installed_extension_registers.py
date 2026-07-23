@@ -14,7 +14,6 @@ registration defect this test names precisely. Live construction of a key- or se
 route to the extension's spec, never fail loud that no extension registers the name."""
 
 from pathlib import Path
-from uuid import uuid4
 
 import pytest
 from cryptography.fernet import Fernet
@@ -58,7 +57,7 @@ from ufo.models.registry import model_registry
 from ufo.serve import (
     _connect_flow,
     _mount_ext_routes,
-    _mount_surfaces,
+    _mount_shared_surfaces,
     _select_auth_proxy,
     _select_carrier,
     _select_cdp_provider,
@@ -71,7 +70,6 @@ from ufo.tools.registry import ToolRegistry
 
 INSTALLED: dict[str, tuple[Manifest, object]] = discovered()
 PACKS = discovered_packs()
-WORKSPACE_ID = uuid4()
 REDIS_URL = "redis://localhost:6379/0"
 PUBLIC_BASE_URL = "https://ufo.test"
 
@@ -226,10 +224,9 @@ def _check_surfaces(manifest: Manifest, store: CredentialStore, tmp_path: Path) 
     if not manifest.surfaces:
         return
     app = FastAPI()
-    _mount_surfaces(
+    _mount_shared_surfaces(
         app,
         (manifest,),
-        WORKSPACE_ID,
         store,
         FilesystemBlobStore(root=tmp_path),
         InProcessHub(),
@@ -247,7 +244,7 @@ def _check_routes(manifest: Manifest, store: CredentialStore) -> None:
     if not manifest.routes:
         return
     app = FastAPI()
-    _mount_ext_routes(app, (manifest,), WORKSPACE_ID, store, None, None)
+    _mount_ext_routes(app, (manifest,), store, None, None)
     mounted = {route.path for route in app.routes}
     for spec in manifest.routes:
         assert f"/ext/{manifest.name}/{spec.path.lstrip('/')}" in mounted

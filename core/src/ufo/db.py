@@ -1,12 +1,10 @@
 """The tenancy boundary: module-private engines, workspace_tx as the only scoped session source.
 
-Isolation is set per transaction from an ambient workspace, so one shared-serve process (one
-connection pool) safely serves many workspaces: a request/turn/job sets `current_workspace` at its
-boundary, and `workspace_tx` pins the RLS GUC (`app.workspace_id`) for that transaction. The
-contextvar defaults to unset — then `workspace_tx` sets no GUC and the connection's own role
-default scopes it on a dedicated single-workspace server.
-The shared-serve role is an RLS *subject* with no pinned default, so a transaction that never set
-the workspace fails closed — the policy's `current_setting` errors on the unset GUC, never a leak.
+Isolation is set per transaction from an ambient workspace, so one serve process (one connection
+pool) safely serves many workspaces: a request/turn/job sets `current_workspace` at its boundary,
+and `workspace_tx` pins the RLS GUC (`app.workspace_id`) for that transaction. The serve role is an
+RLS *subject* with no pinned default, so a transaction that never set the workspace fails closed —
+the policy's `current_setting` errors on the unset GUC, never a leak.
 
 `owner_tx` is the one exception: the RLS-bypassing read the cross-workspace background sweeps
 enumerate through — never a scoped read, and the caller re-binds each row under `with ws(...)`.
@@ -60,11 +58,11 @@ def init_db(url: str) -> None:
 
 
 def init_owner_db(url: str) -> None:
-    """The RLS-bypassing owner-role engine `owner_tx` enumerates through on the shared fleet, built
-    from the owner DSN (`UFO_OWNER_DSN`, the same secret the shared proxy opens). It owns the tables
-    and is never FORCEd RLS, so it reads across every workspace — the one cross-tenant path. A
-    dedicated server never sets it: `owner_tx` falls to `_engine`, whose role enumerates that
-    server's single workspace."""
+    """The RLS-bypassing owner-role engine `owner_tx` enumerates through, built from the owner DSN
+    (`UFO_OWNER_DSN`, the same secret the shared proxy opens). It owns the tables and is never
+    FORCEd RLS, so it reads across every workspace — the one cross-tenant path. `serve` always sets
+    it (and `ufoctl proxy` opens the owner DSN as its sole `init_db` engine); a one-shot `ufoctl`
+    verb opens no owner engine, so `owner_tx` falls to `_engine` and its own role scopes it."""
     global _owner_engine
     if _owner_engine is not None:
         raise RuntimeError("owner db already initialized")
@@ -128,11 +126,11 @@ async def owner_tx() -> AsyncIterator[AsyncConnection]:
     """The one cross-workspace read path: a transaction that pins NO workspace GUC, so it enumerates
     every workspace this deploy serves. The background sweeps find their work across workspaces
     through it, then re-scope each unit under `with ws(row.workspace_id)`. With an owner engine set
-    (shared fleet) it bypasses RLS and sees all workspaces; without one it falls to the main engine,
-    whose role scopes it to the dedicated server's single workspace. The same call therefore
-    enumerates one workspace when dedicated and all workspaces when shared. It
-    threads no workspace and sets no GUC, so nothing it yields is a tenant boundary: never read a
-    row's contents through it beyond the identifiers needed to re-bind that row's own workspace."""
+    (`serve`, and `ufoctl proxy`, which opens the owner DSN) it bypasses RLS through the owner role;
+    without one it falls to the sole `init_db` engine, whose own role scopes it — the local
+    single-role deploy a one-shot `ufoctl` verb runs against. It threads no workspace and sets no
+    GUC, so nothing it yields is a tenant boundary: never read a row's contents through it beyond
+    the identifiers needed to re-bind that row's own workspace."""
     engine = _owner_engine or _engine
     if engine is None:
         raise RuntimeError("db not initialized (init_db runs in the composition root)")

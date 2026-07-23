@@ -133,6 +133,10 @@ async def _unused_ingest(ctx: SurfaceContext, request: object) -> object:
     raise AssertionError("ingest is not exercised by the poller tests")
 
 
+async def _unused_identify(request: object, auth: object) -> None:
+    raise AssertionError("identify is not exercised by the poller tests")
+
+
 async def _seed(*, member_email: str | None = None) -> tuple[UUID, UUID, UUID | None]:
     workspace_id, agent_id = uuid4(), uuid4()
     member_id = uuid4() if member_email is not None else None
@@ -294,6 +298,7 @@ def _fleet_poller(
     spec = SurfaceSpec(
         name=SURFACE,
         routes=(SurfaceRoute(method="POST", path="", handler=_unused_ingest),),
+        identify=_unused_identify,
         post=surface.post,
         attach=surface.attach,
     )
@@ -935,12 +940,14 @@ async def test_writeback_retry_after_does_not_defer_another_surface(db: None, tm
             SURFACE: SurfaceSpec(
                 name=SURFACE,
                 routes=(SurfaceRoute(method="POST", path="", handler=_unused_ingest),),
+                identify=_unused_identify,
                 post=delayed.post,
                 attach=delayed.attach,
             ),
             "other": SurfaceSpec(
                 name="other",
                 routes=(SurfaceRoute(method="POST", path="", handler=_unused_ingest),),
+                identify=_unused_identify,
                 post=delivered.post,
                 attach=delivered.attach,
             ),

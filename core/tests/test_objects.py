@@ -550,7 +550,7 @@ async def test_agent_apply_and_pending_proposal_write_disjoint_fields(db: None) 
             ),
         )
         await Governance(workspace_id=workspace_id, extension="probe").approve_proposal(
-            ref.proposal_id, owner
+            ref.proposal_id
         )
         async with workspace_tx() as connection:
             status = (

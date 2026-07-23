@@ -2,17 +2,15 @@
 
 Rules are values the proxy reads, not an API extensions call: a credential slot implies its
 sentinel→real injection, a granted host implies its scope, a metered host implies its dimension.
-Three derivations produce them — the deploy's model provider from its key, each manifest credential
-slot from its stored secret, and each OAuth grant from its host — and derivation is the only path
-in. A grant injects nothing: the broker holds the account's token and executes server-side, so a
-grant only admits and meters its host."""
+Two derivations produce them — the deploy's model provider from its key, and each OAuth grant from
+its host — and derivation is the only path in. A grant injects nothing: the broker holds the
+account's token and executes server-side, so a grant only admits and meters its host."""
 
 from collections.abc import Mapping
 from dataclasses import dataclass
 from uuid import UUID
 
 from ufo.connectors import CliCredential, RequestForwarder
-from ufo.credentials import CredentialSlotUnset, CredentialStore
 from ufo.ext.manifest import Manifest
 from ufo.grants import Grant, grant_sentinel
 from ufo.sandbox.session import SENTINEL_MODEL_KEY
@@ -154,30 +152,3 @@ def connector_transfer_hosts(manifests: tuple[Manifest, ...]) -> dict[str, tuple
         for connector in manifest.connectors
         if connector.transfer_hosts
     }
-
-
-async def derive_credential_rules(
-    manifests: tuple[Manifest, ...], workspace_id: UUID, store: CredentialStore
-) -> tuple[Rule, ...]:
-    """Each declared slot with an injection target becomes the egress rules that reach its host and
-    swap its stored secret in for the sentinel; a slot with no stored secret opens no egress, and a
-    slot with no injection target is code-only, never on the wire."""
-    rules: list[Rule] = []
-    for manifest in manifests:
-        for slot in manifest.credentials:
-            target = slot.injection
-            if target is None:
-                continue
-            try:
-                real = await store.get(workspace_id, slot.name)
-            except CredentialSlotUnset:
-                continue
-            rules.append(ScopeRule(allowed_hosts=frozenset({target.host})))
-            rules.append(
-                InjectionRule(
-                    host=target.host, header=target.header, sentinel=target.sentinel, real=real
-                )
-            )
-            if target.dimension is not None:
-                rules.append(MeterRule(host=target.host, dimension=target.dimension))
-    return tuple(rules)

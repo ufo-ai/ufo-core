@@ -55,7 +55,7 @@ from ufo.schema.records import (
     QuestionOption,
     TerminalFrame,
 )
-from ufo.serve import _mount_shared_surfaces, _mount_surfaces
+from ufo.serve import _mount_shared_surfaces
 from ufo.workspace import ws
 
 TEAM_ID = "T0000001"
@@ -307,14 +307,14 @@ async def _mount_transport(
 ):
     _patch_httpx(monkeypatch, transport)
     store = await _store(workspace_id)
+    await _register_slack(store, workspace_id)
     blob = FilesystemBlobStore(root=tmp_path)
     if identity:
         await _write_identity(blob, workspace_id)
     app = FastAPI()
-    _mount_surfaces(
+    _mount_shared_surfaces(
         app,
         (slack_manifest(),),
-        workspace_id,
         store,
         blob,
         hub or InProcessHub(),
@@ -379,13 +379,13 @@ async def test_manifest_workspace_verifies_with_its_own_signing_slot(
     _patch_httpx(monkeypatch, _mock_transport(recorder, {}))
     store = await _store(workspace_id)
     await store.put(workspace_id, slack.SLACK_SIGNING_SECRET_SLOT, own_secret)
+    await _register_slack(store, workspace_id)
     blob = FilesystemBlobStore(root=tmp_path)
     await _write_identity(blob, workspace_id)
     app = FastAPI()
-    _mount_surfaces(
+    _mount_shared_surfaces(
         app,
         (slack_manifest(),),
-        workspace_id,
         store,
         blob,
         InProcessHub(),
@@ -639,24 +639,6 @@ async def test_dedicated_surface_accepts_unqualified_event_and_interactive_route
     assert interactive_response.json() == {"ok": True, "ignored": True}
 
 
-async def test_url_verification_answers_the_signed_challenge(
-    db: None, tmp_path, monkeypatch
-) -> None:
-    """Slack's `url_verification` handshake is signed like any request: the deploy's one signing
-    secret verifies it and the bounded challenge echoes; an unsigned probe is a clean 401."""
-    workspace_id, _ = await _seed()
-    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, [])
-    body = json.dumps({"type": "url_verification", "challenge": "chal-1"}).encode()
-    async with client:
-        unsigned = await client.post(EVENTS_PATH, content=body)
-        assert unsigned.status_code == 401
-        answered = await client.post(
-            EVENTS_PATH, content=body, headers=_sign(body, int(time.time()))
-        )
-    assert answered.status_code == 200
-    assert answered.json() == {"challenge": "chal-1"}
-
-
 async def test_shared_handshake_echoes_without_binding_a_workspace(
     db: None, tmp_path, monkeypatch
 ) -> None:
@@ -706,24 +688,6 @@ def _sign_with(secret: str, body: bytes) -> dict[str, str]:
     }
 
 
-async def test_foreign_team_event_is_ignored(db: None, tmp_path, monkeypatch) -> None:
-    """A signed event whose team is not the installed one is acked and dropped — one deploy app,
-    but each workspace answers only for its own team."""
-    workspace_id, _ = await _seed()
-    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, [])
-    foreign = json.dumps(
-        {
-            "team_id": "T0FOREIGN",
-            "event": {"type": "app_mention", "user": "U1", "channel": "C1", "ts": "1.0"},
-        }
-    ).encode()
-    async with client:
-        ignored = await client.post(
-            EVENTS_PATH, content=foreign, headers=_sign(foreign, int(time.time()))
-        )
-    assert ignored.json() == {"ok": True, "ignored": True}
-
-
 def _install_state(store: CredentialStore, workspace_id: UUID, member_id: UUID) -> str:
     """A Fernet-sealed install handoff the surface's callback opens — the same seal the owner's
     `slack_connect` mints, carrying the workspace, owner, bot-token slot, and install marker."""
@@ -748,10 +712,9 @@ async def test_oauth_callback_installs_the_workspace(db: None, tmp_path, monkeyp
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     blob = FilesystemBlobStore(root=tmp_path)
     app = FastAPI()
-    _mount_surfaces(
+    _mount_shared_surfaces(
         app,
         (slack_manifest(),),
-        workspace_id,
         store,
         blob,
         InProcessHub(),
@@ -791,20 +754,20 @@ async def test_oauth_callback_installs_the_workspace(db: None, tmp_path, monkeyp
     assert form["redirect_uri"] == slack.slack_oauth_redirect_uri(PUBLIC_BASE_URL)
 
 
-async def test_oauth_callback_declined_page_does_not_reflect_the_error_param(
+async def test_oauth_callback_declined_carries_no_workspace_and_reflects_no_error_param(
     db: None, tmp_path, monkeypatch
 ) -> None:
-    """The declined-authorization page never reflects the attacker-controllable `error` query param
-    into its HTML — no unescaped markup reaches the response body."""
-    workspace_id, _ = await _seed()
+    """A declined authorization (an `error` query param, no sealed `state`) names no workspace, so
+    the shared fleet rejects it at the identify boundary before any handler — a clean 401 that
+    reflects no attacker-controllable markup."""
+    await _seed()
     _patch_httpx(monkeypatch, _mock_transport([], {}))
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     blob = FilesystemBlobStore(root=tmp_path)
     app = FastAPI()
-    _mount_surfaces(
+    _mount_shared_surfaces(
         app,
         (slack_manifest(),),
-        workspace_id,
         store,
         blob,
         InProcessHub(),
@@ -817,7 +780,7 @@ async def test_oauth_callback_declined_page_does_not_reflect_the_error_param(
             f"{EVENTS_PATH}/{slack.SLACK_OAUTH_CALLBACK_PATH}",
             params={"error": "<script>alert(1)</script>"},
         )
-    assert response.status_code == 400
+    assert response.status_code == 401
     assert "<script>" not in response.text
 
 
@@ -833,10 +796,9 @@ async def test_oauth_callback_refuses_a_team_bound_elsewhere(
     await _register_slack(store, other_workspace, TEAM_ID)
     blob = FilesystemBlobStore(root=tmp_path)
     app = FastAPI()
-    _mount_surfaces(
+    _mount_shared_surfaces(
         app,
         (slack_manifest(),),
-        workspace_id,
         store,
         blob,
         InProcessHub(),
@@ -856,16 +818,16 @@ async def test_oauth_callback_refuses_a_team_bound_elsewhere(
 
 
 async def test_oauth_callback_refuses_a_tampered_state(db: None, tmp_path, monkeypatch) -> None:
-    """A callback whose state does not open — tampered or expired — installs nothing."""
-    workspace_id, _ = await _seed()
+    """A callback whose state does not open — tampered or expired — names no workspace, so the
+    shared fleet rejects it at the identify boundary (401) and installs nothing."""
+    await _seed()
     _patch_httpx(monkeypatch, _mock_transport([], {}))
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     blob = FilesystemBlobStore(root=tmp_path)
     app = FastAPI()
-    _mount_surfaces(
+    _mount_shared_surfaces(
         app,
         (slack_manifest(),),
-        workspace_id,
         store,
         blob,
         InProcessHub(),
@@ -878,7 +840,7 @@ async def test_oauth_callback_refuses_a_tampered_state(db: None, tmp_path, monke
             f"{EVENTS_PATH}/{slack.SLACK_OAUTH_CALLBACK_PATH}",
             params={"code": "c", "state": "not-a-real-seal"},
         )
-    assert response.status_code == 400
+    assert response.status_code == 401
     async with workspace_tx() as connection:
         bindings = (
             await connection.execute(
@@ -902,10 +864,9 @@ async def test_oauth_callback_reports_a_rejected_code(db: None, tmp_path, monkey
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     blob = FilesystemBlobStore(root=tmp_path)
     app = FastAPI()
-    _mount_surfaces(
+    _mount_shared_surfaces(
         app,
         (slack_manifest(),),
-        workspace_id,
         store,
         blob,
         InProcessHub(),

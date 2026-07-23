@@ -16,13 +16,6 @@ from ufo.credentials import (
     seal_credential_request,
 )
 from ufo.db import workspace_tx
-from ufo.ext.manifest import CredentialSlot, InjectionTarget, Manifest
-from ufo.sandbox.proxy.rules import (
-    InjectionRule,
-    MeterRule,
-    ScopeRule,
-    derive_credential_rules,
-)
 from ufo.schema import tables
 
 
@@ -87,61 +80,6 @@ async def test_unset_slot_raises(db: None) -> None:
     store = _store()
     with pytest.raises(CredentialSlotUnset, match="missing"):
         await store.get(await _workspace(), "missing")
-
-
-async def test_derive_swaps_stored_secret_and_meters(db: None) -> None:
-    workspace_id = await _workspace()
-    store = _store()
-    await store.put(workspace_id, "sample_api", "real-secret-42")
-    manifest = Manifest(
-        name="sample",
-        version="1",
-        credentials=(
-            CredentialSlot(
-                name="sample_api",
-                description="x",
-                injection=InjectionTarget(
-                    host="api.sample.test",
-                    header="authorization",
-                    sentinel="Bearer SENTINEL",
-                    dimension="tokens",
-                ),
-            ),
-        ),
-    )
-    rules = await derive_credential_rules((manifest,), workspace_id, store)
-    scope = next(r for r in rules if isinstance(r, ScopeRule))
-    injection = next(r for r in rules if isinstance(r, InjectionRule))
-    meter = next(r for r in rules if isinstance(r, MeterRule))
-    assert scope.allowed_hosts == frozenset({"api.sample.test"})
-    assert injection.real == "real-secret-42"
-    assert injection.sentinel == "Bearer SENTINEL"
-    assert meter == MeterRule(host="api.sample.test", dimension="tokens")
-
-
-async def test_unset_slot_opens_no_egress(db: None) -> None:
-    manifest = Manifest(
-        name="s",
-        version="1",
-        credentials=(
-            CredentialSlot(
-                name="unset",
-                description="x",
-                injection=InjectionTarget(host="h", header="authorization", sentinel="S"),
-            ),
-        ),
-    )
-    assert await derive_credential_rules((manifest,), await _workspace(), _store()) == ()
-
-
-async def test_code_only_slot_has_no_wire_rule(db: None) -> None:
-    workspace_id = await _workspace()
-    store = _store()
-    await store.put(workspace_id, "code_only", "x")
-    manifest = Manifest(
-        name="s", version="1", credentials=(CredentialSlot(name="code_only", description="x"),)
-    )
-    assert await derive_credential_rules((manifest,), workspace_id, store) == ()
 
 
 def test_credential_request_seal_round_trips_and_expires() -> None:

@@ -15,10 +15,10 @@ from ufo.config import BlobConfig
 from ufo.db import current_workspace, workspace_tx
 from ufo.ext.loader import load_manifests
 from ufo.ext.manifest import Manifest
-from ufo.ext.surface import SurfaceAuth, SurfaceContext, SurfaceRoute, SurfaceSpec, Writeback
+from ufo.ext.surface import SurfaceAuth, SurfaceContext, SurfaceRoute, SurfaceSpec
 from ufo.hub import InProcessHub
 from ufo.schema import tables
-from ufo.serve import _mount_shared_surfaces, _shared_fleet_manifests
+from ufo.serve import _mount_shared_surfaces
 from ufo.workspace import ws
 
 PROBE_SURFACE = "probe"
@@ -217,56 +217,7 @@ async def test_surface_auth_resolves_only_the_exact_installation_to_a_workspace(
         assert await other.workspace("team-b") is None
 
 
-def test_shared_fleet_serves_only_extensions_whose_surfaces_all_mount() -> None:
-    """An extension declaring a surface with no request authenticator contributes nothing to shared
-    serve. Authenticated live and durable surfaces both load."""
-
-    async def _handler(context: SurfaceContext, request: Request) -> Response:
-        return Response()
-
-    async def _post(context: SurfaceContext, writeback: Writeback) -> str:
-        return ""
-
-    async def _attach(context: SurfaceContext, writeback: Writeback, reply_ref: str) -> None:
-        return None
-
-    async def _identify(request: Request, auth: SurfaceAuth) -> UUID | None:
-        return None
-
-    route = SurfaceRoute(method="POST", path="", handler=_handler)
-    capable = Manifest(
-        name="capable",
-        version="0",
-        surfaces=(SurfaceSpec(name="live", routes=(route,), identify=_identify),),
-    )
-    toolbox = Manifest(name="toolbox", version="0")
-    unidentified = Manifest(
-        name="unidentified",
-        version="0",
-        surfaces=(SurfaceSpec(name="dedicated", routes=(route,)),),
-    )
-    durable = Manifest(
-        name="durable",
-        version="0",
-        surfaces=(
-            SurfaceSpec(
-                name="writeback",
-                routes=(route,),
-                identify=_identify,
-                post=_post,
-                attach=_attach,
-            ),
-        ),
-    )
-
-    kept = _shared_fleet_manifests((capable, toolbox, unidentified, durable))
-
-    assert tuple(manifest.name for manifest in kept) == ("capable", "toolbox", "durable")
-
-
-def test_assistant_hosted_keeps_slack_and_debugger_on_shared_serve() -> None:
-    names = {
-        manifest.name for manifest in _shared_fleet_manifests(load_manifests("assistant_hosted"))
-    }
+def test_assistant_hosted_mounts_slack_and_debugger_on_shared_serve() -> None:
+    names = {manifest.name for manifest in load_manifests("assistant_hosted")}
     assert "slack" in names
     assert "debugger" in names

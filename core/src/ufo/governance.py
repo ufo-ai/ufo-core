@@ -48,14 +48,13 @@ class Governance:
                     to_digest=prompt_digest(change.new_prompt),
                     body={"prompt": change.new_prompt},
                     status=PENDING,
-                    approved_by=None,
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
             )
         return ProposalRef(proposal_id=proposal_id)
 
-    async def approve_proposal(self, proposal_id: UUID, member_id: UUID) -> None:
+    async def approve_proposal(self, proposal_id: UUID) -> None:
         async with workspace_tx() as connection:
             proposal = (
                 await connection.execute(
@@ -104,7 +103,7 @@ class Governance:
             )
             await connection.execute(
                 sa.update(tables.proposal)
-                .values(status=APPROVED, approved_by=member_id, updated_at=sa.func.now())
+                .values(status=APPROVED, updated_at=sa.func.now())
                 .where(tables.proposal.c.id == proposal_id)
             )
         log(

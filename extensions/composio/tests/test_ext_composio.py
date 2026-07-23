@@ -48,7 +48,7 @@ from ufo.sandbox.proxy.rules import connector_transfer_hosts
 from ufo.schema import tables
 from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
 from ufo.serve import _connect_flow, _connector_registry, _mount_ext_routes
-from ufo.surfaces.cli import router
+from ufo.surfaces.cli import callback_router
 from ufo.tools.builtins import ConnectAccountInput, connect_account_handler
 from ufo.tools.context import ToolContext
 from ufo.workspace import ws
@@ -668,8 +668,8 @@ async def test_shared_oauth_bridge_verifies_workspace_and_lands_the_grant(
     bridge = urlparse(await ConnectHandoff(flow).authorize(workspace_id, turn_id, member_id))
     params = {key: values[0] for key, values in parse_qs(bridge.query).items()}
     app = FastAPI()
-    app.include_router(router)
-    _mount_ext_routes(app, (composio_manifest.manifest(),), None, credentials, None, None)
+    app.include_router(callback_router)
+    _mount_ext_routes(app, (composio_manifest.manifest(),), credentials, None, None)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url=PUBLIC_BASE_URL) as client:
         rejected = await client.get(
@@ -704,27 +704,6 @@ async def test_shared_oauth_bridge_verifies_workspace_and_lands_the_grant(
             )
         ).one()
     assert (grant.account_id, grant.agent_id) == (COMPOSIO_ACCOUNT, agent_id)
-
-
-async def test_dedicated_oauth_bridge_rejects_another_workspace() -> None:
-    flow = _connect_flow(_credentials(), _config(), (composio_manifest.manifest(),))
-    assert flow is not None
-    install_connect_flow(flow)
-    url = flow.authorize(
-        workspace_id=uuid4(),
-        agent_id=uuid4(),
-        provider=PROVIDER,
-        grantor_member_id=uuid4(),
-        conversation_id=uuid4(),
-        shared=False,
-    )
-    bridge = urlparse(url)
-    params = {key: values[0] for key, values in parse_qs(bridge.query).items()}
-    app = FastAPI()
-    _mount_ext_routes(app, (composio_manifest.manifest(),), uuid4(), _credentials(), None, None)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url=PUBLIC_BASE_URL) as client:
-        response = await client.get(bridge.path, params=params)
-    assert response.status_code == 401
 
 
 async def test_call_external_tool_without_a_grant_fails_loud(

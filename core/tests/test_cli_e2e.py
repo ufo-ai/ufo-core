@@ -11,14 +11,14 @@ session's DBOS worker, so its ledger read disposes that engine first and lets th
 its own — the same lifecycle boundary the real process has between `serve` and a one-shot verb."""
 
 import asyncio
-import hashlib
 import os
 import socket
 import threading
 import time
 from collections.abc import AsyncIterator, Iterator
+from datetime import timedelta
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
@@ -28,10 +28,12 @@ from cryptography.fernet import Fernet
 from dbos import DBOSClient
 from fastapi import FastAPI
 from ufo_ext_index_default import DefaultIndex
+from ufo_ext_ufo.manifest import manifest as ufo_manifest
 from ufo_testsupport.tables import DELETE_ORDER
 
 from ufo import cli
 from ufo.accounting import CORE_PRICING
+from ufo.bearer import mint_token
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config, load_config
 from ufo.connectors import ConnectorRegistry
@@ -47,9 +49,10 @@ from ufo.models.registry import ModelRegistry
 from ufo.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME, Usage
-from ufo.surfaces.cli import router
+from ufo.serve import _mount_shared_surfaces
 
 OWNER_EMAIL = "owner@example.com"
+TOKEN_SECRET = "cli-e2e-token-secret"
 SERVER_START_TIMEOUT_SECONDS = 10.0
 SERVER_POLL_SECONDS = 0.02
 CATALOG = """\
@@ -409,7 +412,10 @@ class _ThreadedServer:
         self._thread.join(timeout=SERVER_START_TIMEOUT_SECONDS)
 
 
-async def _bootstrap_workspace(token: str) -> None:
+async def _bootstrap_workspace() -> UUID:
+    """Seed one workspace, its owner (whose email the CLI's bearer names — the `ufo` surface links
+    the member on first contact), and the default agent. Returns the workspace id the fixture mints
+    the bearer for."""
     workspace_id, member_id, agent_id = uuid4(), uuid4(), uuid4()
     async with workspace_tx() as connection:
         for table in DELETE_ORDER:
@@ -439,37 +445,31 @@ async def _bootstrap_workspace(token: str) -> None:
                 updated_at=sa.func.now(),
             )
         )
-        await connection.execute(
-            sa.insert(tables.surface_identity).values(
-                workspace_id=workspace_id,
-                member_id=member_id,
-                surface="cli",
-                external_id=hashlib.sha256(token.encode()).hexdigest(),
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
+    return workspace_id
 
 
 @pytest.fixture
 def chat_server(
     dbos_launched_cli: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[tuple[CliRunner, str]]:
-    """A live in-process server the real `chat` verb talks to: the CLI surface router over the
+    """A live in-process server the real `chat` verb talks to: the shared `ufo` surface over the
     session DBOS worker and a StandIn-model runtime, on an ephemeral port the written config names.
+    The verb reaches it exactly as it reaches the hosted fleet — a signed member bearer to
+    `/surface/ufo/{channel}` — so this exercises the real client wire, not a dedicated shortcut.
     Yields the runner and the config path so verbs run against this same SQLite database."""
     config = dbos_launched_cli
+    monkeypatch.setenv("UFO_TOKEN_SECRET", TOKEN_SECRET)
     init_db(config.database.url)
-    token = "cli-token-" + uuid4().hex
-    asyncio.run(_bootstrap_workspace(token))
+    workspace_id = asyncio.run(_bootstrap_workspace())
 
     hub = InProcessHub()
+    blob = FilesystemBlobStore(root=config.blob.root)
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
     loop_queue.reset_runtime()
     loop_queue.init_runtime(
         loop_queue.Runtime(
             config=config,
-            blob=FilesystemBlobStore(root=config.blob.root),
+            blob=blob,
             workspace_fs=None,
             hub=hub,
             carrier=StandInCarrier(),
@@ -492,10 +492,7 @@ def chat_server(
 
     port = _free_port()
     app = FastAPI()
-    app.state.hub = hub
-    app.state.dbos = dbos_client
-    app.state.durable_surfaces = frozenset()
-    app.include_router(router)
+    _mount_shared_surfaces(app, (ufo_manifest(),), None, blob, hub, dbos_client, "", None)
     server = _ThreadedServer(app, port)
     server.start()
 
@@ -508,6 +505,7 @@ def chat_server(
     monkeypatch.setenv("UFO_CONFIG", str(config_path))
     monkeypatch.setenv("UFOCTL_DIR", str(tmp_path / ".ufoctl"))
     (tmp_path / ".ufoctl").mkdir(mode=0o700, exist_ok=True)
+    token = mint_token(TOKEN_SECRET, str(workspace_id), OWNER_EMAIL, timedelta(hours=1))
     (tmp_path / ".ufoctl" / "token").write_text(token)
 
     try:
@@ -519,20 +517,17 @@ def chat_server(
         asyncio.run(dispose_db())
 
 
-def test_chat_streams_a_terminal_frame_then_spend_reports_the_burn(
+def test_chat_streams_the_answer_then_spend_reports_the_burn(
     chat_server: tuple[CliRunner, str],
 ) -> None:
-    """The headline keyless end-to-end: the real `chat` verb admits a turn on the live server, the
-    StandIn turn runs through the full DBOS queue, and the stream ends on a terminal frame carrying
-    the streamed text and the authoritative cost line. Disposing the server's engine then lets the
-    real `spend` verb open its own connection and read the nonzero ledger row the turn billed."""
+    """The headline keyless end-to-end: the real `chat` verb signs into the live shared `ufo`
+    surface, admits a turn that runs the full DBOS queue on the StandIn model, and renders the
+    streamed `txt` answer from the held directive stream. Disposing the server's engine then lets
+    the real `spend` verb open its own connection and read the nonzero burn the turn billed."""
     runner, _config_path = chat_server
     chatted = runner.invoke(cli.main, ["chat", "ping"])
     assert chatted.exit_code == 0, chatted.output
     assert "echo:1" in chatted.output
-    assert "claude-opus-4-8" in chatted.output
-    assert "10 tok" in chatted.output
-    assert "$0.000110" in chatted.output
 
     asyncio.run(dispose_db())
     spent = runner.invoke(cli.main, ["spend"])

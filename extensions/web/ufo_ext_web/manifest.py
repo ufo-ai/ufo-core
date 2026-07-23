@@ -5,7 +5,7 @@ writeback and tails the hub in its own stream route."""
 
 from ufo.sdk.manifest import Manifest
 from ufo.sdk.surfaces import SurfaceSpec
-from ufo_ext_web.surface import ROUTES, SURFACE_WEB
+from ufo_ext_web.surface import ROUTES, SURFACE_WEB, resolve_workspace
 
 NAME = "web"
 VERSION = "0.1.0"
@@ -15,5 +15,5 @@ def manifest() -> Manifest:
     return Manifest(
         name=NAME,
         version=VERSION,
-        surfaces=(SurfaceSpec(name=SURFACE_WEB, routes=ROUTES),),
+        surfaces=(SurfaceSpec(name=SURFACE_WEB, routes=ROUTES, identify=resolve_workspace),),
     )

@@ -100,7 +100,6 @@ def test_derived_config_forces_shared_serve_with_a_self_owner_dsn(tmp_path: Path
         database_name="unused",
     )
 
-    assert derived.serve.shared_workspace is True
     assert derived.database.owner_url == derived.database.url
 
 

@@ -1,39 +1,19 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
 
 from ufo import runtime_instance
-from ufo.config import BlobConfig, Config, DatabaseConfig, HubConfig
 from ufo.db import workspace_tx
 from ufo.runtime_instance import (
     STALE_AFTER_SECONDS,
-    BootGuard,
     ExecutorRecovery,
     Heartbeat,
-    fingerprint_of,
     record_fleet_seat,
 )
 from ufo.schema import tables
-
-PRODUCTION_FINGERPRINT = "db=postgres;blob=s3;hub=in_process"
-
-
-def _dev_config() -> Config:
-    return Config(
-        database=DatabaseConfig(url="sqlite+aiosqlite:///dev.db"),
-        blob=BlobConfig(backend="filesystem", root=Path()),
-    )
-
-
-def _production_config() -> Config:
-    return Config(
-        database=DatabaseConfig(url="postgresql+asyncpg://u:p@h:5432/db"),
-        blob=BlobConfig(backend="s3", bucket="b"),
-    )
 
 
 async def _workspace() -> UUID:
@@ -55,9 +35,7 @@ async def _insert_instance(workspace_id: UUID, heartbeat_age_seconds: float) -> 
             sa.insert(tables.runtime_instance).values(
                 id=instance_id,
                 workspace_id=workspace_id,
-                started_at=when,
                 heartbeat_at=when,
-                fingerprint=PRODUCTION_FINGERPRINT,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -89,102 +67,6 @@ async def _row_live(instance_id: UUID) -> bool:
             )
         ).one_or_none()
     return row is not None
-
-
-def _shared_hub_config() -> Config:
-    return Config(
-        database=DatabaseConfig(url="postgresql+asyncpg://u:p@h:5432/db"),
-        blob=BlobConfig(backend="s3", bucket="b"),
-        hub=HubConfig(backend="redis", url="redis://cache:6379/0"),
-    )
-
-
-def test_fingerprint_names_the_backend_selection() -> None:
-    assert fingerprint_of(_production_config()) == PRODUCTION_FINGERPRINT
-    assert fingerprint_of(_dev_config()) == "db=sqlite;blob=filesystem;hub=in_process"
-    assert fingerprint_of(_shared_hub_config()) == "db=postgres;blob=s3;hub=redis"
-
-
-async def test_first_instance_admits_and_records_its_row(db: None) -> None:
-    workspace_id = await _workspace()
-    guard = BootGuard(config=_dev_config(), workspace_id=workspace_id, instance_id=uuid4())
-    await guard.admit()
-    assert await _row_present(guard.instance_id)
-
-
-async def test_dev_default_instance_refuses_when_a_peer_is_live(db: None) -> None:
-    workspace_id = await _workspace()
-    await _insert_instance(workspace_id, heartbeat_age_seconds=0)
-    guard = BootGuard(config=_dev_config(), workspace_id=workspace_id, instance_id=uuid4())
-    with pytest.raises(RuntimeError, match="in-process hub"):
-        await guard.admit()
-    assert not await _row_present(guard.instance_id)
-
-
-async def test_a_stale_peer_does_not_block_a_dev_default_instance(db: None) -> None:
-    workspace_id = await _workspace()
-    await _insert_instance(workspace_id, heartbeat_age_seconds=STALE_AFTER_SECONDS + 10)
-    guard = BootGuard(config=_dev_config(), workspace_id=workspace_id, instance_id=uuid4())
-    await guard.admit()
-    assert await _row_present(guard.instance_id)
-
-
-async def test_a_second_live_instance_is_refused_even_with_production_backends(db: None) -> None:
-    workspace_id = await _workspace()
-    await _insert_instance(workspace_id, heartbeat_age_seconds=0)
-    guard = BootGuard(config=_production_config(), workspace_id=workspace_id, instance_id=uuid4())
-    with pytest.raises(RuntimeError, match="in-process hub"):
-        await guard.admit()
-    assert not await _row_present(guard.instance_id)
-
-
-async def test_a_shared_hub_lifts_the_single_instance_refusal(db: None) -> None:
-    workspace_id = await _workspace()
-    await _insert_instance(workspace_id, heartbeat_age_seconds=0)
-    guard = BootGuard(config=_shared_hub_config(), workspace_id=workspace_id, instance_id=uuid4())
-    await guard.admit()
-    assert await _row_present(guard.instance_id)
-
-
-async def test_a_shared_hub_with_a_dev_default_db_or_blob_still_refuses(db: None) -> None:
-    workspace_id = await _workspace()
-    await _insert_instance(workspace_id, heartbeat_age_seconds=0)
-    config = Config(
-        database=DatabaseConfig(url="sqlite+aiosqlite:///dev.db"),
-        blob=BlobConfig(backend="filesystem", root=Path()),
-        hub=HubConfig(backend="redis", url="redis://cache:6379/0"),
-    )
-    guard = BootGuard(config=config, workspace_id=workspace_id, instance_id=uuid4())
-    with pytest.raises(RuntimeError, match="sqlite database"):
-        await guard.admit()
-    assert not await _row_present(guard.instance_id)
-
-
-async def test_two_instances_booting_at_once_admit_exactly_one(db: None) -> None:
-    workspace_id = await _workspace()
-    config = Config(
-        database=DatabaseConfig(url="postgresql+asyncpg://u:p@h:5432/db"),
-        blob=BlobConfig(backend="s3", bucket="b"),
-    )
-    first = BootGuard(config=config, workspace_id=workspace_id, instance_id=uuid4())
-    second = BootGuard(config=config, workspace_id=workspace_id, instance_id=uuid4())
-    results = await asyncio.gather(first.admit(), second.admit(), return_exceptions=True)
-    admitted = [
-        guard for guard, outcome in zip((first, second), results, strict=True) if outcome is None
-    ]
-    refused = [outcome for outcome in results if isinstance(outcome, RuntimeError)]
-    assert len(admitted) == 1
-    assert len(refused) == 1
-    assert await _row_present(admitted[0].instance_id)
-
-
-async def test_a_peer_in_another_workspace_never_blocks(db: None) -> None:
-    workspace_id = await _workspace()
-    other = await _workspace()
-    await _insert_instance(other, heartbeat_age_seconds=0)
-    guard = BootGuard(config=_dev_config(), workspace_id=workspace_id, instance_id=uuid4())
-    await guard.admit()
-    assert await _row_present(guard.instance_id)
 
 
 async def test_a_transient_error_does_not_kill_the_heartbeat_loop(
@@ -248,7 +130,7 @@ async def test_fleet_seat_has_no_workspace_and_counts_as_a_live_executor(db: Non
     same heartbeat, and read as live by the executor-recovery sweep — so a booting fleet process is
     never swept as stranded and its retirement frees the seat like any instance's."""
     instance_id = uuid4()
-    await record_fleet_seat(_production_config(), instance_id)
+    await record_fleet_seat(instance_id)
     async with workspace_tx() as connection:
         row = (
             await connection.execute(

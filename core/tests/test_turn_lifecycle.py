@@ -1,7 +1,5 @@
 import asyncio
-import hashlib
 import json
-import secrets
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,8 +8,6 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 from dbos import DBOSClient
-from fastapi import FastAPI
-from httpx import ASGITransport, AsyncClient
 from pydantic import BaseModel
 from ufo_ext_index_default import DefaultIndex
 from ufo_testsupport.stream_gate import GatingHub, StreamGate, release_when_running
@@ -28,7 +24,7 @@ from ufo.db import workspace_tx
 from ufo.ext.context import context_for
 from ufo.ext.loader import embed_backend, index_backend, skill_registry
 from ufo.ext.manifest import EmbedBackendSpec, IndexBackendSpec, Manifest, ModelProviderSpec
-from ufo.hub import Hub, InProcessHub
+from ufo.hub import CostTick, Hub, InProcessHub, Parked, Terminal
 from ufo.jobs import TurnDispatcher
 from ufo.loop import queue as loop_queue
 from ufo.loop.engine import (
@@ -52,8 +48,7 @@ from ufo.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, Sandbo
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame, Turn, Usage
 from ufo.surfaces import hub_tail
-from ufo.surfaces.admission import Admission, AdmissionInvoker
-from ufo.surfaces.cli import router
+from ufo.surfaces.admission import Admission, AdmissionInvoker, MemberAdmission
 from ufo.tools.context import TextContent, ToolContext, ToolResult
 from ufo.tools.registry import ToolDef
 from ufo.transcript import Conversation
@@ -368,31 +363,86 @@ def dbos_runtime(
     loop_queue.reset_runtime()
 
 
+@dataclass(frozen=True)
+class Seed:
+    workspace_id: UUID
+    member_id: UUID
+    agent_id: UUID
+    conversation_id: UUID
+
+
+@dataclass(frozen=True)
+class Turns:
+    """The turn-engine harness: admit a member turn onto the durable queue and read its live frames
+    off the hub — the surface-agnostic halves (`MemberAdmission`, `hub_tail`) every surface reaches
+    through, exercised directly so these tests bind the engine, not a surface."""
+
+    hub: Hub
+    admission: Admission
+
+    async def admit(self, seed: Seed, body: str, idempotency_key: str | None = None) -> str:
+        turn_id = await MemberAdmission(
+            admission=self.admission, workspace_id=seed.workspace_id
+        ).admit(
+            seed.conversation_id,
+            seed.agent_id,
+            body,
+            idempotency_key=idempotency_key,
+            speaker_member_id=seed.member_id,
+        )
+        return str(turn_id)
+
+    async def consume(self, seed: Seed, turn_id: str) -> tuple[str, dict[str, object]]:
+        deltas: list[str] = []
+        with ws(seed.workspace_id):
+            async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+                async for _cursor, frame in hub_tail.tail_frames(self.hub, UUID(turn_id)):
+                    match frame:
+                        case TextDelta():
+                            deltas.append(frame.text)
+                        case Terminal():
+                            return "".join(deltas), frame.frame.model_dump(mode="json")
+        raise AssertionError("stream ended without a terminal frame")
+
+    async def consume_park(self, seed: Seed, turn_id: str) -> str:
+        with ws(seed.workspace_id):
+            async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+                async for _cursor, frame in hub_tail.tail_frames(self.hub, UUID(turn_id)):
+                    if isinstance(frame, Parked):
+                        return frame.message
+        raise AssertionError("stream ended without a park frame")
+
+    async def consume_costs(self, seed: Seed, turn_id: str) -> list[dict[str, object]]:
+        costs: list[dict[str, object]] = []
+        with ws(seed.workspace_id):
+            async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+                async for _cursor, frame in hub_tail.tail_frames(self.hub, UUID(turn_id)):
+                    match frame:
+                        case CostTick():
+                            costs.append(frame.model_dump(mode="json"))
+                        case Terminal():
+                            return costs
+        raise AssertionError("stream ended without a terminal frame")
+
+
 @pytest.fixture
 async def surface(
     db: None,
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore],
     monkeypatch: pytest.MonkeyPatch,
-) -> AsyncIterator[AsyncClient]:
-    config, hub, _ = dbos_runtime
+) -> AsyncIterator[Turns]:
+    _config, hub, _ = dbos_runtime
     STREAM_GATE.reset()
     monkeypatch.setattr(
         hub_tail, "turn_status_frame", release_when_running(STREAM_GATE, hub_tail.turn_status_frame)
     )
-    app = FastAPI()
-    app.state.hub = hub
-    app.state.dbos = DBOSClient(system_database_url=config.database.system_url)
-    app.state.durable_surfaces = frozenset()
-    app.state.shared_workspace = False
-    app.include_router(router)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://surface") as client:
-        yield client
-    app.state.dbos.destroy()
+    assert loop_queue._runtime is not None
+    admission = Admission(dbos=loop_queue._runtime.dbos, durable_surfaces=frozenset())
+    yield Turns(hub=hub, admission=admission)
 
 
-async def _bootstrap(model: str = "claude-opus-4-8") -> dict[str, str]:
-    token = secrets.token_hex(16)
-    workspace_id, member_id, agent_id = uuid4(), uuid4(), uuid4()
+async def _bootstrap(model: str = "claude-opus-4-8") -> Seed:
+    workspace_id, member_id, agent_id, conversation_id = uuid4(), uuid4(), uuid4(), uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.workspace).values(
@@ -403,7 +453,7 @@ async def _bootstrap(model: str = "claude-opus-4-8") -> dict[str, str]:
             sa.insert(tables.member).values(
                 id=member_id,
                 workspace_id=workspace_id,
-                email=f"{token[:8]}@example.com",
+                email=f"{member_id.hex[:8]}@example.com",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -420,35 +470,17 @@ async def _bootstrap(model: str = "claude-opus-4-8") -> dict[str, str]:
             )
         )
         await connection.execute(
-            sa.insert(tables.surface_identity).values(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
                 workspace_id=workspace_id,
-                member_id=member_id,
                 surface="cli",
-                external_id=hashlib.sha256(token.encode()).hexdigest(),
+                queue_key=uuid4().hex,
+                member_id=member_id,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
         )
-    return {"authorization": f"Bearer {token}", "x-ufo-session": uuid4().hex}
-
-
-async def _consume(
-    client: AsyncClient, headers: dict[str, str], turn_id: str
-) -> tuple[str, dict[str, object]]:
-    deltas: list[str] = []
-    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
-        async with client.stream("GET", f"/v1/turns/{turn_id}/stream", headers=headers) as stream:
-            assert stream.status_code == 200
-            async for line in stream.aiter_lines():
-                if not line:
-                    continue
-                payload = json.loads(line)
-                if "frame" in payload:
-                    return "".join(deltas), payload["frame"]
-                if "text" not in payload:
-                    continue
-                deltas.append(payload["text"])
-    raise AssertionError("stream ended without a terminal frame")
+    return Seed(workspace_id, member_id, agent_id, conversation_id)
 
 
 async def _read_transcript(
@@ -497,13 +529,11 @@ async def test_workspace_mount_source_is_absolute_for_a_relative_blob_root(
     assert await asyncio.to_thread(Path(mount.host_path).is_dir)
 
 
-async def test_turn_round_trip_bills_and_persists(surface: AsyncClient) -> None:
-    headers = await _bootstrap()
+async def test_turn_round_trip_bills_and_persists(surface: Turns) -> None:
+    seed = await _bootstrap()
     STREAM_GATE.arm()
-    admitted = await surface.post("/v1/chat", content=b"ping", headers=headers)
-    assert admitted.status_code == 200
-    turn_id = admitted.json()["turn_id"]
-    streamed, terminal = await _consume(surface, headers, turn_id)
+    turn_id = await surface.admit(seed, "ping")
+    streamed, terminal = await surface.consume(seed, turn_id)
     assert streamed == "echo:1"
     assert terminal["status"] == "done"
     assert terminal["tokens"] == 10
@@ -522,71 +552,59 @@ async def test_turn_round_trip_bills_and_persists(surface: AsyncClient) -> None:
             )
         ).one()
     assert (int(billed.amount), int(billed.priced_micro_usd)) == (10, 110)
-    _, _, blob = _runtime_parts(surface)
+    _, _, blob = _runtime_parts()
     stored = await _read_transcript(blob, conversation_id, 1)
     assert stored.seq == 1
     assert _bodies(stored) == ["ping", "echo:1"]
 
 
-async def test_auto_model_resolves_to_the_configured_default(surface: AsyncClient) -> None:
+async def test_auto_model_resolves_to_the_configured_default(surface: Turns) -> None:
     """An agent authored model-agnostic (`model = "auto"`) resolves at turn time to the deploy's
     configured default, so the run selects a backend, bills, and reports under the concrete model —
     never the sentinel, which no provider serves."""
-    headers = await _bootstrap(model="auto")
-    admitted = await surface.post("/v1/chat", content=b"ping", headers=headers)
-    assert admitted.status_code == 200
-    _, terminal = await _consume(surface, headers, admitted.json()["turn_id"])
+    seed = await _bootstrap(model="auto")
+    turn_id = await surface.admit(seed, "ping")
+    _, terminal = await surface.consume(seed, turn_id)
     assert terminal["status"] == "done"
     assert terminal["model"] == "claude-opus-4-8"
 
 
-async def test_cost_ticks_stream_as_a_turn_accrues_spend(surface: AsyncClient) -> None:
-    headers = await _bootstrap()
+async def test_cost_ticks_stream_as_a_turn_accrues_spend(surface: Turns) -> None:
+    seed = await _bootstrap()
     STREAM_GATE.arm()
-    turn_id = (await surface.post("/v1/chat", content=b"ping", headers=headers)).json()["turn_id"]
-    costs: list[dict[str, object]] = []
-    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
-        async with surface.stream("GET", f"/v1/turns/{turn_id}/stream", headers=headers) as stream:
-            assert stream.status_code == 200
-            async for line in stream.aiter_lines():
-                if not line:
-                    continue
-                payload = json.loads(line)
-                if "cost_micro_usd" in payload:
-                    costs.append(payload)
-                if "frame" in payload:
-                    break
+    turn_id = await surface.admit(seed, "ping")
+    costs = await surface.consume_costs(seed, turn_id)
     assert costs
     assert costs[-1] == {"cost_micro_usd": 110, "tokens": 10}
 
 
-async def test_second_turn_continues_the_conversation(surface: AsyncClient) -> None:
-    headers = await _bootstrap()
+async def test_second_turn_continues_the_conversation(surface: Turns) -> None:
+    seed = await _bootstrap()
     STREAM_GATE.arm()
-    first = (await surface.post("/v1/chat", content=b"one", headers=headers)).json()["turn_id"]
-    await _consume(surface, headers, first)
-    second = (await surface.post("/v1/chat", content=b"two", headers=headers)).json()["turn_id"]
-    streamed, terminal = await _consume(surface, headers, second)
+    first = await surface.admit(seed, "one")
+    await surface.consume(seed, first)
+    second = await surface.admit(seed, "two")
+    streamed, terminal = await surface.consume(seed, second)
     assert terminal["status"] == "done"
     assert streamed == "echo:3"
     _, conversation_id = await _turn_row(second)
-    _, _, blob = _runtime_parts(surface)
+    _, _, blob = _runtime_parts()
     stored = await _read_transcript(blob, conversation_id, 2)
     assert stored.seq == 2
     assert len(stored.messages) == 4
 
 
 async def test_redelivery_of_a_finished_turn_republishes_through_the_worker(
-    surface: AsyncClient,
+    surface: Turns,
 ) -> None:
     """A redelivery of an already-finished turn, replayed through the real worker entrypoint: the
     claim fails on the terminal row, and the repair flow persists the founding inbound and returns
     superseded — the member's own message survives even if the original run crashed before writing
     its transcript. The full exchange (arrivals, answer) is written by the original run's normal
     path, not reconstructed here."""
-    headers = await _bootstrap()
-    first = (await surface.post("/v1/chat", content=b"hi", headers=headers)).json()["turn_id"]
-    await _consume(surface, headers, first)
+    seed = await _bootstrap()
+    first = await surface.admit(seed, "hi")
+    await surface.consume(seed, first)
     _, conversation_id = await _turn_row(first)
     crashed = uuid4()
     async with workspace_tx() as connection:
@@ -636,25 +654,25 @@ async def test_redelivery_of_a_finished_turn_republishes_through_the_worker(
     assert any(text.endswith("follow-up") for text in texts)
 
 
-async def test_mid_turn_messages_absorb_into_the_running_turn(surface: AsyncClient) -> None:
+async def test_mid_turn_messages_absorb_into_the_running_turn(surface: Turns) -> None:
     """Messages sent while a turn runs land on the conversation's inbound queue and the running
     turn absorbs them: the done-commit refuses to close over pending arrivals, the next round
     drains each as its own context-tagged user message, and one reply answers everything. The
     armed gate holds the first turn mid-stream — past its first (empty) drain, before its answer —
     so both sends land in the guarded window deterministically."""
-    headers = await _bootstrap()
+    seed = await _bootstrap()
     STREAM_GATE.arm()
-    first = (await surface.post("/v1/chat", content=b"one", headers=headers)).json()["turn_id"]
+    first = await surface.admit(seed, "one")
     async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
         while True:
             if first in STREAM_GATE._gates:
                 break
             await asyncio.sleep(0.01)
-    second = (await surface.post("/v1/chat", content=b"two", headers=headers)).json()["turn_id"]
-    third = (await surface.post("/v1/chat", content=b"three", headers=headers)).json()["turn_id"]
+    second = await surface.admit(seed, "two")
+    third = await surface.admit(seed, "three")
     assert second == first
     assert third == first
-    streamed, terminal = await _consume(surface, headers, first)
+    streamed, terminal = await surface.consume(seed, first)
     assert terminal["status"] == "done"
     assert streamed == "echo:1echo:4"
     assert terminal["text"] == "echo:4"
@@ -677,20 +695,18 @@ async def test_mid_turn_messages_absorb_into_the_running_turn(surface: AsyncClie
         ).scalar_one()
     assert turns == 1
     assert unconsumed == 0
-    _, _, blob = _runtime_parts(surface)
+    _, _, blob = _runtime_parts()
     stored = await _read_transcript(blob, conversation_id, 1)
     assert stored.seq == 1
     assert _bodies(stored) == ["one", "echo:1", "two", "three", "echo:4"]
 
 
 async def test_failure_commits_terminal_bills_nothing_preserves_inbound(
-    surface: AsyncClient,
+    surface: Turns,
 ) -> None:
-    headers = await _bootstrap()
-    turn_id = (await surface.post("/v1/chat", content=b"explode", headers=headers)).json()[
-        "turn_id"
-    ]
-    streamed, terminal = await _consume(surface, headers, turn_id)
+    seed = await _bootstrap()
+    turn_id = await surface.admit(seed, "explode")
+    streamed, terminal = await surface.consume(seed, turn_id)
     assert streamed == ""
     assert terminal["status"] == "failed"
     assert terminal["error_class"] == "RuntimeError"
@@ -706,7 +722,7 @@ async def test_failure_commits_terminal_bills_nothing_preserves_inbound(
             )
         ).scalar_one()
     assert billed == 0
-    _, _, blob = _runtime_parts(surface)
+    _, _, blob = _runtime_parts()
     stored = await _read_transcript(blob, conversation_id, 1)
     assert _bodies(stored) == ["explode"]
 
@@ -772,30 +788,18 @@ async def test_backstop_terminal_carries_class_and_message(db: None) -> None:
     assert row.terminal["error_message"] == "boom outside the engine"
 
 
-async def test_next_turn_sees_a_failed_turns_inbound(surface: AsyncClient) -> None:
-    headers = await _bootstrap()
-    first = (await surface.post("/v1/chat", content=b"explode", headers=headers)).json()["turn_id"]
-    _, first_terminal = await _consume(surface, headers, first)
+async def test_next_turn_sees_a_failed_turns_inbound(surface: Turns) -> None:
+    seed = await _bootstrap()
+    first = await surface.admit(seed, "explode")
+    _, first_terminal = await surface.consume(seed, first)
     assert first_terminal["status"] == "failed"
-    second = (await surface.post("/v1/chat", content=b"ok", headers=headers)).json()["turn_id"]
-    _, second_terminal = await _consume(surface, headers, second)
+    second = await surface.admit(seed, "ok")
+    _, second_terminal = await surface.consume(seed, second)
     assert second_terminal["status"] == "done"
     _, conversation_id = await _turn_row(second)
-    _, _, blob = _runtime_parts(surface)
+    _, _, blob = _runtime_parts()
     stored = await _read_transcript(blob, conversation_id, 2)
     assert _bodies(stored)[:2] == ["explode", "ok"]
-
-
-async def test_cancel_commits_terminal_while_model_runs(surface: AsyncClient) -> None:
-    headers = await _bootstrap()
-    turn_id = (await surface.post("/v1/chat", content=b"slow", headers=headers)).json()["turn_id"]
-    await asyncio.sleep(1.0)
-    cancelled = await surface.post(f"/v1/turns/{turn_id}/cancel", headers=headers)
-    assert cancelled.json() == {"status": "cancelled"}
-    _, terminal = await _consume(surface, headers, turn_id)
-    assert terminal["status"] == "cancelled"
-    status, _ = await _turn_row(turn_id)
-    assert status == "cancelled"
 
 
 EVAL_DEADLINE_SECONDS = 1.0
@@ -855,33 +859,11 @@ async def test_eval_settle_deadline_cancels_the_turn_before_the_runner_advances(
     assert followup.clean
 
 
-async def test_foreign_token_cannot_reach_the_turn(surface: AsyncClient) -> None:
-    headers = await _bootstrap()
-    other = await _bootstrap()
-    turn_id = (await surface.post("/v1/chat", content=b"ping", headers=headers)).json()["turn_id"]
-    await _consume(surface, headers, turn_id)
-    denied = await surface.post(f"/v1/turns/{turn_id}/cancel", headers=other)
-    assert denied.status_code == 403
-
-
-def _runtime_parts(surface: AsyncClient) -> tuple[Config, Hub, FilesystemBlobStore]:
+def _runtime_parts() -> tuple[Config, Hub, FilesystemBlobStore]:
     runtime = loop_queue._runtime
     assert runtime is not None
     assert isinstance(runtime.blob, FilesystemBlobStore)
     return runtime.config, runtime.hub, runtime.blob
-
-
-async def _consume_park(client: AsyncClient, headers: dict[str, str], turn_id: str) -> str:
-    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
-        async with client.stream("GET", f"/v1/turns/{turn_id}/stream", headers=headers) as stream:
-            assert stream.status_code == 200
-            async for line in stream.aiter_lines():
-                if not line:
-                    continue
-                payload = json.loads(line)
-                if "message" in payload:
-                    return payload["message"]
-    raise AssertionError("stream ended without a park frame")
 
 
 async def _await_status(turn_id: str, target: str) -> None:
@@ -894,11 +876,11 @@ async def _await_status(turn_id: str, target: str) -> None:
 
 
 async def test_member_cap_parks_a_turn_in_surface_then_resumes_when_raised(
-    surface: AsyncClient,
+    surface: Turns,
 ) -> None:
-    headers = await _bootstrap()
-    first = (await surface.post("/v1/chat", content=b"ping", headers=headers)).json()["turn_id"]
-    _, first_terminal = await _consume(surface, headers, first)
+    seed = await _bootstrap()
+    first = await surface.admit(seed, "ping")
+    _, first_terminal = await surface.consume(seed, first)
     assert first_terminal["status"] == "done"
     async with workspace_tx() as connection:
         workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
@@ -917,8 +899,8 @@ async def test_member_cap_parks_a_turn_in_surface_then_resumes_when_raised(
                 updated_at=sa.func.now(),
             )
         )
-    second = (await surface.post("/v1/chat", content=b"again", headers=headers)).json()["turn_id"]
-    park_message = await _consume_park(surface, headers, second)
+    second = await surface.admit(seed, "again")
+    park_message = await surface.consume_park(seed, second)
     assert "parked" in park_message
     status, _ = await _turn_row(second)
     assert status == "parked"
@@ -952,12 +934,10 @@ async def test_member_cap_parks_a_turn_in_surface_then_resumes_when_raised(
     assert billed == 1
 
 
-async def test_failure_after_usage_bills_partial_usage(surface: AsyncClient) -> None:
-    headers = await _bootstrap()
-    turn_id = (
-        await surface.post("/v1/chat", content=b"explode-after-usage", headers=headers)
-    ).json()["turn_id"]
-    _, terminal = await _consume(surface, headers, turn_id)
+async def test_failure_after_usage_bills_partial_usage(surface: Turns) -> None:
+    seed = await _bootstrap()
+    turn_id = await surface.admit(seed, "explode-after-usage")
+    _, terminal = await surface.consume(seed, turn_id)
     assert terminal["status"] == "failed"
     assert terminal["error_class"] == "RuntimeError"
     assert terminal["tokens"] == 10
@@ -971,25 +951,25 @@ async def test_failure_after_usage_bills_partial_usage(surface: AsyncClient) -> 
 
 
 async def test_empty_response_nudge_recovers_and_bills_both_calls(
-    surface: AsyncClient,
+    surface: Turns,
 ) -> None:
-    headers = await _bootstrap()
+    seed = await _bootstrap()
     STREAM_GATE.arm()
-    turn_id = (await surface.post("/v1/chat", content=b"shy", headers=headers)).json()["turn_id"]
-    streamed, terminal = await _consume(surface, headers, turn_id)
+    turn_id = await surface.admit(seed, "shy")
+    streamed, terminal = await surface.consume(seed, turn_id)
     assert terminal["status"] == "done"
     assert streamed == "echo:2"
     assert terminal["tokens"] == 15
     _, conversation_id = await _turn_row(turn_id)
-    _, _, blob = _runtime_parts(surface)
+    _, _, blob = _runtime_parts()
     stored = await _read_transcript(blob, conversation_id, 1)
     assert _bodies(stored) == ["shy", EMPTY_RESPONSE_NUDGE, "echo:2"]
 
 
-async def test_empty_response_twice_fails_loud(surface: AsyncClient) -> None:
-    headers = await _bootstrap()
-    turn_id = (await surface.post("/v1/chat", content=b"mute", headers=headers)).json()["turn_id"]
-    streamed, terminal = await _consume(surface, headers, turn_id)
+async def test_empty_response_twice_fails_loud(surface: Turns) -> None:
+    seed = await _bootstrap()
+    turn_id = await surface.admit(seed, "mute")
+    streamed, terminal = await surface.consume(seed, turn_id)
     assert streamed == ""
     assert terminal["status"] == "failed"
     assert terminal["error_class"] == "RuntimeError"
@@ -997,20 +977,18 @@ async def test_empty_response_twice_fails_loud(surface: AsyncClient) -> None:
     assert terminal["tokens"] == 10
 
 
-async def test_a_truncated_round_recovers_and_the_turn_completes(surface: AsyncClient) -> None:
+async def test_a_truncated_round_recovers_and_the_turn_completes(surface: Turns) -> None:
     """A stream dying at max_tokens is recovered: the correction is fed back as a user message
     and the retried round answers the turn — through the full surface/DBOS runtime."""
-    headers = await _bootstrap()
-    turn_id = (await surface.post("/v1/chat", content=b"truncate", headers=headers)).json()[
-        "turn_id"
-    ]
-    _, terminal = await _consume(surface, headers, turn_id)
+    seed = await _bootstrap()
+    turn_id = await surface.admit(seed, "truncate")
+    _, terminal = await surface.consume(seed, turn_id)
     assert terminal["status"] == "done"
     assert terminal["text"] == "echo:2"
 
 
 async def test_a_model_round_error_commits_a_terminal_without_leaking_an_orphaned_future(
-    surface: AsyncClient, dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore]
+    surface: Turns, dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore]
 ) -> None:
     """A fatal mid-stream model error commits ONE durable failed terminal carrying the model's
     error class AND message, and the turn workflow completes cleanly — it does NOT re-raise into
@@ -1020,11 +998,9 @@ async def test_a_model_round_error_commits_a_terminal_without_leaking_an_orphane
     workflow SUCCESS with the turn's terminal status as its output, so the retrieval leg returns
     that status instead of raising a pickled exception nobody consumes."""
     config, _, _ = dbos_runtime
-    headers = await _bootstrap()
-    turn_id = (await surface.post("/v1/chat", content=b"explode", headers=headers)).json()[
-        "turn_id"
-    ]
-    _, terminal = await _consume(surface, headers, turn_id)
+    seed = await _bootstrap()
+    turn_id = await surface.admit(seed, "explode")
+    _, terminal = await surface.consume(seed, turn_id)
     assert terminal["status"] == "failed"
     assert terminal["error_class"] == "RuntimeError"
     assert terminal["error_message"] == "boom"
@@ -1052,34 +1028,26 @@ async def test_a_model_round_error_commits_a_terminal_without_leaking_an_orphane
     assert workflow.status == "SUCCESS"
 
 
-async def test_concurrent_admissions_land_every_message_once(surface: AsyncClient) -> None:
+async def test_concurrent_admissions_land_every_message_once(surface: Turns) -> None:
     """A burst of concurrent sends serializes on the conversation lock: each message either opens
     a turn or lands exactly once on the live turn's inbound queue, and every reply covers what it
     drained — no message is doubled, none is dropped."""
-    headers = await _bootstrap()
-    responses = await asyncio.gather(
-        *(
-            surface.post("/v1/chat", content=f"burst {n}".encode(), headers=headers)
-            for n in range(10)
-        )
-    )
-    turn_ids = {response.json()["turn_id"] for response in responses}
+    seed = await _bootstrap()
+    turn_ids = set(await asyncio.gather(*(surface.admit(seed, f"burst {n}") for n in range(10))))
     async with workspace_tx() as connection:
         foundings = (await connection.execute(sa.select(tables.turn.c.inbound))).scalars().all()
         queued = (
             (await connection.execute(sa.select(tables.inbound_message.c.body))).scalars().all()
         )
     assert sorted([*foundings, *queued]) == sorted(f"burst {n}" for n in range(10))
-    results = await asyncio.gather(*(_consume(surface, headers, turn_id) for turn_id in turn_ids))
+    results = await asyncio.gather(*(surface.consume(seed, turn_id) for turn_id in turn_ids))
     assert all(terminal["status"] == "done" for _, terminal in results)
 
 
-async def test_typed_subagent_round_trips_schema(surface: AsyncClient) -> None:
-    headers = await _bootstrap()
-    parent = (await surface.post("/v1/chat", content=b"spawn-subagent", headers=headers)).json()[
-        "turn_id"
-    ]
-    _, terminal = await _consume(surface, headers, parent)
+async def test_typed_subagent_round_trips_schema(surface: Turns) -> None:
+    seed = await _bootstrap()
+    parent = await surface.admit(seed, "spawn-subagent")
+    _, terminal = await surface.consume(seed, parent)
     assert terminal["status"] == "done"
     async with workspace_tx() as connection:
         child = (
@@ -1097,7 +1065,7 @@ async def test_typed_subagent_round_trips_schema(surface: AsyncClient) -> None:
     child_output = TerminalFrame.model_validate(child.terminal).text
     assert RoundTripOutput.model_validate_json(child_output).echoed == 21
     _, conversation_id = await _turn_row(parent)
-    _, _, blob = _runtime_parts(surface)
+    _, _, blob = _runtime_parts()
     stored = await _read_transcript(blob, conversation_id, 1)
     tool_result = next(
         block
@@ -1111,13 +1079,11 @@ async def test_typed_subagent_round_trips_schema(surface: AsyncClient) -> None:
 
 
 async def test_subagent_exhausting_its_round_budget_does_not_detonate_its_parent(
-    surface: AsyncClient,
+    surface: Turns,
 ) -> None:
-    headers = await _bootstrap()
-    parent = (await surface.post("/v1/chat", content=b"spawn-exhaust", headers=headers)).json()[
-        "turn_id"
-    ]
-    _, terminal = await _consume(surface, headers, parent)
+    seed = await _bootstrap()
+    parent = await surface.admit(seed, "spawn-exhaust")
+    _, terminal = await surface.consume(seed, parent)
     assert terminal["status"] == "done"
     async with workspace_tx() as connection:
         child = (
@@ -1133,13 +1099,11 @@ async def test_subagent_exhausting_its_round_budget_does_not_detonate_its_parent
 
 
 async def test_subagent_bills_under_its_profile_model_not_the_parents(
-    surface: AsyncClient,
+    surface: Turns,
 ) -> None:
-    headers = await _bootstrap()
-    parent = (await surface.post("/v1/chat", content=b"spawn-pinned", headers=headers)).json()[
-        "turn_id"
-    ]
-    _, terminal = await _consume(surface, headers, parent)
+    seed = await _bootstrap()
+    parent = await surface.admit(seed, "spawn-pinned")
+    _, terminal = await surface.consume(seed, parent)
     assert terminal["status"] == "done"
     assert terminal["model"] == "claude-opus-4-8"
     async with workspace_tx() as connection:
@@ -1190,27 +1154,23 @@ async def _child_echo(parent: str) -> int:
     ).echoed
 
 
-async def test_subagent_extended_context_lifts_the_round_ceiling(surface: AsyncClient) -> None:
+async def test_subagent_extended_context_lifts_the_round_ceiling(surface: Turns) -> None:
     """A subagent whose payload carries `extended_context: true` runs under MAIN_ROUND_LIMIT, not
     its own smaller `max_rounds`. The `extend` profile burns a tool round and echoes on the next —
     a reach its 1-round budget cannot make: capped it force-finals to the sentinel, extended it
     reaches the real echo."""
-    headers = await _bootstrap()
-    extended = (await surface.post("/v1/chat", content=b"spawn-extended", headers=headers)).json()[
-        "turn_id"
-    ]
-    _, extended_terminal = await _consume(surface, headers, extended)
+    seed = await _bootstrap()
+    extended = await surface.admit(seed, "spawn-extended")
+    _, extended_terminal = await surface.consume(seed, extended)
     assert extended_terminal["status"] == "done"
-    capped = (await surface.post("/v1/chat", content=b"spawn-capped", headers=headers)).json()[
-        "turn_id"
-    ]
-    _, capped_terminal = await _consume(surface, headers, capped)
+    capped = await surface.admit(seed, "spawn-capped")
+    _, capped_terminal = await surface.consume(seed, capped)
     assert capped_terminal["status"] == "done"
     assert await _child_echo(extended) == 42
     assert await _child_echo(capped) == FORCED_ECHO
 
 
-async def test_subagent_preload_skills_mounts_and_injects_the_skill(surface: AsyncClient) -> None:
+async def test_subagent_preload_skills_mounts_and_injects_the_skill(surface: Turns) -> None:
     """A subagent whose payload carries `preload_skills` starts with the skill mounted into its
     sandbox and its instructions already in the system prompt — no `load_skill` round needed."""
     runtime = loop_queue._runtime
@@ -1219,11 +1179,9 @@ async def test_subagent_preload_skills_mounts_and_injects_the_skill(surface: Asy
     skill = runtime.skills.named("sandbox")
     runtime.carrier.writes.clear()
     SEEN_SYSTEM_PROMPTS.clear()
-    headers = await _bootstrap()
-    parent = (await surface.post("/v1/chat", content=b"spawn-preload", headers=headers)).json()[
-        "turn_id"
-    ]
-    _, terminal = await _consume(surface, headers, parent)
+    seed = await _bootstrap()
+    parent = await surface.admit(seed, "spawn-preload")
+    _, terminal = await surface.consume(seed, parent)
     assert terminal["status"] == "done"
     assert await _child_echo(parent) == 5
     mounted = dict(runtime.carrier.writes)
@@ -1233,18 +1191,16 @@ async def test_subagent_preload_skills_mounts_and_injects_the_skill(surface: Asy
 
 
 async def test_subagent_plain_text_followup_runs_without_a_spawn_payload(
-    surface: AsyncClient,
+    surface: Turns,
 ) -> None:
     """`message_subagent` stores free text as the follow-up turn's inbound — only the child's
     spawn turn (seq 1) carries the JSON payload, so the follow-up must run to its own terminal
     without parsing one."""
     runtime = loop_queue._runtime
     assert runtime is not None
-    headers = await _bootstrap()
-    parent_id = (await surface.post("/v1/chat", content=b"spawn-subagent", headers=headers)).json()[
-        "turn_id"
-    ]
-    _, terminal = await _consume(surface, headers, parent_id)
+    seed = await _bootstrap()
+    parent_id = await surface.admit(seed, "spawn-subagent")
+    _, terminal = await surface.consume(seed, parent_id)
     assert terminal["status"] == "done"
     async with workspace_tx() as connection:
         parent_row = (
@@ -1275,15 +1231,13 @@ async def test_subagent_plain_text_followup_runs_without_a_spawn_payload(
     assert RoundTripOutput.model_validate_json(followup.text).echoed == FOLLOWUP_ECHO
 
 
-async def test_profile_only_tools_stay_out_of_main_agent_turns(surface: AsyncClient) -> None:
+async def test_profile_only_tools_stay_out_of_main_agent_turns(surface: Turns) -> None:
     """Both ends of the profile-only seam through the real turn path: the main agent's registry
     never offers the tool, and the profile that names it still resolves it for its child turn."""
-    headers = await _bootstrap()
+    seed = await _bootstrap()
     SEEN_TOOLS.clear()
-    parent = (await surface.post("/v1/chat", content=b"spawn-subagent", headers=headers)).json()[
-        "turn_id"
-    ]
-    _, terminal = await _consume(surface, headers, parent)
+    parent = await surface.admit(seed, "spawn-subagent")
+    _, terminal = await surface.consume(seed, parent)
     assert terminal["status"] == "done"
     main_offers = [names for names in SEEN_TOOLS if "spawn_subagent" in names]
     child_offers = [names for names in SEEN_TOOLS if "hidden_probe" in names]

@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
-import sqlalchemy as sa
 import uvicorn
 from cryptography.fernet import Fernet
 from dbos import DBOS, DBOSClient
@@ -30,7 +29,7 @@ from ufo.config import (
 )
 from ufo.connectors import AuthProxy, ConnectorEntry, ConnectorRegistry
 from ufo.credentials import CredentialStore
-from ufo.db import current_workspace, init_db, init_owner_db, workspace_tx
+from ufo.db import current_workspace, init_db, init_owner_db
 from ufo.ext.context import CredentialAccess, context_for
 from ufo.ext.loader import (
     NotRegisteredError,
@@ -71,13 +70,12 @@ from ufo.memory import DEFAULT_MEMORY_SEARCH_PROVIDER
 from ufo.models.registry import model_registry
 from ufo.o11y import init_o11y, log
 from ufo.proxy_serve import OWNER_DSN_ENV, model_rule_base
-from ufo.runtime_instance import BootGuard, ExecutorRecovery, Heartbeat, record_fleet_seat
+from ufo.runtime_instance import ExecutorRecovery, Heartbeat, record_fleet_seat
 from ufo.sandbox.fs_creds import DEFAULT_S3_REGION, AwsStsClient, SandboxFsCredentialMinter
 from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.proxy.rules import Rule, connector_transfer_hosts, derive_credential_rules
+from ufo.sandbox.proxy.rules import Rule, connector_transfer_hosts
 from ufo.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
 from ufo.sandbox.session import EGRESS_CA_CERT_ENV, Carrier, ProxyEndpoint
-from ufo.schema import tables
 from ufo.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION, DBOS_MAX_EXECUTOR_THREADS
 from ufo.search import SearchProvider
 from ufo.sources.sync import (
@@ -86,11 +84,10 @@ from ufo.sources.sync import (
     FolderSource,
     SourceBackend,
     SyncDriver,
-    register_sources,
 )
 from ufo.surfaces.admission import Admission, AdmissionInvoker, MemberAdmission
 from ufo.surfaces.artifacts import router as artifacts_router
-from ufo.surfaces.cli import CONNECT_CALLBACK_PATH, callback_router, router
+from ufo.surfaces.cli import CONNECT_CALLBACK_PATH, callback_router
 from ufo.surfaces.hub_tail import HubTailer
 from ufo.workspace import init_workspace_credentials, ws
 
@@ -118,7 +115,9 @@ def _assert_no_reserved_routes(app: FastAPI) -> None:
 
 
 def run() -> None:
-    """Start the configured dedicated server or shared service."""
+    """Start the shared fleet: one process serving every workspace, resolving the workspace per
+    request (from the caller's token) and per turn (from the workflow argument), scoping each
+    transaction by the ambient `current_workspace`."""
     config = load_config()
     init_o11y(config.o11y.otlp_endpoint)
     init_db(config.database.url)
@@ -129,19 +128,9 @@ def run() -> None:
             f"credential key env {config.credentials.key_env!r} is unset but jobs are registered"
         )
     credentials = CredentialStore(fernet=Fernet(key.encode()))
-    shared = config.serve.shared_workspace
-    if shared:
-        manifests = _shared_fleet_manifests(manifests)
-        init_owner_db(_shared_owner_dsn(config))
-    else:
-        asyncio.run(_require_bootstrap())
-    workspace_id = None if shared else asyncio.run(_sole_workspace_id())
+    init_owner_db(_shared_owner_dsn(config))
     instance_id = uuid4()
-    if workspace_id is not None:
-        guard = BootGuard(config=config, workspace_id=workspace_id, instance_id=instance_id)
-        asyncio.run(guard.admit())
-    else:
-        asyncio.run(record_fleet_seat(config, instance_id))
+    asyncio.run(record_fleet_seat(instance_id))
     heartbeat = Heartbeat(instance_id=instance_id)
     threading.Thread(
         target=lambda: asyncio.run(heartbeat.run()), name="instance-heartbeat", daemon=True
@@ -198,15 +187,11 @@ def run() -> None:
     app.state.hub = hub
     app.state.dbos = dbos_client
     app.state.instance_id = instance_id
-    app.state.workspace_id = workspace_id
     app.state.durable_surfaces = durable_surfaces(manifests)
     app.state.writeback_poller = None
     app.state.blob = blob
     app.state.artifact_token_secret = artifact_secret
-    if workspace_id is not None:
-        app.include_router(router)
-    else:
-        app.include_router(callback_router)
+    app.include_router(callback_router)
     app.include_router(artifacts_router)
     sync_driver = SyncDriver(
         backends=_source_backends(manifests),
@@ -215,51 +200,25 @@ def run() -> None:
         auth_proxy=connectors,
     )
     page_feed = CorePageFeed(blob=blob)
-    if workspace_id is not None:
-        asyncio.run(register_sources(config.sources))
     _launch_jobs(runtime, sync_driver, page_feed)
-    if workspace_id is not None:
-        _mount_ext_routes(app, manifests, workspace_id, credentials, index, embed)
-        _mount_surfaces(
-            app,
-            manifests,
-            workspace_id,
-            credentials,
-            blob,
-            hub,
-            dbos_client,
-            artifact_secret,
-            config.connect.public_base_url,
-        )
-    else:
-        _mount_ext_routes(app, manifests, None, credentials, index, embed)
-        _mount_shared_surfaces(
-            app,
-            manifests,
-            credentials,
-            blob,
-            hub,
-            dbos_client,
-            artifact_secret,
-            config.connect.public_base_url,
-        )
-        _assert_no_reserved_routes(app)
-    log("serve.started", host=config.serve.host, port=config.serve.port, shared_workspace=shared)
+    _mount_ext_routes(app, manifests, credentials, index, embed)
+    _mount_shared_surfaces(
+        app,
+        manifests,
+        credentials,
+        blob,
+        hub,
+        dbos_client,
+        artifact_secret,
+        config.connect.public_base_url,
+    )
+    _assert_no_reserved_routes(app)
+    log("serve.started", host=config.serve.host, port=config.serve.port)
     try:
         uvicorn.run(app, host=config.serve.host, port=config.serve.port, log_level="warning")
     finally:
         DBOS.destroy()
         asyncio.run(heartbeat.retire())
-
-
-async def _require_bootstrap() -> None:
-    try:
-        async with workspace_tx() as connection:
-            row = (await connection.execute(sa.select(tables.workspace.c.id))).first()
-    except (sa.exc.OperationalError, sa.exc.ProgrammingError) as error:
-        raise RuntimeError("schema missing — run `ufoctl init` first") from error
-    if row is None:
-        raise RuntimeError("workspace missing — run `ufoctl init` first")
 
 
 def _shared_owner_dsn(config: Config) -> str:
@@ -323,11 +282,6 @@ def _launch_jobs(
         blob=runtime.blob,
         registry=runtime.registry,
     ).launch()
-
-
-async def _sole_workspace_id() -> UUID:
-    async with workspace_tx() as connection:
-        return (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
 
 
 def _sandbox_fs_minter(blob: BlobConfig) -> SandboxFsCredentialMinter | None:
@@ -640,26 +594,16 @@ def _select_auth_proxy(
 def _mount_ext_routes(
     app: FastAPI,
     manifests: tuple[Manifest, ...],
-    workspace_id: UUID | None,
     credentials: CredentialStore | None,
     index: IndexBackend,
     embed: EmbedClient,
 ) -> None:
-    """Mount extension routes with a verified workspace-scoped context.
-
-    A dedicated server mounts every route against its pinned workspace; a route declaring
-    `identify` must independently verify that same workspace. Shared serve mounts only identified
-    routes and runs each under the workspace its verifier returns. An unverified request is refused
-    before the handler can touch the database or credentials."""
+    """Mount every extension route under `/ext/<name>/<path>` with a verified workspace-scoped
+    context. `RouteSpec.identify` resolves and returns the request's workspace, which core binds for
+    the handler; an unresolved request is refused before the handler can touch the database or
+    credentials."""
     for manifest in manifests:
-        routes = tuple(
-            spec
-            for spec in manifest.routes
-            if workspace_id is not None or spec.identify is not None
-        )
-        if manifest.routes and not routes:
-            log("serve.shared_route.deferred", extension=manifest.name)
-        if not routes:
+        if not manifest.routes:
             continue
         if credentials is None:
             raise RuntimeError(
@@ -667,19 +611,16 @@ def _mount_ext_routes(
             )
         declared = frozenset(slot.name for slot in manifest.credentials)
         context = context_for(manifest.name, declared, index, embed)
-        for spec in routes:
+        for spec in manifest.routes:
 
             async def endpoint(
                 request: Request,
                 handler=spec.handler,
                 identify=spec.identify,
                 extension_context=context,
-                pinned_workspace=workspace_id,
             ) -> Response:
-                identified = identify(request) if identify is not None else pinned_workspace
-                if identified is None or (
-                    pinned_workspace is not None and identified != pinned_workspace
-                ):
+                identified = identify(request)
+                if identified is None:
                     return Response("unauthorized", status_code=401)
                 with ws(identified):
                     return await handler(extension_context, request)
@@ -689,80 +630,6 @@ def _mount_ext_routes(
                 endpoint,
                 methods=[spec.method],
             )
-
-
-def _mount_surfaces(
-    app: FastAPI,
-    manifests: tuple[Manifest, ...],
-    workspace_id: UUID,
-    credentials: CredentialStore | None,
-    blob: BlobStore,
-    hub: Hub,
-    dbos_client: DBOSClient,
-    artifact_secret: str,
-    public_base_url: str | None,
-) -> None:
-    """Mount every installed surface's routes under `/surface/<name>`, each request bound to that
-    surface's privileged SurfaceContext, and run one writeback poller over those that deliver by
-    writeback. A surface reads its own credential slots (a bot token, a signing secret) in-process,
-    so an installed surface whose extension declares slots without a credential key set fails loud
-    at boot rather than on the first event; a slotless surface (web) mounts with no key. A durable
-    surface (declaring `post`/`attach`) joins the poller; a live surface admits without writeback
-    and tails the hub in its own route, so the poller never sees its turns — the tailer and member
-    admission are injected capabilities."""
-    member_admission = MemberAdmission(
-        workspace_id=workspace_id,
-        admission=Admission(dbos=dbos_client, durable_surfaces=durable_surfaces(manifests)),
-    )
-    tailer = HubTailer(hub=hub)
-    registered: dict[str, SurfaceSpec] = {}
-    contexts: dict[str, SurfaceContext] = {}
-    for manifest in manifests:
-        for spec in manifest.surfaces:
-            if manifest.credentials and credentials is None:
-                raise RuntimeError(f"surface {spec.name!r} needs a credential key but none is set")
-            context = SurfaceContext(
-                workspace_id=workspace_id,
-                surface=spec.name,
-                blob=blob,
-                _admitter=member_admission,
-                _tailer=tailer,
-                _credentials=credentials,
-                _artifact_token_secret=artifact_secret,
-                _public_base_url=public_base_url,
-            )
-            contexts[spec.name] = context
-            if spec.post is not None:
-                registered[spec.name] = spec
-            for route in spec.routes:
-
-                async def endpoint(
-                    request: Request,
-                    handler=route.handler,
-                    surface_context=context,
-                    wsid=workspace_id,
-                ) -> Response:
-                    with ws(wsid):
-                        return await handler(surface_context, request)
-
-                app.add_route(
-                    f"/surface/{spec.name}/{route.path}".rstrip("/"),
-                    endpoint,
-                    methods=[route.method],
-                )
-    if registered:
-
-        def context_for(candidate_workspace: UUID, surface: str) -> SurfaceContext:
-            if candidate_workspace != workspace_id:
-                raise RuntimeError("dedicated writeback selected another workspace")
-            return contexts[surface]
-
-        app.state.writeback_poller = WritebackPoller(
-            worker_id=uuid4().hex,
-            surfaces=registered,
-            context_for=context_for,
-            candidates=writeback_workspaces(),
-        )
 
 
 @dataclass(frozen=True)
@@ -794,27 +661,6 @@ class WorkspaceScopeBoundary:
             current_workspace.set(None)
 
 
-def _shared_fleet_capable(spec: SurfaceSpec) -> bool:
-    """Whether shared serve can mount this surface: every request must authenticate its workspace
-    before core binds it. Live and durable delivery use the same bound context."""
-    return spec.identify is not None
-
-
-def _shared_fleet_manifests(manifests: tuple[Manifest, ...]) -> tuple[Manifest, ...]:
-    kept: list[Manifest] = []
-    for manifest in manifests:
-        blocked = [spec.name for spec in manifest.surfaces if not _shared_fleet_capable(spec)]
-        if blocked:
-            log(
-                "serve.shared_fleet.extension_excluded",
-                extension=manifest.name,
-                surfaces=",".join(blocked),
-            )
-            continue
-        kept.append(manifest)
-    return tuple(kept)
-
-
 def _mount_shared_surfaces(
     app: FastAPI,
     manifests: tuple[Manifest, ...],
@@ -833,9 +679,9 @@ def _mount_shared_surfaces(
     per-request SurfaceContext carries a `MemberAdmission` bound to that workspace so its
     admitted turn lands scoped to the token's workspace and no other.
 
-    A surface that declares no `identify` cannot scope a shared request and is skipped. Durable
-    surfaces share one bounded writeback poller: its owner read selects only workspace ids, then
-    every claim, build, credential read, post, and attachment runs under that workspace's
+    `SurfaceSpec.identify` is a required field, so every mounted surface scopes its own requests.
+    Durable surfaces share one bounded writeback poller: its owner read selects only workspace ids,
+    then every claim, build, credential read, post, and attachment runs under that workspace's
     binding."""
     app.add_middleware(WorkspaceScopeBoundary)
     admission = Admission(dbos=dbos_client, durable_surfaces=durable_surfaces(manifests))
@@ -862,9 +708,6 @@ def _mount_shared_surfaces(
                 _surface=spec.name,
             )
             resolver = spec.identify
-            if resolver is None or not _shared_fleet_capable(spec):
-                log("serve.shared_surface.deferred", surface=spec.name)
-                continue
             if manifest.credentials and credentials is None:
                 raise RuntimeError(f"surface {spec.name!r} needs a credential key but none is set")
             if spec.post is not None:
@@ -961,15 +804,14 @@ def _local_egress_proxy(
 ) -> ProxyEndpoint:
     """The single-node sandbox's sole route out, run in-process on its own event loop — a
     standalone network service, not part of the turn loop, that outlives every turn for the
-    process's life. One workspace's serve owns it, so (unlike the shared `ufoctl proxy`) it mints an
-    ephemeral CA with no shared trust material to carry and injects this workspace's own credential
-    secrets with no injecting-slot ban. The resolver reads the turn's agent and grants per turn
-    through `workspace_tx` — already scoped to the configured application database by `init_db` —
-    and authorizes each keyed-host CONNECT against the turn's live status, so a real key is injected
-    only while the turn runs. It binds `proxy_port` and carries no `public_url`: a local carrier
-    forms a process-local address from the port alone."""
+    process's life. It mints an ephemeral CA with no shared trust material to carry; like the shared
+    `ufoctl proxy` it carries no injectable credential secrets (an injecting slot fails loud in
+    `_local_rule_base`). The resolver reads the turn's agent and grants per turn through
+    `workspace_tx`, binding each request's own workspace, and authorizes each granted-host CONNECT
+    against the turn's live status. It binds `proxy_port` and carries no `public_url`: a local
+    carrier forms a process-local address from the port alone."""
     resolver = PerAgentRules(
-        base=asyncio.run(_local_rule_base(config, manifests, credentials)),
+        base=_local_rule_base(config, manifests),
         grants=GrantStore() if credentials is not None else None,
         transfer_hosts=connector_transfer_hosts(manifests),
         clis=connector_clis(manifests),
@@ -990,22 +832,21 @@ def _local_egress_proxy(
     return asyncio.run_coroutine_threadsafe(_boot(), loop).result(PROXY_STARTUP_TIMEOUT_SECONDS)
 
 
-async def _local_rule_base(
-    config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None
-) -> tuple[Rule, ...]:
-    """The local proxy's static base: the shared model-provider egress plus this single workspace's
-    injected credential slots. The shared proxy forbids injecting slots; the local proxy owns the
-    one workspace, so it swaps their stored secrets onto the wire itself. A slot that needs
-    injection with no credential key set fails loud."""
-    base = model_rule_base(config)
-    if not any(slot.injection for manifest in manifests for slot in manifest.credentials):
-        return base
-    if credentials is None:
+def _local_rule_base(config: Config, manifests: tuple[Manifest, ...]) -> tuple[Rule, ...]:
+    """The in-process proxy's static base: the shared model-provider egress alone. The shared fleet
+    serves every workspace, so no single workspace's stored secrets can be baked into a rule base —
+    an injecting credential slot needs the standalone `ufoctl proxy`'s per-request, per-workspace
+    resolution and fails loud here, exactly as `ProxyServe._base` refuses it."""
+    injecting = sorted(
+        slot.name for manifest in manifests for slot in manifest.credentials if slot.injection
+    )
+    if injecting:
         raise RuntimeError(
-            f"credential key env {config.credentials.key_env!r} is unset but a slot needs injection"
+            f"the in-process egress proxy cannot inject workspace credential secrets on the "
+            f"shared fleet, but the active pack declares injecting credential slot(s) {injecting}; "
+            "run the standalone `ufoctl proxy` for a deploy that needs credential injection"
         )
-    workspace_id = await _sole_workspace_id()
-    return (*base, *await derive_credential_rules(manifests, workspace_id, credentials))
+    return model_rule_base(config)
 
 
 BIND_ADDRESSES = frozenset({"0.0.0.0", "127.0.0.1", "localhost", "::", "::1"})

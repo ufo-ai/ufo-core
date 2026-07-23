@@ -21,6 +21,7 @@ import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict
 
 from ufo.sdk.authproxy import AuthProxySpec, Credential
+from ufo.sdk.bearer import workspace_claim
 from ufo.sdk.browser import CdpEndpoint, CdpLease
 from ufo.sdk.connectors import (
     BrokerFile,
@@ -99,7 +100,7 @@ from ufo.sdk.search import (
     SearchResults,
 )
 from ufo.sdk.sources import SHARED_SUBJECT, Page, SourceAuth, SyncResult
-from ufo.sdk.surfaces import SurfaceContext, SurfaceRoute, SurfaceSpec, Writeback
+from ufo.sdk.surfaces import SurfaceAuth, SurfaceContext, SurfaceRoute, SurfaceSpec, Writeback
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 
 NAME = "sample"
@@ -913,6 +914,22 @@ class SampleCarrier:
         return f"{CARRIER_CONTAINER}:{port}"
 
 
+def resolve_workspace(request: Request) -> UUID | None:
+    """The workspace a request's bearer claims, or None to reject — the shared fleet scopes each
+    request by it before the handler runs. Mirrors `ufo_ext_ufo.surface.resolve_workspace`, so the
+    sample stays a valid shared-fleet conformance probe. This is the route's synchronous
+    `RouteSpec.identify`."""
+    scheme, _, token = request.headers.get("authorization", "").partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        return None
+    return workspace_claim(token.strip())
+
+
+async def resolve_surface_workspace(request: Request, _auth: SurfaceAuth) -> UUID | None:
+    """The async `SurfaceSpec.identify`, resolving the same bearer claim as the route resolver."""
+    return resolve_workspace(request)
+
+
 def manifest() -> Manifest:
     broker: ConnectorBroker = _SampleBroker()
     return Manifest(
@@ -960,7 +977,9 @@ def manifest() -> Manifest:
                 ),
             ),
         ),
-        routes=(RouteSpec(method="POST", path=ROUTE_PATH, handler=_hook),),
+        routes=(
+            RouteSpec(method="POST", path=ROUTE_PATH, handler=_hook, identify=resolve_workspace),
+        ),
         onboarding_steps=(OnboardingStep(name=ONBOARDING_NAME, handler=_setup),),
         prompt_sections=(PromptSection(name=SECTION_NAME, body=SECTION_BODY),),
         subagents=(
@@ -1019,6 +1038,7 @@ def manifest() -> Manifest:
                 routes=(SurfaceRoute(method="POST", path="", handler=_surface_ingest),),
                 post=_surface_post,
                 attach=_surface_attach,
+                identify=resolve_surface_workspace,
             ),
             SurfaceSpec(
                 name=SURFACE_LIVE_NAME,
@@ -1032,6 +1052,7 @@ def manifest() -> Manifest:
                         handler=_surface_live_stream,
                     ),
                 ),
+                identify=resolve_surface_workspace,
             ),
         ),
         sources=(

@@ -456,9 +456,7 @@ def derived_config(
         update={
             "database": DatabaseConfig(url=url, owner_url=template.database.owner_url or url),
             "blob": template.blob.model_copy(update={"root": root / "blobs"}),
-            "serve": template.serve.model_copy(
-                update={"host": "127.0.0.1", "port": serve_port, "shared_workspace": True}
-            ),
+            "serve": template.serve.model_copy(update={"host": "127.0.0.1", "port": serve_port}),
             "sandbox": template.sandbox.model_copy(update={"proxy_port": proxy_port}),
             **(
                 {"o11y": O11yConfig(otlp_endpoint=f"http://127.0.0.1:{otlp_port}")}

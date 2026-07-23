@@ -49,7 +49,7 @@ from ufo.schema import tables
 from ufo.schema.records import CredentialPrompt, CredentialRequest, TerminalFrame, Usage
 from ufo.sdk.bearer import verify_token, workspace_claim
 from ufo.sdk.surfaces import ConnectRequest, SurfaceAuth
-from ufo.serve import _mount_shared_surfaces, _mount_surfaces
+from ufo.serve import _mount_shared_surfaces
 
 SECRET = "ufo-token-secret"
 STREAM_TIMEOUT_SECONDS = 30
@@ -429,7 +429,7 @@ async def ufo(
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
     workspace_id = await _seed_workspace()
     app = FastAPI()
-    _mount_surfaces(app, (ufo_manifest(),), workspace_id, None, blob, hub, dbos_client, "", None)
+    _mount_shared_surfaces(app, (ufo_manifest(),), None, blob, hub, dbos_client, "", None)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://ufo") as client:
         yield client, workspace_id
     dbos_client.destroy()
@@ -701,7 +701,7 @@ async def test_secret_fulfillment_lands_in_the_store_never_the_transcript(
         ),
     )
     app = FastAPI()
-    _mount_surfaces(app, (ufo_manifest(),), workspace_id, store, blob, hub, dbos_client, "", None)
+    _mount_shared_surfaces(app, (ufo_manifest(),), store, blob, hub, dbos_client, "", None)
     token = _mint(SECRET, workspace_id, "owner@example.com", _future())
     foreign = _mint(SECRET, workspace_id, "late@example.com", _future())
     try:

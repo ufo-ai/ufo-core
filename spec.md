@@ -26,7 +26,7 @@ test for the extension API — every entry must be expressible without touching 
 | Decision | Value |
 |---|---|
 | Language | Python 3.12+, uv. Monorepo: `core/` + `extensions/*` + `packs/*` + the top-level `evals/` operator package, built and shipped as one pip-installable distribution (`ufo`). `pip install ufo` brings core and evals directly; first-party extensions and packs register through entry points. Rust was considered and rejected for core: the salvage is Python, DBOS has no Rust SDK, the loop is I/O-bound, and extensions must be writable by users and agents in the AI ecosystem's default language. A hot data plane (egress proxy) may become a Rust component later without changing this. |
-| Persistence | One async-SQLAlchemy schema over **SQLite by default** (aiosqlite, WAL — zero services for dev) and **Postgres for deploys** (asyncpg); alembic migrations are the single schema source, dialect-neutral (integers for money/tokens; dialect-only types live inside IndexBackend impls). Plus a pluggable blob store (transcripts, compaction records, sandbox workspaces, shared artifacts): **local filesystem by default**, S3-compatible for deploys — the S3 API is the cloud-portability seam. Every row carries `workspace_id`; a deploy serves ONE workspace (hosted multi-workspace is the enterprise layer). |
+| Persistence | One async-SQLAlchemy schema over **SQLite by default** (aiosqlite, WAL — zero services for dev) and **Postgres for deploys** (asyncpg); alembic migrations are the single schema source, dialect-neutral (integers for money/tokens; dialect-only types live inside IndexBackend impls). Plus a pluggable blob store (transcripts, compaction records, sandbox workspaces, shared artifacts): **local filesystem by default**, S3-compatible for deploys — the S3 API is the cloud-portability seam. Every row carries `workspace_id`; one shared fleet serves every workspace, scoping each request and turn to its `workspace_id` under row-level security. |
 | Durable execution | DBOS on the same database as the schema (SQLite dev / Postgres deploys): a turn is a durable workflow, a subagent a child workflow; queues, async cancel, crash recovery. DBOS-on-SQLite is verified in U1 — fail loud, never silently fall back to requiring Postgres. Dequeue poll interval and system-DB retention are configured from day one. |
 | Streaming | Durable terminal frames in Postgres; live token deltas through a hub interface — in-process in the single-process default, a Redis hub extension for multi-instance deploys. A lost delta costs a redrawn token, never correctness. |
 | Topology | `ufoctl serve` is one process on one event loop: surfaces + DBOS workers + jobs. Everything is async-native — a blocking call stalls the whole deploy, so blocking-in-async fails lint. Scale-out = more instances plus a shared hub. |
@@ -376,7 +376,7 @@ carrier extension and needs no host Docker at all.
 ## Scale-out
 
 Scale-out is a deployment mode, not a feature: the same bundle with more instances. Nothing in core
-is instance-aware except the boot guard, its heartbeat, and the executor-recovery sweep; the only
+is instance-aware except the `runtime_instance` heartbeat and the executor-recovery sweep; the only
 extension involved is the Redis hub.
 
 | Concern | Multi-instance behavior |
@@ -395,9 +395,9 @@ Two invariants make this safe, and they hold even single-instance:
 - **The workspace is the truth, the container is cache** — a sandbox may be destroyed and
   recreated between turns from the blob store without a turn noticing beyond latency.
 
-Misconfiguration fails loud at boot: instances heartbeat a `runtime_instance` row; an instance that
-sees a live peer while configured with any dev default — in-process hub, filesystem blob store, or
-SQLite — refuses to start.
+Misconfiguration fails loud at boot: the shared owner DSN must be set and no surface may claim a
+reserved onboarding route. Instances heartbeat a `runtime_instance` row so the fleet tracks its live
+executors; a peer that stops heartbeating has its in-flight turns recovered by the survivors.
 
 ### Roles — the split that's already paid for
 
@@ -449,8 +449,8 @@ one coherent config, no code of its own beyond what it references.
 
 ## Non-goals (core, now)
 
-- No Kubernetes, CRDs, operators, or RLS multi-tenancy (the `workspace_id` column is the only
-  concession to the future).
+- No Kubernetes, CRDs, or operators in core (the enterprise k8s layer wraps core — principle 3).
+  Workspace isolation is row-level security on `workspace_id`, scoped per request and turn.
 - No Redis in the single-process default; no router service in core (both are extensions).
 - No self-improvement machinery in core (the extension API carries it — see `trajectories.read` /
   `agents.propose_change`).

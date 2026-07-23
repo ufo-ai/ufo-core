@@ -1,22 +1,23 @@
 """The web chat surface on the core surface seam, in its live mode: a self-contained chat page,
 cookie-authenticated turn admission, an SSE tail of the turn's live frames, and a spend view.
 
-Auth mirrors the CLI: a session cookie carries the member's token, and its SHA-256 digest is the web
-`surface_identity`. The first time a member's token reaches web it adopts the member from their CLI
-identity — the token's canonical home — so one human spans CLI and web under one member and one
-memory subject. Admission is the shared durable queue every surface admits onto, so the same agent
-answers everywhere; web admits without writeback and delivers by tailing the hub over SSE in its own
-stream route, never through the writeback poller. Everything web-specific lives here, reaching core
-only through the privileged `SurfaceContext` (admit, identity, tail, spend) — the SDK surface a CI
-gate pins."""
+The `ufo_session` cookie carries the signed HMAC member bearer `ufoctl init` mints (the
+`ufo.sdk.bearer` codec over `{ws, email, exp}`). The shared fleet scopes each request to the
+workspace the bearer claims (`resolve_workspace`), and the handler re-verifies it for its email —
+that email is the web `surface_identity`, resolved to (or created as) a member the first time they
+speak. Admission is the shared durable queue every surface admits onto, so the same agent answers
+everywhere; web admits without writeback and delivers by tailing the hub over SSE in its own stream
+route, never through the writeback poller. Everything web-specific lives here, reaching core only
+through the privileged `SurfaceContext` (admit, identity, tail, spend) — the SDK surface a CI gate
+pins."""
 
-import hashlib
 import html
 import json
 from collections.abc import AsyncIterator
 from uuid import UUID
 
 from ufo.sdk.accounting import MICRO_USD_PER_USD, SpendReport, SubjectTotal
+from ufo.sdk.bearer import verify_token, workspace_claim
 from ufo.sdk.http import (
     HTMLResponse,
     JSONResponse,
@@ -26,25 +27,36 @@ from ufo.sdk.http import (
     set_session_cookie,
 )
 from ufo.sdk.hub import CostTick, LiveFrame, Parked, SkillLoad, Terminal, ToolCall
-from ufo.sdk.surfaces import ConnectRequestInvalid, SurfaceContext, SurfaceRoute
+from ufo.sdk.surfaces import ConnectRequestInvalid, SurfaceAuth, SurfaceContext, SurfaceRoute
 
 SURFACE_WEB = "web"
-SURFACE_CLI = "cli"
 SESSION_COOKIE = "ufo_session"
 MAX_INBOUND_CHARS = 200_000
 SPEND_WINDOW_DEFAULT_SECONDS = 86_400
 
 
+async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | None:
+    """The `SurfaceSpec.identify` the shared fleet calls to scope a request before its handler runs:
+    the workspace the bearer claims, or None to reject. The bearer rides the `ufo_session` cookie,
+    or the `?token=` query param the landing page carries before any cookie is set (`chat_page`
+    binds it into the cookie for the requests that follow). The handler re-verifies the same bearer
+    for the member email — workspace here, identity there."""
+    token = request.cookies.get(SESSION_COOKIE, "") or request.query_params.get("token", "")
+    return workspace_claim(token) if token else None
+
+
 async def _authenticate(ctx: SurfaceContext, request: Request) -> tuple[UUID, str] | None:
-    """The member and session digest a request's cookie authenticates, or None when the cookie is
-    missing or its token names no known member. On first contact the web identity is adopted from
-    the token's CLI identity — the digest's canonical home — so one human spans both surfaces."""
+    """The member and email a request's session cookie authenticates, or None when the cookie is
+    missing or its bearer names no email for this workspace. The email is the web
+    `surface_identity`, linked to (or created as) a member on first contact."""
     token = request.cookies.get(SESSION_COOKIE, "")
     if not token:
         return None
-    digest = hashlib.sha256(token.encode()).hexdigest()
-    member_id = await ctx.linked_member(digest) or await ctx.adopt_identity(SURFACE_CLI, digest)
-    return None if member_id is None else (member_id, digest)
+    email = verify_token(token, ctx.workspace_id)
+    if email is None:
+        return None
+    member_id = await ctx.linked_member(email) or await ctx.link_member(email, email)
+    return None if member_id is None else (member_id, email)
 
 
 async def chat_page(ctx: SurfaceContext, request: Request) -> Response:
@@ -61,13 +73,13 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
     auth = await _authenticate(ctx, request)
     if auth is None:
         return Response("missing or unknown session cookie", status_code=401)
-    member_id, digest = auth
+    member_id, email = auth
     inbound = (await request.body()).decode()
     if not inbound.strip():
         return Response("empty message", status_code=400)
     if len(inbound) > MAX_INBOUND_CHARS:
         return Response(f"message exceeds {MAX_INBOUND_CHARS} characters", status_code=413)
-    conversation_id = await ctx.conversation_for(digest, member_id)
+    conversation_id = await ctx.conversation_for(email, member_id)
     agent_id = await ctx.default_agent()
     turn_id = await ctx.admit(conversation_id, agent_id, inbound, speaker_member_id=member_id)
     return JSONResponse({"turn_id": str(turn_id)})
@@ -77,7 +89,7 @@ async def stream(ctx: SurfaceContext, request: Request) -> Response:
     auth = await _authenticate(ctx, request)
     if auth is None:
         return Response("missing or unknown session cookie", status_code=401)
-    member_id, _digest = auth
+    member_id, _email = auth
     try:
         turn_id = UUID(request.path_params["turn_id"])
     except ValueError:

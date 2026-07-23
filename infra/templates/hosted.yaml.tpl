@@ -187,10 +187,9 @@ spec:
 ---
 # The shared serve fleet is one Deployment serving turns for every workspace. It runs the
 # bundle image (`ufoctl serve`) over the ufo-serve Secret's ufo.toml (mounted over the image's baked
-# dev config): [serve] shared_workspace=true, the RLS-SUBJECT ufo_serve DSN, and the hosted
-# assistant_hosted backends (s3 blob, e2b sandbox behind the shared proxy, redis hub, turbopuffer +
-# exa). It connects as ufo_serve and scopes each request/turn to its workspace per transaction (the
-# app.workspace_id GUC).
+# dev config): the RLS-SUBJECT ufo_serve DSN and the hosted assistant_hosted backends (s3 blob, e2b
+# sandbox behind the shared proxy, redis hub, turbopuffer + exa). It connects as ufo_serve and
+# scopes each request/turn to its workspace per transaction (the app.workspace_id GUC).
 apiVersion: v1
 kind: ServiceAccount
 metadata:

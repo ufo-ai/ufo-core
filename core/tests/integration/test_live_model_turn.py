@@ -1,17 +1,15 @@
 """A real streamed Anthropic turn through the DBOS queue — the live-model proof the StandIn
 lifecycle tests can't give. The model client is the real `AnthropicClient` (not monkeypatched), so
-`/v1/chat` admits a turn, the DBOS worker runs it against the live API, and the durable turn row,
-the priced ledger row, and the streamed frames are asserted from what the real call produced. Gated
-on `ANTHROPIC_API_KEY`; the carrier is the StandIn (this proves the model path, not the sandbox).
+a turn admitted through `MemberAdmission` runs on the DBOS worker against the live API, and the
+durable turn row, the priced ledger row, and the streamed frames are asserted from what the real
+call produced. Gated on `ANTHROPIC_API_KEY`; the carrier is the StandIn (this proves the model path,
+not the sandbox).
 
 Runs only where the key is set (skips with a clear reason otherwise), and serially — it shares the
 process-singleton DBOS executor with the rest of the suite."""
 
 import asyncio
-import hashlib
-import json
 import os
-import secrets
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from uuid import UUID, uuid4
@@ -19,19 +17,19 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 from dbos import DBOSClient
-from fastapi import FastAPI
-from httpx import ASGITransport, AsyncClient
 
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
 from ufo.connectors import ConnectorRegistry
 from ufo.db import workspace_tx
-from ufo.hub import InProcessHub
+from ufo.hub import Hub, InProcessHub, Terminal, TextDelta
 from ufo.loop import queue as loop_queue
 from ufo.loop.subagents import SubagentRegistry
 from ufo.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
 from ufo.schema import tables
-from ufo.surfaces.cli import router
+from ufo.surfaces.admission import Admission, MemberAdmission
+from ufo.surfaces.hub_tail import tail_frames
+from ufo.workspace import ws
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("ANTHROPIC_API_KEY"), reason="needs ANTHROPIC_API_KEY for a live model turn"
@@ -39,7 +37,7 @@ pytestmark = pytest.mark.skipif(
 
 STREAM_TIMEOUT_SECONDS = 120
 LIVE_MODEL = "claude-opus-4-8"
-LIVE_PROMPT = b"Reply with exactly the single word: pong. Do not use any tools."
+LIVE_PROMPT = "Reply with exactly the single word: pong. Do not use any tools."
 
 
 @dataclass(frozen=True)
@@ -67,10 +65,18 @@ class _StandInCarrier:
     async def destroy(self, handle: SandboxHandle) -> None: ...
 
 
+@dataclass(frozen=True)
+class Seed:
+    workspace_id: UUID
+    member_id: UUID
+    agent_id: UUID
+    conversation_id: UUID
+
+
 @pytest.fixture
-async def live_surface(
+async def live_runtime(
     db: None, dbos_launched: Config
-) -> AsyncIterator[tuple[AsyncClient, FilesystemBlobStore]]:
+) -> AsyncIterator[tuple[Hub, FilesystemBlobStore]]:
     config = dbos_launched
     hub = InProcessHub()
     blob = FilesystemBlobStore(root=config.blob.root)
@@ -97,21 +103,13 @@ async def live_surface(
             artifact_token_secret="",
         )
     )
-    app = FastAPI()
-    app.state.hub = hub
-    app.state.dbos = DBOSClient(system_database_url=config.database.system_url)
-    app.state.durable_surfaces = frozenset()
-    app.include_router(router)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://live") as client:
-        yield client, blob
-    app.state.dbos.destroy()
+    yield hub, blob
     runtime_dbos.destroy()
     loop_queue.reset_runtime()
 
 
-async def _bootstrap() -> dict[str, str]:
-    token = secrets.token_hex(16)
-    workspace_id, member_id, agent_id = uuid4(), uuid4(), uuid4()
+async def _bootstrap() -> Seed:
+    workspace_id, member_id, agent_id, conversation_id = uuid4(), uuid4(), uuid4(), uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.workspace).values(
@@ -122,7 +120,7 @@ async def _bootstrap() -> dict[str, str]:
             sa.insert(tables.member).values(
                 id=member_id,
                 workspace_id=workspace_id,
-                email=f"{token[:8]}@example.com",
+                email=f"{member_id.hex[:8]}@example.com",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -139,46 +137,47 @@ async def _bootstrap() -> dict[str, str]:
             )
         )
         await connection.execute(
-            sa.insert(tables.surface_identity).values(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
                 workspace_id=workspace_id,
-                member_id=member_id,
                 surface="cli",
-                external_id=hashlib.sha256(token.encode()).hexdigest(),
+                queue_key=uuid4().hex,
+                member_id=member_id,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
         )
-    return {"authorization": f"Bearer {token}", "x-ufo-session": uuid4().hex}
+    return Seed(workspace_id, member_id, agent_id, conversation_id)
 
 
-async def _consume(
-    client: AsyncClient, headers: dict[str, str], turn_id: str
-) -> tuple[str, dict[str, object]]:
+async def _admit(seed: Seed, body: str) -> UUID:
+    admission = Admission(dbos=loop_queue._runtime.dbos, durable_surfaces=frozenset())
+    return await MemberAdmission(admission=admission, workspace_id=seed.workspace_id).admit(
+        seed.conversation_id, seed.agent_id, body, speaker_member_id=seed.member_id
+    )
+
+
+async def _consume(hub: Hub, seed: Seed, turn_id: UUID) -> tuple[str, dict[str, object]]:
     deltas: list[str] = []
-    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
-        async with client.stream("GET", f"/v1/turns/{turn_id}/stream", headers=headers) as stream:
-            assert stream.status_code == 200
-            async for line in stream.aiter_lines():
-                if not line:
-                    continue
-                payload = json.loads(line)
-                if "frame" in payload:
-                    return "".join(deltas), payload["frame"]
-                if "text" in payload:
-                    deltas.append(payload["text"])
+    with ws(seed.workspace_id):
+        async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+            async for _cursor, frame in tail_frames(hub, turn_id):
+                match frame:
+                    case TextDelta():
+                        deltas.append(frame.text)
+                    case Terminal():
+                        return "".join(deltas), frame.frame.model_dump(mode="json")
     raise AssertionError("stream ended without a terminal frame")
 
 
 async def test_live_anthropic_turn_streams_and_bills(
-    live_surface: tuple[AsyncClient, FilesystemBlobStore],
+    live_runtime: tuple[Hub, FilesystemBlobStore],
 ) -> None:
-    client, _ = live_surface
-    headers = await _bootstrap()
-    admitted = await client.post("/v1/chat", content=LIVE_PROMPT, headers=headers)
-    assert admitted.status_code == 200
-    turn_id = admitted.json()["turn_id"]
+    hub, _ = live_runtime
+    seed = await _bootstrap()
+    turn_id = await _admit(seed, LIVE_PROMPT)
 
-    streamed, terminal = await _consume(client, headers, turn_id)
+    streamed, terminal = await _consume(hub, seed, turn_id)
 
     assert terminal["status"] == "done", terminal
     assert terminal["model"] == LIVE_MODEL
@@ -187,7 +186,7 @@ async def test_live_anthropic_turn_streams_and_bills(
     async with workspace_tx() as connection:
         status = (
             await connection.execute(
-                sa.select(tables.turn.c.status).where(tables.turn.c.id == UUID(turn_id))
+                sa.select(tables.turn.c.status).where(tables.turn.c.id == turn_id)
             )
         ).scalar_one()
         billed = (
@@ -196,7 +195,7 @@ async def test_live_anthropic_turn_streams_and_bills(
                     tables.ledger.c.amount,
                     tables.ledger.c.priced_micro_usd,
                     tables.ledger.c.model,
-                ).where(tables.ledger.c.turn_id == UUID(turn_id))
+                ).where(tables.ledger.c.turn_id == turn_id)
             )
         ).one()
     assert status == "done"

@@ -42,6 +42,11 @@ from ufo.workspace import ws
 EXTENSION = "sample"
 
 
+async def _identify_workspace(request: object, auth: object) -> None:
+    """A trivial `SurfaceSpec.identify`; this test exercises tool mapping, never the surface."""
+    return None
+
+
 @dataclass(frozen=True)
 class StubMemory:
     """Stand-in memory service: recall yields nothing, so these dispatch tests run the turn loop
@@ -330,7 +335,7 @@ def test_turn_tools_maps_extension_tools_to_owning_context_and_leaves_builtins_u
         version="0.1.0",
         tools=(NOTE_TOOL,),
         credentials=(CredentialSlot(name="sample_api", description="key"),),
-        surfaces=(SurfaceSpec(name="slack", routes=()),),
+        surfaces=(SurfaceSpec(name="slack", routes=(), identify=_identify_workspace),),
     )
     tools, ext_by_tool = turn_tools((manifest,), store)
     names = {tool.name for tool in tools}

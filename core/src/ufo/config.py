@@ -23,10 +23,9 @@ class DatabaseConfig(BaseModel):
     sibling of the application database. A dedicated server and a shared service each use one DBOS
     store paired with that application database; set it explicitly only when DBOS lives elsewhere.
 
-    `owner_url` is the RLS-bypassing owner-role DSN shared-service jobs and `ufoctl proxy` use for
-    cross-workspace enumeration. Reads bind or filter the workspace before accessing its data.
-    Dedicated servers need only `url`; shared modes fail loud when neither this field nor their
-    environment override is set."""
+    `owner_url` is the RLS-bypassing owner-role DSN the shared fleet's jobs and `ufoctl proxy` use
+    for cross-workspace enumeration. Reads bind or filter the workspace before accessing its data.
+    Serve fails loud when neither this field nor its `UFO_OWNER_DSN` override is set."""
 
     model_config = ConfigDict(extra="forbid")
     url: str
@@ -106,11 +105,6 @@ class ServeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     host: str = "127.0.0.1"
     port: int = 8710
-    shared_workspace: bool = False
-    """The shared service: one process serves every workspace, resolving the workspace per
-    request (from the member's token) and per turn (from the workflow argument) instead of pinning
-    one at boot. It connects as an RLS-*subject* role and scopes each transaction by the ambient
-    `current_workspace`. Default off for a dedicated single-workspace server."""
 
 
 class ConnectConfig(BaseModel):
@@ -175,8 +169,8 @@ class SourceConfig(BaseModel):
 
 
 class SourceEntry(BaseModel):
-    """One `[[sources]]` block: which backend, with its config. Boot registers each as a source
-    row; the sync driver polls those rows."""
+    """One content source: which backend, with its config. `register_sources` lands each as a
+    source row the sync driver polls."""
 
     model_config = ConfigDict(extra="forbid")
     backend: Literal["folder"]
@@ -258,7 +252,6 @@ class Config(BaseModel):
     o11y: O11yConfig = O11yConfig()
     sandbox: SandboxConfig = SandboxConfig()
     ext: ExtConfig = ExtConfig()
-    sources: tuple[SourceEntry, ...] = ()
     artifacts: ArtifactsConfig = ArtifactsConfig()
     hub: HubConfig = HubConfig()
     browser: BrowserConfig = BrowserConfig()

@@ -1,9 +1,10 @@
-"""The member bearer's verify half — one home for the codec every surface checks.
+"""The member bearer's codec — one home for the claim every surface checks and every minter issues.
 
-A self-contained HMAC claim, no server-side state. The mint half lives on the control plane
-(`ufo_control.gateway_token`) and the verify roles live in extensions (the `ufo` terminal surface,
-the `debug` surface) — packages that cannot import each other — so the codec is spelled out here
-once and re-exported through `ufo.sdk.bearer`:
+A self-contained HMAC claim, no server-side state. Both minters — the control-plane gateway
+(`ufo_control.gateway_token`, which delegates here) for a hosted member, and `ufoctl init` for the
+local single-workspace developer — issue through `mint_token`; the verify roles live in extensions
+(the `ufo` terminal surface, the `debug` surface) through the `ufo.sdk.bearer` re-export. The codec
+is spelled out here once:
 
     payload_json = {"ws": "<workspace uuid>", "email": "<lower email>", "exp": <unix seconds>}
     body         = base64url(payload_json)            # padding stripped
@@ -17,11 +18,31 @@ import hashlib
 import hmac
 import json
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 UFO_TOKEN_SECRET_ENV = "UFO_TOKEN_SECRET"
 TOKEN_SEPARATOR = "."
+
+
+def mint_token(
+    secret: str, workspace_id: str, email: str, ttl: timedelta, now: datetime | None = None
+) -> str:
+    """Sign a bearer claiming `workspace_id` for `email`, expiring `ttl` from now — the inverse of
+    `verified_claims`. Both minters issue through this one codec so the signed shape never drifts
+    from the verify half below."""
+    if not secret:
+        raise ValueError("token secret is required")
+    moment = now or datetime.now(tz=UTC)
+    payload = {
+        "ws": workspace_id,
+        "email": email.strip().lower(),
+        "exp": int((moment + ttl).timestamp()),
+    }
+    payload_json = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    body = base64.urlsafe_b64encode(payload_json.encode()).decode().rstrip("=")
+    signature = hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()
+    return f"{body}{TOKEN_SEPARATOR}{signature}"
 
 
 def verified_claims(token: str, now: int | None = None) -> tuple[str, str] | None:

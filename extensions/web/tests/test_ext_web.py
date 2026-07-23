@@ -1,9 +1,9 @@
 import asyncio
-import hashlib
 import json
 import secrets
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
+from datetime import timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -19,6 +19,7 @@ from ufo_ext_web.surface import CHAT_PAGE, SESSION_COOKIE, _sse
 from ufo_testsupport.stream_gate import GatingHub, StreamGate, release_when_running
 
 from ufo.accounting import CORE_PRICING, record_egress_request, record_turn_usage
+from ufo.bearer import mint_token
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
 from ufo.connectors import ConnectorRegistry
@@ -34,11 +35,12 @@ from ufo.models.registry import ModelRegistry
 from ufo.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
 from ufo.schema import tables
 from ufo.schema.records import ConnectRequest, TerminalFrame, Usage
-from ufo.serve import _mount_surfaces
+from ufo.serve import _mount_shared_surfaces
 from ufo.subjects import SHARED_SUBJECT, member_subject
 from ufo.surfaces import hub_tail
 
 SECRET = "artifact-signing-secret"
+TOKEN_SECRET = "web-token-secret"
 STREAM_TIMEOUT_SECONDS = 30
 STREAM_GATE = StreamGate()
 
@@ -135,8 +137,9 @@ async def _seed_workspace() -> UUID:
 
 
 async def _seed_member(workspace_id: UUID, email: str) -> tuple[UUID, str]:
+    """Seed a member and mint the signed bearer `ufoctl init` would — the value the `ufo_session`
+    cookie carries; the web surface resolves the workspace and the member email from it."""
     member_id = uuid4()
-    token = secrets.token_hex(16)
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.member).values(
@@ -147,16 +150,7 @@ async def _seed_member(workspace_id: UUID, email: str) -> tuple[UUID, str]:
                 updated_at=sa.func.now(),
             )
         )
-        await connection.execute(
-            sa.insert(tables.surface_identity).values(
-                workspace_id=workspace_id,
-                member_id=member_id,
-                surface="cli",
-                external_id=hashlib.sha256(token.encode()).hexdigest(),
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
+    token = mint_token(TOKEN_SECRET, str(workspace_id), email, timedelta(hours=1))
     return member_id, token
 
 
@@ -206,13 +200,14 @@ async def web(
 ) -> AsyncIterator[tuple[AsyncClient, UUID]]:
     config, hub, blob = dbos_runtime
     STREAM_GATE.reset()
+    monkeypatch.setenv("UFO_TOKEN_SECRET", TOKEN_SECRET)
     monkeypatch.setattr(
         hub_tail, "turn_status_frame", release_when_running(STREAM_GATE, hub_tail.turn_status_frame)
     )
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
     workspace_id = await _seed_workspace()
     app = FastAPI()
-    _mount_surfaces(app, (web_manifest(),), workspace_id, None, blob, hub, dbos_client, "", None)
+    _mount_shared_surfaces(app, (web_manifest(),), None, blob, hub, dbos_client, "", None)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
         yield client, workspace_id
     dbos_client.destroy()
@@ -258,13 +253,12 @@ async def test_web_turn_round_trip_admits_streams_and_links_identity(
     streamed, terminal = await _consume(client, token, turn_id)
     assert streamed == "echo:1"
     assert terminal["status"] == "done"
-    digest = hashlib.sha256(token.encode()).hexdigest()
     async with workspace_tx() as connection:
         linked = (
             await connection.execute(
                 sa.select(tables.surface_identity.c.member_id).where(
                     tables.surface_identity.c.surface == "web",
-                    tables.surface_identity.c.external_id == digest,
+                    tables.surface_identity.c.external_id == "owner@example.com",
                 )
             )
         ).one()
@@ -470,11 +464,12 @@ async def test_chat_page_query_token_binds_a_host_only_secure_cookie(
 ) -> None:
     """`?token=` binds the session through the shared `set_session_cookie` factory: host-only (no
     `Domain`, so it never crosses an environment or preview host), plus HttpOnly, Secure, and
-    SameSite=strict."""
-    client, _ = web
-    response = await client.get("/surface/web?token=member-token")
+    SameSite=strict. The token scopes the landing page's own request (it carries no cookie yet)."""
+    client, workspace_id = web
+    token = mint_token(TOKEN_SECRET, str(workspace_id), "owner@example.com", timedelta(hours=1))
+    response = await client.get(f"/surface/web?token={token}")
     cookie = response.headers["set-cookie"]
-    assert cookie.startswith("ufo_session=member-token")
+    assert cookie.startswith(f"ufo_session={token}")
     assert "HttpOnly" in cookie
     assert "Secure" in cookie
     assert "SameSite=strict" in cookie

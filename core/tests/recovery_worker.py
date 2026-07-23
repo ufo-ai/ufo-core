@@ -237,9 +237,7 @@ def _launch_dbos(env: _Env) -> None:
                 sa.insert(tables.runtime_instance).values(
                     id=instance_id,
                     workspace_id=env.workspace_id,
-                    started_at=sa.func.now(),
                     heartbeat_at=sa.func.now(),
-                    fingerprint="test",
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )

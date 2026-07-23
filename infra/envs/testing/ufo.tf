@@ -93,7 +93,6 @@ locals {
     [serve]
     host = "0.0.0.0"
     port = 8710
-    shared_workspace = true
 
     [database]
     url = "${module.platform.serve_dsn}"

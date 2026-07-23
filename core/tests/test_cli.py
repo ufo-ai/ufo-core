@@ -1,7 +1,7 @@
-"""The chat stream renderer: the live cost meter may never corrupt streamed text."""
+"""The chat stream renderer: the live status meter may never corrupt streamed text, and the held
+`ufo` surface directive stream parses to the right screen and reconnect signal."""
 
 import io
-import json
 import os
 from pathlib import Path
 
@@ -9,15 +9,8 @@ import click
 import httpx
 import pytest
 
-from ufo.cli import _load_dotenv, _stream_turn, _TurnDisplay
-
-DONE_FRAME: dict[str, object] = {
-    "status": "done",
-    "text": "Hi! How can I help you today?",
-    "model": "claude-opus-4-8",
-    "tokens": 1834,
-    "cost_micro_usd": 9430,
-}
+from ufo.cli import _ChatStream, _load_dotenv, _run_turn, _TurnDisplay, _unescape
+from ufo.config import BlobConfig, Config, DatabaseConfig
 
 
 def tty_display(buffer: io.StringIO) -> _TurnDisplay:
@@ -54,149 +47,195 @@ def screen(raw: str) -> list[str]:
     return lines
 
 
-def test_cost_tick_after_streamed_text_never_overwrites_it() -> None:
+def test_status_meter_after_streamed_text_never_overwrites_it() -> None:
     buffer = io.StringIO()
     display = tty_display(buffer)
     display.text("Hi! How can I help you today?")
-    display.tick(1834, 9430)
-    display.terminal(DONE_FRAME)
-    assert screen(buffer.getvalue()) == [
-        "Hi! How can I help you today?",
-        "claude-opus-4-8 · 1834 tok · $0.009430",
-        "",
-    ]
+    display.meter("1834 tok · $0.009430")
+    display.close()
+    assert screen(buffer.getvalue()) == ["Hi! How can I help you today?", ""]
 
 
 def test_meter_redraws_in_place_while_no_text_streams() -> None:
     buffer = io.StringIO()
     display = tty_display(buffer)
-    display.tick(1000, 5000)
-    display.tick(2000, 10000)
-    assert screen(buffer.getvalue()) == ["2000 tok · $0.010000"]
-    display.text("Answer")
-    display.terminal(DONE_FRAME)
-    assert screen(buffer.getvalue()) == [
-        "Answer",
-        "claude-opus-4-8 · 1834 tok · $0.009430",
-        "",
-    ]
+    display.meter("1000 tok")
+    display.meter("2000 tok")
+    assert screen(buffer.getvalue()) == ["2000 tok"]
 
 
-def test_multi_round_text_survives_interleaved_ticks() -> None:
+def test_multi_round_text_survives_interleaved_meters() -> None:
     buffer = io.StringIO()
     display = tty_display(buffer)
     display.text("Round one.")
-    display.tick(500, 2500)
+    display.meter("500 tok")
     display.text("Round two.")
-    display.tick(1834, 9430)
-    display.terminal(DONE_FRAME)
-    assert screen(buffer.getvalue()) == [
-        "Round one.",
-        "Round two.",
-        "claude-opus-4-8 · 1834 tok · $0.009430",
-        "",
-    ]
+    display.meter("1834 tok")
+    display.close()
+    assert screen(buffer.getvalue()) == ["Round one.", "Round two.", ""]
 
 
 def test_meter_is_suppressed_when_streams_diverge() -> None:
     out, err = io.StringIO(), io.StringIO()
     display = _TurnDisplay(out=out, err=err, tty=False)
-    for round_tokens in (100, 200, 300):
-        display.text(f"Round of {round_tokens}. ")
-        display.tick(round_tokens, round_tokens * 5)
-    display.terminal(DONE_FRAME)
+    for tokens in (100, 200, 300):
+        display.text(f"Round of {tokens}. ")
+        display.meter(f"{tokens} tok")
+    display.close()
     assert err.getvalue() == ""
-    assert screen(out.getvalue()) == [
-        "Round of 100. Round of 200. Round of 300. ",
-        "claude-opus-4-8 · 1834 tok · $0.009430",
-        "",
-    ]
+    assert screen(out.getvalue()) == ["Round of 100. Round of 200. Round of 300. ", ""]
 
 
 def test_activity_note_streams_on_its_own_line_without_corrupting_text_or_meter() -> None:
     buffer = io.StringIO()
     display = tty_display(buffer)
     display.text("Working. ")
-    display.tick(500, 2500)
+    display.meter("500 tok")
     display.activity('running bash: {"command":"echo hi"}')
     display.text("Answer")
-    display.terminal(DONE_FRAME)
+    display.close()
     assert screen(buffer.getvalue()) == [
         "Working. ",
         'running bash: {"command":"echo hi"}',
         "Answer",
-        "claude-opus-4-8 · 1834 tok · $0.009430",
         "",
     ]
 
 
-async def test_stream_renders_connect_and_error_frames(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async_client = httpx.AsyncClient
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "POST":
-            return httpx.Response(200, json={"turn_id": "turn-1"})
-        frames = (
-            {"connect_url": "https://oauth.example.test/authorize"},
-            {"connect_error": "Connection request unavailable"},
-            {"frame": DONE_FRAME},
-        )
-        return httpx.Response(
-            200,
-            content=b"".join(json.dumps(frame).encode() + b"\n" for frame in frames),
-        )
-
-    monkeypatch.setattr(
-        "ufo.cli.httpx.AsyncClient",
-        lambda **kwargs: async_client(
-            transport=httpx.MockTransport(handler),
-            base_url=kwargs["base_url"],
-            timeout=kwargs["timeout"],
-        ),
-    )
-    out, err = io.StringIO(), io.StringIO()
-    monkeypatch.setattr("ufo.cli.sys.stdout", out)
-    monkeypatch.setattr("ufo.cli.sys.stderr", err)
-    current: dict[str, str] = {}
-
-    await _stream_turn("http://ufo.test", {}, "connect", current)
-
-    assert current == {"turn_id": "turn-1"}
-    assert out.getvalue().splitlines() == [
-        "Connect account: https://oauth.example.test/authorize",
-        "Connection request unavailable",
-        "Hi! How can I help you today?",
-        "claude-opus-4-8 · 1834 tok · $0.009430",
-    ]
-    assert err.getvalue() == ""
-
-
-def test_cancelled_erases_pending_meter() -> None:
+def test_say_line_prints_after_erasing_a_pending_meter() -> None:
     buffer = io.StringIO()
     display = tty_display(buffer)
-    display.tick(1000, 5000)
-    display.terminal({"status": "cancelled", "text": "stopped by user"})
-    assert screen(buffer.getvalue()) == ["stopped by user", ""]
+    display.meter("1000 tok")
+    display.line("cancelled")
+    display.close()
+    assert screen(buffer.getvalue()) == ["cancelled", ""]
 
 
-def test_failed_terminal_reports_error_class_and_message() -> None:
-    display = tty_display(io.StringIO())
-    frame = {
-        "status": "failed",
-        "error_class": "ModelResponseTruncated",
-        "error_message": "Anthropic completion truncated at the max_tokens budget",
-    }
-    with pytest.raises(click.ClickException) as failure:
-        display.terminal(frame)
-    assert failure.value.message == (
-        "turn failed: ModelResponseTruncated — "
-        "Anthropic completion truncated at the max_tokens budget"
+def test_unescape_reverses_directive_escaping() -> None:
+    assert _unescape("plain") == "plain"
+    assert _unescape("line one\\nline two") == "line one\nline two"
+    assert _unescape("a\\tb") == "a\tb"
+    assert _unescape("path\\\\to") == "path\\to"
+
+
+async def _drain_lines(display: _TurnDisplay, *directives: str) -> object:
+    """Run `_drain` over a held stream that emits `directives` as tab-directive lines."""
+    body = "".join(directives).encode()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=body)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://fleet"
+    ) as client:
+        return await _ChatStream(
+            client=client, path="/surface/ufo/main", headers={}, display=display
+        )._drain("hi")
+
+
+async def test_drain_renders_a_done_stream_and_signals_no_reconnect() -> None:
+    out = io.StringIO()
+    display = _TurnDisplay(out=out, err=out, tty=False)
+    pending = await _drain_lines(
+        display,
+        "txt\tHello\n",
+        "note\trunning bash: echo hi\n",
+        "status\t7 tok · $0.000110\n",
+        "say\tComplete the connection: https://oauth.example.test\n",
+        "ask\t>\n",
     )
-    with pytest.raises(click.ClickException) as bare:
-        display.terminal({"status": "failed", "error_class": "RuntimeError"})
-    assert bare.value.message == "turn failed: RuntimeError"
+    display.close()
+    assert pending.poll_seconds is None
+    assert pending.secrets == []
+    assert screen(out.getvalue()) == [
+        "Hello",
+        "running bash: echo hi",
+        "Complete the connection: https://oauth.example.test",
+        "",
+    ]
+
+
+async def test_drain_reports_a_poll_reconnect_and_collects_secret_prompts() -> None:
+    display = _TurnDisplay(out=io.StringIO(), err=io.StringIO(), tty=False)
+    polled = await _drain_lines(display, "txt\tworking\n", "poll\t2\n")
+    assert polled.poll_seconds == 2.0
+
+    display = _TurnDisplay(out=io.StringIO(), err=io.StringIO(), tty=False)
+    with_secret = await _drain_lines(
+        display, "secret\tsealed-blob\texa_api\tPaste your Exa key\n", "ask\t>\n"
+    )
+    assert with_secret.poll_seconds is None
+    assert with_secret.secrets == [("sealed-blob", "exa_api", "Paste your Exa key")]
+
+
+async def test_drain_fails_loud_on_a_non_200() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, content=b"unauthorized")
+
+    display = _TurnDisplay(out=io.StringIO(), err=io.StringIO(), tty=False)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://fleet"
+    ) as client:
+        with pytest.raises(click.ClickException, match="401"):
+            await _ChatStream(
+                client=client, path="/surface/ufo/main", headers={}, display=display
+            )._drain("hi")
+
+
+async def test_drain_fails_loud_on_an_unknown_directive() -> None:
+    """A protocol drift (a new verb, or a malformed `secret` line) fails loud rather than vanishing
+    silently — the surface and this client must not disagree unnoticed."""
+    display = _TurnDisplay(out=io.StringIO(), err=io.StringIO(), tty=False)
+    with pytest.raises(click.ClickException, match="unexpected directive"):
+        await _drain_lines(display, "txt\thi\n", "mystery\tpayload\n")
+
+    display = _TurnDisplay(out=io.StringIO(), err=io.StringIO(), tty=False)
+    with pytest.raises(click.ClickException, match="unexpected directive"):
+        await _drain_lines(display, "secret\tsealed\tonly-two-fields\n")
+
+
+async def test_drain_fails_loud_on_a_non_numeric_poll() -> None:
+    """A malformed `poll` value fails loud as a clean ClickException — never a raw ValueError
+    traceback the way an unguarded `float()` would leak."""
+    display = _TurnDisplay(out=io.StringIO(), err=io.StringIO(), tty=False)
+    with pytest.raises(click.ClickException, match="unexpected directive"):
+        await _drain_lines(display, "txt\tworking\n", "poll\tabc\n")
+
+
+async def test_fulfill_secret_fails_loud_on_a_non_200(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A rejected credential (non-200) raises rather than silently swallowing — the member gets a
+    clear failure, not nothing."""
+    monkeypatch.setattr(click, "prompt", lambda *a, **k: "the-secret")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, content=b"say\tnot stored - stale seal\n")
+
+    display = _TurnDisplay(out=io.StringIO(), err=io.StringIO(), tty=False)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://fleet"
+    ) as client:
+        with pytest.raises(click.ClickException, match="could not store exa_api"):
+            await _ChatStream(
+                client=client, path="/surface/ufo/main", headers={}, display=display
+            )._fulfill_secret("sealed", "exa_api", "Key?")
+
+
+def test_run_turn_surfaces_a_dropped_connection_as_a_clean_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transport error mid-turn is a clean failure, not a raw traceback — the turn keeps running
+    on the fleet and the next message resumes tailing it."""
+
+    async def drop(*args: object, **kwargs: object) -> None:
+        raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr("ufo.cli._stream_turn", drop)
+    config = Config(
+        database=DatabaseConfig(url="sqlite+aiosqlite:///unused.db"),
+        blob=BlobConfig(backend="filesystem", root=Path("/tmp/unused")),
+    )
+    with pytest.raises(click.ClickException, match="lost connection to serve"):
+        _run_turn(config, "token", "channel", "hi")
 
 
 def test_load_dotenv_fills_unset_vars_without_overriding(

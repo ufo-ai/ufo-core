@@ -26,6 +26,7 @@ from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import MemoryStore, PageIndexer
 
+from ufo.bearer import mint_token
 from ufo.blob import FilesystemBlobStore
 from ufo.config import (
     BlobConfig,
@@ -72,7 +73,6 @@ from ufo.models.interface import Message, ModelRequest, TextDelta
 from ufo.models.registry import model_registry
 from ufo.onboarding import run_onboarding_steps
 from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.proxy.rules import InjectionRule, MeterRule, derive_credential_rules
 from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.schema import tables
 from ufo.schema.records import WRITEBACK_PENDING, Agent, Turn, Usage
@@ -80,7 +80,7 @@ from ufo.search import FetchRequest, SearchQuery
 from ufo.serve import (
     _connector_registry,
     _mount_ext_routes,
-    _mount_surfaces,
+    _mount_shared_surfaces,
     _select_auth_proxy,
     _select_carrier,
     _select_cdp_provider,
@@ -107,6 +107,26 @@ def _sample_manifest() -> Manifest:
 
 def _credential_store() -> CredentialStore:
     return CredentialStore(fernet=Fernet(Fernet.generate_key()))
+
+
+TOKEN_SECRET = "conformance-token-secret"
+
+
+def _bearer(workspace_id: UUID) -> dict[str, str]:
+    """A signed member bearer the sample's `identify` resolvers claim their workspace from — the
+    shared fleet scopes each request by it, exactly as the `ufo` surface does."""
+    token = mint_token(TOKEN_SECRET, str(workspace_id), "probe@x.test", timedelta(hours=1))
+    return {"authorization": f"Bearer {token}"}
+
+
+def _forged_bearer(workspace_id: UUID) -> dict[str, str]:
+    """A correctly-shaped bearer minted by an untrusted signer (a foreign secret): it reaches the
+    sample's `identify`, but its signature does not verify, so `workspace_claim` returns None and
+    the request is refused before any handler — the forbidden-act half of the seam."""
+    token = mint_token(
+        "untrusted-signer-secret", str(workspace_id), "probe@x.test", timedelta(hours=1)
+    )
+    return {"authorization": f"Bearer {token}"}
 
 
 async def _workspace() -> UUID:
@@ -822,23 +842,6 @@ async def test_connector_execute_tool_resolves_the_bound_account_without_the_san
         }
 
 
-async def test_credential_slot_derives_its_injection_and_meter_rules(db: None) -> None:
-    workspace_id = await _workspace()
-    manifest = _sample_manifest()
-    store = _credential_store()
-    await store.put(workspace_id, sample.API_SLOT, "sk-real-sample")
-    rules = await derive_credential_rules((manifest,), workspace_id, store)
-    injection = next(rule for rule in rules if isinstance(rule, InjectionRule))
-    assert injection == InjectionRule(
-        host=sample.INJECTION_HOST,
-        header=sample.INJECTION_HEADER,
-        sentinel=sample.INJECTION_SENTINEL,
-        real="sk-real-sample",
-    )
-    meter = next(rule for rule in rules if isinstance(rule, MeterRule))
-    assert meter == MeterRule(host=sample.INJECTION_HOST, dimension=sample.INJECTION_DIMENSION)
-
-
 async def test_undeclared_credential_slot_is_refused(db: None) -> None:
     manifest = _sample_manifest()
     declared = frozenset(slot.name for slot in manifest.credentials)
@@ -874,7 +877,7 @@ async def test_context_confines_the_credential_handle(db: None) -> None:
 def test_a_route_without_a_credential_key_fails_loud() -> None:
     manifest = _sample_manifest()
     with pytest.raises(RuntimeError, match="serves routes but no credential key"):
-        _mount_ext_routes(FastAPI(), (manifest,), uuid4(), None, None, None)
+        _mount_ext_routes(FastAPI(), (manifest,), None, None, None)
 
 
 async def test_job_fires_through_its_scoped_context(db: None) -> None:
@@ -898,15 +901,28 @@ async def test_onboarding_step_runs_through_its_scoped_context(db: None) -> None
         assert await scoped.get(sample.ONBOARDING_KEY) == {"onboarded": True}
 
 
-async def test_route_reaches_its_scoped_context(db: None) -> None:
+async def test_route_reaches_its_scoped_context(db: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("UFO_TOKEN_SECRET", TOKEN_SECRET)
     workspace_id = await _workspace()
     manifest = _sample_manifest()
     app = FastAPI()
-    _mount_ext_routes(app, (manifest,), workspace_id, _credential_store(), None, None)
+    _mount_ext_routes(app, (manifest,), _credential_store(), None, None)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://serve") as client:
-        response = await client.post(f"/ext/{sample.NAME}/{sample.ROUTE_PATH}", content="ping")
+        response = await client.post(
+            f"/ext/{sample.NAME}/{sample.ROUTE_PATH}",
+            content="ping",
+            headers=_bearer(workspace_id),
+        )
+        no_bearer = await client.post(f"/ext/{sample.NAME}/{sample.ROUTE_PATH}", content="ping")
+        forged = await client.post(
+            f"/ext/{sample.NAME}/{sample.ROUTE_PATH}",
+            content="ping",
+            headers=_forged_bearer(uuid4()),
+        )
     assert response.status_code == 200
     assert response.text == "ping"
+    assert no_bearer.status_code == 401
+    assert forged.status_code == 401
     with ws(workspace_id):
         scoped = ScopedStore(extension=sample.NAME)
         assert await scoped.get(sample.ROUTE_KEY) == {"body": "ping"}
@@ -1141,24 +1157,42 @@ async def _surface_workspace() -> tuple[UUID, UUID, str]:
     return workspace_id, member_id, email
 
 
-async def test_sample_surface_admits_links_streams_and_delivers(db: None, tmp_path: Path) -> None:
+async def test_sample_surface_admits_links_streams_and_delivers(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The surface seam end to end through the probe: an inbound event admits a turn, links a
     surface identity, and streams an inbound file into the workspace; then the writeback poller
     delivers the terminal turn and streams a shared file back out — every step read through the
     durable rows and blobs core wrote, never a mock."""
+    monkeypatch.setenv("UFO_TOKEN_SECRET", TOKEN_SECRET)
     workspace_id, member_id, email = await _surface_workspace()
     manifest = _sample_manifest()
     blob = FilesystemBlobStore(root=tmp_path)
     dbos = _StubDbos()
     app = FastAPI()
-    _mount_surfaces(
-        app, (manifest,), workspace_id, _credential_store(), blob, InProcessHub(), dbos, "", None
+    _mount_shared_surfaces(
+        app,
+        (manifest,),
+        _credential_store(),
+        blob,
+        InProcessHub(),
+        dbos,
+        "",
+        None,
     )
     body = json.dumps(
         {"external_id": "ext-1", "email": email, "message": "hello", "inbound_text": "note!"}
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://surface") as client:
-        response = await client.post(f"/surface/{sample.SURFACE_NAME}", content=body)
+        no_bearer = await client.post(f"/surface/{sample.SURFACE_NAME}", content=body)
+        forged = await client.post(
+            f"/surface/{sample.SURFACE_NAME}", content=body, headers=_forged_bearer(uuid4())
+        )
+        response = await client.post(
+            f"/surface/{sample.SURFACE_NAME}", content=body, headers=_bearer(workspace_id)
+        )
+    assert no_bearer.status_code == 401
+    assert forged.status_code == 401
     assert response.status_code == 200
     turn_id = UUID(response.json()["turn_id"])
     conversation_id = UUID(response.json()["conversation_id"])
@@ -1228,7 +1262,7 @@ async def test_sample_surface_admits_links_streams_and_delivers(db: None, tmp_pa
 
 
 async def test_sample_surface_live_admit_tails_and_stays_off_writeback(
-    db: None, tmp_path: Path
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The seam's LIVE mode end to end through the same probe surface: the live route adopts a
     member from a peer surface's identity, admits WITHOUT writeback, and reads back turn owner and
@@ -1236,6 +1270,7 @@ async def test_sample_surface_live_admit_tails_and_stays_off_writeback(
     the contrast against the durable ingest is that NO writeback row is written — the poller never
     sees this turn. Then the tail route drives `ctx.tail` and streams the turn's terminal frame off
     the hub, exercising the live delivery path a live surface uses instead of the poller."""
+    monkeypatch.setenv("UFO_TOKEN_SECRET", TOKEN_SECRET)
     workspace_id, member_id, _email = await _surface_workspace()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -1252,13 +1287,22 @@ async def test_sample_surface_live_admit_tails_and_stays_off_writeback(
     blob = FilesystemBlobStore(root=tmp_path)
     dbos = _StubDbos()
     app = FastAPI()
-    _mount_surfaces(
-        app, (manifest,), workspace_id, _credential_store(), blob, InProcessHub(), dbos, "", None
+    _mount_shared_surfaces(
+        app,
+        (manifest,),
+        _credential_store(),
+        blob,
+        InProcessHub(),
+        dbos,
+        "",
+        None,
     )
     body = json.dumps({"external_id": "ext-live-1", "message": "hello"})
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://surface") as client:
         admitted = await client.post(
-            f"/surface/{sample.SURFACE_LIVE_NAME}/{sample.SURFACE_LIVE_PATH}", content=body
+            f"/surface/{sample.SURFACE_LIVE_NAME}/{sample.SURFACE_LIVE_PATH}",
+            content=body,
+            headers=_bearer(workspace_id),
         )
         assert admitted.status_code == 200
         result = admitted.json()
@@ -1301,7 +1345,9 @@ async def test_sample_surface_live_admit_tails_and_stays_off_writeback(
         frames = []
         async with asyncio.timeout(30):
             async with client.stream(
-                "GET", f"/surface/{sample.SURFACE_LIVE_NAME}/live/{turn_id}/stream"
+                "GET",
+                f"/surface/{sample.SURFACE_LIVE_NAME}/live/{turn_id}/stream",
+                headers=_bearer(workspace_id),
             ) as stream:
                 assert stream.status_code == 200
                 async for line in stream.aiter_lines():

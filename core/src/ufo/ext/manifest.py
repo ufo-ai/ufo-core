@@ -81,13 +81,13 @@ class RouteSpec:
     """An HTTP endpoint an extension serves. The app mounts `handler` for `method` at
     `/ext/<name>/<path>`; each request is handed the extension's scoped ExtensionContext and the
     incoming Request, and the handler returns the Response. `identify` verifies and returns a
-    request's workspace when the route can run on shared serve; an unidentified route is mounted
-    only on a dedicated server."""
+    request's workspace, which core binds for the handler; it is required because the shared fleet
+    is the only runtime and every request must resolve its workspace before touching any data."""
 
     method: Literal["GET", "POST"]
     path: str
     handler: Callable[[ExtensionContext, Request], Awaitable[Response]]
-    identify: Callable[[Request], UUID | None] | None = None
+    identify: Callable[[Request], UUID | None]
 
 
 @dataclass(frozen=True)

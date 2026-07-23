@@ -178,15 +178,15 @@ def test_local_proxy_mints_an_ephemeral_ca_and_needs_no_shared_ca_env(
     assert endpoint.ca_cert.startswith(LEAF_PEM_PREFIX)
 
 
-async def test_local_rule_base_is_the_model_base_when_no_slot_injects(
+def test_local_rule_base_is_the_model_base_when_no_slot_injects(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No injecting slot means the local base is exactly the shared model-provider egress — the
-    single-node proxy carries a workspace's credential rules only when a slot needs injection."""
+    """The in-process proxy's base is exactly the shared model-provider egress — on the shared fleet
+    it carries no workspace credential rules at all."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     config = _local_config()
-    base = await serve._local_rule_base(config, (), None)
+    base = serve._local_rule_base(config, ())
     assert base == model_rule_base(config)
     assert {rule.allowed_hosts for rule in base if isinstance(rule, ScopeRule)} == {
         frozenset({ANTHROPIC_HOST})
@@ -224,12 +224,12 @@ def test_shared_owner_dsn_fails_loud_when_unset(monkeypatch: pytest.MonkeyPatch)
         serve._shared_owner_dsn(_local_config())
 
 
-async def test_local_rule_base_fails_loud_on_an_injecting_slot_without_a_key(
+def test_local_rule_base_fails_loud_on_an_injecting_slot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The local proxy injects a workspace's own credential secrets, but only if the credential key
-    is set — an injecting slot with no key fails loud rather than shipping a sandbox that cannot
-    reach the slot's host."""
+    """The in-process proxy serves every workspace on the shared fleet, so it cannot bake one
+    workspace's secrets into its rule base — an injecting credential slot fails loud, directing the
+    deploy to the standalone `ufoctl proxy` that injects per request."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     slot = CredentialSlot(
@@ -238,8 +238,8 @@ async def test_local_rule_base_fails_loud_on_an_injecting_slot_without_a_key(
         injection=InjectionTarget(host="api.inj.test", header="authorization", sentinel="S"),
     )
     manifest = Manifest(name="inj", version="1", credentials=(slot,))
-    with pytest.raises(RuntimeError, match="UFO_CREDENTIAL_KEY"):
-        await serve._local_rule_base(_local_config(), (manifest,), None)
+    with pytest.raises(RuntimeError, match="cannot inject workspace credential secrets"):
+        serve._local_rule_base(_local_config(), (manifest,))
 
 
 def test_reserved_host_prefixes_guard_fails_loud_on_a_gateway_route() -> None:

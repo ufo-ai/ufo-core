@@ -1,6 +1,5 @@
 import asyncio
 import base64
-import hashlib
 import json
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
@@ -28,7 +27,6 @@ from ufo.grants import (
     grant_summaries,
     install_connect_flow,
 )
-from ufo.hub import InProcessHub
 from ufo.sandbox.proxy.rules import (
     GRANT_METER_DIMENSION,
     InjectionRule,
@@ -40,7 +38,7 @@ from ufo.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
 from ufo.sandbox.session import RunToken
 from ufo.schema import tables
 from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
-from ufo.surfaces.cli import router
+from ufo.surfaces.cli import callback_router
 from ufo.tools.builtins import ConnectAccountInput, connect_account_handler
 from ufo.tools.context import ToolContext
 
@@ -536,8 +534,7 @@ async def test_connect_account_handoff_is_private_memoized_and_binds_the_speaker
     assert await ConnectHandoff(flow).authorize(workspace_id, ctx.turn.id, member_id) == url
     state = parse_qs(urlparse(url).query)["state"][0]
     app = FastAPI()
-    app.state.shared_workspace = False
-    app.include_router(router)
+    app.include_router(callback_router)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://surface") as client:
         for _ in range(2):
             done = await client.get(
@@ -642,60 +639,6 @@ async def test_connect_handoff_replays_against_its_authorization_ttl(db: None) -
         await handoff.authorize(workspace_id, turn_id, member_id)
 
 
-async def test_cli_stream_privately_opens_the_speakers_connect_handoff(db: None) -> None:
-    workspace_id = await _workspace()
-    member_id, agent_id = await _member_agent(workspace_id)
-    conversation_id = await _conversation(workspace_id, member_id)
-    token = "cli-secret"
-    flow = ConnectFlow(
-        providers={"stub": StubProvider()},
-        fernet=Fernet(Fernet.generate_key()),
-        store=GrantStore(),
-        redirect_uri=REDIRECT_URI,
-    )
-    install_connect_flow(flow)
-    turn_id = uuid4()
-    terminal = TerminalFrame(status="done", connect_request=ConnectRequest(provider="stub"))
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.surface_identity).values(
-                workspace_id=workspace_id,
-                member_id=member_id,
-                surface="cli",
-                external_id=hashlib.sha256(token.encode()).hexdigest(),
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-        await connection.execute(
-            sa.insert(tables.turn).values(
-                id=turn_id,
-                workspace_id=workspace_id,
-                conversation_id=conversation_id,
-                agent_id=agent_id,
-                seq=1,
-                status="done",
-                inbound="connect",
-                admission_source="member",
-                speaker_member_id=member_id,
-                terminal=terminal.model_dump(mode="json"),
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    app = FastAPI()
-    app.state.hub = InProcessHub()
-    app.include_router(router)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://surface") as client:
-        response = await client.get(
-            f"/v1/turns/{turn_id}/stream",
-            headers={"authorization": f"Bearer {token}"},
-        )
-    frames = [json.loads(line) for line in response.text.splitlines()]
-    assert frames[0]["connect_url"].startswith("https://stub.test/oauth")
-    assert frames[1]["frame"]["connect_request"] == {"provider": "stub", "shared": False}
-
-
 async def test_connect_account_without_a_speaker_is_refused() -> None:
     ctx = _turn_context(uuid4(), uuid4(), uuid4(), None)
     with pytest.raises(ValueError, match="speaking member"):
@@ -714,8 +657,7 @@ async def test_the_begin_route_is_gone_and_the_callback_reports_unavailable_with
 ):
     install_connect_flow(None)
     app = FastAPI()
-    app.state.shared_workspace = False
-    app.include_router(router)
+    app.include_router(callback_router)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://surface") as client:
         begun = await client.post("/v1/connect", params={"provider": "stub"})
         callback = await client.get("/v1/connect/callback", params={"state": "s", "code": "c"})
