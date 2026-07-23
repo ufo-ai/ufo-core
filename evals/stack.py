@@ -28,6 +28,7 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from evals.harness.viewer import load_runs, write_viewer
 from ufo.config import Config, DatabaseConfig, O11yConfig
+from ufo.proxy_serve import OWNER_DSN_ENV
 
 RUNS_ROOT = Path(".local/evals")
 DEFAULT_OUT = Path("eval-reports")
@@ -202,6 +203,10 @@ class EvalStack:
         config_file = root / "ufo.toml"
         config_file.write_text(tomli_w.dumps(config.model_dump(mode="json", exclude_none=True)))
         env = dict(os.environ) | spec.env
+        # Each stack derives its own per-run owner DSN as database.owner_url. Drop any UFO_OWNER_DSN
+        # inherited from the shell, which _shared_owner_dsn prefers over the config — else it would
+        # point this run's cross-workspace owner engine at a foreign (possibly production) database.
+        env.pop(OWNER_DSN_ENV, None)
         env["UFO_CONFIG"] = str(config_file.resolve())
         env["UFOCTL_DIR"] = str((root / ".ufoctl").resolve())
         key_env = config.credentials.key_env
@@ -436,16 +441,24 @@ def derived_config(
     """Rewrite only the collision knobs of a validated template: database (a per-run SQLite file
     or a per-run database on the template's Postgres server, DBOS sibling re-derived), blob root,
     loopback serve host with probed serve/proxy ports, and — when the template sets one — a
-    private loopback OTLP endpoint. Every suite knob passes through untouched."""
+    private loopback OTLP endpoint. Every suite knob passes through untouched.
+
+    The stack always serves shared: the shared fleet is the only runtime, so a stack seeds one
+    workspace and serves it through the fleet path (per-request/per-turn workspace resolution, the
+    owner engine for cross-workspace job sweeps) rather than pinning it at boot. `owner_url`
+    defaults to the run's own `url` — the seeded role owns its per-run database, so the same DSN is
+    the RLS-bypassing owner engine `owner_tx` opens."""
     if template.database.url.startswith("sqlite"):
         url = f"sqlite+aiosqlite:///{root / 'ufo.db'}"
     else:
         url = f"{template.database.url.rpartition('/')[0]}/{database_name}"
     return template.model_copy(
         update={
-            "database": DatabaseConfig(url=url, owner_url=template.database.owner_url),
+            "database": DatabaseConfig(url=url, owner_url=template.database.owner_url or url),
             "blob": template.blob.model_copy(update={"root": root / "blobs"}),
-            "serve": template.serve.model_copy(update={"host": "127.0.0.1", "port": serve_port}),
+            "serve": template.serve.model_copy(
+                update={"host": "127.0.0.1", "port": serve_port, "shared_workspace": True}
+            ),
             "sandbox": template.sandbox.model_copy(update={"proxy_port": proxy_port}),
             **(
                 {"o11y": O11yConfig(otlp_endpoint=f"http://127.0.0.1:{otlp_port}")}

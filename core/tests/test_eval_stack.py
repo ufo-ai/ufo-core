@@ -18,6 +18,7 @@ from evals.stack import (
     template_config,
 )
 from ufo.config import Config
+from ufo.proxy_serve import OWNER_DSN_ENV
 
 
 def _close(stack: EvalStack) -> None:
@@ -86,6 +87,23 @@ def test_derived_config_isolates_a_sqlite_template(tmp_path: Path) -> None:
     assert config.research.search_provider == "exa"
 
 
+def test_derived_config_forces_shared_serve_with_a_self_owner_dsn(tmp_path: Path) -> None:
+    """Every stack serves shared — the only runtime — seeding one workspace behind the fleet path
+    rather than pinning it at boot. `owner_url` defaults to the run's own `url` so `owner_tx` has an
+    RLS-bypassing engine to enumerate through (the seeded role owns its per-run database)."""
+    derived = derived_config(
+        template_config(SQLITE_TEMPLATE),
+        root=tmp_path,
+        serve_port=18710,
+        proxy_port=18888,
+        otlp_port=None,
+        database_name="unused",
+    )
+
+    assert derived.serve.shared_workspace is True
+    assert derived.database.owner_url == derived.database.url
+
+
 def test_derived_config_names_a_per_run_postgres_database(tmp_path: Path) -> None:
     derived = derived_config(
         template_config(POSTGRES_TEMPLATE),
@@ -100,6 +118,7 @@ def test_derived_config_names_a_per_run_postgres_database(tmp_path: Path) -> Non
     assert derived.database.system_url == (
         "postgresql+psycopg://ufo:ufo@127.0.0.1:5541/eval_20260717_smoke_dbos"
     )
+    assert derived.database.owner_url == derived.database.url
 
 
 def test_derived_config_reports_a_private_otlp_endpoint_only_when_the_template_sets_one(
@@ -200,6 +219,29 @@ def test_provision_writes_the_derived_config_and_owns_the_child_argv(
         "--model",
         "claude-haiku-4-5",
     )
+
+
+def test_provision_strips_an_ambient_owner_dsn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A UFO_OWNER_DSN in the shell must not reach a stack's serve. Shared serve prefers it over the
+    config's owner_url, so an inherited one would point the run's cross-workspace owner engine at a
+    foreign (possibly production) database instead of the derived per-run one."""
+    monkeypatch.delenv("UFO_CREDENTIAL_KEY", raising=False)
+    monkeypatch.setenv(OWNER_DSN_ENV, "postgresql://ufo_owner@prod/ufo")
+    template = tmp_path / "template.toml"
+    template.write_text(SQLITE_TEMPLATE)
+
+    stack = EvalStack.provision(
+        RunSpec(label="isolated", config=template),
+        root=tmp_path / "run",
+        out=tmp_path / "archive",
+        repo_root=tmp_path,
+    )
+    _close(stack)
+
+    assert OWNER_DSN_ENV not in stack.env
+    assert stack.config.database.owner_url == stack.config.database.url
 
 
 async def test_create_databases_creates_the_app_and_dbos_pair_once(
