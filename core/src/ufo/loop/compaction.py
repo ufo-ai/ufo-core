@@ -35,6 +35,7 @@ from ufo.models.interface import (
     ToolResultBlock,
     ToolUseBlock,
 )
+from ufo.sandbox.session import TOOL_OUTPUT_DIRNAME
 from ufo.schema.records import Agent, Turn, Usage
 from ufo.transcript import (
     CompactionRecord,
@@ -69,7 +70,6 @@ REPEATED_RUN_RE = re.compile(
     rf"(?:\s\1){{{REPEATED_RUN_MIN_OCCURRENCES - 1},}}"
 )
 REPEATED_RUN_MARKER = "[repeated {count} times]"
-TOOL_OUTPUT_DIRNAME = ".tool-output"
 TOOL_OUTPUT_PATH_RE = re.compile(rf"/\S*{re.escape(TOOL_OUTPUT_DIRNAME)}/\S+\.txt")
 CONTEXT_OVERFLOW_MARKERS = ("too long", "context length", "maximum context", "prompt is too large")
 

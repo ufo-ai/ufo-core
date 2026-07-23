@@ -39,6 +39,7 @@ METRICS = (
     "turn_context_overflow_recovered_total",
     "turn_truncation_recovered_total",
     "sandbox_egress_total",
+    "sandbox_tool_output_dir_reclaimed_total",
 )
 SENSITIVE_FIELD_KEYS = frozenset(
     {

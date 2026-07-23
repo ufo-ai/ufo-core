@@ -123,6 +123,52 @@ async def test_file_tools_run_through_sbxfs_locally(tmp_path: Path) -> None:
     assert "alpha" in json.dumps(read)
 
 
+async def test_ensure_tool_output_dir_creates_the_directory_when_absent(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    carrier = LocalCarrier()
+    handle = await carrier.create(_spec(workspace))
+    session = SandboxSession(carrier=carrier, handle=handle)
+
+    reclaimed = await session.ensure_tool_output_dir()
+
+    assert reclaimed is False
+    assert (workspace / ".tool-output").is_dir()
+
+
+async def test_ensure_tool_output_dir_reclaims_a_file_squatting_the_name(tmp_path: Path) -> None:
+    """The poison-pill case: a member write left a regular file where the engine's offload
+    directory must be, so a bare `mkdir -p` would fail `File exists` on every later offload. The
+    ensure reclaims it to a directory and reports the reclaim."""
+    workspace = tmp_path / "workspace"
+    carrier = LocalCarrier()
+    handle = await carrier.create(_spec(workspace))
+    session = SandboxSession(carrier=carrier, handle=handle)
+    await session.write_file(".tool-output", b"squatter")
+    assert (workspace / ".tool-output").is_file()
+
+    reclaimed = await session.ensure_tool_output_dir()
+
+    assert reclaimed is True
+    assert (workspace / ".tool-output").is_dir()
+    await session.write_file(".tool-output/call.txt", b"offloaded")
+    assert (workspace / ".tool-output" / "call.txt").read_text() == "offloaded"
+
+
+async def test_ensure_tool_output_dir_leaves_an_existing_directory_and_its_contents(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    carrier = LocalCarrier()
+    handle = await carrier.create(_spec(workspace))
+    session = SandboxSession(carrier=carrier, handle=handle)
+    await session.write_file(".tool-output/kept.txt", b"keep me")
+
+    reclaimed = await session.ensure_tool_output_dir()
+
+    assert reclaimed is False
+    assert (workspace / ".tool-output" / "kept.txt").read_text() == "keep me"
+
+
 async def test_exec_env_rides_the_handle_not_the_conversation(tmp_path: Path) -> None:
     """Two turns can hold one conversation's workspace at once (a subagent beside its parent): each
     exec runs under its own handle's run token and the spec's per-turn sentinel entries, so a later

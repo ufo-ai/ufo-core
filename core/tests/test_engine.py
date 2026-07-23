@@ -1627,6 +1627,38 @@ async def test_a_truncation_salvages_the_partial_to_a_workspace_file_and_feeds_t
     assert write_stdin == salvaged.encode()
 
 
+async def test_a_salvage_ensures_the_offload_directory_before_it_writes(
+    db: None, tmp_path: Path
+) -> None:
+    """The offload area is established lazily at the write, so a member file squatting the name is
+    reclaimed before the salvage lands rather than poisoning the turn — and a turn that never
+    offloads (see the fail-closed hook tests) issues no such call at all."""
+    turn = await _seed_turn("queued", None)
+    model = TruncateThenAnswerModel(truncations=1, partial=(TextDelta(text="partial deltas"),))
+    carrier = RecordingCarrier()
+    frame = await _engine(turn, model, tmp_path, carrier=carrier).run()
+    assert frame.status == "done"
+    ensures = [
+        i
+        for i, argv in enumerate(carrier.calls)
+        if argv[-1] == TOOL_OUTPUT_DIR and "mkdir -p" in argv[2]
+    ]
+    writes = [i for i, argv in enumerate(carrier.calls) if len(argv) >= 3 and "cat >" in argv[2]]
+    assert ensures and writes and ensures[0] < writes[0]
+
+
+async def test_a_reclaimed_offload_directory_still_completes_the_turn(
+    db: None, tmp_path: Path
+) -> None:
+    """When `ensure_dir` reports it reclaimed a squatting file (stdout `r`), the offload path emits
+    its reclaim metric — a registered counter, or the emit itself would raise and fail the turn."""
+    turn = await _seed_turn("queued", None)
+    model = TruncateThenAnswerModel(truncations=1, partial=(TextDelta(text="partial deltas"),))
+    carrier = RecordingCarrier(result=ExecResult(stdout="r", stderr="", exit_code=0))
+    frame = await _engine(turn, model, tmp_path, carrier=carrier).run()
+    assert frame.status == "done"
+
+
 async def test_a_truncation_with_no_partial_feeds_the_plain_correction_back(
     db: None, tmp_path: Path
 ) -> None:

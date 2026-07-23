@@ -54,7 +54,6 @@ from ufo.ext.manifest import (
 from ufo.grants import GrantStore
 from ufo.hub import CostTick, Hub, LiveFrame, Parked, SkillLoad, Terminal, ToolCall
 from ufo.loop.compaction import (
-    TOOL_OUTPUT_DIRNAME,
     Compaction,
     is_context_overflow,
 )
@@ -77,7 +76,7 @@ from ufo.models.interface import (
     ToolUseBlock,
 )
 from ufo.o11y import emit_metric, log, turn_span
-from ufo.sandbox.session import WORKSPACE_DIR, SandboxSession, workspace_path
+from ufo.sandbox.session import TOOL_OUTPUT_DIR, SandboxSession
 from ufo.schema import tables
 from ufo.schema.records import (
     DEFAULT_REASONING_EFFORT,
@@ -278,7 +277,6 @@ async def _claim_turn_with_handoff(turn_id: UUID, attempt: str) -> tuple[bool, _
 TOOL_CALL_PREVIEW_CHARS = 200
 MAX_TOOL_RESULT_CHARS = 1_048_576
 TOOL_RESULT_PREVIEW_CHARS = 2_000
-TOOL_OUTPUT_DIR = f"{WORKSPACE_DIR}/{TOOL_OUTPUT_DIRNAME}"
 TOOL_IMAGE_BLOB_DIR = "tool-images"
 TOOL_IMAGE_EDGE_LIMIT = 2000
 TOOL_IMAGE_SAVE_FORMATS = {"image/jpeg": "JPEG", "image/png": "PNG", "image/webp": "WEBP"}
@@ -853,8 +851,9 @@ class TurnEngine:
                 )
                 feedback = TRUNCATION_FEEDBACK
                 if error.partial_output:
-                    path = f"{TOOL_OUTPUT_DIR}/truncated-{self.turn.id}-{round_index}.txt"
-                    await self.sandbox.write_file(path, error.partial_output.encode())
+                    path = await self._offload(
+                        f"truncated-{self.turn.id}-{round_index}.txt", error.partial_output
+                    )
                     feedback += TRUNCATION_SALVAGE_NOTICE.format(path=path)
                 messages = (*messages, Message(role="user", content=feedback))
                 continue
@@ -1329,6 +1328,18 @@ class TurnEngine:
             tool_use_id=result.tool_use_id, content=blocks, is_error=result.is_error
         )
 
+    async def _offload(self, name: str, content: str) -> str:
+        """Write `content` into the turn's private `.tool-output` dir and return its path, ensuring
+        the directory exists first. A member write (or bash) can leave a file squatting the name,
+        which the bare `mkdir -p` in the write step cannot reclaim — left unhandled it fails
+        `File exists` and poisons every later offload and salvage in the workspace."""
+        if await self.sandbox.ensure_tool_output_dir():
+            emit_metric("sandbox_tool_output_dir_reclaimed_total")
+            log("sandbox.tool_output_dir_reclaimed", turn_id=str(self.turn.id))
+        path = f"{TOOL_OUTPUT_DIR}/{name}"
+        await self.sandbox.write_file(path, content.encode())
+        return path
+
     @DBOS.step(preemptible=True)
     async def _dispatch_step(self, context: ToolContext, call: ToolUseBlock) -> DispatchResult:
         """Run one tool call end to end, memoized as a DBOS step keyed after its round: the recorded
@@ -1403,8 +1414,7 @@ class TurnEngine:
         if is_error:
             content = _bounded(content)
         elif len(content) > MAX_TOOL_RESULT_CHARS:
-            path = workspace_path(f"{TOOL_OUTPUT_DIR}/{call.id}.txt")
-            await self.sandbox.write_file(path, content.encode())
+            path = await self._offload(f"{call.id}.txt", content)
             content = content[:TOOL_RESULT_PREVIEW_CHARS] + OFFLOAD_NOTICE.format(
                 total=len(content), path=path
             )

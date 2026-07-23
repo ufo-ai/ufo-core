@@ -17,6 +17,8 @@ from ufo.blob import BlobStore
 from ufo.sandbox.fs_creds import SandboxFsCredentials
 
 WORKSPACE_DIR = "/workspace"
+TOOL_OUTPUT_DIRNAME = ".tool-output"
+TOOL_OUTPUT_DIR = f"{WORKSPACE_DIR}/{TOOL_OUTPUT_DIRNAME}"
 DEFAULT_EXEC_TIMEOUT_SECONDS = 120
 SENTINEL_MODEL_KEY = "UFO_SENTINEL_MODEL_KEY"
 SANDBOX_UID = 1000
@@ -231,6 +233,31 @@ class SandboxSession:
         )
         if result.exit_code != 0:
             raise OSError(result.stderr.strip() or f"write failed: {path}")
+
+    async def ensure_tool_output_dir(self) -> bool:
+        """Guarantee the engine's private `.tool-output` offload dir exists, reclaiming a
+        non-directory squatting the name — a bare `mkdir -p` fails `File exists` when a file or
+        broken symlink already occupies it, so a member write to that name would otherwise poison
+        every later offload. The target is fixed to `TOOL_OUTPUT_DIR`, never a caller-supplied path,
+        so this destructive reclaim can only ever touch the engine's own namespace, never member
+        data. Returns whether a squatter was reclaimed."""
+        result = await self.carrier.exec(
+            self.handle,
+            (
+                "sh",
+                "-c",
+                'if [ -d "$1" ]; then exit 0; fi; '
+                'if [ -e "$1" ] || [ -L "$1" ]; then rm -f "$1" && printf r; fi; '
+                'mkdir -p "$1"',
+                "sh",
+                TOOL_OUTPUT_DIR,
+            ),
+            stdin=b"",
+            timeout_s=30,
+        )
+        if result.exit_code != 0:
+            raise OSError(result.stderr.strip() or f"cannot ensure {TOOL_OUTPUT_DIR}")
+        return result.stdout == "r"
 
     async def file_exists(self, path: str) -> bool:
         target = workspace_path(path)
