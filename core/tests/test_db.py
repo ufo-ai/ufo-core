@@ -1,4 +1,5 @@
 import os
+import warnings
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -26,7 +27,12 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
     core-first. The base-pinned index_default and memory extensions own their chunk and memory_item
     tables, the sample probe owns its note table, skill_create owns the user_skill table,
     knowledge-graph owns the graph_entity and graph_edge tables, and eval_env owns the fake
-    mailbox and calendar tables."""
+    mailbox and calendar tables.
+
+    Every revision id is unique: two files claiming one id collapse into a single graph node, so a
+    deploy already stamped with that id plans nothing and the losing file's DDL is skipped while
+    `upgrade heads` still reports success. Alembic detects the collision as a warning, which this
+    raises."""
     config = Config()
     config.set_main_option("script_location", str(MIGRATIONS_DIR))
     config.set_main_option(
@@ -34,7 +40,9 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         os.pathsep.join((str(MIGRATIONS_DIR / "versions"), *migration_locations())),
     )
     config.set_main_option("path_separator", "os")
-    heads = set(ScriptDirectory.from_config(config).get_heads())
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        heads = ScriptDirectory.from_config(config).get_heads()
     assert {
         "index_default_0002",
         "memory_0007",
@@ -42,7 +50,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         "skill_create_0001",
         "knowledge_graph_0001",
         "eval_env_0001",
-    } <= heads
+    } <= set(heads)
     assert len(heads) == 7
 
 
