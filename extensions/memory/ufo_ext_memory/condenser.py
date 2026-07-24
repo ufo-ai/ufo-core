@@ -128,6 +128,7 @@ class FactDeriver:
                     memory_kind=fact.memory_kind,
                     confidence=fact.confidence,
                     source_ref=str(page.page_id),
+                    as_of=page.as_of,
                 )
             )
 

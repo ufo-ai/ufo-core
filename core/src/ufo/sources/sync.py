@@ -612,8 +612,9 @@ PAGE_FEED_BATCH_MAX = 50
 @dataclass(frozen=True)
 class PageChange:
     """One page's current state as the feed replays it: the source row it belongs to, the inlined
-    body (empty when tombstoned), the content digest, and `changed_at` — the page's `updated_at`,
-    which is the cursor field."""
+    body (empty when tombstoned), the content digest, `as_of` — the provider's update or creation
+    time, falling back to ingestion time — and `changed_at`, the page's `updated_at` cursor
+    field."""
 
     page_id: UUID
     source_id: UUID
@@ -622,6 +623,7 @@ class PageChange:
     digest: str
     tombstone: bool
     created_at: datetime
+    as_of: datetime
     changed_at: datetime
 
 
@@ -658,6 +660,8 @@ class CorePageFeed:
                 tables.page.c.body_ref,
                 tables.page.c.digest,
                 tables.page.c.tombstone,
+                tables.page.c.source_created_at,
+                tables.page.c.source_updated_at,
                 tables.page.c.created_at,
                 tables.page.c.updated_at,
             )
@@ -678,6 +682,7 @@ class CorePageFeed:
         changes: list[PageChange] = []
         for row in rows:
             body = "" if row["tombstone"] else (await self.blob.get(row["body_ref"])).decode()
+            source_as_of = row["source_updated_at"] or row["source_created_at"]
             changes.append(
                 PageChange(
                     page_id=row["id"],
@@ -687,6 +692,11 @@ class CorePageFeed:
                     digest=row["digest"],
                     tombstone=bool(row["tombstone"]),
                     created_at=row["created_at"],
+                    as_of=(
+                        datetime.fromisoformat(source_as_of)
+                        if source_as_of is not None
+                        else row["created_at"]
+                    ),
                     changed_at=row["updated_at"],
                 )
             )

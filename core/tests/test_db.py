@@ -1,8 +1,11 @@
 import os
+from datetime import UTC, datetime
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
 import sqlalchemy as sa
+from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
@@ -34,13 +37,98 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
     heads = set(ScriptDirectory.from_config(config).get_heads())
     assert {
         "index_default_0002",
-        "memory_0006",
+        "memory_0007",
         "sample_ext_note_0001",
         "skill_create_0001",
         "knowledge_graph_0001",
         "eval_env_0001",
     } <= heads
     assert len(heads) == 7
+
+
+def test_memory_as_of_migration_repairs_page_derived_rows(tmp_path: Path) -> None:
+    url = f"sqlite+aiosqlite:///{tmp_path / 'memory-as-of.db'}"
+    config = Config()
+    config.set_main_option("script_location", str(MIGRATIONS_DIR))
+    config.set_main_option(
+        "version_locations",
+        os.pathsep.join((str(MIGRATIONS_DIR / "versions"), *migration_locations())),
+    )
+    config.set_main_option("path_separator", "os")
+    config.set_main_option("sqlalchemy.url", url)
+    command.upgrade(config, "0048")
+    command.upgrade(config, "memory_0006")
+
+    engine = sa.create_engine(f"sqlite:///{tmp_path / 'memory-as-of.db'}")
+    workspace_id, source_id, page_id, memory_id, manual_id = (uuid4() for _ in range(5))
+    ingested = datetime(2026, 7, 24, tzinfo=UTC)
+    source_as_of = datetime(2025, 7, 24, tzinfo=UTC)
+    with engine.connect() as connection:
+        connection.execute(
+            sa.text(
+                "insert into workspace (id, created_at, updated_at) "
+                "values (:id, :ingested, :ingested)"
+            ),
+            {"id": workspace_id.hex, "ingested": ingested},
+        )
+        connection.execute(
+            sa.text(
+                "insert into source "
+                "(id, workspace_id, backend, config, next_sync_at, created_at, updated_at) "
+                "values (:id, :workspace_id, 'folder', '{}', :ingested, :ingested, :ingested)"
+            ),
+            {"id": source_id.hex, "workspace_id": workspace_id.hex, "ingested": ingested},
+        )
+        connection.execute(
+            sa.text(
+                "insert into page "
+                "(id, workspace_id, source_id, digest, body_ref, subject, tombstone, "
+                "stream, title, "
+                "source_created_at, source_updated_at, created_at, updated_at) values "
+                "(:id, :workspace_id, :source_id, 'sha256:page', 'pages/page', 'shared', false, "
+                "'issues', 'Old issue', :source_as_of, null, :ingested, :ingested)"
+            ),
+            {
+                "id": page_id.hex,
+                "workspace_id": workspace_id.hex,
+                "source_id": source_id.hex,
+                "source_as_of": source_as_of.isoformat(),
+                "ingested": ingested,
+            },
+        )
+        for item_id, source_ref in (
+            (memory_id, str(page_id)),
+            (manual_id, "member-authored"),
+        ):
+            connection.execute(
+                sa.text(
+                    "insert into memory_item "
+                    "(id, workspace_id, subject, body, item_class, memory_kind, confidence, "
+                    "source_ref, created_at, updated_at) values "
+                    "(:id, :workspace_id, 'shared', 'fact', 'fact', 'fact', 5, "
+                    ":source_ref, :ingested, :ingested)"
+                ),
+                {
+                    "id": item_id.hex,
+                    "workspace_id": workspace_id.hex,
+                    "source_ref": source_ref,
+                    "ingested": ingested,
+                },
+            )
+        connection.commit()
+
+    command.upgrade(config, "memory_0007")
+    with engine.connect() as connection:
+        repaired = connection.execute(
+            sa.text("select as_of from memory_item where id = :id"), {"id": memory_id.hex}
+        ).scalar_one()
+        untouched = connection.execute(
+            sa.text("select as_of from memory_item where id = :id"), {"id": manual_id.hex}
+        ).scalar_one()
+    engine.dispose()
+
+    assert datetime.fromisoformat(repaired).replace(tzinfo=UTC) == source_as_of
+    assert untouched is None
 
 
 def test_migrate_command_brings_the_schema_to_head(

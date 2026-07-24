@@ -87,6 +87,7 @@ memory_item = sa.Table(
     sa.Column("memory_kind", sa.Text, nullable=False),
     sa.Column("confidence", sa.Integer, nullable=False),
     sa.Column("source_ref", sa.Text, nullable=True),
+    sa.Column("as_of", sa.DateTime(timezone=True), nullable=True),
     sa.Column("embedding_digest", sa.Text, nullable=True),
     sa.Column("embedding_claimed_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("superseded_by", sa.Uuid, nullable=True),
@@ -117,13 +118,14 @@ class MemoryInventoryItem(BaseModel):
     signals, so both how it was ingested and how it decays are visible without re-deriving them.
 
     Ingestion/creation: `source_ref` is what produced it (a tool write, a synced source, a
-    consolidation); `created_at` is when it was committed; `embedding_digest` NULL means it is still
-    due for the index job (not yet chunked/embedded), and `embedding_claimed_at` set means the
-    indexer currently holds a lease on it. Recall/decay: `half_life_days` is the recency half-life
-    for its kind (None for episodic/semantic, which never decay) and `decay_factor` is the live
-    multiplier recall applies to its relevance (`(confidence/10)·0.5**(age_days/half_life)` for
-    facts, else 1.0). Lifecycle: `superseded_by` non-NULL means consolidation replaced it; `subject`
-    encodes shared-vs-member visibility."""
+    consolidation); `created_at` is when it was committed and `as_of` is when its source information
+    was current; `embedding_digest` NULL means it is still due for the index job (not yet
+    chunked/embedded), and `embedding_claimed_at` set means the indexer currently holds a lease on
+    it. Recall/decay: `half_life_days` is the recency half-life for its kind (None for
+    episodic/semantic, which never decay) and `decay_factor` is the live multiplier recall applies
+    to its relevance (`(confidence/10)·0.5**(age_days/half_life)` for facts, else 1.0). Lifecycle:
+    `superseded_by` non-NULL means consolidation replaced it; `subject` encodes shared-vs-member
+    visibility."""
 
     subject: str
     body: str
@@ -131,6 +133,7 @@ class MemoryInventoryItem(BaseModel):
     memory_kind: MemoryKind
     confidence: int
     source_ref: str | None
+    as_of: datetime | None
     embedding_digest: str | None
     embedding_claimed_at: datetime | None
     superseded_by: UUID | None
@@ -175,17 +178,21 @@ async def inventory(
             memory_kind=row["memory_kind"],
             confidence=row["confidence"],
             source_ref=row["source_ref"],
+            as_of=row["as_of"],
             embedding_digest=row["embedding_digest"],
             embedding_claimed_at=row["embedding_claimed_at"],
             superseded_by=row["superseded_by"],
             created_at=row["created_at"],
-            age_days=max(0.0, (now - _aware(row["created_at"])).total_seconds() / 86400.0),
+            age_days=max(
+                0.0,
+                (now - _aware(row["as_of"] or row["created_at"])).total_seconds() / 86400.0,
+            ),
             half_life_days=half_life_days(row["item_class"], row["memory_kind"]),
             decay_factor=decay_multiplier(
                 row["item_class"],
                 row["memory_kind"],
                 row["confidence"],
-                row["created_at"],
+                row["as_of"] or row["created_at"],
                 now,
             ),
         )
@@ -199,8 +206,9 @@ def _aware(when: datetime) -> datetime:
 
 class MemoryWrite(BaseModel):
     """What a commit records: the subject scoping visibility, the body, its class, the ref back to
-    what produced it, and the recall-decay inputs — `memory_kind` selects the recency half-life
-    (fact/preference/decision/event/task) and `confidence` (1..10) scales a fact's decayed rank."""
+    what produced it, and the recall-decay inputs — `as_of` is when the source information was
+    current, `memory_kind` selects the recency half-life (fact/preference/decision/event/task), and
+    `confidence` (1..10) scales a fact's decayed rank."""
 
     subject: str
     body: str
@@ -208,6 +216,7 @@ class MemoryWrite(BaseModel):
     memory_kind: MemoryKind = KIND_FACT
     confidence: int = Field(default=DEFAULT_CONFIDENCE, ge=1, le=MAX_CONFIDENCE)
     source_ref: str | None = None
+    as_of: datetime | None = None
 
 
 class MemoryItem(BaseModel):
@@ -297,6 +306,7 @@ class Recalled:
     memory_kind: str = KIND_FACT
     confidence: int = DEFAULT_CONFIDENCE
     created_at: datetime | None = None
+    as_of: datetime | None = None
     recall_mode: str | None = None
 
 
@@ -310,23 +320,23 @@ def half_life_days(item_class: str, memory_kind: str) -> float | None:
 
 
 def decay_multiplier(
-    item_class: str, memory_kind: str, confidence: int, created_at: datetime | None, now: datetime
+    item_class: str, memory_kind: str, confidence: int, as_of: datetime | None, now: datetime
 ) -> float:
     """The factor recall multiplies an item's relevance by — gbrain `effectiveConfidence`. A fact's
     is `(confidence / 10) * 0.5 ** (age_days / halflife)`; every other class carries no decay and
     stays 1.0. The one home for the decay math, so recall's ranking and the explorer's reported
     weight are the same number."""
     halflife = half_life_days(item_class, memory_kind)
-    if halflife is None or created_at is None:
+    if halflife is None or as_of is None:
         return 1.0
     base = confidence / MAX_CONFIDENCE
-    age_days = max(0.0, (now - _aware(created_at)).total_seconds() / 86400.0)
+    age_days = max(0.0, (now - _aware(as_of)).total_seconds() / 86400.0)
     return base * (0.5 ** (age_days / halflife))
 
 
 def decay_factor(item: Recalled, now: datetime) -> float:
     return decay_multiplier(
-        item.item_class, item.memory_kind, item.confidence, item.created_at, now
+        item.item_class, item.memory_kind, item.confidence, item.as_of or item.created_at, now
     )
 
 
@@ -405,6 +415,7 @@ class MemoryStore:
                 memory_kind=write.memory_kind,
                 confidence=write.confidence,
                 source_ref=write.source_ref,
+                as_of=write.as_of,
                 superseded_by=None,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
@@ -416,6 +427,7 @@ class MemoryStore:
                         memory_item.c.memory_kind: statement.excluded.memory_kind,
                         memory_item.c.confidence: statement.excluded.confidence,
                         memory_item.c.source_ref: statement.excluded.source_ref,
+                        memory_item.c.as_of: statement.excluded.as_of,
                         memory_item.c.updated_at: sa.func.now(),
                     },
                 )
@@ -586,6 +598,7 @@ class MemoryStore:
                             memory_item.c.confidence,
                             memory_item.c.body,
                             memory_item.c.source_ref,
+                            memory_item.c.as_of,
                             memory_item.c.created_at,
                         ).where(*conditions)
                     )
@@ -605,6 +618,7 @@ class MemoryStore:
                 memory_kind=by_id[UUID(hit.owner_id)]["memory_kind"],
                 confidence=by_id[UUID(hit.owner_id)]["confidence"],
                 created_at=by_id[UUID(hit.owner_id)]["created_at"],
+                as_of=by_id[UUID(hit.owner_id)]["as_of"],
             )
             for hit in fused
             if UUID(hit.owner_id) in by_id

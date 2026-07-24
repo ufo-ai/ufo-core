@@ -235,6 +235,7 @@ async def _facts(workspace_id: UUID) -> list[sa.Row]:
                         memory_item.c.memory_kind,
                         memory_item.c.confidence,
                         memory_item.c.source_ref,
+                        memory_item.c.as_of,
                         memory_item.c.superseded_by,
                     ).where(memory_item.c.workspace_id == workspace_id)
                 )
@@ -385,6 +386,7 @@ async def test_derive_facts_is_idempotent(db: None) -> None:
         digest="sha256:x",
         tombstone=False,
         created_at=WHEN,
+        as_of=WHEN - timedelta(days=365),
         changed_at=WHEN,
     )
     deriver = FactDeriver(store=_store(workspace_id, vec((2, 1.0))), model=_model(payload))
@@ -395,6 +397,7 @@ async def test_derive_facts_is_idempotent(db: None) -> None:
     rows = [row for row in await _facts(workspace_id) if row.item_class == FACT]
     assert len(rows) == 1
     assert rows[0].body == "the office is in the old cannery building"
+    assert rows[0].as_of.replace(tzinfo=UTC) == change.as_of
 
 
 async def test_derive_facts_without_a_model_skips_but_advances_cursor(

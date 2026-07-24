@@ -175,6 +175,7 @@ def _page(subject: str, body: str, tombstone: bool = False) -> PageChange:
         digest=f"digest-{subject}",
         tombstone=tombstone,
         created_at=now,
+        as_of=now,
         changed_at=now,
     )
 

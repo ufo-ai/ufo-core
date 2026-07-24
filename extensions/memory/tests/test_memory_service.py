@@ -7,7 +7,7 @@ asserted thing: every assertion reads the Recalled/SourceMatch values back."""
 
 from collections.abc import AsyncIterator
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -97,6 +97,7 @@ async def _seed_item(
     body: str,
     vector: tuple[float, ...],
     created_at: datetime | None = None,
+    as_of: datetime | None = None,
 ) -> UUID:
     """Insert a memory_item and its one already-derived chunk directly, so recall can be exercised
     without the derivation job in these unit tests."""
@@ -110,6 +111,7 @@ async def _seed_item(
                 body=body,
                 item_class=FACT,
                 source_ref=None,
+                as_of=as_of,
                 embedding_digest="sha256:seeded",
                 superseded_by=None,
                 created_at=created_at if created_at is not None else sa.func.now(),
@@ -365,9 +367,9 @@ def test_decay_factor_weights_recency_kind_and_confidence() -> None:
         created_at=now,
     )
     assert decay_factor(fresh, now) == 1.0
-    old = replace(fresh, created_at=datetime(2020, 1, 1, tzinfo=UTC))
+    old = replace(fresh, as_of=datetime(2020, 1, 1, tzinfo=UTC))
     assert 0.0 < decay_factor(old, now) < decay_factor(fresh, now)
-    aged = replace(fresh, created_at=datetime(2025, 10, 1, tzinfo=UTC))
+    aged = replace(fresh, as_of=datetime(2025, 10, 1, tzinfo=UTC))
     assert decay_factor(replace(aged, memory_kind="task"), now) < decay_factor(aged, now)
     assert decay_factor(replace(fresh, item_class="episodic"), now) == 1.0
     assert decay_factor(replace(fresh, item_class="semantic"), now) == 1.0
@@ -384,9 +386,9 @@ def test_enforce_type_diversity_caps_a_class_and_backfills() -> None:
     assert sum(1 for row in kept if row.item_class == "fact") == 3
 
 
-async def test_recall_reorders_by_recency_decay(clean: None) -> None:
-    """Two equally-matching facts on the same subject rank by recency decay: the newer one first,
-    the older one demoted — the fact half-life reordering, end to end over the real index."""
+async def test_recall_reorders_by_information_age(clean: None) -> None:
+    """Two equally-matching facts committed together rank by source information time: the current
+    one first and the year-old page fact demoted, end to end over the real index."""
     workspace_id = await _workspace()
     probe = vec((8, 1.0))
     old = await _seed_item(
@@ -394,14 +396,14 @@ async def test_recall_reorders_by_recency_decay(clean: None) -> None:
         SHARED_SUBJECT,
         "budget review meeting",
         probe,
-        created_at=datetime(2020, 1, 1, tzinfo=UTC),
+        as_of=datetime.now(UTC) - timedelta(days=365),
     )
     new = await _seed_item(
         workspace_id,
         SHARED_SUBJECT,
         "budget review meeting",
         probe,
-        created_at=datetime(2025, 6, 1, tzinfo=UTC),
+        as_of=datetime.now(UTC),
     )
     recalled = await _store(StubEmbed(probe), workspace_id).recall(
         "budget review", frozenset({SHARED_SUBJECT}), 10
@@ -472,6 +474,7 @@ async def test_page_indexer_writes_the_contexts_workspace_id(clean: None) -> Non
         digest="sha256:seeded",
         tombstone=False,
         created_at=datetime(2025, 1, 1, tzinfo=UTC),
+        as_of=datetime(2025, 1, 1, tzinfo=UTC),
         changed_at=datetime(2025, 1, 1, tzinfo=UTC),
     )
     with ws(workspace_id):

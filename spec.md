@@ -87,9 +87,10 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   `memory_search` seam: core resolves the conversation's member under workspace scope and routes
   a consumer to the extension's one search workflow. Scheduled tasks require this seam and search
   after admission and before the run's first model round. Recall carries the
-  gbrain richness: per-kind recency decay (fact/preference/decision/event/task half-lives, fact
-  items only), a type-diversity cap so no class dominates, supersession suppression, and an
-  episodic→topic pointer excluded from auto-injection. It rides two core selection seams: the
+  gbrain richness: per-kind recency decay against source information time, falling back to commit
+  time (fact/preference/decision/event/task half-lives, fact items only), a type-diversity cap so no
+  class dominates, supersession suppression, and an episodic→topic pointer excluded from
+  auto-injection. It rides two core selection seams: the
   **index backend** behind one lexical/vector interface and the **embed backend** behind
   one batched-embed interface. The dialect-native index (SQLite FTS5 + local cosine, Postgres
   tsvector + pgvector) ships as the base-pinned `index_default` extension and OpenAI embedding as

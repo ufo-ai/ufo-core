@@ -1117,6 +1117,10 @@ async def test_sync_persists_backend_page_browse_metadata(
     assert stored["title"] == page.title
     assert stored["source_created_at"] == page.created_at
     assert stored["source_updated_at"] == page.updated_at
+    feed = CorePageFeed(blob=FilesystemBlobStore(root=tmp_path / "blobs"))
+    with ws(workspace_id):
+        change = (await feed.pages_changed_since(None, 1)).changes[0]
+    assert change.as_of == datetime.fromisoformat(page.updated_at)
 
 
 async def test_sync_refreshes_browse_metadata_without_replaying_unchanged_content(

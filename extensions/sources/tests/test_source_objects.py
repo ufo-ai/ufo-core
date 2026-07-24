@@ -1019,6 +1019,7 @@ def _change(
         digest=f"sha256:{uuid4().hex}",
         tombstone=False,
         created_at=now,
+        as_of=now,
         changed_at=now,
     )
 
