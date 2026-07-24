@@ -20,3 +20,20 @@ resource "datadog_monitor" "telemetry_silent" {
 
   tags = ["env:testing", "managed-by:terraform"]
 }
+
+# The deploy's own verdict. A stuck rollout keeps the previous pods alive and talking, so the
+# silence monitor above is blind to it. The `deployment` job posts every main conclusion to the
+# event stream; this consumes the error half. No no-data clause: deploys are merge-driven, so a
+# quiet weekend is not an incident — a reporter that breaks fails the deploy step instead.
+resource "datadog_monitor" "deploy_failed" {
+  name    = "ufo testing deploy failed on main"
+  type    = "event-v2 alert"
+  query   = "events(\"env:testing deploy:main status:error\").rollup(\"count\").last(\"15m\") > 0"
+  message = "Deploy (testing) failed on main: the fleet is still running the previous images. Open the run linked from the event, then fix forward or revert. @slack-alerts @ops@flyingobject.ai"
+
+  monitor_thresholds {
+    critical = 0
+  }
+
+  tags = ["env:testing", "managed-by:terraform"]
+}

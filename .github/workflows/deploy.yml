@@ -228,6 +228,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Require the selected deployment work
+        id: gate
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
           DEPLOY_SELECTED: ${{ needs.changes.outputs.deploy }}
@@ -250,3 +251,26 @@ jobs:
               exit 1
               ;;
           esac
+
+      # A stuck deploy leaves the previous pods running and emitting logs, so the telemetry monitor
+      # reads it as green — main's deploy conclusion has to be its own signal. Every conclusion is
+      # reported, not only failures: the success path drives the same key, endpoint and payload, so
+      # a reporter that stops working turns the next deploy red instead of going quiet.
+      - name: Report the deploy conclusion to Datadog
+        if: always() && github.ref_name == 'main'
+        env:
+          DD_EVENT_URL: https://api.us5.datadoghq.com/api/v1/events
+          GATE_OUTCOME: ${{ steps.gate.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          test -n "$DD_API_KEY" || { echo 'DD_API_KEY secret is unset' >&2; exit 1; }
+          if [ "$GATE_OUTCOME" = success ]; then
+            STATUS=success VERB=succeeded
+          else
+            STATUS=error VERB=failed
+          fi
+          curl -sS --fail-with-body -X POST "$DD_EVENT_URL" \
+            -H "DD-API-KEY: $DD_API_KEY" -H 'Content-Type: application/json' \
+            -d "$(jq -n --arg status "$STATUS" --arg verb "$VERB" --arg url "$RUN_URL" \
+              '{title: "Deploy (testing) \($verb) on main", text: $url, alert_type: $status,
+                tags: ["env:testing", "deploy:main"]}')"
