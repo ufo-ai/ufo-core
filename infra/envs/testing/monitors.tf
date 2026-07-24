@@ -9,7 +9,7 @@ resource "datadog_monitor" "telemetry_silent" {
   name    = "ufo testing telemetry is silent"
   type    = "log alert"
   query   = "logs(\"env:testing\").index(\"*\").rollup(\"count\").last(\"15m\") < 1"
-  message = "No logs from the testing fleet reached Datadog for 15 minutes: the pipeline (pods → otel-collector → Datadog exporter) or cluster egress/DNS is down. @ops@flyingobject.ai"
+  message = "No logs from the testing fleet reached Datadog for 15 minutes: the pipeline (pods → otel-collector → Datadog exporter) or cluster egress/DNS is down. @ops@flyingobject.ai @slack-alerts"
 
   monitor_thresholds {
     critical = 1
