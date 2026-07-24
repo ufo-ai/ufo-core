@@ -20,6 +20,38 @@ def test_migrations_are_idempotent(database_url: str) -> None:
     apply_migrations(database_url)
 
 
+DUPLICATE_PROBE = """\"\"\"duplicate revision probe\"\"\"
+
+revision: str = "probe_dup"
+down_revision: str | None = None
+branch_labels: tuple[str, ...] | None = None
+depends_on: str | None = None
+
+
+def upgrade() -> None:
+    pass
+
+
+def downgrade() -> None:
+    pass
+"""
+
+
+def test_apply_migrations_rejects_a_stamp_short_of_the_graph_heads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two files claiming one revision id are one graph node, so alembic stamps one head where the
+    graph declares two and `upgrade heads` still exits 0. The run must not report success on a
+    schema missing the losing file's DDL."""
+    probe = tmp_path / "probe_versions"
+    probe.mkdir()
+    for name in ("first", "second"):
+        (probe / f"{name}.py").write_text(DUPLICATE_PROBE)
+    monkeypatch.setattr("ufo.ext.loader.migration_locations", lambda pack: (str(probe),))
+    with pytest.raises(RuntimeError, match="collapses into one node"):
+        apply_migrations(f"sqlite+aiosqlite:///{tmp_path / 'probe.db'}")
+
+
 def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None:
     """The migration seam's schema invariant: each table-owning extension's version location layers
     over core's — `apply_migrations` ran clean in the fixture — and the graph has exactly one head

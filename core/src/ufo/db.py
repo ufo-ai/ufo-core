@@ -23,11 +23,13 @@ from uuid import UUID
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config as AlembicConfig
+from alembic.script import ScriptDirectory
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
 MIGRATIONS_DIR = Path(__file__).parent / "schema" / "migrations"
 SQLITE_BUSY_TIMEOUT_MS = 5_000
+STAMPED_HEADS = "stamped_heads"
 WORKSPACE_GUC = "app.workspace_id"
 
 _engine: AsyncEngine | None = None
@@ -145,7 +147,11 @@ def apply_migrations(url: str, pack: str | None = None) -> None:
     after core by the `depends_on` its base declares. With `pack` set the active set narrows to that
     pack's bundle, so only its extensions' tables are created. The loader import is local to break
     the db↔loader↔context cycle (the loader reaches core through the same context that binds to this
-    module)."""
+    module).
+
+    `upgrade heads` reports success when it plans nothing, so the run ends by holding what `env.py`
+    stamped against the graph's heads. Two files claiming one revision id are one graph node: the
+    losing file's DDL is skipped, and every later deploy reads a schema the chain calls head."""
     from ufo.ext.loader import migration_locations
 
     config = AlembicConfig()
@@ -155,6 +161,13 @@ def apply_migrations(url: str, pack: str | None = None) -> None:
     config.set_main_option("path_separator", "os")
     config.set_main_option("sqlalchemy.url", url.replace("%", "%%"))
     command.upgrade(config, "heads")
+    stamped = sorted(config.attributes[STAMPED_HEADS])
+    heads = sorted(ScriptDirectory.from_config(config).get_heads())
+    if stamped != heads:
+        raise RuntimeError(
+            f"migration stamped {stamped}, not the graph's heads {heads} — a revision id claimed "
+            "by two files collapses into one node, so `upgrade heads` skips the losing file's DDL"
+        )
 
 
 def _sqlite_on_connect(dbapi_connection: Any, _connection_record: Any) -> None:
