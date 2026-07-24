@@ -2,9 +2,10 @@
 recallable pages.
 
 GitHub paginates uniformly: every list endpoint returns records as a bare JSON array and ships an
-RFC 5988 `Link: rel=next` header until the last page (`?per_page=100`). Records arrive flat, so
-`flatten` stays the identity passthrough. Auth is the two required GitHub headers (the v3 media type
-and the API version) layered on whichever client the base built from the resolved `Credential`.
+RFC 5988 `Link: rel=next` header until the last page (`?per_page=100`). Pull requests drop the
+foreign `head.repo`/`base.repo` objects before rendering; every other record stays flat. Auth is the
+two required GitHub headers (the v3 media type and the API version) layered on whichever client the
+base built from the resolved `Credential`.
 
 Most streams hit a per-repo path, but the repo catalog is derived from the organizations the grant
 exposes: the connector walks `/user/orgs`, then `/orgs/{org}/repos`, and fans repo-scoped streams
@@ -170,6 +171,21 @@ class GitHubConnector(RestConnector):
         client.headers["Accept"] = _GITHUB_ACCEPT
         client.headers["X-GitHub-Api-Version"] = _GITHUB_API_VERSION
         return client
+
+    def flatten(self, record: dict[str, Any], stream: StreamSpec) -> dict[str, Any]:
+        if stream.name != "pull_requests":
+            return record
+        head = record.get("head")
+        base = record.get("base")
+        return {
+            **record,
+            "head": {key: value for key, value in head.items() if key != "repo"}
+            if isinstance(head, dict)
+            else head,
+            "base": {key: value for key, value in base.items() if key != "repo"}
+            if isinstance(base, dict)
+            else base,
+        }
 
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None

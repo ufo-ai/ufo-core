@@ -13,8 +13,9 @@ Klaviyo wraps every record as `{type, id, attributes, relationships, links}`, so
 cursor lives under `attributes`; `flatten` lifts `attributes.*` to the top level (that is what makes
 the watermark advance) and additionally surfaces the nested relationship/sub-attribute fields a
 record's recall benefits from (a profile's consent, a campaign's subject, an event's metric name and
-references). A refusal (HTTP 401/403) raises `StreamSkipped` so the run records a skip. The write
-path is intentionally absent — the source seam only reads."""
+references). List and segment profile counts are neither requested nor rendered: membership changes
+must not change those records. A refusal (HTTP 401/403) raises `StreamSkipped` so the run records a
+skip. The write path is intentionally absent — the source seam only reads."""
 
 from collections.abc import AsyncIterator
 from typing import Any
@@ -128,10 +129,6 @@ class KlaviyoConnector(RestConnector):
             params["sort"] = field
         if stream.name == "profiles":
             params["additional-fields[profile]"] = "subscriptions"
-        elif stream.name == "lists":
-            params["additional-fields[list]"] = "profile_count"
-        elif stream.name == "segments":
-            params["additional-fields[segment]"] = "profile_count"
         elif stream.name == "events":
             params["include"] = "metric"
         return params
@@ -159,6 +156,8 @@ class KlaviyoConnector(RestConnector):
             flat["resource_type"] = record["type"]
         if isinstance(attrs, dict):
             flat.update(attrs)
+        if stream.name in {"lists", "segments"}:
+            flat.pop("profile_count", None)
 
         rels = record.get("relationships")
 

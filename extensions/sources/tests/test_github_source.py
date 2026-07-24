@@ -159,6 +159,40 @@ async def test_issues_send_since_per_repo() -> None:
     )
 
 
+async def test_pull_requests_drop_embedded_repositories() -> None:
+    def pull(*, title: str, stars: int) -> dict[str, object]:
+        side_repo = {**REPO, "stargazers_count": stars}
+        return {
+            "id": 700,
+            "title": title,
+            "updated_at": "2026-02-06T00:00:00Z",
+            "head": {"label": "ada:feature", "ref": "feature", "sha": "abc", "repo": side_repo},
+            "base": {"label": "acme:main", "ref": "main", "sha": "def", "repo": side_repo},
+        }
+
+    def handler(record: dict[str, object]) -> Callable[[httpx.Request], httpx.Response]:
+        def handle(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/user/orgs":
+                return httpx.Response(200, json=[ORG])
+            if request.url.path == "/orgs/acme/repos":
+                return httpx.Response(200, json=[REPO])
+            if request.url.path == "/repos/acme/repo1/pulls":
+                return httpx.Response(200, json=[record])
+            return httpx.Response(404, json={"path": request.url.path})
+
+        return handle
+
+    first = await _fetch("pull_requests", handler(pull(title="Feature", stars=10)))
+    repo_changed = await _fetch("pull_requests", handler(pull(title="Feature", stars=42)))
+    pr_changed = await _fetch("pull_requests", handler(pull(title="Feature v2", stars=42)))
+
+    assert first.pages[0].digest == repo_changed.pages[0].digest
+    assert repo_changed.pages[0].digest != pr_changed.pages[0].digest
+    body = json.loads(first.pages[0].body.split("\n\n", 1)[1])
+    assert body["head"] == {"label": "ada:feature", "ref": "feature", "sha": "abc"}
+    assert body["base"] == {"label": "acme:main", "ref": "main", "sha": "def"}
+
+
 async def test_newest_first_stream_stops_at_the_repo_watermark() -> None:
     """`commits` arrives newest-first and append-only: once a whole page sits at or below the
     repo's watermark every later page is older, so the walk stops instead of re-reading history."""

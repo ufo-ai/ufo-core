@@ -7,8 +7,9 @@ the `pagination.next_page_token` the response body carries (`?page_token=<token>
 `event_types` and `scheduled_events` filter incrementally through Calendly's own `updated_since` /
 `min_start_time` params; `event_invitees` fans out per scheduled event and filters past the stored
 watermark on `created_at`. A grant whose account exposes no `current_organization` yields
-`StreamSkipped`. Auth is the OAuth bearer the resolved `Credential` carries. The write path is
-intentionally absent — the source seam only reads."""
+`StreamSkipped`. Organization memberships lift the member's name and email, then drop the foreign
+user object so profile changes do not change the membership. Auth is the OAuth bearer the resolved
+`Credential` carries. The write path is intentionally absent — the source seam only reads."""
 
 from collections.abc import AsyncIterator
 from typing import Any
@@ -170,7 +171,7 @@ class CalendlyConnector(RestConnector):
         if stream.name == "organization_memberships":
             user = dict_or_empty(record.get("user"))
             return {
-                **record,
+                **{key: value for key, value in record.items() if key != "user"},
                 "name": user.get("name"),
                 "email": user.get("email"),
                 "created_at": record.get("created_at"),

@@ -97,6 +97,40 @@ async def test_links_next_pagination_follows_the_cursor() -> None:
     assert result.next_cursor == "2024-01-02"
 
 
+@pytest.mark.parametrize(("stream", "resource_type"), [("lists", "list"), ("segments", "segment")])
+async def test_list_membership_counts_do_not_change_digests(
+    stream: str, resource_type: str
+) -> None:
+    async def fetch(profile_count: int):
+        def handle(request: httpx.Request) -> httpx.Response:
+            assert request.url.params.get(f"additional-fields[{resource_type}]") is None
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "type": resource_type,
+                            "id": "group1",
+                            "attributes": {
+                                "name": "Customers",
+                                "updated": "2024-01-01",
+                                "profile_count": profile_count,
+                            },
+                        }
+                    ],
+                    "links": {"next": None},
+                },
+            )
+
+        return await _fetch(stream, handle)
+
+    first = await fetch(10)
+    membership_changed = await fetch(11)
+
+    assert first.pages[0].digest == membership_changed.pages[0].digest
+    assert "profile_count" not in first.pages[0].body
+
+
 async def test_events_stamp_metric_name_from_the_included_sidecar() -> None:
     event = {
         "type": "event",

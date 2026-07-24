@@ -127,28 +127,40 @@ async def test_event_types_flatten_derives_api_url() -> None:
     assert record["name"] == "Intro"
 
 
-async def test_organization_memberships_flatten_lifts_name_and_email_from_user() -> None:
-    def handle(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/users/me":
-            return httpx.Response(200, json=_me())
-        assert request.url.path == "/organization_memberships"
-        return httpx.Response(
-            200,
-            json={
-                "collection": [
-                    {
-                        "uri": "om1",
-                        "created_at": "2026-01-03",
-                        "user": {"name": "Ada Lovelace", "email": "ada@example.com"},
-                    }
-                ],
-                "pagination": {"next_page_token": None},
-            },
-        )
+async def test_organization_memberships_keep_only_user_name_and_email() -> None:
+    async def fetch(user_updated_at: str) -> SyncResult:
+        def handle(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/users/me":
+                return httpx.Response(200, json=_me())
+            assert request.url.path == "/organization_memberships"
+            return httpx.Response(
+                200,
+                json={
+                    "collection": [
+                        {
+                            "uri": "om1",
+                            "created_at": "2026-01-03",
+                            "user": {
+                                "name": "Ada Lovelace",
+                                "email": "ada@example.com",
+                                "avatar_url": "https://example.com/avatar.png",
+                                "updated_at": user_updated_at,
+                            },
+                        }
+                    ],
+                    "pagination": {"next_page_token": None},
+                },
+            )
 
-    record = _flat(await _fetch("organization_memberships", handle), "organization_memberships/om1")
+        return await _fetch("organization_memberships", handle)
+
+    first = await fetch("2026-01-01")
+    profile_changed = await fetch("2026-01-02")
+    record = _flat(first, "organization_memberships/om1")
     assert record["name"] == "Ada Lovelace"
     assert record["email"] == "ada@example.com"
+    assert "user" not in record
+    assert first.pages[0].digest == profile_changed.pages[0].digest
 
 
 async def test_missing_organization_skips_the_stream() -> None:
