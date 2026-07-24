@@ -16,7 +16,6 @@ from ufo.sdk.connectors import OAuthAccount
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.http import Request, Response
 from ufo_ext_composio import client as composio
-from ufo_ext_composio.client import CONNECTORS
 
 OAUTH_ROUTE_PATH = "oauth"
 OAUTH_ROUTE_MOUNT = "/ext/composio/oauth"
@@ -28,9 +27,10 @@ FAILED_CONSENT_STATUS = 502
 
 @dataclass(frozen=True)
 class ComposioOAuthProvider:
-    """One provider's OAuth descriptor keyed into `serve`'s connect registry. `host` is the
-    provider's own API host the derived grant admits and meters; `toolkit` is the Composio
-    managed-auth slug the consent leg opens. `authorize_url` is pure — it points the browser at the
+    """One provider's OAuth descriptor keyed into `serve`'s connect registry. `provider` is the
+    Composio managed-auth slug the consent leg opens; `host` is the provider's own API host the
+    derived grant admits and meters (empty for a brokered grant, which admits no provider host since
+    tools execute server-side). `authorize_url` is pure — it points the browser at the
     async `oauth` route — and `exchange` binds the consented account (by its id) once Composio
     confirms it is owned by this workspace's brokered user — the same `EXTERNAL_USER_PREFIX`-scoped
     id `oauth_route` minted the consent link against — so a foreign account id injected on the
@@ -39,7 +39,6 @@ class ComposioOAuthProvider:
 
     provider: str
     host: str
-    toolkit: str
 
     def authorize_url(self, state: str, redirect_uri: str) -> str:
         query = urlencode({"provider": self.provider, "state": state, "callback": redirect_uri})
@@ -49,7 +48,9 @@ class ComposioOAuthProvider:
         self, code: str, _redirect_uri: str, workspace_id: UUID, _state: str
     ) -> OAuthAccount:
         expected_user = f"{composio.EXTERNAL_USER_PREFIX}{workspace_id}"
-        return await composio.composio_client().connected_account(code, expected_user, self.toolkit)
+        return await composio.composio_client().connected_account(
+            code, expected_user, self.provider
+        )
 
 
 async def oauth_route(ctx: ExtensionContext, request: Request) -> Response:
@@ -78,15 +79,14 @@ async def oauth_route(ctx: ExtensionContext, request: Request) -> Response:
             "return to chat and ask the agent to connect again",
         )
     provider = params.get("provider", "")
-    spec = CONNECTORS.get(provider)
-    if spec is None:
-        return Response(status_code=404, content=f"unknown connector provider {provider!r}")
+    if not provider:
+        return Response(status_code=404, content="connect bridge is missing a provider")
     return_url = (
         f"{_origin(callback)}{OAUTH_ROUTE_MOUNT}"
         f"?{urlencode({'provider': provider, 'state': state, 'callback': callback})}"
     )
     redirect = await composio.composio_client().connect_link(
-        toolkit=spec.toolkit,
+        toolkit=provider,
         user_id=f"{composio.EXTERNAL_USER_PREFIX}{ctx.store.workspace_id}",
         callback_url=return_url,
     )

@@ -157,9 +157,9 @@ async def test_forwarder_bounds_the_total_exchange_by_wall_clock(
 
 def test_the_github_connector_declares_the_gh_cli() -> None:
     connectors = {provider.oauth.provider: provider for provider in manifest().connectors}
+    assert set(connectors) == {"github"}, "only the CLI exception is an explicit connector"
     github = connectors["github"].cli
     assert github is not None
     assert github.env == "GH_TOKEN"
     assert github.header == "authorization"
     assert isinstance(github.forward, ComposioRequestForwarder)
-    assert connectors["slack"].cli is None

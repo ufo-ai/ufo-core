@@ -223,7 +223,9 @@ class LoadSkillInput(BaseModel):
 
 class ConnectAccountInput(BaseModel):
     provider: str = Field(
-        description="The provider to connect an account for, e.g. 'github', 'google'."
+        description="The connector source_id to connect an account for, exactly as "
+        "list_external_tools returns it (e.g. 'github', 'googlecalendar', 'notion'). Look it up "
+        "there first rather than guessing — an unknown provider is refused."
     )
     shared: bool = Field(
         default=False,
@@ -638,7 +640,7 @@ async def connect_account_handler(ctx: ToolContext, args: ConnectAccountInput) -
     """Leave a provider-validated private OAuth handoff for the speaking member."""
     if ctx.speaker_member_id is None:
         raise ValueError("connect requires a speaking member to gate the grant")
-    installed_connect_flow().validate_provider(args.provider)
+    await installed_connect_flow().validate_provider(args.provider)
     request = ConnectRequest(provider=args.provider, shared=args.shared)
     return ToolResult(
         content=(TextContent(text=f"{CONNECT_ACCOUNT_DIRECTIVE}\n{request.model_dump_json()}"),)

@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from ufo_ext_sources.google_ads import GoogleAdsConnector
+from ufo_ext_sources.googleads import GoogleAdsConnector
 
 from ufo.connectors import Credential
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig

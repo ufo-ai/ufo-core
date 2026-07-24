@@ -166,7 +166,7 @@ ACTIVECAMPAIGN_STREAMS: list[StreamSpec] = [
 
 
 class ActiveCampaignConnector(RestConnector):
-    name = "activecampaign"
+    name = "active_campaign"
     base_url = ""
     streams_list = ACTIVECAMPAIGN_STREAMS
 
@@ -174,7 +174,7 @@ class ActiveCampaignConnector(RestConnector):
         if credential.transport is not None:
             return super()._make_client(base_url, credential)
         if credential.bearer is None:
-            raise RuntimeError("activecampaign: credential carries no api key")
+            raise RuntimeError("active_campaign: credential carries no api key")
         return super()._make_client(base_url, Credential(headers={"Api-Token": credential.bearer}))
 
     @staticmethod
@@ -202,7 +202,7 @@ class ActiveCampaignConnector(RestConnector):
         except httpx.HTTPStatusError as error:
             if error.response.status_code in _REFUSAL_STATUS:
                 raise StreamSkipped(
-                    f"activecampaign: {stream.name!r} refused ({error.response.status_code}); the "
+                    f"active_campaign: {stream.name!r} refused ({error.response.status_code}); the "
                     "grant lacks scope or the key is invalid"
                 ) from error
             raise

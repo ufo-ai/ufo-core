@@ -21,20 +21,24 @@ import pytest
 import sqlalchemy as sa
 import ufo_ext_composio.client as composio
 import ufo_ext_composio.manifest as composio_manifest
+import ufo_ext_composio.mcp_session as mcp_session
 import ufo_ext_composio.provider as provider
 import ufo_ext_connectors.manifest as connectors_manifest
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from pydantic import ValidationError
 from starlette.requests import Request
 from ufo_ext_composio.broker import ComposioBroker
 from ufo_ext_connectors.tools import (
     CallExternalToolInput,
     DescribeExternalToolsInput,
     ListExternalToolsInput,
+    SearchConnectorToolsInput,
     call_external_tool,
     describe_external_tools,
     list_external_tools,
+    search_connector_tools,
 )
 
 from ufo.config import Config
@@ -43,7 +47,13 @@ from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import context_for
 from ufo.ext.loader import turn_tools
-from ufo.grants import ConnectHandoff, GrantStore, install_connect_flow
+from ufo.ext.manifest import open_connector_namespace
+from ufo.grants import (
+    ConnectHandoff,
+    GrantStore,
+    UnknownProvider,
+    install_connect_flow,
+)
 from ufo.sandbox.proxy.rules import connector_transfer_hosts
 from ufo.schema import tables
 from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
@@ -64,6 +74,7 @@ COMPOSIO_USER = "ufo_ws"
 GITHUB_SLUG = "GITHUB_LIST_PULL_REQUESTS"
 UNKNOWN_SLUG = "GITHUB_DEFINITELY_NOT_A_TOOL"
 TOOL_DESCRIPTION = "List pull requests on a repository."
+TOOLKIT_CATALOG = {"github": "GitHub", "notion": "Notion", "stripe": "Stripe"}
 
 
 @pytest.fixture(autouse=True)
@@ -73,12 +84,17 @@ def _reset_connect_flow() -> Iterator[None]:
 
 
 def _composio_handler(
-    owner: str, executed: list[dict[str, object]] | None = None
+    owner: str,
+    executed: list[dict[str, object]] | None = None,
+    toolkit: str = "github",
+    tool_slug: str = GITHUB_SLUG,
 ) -> Callable[[httpx.Request], httpx.Response]:
     """A Composio mock: connect endpoints (reporting `owner` as the account's owning user, so the
     ownership assertion passes for a match and refuses a foreign one), the tool catalog
     (`GET /tools`, `GET /tools/{slug}`), and server-side execute (`POST /tools/execute/{slug}`,
-    recording the request body into `executed`). An unknown slug 404s on schema and execute."""
+    recording the request body into `executed`). An unknown slug 404s on schema and execute. The
+    connected account authenticates `toolkit` and its one catalog tool is `tool_slug`, so the same
+    mock serves an explicit connector (github) or an open-namespace slug (its own toolkit)."""
 
     def handle(request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -93,40 +109,62 @@ def _composio_handler(
                 json={
                     "status": "ACTIVE",
                     "user_id": owner,
-                    "toolkit": {"slug": "github"},
+                    "toolkit": {"slug": toolkit},
                     "state": {"val": {"access_token": GITHUB_TOKEN}},
                 },
             )
         if method == "GET" and path.endswith("/tools"):
             return httpx.Response(
-                200, json={"items": [{"slug": GITHUB_SLUG, "description": TOOL_DESCRIPTION}]}
+                200, json={"items": [{"slug": tool_slug, "description": TOOL_DESCRIPTION}]}
             )
-        if method == "GET" and path.endswith(f"/tools/{GITHUB_SLUG}"):
+        if method == "GET" and path.endswith(f"/tools/{tool_slug}"):
             return httpx.Response(
                 200,
                 json={
-                    "slug": GITHUB_SLUG,
+                    "slug": tool_slug,
                     "input_schema": {"type": "object", "properties": {"owner": {"type": "string"}}},
                 },
             )
         if method == "GET" and "/tools/" in path:
             return httpx.Response(404, json={"error": "unknown tool"})
-        if method == "POST" and path.endswith(f"/tools/execute/{GITHUB_SLUG}"):
+        if method == "POST" and path.endswith(f"/tools/execute/{tool_slug}"):
             if executed is not None:
                 executed.append(json.loads(request.content))
             return httpx.Response(200, json={"successful": True, "data": {"items": []}})
         if method == "POST" and "/tools/execute/" in path:
             return httpx.Response(404, json={"error": "unknown tool"})
+        if method == "POST" and path.endswith("/tool_router/session"):
+            return httpx.Response(
+                200, json={"session_id": "s", "mcp": {"url": "https://router.test/mcp"}}
+            )
+        if method == "GET" and "/toolkits/" in path:
+            slug = path.rsplit("/", 1)[-1]
+            label = TOOLKIT_CATALOG.get(slug)
+            if label is None:
+                return httpx.Response(404, json={"error": "unknown toolkit"})
+            return httpx.Response(200, json={"slug": slug, "name": label})
+        if method == "GET" and path.endswith("/toolkits"):
+            search = (request.url.params.get("search") or "").lower()
+            items = [
+                {"slug": slug, "name": label}
+                for slug, label in TOOLKIT_CATALOG.items()
+                if not search or search in slug or search in label.lower()
+            ]
+            return httpx.Response(200, json={"items": items})
         return httpx.Response(404, json={})
 
     return handle
 
 
 def _mock_client(
-    owner: str = COMPOSIO_USER, executed: list[dict[str, object]] | None = None
+    owner: str = COMPOSIO_USER,
+    executed: list[dict[str, object]] | None = None,
+    toolkit: str = "github",
+    tool_slug: str = GITHUB_SLUG,
 ) -> composio.ComposioClient:
     return composio.ComposioClient(
-        api_key="test", transport=httpx.MockTransport(_composio_handler(owner, executed))
+        api_key="test",
+        transport=httpx.MockTransport(_composio_handler(owner, executed, toolkit, tool_slug)),
     )
 
 
@@ -151,6 +189,20 @@ def _registry() -> ConnectorRegistry:
 async def test_composio_client_confirms_an_active_accounts_owner() -> None:
     account = await _mock_client().connected_account(COMPOSIO_ACCOUNT, COMPOSIO_USER, "github")
     assert account.account_id == COMPOSIO_ACCOUNT
+
+
+async def test_toolkit_label_rejects_a_path_traversing_slug_without_calling() -> None:
+    """A member-supplied provider slug that isn't a plain toolkit identifier is no toolkit and never
+    reaches the URL — else a `/` or `..` would traverse out of `/toolkits` to any same-host Composio
+    endpoint under the deploy's key (httpx resolves `..` against the base path)."""
+
+    def explode(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"a malformed slug must not reach Composio: {request.url}")
+
+    client = composio.ComposioClient(api_key="test", transport=httpx.MockTransport(explode))
+    assert await client.toolkit_label("../../../etc/passwd") is None
+    assert await client.toolkit_label("tool/kit") is None
+    assert await client.toolkit_label("with space") is None
 
 
 async def test_composio_client_refuses_an_account_owned_by_a_foreign_user() -> None:
@@ -324,7 +376,7 @@ async def test_stage_upload_names_the_staged_object_for_the_tool_argument(
         lambda: composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handler)),
     )
     staged = await ComposioBroker().stage_upload(
-        uuid4(), "google_drive", "GOOGLEDRIVE_UPLOAD_FILE", "form.pdf", "application/pdf", "abc123"
+        uuid4(), "googledrive", "GOOGLEDRIVE_UPLOAD_FILE", "form.pdf", "application/pdf", "abc123"
     )
     assert staged.put_url == UPLOAD_PUT_URL
     assert staged.content_type == "application/pdf"
@@ -365,7 +417,7 @@ async def test_stage_upload_reuses_a_deduped_slot_without_a_put_url(
         lambda: composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handler)),
     )
     staged = await ComposioBroker().stage_upload(
-        uuid4(), "google_drive", "GOOGLEDRIVE_UPLOAD_FILE", "form.pdf", "application/pdf", "abc123"
+        uuid4(), "googledrive", "GOOGLEDRIVE_UPLOAD_FILE", "form.pdf", "application/pdf", "abc123"
     )
     assert staged.put_url is None
     assert staged.argument == {
@@ -420,11 +472,13 @@ async def test_schema_rewrites_file_params_to_the_workspace_vocabulary(
 
 def test_manifest_declares_the_broker_file_transfer_hosts() -> None:
     hosts = connector_transfer_hosts((composio_manifest.manifest(),))
-    assert hosts[PROVIDER] == composio.COMPOSIO_TRANSFER_HOSTS
+    assert hosts.of(PROVIDER) == composio.COMPOSIO_TRANSFER_HOSTS
+    assert hosts.of("notion") == composio.COMPOSIO_TRANSFER_HOSTS
+    assert hosts.default == composio.COMPOSIO_TRANSFER_HOSTS
 
 
 def test_authorize_url_points_the_browser_at_the_oauth_bridge() -> None:
-    oauth = provider.ComposioOAuthProvider(provider=PROVIDER, host=PROVIDER_HOST, toolkit="github")
+    oauth = provider.ComposioOAuthProvider(provider=PROVIDER, host=PROVIDER_HOST)
     url = oauth.authorize_url("SEALED", EXPECTED_REDIRECT_URI)
     parsed = urlparse(url)
     assert (parsed.scheme, parsed.netloc, parsed.path) == (
@@ -444,6 +498,20 @@ async def test_oauth_route_start_leg_redirects_to_composio_consent(
     monkeypatch.setattr(composio, "composio_client", _mock_client)
     ctx = context_for(composio_manifest.NAME, frozenset())
     query = f"provider={PROVIDER}&state=SEALED&callback={EXPECTED_REDIRECT_URI}"
+    with ws(uuid4()):
+        response = await provider.oauth_route(ctx, _request(query))
+    assert response.status_code == provider.REDIRECT_STATUS
+    assert response.headers["location"] == COMPOSIO_CONSENT_URL
+
+
+async def test_oauth_route_start_leg_mints_a_link_for_an_open_toolkit_slug(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider no explicit connector registers is a Composio toolkit slug: the start leg mints
+    its consent link (toolkit == slug) rather than 404-ing on the closed registry."""
+    monkeypatch.setattr(composio, "composio_client", _mock_client)
+    ctx = context_for(composio_manifest.NAME, frozenset())
+    query = f"provider=notion&state=SEALED&callback={EXPECTED_REDIRECT_URI}"
     with ws(uuid4()):
         response = await provider.oauth_route(ctx, _request(query))
     assert response.status_code == provider.REDIRECT_STATUS
@@ -478,35 +546,96 @@ async def test_oauth_route_failed_consent_answers_loud_instead_of_reminting_cons
     assert "location" not in response.headers
 
 
-def test_serve_registers_every_provider_with_label_and_broker() -> None:
-    """The manifest's connectors land in both registries `serve` builds: the connect flow's OAuth
-    map and the `ConnectorRegistry` the dynamic tools and feed-sync route through — labels and the
-    shared broker included. Gmail is deliberately absent: it is Pipedream's provider (Google blocks
-    restricted Gmail scopes on Composio's shared client)."""
+def test_serve_registers_the_cli_exception_explicitly_and_opens_the_rest() -> None:
+    """`serve` builds both registries from the manifest: the CLI exception (github) lands as an
+    explicit provider with its real host, and the open `ComposioResolver` serves every other toolkit
+    by its slug alone — resolved to the shared broker and an OAuth descriptor with no provider host,
+    since a brokered grant admits none (execution is server-side)."""
     flow = _connect_flow(_credentials(), _config(), (composio_manifest.manifest(),))
     assert flow is not None
-    assert set(flow.providers) == set(composio.CONNECTORS)
-    assert "gmail" not in flow.providers
-    assert "activecampaign" in flow.providers
-    assert "active_campaign" not in flow.providers
+    assert set(flow.providers) == {PROVIDER}
     assert flow.providers[PROVIDER].host == PROVIDER_HOST
     assert flow.redirect_uri == EXPECTED_REDIRECT_URI
+    assert flow.resolver is not None
+    descriptor = flow.resolver.descriptor("notion")
+    assert descriptor.provider == "notion"
+    assert descriptor.host == ""
     registry = _registry()
-    assert set(registry.entries) == set(composio.CONNECTORS)
-    entry = registry.entry(PROVIDER)
-    assert entry.label == "GitHub"
-    assert isinstance(entry.broker, ComposioBroker)
+    assert set(registry.entries) == {PROVIDER}
+    assert registry.entry(PROVIDER).label == "GitHub"
+    opened = registry.entry("notion")
+    assert opened.provider == "notion"
+    assert isinstance(opened.broker, ComposioBroker)
+    assert isinstance(registry.entry(PROVIDER).broker, ComposioBroker)
 
 
-async def test_list_external_tools_filters_the_composio_catalog() -> None:
+def test_two_open_connector_namespaces_fail_loud() -> None:
+    """At most one open namespace can own the unregistered-slug space; two would leave the connect
+    flow and registry unable to decide which brokers a slug, so serve refuses at boot rather than
+    resolve it arbitrarily."""
+    manifest = composio_manifest.manifest()
+    assert open_connector_namespace((manifest,)) is manifest.connector_resolver
+    with pytest.raises(RuntimeError, match="two extensions register an open connector namespace"):
+        open_connector_namespace((manifest, manifest))
+
+
+def test_knows_provider_is_a_cheap_check_that_never_hits_the_catalog() -> None:
+    """The memoizing `authorize` runs this under a turn-row lock, so it must not reach Composio: an
+    installed open namespace answers yes for any slug without a client (no `composio_client` is
+    patched, so an actual catalog call would raise)."""
+    flow = _connect_flow(_credentials(), _config(), (composio_manifest.manifest(),))
+    assert flow is not None
+    assert flow.knows_provider(PROVIDER)
+    assert flow.knows_provider("any-open-slug")
+
+
+async def test_connect_flow_validates_a_toolkit_slug_against_the_live_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member connecting an unregistered slug is validated against Composio's catalog, so a real
+    toolkit passes and a typo fails loud at connect time rather than minting a dead consent link."""
+    monkeypatch.setattr(composio, "composio_client", _mock_client)
+    flow = _connect_flow(_credentials(), _config(), (composio_manifest.manifest(),))
+    assert flow is not None
+    await flow.validate_provider("notion")
+    with pytest.raises(UnknownProvider):
+        await flow.validate_provider("definitelynotatoolkit")
+
+
+async def test_list_external_tools_surfaces_the_open_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(composio, "composio_client", _mock_client)
     result = await list_external_tools(
         _ctx(uuid4(), uuid4(), uuid4(), None),
-        ListExternalToolsInput(queries=("github",), user_description="find a code host"),
+        ListExternalToolsInput(queries=("notion",), user_description="find a doc store"),
     )
     payload = json.loads(result.content[0].text)
     rows = {row["source_id"] for row in payload["connectors"]}
-    assert PROVIDER in rows
+    assert "notion" in rows
     assert "stripe" not in rows
+
+
+async def test_list_external_tools_fans_multiple_queries_across_the_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Several distinct queries each search the catalog (concurrently) and merge deduped, so the
+    fan-out surfaces every match — the path a single query never exercises."""
+    monkeypatch.setattr(composio, "composio_client", _mock_client)
+    result = await list_external_tools(
+        _ctx(uuid4(), uuid4(), uuid4(), None),
+        ListExternalToolsInput(
+            queries=("notion", "stripe", "notion"), user_description="find a few tools"
+        ),
+    )
+    rows = [row["source_id"] for row in json.loads(result.content[0].text)["connectors"]]
+    assert set(rows) >= {"notion", "stripe"}
+    assert rows.count("notion") == 1
+
+
+def test_list_external_tools_input_bounds_the_query_count() -> None:
+    with pytest.raises(ValidationError):
+        ListExternalToolsInput(queries=tuple(f"q{n}" for n in range(9)), user_description="x")
 
 
 async def test_describe_external_tools_fetches_schemas_and_available_tools(
@@ -620,6 +749,91 @@ async def test_connect_binds_a_grant_and_call_external_tool_executes_via_composi
             "connected_account_id": COMPOSIO_ACCOUNT,
         }
     ]
+
+
+async def test_open_namespace_slug_connects_describes_searches_and_executes(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The headline capability, whole chain, for a slug no connector registered. Front leg: the
+    member asks to connect it, `connect_account_handler` validates it against the live catalog, and
+    the turn-locked `ConnectHandoff.authorize` (via `knows_provider` + the resolver's descriptor)
+    mints the consent URL; `complete` then binds a host="" grant. Back leg: `describe`, `search`,
+    and `call` each dispatch through the registry's resolver fallback (`entry`) to the Composio
+    broker's schema, Tool Router, and server-side execute — so an open-namespace provider is
+    connectable, describable, searchable, and callable, not just registered."""
+    notion_tool = "NOTION_INSERT_ROW"
+    workspace_id = await _workspace()
+    owner = f"{composio.EXTERNAL_USER_PREFIX}{workspace_id}"
+    executed: list[dict[str, object]] = []
+    client = _mock_client(owner, executed, toolkit="notion", tool_slug=notion_tool)
+    monkeypatch.setattr(composio, "composio_client", lambda: client)
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    turn_id = await _turn(workspace_id, agent_id, conversation_id)
+    credentials = _credentials()
+    flow = _connect_flow(
+        credentials, _config(), (connectors_manifest.manifest(), composio_manifest.manifest())
+    )
+    assert flow is not None
+    install_connect_flow(flow)
+
+    begin = await connect_account_handler(
+        _turn_context(workspace_id, agent_id, conversation_id, member_id, turn_id),
+        ConnectAccountInput(provider="notion"),
+    )
+    request = ConnectRequest.model_validate_json(begin.content[0].text.splitlines()[1])
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == turn_id)
+            .values(
+                status="done",
+                speaker_member_id=member_id,
+                terminal=TerminalFrame(status="done", connect_request=request).model_dump(
+                    mode="json"
+                ),
+                updated_at=sa.func.now(),
+            )
+        )
+    url = await ConnectHandoff(flow).authorize(workspace_id, turn_id, member_id)
+    state = parse_qs(urlparse(url).query)["state"][0]
+    recorded = await flow.complete(state=state, code=COMPOSIO_ACCOUNT)
+    assert (recorded.provider, recorded.account_id) == ("notion", COMPOSIO_ACCOUNT)
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.grant.c.host, tables.grant.c.provider).where(
+                    tables.grant.c.workspace_id == workspace_id
+                )
+            )
+        ).one()
+    assert (row.host, row.provider) == ("", "notion")
+
+    ctx = _ctx(
+        workspace_id, agent_id, conversation_id, turn_id, flow.store, speaker_member_id=member_id
+    )
+    described = await describe_external_tools(
+        ctx, DescribeExternalToolsInput(source_id="notion", tool_names=(notion_tool,))
+    )
+    assert notion_tool in json.loads(described.content[0].text)["schemas"]
+
+    monkeypatch.setattr(composio, "_SEARCH_SESSIONS", {})
+
+    async def fake_router_call(*args: object, **kwargs: object) -> dict[str, object]:
+        return {"data": {"results": [{"primary_tool_slugs": [notion_tool]}], "tool_schemas": {}}}
+
+    monkeypatch.setattr(mcp_session, "mcp_call_tool", fake_router_call)
+    found = await search_connector_tools(
+        ctx, SearchConnectorToolsInput(source_id="notion", query="insert a row")
+    )
+    assert notion_tool in [t["slug"] for t in json.loads(found.content[0].text)["tools"]]
+
+    result = await call_external_tool(
+        ctx, CallExternalToolInput(tool_name=notion_tool, source_id="notion", arguments={})
+    )
+    assert result.is_error is False
+    assert json.loads(result.content[0].text)["successful"] is True
+    assert executed and executed[0]["connected_account_id"] == COMPOSIO_ACCOUNT
 
 
 async def test_shared_oauth_bridge_verifies_workspace_and_lands_the_grant(

@@ -127,16 +127,15 @@ def _context(state: State, grants: GrantStore, connectors: ConnectorRegistry) ->
 
 
 def _registry(manifest: object, provider: str) -> ConnectorRegistry:
-    connector = next(
-        connector for connector in manifest.connectors if connector.oauth.provider == provider
+    explicit = {connector.oauth.provider: connector for connector in manifest.connectors}.get(
+        provider
     )
-    return ConnectorRegistry(
-        entries={
-            provider: ConnectorEntry(
-                provider=provider, label=connector.label, broker=connector.broker
-            )
-        }
+    entries = (
+        {provider: ConnectorEntry(provider=provider, label=explicit.label, broker=explicit.broker)}
+        if explicit is not None
+        else {}
     )
+    return ConnectorRegistry(entries=entries, resolver=manifest.connector_resolver)
 
 
 async def _register_grant(

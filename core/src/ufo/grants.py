@@ -85,6 +85,19 @@ class OAuthProvider(Protocol):
     ) -> OAuthAccount: ...
 
 
+class OAuthProviderResolver(Protocol):
+    """The connect-flow half of an open connector namespace: how a broker extension answers the
+    OAuth descriptor for any provider slug it brokers without registering each explicitly. `claims`
+    validates the slug against the broker's live catalog (I/O), so a typo fails loud at connect time
+    rather than minting a dead consent link; `descriptor` builds the pure descriptor a validated
+    slug connects through — the broker holds the account's token, so the grant admits no provider
+    host (`host` is empty) and injects nothing."""
+
+    async def claims(self, provider: str) -> bool: ...
+
+    def descriptor(self, provider: str) -> OAuthProvider: ...
+
+
 @dataclass(frozen=True)
 class Grant:
     """A grant as the proxy-rule derivation and connector tools read it: the host it admits and
@@ -270,13 +283,15 @@ class ConnectFlow:
     """The connect workflow, twinned across a browser redirect: `authorize` opens a provider's link
     carrying sealed state; `complete` verifies that state, exchanges the code, and records the
     grant. Deps: the providers the deploy installs (empty until a connectors extension declares
-    any), the Fernet that seals the state, the grant store, and the deploy's callback `redirect_uri`
-    — one value both legs use, so the token exchange presents the same redirect the link did."""
+    any), an optional `resolver` for an open connector namespace whose broker serves any other slug,
+    the Fernet that seals the state, the grant store, and the deploy's callback `redirect_uri` — one
+    value both legs use, so the token exchange presents the same redirect the link did."""
 
     providers: Mapping[str, OAuthProvider]
     fernet: Fernet
     store: GrantStore
     redirect_uri: str
+    resolver: OAuthProviderResolver | None = None
 
     def authorize(
         self,
@@ -300,8 +315,19 @@ class ConnectFlow:
         sealed = self.fernet.encrypt(state.model_dump_json().encode()).decode()
         return descriptor.authorize_url(sealed, self.redirect_uri)
 
-    def validate_provider(self, provider: str) -> None:
-        self._provider(provider)
+    async def validate_provider(self, provider: str) -> None:
+        if provider in self.providers:
+            return
+        if self.resolver is not None and await self.resolver.claims(provider):
+            return
+        raise UnknownProvider(provider)
+
+    def knows_provider(self, provider: str) -> bool:
+        """Whether the connect machinery for `provider` is still installed — the cheap check the
+        memoizing `authorize` runs under its turn-row lock, never the external catalog validation
+        `validate_provider` already ran when the connect request was made. An open namespace serves
+        any slug, so its presence alone answers yes."""
+        return provider in self.providers or self.resolver is not None
 
     def bridge_workspace(self, *, state: str, provider: str, callback: str) -> UUID:
         """Verify a browser bridge request and return the workspace it may run as."""
@@ -332,9 +358,11 @@ class ConnectFlow:
 
     def _provider(self, name: str) -> OAuthProvider:
         descriptor = self.providers.get(name)
-        if descriptor is None:
-            raise UnknownProvider(name)
-        return descriptor
+        if descriptor is not None:
+            return descriptor
+        if self.resolver is not None:
+            return self.resolver.descriptor(name)
+        raise UnknownProvider(name)
 
     def _open(self, state: str) -> ConnectState:
         try:
@@ -378,10 +406,8 @@ class ConnectHandoff:
             request = terminal.connect_request
             if request is None:
                 raise ConnectRequestInvalid("connect request is no longer available")
-            try:
-                self.flow.validate_provider(request.provider)
-            except UnknownProvider as error:
-                raise ConnectRequestInvalid("connect provider is no longer available") from error
+            if not self.flow.knows_provider(request.provider):
+                raise ConnectRequestInvalid("connect provider is no longer available")
             now = datetime.now(UTC)
             if row.connect_authorization_url is not None:
                 if row.connect_authorized_at is None:

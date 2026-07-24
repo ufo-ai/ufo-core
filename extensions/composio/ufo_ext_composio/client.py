@@ -13,6 +13,7 @@ environment (one Composio account per deploy, the analog of the model key)."""
 import asyncio
 import json
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from uuid import UUID
@@ -34,21 +35,24 @@ TOOL_ROUTER_TIMEOUT_SECONDS = 30.0
 TOOL_ROUTER_SESSION_PATH = "/tool_router/session"
 COMPOSIO_SEARCH_TOOL = "COMPOSIO_SEARCH_TOOLS"
 FILES_UPLOAD_PATH = "/files/upload/request"
+TOOLKITS_PATH = "/toolkits"
+NOT_FOUND_STATUS = 404
+TOOLKIT_SLUG = re.compile(r"[A-Za-z0-9_-]+\Z")
 COMPOSIO_TRANSFER_HOSTS = ("temp.4d4f16c61d89ec64e760039c4ec50717.r2.cloudflarestorage.com",)
 FILE_UPLOADABLE_KEY = "file_uploadable"
 
 
 @dataclass(frozen=True)
 class ConnectorSpec:
-    """One brokered connector: the member-facing label, the Composio toolkit slug whose managed or
-    custom OAuth config grants the account, and the provider's own API `host` the derived grant
-    admits and injects at the egress proxy — direct-provider-host, never Composio's backend.
-    `cli_env` names the env var a provider CLI reads its token from (github's `GH_TOKEN`): the
-    sandbox exports the grant's sentinel there and the proxy forwards the matching request through
-    proxy-execute, so the CLI authenticates without the token ever existing on this deploy."""
+    """One connector whose grant needs a real provider host — the small CLI exception to the open
+    catalog. Every other Composio toolkit is connectable through `ComposioResolver` by its slug
+    alone, its brokered grant admitting no provider host (execution is server-side). Its provider
+    name is the Composio toolkit slug (the key it is registered under). `cli_env` names the env var
+    a provider CLI reads its token from (github's `GH_TOKEN`): the sandbox exports the grant's
+    sentinel there and the proxy forwards the matching request to `host` through proxy-execute, so
+    the CLI authenticates without the token existing on this deploy. `label` is member-facing."""
 
     label: str
-    toolkit: str
     host: str
     cli_env: str | None = None
 
@@ -75,43 +79,7 @@ class ComposioUpload:
 
 
 CONNECTORS: dict[str, ConnectorSpec] = {
-    "github": ConnectorSpec("GitHub", "github", "api.github.com", cli_env="GH_TOKEN"),
-    "google_calendar": ConnectorSpec("Google Calendar", "googlecalendar", "www.googleapis.com"),
-    "google_sheets": ConnectorSpec("Google Sheets", "googlesheets", "sheets.googleapis.com"),
-    "google_drive": ConnectorSpec("Google Drive", "googledrive", "www.googleapis.com"),
-    "google_meet": ConnectorSpec("Google Meet", "googlemeet", "meet.googleapis.com"),
-    "slack": ConnectorSpec("Slack", "slack", "slack.com"),
-    "notion": ConnectorSpec("Notion", "notion", "api.notion.com"),
-    "linear": ConnectorSpec("Linear", "linear", "api.linear.app"),
-    "asana": ConnectorSpec("Asana", "asana", "app.asana.com"),
-    "stripe": ConnectorSpec("Stripe", "stripe", "api.stripe.com"),
-    "hubspot": ConnectorSpec("HubSpot", "hubspot", "api.hubapi.com"),
-    "calendly": ConnectorSpec("Calendly", "calendly", "api.calendly.com"),
-    "intercom": ConnectorSpec("Intercom", "intercom", "api.intercom.io"),
-    "airtable": ConnectorSpec("Airtable", "airtable", "api.airtable.com"),
-    "monday": ConnectorSpec("Monday", "monday", "api.monday.com"),
-    "pagerduty": ConnectorSpec("PagerDuty", "pagerduty", "api.pagerduty.com"),
-    "sentry": ConnectorSpec("Sentry", "sentry", "sentry.io"),
-    "typeform": ConnectorSpec("Typeform", "typeform", "api.typeform.com"),
-    "klaviyo": ConnectorSpec("Klaviyo", "klaviyo", "a.klaviyo.com"),
-    "clickup": ConnectorSpec("ClickUp", "clickup", "api.clickup.com"),
-    "outlook": ConnectorSpec("Outlook", "outlook", "graph.microsoft.com"),
-    "microsoft_teams": ConnectorSpec("Microsoft Teams", "microsoft_teams", "graph.microsoft.com"),
-    "zendesk": ConnectorSpec("Zendesk", "zendesk", "api.zendesk.com"),
-    "jira": ConnectorSpec("Jira", "jira", "api.atlassian.com"),
-    "confluence": ConnectorSpec("Confluence", "confluence", "api.atlassian.com"),
-    "freshdesk": ConnectorSpec("Freshdesk", "freshdesk", "api.freshdesk.com"),
-    "bamboohr": ConnectorSpec("BambooHR", "bamboohr", "api.bamboohr.com"),
-    "activecampaign": ConnectorSpec("ActiveCampaign", "active_campaign", "api.activecampaign.com"),
-    "ashby": ConnectorSpec("Ashby", "ashby", "api.ashbyhq.com"),
-    "brex": ConnectorSpec("Brex", "brex", "platform.brexapis.com"),
-    "instagram": ConnectorSpec("Instagram", "instagram", "graph.instagram.com"),
-    "mailchimp": ConnectorSpec("Mailchimp", "mailchimp", "api.mailchimp.com"),
-    "quickbooks": ConnectorSpec("QuickBooks", "quickbooks", "quickbooks.api.intuit.com"),
-    "recruitee": ConnectorSpec("Recruitee", "recruitee", "api.recruitee.com"),
-    "square": ConnectorSpec("Square", "square", "connect.squareup.com"),
-    "wrike": ConnectorSpec("Wrike", "wrike", "www.wrike.com"),
-    "xero": ConnectorSpec("Xero", "xero", "api.xero.com"),
+    "github": ConnectorSpec("GitHub", "api.github.com", cli_env="GH_TOKEN"),
 }
 
 
@@ -186,6 +154,43 @@ class ComposioClient:
 
     async def tool_schema(self, slug: str) -> dict[str, object]:
         return await self._get(f"/tools/{slug}")
+
+    async def toolkit_label(self, slug: str) -> str | None:
+        """The member-facing name Composio holds for a toolkit slug, or None when Composio brokers
+        no such toolkit — the existence check `ComposioResolver.claims` runs so a typo'd slug fails
+        loud at connect time rather than minting a dead consent link. A slug carrying anything but a
+        toolkit identifier's charset is no toolkit and never reaches the URL — `/` or `.` would
+        otherwise let a member-supplied string traverse out of the toolkits path to any same-host
+        Composio endpoint under this deploy's key."""
+        if not TOOLKIT_SLUG.match(slug):
+            return None
+        try:
+            payload = await self._get(f"{TOOLKITS_PATH}/{slug}")
+        except ComposioError as error:
+            if error.status == NOT_FOUND_STATUS:
+                return None
+            raise
+        name = payload.get("name")
+        return name if isinstance(name, str) and name else slug
+
+    async def list_toolkits(self, query: str, limit: int) -> tuple[tuple[str, str], ...]:
+        """Search Composio's toolkit catalog, returning `(slug, label)` for each match — the open
+        set the discovery tool surfaces, never bounded by the explicitly registered connectors."""
+        params = {"limit": str(limit)}
+        if query:
+            params["search"] = query
+        payload = await self._get(TOOLKITS_PATH, params=params)
+        items = payload.get("items")
+        rows: list[tuple[str, str]] = []
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            slug = item.get("slug")
+            if not isinstance(slug, str) or not slug:
+                continue
+            name = item.get("name")
+            rows.append((slug, name if isinstance(name, str) and name else slug))
+        return tuple(rows)
 
     async def execute_tool(
         self,
@@ -399,16 +404,14 @@ async def search_connector_tools(
     the recommended execution plan, guidance, and pitfalls. Search only — execution never goes via
     Tool Router, so metering and the grant stay on the execute API. The (broker user, toolkit)
     session is opened once and cached, so concurrent searches on one connector share it."""
-    spec = CONNECTORS.get(connector)
-    toolkit = spec.toolkit if spec is not None else connector
     user_id = f"{EXTERNAL_USER_PREFIX}{workspace_id}"
-    key = (user_id, toolkit)
+    key = (user_id, connector)
     session = _SEARCH_SESSIONS.get(key)
     if session is None:
         async with _SEARCH_SESSIONS_LOCK:
             session = _SEARCH_SESSIONS.get(key)
             if session is None:
-                session = await client.tool_router_session(user_id, [toolkit])
+                session = await client.tool_router_session(user_id, [connector])
                 _SEARCH_SESSIONS[key] = session
     result = await mcp_session.mcp_call_tool(
         session.url,

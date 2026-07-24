@@ -43,7 +43,13 @@ from ufo.ext.loader import (
     turn_subagents,
     validate_ext_tools,
 )
-from ufo.ext.manifest import AuthProxySpec, CdpProviderSpec, Manifest, SearchProviderSpec
+from ufo.ext.manifest import (
+    AuthProxySpec,
+    CdpProviderSpec,
+    Manifest,
+    SearchProviderSpec,
+    open_connector_namespace,
+)
 from ufo.ext.surface import (
     SurfaceAuth,
     SurfaceContext,
@@ -883,7 +889,9 @@ def _connector_registry(
                 provider=provider, label=connector.label, broker=connector.broker
             )
     return ConnectorRegistry(
-        entries=entries, fallback=_select_auth_proxy(config, manifests, credentials)
+        entries=entries,
+        resolver=open_connector_namespace(manifests),
+        fallback=_select_auth_proxy(config, manifests, credentials),
     )
 
 
@@ -911,6 +919,7 @@ def _connect_flow(
         fernet=credentials.fernet,
         store=GrantStore(),
         redirect_uri=_connect_redirect_uri(config, providers),
+        resolver=open_connector_namespace(manifests),
     )
 
 

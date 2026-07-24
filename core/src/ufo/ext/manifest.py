@@ -11,7 +11,7 @@ activating one named pack brings a coherent product config up together."""
 from collections.abc import Awaitable, Callable
 from dataclasses import KW_ONLY, dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -20,10 +20,10 @@ from starlette.responses import Response
 
 from ufo.browser import CdpProvider
 from ufo.candidates import WorkspaceCandidates
-from ufo.connectors import AuthProxy, CliCredential, ConnectorBroker
+from ufo.connectors import AuthProxy, CliCredential, ConnectorBroker, ConnectorResolver
 from ufo.ext.context import CredentialAccess, ExtensionContext
 from ufo.ext.surface import SurfaceSpec
-from ufo.grants import OAuthProvider
+from ufo.grants import OAuthProvider, OAuthProviderResolver
 from ufo.hub import Hub
 from ufo.indexing import EmbedClient, IndexBackend
 from ufo.memory import MemorySearchProvider
@@ -110,6 +110,16 @@ class ConnectorProvider:
     tools: tuple[ToolDef, ...] = ()
     transfer_hosts: tuple[str, ...] = ()
     cli: CliCredential | None = None
+
+
+class OpenConnectorNamespace(OAuthProviderResolver, ConnectorResolver, Protocol):
+    """An extension's open connector namespace, declared once through `Manifest.connector_resolver`:
+    the broker serves any provider slug it brokers without registering each as an explicit
+    `ConnectorProvider`. It is both halves of the seam — the connect flow resolves a slug's OAuth
+    descriptor through it (`claims`/`descriptor`), and the connector registry resolves the slug's
+    routing entry and searches its live service catalog through it (`entry`/`catalog`). The connect
+    flow and the registry gate the closed set of explicitly registered connectors first, so a
+    namespace only serves the slugs no `ConnectorProvider` claimed."""
 
 
 @dataclass(frozen=True)
@@ -518,6 +528,7 @@ class Manifest:
     routes: tuple[RouteSpec, ...] = ()
     credentials: tuple[CredentialSlot, ...] = ()
     connectors: tuple[ConnectorProvider, ...] = ()
+    connector_resolver: OpenConnectorNamespace | None = None
     sources: tuple[SourceProvider, ...] = ()
     onboarding_steps: tuple[OnboardingStep, ...] = ()
     indexes: tuple[IndexBackendSpec, ...] = ()
@@ -537,6 +548,21 @@ class Manifest:
     search_providers: tuple[SearchProviderSpec, ...] = ()
     memory_search: tuple[MemorySearchProviderSpec, ...] = ()
     requires: tuple[str, ...] = field(default_factory=tuple)
+
+
+def open_connector_namespace(manifests: tuple[Manifest, ...]) -> OpenConnectorNamespace | None:
+    """The one open connector namespace across every manifest, or None. Two fail loud: a namespace
+    is the catch-all for unregistered slugs, so a second leaves the connect flow, the registry, and
+    the egress transfer-host derivation unable to decide which broker owns a slug. Every derivation
+    that resolves an unregistered slug routes through here, so the check holds on all at once."""
+    found: OpenConnectorNamespace | None = None
+    for manifest in manifests:
+        if manifest.connector_resolver is None:
+            continue
+        if found is not None:
+            raise RuntimeError("two extensions register an open connector namespace")
+        found = manifest.connector_resolver
+    return found
 
 
 @dataclass(frozen=True)

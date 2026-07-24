@@ -53,6 +53,7 @@ from ufo.o11y import emit_metric, log
 from ufo.sandbox.proxy.rules import (
     ANTHROPIC_HOST,
     OPENAI_HOST,
+    ConnectorTransferHosts,
     ForwardRule,
     InjectionRule,
     MeterRule,
@@ -128,7 +129,9 @@ class PerAgentRules:
 
     base: tuple[Rule, ...]
     grants: GrantStore | None
-    transfer_hosts: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    transfer_hosts: ConnectorTransferHosts = field(
+        default_factory=lambda: ConnectorTransferHosts(explicit={})
+    )
     clis: Mapping[str, CliCredential] = field(default_factory=dict)
 
     async def resolve(self, run: RunToken | None) -> tuple[Rule, ...]:

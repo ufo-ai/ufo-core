@@ -22,7 +22,7 @@ driver reads through the broker — no key ever lands here. Everything this pack
 read-only; grant no write scope anywhere. Confirm with the member before registering anything —
 the speaker gates the granting act.
 
-- Google Meet: ask the member to connect `google_meet` (`object_explain` on kind `source` shows
+- Google Meet: ask the member to connect `googlemeet` (`object_explain` on kind `source` shows
   the spec), then apply a `source` object with the exact `meeting_artifacts` stream. The source reads generated Meet transcripts
   (rendered as speaker-grouped dialogue) and Gemini smart notes. The operator first creates a
   custom Google OAuth auth config for the `googlemeet` toolkit in the Composio project, requesting

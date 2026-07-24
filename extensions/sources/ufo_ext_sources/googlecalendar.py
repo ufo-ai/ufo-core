@@ -43,7 +43,7 @@ GOOGLE_CALENDAR_STREAMS: list[StreamSpec] = [
 
 
 class GoogleCalendarConnector(RestConnector):
-    name = "google_calendar"
+    name = "googlecalendar"
     base_url = "https://www.googleapis.com"
     streams_list = GOOGLE_CALENDAR_STREAMS
 
@@ -52,7 +52,7 @@ class GoogleCalendarConnector(RestConnector):
     ) -> AsyncIterator[StreamPage]:
         if stream.name not in ("calendar_events", "event_attendees"):
             raise NotImplementedError(
-                f"google_calendar: stream {stream.name!r} has no paginate dispatch"
+                f"googlecalendar: stream {stream.name!r} has no paginate dispatch"
             )
         attendees_stream = stream.name == "event_attendees"
         params: dict[str, Any] = {"maxResults": LIST_PAGE_SIZE}
@@ -99,10 +99,10 @@ class GoogleCalendarConnector(RestConnector):
                 return
         except httpx.HTTPStatusError as error:
             if error.response.status_code == 410:
-                raise CursorExpired(f"google_calendar syncToken {cursor} expired") from error
+                raise CursorExpired(f"googlecalendar syncToken {cursor} expired") from error
             if error.response.status_code in _REFUSAL_STATUS:
                 raise StreamSkipped(
-                    f"google_calendar: {stream.name!r} refused ({error.response.status_code}); "
+                    f"googlecalendar: {stream.name!r} refused ({error.response.status_code}); "
                     "the grant lacks the Calendar scope"
                 ) from error
             raise
@@ -111,7 +111,7 @@ class GoogleCalendarConnector(RestConnector):
         if stream.name != "calendar_events":
             return super().render(record, stream)
         title = _str(record.get("title"))
-        lines = [f"# google_calendar calendar_events: {title}".rstrip()]
+        lines = [f"# googlecalendar calendar_events: {title}".rstrip()]
         starts = record.get("starts_at")
         ends = record.get("ends_at")
         if isinstance(starts, str) and starts:

@@ -29,6 +29,7 @@ from ufo.grants import (
 )
 from ufo.sandbox.proxy.rules import (
     GRANT_METER_DIMENSION,
+    ConnectorTransferHosts,
     InjectionRule,
     MeterRule,
     ScopeRule,
@@ -145,7 +146,7 @@ def test_derive_admits_the_providers_transfer_hosts_with_the_grant() -> None:
         grantor_member_id=uuid4(),
         shared=False,
     )
-    rules = derive_grant_rules((grant,), {"stub": (TRANSFER_HOST,)})
+    rules = derive_grant_rules((grant,), ConnectorTransferHosts({"stub": (TRANSFER_HOST,)}))
     scope = next(r for r in rules if isinstance(r, ScopeRule))
     assert scope.allowed_hosts == frozenset({GRANTED_HOST, TRANSFER_HOST})
     assert MeterRule(host=TRANSFER_HOST, dimension=GRANT_METER_DIMENSION) in rules
@@ -160,7 +161,7 @@ def test_derive_ignores_another_providers_transfer_hosts() -> None:
         grantor_member_id=uuid4(),
         shared=False,
     )
-    rules = derive_grant_rules((grant,), {"other": (TRANSFER_HOST,)})
+    rules = derive_grant_rules((grant,), ConnectorTransferHosts({"other": (TRANSFER_HOST,)}))
     scope = next(r for r in rules if isinstance(r, ScopeRule))
     assert scope.allowed_hosts == frozenset({GRANTED_HOST})
 
@@ -183,7 +184,9 @@ async def test_resolver_folds_the_transfer_hosts_into_the_turns_rules(db: None) 
         conversation_id=conversation_id,
         shared=False,
     )
-    resolver = PerAgentRules(base=(), grants=store, transfer_hosts={"stub": (TRANSFER_HOST,)})
+    resolver = PerAgentRules(
+        base=(), grants=store, transfer_hosts=ConnectorTransferHosts({"stub": (TRANSFER_HOST,)})
+    )
     rules = await resolver.resolve(RunToken(workspace_id, turn_id))
     assert any(isinstance(r, ScopeRule) and TRANSFER_HOST in r.allowed_hosts for r in rules)
     assert not any(isinstance(r, InjectionRule) for r in rules)

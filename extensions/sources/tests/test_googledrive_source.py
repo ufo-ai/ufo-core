@@ -8,7 +8,7 @@ from collections.abc import Callable
 from uuid import UUID, uuid4
 
 import httpx
-from ufo_ext_sources.google_drive import GoogleDriveConnector
+from ufo_ext_sources.googledrive import GoogleDriveConnector
 
 from ufo.connectors import Credential
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig

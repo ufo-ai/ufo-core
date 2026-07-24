@@ -63,7 +63,7 @@ ALL_STREAMS = [CUSTOMERS, CAMPAIGNS, AD_GROUPS, ADS, CAMPAIGN_METRICS, CUSTOMER_
 
 
 class GoogleAdsConnector(RestConnector):
-    name = "google_ads"
+    name = "googleads"
     base_url = f"https://googleads.googleapis.com/{GOOGLE_ADS_VERSION}"
     streams_list = ALL_STREAMS
 
@@ -73,7 +73,7 @@ class GoogleAdsConnector(RestConnector):
         )
         if not token:
             raise StreamSkipped(
-                "google_ads requires UFO_GOOGLE_ADS_DEVELOPER_TOKEN "
+                "googleads requires UFO_GOOGLE_ADS_DEVELOPER_TOKEN "
                 "(Google Ads OAuth alone is not sufficient)"
             )
         return token
@@ -189,11 +189,11 @@ class GoogleAdsConnector(RestConnector):
                 async for page in self._query_each_customer(client, query):
                     yield page
                 return
-            raise StreamSkipped(f"google_ads stream {stream.name!r} is not implemented")
+            raise StreamSkipped(f"googleads stream {stream.name!r} is not implemented")
         except httpx.HTTPStatusError as error:
             if error.response.status_code in _REFUSAL_STATUS:
                 raise StreamSkipped(
-                    f"google_ads: {stream.name!r} refused ({error.response.status_code}); "
+                    f"googleads: {stream.name!r} refused ({error.response.status_code}); "
                     "the grant lacks scope or the developer token is not approved"
                 ) from error
             raise

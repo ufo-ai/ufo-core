@@ -46,7 +46,7 @@ GOOGLE_SHEETS_STREAMS: list[StreamSpec] = [
 
 
 class GoogleSheetsConnector(RestConnector):
-    name = "google_sheets"
+    name = "googlesheets"
     base_url = "https://www.googleapis.com"
     streams_list = GOOGLE_SHEETS_STREAMS
 
@@ -67,7 +67,7 @@ class GoogleSheetsConnector(RestConnector):
                         page.append(values)
                 else:
                     raise NotImplementedError(
-                        f"google_sheets: stream {stream.name!r} has no paginate dispatch"
+                        f"googlesheets: stream {stream.name!r} has no paginate dispatch"
                     )
                 if len(page) >= PAGE_SIZE:
                     yield page
@@ -75,7 +75,7 @@ class GoogleSheetsConnector(RestConnector):
         except httpx.HTTPStatusError as error:
             if error.response.status_code in _REFUSAL_STATUS:
                 raise StreamSkipped(
-                    f"google_sheets: {stream.name!r} refused ({error.response.status_code}); the "
+                    f"googlesheets: {stream.name!r} refused ({error.response.status_code}); the "
                     "grant lacks the Drive or Sheets scope"
                 ) from error
             raise
@@ -183,7 +183,7 @@ class GoogleSheetsConnector(RestConnector):
                 body = _grid_text(record.get("values"))
             case _:
                 return super().render(record, stream)
-        heading = f"# google_sheets {stream.name}: {title}".rstrip()
+        heading = f"# googlesheets {stream.name}: {title}".rstrip()
         return title, f"{heading}\n\n{body}".rstrip()
 
 

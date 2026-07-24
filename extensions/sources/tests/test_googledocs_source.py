@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from ufo_ext_sources.google_docs import GoogleDocsConnector
+from ufo_ext_sources.googledocs import GoogleDocsConnector
 
 from ufo.connectors import Credential
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig

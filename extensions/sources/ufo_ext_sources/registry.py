@@ -6,7 +6,7 @@ the credential slot the direct backend reads its key from; the manifest wraps ea
 `ConnectorBackend` and registers it as a source the sync driver drives."""
 
 from ufo.sdk.sources import Connector
-from ufo_ext_sources.activecampaign import ActiveCampaignConnector
+from ufo_ext_sources.active_campaign import ActiveCampaignConnector
 from ufo_ext_sources.airtable import AirtableConnector
 from ufo_ext_sources.asana import AsanaConnector
 from ufo_ext_sources.ashby import AshbyConnector
@@ -22,12 +22,12 @@ from ufo_ext_sources.facebook_ads import FacebookAdsConnector
 from ufo_ext_sources.freshdesk import FreshdeskConnector
 from ufo_ext_sources.github import GitHubConnector
 from ufo_ext_sources.gmail import GmailConnector
-from ufo_ext_sources.google_ads import GoogleAdsConnector
-from ufo_ext_sources.google_calendar import GoogleCalendarConnector
-from ufo_ext_sources.google_docs import GoogleDocsConnector
-from ufo_ext_sources.google_drive import GoogleDriveConnector
-from ufo_ext_sources.google_meet import GoogleMeetConnector
-from ufo_ext_sources.google_sheets import GoogleSheetsConnector
+from ufo_ext_sources.googleads import GoogleAdsConnector
+from ufo_ext_sources.googlecalendar import GoogleCalendarConnector
+from ufo_ext_sources.googledocs import GoogleDocsConnector
+from ufo_ext_sources.googledrive import GoogleDriveConnector
+from ufo_ext_sources.googlemeet import GoogleMeetConnector
+from ufo_ext_sources.googlesheets import GoogleSheetsConnector
 from ufo_ext_sources.greenhouse import GreenhouseConnector
 from ufo_ext_sources.hubspot import HubSpotConnector
 from ufo_ext_sources.instagram import InstagramConnector

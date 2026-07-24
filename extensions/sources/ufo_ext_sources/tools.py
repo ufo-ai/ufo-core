@@ -54,7 +54,7 @@ ALERT_LABELS_MAX = 5
 ALERT_LABEL_CHARS = 60
 DOMAIN_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 TENANT_URL_RULES: dict[str, tuple[re.Pattern[str], re.Pattern[str], str]] = {
-    "activecampaign": (
+    "active_campaign": (
         re.compile(rf"{DOMAIN_LABEL}\.api-us1\.com"),
         re.compile(r"/?"),
         "https://<account>.api-us1.com",
@@ -426,13 +426,22 @@ class SourceObjects(MemberOwnedObjects[SourceSpec]):
         await _store_subscribers(ext, name, {})
 
     async def _resolved_account(self, ctx: ToolContext, spec: SourceSpec) -> str:
+        """The account a source authenticates as. An explicitly registered connector always uses its
+        broker; an open provider the broker namespace serves uses the broker once an account is
+        connected, else its direct BYOK credential when one is declared — so a member picks the path
+        by connecting an account or setting a key, never a flag."""
         ext = _require_ext(ctx)
         registry = _require_connectors(ctx)
-        if spec.provider in registry.entries:
+        explicit = spec.provider in registry.entries
+        brokerable = explicit or registry.resolver is not None
+        accounts: tuple[str, ...] = ()
+        if brokerable:
             try:
-                accounts = await ctx.connector_accounts(spec.provider)
+                accounts = tuple(await ctx.connector_accounts(spec.provider))
             except ConnectUnavailable:
                 accounts = ()
+        direct_capable = spec.provider in ext.credentials.declared and registry.fallback is not None
+        if explicit or accounts:
             if not accounts:
                 raise ValueError(
                     f"connect a {spec.provider!r} account before registering its sources "
@@ -450,7 +459,12 @@ class SourceObjects(MemberOwnedObjects[SourceSpec]):
                     f"accounts: {', '.join(accounts)}"
                 )
             return account
-        if spec.provider not in ext.credentials.declared or registry.fallback is None:
+        if not direct_capable:
+            if brokerable:
+                raise ValueError(
+                    f"connect a {spec.provider!r} account before registering its sources "
+                    f"(connect_account with provider={spec.provider!r})"
+                )
             raise ValueError(f"no direct authentication backend can sync {spec.provider!r}")
         if spec.account_id:
             raise ValueError(

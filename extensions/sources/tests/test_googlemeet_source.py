@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from ufo_ext_sources.google_meet import CONFERENCE_PAGE_SIZE, GoogleMeetConnector
+from ufo_ext_sources.googlemeet import CONFERENCE_PAGE_SIZE, GoogleMeetConnector
 
 from ufo.connectors import Credential
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
@@ -159,7 +159,7 @@ async def test_meeting_artifacts_render_transcripts_and_ai_summaries() -> None:
     assert result.next_cursor == "2026-02-01T10:00:00.000Z"
     assert result.snapshot is False
     body = result.pages[0].body
-    assert "# google_meet meeting_artifacts: Google Meet conf-1" in body
+    assert "# googlemeet meeting_artifacts: Google Meet conf-1" in body
     assert "conference: conferenceRecords/conf-1" in body
     assert "space: spaces/aaa-bbbb-ccc" in body
     assert "## Transcripts" in body
@@ -234,5 +234,5 @@ async def test_scope_refusal_yields_stream_skipped() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         return httpx.Response(403, json={"error": {"code": 403, "message": "insufficientScopes"}})
 
-    with pytest.raises(StreamSkipped, match="google_meet"):
+    with pytest.raises(StreamSkipped, match="googlemeet"):
         await _fetch(handle)

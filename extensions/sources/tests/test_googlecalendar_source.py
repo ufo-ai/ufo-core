@@ -9,7 +9,7 @@ from collections.abc import Callable
 from uuid import UUID, uuid4
 
 import httpx
-from ufo_ext_sources.google_calendar import GoogleCalendarConnector
+from ufo_ext_sources.googlecalendar import GoogleCalendarConnector
 
 from ufo.connectors import Credential
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig

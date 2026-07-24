@@ -230,27 +230,70 @@ class ConnectorEntry:
 
 
 @dataclass(frozen=True)
+class CatalogEntry:
+    """One connectable service the discovery tool surfaces: the provider slug a member connects and
+    the broker's own label for it. A resolver answers these live from its broker's service catalog,
+    so the open set the tool lists is never bounded by the explicitly registered connectors."""
+
+    provider: str
+    label: str
+
+
+class ConnectorResolver(Protocol):
+    """The registry half of an open connector namespace: how a broker extension serves any provider
+    slug it brokers without registering each as an explicit `ConnectorProvider`. `entry` builds the
+    routing entry for a claimed slug (pure — the broker is shared and the label is cosmetic, since
+    the real label rides `catalog`); `catalog` searches the broker's live service catalog so the
+    discovery tool surfaces connectable services the closed registry never enumerated;
+    `transfer_hosts` are the broker's file-store hosts every grant in the namespace additionally
+    admits at the egress proxy. A namespace is the catch-all — it claims any slug, so its broker's
+    own calls fail loud on a slug the broker cannot serve."""
+
+    @property
+    def transfer_hosts(self) -> tuple[str, ...]: ...
+
+    def entry(self, provider: str) -> ConnectorEntry: ...
+
+    async def catalog(self, query: str, limit: int) -> tuple[CatalogEntry, ...]: ...
+
+
+@dataclass(frozen=True)
 class ConnectorRegistry:
-    """Every installed connector keyed by provider, plus the deploy-selected fallback auth backend —
-    the one routing object `serve` builds from the manifests' `connectors` points. The dynamic
-    connector tools read `entries` to list providers and dispatch to the owning broker (`entry`
-    fails loud on a provider no extension registers); the sync runner uses the registry as its auth
-    proxy — `credential` routes a brokered provider to its own broker and any other to the
-    fallback."""
+    """Every installed connector keyed by provider, an optional open `resolver` for any other slug
+    its broker brokers, and the deploy-selected fallback auth backend — the one routing object
+    `serve` builds from the manifests' `connectors` points. The dynamic connector tools read
+    `entries` and `search_catalog` to list providers and dispatch through `entry` to the owning
+    broker (`entry` resolves an unregistered slug through the resolver, else fails loud); the sync
+    runner uses the registry as its auth proxy — `credential` routes a registered provider to its
+    own broker, an unregistered slug to the resolver's broker, and any other to the fallback."""
 
     entries: Mapping[str, ConnectorEntry]
+    resolver: ConnectorResolver | None = None
     fallback: AuthProxy | None = None
 
     def entry(self, provider: str) -> ConnectorEntry:
         found = self.entries.get(provider)
-        if found is None:
-            raise KeyError(f"no installed connector registers provider {provider!r}")
-        return found
+        if found is not None:
+            return found
+        if self.resolver is not None:
+            return self.resolver.entry(provider)
+        raise KeyError(f"no installed connector registers provider {provider!r}")
+
+    async def search_catalog(self, query: str, limit: int) -> tuple[CatalogEntry, ...]:
+        """The open catalog the discovery tool appends to its registered connectors: the resolver's
+        live service search, empty when no open namespace is installed."""
+        if self.resolver is None:
+            return ()
+        return await self.resolver.catalog(query, limit)
 
     async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
         found = self.entries.get(provider)
         if found is not None:
             return await found.broker.credential(workspace_id, provider, account)
+        if self.resolver is not None:
+            return await self.resolver.entry(provider).broker.credential(
+                workspace_id, provider, account
+            )
         if self.fallback is not None:
             return await self.fallback.credential(workspace_id, provider, account)
         raise RuntimeError(

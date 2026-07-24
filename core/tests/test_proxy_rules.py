@@ -10,13 +10,17 @@ from ufo.ext.manifest import ConnectorProvider, Manifest
 from ufo.grants import Grant, grant_sentinel
 from ufo.sandbox.proxy.rules import (
     ANTHROPIC_HOST,
+    GRANT_METER_DIMENSION,
     OPENAI_HOST,
     SENTINEL_MODEL_KEY,
+    ConnectorTransferHosts,
     ForwardRule,
     InjectionRule,
     MeterRule,
     ScopeRule,
+    connector_transfer_hosts,
     derive_cli_rules,
+    derive_grant_rules,
     derive_model_rules,
     provider_host,
 )
@@ -82,6 +86,44 @@ def _grant(account: str = "acct-1", grantor=ACTING, shared: bool = False) -> Gra
     )
 
 
+TRANSFER = ("files.broker.example.com",)
+
+
+def test_grant_with_a_provider_host_admits_and_meters_it() -> None:
+    rules = derive_grant_rules((_grant(),))
+    scope = next(r for r in rules if isinstance(r, ScopeRule))
+    assert scope.allowed_hosts == frozenset({CLI_HOST})
+    assert MeterRule(host=CLI_HOST, dimension=GRANT_METER_DIMENSION) in rules
+
+
+def test_brokered_grant_admits_only_its_transfer_hosts_never_an_empty_host() -> None:
+    """A grant with no provider host (server-side execution) admits only its broker file-store hosts
+    from the open namespace default — never a ScopeRule allowing the empty host."""
+    grant = Grant(
+        provider="notion", account_id="a", host="", grantor_member_id=ACTING, shared=False
+    )
+    rules = derive_grant_rules((grant,), ConnectorTransferHosts({}, default=TRANSFER))
+    scope = next(r for r in rules if isinstance(r, ScopeRule))
+    assert scope.allowed_hosts == frozenset(TRANSFER)
+    assert "" not in scope.allowed_hosts
+    assert MeterRule(host=TRANSFER[0], dimension=GRANT_METER_DIMENSION) in rules
+
+
+def test_brokered_grant_without_any_host_derives_no_scope_rule() -> None:
+    grant = Grant(
+        provider="notion", account_id="a", host="", grantor_member_id=ACTING, shared=False
+    )
+    assert derive_grant_rules((grant,)) == ()
+
+
+def test_an_explicit_mapping_wins_over_the_open_namespace_default() -> None:
+    hosts = ConnectorTransferHosts({"hub": ("hub.files.example.com",)}, default=TRANSFER)
+    rules = derive_grant_rules((_grant(),), hosts)
+    scope = next(r for r in rules if isinstance(r, ScopeRule))
+    assert scope.allowed_hosts == frozenset({CLI_HOST, "hub.files.example.com"})
+    assert TRANSFER[0] not in scope.allowed_hosts
+
+
 def test_grant_sentinel_is_deterministic_per_account() -> None:
     assert grant_sentinel("acct-1") == grant_sentinel("acct-1")
     assert grant_sentinel("acct-1") != grant_sentinel("acct-2")
@@ -137,3 +179,44 @@ def test_connector_clis_maps_only_declaring_providers() -> None:
     )
     manifest = Manifest(name="t", version="0", connectors=(declaring, silent))
     assert connector_clis((manifest,)) == {"hub": CLI}
+
+
+@dataclass(frozen=True)
+class _Namespace:
+    transfer_hosts: tuple[str, ...]
+
+
+def test_transfer_hosts_default_reaches_only_unregistered_providers() -> None:
+    """A registered connector that declares no transfer hosts admits none — never the open
+    namespace's default, which is for a slug no connector registered. Distinguishing the two is the
+    whole point of keying every registered provider, so a hostless connector cannot silently inherit
+    the broker's file-store egress scope."""
+    hostful = ConnectorProvider(
+        oauth=_CliOAuth(provider="hub", host="api.hub.test"),
+        label="Hub",
+        broker=object(),
+        transfer_hosts=("files.hub.test",),
+    )
+    hostless = ConnectorProvider(
+        oauth=_CliOAuth(provider="quiet", host="api.quiet.test"), label="Quiet", broker=object()
+    )
+    manifest = Manifest(
+        name="t",
+        version="0",
+        connectors=(hostful, hostless),
+        connector_resolver=_Namespace(("cdn.broker.test",)),
+    )
+    hosts = connector_transfer_hosts((manifest,))
+    assert hosts.of("hub") == ("files.hub.test",)
+    assert hosts.of("quiet") == ()
+    assert hosts.of("unregistered") == ("cdn.broker.test",)
+
+
+def test_transfer_hosts_fail_loud_on_two_open_namespaces() -> None:
+    """The transfer-host derivation routes through the same one-namespace guard as the connect flow
+    and registry, so a second open namespace fails loud here too rather than silently scoping every
+    unregistered slug to the first-declared broker's file store."""
+    a = Manifest(name="a", version="0", connector_resolver=_Namespace(("cdn.a.test",)))
+    b = Manifest(name="b", version="0", connector_resolver=_Namespace(("cdn.b.test",)))
+    with pytest.raises(RuntimeError, match="two extensions register an open connector namespace"):
+        connector_transfer_hosts((a, b))

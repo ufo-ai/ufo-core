@@ -60,6 +60,17 @@ class _UnusedBroker:
         raise AssertionError("source objects must not resolve provider credentials")
 
 
+class _OpenNamespace:
+    """Stands in for a broker's open namespace: it claims any slug, so a provider it brokers is
+    resolvable without an explicit entry. Account resolution never reaches its broker (it refuses
+    before, asking the member to connect), so no method is called."""
+
+    transfer_hosts: tuple[str, ...] = ()
+
+    def entry(self, provider: str) -> None:
+        raise AssertionError("account resolution must not reach the namespace broker")
+
+
 @dataclass(frozen=True)
 class _Workspace:
     workspace_id: UUID
@@ -140,6 +151,7 @@ def _context(
     speaker_id: UUID | None = None,
     direct_fallback: bool = True,
     no_speaker: bool = False,
+    open_namespace: bool = False,
 ) -> ToolContext:
     ext = context_for(NAME, DECLARED_PROVIDERS)
     speaker = None if no_speaker else (speaker_id or state.owner_id)
@@ -167,6 +179,7 @@ def _context(
                 provider: ConnectorEntry(provider=provider, label=provider, broker=_UnusedBroker())
                 for provider in brokered
             },
+            resolver=_OpenNamespace() if open_namespace else None,
             fallback=DirectAuthProxy(credentials=ext.credentials) if direct_fallback else None,
         ),
         ext=ext,
@@ -773,10 +786,55 @@ async def test_missing_or_ambiguous_broker_account_refuses_with_repair(db: None)
     assert row["config"]["account"] == "acct-b"
 
 
+async def test_open_namespace_provider_without_an_account_asks_to_connect(db: None) -> None:
+    """A provider the open namespace brokers — no explicit entry — with no connected account and no
+    direct BYOK credential guides the member to connect an account, never a dead direct backend."""
+    state = await _workspace()
+    ctx = _context(state, GrantStore(), brokered=(), direct_fallback=False, open_namespace=True)
+    tool = _TOOLS["object_apply"]
+    args = tool.input_model.model_validate(
+        {"manifest": _manifest_text(ASANA, ("workspaces",), "asana-open")}
+    )
+    with ws(state.workspace_id):
+        with pytest.raises(ValueError, match="connect_account with provider='asana'"):
+            await tool.handler(ctx, args)
+
+
+async def test_provider_with_no_broker_and_no_direct_backend_refuses(db: None) -> None:
+    """A provider no connector brokers, no open namespace claims, and no direct backend can
+    authenticate is refused loud — the deploy simply cannot sync it."""
+    state = await _workspace()
+    ctx = _context(state, GrantStore(), brokered=(), direct_fallback=False, open_namespace=False)
+    tool = _TOOLS["object_apply"]
+    args = tool.input_model.model_validate(
+        {"manifest": _manifest_text(ASANA, ("workspaces",), "asana-orphan")}
+    )
+    with ws(state.workspace_id):
+        with pytest.raises(ValueError, match="no direct authentication backend can sync 'asana'"):
+            await tool.handler(ctx, args)
+
+
+async def test_open_namespace_provider_with_a_byok_key_syncs_directly(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A provider the open namespace could broker but that has no connected account and a set BYOK
+    credential syncs through its direct key — the member picked the path by setting a key, so it is
+    never forced through connect."""
+    monkeypatch.setenv("GREENHOUSE", "secret")
+    state = await _workspace()
+    ctx = _context(state, GrantStore(), brokered=(), open_namespace=True)
+    name = _binding_name(GREENHOUSE, DIRECT_ACCOUNT, None)
+    with ws(state.workspace_id):
+        registered = await _apply(ctx, _manifest_text(GREENHOUSE, ("jobs",), name))
+    assert registered["result"] == "created"
+    [row] = await _rows(state, GREENHOUSE)
+    assert row["config"]["account"] == DIRECT_ACCOUNT
+
+
 @pytest.mark.parametrize(
     ("provider", "base_url", "normalized"),
     [
-        ("activecampaign", "https://acme.api-us1.com/", "https://acme.api-us1.com"),
+        ("active_campaign", "https://acme.api-us1.com/", "https://acme.api-us1.com"),
         (
             "bamboohr",
             "https://api.bamboohr.com/api/gateway.php/acme/",
@@ -799,7 +857,7 @@ def test_tenant_urls_are_validated_by_provider(
 @pytest.mark.parametrize(
     ("provider", "base_url"),
     [
-        ("activecampaign", "https://acme.freshdesk.com"),
+        ("active_campaign", "https://acme.freshdesk.com"),
         ("bamboohr", "https://api.bamboohr.com.evil.test/api/gateway.php/acme"),
         ("chargebee", "https://acme.chargebee.com/admin"),
         ("freshdesk", "https://localhost"),

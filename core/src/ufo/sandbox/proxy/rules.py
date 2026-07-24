@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from ufo.connectors import CliCredential, RequestForwarder
-from ufo.ext.manifest import Manifest
+from ufo.ext.manifest import Manifest, open_connector_namespace
 from ufo.grants import Grant, grant_sentinel
 from ufo.sandbox.session import SENTINEL_MODEL_KEY
 
@@ -103,19 +103,22 @@ def derive_model_rules(model: str, real_key: str) -> tuple[Rule, ...]:
 
 
 def derive_grant_rules(
-    grants: tuple[Grant, ...], transfer_hosts: Mapping[str, tuple[str, ...]] | None = None
+    grants: tuple[Grant, ...], transfer_hosts: "ConnectorTransferHosts | None" = None
 ) -> tuple[Rule, ...]:
-    """Each active grant admits its provider's own host — plus the broker file-store hosts its
-    connector declares as `transfer_hosts`, where the sandbox fetches a tool's presigned file
-    outputs and stages its file inputs — and meters every request to each under `requests`, so any
-    egress to a granted host shows in `ufoctl spend`. A grant injects nothing — the broker holds
-    the account's token and runs connector tools server-side, so no secret is on the wire. An
+    """Each active grant admits its provider's own host — plus the broker file-store hosts
+    `transfer_hosts` resolves for it, where the sandbox fetches a tool's presigned file outputs and
+    stages its file inputs — and meters every request to each under `requests`, so any egress to a
+    granted host shows in `ufoctl spend`. A grant injects nothing — the broker holds the account's
+    token and runs connector tools server-side, so no secret is on the wire. A brokered grant admits
+    no provider host of its own (its `host` is empty), so only its transfer hosts scope; an
     ungranted host derives no ScopeRule, so the proxy refuses it at CONNECT."""
     rules: list[Rule] = []
     for grant in grants:
-        hosts = (grant.host, *(transfer_hosts or {}).get(grant.provider, ()))
-        rules.append(ScopeRule(allowed_hosts=frozenset(hosts)))
-        rules.extend(MeterRule(host=host, dimension=GRANT_METER_DIMENSION) for host in hosts)
+        extra = transfer_hosts.of(grant.provider) if transfer_hosts is not None else ()
+        hosts = tuple(dict.fromkeys(host for host in (grant.host, *extra) if host))
+        if hosts:
+            rules.append(ScopeRule(allowed_hosts=frozenset(hosts)))
+            rules.extend(MeterRule(host=host, dimension=GRANT_METER_DIMENSION) for host in hosts)
     return tuple(rules)
 
 
@@ -142,13 +145,30 @@ def derive_cli_rules(
     )
 
 
-def connector_transfer_hosts(manifests: tuple[Manifest, ...]) -> dict[str, tuple[str, ...]]:
-    """Each installed connector's declared broker file-store hosts, keyed by provider — the map the
-    per-turn resolver folds into `derive_grant_rules` so a grant admits them live from the current
-    deploy's manifests, never a persisted copy a broker-side store move would strand."""
-    return {
+@dataclass(frozen=True)
+class ConnectorTransferHosts:
+    """The broker file-store hosts a grant admits at the egress proxy, derived live from the
+    deploy's manifests so a broker-side store move never strands a persisted copy. `explicit` maps
+    every registered connector's provider to its declared hosts (empty for one that declares none),
+    so `default` — the open connector namespace's hosts — reaches only a provider no connector
+    registered. `of` is the one lookup the grant-rule derivation makes."""
+
+    explicit: Mapping[str, tuple[str, ...]]
+    default: tuple[str, ...] = ()
+
+    def of(self, provider: str) -> tuple[str, ...]:
+        return self.explicit.get(provider, self.default)
+
+
+def connector_transfer_hosts(manifests: tuple[Manifest, ...]) -> ConnectorTransferHosts:
+    """The deploy's connector file-store hosts: every registered connector's declared hosts keyed by
+    provider (so one that declares none admits none, never the namespace default), plus the open
+    namespace's hosts as the default for any other slug it brokers."""
+    explicit = {
         connector.oauth.provider: connector.transfer_hosts
         for manifest in manifests
         for connector in manifest.connectors
-        if connector.transfer_hosts
     }
+    namespace = open_connector_namespace(manifests)
+    default = namespace.transfer_hosts if namespace is not None else ()
+    return ConnectorTransferHosts(explicit=explicit, default=default)

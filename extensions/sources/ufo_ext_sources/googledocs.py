@@ -42,7 +42,7 @@ GOOGLE_DOCS_STREAMS: list[StreamSpec] = [
 
 
 class GoogleDocsConnector(RestConnector):
-    name = "google_docs"
+    name = "googledocs"
     base_url = "https://www.googleapis.com"
     streams_list = GOOGLE_DOCS_STREAMS
 
@@ -77,7 +77,7 @@ class GoogleDocsConnector(RestConnector):
         except httpx.HTTPStatusError as error:
             if error.response.status_code in _REFUSAL_STATUS:
                 raise StreamSkipped(
-                    f"google_docs: {stream.name!r} refused ({error.response.status_code}); the "
+                    f"googledocs: {stream.name!r} refused ({error.response.status_code}); the "
                     "grant lacks the Drive or Docs scope, or was not shared the document"
                 ) from error
             raise
@@ -128,7 +128,7 @@ class GoogleDocsConnector(RestConnector):
         title = record.get("title")
         title = title if isinstance(title, str) else ""
         body = _plain_text(record)
-        heading = f"# google_docs {stream.name}: {title}".rstrip()
+        heading = f"# googledocs {stream.name}: {title}".rstrip()
         return title, f"{heading}\n\n{body}".rstrip()
 
 

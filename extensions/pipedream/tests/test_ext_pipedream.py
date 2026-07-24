@@ -583,7 +583,8 @@ async def test_stage_upload_routes_the_agent_to_share_file() -> None:
 
 def test_manifest_declares_the_broker_file_transfer_hosts() -> None:
     hosts = connector_transfer_hosts((pipedream_manifest.manifest(),))
-    assert hosts[PROVIDER] == pipedream.PIPEDREAM_TRANSFER_HOSTS
+    assert hosts.of(PROVIDER) == pipedream.PIPEDREAM_TRANSFER_HOSTS
+    assert hosts.default == ()
 
 
 async def test_call_external_tool_augments_an_unknown_key_with_the_real_actions(

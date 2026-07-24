@@ -45,7 +45,7 @@ GOOGLE_MEET_STREAMS: list[StreamSpec] = [
 
 
 class GoogleMeetConnector(RestConnector):
-    name = "google_meet"
+    name = "googlemeet"
     base_url = MEET_API_BASE
     streams_list = GOOGLE_MEET_STREAMS
 
@@ -54,7 +54,7 @@ class GoogleMeetConnector(RestConnector):
     ) -> AsyncIterator[StreamPage]:
         if stream.name != "meeting_artifacts":
             raise NotImplementedError(
-                f"google_meet: stream {stream.name!r} has no paginate dispatch"
+                f"googlemeet: stream {stream.name!r} has no paginate dispatch"
             )
         params: dict[str, Any] = {"pageSize": CONFERENCE_PAGE_SIZE}
         if cursor:
@@ -80,7 +80,7 @@ class GoogleMeetConnector(RestConnector):
         except httpx.HTTPStatusError as error:
             if error.response.status_code in _REFUSAL_STATUS:
                 raise StreamSkipped(
-                    f"google_meet: {stream.name!r} refused ({error.response.status_code}); "
+                    f"googlemeet: {stream.name!r} refused ({error.response.status_code}); "
                     "the grant lacks the Google Meet scope or cannot read these artifacts"
                 ) from error
             raise
@@ -211,7 +211,7 @@ class GoogleMeetConnector(RestConnector):
             return super().render(record, stream)
         title = _str(record.get("title"))
         parts = [
-            f"# google_meet meeting_artifacts: {title}".rstrip(),
+            f"# googlemeet meeting_artifacts: {title}".rstrip(),
             _labeled(
                 [
                     ("conference", _str(record.get("conference_name"))),

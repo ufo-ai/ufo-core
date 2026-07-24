@@ -20,6 +20,9 @@ from ufo.connectors import (
     BrokerTool as BrokerTool,
 )
 from ufo.connectors import (
+    CatalogEntry as CatalogEntry,
+)
+from ufo.connectors import (
     CliCredential as CliCredential,
 )
 from ufo.connectors import (
@@ -30,6 +33,9 @@ from ufo.connectors import (
 )
 from ufo.connectors import (
     ConnectorRegistry as ConnectorRegistry,
+)
+from ufo.connectors import (
+    ConnectorResolver as ConnectorResolver,
 )
 from ufo.connectors import (
     ForwardedResponse as ForwardedResponse,
@@ -51,6 +57,9 @@ from ufo.grants import (
 )
 from ufo.grants import (
     OAuthProvider as OAuthProvider,
+)
+from ufo.grants import (
+    OAuthProviderResolver as OAuthProviderResolver,
 )
 from ufo.grants import (
     connect_bridge_workspace as connect_bridge_workspace,

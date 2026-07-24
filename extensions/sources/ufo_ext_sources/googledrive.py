@@ -64,7 +64,7 @@ GOOGLE_DRIVE_STREAMS: list[StreamSpec] = [
 
 
 class GoogleDriveConnector(RestConnector):
-    name = "google_drive"
+    name = "googledrive"
     base_url = "https://www.googleapis.com"
     streams_list = GOOGLE_DRIVE_STREAMS
 
@@ -92,12 +92,12 @@ class GoogleDriveConnector(RestConnector):
                     yield child_page
                 return
             raise NotImplementedError(
-                f"google_drive: stream {stream.name!r} has no paginate dispatch"
+                f"googledrive: stream {stream.name!r} has no paginate dispatch"
             )
         except httpx.HTTPStatusError as error:
             if error.response.status_code in _REFUSAL_STATUS:
                 raise StreamSkipped(
-                    f"google_drive: {stream.name!r} refused ({error.response.status_code}); the "
+                    f"googledrive: {stream.name!r} refused ({error.response.status_code}); the "
                     "grant lacks the Drive scope"
                 ) from error
             raise
@@ -153,7 +153,7 @@ class GoogleDriveConnector(RestConnector):
                 data = await self._get(client, "/drive/v3/changes", params=params)
             except httpx.HTTPStatusError as error:
                 if error.response.status_code == 410:
-                    raise CursorExpired("google_drive changes token expired") from error
+                    raise CursorExpired("googledrive changes token expired") from error
                 raise
             records: list[dict[str, Any]] = []
             deletes: list[str] = []
@@ -246,7 +246,7 @@ class GoogleDriveConnector(RestConnector):
         if stream.name != "files":
             return super().render(record, stream)
         title = _str(record.get("name"))
-        lines = [f"# google_drive files: {title}".rstrip(), f"mimeType: {record.get('mimeType')}"]
+        lines = [f"# googledrive files: {title}".rstrip(), f"mimeType: {record.get('mimeType')}"]
         owners = ", ".join(
             owner.get("displayName") or owner.get("emailAddress") or ""
             for owner in record.get("owners") or []

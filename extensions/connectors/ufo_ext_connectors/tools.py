@@ -16,6 +16,7 @@ tool produces (`file_outputs`, presigned URLs on the broker's file store) is fet
 `/workspace/connector_files/` and listed in the result. Both transfers ride the egress proxy under
 the grant's declared transfer hosts — the bytes never cross the serve process."""
 
+import asyncio
 import json
 import mimetypes
 import re
@@ -44,6 +45,8 @@ FALLBACK_MIMETYPE = "application/octet-stream"
 TRANSFER_TIMEOUT_SECONDS = 600
 TRANSFER_MAX_BYTES = 100 * 1024 * 1024
 WORKSPACE_FILES_RESULT_KEY = "workspace_files"
+CATALOG_SEARCH_LIMIT = 10
+MAX_LIST_QUERIES = 8
 
 MD5_PREFLIGHT_PROG = """
 import hashlib, sys
@@ -60,9 +63,10 @@ print(size)
 
 class ListExternalToolsInput(BaseModel):
     queries: tuple[str, ...] = Field(
+        max_length=MAX_LIST_QUERIES,
         description="Search keywords. Use single-word queries — split multi-word searches into "
         "separate keywords, e.g. ['Microsoft', 'email'] not ['Microsoft email']. Multiple queries "
-        "searched in parallel. Use 'select:<source_id>' to fetch a specific connector by exact ID."
+        "searched in parallel. Use 'select:<source_id>' to fetch a specific connector by exact ID.",
     )
     user_description: str = Field(
         description="Brief plain-language description shown in the activity timeline."
@@ -107,8 +111,8 @@ async def list_external_tools(ctx: ToolContext, args: ListExternalToolsInput) ->
     registry = _registry(ctx)
     matches: list[dict[str, str]] = []
     seen: set[str] = set()
-    for query in args.queries:
-        target = query.removeprefix("select:").strip().lower()
+    targets = list(dict.fromkeys(q.removeprefix("select:").strip().lower() for q in args.queries))
+    for target in targets:
         for provider, entry in sorted(registry.entries.items()):
             if provider in seen:
                 continue
@@ -117,6 +121,15 @@ async def list_external_tools(ctx: ToolContext, args: ListExternalToolsInput) ->
                 continue
             seen.add(provider)
             matches.append({"source_id": provider, "label": entry.label})
+    catalogs = await asyncio.gather(
+        *(registry.search_catalog(target, CATALOG_SEARCH_LIMIT) for target in targets)
+    )
+    for rows in catalogs:
+        for row in rows:
+            if row.provider in seen:
+                continue
+            seen.add(row.provider)
+            matches.append({"source_id": row.provider, "label": row.label})
     return _json_result({"connectors": matches})
 
 
@@ -290,9 +303,10 @@ CONNECTOR_TOOLS: tuple[ToolDef, ...] = (
     ToolDef(
         name="list_external_tools",
         description=(
-            "List available external connectors (github, slack, ...), not their tools. Filter by "
-            "queries to search connector name/label. Returns connector catalog rows: source_id, "
-            "label. Call this before claiming you can't access something — there may be a "
+            "Search available external connectors (github, slack, notion, ...), not their tools. "
+            "The broker brokers hundreds of services, so always search by keyword rather than "
+            "assuming — queries match the live catalog. Returns connector catalog rows: source_id, "
+            "label. Call this before claiming you can't access something — there is very likely a "
             "connector available. Use 'select:<source_id>' syntax to fetch a specific connector by "
             "exact source ID. To find a connector's real tools, call "
             "describe_external_tools(source_id, query=...)."

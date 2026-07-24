@@ -46,7 +46,7 @@ class ComposioBroker:
     test's transport override is honoured. See the module docstring for each method's contract."""
 
     async def tools(self, workspace_id: UUID, provider: str, query: str) -> tuple[BrokerTool, ...]:
-        listed = await composio.composio_client().list_tools(_toolkit(provider), query)
+        listed = await composio.composio_client().list_tools(provider, query)
         return _discovered_tools(listed)
 
     async def schema(self, workspace_id: UUID, provider: str, slug: str) -> BrokerTool:
@@ -106,7 +106,7 @@ class ComposioBroker:
         md5: str,
     ) -> StagedUpload:
         upload = await composio.composio_client().create_upload(
-            _toolkit(provider), slug, filename, mimetype, md5
+            provider, slug, filename, mimetype, md5
         )
         return StagedUpload(
             put_url=upload.put_url,
@@ -123,7 +123,7 @@ class ComposioBroker:
         broker_user = f"{composio.EXTERNAL_USER_PREFIX}{workspace_id}"
         client = composio.composio_client()
         try:
-            await client.connected_account(account, broker_user, _toolkit(provider))
+            await client.connected_account(account, broker_user, provider)
         except composio.ComposioError as error:
             if error.status != NOT_FOUND:
                 raise
@@ -146,19 +146,18 @@ class ComposioBroker:
     ) -> composio.ComposioError:
         """A 404 from execute, augmented with the toolkit's real tool slugs. Augmentation is
         best-effort: if the discovery lookup fails, the original 404 stands."""
-        toolkit = _toolkit(provider)
         try:
             query = " ".join(dict.fromkeys(re.sub(r"[^a-z0-9]+", " ", slug.lower()).split()))
-            tools = _discovered_tools(await client.list_tools(toolkit, query))
+            tools = _discovered_tools(await client.list_tools(provider, query))
             if not tools and query:
-                tools = _discovered_tools(await client.list_tools(toolkit, ""))
+                tools = _discovered_tools(await client.list_tools(provider, ""))
         except (composio.ComposioError, ValueError, KeyError):
             return error
         if not tools:
             return error
         names = ", ".join(tool.slug for tool in tools)
         return composio.ComposioError(
-            error.status, f"{error.body} — tools available on {toolkit}: {names}"
+            error.status, f"{error.body} — tools available on {provider}: {names}"
         )
 
 
@@ -190,11 +189,6 @@ def _stale_account(error: composio.ComposioError, account_id: str) -> bool:
 
 def _reconnect_error(error: composio.ComposioError, provider: str) -> composio.ComposioError:
     return composio.ComposioError(error.status, f"{error.body} — {stale_grant_guidance(provider)}")
-
-
-def _toolkit(provider: str) -> str:
-    spec = composio.CONNECTORS.get(provider)
-    return spec.toolkit if spec is not None else provider
 
 
 def _discovered_tools(listed: dict[str, object]) -> tuple[BrokerTool, ...]:

@@ -61,6 +61,9 @@ from ufo.ext.manifest import (
     OnboardingStep as OnboardingStep,
 )
 from ufo.ext.manifest import (
+    OpenConnectorNamespace as OpenConnectorNamespace,
+)
+from ufo.ext.manifest import (
     Pack as Pack,
 )
 from ufo.ext.manifest import (
