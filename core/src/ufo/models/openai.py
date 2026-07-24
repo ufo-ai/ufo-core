@@ -1,4 +1,10 @@
-"""OpenAI Chat Completions API client streaming ModelEvents."""
+"""OpenAI-wire client streaming ModelEvents over the Chat Completions or Responses API.
+
+The api surface a model is called on is a fact of its `ModelSpec` (`spec.api_surface`), not a guess
+from its id: a model that rejects `tools` + `reasoning_effort` together on `/v1/chat/completions`
+(the `gpt-5.6-terra` case, #568) declares `api_surface="responses"` and this client renders the
+legal Responses request. One client class serves both surfaces so an OpenAI-compatible extension
+(Bedrock Mantle, OpenRouter) reuses it by handing its own spec and base_url."""
 
 import asyncio
 import json
@@ -7,12 +13,39 @@ from dataclasses import dataclass
 from typing import Any
 
 import openai
+from openai.types.responses import (
+    ResponseCompletedEvent,
+    ResponseErrorEvent,
+    ResponseFailedEvent,
+    ResponseFunctionCallArgumentsDeltaEvent,
+    ResponseFunctionCallArgumentsDoneEvent,
+    ResponseFunctionToolCall,
+    ResponseIncompleteEvent,
+    ResponseOutputItemAddedEvent,
+    ResponseRefusalDeltaEvent,
+    ResponseTextDeltaEvent,
+)
+from openai.types.responses.easy_input_message_param import EasyInputMessageParam
+from openai.types.responses.function_tool_param import FunctionToolParam
+from openai.types.responses.response_function_call_output_item_list_param import (
+    ResponseFunctionCallOutputItemParam,
+)
+from openai.types.responses.response_function_tool_call_param import ResponseFunctionToolCallParam
+from openai.types.responses.response_input_image_content_param import ResponseInputImageContentParam
+from openai.types.responses.response_input_image_param import ResponseInputImageParam
+from openai.types.responses.response_input_message_content_list_param import (
+    ResponseInputContentParam,
+)
+from openai.types.responses.response_input_param import FunctionCallOutput, ResponseInputItemParam
+from openai.types.responses.response_input_text_content_param import ResponseInputTextContentParam
+from openai.types.responses.response_input_text_param import ResponseInputTextParam
 
 from ufo.models.interface import (
     ImageBlock,
     ImageSource,
     Message,
     ModelEvent,
+    ModelRefusal,
     ModelRequest,
     ModelResponseTruncated,
     TextBlock,
@@ -24,6 +57,7 @@ from ufo.models.interface import (
     ToolUseBlock,
     trim_images,
 )
+from ufo.models.spec import ModelSpec
 from ufo.o11y import log
 from ufo.schema.records import Usage
 
@@ -36,8 +70,8 @@ MAX_EMPTY_PROVIDER_RETRIES = 3
 
 def openai_sdk_client(api_key: str, base_url: str | None = None) -> openai.AsyncOpenAI:
     """SDK client with its own retries disabled: the retry policy lives in OpenAIClient. A base_url
-    points the OpenAI-compatible client at another host — an OpenRouter or similar model-provider
-    extension speaks the OpenAI wire against its own endpoint."""
+    points the OpenAI-compatible client at another host — an OpenRouter or Bedrock Mantle
+    model-provider extension speaks the OpenAI wire against its own endpoint."""
     return openai.AsyncOpenAI(
         api_key=api_key, base_url=base_url, max_retries=0, timeout=PROVIDER_TIMEOUT_SECONDS
     )
@@ -125,21 +159,159 @@ def openai_messages(system: str, messages: tuple[Message, ...]) -> list[dict[str
     return out
 
 
+def responses_input(messages: tuple[Message, ...]) -> list[ResponseInputItemParam]:
+    """Canonical messages as Responses API input items: text/image content, function calls, and
+    function-call outputs — the shape `/v1/responses` accepts."""
+    items: list[ResponseInputItemParam] = []
+    for message in trim_images(messages):
+        if isinstance(message.content, str):
+            items.append(EasyInputMessageParam(role=message.role, content=message.content))
+            continue
+        content: list[ResponseInputContentParam] = []
+        for block in message.content:
+            match block:
+                case TextBlock(text=text):
+                    content.append(ResponseInputTextParam(type="input_text", text=text))
+                case ImageBlock(source=source):
+                    content.append(
+                        ResponseInputImageParam(
+                            type="input_image",
+                            detail="auto",
+                            image_url=f"data:{source.media_type};base64,{source.data}",
+                        )
+                    )
+                case ToolUseBlock(id=call_id, name=name, input=arguments):
+                    if content:
+                        items.append(EasyInputMessageParam(role=message.role, content=content))
+                        content = []
+                    items.append(
+                        ResponseFunctionToolCallParam(
+                            type="function_call",
+                            call_id=call_id,
+                            name=name,
+                            arguments=json.dumps(arguments),
+                        )
+                    )
+                case ToolResultBlock(tool_use_id=call_id, content=result, is_error=is_error):
+                    if content:
+                        items.append(EasyInputMessageParam(role=message.role, content=content))
+                        content = []
+                    if isinstance(result, str):
+                        output: str | list[ResponseFunctionCallOutputItemParam] = (
+                            f"[tool error] {result}" if is_error else result
+                        )
+                    else:
+                        output = [
+                            ResponseInputTextContentParam(
+                                type="input_text",
+                                text=f"[tool error] {part.text}" if is_error else part.text,
+                            )
+                            if isinstance(part, TextBlock)
+                            else ResponseInputImageContentParam(
+                                type="input_image",
+                                detail="auto",
+                                image_url=(
+                                    f"data:{part.source.media_type};base64,{part.source.data}"
+                                ),
+                            )
+                            for part in result
+                        ]
+                    items.append(
+                        FunctionCallOutput(
+                            type="function_call_output",
+                            call_id=call_id,
+                            output=output,
+                        )
+                    )
+        if content:
+            items.append(EasyInputMessageParam(role=message.role, content=content))
+    return items
+
+
+def responses_request(request: ModelRequest) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "model": request.model,
+        "instructions": request.system,
+        "input": responses_input(request.messages),
+        "max_output_tokens": request.max_tokens,
+        "store": False,
+        "stream": True,
+    }
+    if request.reasoning != "off":
+        kwargs["reasoning"] = {"effort": request.reasoning}
+    if request.tools:
+        kwargs["tools"] = [
+            FunctionToolParam(
+                type="function",
+                name=tool.name,
+                description=tool.description,
+                parameters=tool.input_schema,
+                strict=False,
+            )
+            for tool in request.tools
+        ]
+        kwargs["parallel_tool_calls"] = request.tool_choice is None
+        if request.tool_choice is not None:
+            kwargs["tool_choice"] = {"type": "function", "name": request.tool_choice}
+    return kwargs
+
+
 @dataclass(frozen=True)
 class OpenAIClient:
-    client: openai.AsyncOpenAI
+    """An OpenAI-wire backend for one model. `spec.api_surface` selects the Chat Completions or
+    Responses request shape; `spec.reasoning` gates whether reasoning is emitted and whether it
+    composes with tools on the chat surface (the #568 fix)."""
 
-    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+    client: openai.AsyncOpenAI
+    spec: ModelSpec
+
+    def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        if self.spec.api_surface == "responses":
+            return self._complete_responses(request)
+        return self._complete_chat(request)
+
+    def _chat_kwargs(self, request: ModelRequest) -> dict[str, Any]:
+        create_kwargs: dict[str, Any] = {
+            "model": request.model,
+            "messages": openai_messages(request.system, request.messages),
+            "max_completion_tokens": request.max_tokens,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        effort = self.spec.default_reasoning(request.reasoning, request.tools)
+        if effort != "off":
+            create_kwargs["reasoning_effort"] = effort
+        if request.tools:
+            create_kwargs["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.input_schema,
+                    },
+                }
+                for t in request.tools
+            ]
+            create_kwargs["parallel_tool_calls"] = request.tool_choice is None
+            if request.tool_choice is not None:
+                create_kwargs["tool_choice"] = {
+                    "type": "function",
+                    "function": {"name": request.tool_choice},
+                }
+        return create_kwargs
+
+    async def _complete_chat(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         """Yield text and tool-call events then exactly one Usage as the final event.
 
         429/5xx responses retry with retry-after-aware exponential backoff, and request timeouts
         retry on the same backoff and shared attempt budget (each retry logged, exhaustion logged
         and re-raising the provider's APITimeoutError) — both only until the first event is
-        yielded; any failure after that raises immediately. finish_reason=length is
-        a truncated completion and raises ModelResponseTruncated. finish_reason=tool_calls is a
-        normal stop. An empty completion (no event, finish_reason=stop) is a retryable provider
-        failure, re-issued up to MAX_EMPTY_PROVIDER_RETRIES before degrading to the empty result
-        for the turn loop's nudge — a tool-call-only response has yielded and never degrades.
+        yielded; any failure after that raises immediately. finish_reason=length is a truncated
+        completion and raises ModelResponseTruncated. finish_reason=tool_calls is a normal stop. An
+        empty completion (no event, finish_reason=stop) is a retryable provider failure, re-issued
+        up to MAX_EMPTY_PROVIDER_RETRIES before degrading to the empty result for the turn loop's
+        nudge — a tool-call-only response has yielded and never degrades.
         """
         delay = INITIAL_RETRY_DELAY_SECONDS
         attempt = 0
@@ -149,35 +321,8 @@ class OpenAIClient:
             tool_call_ids: dict[int, str] = {}
             usage: Usage | None = None
             finish_reason: str | None = None
-            create_kwargs: dict[str, Any] = {
-                "model": request.model,
-                "messages": openai_messages(request.system, request.messages),
-                "max_completion_tokens": request.max_tokens,
-                "stream": True,
-                "stream_options": {"include_usage": True},
-            }
-            if request.reasoning != "off":
-                create_kwargs["reasoning_effort"] = request.reasoning
-            if request.tools:
-                create_kwargs["tools"] = [
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": t.name,
-                            "description": t.description,
-                            "parameters": t.input_schema,
-                        },
-                    }
-                    for t in request.tools
-                ]
-                create_kwargs["parallel_tool_calls"] = request.tool_choice is None
-                if request.tool_choice is not None:
-                    create_kwargs["tool_choice"] = {
-                        "type": "function",
-                        "function": {"name": request.tool_choice},
-                    }
             try:
-                stream = await self.client.chat.completions.create(**create_kwargs)
+                stream = await self.client.chat.completions.create(**self._chat_kwargs(request))
                 async for chunk in stream:
                     if chunk.usage is not None:
                         details = chunk.usage.prompt_tokens_details
@@ -255,6 +400,116 @@ class OpenAIClient:
                 and finish_reason == "stop"
                 and empty_attempt < MAX_EMPTY_PROVIDER_RETRIES
             ):
+                empty_attempt += 1
+                continue
+            yield usage
+            return
+
+    async def _complete_responses(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        """The Responses-API twin of `_complete_chat` for a model whose spec sets
+        `api_surface="responses"` — same retry, truncation, refusal, and empty-completion contract,
+        translated to the Responses streaming events. Reasoning is gated by the spec exactly as the
+        chat path is: an unsupported reasoning or reasoning-with-tools combination never emits the
+        thinking parameters."""
+        effort = self.spec.default_reasoning(request.reasoning, request.tools)
+        request = request.model_copy(update={"reasoning": effort})
+        delay = INITIAL_RETRY_DELAY_SECONDS
+        attempt = 0
+        empty_attempt = 0
+        while True:
+            yielded = False
+            tool_call_ids: dict[str, str] = {}
+            tool_call_arguments: set[str] = set()
+            usage: Usage | None = None
+            try:
+                stream = await self.client.responses.create(**responses_request(request))
+                async for event in stream:
+                    match event:
+                        case ResponseTextDeltaEvent(delta=text):
+                            yielded = True
+                            yield TextDelta(text=text)
+                        case ResponseOutputItemAddedEvent(
+                            item=ResponseFunctionToolCall(id=item_id, call_id=call_id, name=name)
+                        ):
+                            if item_id is None:
+                                raise RuntimeError("OpenAI function call has no item id")
+                            tool_call_ids[item_id] = call_id
+                            yielded = True
+                            yield ToolCallStart(id=call_id, name=name)
+                        case ResponseFunctionCallArgumentsDeltaEvent(
+                            item_id=item_id, delta=partial_json
+                        ):
+                            tool_call_arguments.add(item_id)
+                            yielded = True
+                            yield ToolCallDelta(
+                                id=tool_call_ids[item_id], partial_json=partial_json
+                            )
+                        case ResponseFunctionCallArgumentsDoneEvent(
+                            item_id=item_id, arguments=arguments
+                        ) if item_id not in tool_call_arguments:
+                            yielded = True
+                            yield ToolCallDelta(id=tool_call_ids[item_id], partial_json=arguments)
+                        case ResponseRefusalDeltaEvent(delta=refusal):
+                            raise ModelRefusal(f"OpenAI declined the completion: {refusal}")
+                        case ResponseCompletedEvent(response=response):
+                            raw = response.usage
+                            if raw is None:
+                                raise RuntimeError("model stream produced no usage")
+                            cached_tokens = raw.input_tokens_details.cached_tokens
+                            if cached_tokens > raw.input_tokens:
+                                raise RuntimeError(
+                                    "cached prompt tokens exceed total prompt tokens"
+                                )
+                            usage = Usage(
+                                input_tokens=raw.input_tokens - cached_tokens,
+                                output_tokens=raw.output_tokens,
+                                cache_read_tokens=cached_tokens,
+                            )
+                        case ResponseIncompleteEvent(response=response):
+                            reason = response.incomplete_details
+                            if reason is not None and reason.reason == "max_output_tokens":
+                                raise ModelResponseTruncated(
+                                    "OpenAI response truncated at the max_output_tokens budget"
+                                )
+                            if reason is not None and reason.reason == "content_filter":
+                                raise ModelRefusal(
+                                    "OpenAI declined the completion (content_filter)"
+                                )
+                            raise RuntimeError("OpenAI returned an incomplete response")
+                        case ResponseFailedEvent(response=response):
+                            message = response.error.message if response.error else "unknown error"
+                            raise RuntimeError(f"OpenAI response failed: {message}")
+                        case ResponseErrorEvent(message=message):
+                            raise RuntimeError(f"OpenAI response failed: {message}")
+            except openai.APITimeoutError:
+                attempt += 1
+                if yielded or attempt > MAX_PROVIDER_RETRIES:
+                    log(
+                        "model.provider_timeout",
+                        provider="openai",
+                        model=request.model,
+                        attempts=attempt,
+                    )
+                    raise
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
+                continue
+            except openai.APIStatusError as error:
+                attempt += 1
+                retryable = error.status_code == 429 or error.status_code >= 500
+                if yielded or not retryable or attempt > MAX_PROVIDER_RETRIES:
+                    raise
+                header = error.response.headers.get("retry-after")
+                try:
+                    wait = max(float(header), 0.0) if header is not None else delay
+                except ValueError:
+                    wait = delay
+                await asyncio.sleep(wait)
+                delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
+                continue
+            if usage is None:
+                raise RuntimeError("model stream produced no usage")
+            if not yielded and empty_attempt < MAX_EMPTY_PROVIDER_RETRIES:
                 empty_attempt += 1
                 continue
             yield usage

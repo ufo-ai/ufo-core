@@ -239,7 +239,7 @@ async def test_turn_runtime_skills_feeds_a_saved_skill_into_the_merge(db: None) 
     merged = CORE_SKILL_REGISTRY.merged_with(provided)
     assert ("greet", "greets people") in merged.index()
     main_prompt = render_system_prompt(
-        "You are the assistant.", (), skills=merged.index(), model="claude-opus-4-8"
+        "You are the assistant.", (), skills=merged.index(), knowledge_cutoff="2026-01"
     ).content
     subagent_prompt = subagent_system_prompt(GENERAL_PURPOSE_PROFILE, skills=merged.index())
     assert "- greet: greets people" in main_prompt

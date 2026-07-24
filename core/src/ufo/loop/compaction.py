@@ -73,13 +73,6 @@ REPEATED_RUN_MARKER = "[repeated {count} times]"
 TOOL_OUTPUT_PATH_RE = re.compile(rf"/\S*{re.escape(TOOL_OUTPUT_DIRNAME)}/\S+\.txt")
 CONTEXT_OVERFLOW_MARKERS = ("too long", "context length", "maximum context", "prompt is too large")
 
-MODEL_CONTEXT_WINDOW: dict[str, int] = {
-    "gpt-5.5": 272_000,
-    "gpt-5.4": 272_000,
-    "gpt-5.4-mini": 272_000,
-    "gpt-5.4-nano": 272_000,
-}
-
 
 def is_context_overflow(error: Exception) -> bool:
     """A provider rejected the request because the context is too large — matched against the error
@@ -105,6 +98,7 @@ class Compaction:
     blob: BlobStore
     conversation_id: UUID
     summary_max_tokens: int = COMPACTION_SUMMARY_MAX_TOKENS
+    context_window: int = DEFAULT_CONTEXT_WINDOW_TOKENS
     trigger_tokens: int | None = None
     keep_messages: int = COMPACTION_KEEP_MESSAGES
     max_ptl_retries: int = MAX_PTL_RETRIES
@@ -123,7 +117,7 @@ class Compaction:
         nothing to summarize and is returned unchanged, so a forced call still no-ops safely."""
         if len(messages) <= self.keep_messages:
             return messages, ()
-        window = MODEL_CONTEXT_WINDOW.get(self.model, DEFAULT_CONTEXT_WINDOW_TOKENS)
+        window = self.context_window
         trigger = (
             self.trigger_tokens
             if self.trigger_tokens is not None

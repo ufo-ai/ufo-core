@@ -5,17 +5,19 @@ behaviors are pinned: only a template with the `{{agent-prompt}}` slot accepts a
 template without `{{skill_index}}` renders no skill block, every var is validated both ways, and a
 slot nothing fills fails loud rather than reaching the model as a literal brace."""
 
+import re
+
 import pytest
 
 from ufo.ext.loader import load_manifests
 from ufo.loop.prompts.render import (
     COMPACTION_SYSTEM_PROMPT,
-    MODEL_KNOWLEDGE_CUTOFF,
     render_skill_index,
     render_system_prompt,
     render_template,
     rendered_prompt,
 )
+from ufo.models.catalog import CORE_MODEL_SPECS
 
 SHELL_FIXTURE = "You are {{agent-prompt}}.\n\n{{skill_index}}\n\n{{sections}}"
 BROWSER_FIXTURE = "You browse the web. Cite what you find.\n\n{{sections}}"
@@ -25,7 +27,7 @@ def test_system_prompt_slots_the_agent_prompt_sections_and_citation() -> None:
     rendered = render_system_prompt(
         "You are the workspace assistant.",
         (("search", "<search>Search the web before answering factual questions.</search>"),),
-        model="claude-opus-4-8",
+        knowledge_cutoff="2026-01",
     )
     assert "You are the workspace assistant." in rendered.content
     assert "<search>Search the web before answering factual questions.</search>" in rendered.content
@@ -34,10 +36,10 @@ def test_system_prompt_slots_the_agent_prompt_sections_and_citation() -> None:
 
 
 def test_digest_is_stable_for_equal_content_and_shifts_with_it() -> None:
-    first = render_system_prompt("A", (), model="claude-opus-4-8")
-    again = render_system_prompt("A", (), model="claude-opus-4-8")
-    other = render_system_prompt("B", (), model="claude-opus-4-8")
-    other_model = render_system_prompt("A", (), model="claude-haiku-4-5")
+    first = render_system_prompt("A", (), knowledge_cutoff="2026-01")
+    again = render_system_prompt("A", (), knowledge_cutoff="2026-01")
+    other = render_system_prompt("B", (), knowledge_cutoff="2026-01")
+    other_model = render_system_prompt("A", (), knowledge_cutoff="2025-07")
     assert first.digest == again.digest
     assert first.digest != other.digest
     assert first.digest != other_model.digest
@@ -46,38 +48,35 @@ def test_digest_is_stable_for_equal_content_and_shifts_with_it() -> None:
 
 def test_sections_render_in_name_order() -> None:
     rendered = render_system_prompt(
-        "A", (("zeta", "BODY_ZETA"), ("alpha", "BODY_ALPHA")), model="claude-opus-4-8"
+        "A", (("zeta", "BODY_ZETA"), ("alpha", "BODY_ALPHA")), knowledge_cutoff="2026-01"
     )
     assert rendered.content.index("BODY_ALPHA") < rendered.content.index("BODY_ZETA")
 
 
 def test_knowledge_cutoff_renders_the_models_boundary() -> None:
-    rendered = render_system_prompt("A", (), model="claude-opus-4-8")
+    rendered = render_system_prompt("A", (), knowledge_cutoff="2026-01")
     assert "<knowledge_cutoff>" in rendered.content
     assert "January 2026" in rendered.content
     assert "{{" not in rendered.content
 
 
 def test_gpt_5_6_terra_renders_its_knowledge_cutoff() -> None:
-    rendered = render_system_prompt("A", (), model="gpt-5.6-terra")
+    rendered = render_system_prompt("A", (), knowledge_cutoff="2026-02")
     assert "February 2026" in rendered.content
 
 
-def test_a_model_without_a_declared_cutoff_fails_loud() -> None:
-    with pytest.raises(ValueError, match="no knowledge cutoff declared for model 'gpt-5'"):
-        render_system_prompt("A", (), model="gpt-5")
+def test_a_malformed_cutoff_fails_loud() -> None:
+    with pytest.raises(ValueError):
+        render_system_prompt("A", (), knowledge_cutoff="unknown")
 
 
-def test_every_extension_priced_model_declares_a_knowledge_cutoff() -> None:
-    for manifest in load_manifests():
-        if manifest.name == "sample":
-            continue
-        for spec in manifest.models:
-            for model, _ in spec.prices:
-                assert model in MODEL_KNOWLEDGE_CUTOFF, (
-                    f"extension {manifest.name!r} prices model {model!r} without a knowledge "
-                    f"cutoff — an agent set to it fails every turn at prompt render"
-                )
+def test_every_registered_model_declares_a_knowledge_cutoff() -> None:
+    specs = [*CORE_MODEL_SPECS, *(spec for m in load_manifests() for spec in m.models)]
+    assert specs
+    for spec in specs:
+        assert re.match(r"^\d{4}-\d{2}$", spec.knowledge_cutoff), (
+            f"model {spec.id!r} has a non-YYYY-MM knowledge cutoff {spec.knowledge_cutoff!r}"
+        )
 
 
 def test_a_var_substitutes_in_the_agent_prompt() -> None:
@@ -119,7 +118,7 @@ def test_skill_index_renders_a_block_and_is_empty_without_skills() -> None:
 
 def test_main_prompt_renders_the_complete_per_turn_skill_index() -> None:
     skills = (("first", "First workflow."), ("second", "Second workflow."))
-    prompt = render_system_prompt("A", (), skills=skills, model="claude-opus-4-8").content
+    prompt = render_system_prompt("A", (), skills=skills, knowledge_cutoff="2026-01").content
     assert "<available_skills>" in prompt
     assert "</available_skills>" in prompt
     assert all(f"- {name}: {description}" in prompt for name, description in skills)
@@ -127,7 +126,7 @@ def test_main_prompt_renders_the_complete_per_turn_skill_index() -> None:
 
 def test_an_unresolved_slot_in_a_section_fails_loud() -> None:
     with pytest.raises(ValueError, match="unresolved slots: leftover"):
-        render_system_prompt("A", (("bad", "<bad>{{leftover}}</bad>"),), model="claude-opus-4-8")
+        render_system_prompt("A", (("bad", "<bad>{{leftover}}</bad>"),), knowledge_cutoff="2026-01")
 
 
 def test_rendered_prompt_wraps_a_raw_string_with_a_digest() -> None:

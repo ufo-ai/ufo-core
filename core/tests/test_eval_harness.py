@@ -92,7 +92,7 @@ from evals.registry import (
     TASKS,
     selected_run_tasks,
 )
-from ufo.accounting import CORE_PRICING, Pricing
+from ufo.accounting import Pricing
 from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.db import workspace_tx
@@ -100,6 +100,7 @@ from ufo.ext.context import ExtensionContext, ModelAccess, Trajectory, context_f
 from ufo.ext.surface import workspace_key
 from ufo.governance import Governance, prompt_digest
 from ufo.loop.transcript import Transcript
+from ufo.models.catalog import CORE_PRICING
 from ufo.models.interface import (
     ImageBlock,
     ImageSource,
@@ -2957,7 +2958,7 @@ async def test_eval_run_pins_model_metadata_on_boundary_report(tmp_path, monkeyp
     monkeypatch.setattr("evals.__main__.DBOSClient", lambda **_kwargs: object())
     monkeypatch.setattr("evals.__main__.WorkspaceDriver", lambda *_args, **_kwargs: object())
     monkeypatch.setattr("evals.__main__.load_manifests", lambda *_args: ())
-    registry = ModelRegistry((), CORE_PRICING, MODEL)
+    registry = ModelRegistry({}, CORE_PRICING, MODEL)
     monkeypatch.setattr("evals.__main__.model_registry", lambda *_args: registry)
     monkeypatch.setattr(
         "evals.__main__.context_for",

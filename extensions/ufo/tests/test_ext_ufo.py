@@ -4,7 +4,7 @@ import hashlib
 import hmac
 import json
 from collections.abc import AsyncIterator, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -26,7 +26,6 @@ from ufo_ext_ufo.surface import (
     stream_directives,
 )
 
-from ufo.accounting import CORE_PRICING
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
 from ufo.connectors import ConnectorRegistry
@@ -37,11 +36,11 @@ from ufo.credentials import (
 )
 from ufo.db import workspace_tx
 from ufo.ext.loader import skill_registry
-from ufo.ext.manifest import ModelProviderSpec
 from ufo.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
 from ufo.hub import CostTick, InProcessHub, Parked, SkillLoad, Terminal, ToolCall
 from ufo.loop import queue as loop_queue
 from ufo.loop.subagents import SubagentRegistry
+from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.models.interface import ModelEvent, ModelRequest, TextDelta
 from ufo.models.registry import ModelRegistry
 from ufo.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
@@ -303,11 +302,10 @@ class StandInModel:
 
 
 STANDIN_REGISTRY = ModelRegistry(
-    providers=(
-        ModelProviderSpec(
-            name="standin", matches=lambda model: True, client=lambda model, key: StandInModel()
-        ),
-    ),
+    specs={
+        spec.id: replace(spec, client=lambda spec, key: StandInModel(), key_slot="", key_env="")
+        for spec in CORE_MODEL_SPECS
+    },
     pricing=CORE_PRICING,
     auto_model="claude-opus-4-8",
 )

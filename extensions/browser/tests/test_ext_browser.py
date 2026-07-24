@@ -438,7 +438,7 @@ def test_manifest_contributes_the_browser_prompt_section_into_the_rendered_shell
     (section,) = browser_manifest.manifest().prompt_sections
     assert section.name == "browser"
     rendered = render_system_prompt(
-        "You are the assistant.", ((section.name, section.body),), model="claude-opus-4-8"
+        "You are the assistant.", ((section.name, section.body),), knowledge_cutoff="2026-01"
     )
     assert "have browser_task browse the job boards directly" in rendered.content
     assert "no saved sessions or cookies" in rendered.content

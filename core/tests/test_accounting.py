@@ -4,7 +4,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
-import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -16,10 +15,11 @@ from ufo.accounting import (
     record_sandbox_tokens,
     record_turn_usage,
     record_workspace_usage,
-    usage_priced_micro_usd,
 )
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.db import workspace_tx
+from ufo.models.catalog import CORE_PRICES, CORE_PRICING, PRICE_DIGEST
+from ufo.models.pricing import ModelPrice, price_digest, pricing_from
 from ufo.models.registry import model_registry
 from ufo.schema import tables
 from ufo.schema.records import Usage
@@ -31,67 +31,60 @@ FULL_USAGE = Usage(
 
 def test_priced_micro_usd_matches_hand_math() -> None:
     usage = Usage(input_tokens=1000, output_tokens=2000)
-    assert usage_priced_micro_usd("claude-opus-4-8", usage) == 55_000
+    assert CORE_PRICING.micro_usd("claude-opus-4-8", usage) == 55_000
 
 
 def test_cache_tokens_are_priced() -> None:
     usage = Usage(cache_read_tokens=1_000_000, cache_write_tokens=1_000_000)
-    assert usage_priced_micro_usd("claude-opus-4-8", usage) == 6_750_000
+    assert CORE_PRICING.micro_usd("claude-opus-4-8", usage) == 6_750_000
 
 
 def test_sub_micro_usd_floors() -> None:
-    assert usage_priced_micro_usd("claude-haiku-4-5", Usage(cache_read_tokens=9)) == 0
+    assert CORE_PRICING.micro_usd("claude-haiku-4-5", Usage(cache_read_tokens=9)) == 0
 
 
 def test_openai_row_converted_from_usd_per_mtok() -> None:
     usage = Usage(input_tokens=1_000_000, output_tokens=1_000_000)
-    assert usage_priced_micro_usd("gpt-5.4", usage) == 17_500_000
+    assert CORE_PRICING.micro_usd("gpt-5.4", usage) == 17_500_000
 
 
 def test_unknown_model_prices_zero_never_raises() -> None:
-    assert usage_priced_micro_usd("gpt-4o", FULL_USAGE) == 0
+    assert CORE_PRICING.micro_usd("gpt-4o", FULL_USAGE) == 0
 
 
 def test_gpt_5_6_terra_uses_standard_pricing() -> None:
-    assert usage_priced_micro_usd("gpt-5.6-terra", FULL_USAGE) == 45_750
+    assert CORE_PRICING.micro_usd("gpt-5.6-terra", FULL_USAGE) == 45_750
 
 
 def test_price_digest_is_stable_sha256() -> None:
-    assert accounting.PRICE_DIGEST.startswith("sha256:")
-    assert len(accounting.PRICE_DIGEST) == len("sha256:") + 64
-    assert accounting.price_digest() == accounting.PRICE_DIGEST
+    assert PRICE_DIGEST.startswith("sha256:")
+    assert len(PRICE_DIGEST) == len("sha256:") + 64
+    assert price_digest(CORE_PRICES) == PRICE_DIGEST
 
 
-def test_price_digest_changes_when_price_table_changes(monkeypatch: pytest.MonkeyPatch) -> None:
-    baseline = accounting.price_digest()
-    monkeypatch.setitem(
-        accounting.MODEL_TOKEN_PRICE,
-        "claude-opus-4-8",
-        accounting.ModelPrice(1, 1, 1, 1),
-    )
-    assert accounting.price_digest() != baseline
+def test_price_digest_changes_when_price_table_changes() -> None:
+    changed = {**CORE_PRICES, "claude-opus-4-8": ModelPrice(1, 1, 1, 1)}
+    assert price_digest(changed) != PRICE_DIGEST
 
 
-def test_pricing_with_prices_a_contributed_model() -> None:
-    contributed = {"vendor/model-x": accounting.ModelPrice(1_000_000, 2_000_000, 0, 0)}
-    pricing = accounting.pricing_with(contributed)
+def test_pricing_from_prices_a_contributed_model() -> None:
+    contributed = {"vendor/model-x": ModelPrice(1_000_000, 2_000_000, 0, 0)}
+    pricing = pricing_from({**CORE_PRICES, **contributed})
     assert (
         pricing.micro_usd("vendor/model-x", Usage(input_tokens=1_000_000, output_tokens=1_000_000))
         == 3_000_000
     )
     assert pricing.micro_usd("claude-opus-4-8", Usage(input_tokens=1_000_000)) == 5_000_000
-    assert pricing.digest != accounting.CORE_PRICING.digest
+    assert pricing.digest != CORE_PRICING.digest
 
 
 def test_core_pricing_is_the_core_table() -> None:
-    assert accounting.CORE_PRICING.digest == accounting.PRICE_DIGEST
+    assert CORE_PRICING.digest == PRICE_DIGEST
     assert (
-        accounting.CORE_PRICING.micro_usd(
-            "claude-opus-4-8", Usage(input_tokens=1000, output_tokens=2000)
-        )
+        CORE_PRICING.micro_usd("claude-opus-4-8", Usage(input_tokens=1000, output_tokens=2000))
         == 55_000
     )
-    assert accounting.CORE_PRICING.micro_usd("vendor/model-x", FULL_USAGE) == 0
+    assert CORE_PRICING.micro_usd("vendor/model-x", FULL_USAGE) == 0
 
 
 async def test_unknown_model_records_tokens_at_zero_price(db: None) -> None:
@@ -109,7 +102,7 @@ async def test_unknown_model_records_tokens_at_zero_price(db: None) -> None:
             )
         ).scalar_one()
     assert cost == (10_000, 0, "gpt-4o")
-    assert stamped == accounting.PRICE_DIGEST
+    assert stamped == PRICE_DIGEST
 
 
 def test_absent_caps_cache_evicts_expired_entries_when_full() -> None:
@@ -198,7 +191,7 @@ async def test_ledger_insert_stamps_current_price_digest(db: None) -> None:
                 sa.select(tables.ledger.c.price_digest).where(tables.ledger.c.turn_id == turn_id)
             )
         ).scalar_one()
-    assert stamped == accounting.PRICE_DIGEST
+    assert stamped == PRICE_DIGEST
 
 
 async def test_egress_row_carries_no_price_digest(db: None) -> None:
@@ -295,8 +288,8 @@ async def test_sandbox_tokens_row_is_disjoint_from_the_host_token_row(db: None) 
         row.dimension: (int(row.amount), int(row.priced_micro_usd), row.price_digest)
         for row in rows
     } == {
-        "sandbox_tokens": (10_000, 81_500, accounting.PRICE_DIGEST),
-        "tokens": (10_000, 81_500, accounting.PRICE_DIGEST),
+        "sandbox_tokens": (10_000, 81_500, PRICE_DIGEST),
+        "tokens": (10_000, 81_500, PRICE_DIGEST),
     }
     assert len({row.id for row in rows}) == 2
     assert cost == (10_000, 81_500, "claude-opus-4-8")
@@ -329,8 +322,8 @@ async def test_sandbox_tokens_priced_and_stamped_by_the_merged_pricing(db: None)
     """An in-sandbox call on a contributed slug is priced against the deploy's merged table and
     stamped with its digest — never the core rate (which lacks the slug → $0) or the core digest —
     so it bills at the real rate and reconciles with the turn path's rows by digest."""
-    pricing = accounting.pricing_with(
-        {"vendor/model-x": accounting.ModelPrice(1_000_000, 2_000_000, 0, 0)}
+    pricing = pricing_from(
+        {**CORE_PRICES, "vendor/model-x": ModelPrice(1_000_000, 2_000_000, 0, 0)}
     )
     usage = Usage(input_tokens=1_000_000, output_tokens=1_000_000)
     async with workspace_tx() as connection:
@@ -350,7 +343,7 @@ async def test_sandbox_tokens_priced_and_stamped_by_the_merged_pricing(db: None)
         ).one()
     assert int(row.priced_micro_usd) == 3_000_000
     assert row.price_digest == pricing.digest
-    assert row.price_digest != accounting.PRICE_DIGEST
+    assert row.price_digest != PRICE_DIGEST
     assert row.model == "vendor/model-x"
 
 
@@ -392,7 +385,7 @@ async def test_spend_rollup_matches_ledger_sums(db: None) -> None:
     assert [(s.label, s.priced_micro_usd) for s in report.by_member] == [("a@b.c", 81_500)]
     assert [(s.label, s.priced_micro_usd) for s in report.by_agent] == [("assistant", 81_500)]
     assert [(p.price_digest, p.priced_micro_usd) for p in report.by_price_digest] == [
-        (accounting.PRICE_DIGEST, 81_500)
+        (PRICE_DIGEST, 81_500)
     ]
 
 
@@ -416,7 +409,7 @@ async def test_workspace_usage_is_anchorless_priced_and_stamped(db: None) -> Non
     assert row.turn_id is None
     assert (row.dimension, int(row.amount), int(row.priced_micro_usd)) == ("tokens", 10_000, 81_500)
     assert row.model == "claude-opus-4-8"
-    assert row.price_digest == accounting.PRICE_DIGEST
+    assert row.price_digest == PRICE_DIGEST
 
 
 async def test_workspace_usage_counts_in_total_not_member_or_agent(db: None) -> None:
@@ -436,7 +429,7 @@ async def test_workspace_usage_counts_in_total_not_member_or_agent(db: None) -> 
     assert [(s.label, s.priced_micro_usd) for s in report.by_member] == [("a@b.c", 81_500)]
     assert [(s.label, s.priced_micro_usd) for s in report.by_agent] == [("assistant", 81_500)]
     assert [(p.price_digest, p.priced_micro_usd) for p in report.by_price_digest] == [
-        (accounting.PRICE_DIGEST, 81_500 * 2)
+        (PRICE_DIGEST, 81_500 * 2)
     ]
 
 

@@ -675,7 +675,7 @@ async def _mcp_atlas_target(
         agent_prompt,
         sections,
         skills=skill_registry(manifests).index(),
-        model=resolved_model,
+        knowledge_cutoff=registry.spec(resolved_model).knowledge_cutoff,
     ).content
     public_client = await stack.enter_async_context(
         AsyncClient(

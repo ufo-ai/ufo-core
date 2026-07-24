@@ -25,6 +25,7 @@ from ufo.models.interface import (
     ToolUseBlock,
     trim_images,
 )
+from ufo.models.spec import ModelSpec
 from ufo.o11y import log
 from ufo.schema.records import Usage
 
@@ -90,6 +91,7 @@ def anthropic_content(content: str | tuple[ContentBlock, ...]) -> str | list[dic
 @dataclass(frozen=True)
 class AnthropicClient:
     client: anthropic.AsyncAnthropic
+    spec: ModelSpec
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         """Yield text and tool-call events then exactly one Usage as the final event.
@@ -139,9 +141,10 @@ class AnthropicClient:
                 "stream": True,
                 "cache_control": CACHE_CONTROL,
             }
-            if request.reasoning != "off":
+            effort = self.spec.default_reasoning(request.reasoning, request.tools)
+            if effort != "off":
                 create_kwargs["thinking"] = {"type": "adaptive"}
-                create_kwargs["output_config"] = {"effort": request.reasoning}
+                create_kwargs["output_config"] = {"effort": effort}
             if request.tools:
                 create_kwargs["tools"] = [
                     {"name": t.name, "description": t.description, "input_schema": t.input_schema}

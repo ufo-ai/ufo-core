@@ -18,7 +18,6 @@ from pydantic import BaseModel
 from starlette.requests import Request
 from starlette.responses import Response
 
-from ufo.accounting import ModelPrice
 from ufo.browser import CdpProvider
 from ufo.candidates import WorkspaceCandidates
 from ufo.connectors import AuthProxy, CliCredential, ConnectorBroker
@@ -28,7 +27,7 @@ from ufo.grants import OAuthProvider
 from ufo.hub import Hub
 from ufo.indexing import EmbedClient, IndexBackend
 from ufo.memory import MemorySearchProvider
-from ufo.models.interface import ModelClient
+from ufo.models.spec import ModelSpec
 from ufo.objects import ObjectKind
 from ufo.sandbox.session import Carrier
 from ufo.schema.records import Agent, Turn
@@ -182,28 +181,6 @@ class EmbedBackendSpec:
 
     name: str
     factory: Callable[[ExtensionContext], EmbedClient]
-
-
-@dataclass(frozen=True)
-class ModelProviderSpec:
-    """One model backend an extension contributes. `matches` claims the model ids this backend
-    serves — an explicit-slug test, a prefix test, or a catch-all router; `client` builds the
-    `ModelClient` for a served id from the api key the registry resolves and hands it, once per
-    turn, never at boot; `prices` are the `(model_id, ModelPrice)` rates it knows, merged over
-    core's table so its slugs are billed and stamped. The registry tries providers in order —
-    core's direct Anthropic + OpenAI first — so a contributed router serves only what core lacks.
-
-    `key_slot`/`key_env` name where the registry resolves this provider's api key per turn: the
-    workspace's stored BYOK secret under `key_slot` if set, else the platform default in env
-    `key_env`. Both empty means the provider needs no key (a stub or a keyless local backend) and
-    `client` is handed the empty string."""
-
-    name: str
-    matches: Callable[[str], bool]
-    client: Callable[[str, str], ModelClient]
-    key_slot: str = ""
-    key_env: str = ""
-    prices: tuple[tuple[str, ModelPrice], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -551,7 +528,7 @@ class Manifest:
     runtime_skills: RuntimeSkillProvider | None = None
     subagent_tool_grants: tuple[SubagentToolGrant, ...] = ()
     surfaces: tuple[SurfaceSpec, ...] = ()
-    models: tuple[ModelProviderSpec, ...] = ()
+    models: tuple[ModelSpec, ...] = ()
     hubs: tuple[HubSpec, ...] = ()
     skills: tuple[SkillSpec, ...] = ()
     cdp_providers: tuple[CdpProviderSpec, ...] = ()

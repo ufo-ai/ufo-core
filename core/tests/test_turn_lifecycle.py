@@ -1,7 +1,7 @@
 import asyncio
 import json
 from collections.abc import AsyncIterator, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -16,14 +16,13 @@ from evals.driver import WorkspaceDriver
 from evals.harness.capability import CapabilityCase
 from evals.harness.scorers import exact_scorer
 from evals.harness.target import InProcessTarget
-from ufo.accounting import CORE_PRICING
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
 from ufo.connectors import ConnectorRegistry
 from ufo.db import workspace_tx
 from ufo.ext.context import context_for
 from ufo.ext.loader import embed_backend, index_backend, skill_registry
-from ufo.ext.manifest import EmbedBackendSpec, IndexBackendSpec, Manifest, ModelProviderSpec
+from ufo.ext.manifest import EmbedBackendSpec, IndexBackendSpec, Manifest
 from ufo.hub import CostTick, Hub, InProcessHub, Parked, Terminal
 from ufo.jobs import TurnDispatcher
 from ufo.loop import queue as loop_queue
@@ -34,6 +33,7 @@ from ufo.loop.engine import (
 )
 from ufo.loop.subagents import SubagentProfile, SubagentRegistry, Subagents
 from ufo.loop.transcript import Transcript
+from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.models.interface import (
     ModelEvent,
     ModelRequest,
@@ -283,13 +283,10 @@ class StandInModel:
 
 
 STANDIN_REGISTRY = ModelRegistry(
-    providers=(
-        ModelProviderSpec(
-            name="standin",
-            matches=lambda model: True,
-            client=lambda model, key: StandInModel(),
-        ),
-    ),
+    specs={
+        spec.id: replace(spec, client=lambda spec, key: StandInModel(), key_slot="", key_env="")
+        for spec in CORE_MODEL_SPECS
+    },
     pricing=CORE_PRICING,
     auto_model="claude-opus-4-8",
 )
@@ -567,6 +564,44 @@ async def test_auto_model_resolves_to_the_configured_default(surface: Turns) -> 
     _, terminal = await surface.consume(seed, turn_id)
     assert terminal["status"] == "done"
     assert terminal["model"] == "claude-opus-4-8"
+
+
+async def test_turn_prompt_uses_the_models_knowledge_cutoff(
+    surface: Turns, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cutoffs: list[str] = []
+    render = loop_queue.render_system_prompt
+
+    def capture_knowledge_cutoff(*args: object, **kwargs: object) -> object:
+        cutoffs.append(str(kwargs["knowledge_cutoff"]))
+        return render(*args, **kwargs)
+
+    monkeypatch.setattr(loop_queue, "render_system_prompt", capture_knowledge_cutoff)
+    seed = await _bootstrap(model=PINNED_MODEL)
+    turn_id = await surface.admit(seed, "ping")
+    _, terminal = await surface.consume(seed, turn_id)
+    assert terminal["status"] == "done"
+    assert cutoffs == [STANDIN_REGISTRY.spec(PINNED_MODEL).knowledge_cutoff]
+    assert cutoffs != [STANDIN_REGISTRY.spec("claude-opus-4-8").knowledge_cutoff]
+
+
+async def test_turn_compaction_uses_the_models_context_window(
+    surface: Turns, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    windows: list[int] = []
+    compaction = loop_queue.Compaction
+
+    def capture_context_window(**kwargs: object) -> object:
+        windows.append(int(kwargs["context_window"]))
+        return compaction(**kwargs)
+
+    monkeypatch.setattr(loop_queue, "Compaction", capture_context_window)
+    seed = await _bootstrap(model=PINNED_MODEL)
+    turn_id = await surface.admit(seed, "ping")
+    _, terminal = await surface.consume(seed, turn_id)
+    assert terminal["status"] == "done"
+    assert windows == [STANDIN_REGISTRY.spec(PINNED_MODEL).context_window]
+    assert windows != [STANDIN_REGISTRY.spec("claude-opus-4-8").context_window]
 
 
 async def test_cost_ticks_stream_as_a_turn_accrues_spend(surface: Turns) -> None:

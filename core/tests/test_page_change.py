@@ -19,7 +19,6 @@ import pytest
 import sqlalchemy as sa
 import ufo_ext_sample as sample
 
-from ufo.accounting import CORE_PRICING
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ScopedStore
@@ -35,6 +34,7 @@ from ufo.jobs import (
     bindings_from,
     core_jobs,
 )
+from ufo.models.catalog import CORE_PRICING
 from ufo.models.registry import ModelRegistry
 from ufo.sandbox.local import LocalCarrier
 from ufo.schema import tables
@@ -137,7 +137,7 @@ async def test_runner_wires_the_model_into_the_off_turn_context(db: None, tmp_pa
     workspace_id = await _workspace()
     blob = FilesystemBlobStore(root=tmp_path)
     await _seed_page(blob, workspace_id, "a page for model wiring")
-    registry = ModelRegistry(providers=(), pricing=CORE_PRICING, auto_model="claude-opus-4-8")
+    registry = ModelRegistry(specs={}, pricing=CORE_PRICING, auto_model="claude-opus-4-8")
     with ws(workspace_id):
         await _drive_all(_runner(blob, registry=registry))
 

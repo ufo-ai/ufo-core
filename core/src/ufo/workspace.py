@@ -16,9 +16,11 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from uuid import UUID
 
-from ufo.accounting import CORE_PRICING, Pricing, record_workspace_usage
+from ufo.accounting import record_workspace_usage
 from ufo.credentials import CredentialSlotUnset, CredentialStore
 from ufo.db import current_workspace, workspace_tx
+from ufo.models.catalog import CORE_PRICING
+from ufo.models.pricing import Pricing
 from ufo.schema.records import Usage
 
 _store: CredentialStore | None = None

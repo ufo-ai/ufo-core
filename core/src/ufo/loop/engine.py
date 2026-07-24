@@ -30,8 +30,6 @@ from pydantic import BaseModel, ValidationError
 
 from ufo.accounting import (
     ALLOW,
-    CORE_PRICING,
-    Pricing,
     SpendEvaluator,
     applicable_caps_absent,
     read_turn_cost,
@@ -60,6 +58,7 @@ from ufo.loop.compaction import (
 from ufo.loop.prompts.render import RenderedPrompt
 from ufo.loop.transcript import Transcript
 from ufo.memory import MemorySearch
+from ufo.models.catalog import CORE_PRICING
 from ufo.models.interface import (
     ImageBlock,
     ImageSource,
@@ -75,6 +74,7 @@ from ufo.models.interface import (
     ToolSchema,
     ToolUseBlock,
 )
+from ufo.models.pricing import Pricing
 from ufo.o11y import emit_metric, log, turn_span
 from ufo.sandbox.session import TOOL_OUTPUT_DIR, SandboxSession
 from ufo.schema import tables

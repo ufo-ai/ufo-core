@@ -12,12 +12,12 @@ import asyncio
 import os
 from dataclasses import dataclass
 
-from ufo.accounting import Pricing
 from ufo.config import Config, load_config
 from ufo.db import init_db
 from ufo.ext.loader import connector_clis, load_manifests
 from ufo.ext.manifest import Manifest
 from ufo.grants import GrantStore
+from ufo.models.pricing import Pricing
 from ufo.models.registry import model_registry
 from ufo.o11y import init_o11y, log
 from ufo.sandbox.proxy.rules import (

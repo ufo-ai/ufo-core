@@ -1,9 +1,7 @@
 """Token pricing, the one billing write per turn, and the spend caps decided against the ledger."""
 
-import hashlib
-import json
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -15,11 +13,11 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.candidates import WorkspaceCandidates, owner_candidates
-from ufo.o11y import log
+from ufo.models.catalog import CORE_PRICING
+from ufo.models.pricing import Pricing
 from ufo.schema import tables
 from ufo.schema.records import Usage, ledger_id_for
 
-TOKENS_PER_MTOK = 1_000_000
 MICRO_USD_PER_USD = 1_000_000
 
 TOKENS_DIMENSION = "tokens"
@@ -62,106 +60,6 @@ def _note_absent_caps(key: tuple[UUID, UUID | None, UUID]) -> None:
         for expired in [k for k, expiry in _no_applicable_caps.items() if expiry <= now]:
             del _no_applicable_caps[expired]
     _no_applicable_caps[key] = now + CAP_PRESENCE_TTL_SECONDS
-
-
-@dataclass(frozen=True, slots=True)
-class ModelPrice:
-    """Micro-USD per million tokens, one rate per token class."""
-
-    input: int
-    output: int
-    cache_read: int
-    cache_write: int
-
-
-MODEL_TOKEN_PRICE: dict[str, ModelPrice] = {
-    "claude-fable-5": ModelPrice(10_000_000, 50_000_000, 1_000_000, 12_500_000),
-    "claude-opus-4-8": ModelPrice(5_000_000, 25_000_000, 500_000, 6_250_000),
-    "claude-opus-4-7": ModelPrice(5_000_000, 25_000_000, 500_000, 6_250_000),
-    "claude-opus-4-6": ModelPrice(5_000_000, 25_000_000, 500_000, 6_250_000),
-    "claude-sonnet-5": ModelPrice(3_000_000, 15_000_000, 300_000, 3_750_000),
-    "claude-sonnet-4-6": ModelPrice(3_000_000, 15_000_000, 300_000, 3_750_000),
-    "claude-haiku-4-5": ModelPrice(1_000_000, 5_000_000, 100_000, 1_250_000),
-    "gpt-5.6-terra": ModelPrice(2_500_000, 15_000_000, 250_000, 3_125_000),
-    "gpt-5.5": ModelPrice(5_000_000, 30_000_000, 500_000, 5_000_000),
-    "gpt-5.4": ModelPrice(2_500_000, 15_000_000, 250_000, 2_500_000),
-    "gpt-5.4-mini": ModelPrice(750_000, 4_500_000, 75_000, 750_000),
-    "gpt-5.4-nano": ModelPrice(200_000, 1_250_000, 20_000, 200_000),
-}
-
-
-def price_digest(prices: Mapping[str, ModelPrice] | None = None) -> str:
-    """A deterministic version stamp of a price table: sha256 over its sorted per-model rates.
-    Stamped on every priced ledger row so a burn stays attributable to the rate that priced it —
-    after a price-table edit historical rows keep their original digest and reprice/audit
-    reconciliation over a window that spans the change stays exact. `prices` defaults to the core
-    table; a model-provider extension's merged table is stamped through its Pricing."""
-    table = MODEL_TOKEN_PRICE if prices is None else prices
-    payload = json.dumps(
-        {
-            model: {
-                "input": price.input,
-                "output": price.output,
-                "cache_read": price.cache_read,
-                "cache_write": price.cache_write,
-            }
-            for model, price in sorted(table.items())
-        },
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-    return "sha256:" + hashlib.sha256(payload.encode()).hexdigest()
-
-
-PRICE_DIGEST = price_digest()
-
-
-def usage_priced_micro_usd(
-    model: str, usage: Usage, prices: Mapping[str, ModelPrice] | None = None
-) -> int:
-    """Micro-USD for a usage split: integer dot product, floored at micro-dollar precision.
-
-    `prices` defaults to the core table; a model-provider extension's merged table is priced
-    through its Pricing. An unknown model warns loudly and prices at zero — never a silent fallback
-    to another model's price, and never a raise: pricing runs inside the turn's terminal commit, so
-    raising would wedge the commit-retry loop instead of ending the client's wait."""
-    price = (MODEL_TOKEN_PRICE if prices is None else prices).get(model)
-    if price is None:
-        log("pricing.unknown_model", model=model)
-        return 0
-    micro_usd_mtok = (
-        usage.input_tokens * price.input
-        + usage.output_tokens * price.output
-        + usage.cache_read_tokens * price.cache_read
-        + usage.cache_write_tokens * price.cache_write
-    )
-    return micro_usd_mtok // TOKENS_PER_MTOK
-
-
-@dataclass(frozen=True, slots=True)
-class Pricing:
-    """The model price table in force for a burn — core's rates plus every model-provider
-    extension's contributed entries — and the version stamp derived from it. Built once from the
-    model registry at serve and threaded to the host turn's priced write, so a contributed slug is
-    billed and stamped by exactly the merged table that priced it; the unknown-model warns+zero and
-    the per-usage arithmetic stay in `usage_priced_micro_usd`, priced here against this table."""
-
-    prices: Mapping[str, ModelPrice]
-    digest: str
-
-    def micro_usd(self, model: str, usage: Usage) -> int:
-        return usage_priced_micro_usd(model, usage, self.prices)
-
-
-def pricing_with(contributed: Mapping[str, ModelPrice]) -> Pricing:
-    """Core's rates with every provider-contributed entry merged over them, plus the digest of the
-    merged table. A slug the core table lacks becomes billable; a slug colliding with a core id is
-    overridden by the contribution. `pricing_with({})` is the core-only table (`CORE_PRICING`)."""
-    prices = {**MODEL_TOKEN_PRICE, **contributed}
-    return Pricing(prices=prices, digest=price_digest(prices))
-
-
-CORE_PRICING = pricing_with({})
 
 
 async def record_turn_usage(
@@ -705,7 +603,7 @@ class SpendReport:
     """A window's ledger, summed four ways: the workspace total, per member, and per agent, plus
     the per-dimension split so a reader sees priced tokens beside the egress request count, and the
     per-price-digest split so an audit attributes each burn to the rate version that priced it —
-    the reconciliation seam over a window that spans a MODEL_TOKEN_PRICE change."""
+    the reconciliation seam over a window that spans a price-table change."""
 
     window_seconds: int
     total_micro_usd: int

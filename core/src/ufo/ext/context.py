@@ -22,7 +22,6 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.accounting import (
-    Pricing,
     UsageExport,
     ack_usage_exports,
     mint_usage_exports,
@@ -44,6 +43,7 @@ from ufo.models.interface import (
     ToolCallStart,
     ToolUseBlock,
 )
+from ufo.models.pricing import Pricing
 from ufo.o11y import log
 from ufo.scheduling import ScheduleInvoker, ScheduleStore
 from ufo.schema import tables

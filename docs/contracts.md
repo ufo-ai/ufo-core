@@ -185,7 +185,7 @@ class Manifest:
     hooks: tuple[HookSpec, ...] = ();           jobs: tuple[JobSpec, ...] = ()
     routes: tuple[RouteSpec, ...] = ();         credentials: tuple[CredentialSlot, ...] = ()
     onboarding: tuple[OnboardingStep, ...] = ();packs: tuple[PackRef, ...] = ()
-    models: tuple[ModelProviderSpec, ...] = (); carriers: tuple[CarrierSpec, ...] = ()
+    models: tuple[ModelSpec, ...] = (); carriers: tuple[CarrierSpec, ...] = ()
     memory_search: tuple[MemorySearchProviderSpec, ...] = ()
     indexes: tuple[IndexBackendSpec, ...] = (); hubs: tuple[HubSpec, ...] = ()
     requires: tuple[str, ...] = ()

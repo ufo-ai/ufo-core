@@ -2,10 +2,10 @@ from pathlib import Path
 
 import pytest
 
-from ufo.accounting import CORE_PRICING
 from ufo.config import BlobConfig, Config, DatabaseConfig, load_config
 from ufo.ext.loader import load_manifests
 from ufo.ext.manifest import CredentialSlot, InjectionTarget, Manifest
+from ufo.models.catalog import CORE_PRICING
 from ufo.proxy_serve import OWNER_DSN_ENV, ProxyServe, _egress_ca, _owner_dsn, model_rule_base
 from ufo.sandbox.proxy.rules import ANTHROPIC_HOST, ScopeRule, derive_model_rules
 from ufo.sandbox.session import EGRESS_CA_CERT_ENV, EGRESS_CA_KEY_ENV

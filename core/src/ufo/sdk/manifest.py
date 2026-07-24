@@ -52,9 +52,6 @@ from ufo.ext.manifest import (
     MemorySearchProviderSpec as MemorySearchProviderSpec,
 )
 from ufo.ext.manifest import (
-    ModelProviderSpec as ModelProviderSpec,
-)
-from ufo.ext.manifest import (
     ModifyInput as ModifyInput,
 )
 from ufo.ext.manifest import (

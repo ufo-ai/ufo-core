@@ -4,8 +4,8 @@ A profile template is core-shipped prose with slots the renderer fills: {{agent-
 agent's own instructions — only the shell carries this slot), {{skill_index}} (the loadable-skill
 <available_skills> block), {{sections}} (the capability sections packs contribute — the seam),
 {{citation}} (the one shared citation block, kept in citation.md and injected here), and
-{{knowledge_cutoff}} (the resolved model's knowledge boundary from knowledge_cutoff.md — a model
-with no MODEL_KNOWLEDGE_CUTOFF entry fails loud rather than shipping a prompt without one).
+{{knowledge_cutoff}} (the resolved model's knowledge boundary from knowledge_cutoff.md — the
+`ModelSpec.knowledge_cutoff` fact, which every registered model declares).
 
 Vars ({{under_scored}}) inside the agent prompt are substituted from a caller-supplied mapping under
 strict both-ends validation — every declared var supplied, every supplied var declared — so a
@@ -16,6 +16,7 @@ smuggling a slot, is a bug, never silently shipped to the model."""
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
 
@@ -34,29 +35,6 @@ SHELL = (_PROMPTS_DIR / "shell.md").read_text()
 CITATION_BLOCK = (_PROMPTS_DIR / "citation.md").read_text().strip()
 KNOWLEDGE_CUTOFF_BLOCK = (_PROMPTS_DIR / "knowledge_cutoff.md").read_text().strip()
 COMPACTION_SYSTEM_PROMPT = (_PROMPTS_DIR / "compaction.md").read_text().strip()
-
-MODEL_KNOWLEDGE_CUTOFF: dict[str, str] = {
-    "claude-fable-5": "January 2026",
-    "claude-opus-4-8": "January 2026",
-    "claude-opus-4-7": "January 2026",
-    "claude-opus-4-6": "August 2025",
-    "claude-sonnet-5": "January 2026",
-    "claude-sonnet-4-6": "August 2025",
-    "claude-haiku-4-5": "July 2025",
-    "anthropic.claude-fable-5": "January 2026",
-    "anthropic.claude-opus-4-8": "January 2026",
-    "anthropic.claude-opus-4-7": "January 2026",
-    "anthropic.claude-opus-4-6-v1": "August 2025",
-    "anthropic.claude-sonnet-5": "January 2026",
-    "anthropic.claude-sonnet-4-6": "August 2025",
-    "openai.gpt-oss-20b": "June 2024",
-    "openai.gpt-oss-120b": "June 2024",
-    "gpt-5.6-terra": "February 2026",
-    "openai.gpt-5.4": "August 2025",
-    "openai.gpt-5.5": "December 2025",
-    "google/gemini-2.5-pro": "January 2025",
-    "z-ai/glm-5.2": "March 2026",
-}
 
 
 @dataclass(frozen=True)
@@ -77,16 +55,16 @@ def render_system_prompt(
     sections: Sequence[tuple[str, str]],
     skills: Sequence[tuple[str, str]] = (),
     *,
-    model: str,
+    knowledge_cutoff: str,
 ) -> RenderedPrompt:
     """The main agent's system prompt: the core shell with the agent's own prompt, the pack-
-    contributed capability sections, the loadable-skill index, and the resolved model's knowledge
-    cutoff slotted in. A model absent from MODEL_KNOWLEDGE_CUTOFF fails loud — the prompt never
-    ships without the model's boundary."""
-    cutoff = MODEL_KNOWLEDGE_CUTOFF.get(model)
-    if cutoff is None:
-        raise ValueError(f"no knowledge cutoff declared for model {model!r}")
-    block = KNOWLEDGE_CUTOFF_BLOCK.replace(CUTOFF_VAR, cutoff)
+    contributed capability sections, the loadable-skill index, and the model's knowledge cutoff
+    slotted in. `knowledge_cutoff` is the resolved model's `ModelSpec.knowledge_cutoff` (a machine
+    `YYYY-MM` date) — the spec guarantees every model declares one, so the prompt never ships
+    without the boundary. The machine `YYYY-MM` date renders to the human month the prompt shows —
+    `"2026-02"` → `"February 2026"`."""
+    human_cutoff = datetime.strptime(knowledge_cutoff, "%Y-%m").strftime("%B %Y")
+    block = KNOWLEDGE_CUTOFF_BLOCK.replace(CUTOFF_VAR, human_cutoff)
     return render_template(
         SHELL.replace(KNOWLEDGE_CUTOFF_SLOT, block), agent_prompt, {}, skills, sections
     )

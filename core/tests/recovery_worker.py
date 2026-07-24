@@ -17,7 +17,7 @@ import signal
 import sys
 import threading
 from collections.abc import AsyncIterator, Callable, Coroutine
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -25,16 +25,15 @@ import sqlalchemy as sa
 from dbos import DBOS, DBOSClient, EnqueueOptions
 from ufo_ext_index_default import DefaultIndex
 
-from ufo.accounting import CORE_PRICING
 from ufo.blob import FilesystemBlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.connectors import ConnectorRegistry
 from ufo.db import init_db, workspace_tx
 from ufo.ext.loader import skill_registry
-from ufo.ext.manifest import ModelProviderSpec
 from ufo.hub import InProcessHub
 from ufo.loop import queue as loop_queue
 from ufo.loop.subagents import SubagentRegistry
+from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.models.interface import (
     ModelEvent,
     ModelRequest,
@@ -186,13 +185,10 @@ def _install_runtime(env: _Env, model: _CrashModel | _AnswerModel) -> None:
         blob=BlobConfig(backend="filesystem", root=env.blob_root),
     )
     registry = ModelRegistry(
-        providers=(
-            ModelProviderSpec(
-                name="fake",
-                matches=lambda name: True,
-                client=lambda name, key: model,
-            ),
-        ),
+        specs={
+            spec.id: replace(spec, client=lambda spec, key: model, key_slot="", key_env="")
+            for spec in CORE_MODEL_SPECS
+        },
         pricing=CORE_PRICING,
         auto_model="claude-opus-4-8",
     )

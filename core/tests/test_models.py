@@ -1,8 +1,9 @@
 import logging
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 import anthropic
 import httpx
@@ -13,9 +14,11 @@ from openai.types.chat import chat_completion_chunk
 from openai.types.completion_usage import CompletionUsage, PromptTokensDetails
 
 from ufo.config import BlobConfig, Config, DatabaseConfig, ModelsConfig
+from ufo.ext.manifest import Manifest
 from ufo.models.anthropic import MAX_EMPTY_PROVIDER_RETRIES as ANTHROPIC_MAX_EMPTY_RETRIES
 from ufo.models.anthropic import MAX_PROVIDER_RETRIES as ANTHROPIC_MAX_RETRIES
 from ufo.models.anthropic import AnthropicClient, anthropic_sdk_client
+from ufo.models.catalog import core_model_specs
 from ufo.models.interface import (
     IMAGE_OMITTED_TEXT,
     ImageBlock,
@@ -34,15 +37,41 @@ from ufo.models.interface import (
 )
 from ufo.models.openai import MAX_EMPTY_PROVIDER_RETRIES as OPENAI_MAX_EMPTY_RETRIES
 from ufo.models.openai import MAX_PROVIDER_RETRIES as OPENAI_MAX_RETRIES
-from ufo.models.openai import OpenAIClient, openai_sdk_client
+from ufo.models.openai import OpenAIClient, openai_sdk_client, responses_request
+from ufo.models.pricing import ModelPrice
 from ufo.models.registry import model_registry
+from ufo.models.spec import ModelSpec, ReasoningSupport
 from ufo.schema.records import Usage
+from ufo.workspace import ws
 
 REQUEST = ModelRequest(
     model="claude-opus-4-8",
     system="be terse",
     messages=(Message(role="user", content="hi"),),
     max_tokens=64,
+)
+
+_REASONS = ReasoningSupport(supported=True, tools_with_reasoning=True)
+_PRICE = ModelPrice(0, 0, 0, 0)
+ANTHROPIC_SPEC = ModelSpec(
+    id="claude-opus-4-8",
+    provider="anthropic",
+    client=lambda spec, key: AnthropicClient(client=anthropic_sdk_client(key), spec=spec),
+    price=_PRICE,
+    knowledge_cutoff="2026-01",
+    context_window=200_000,
+    reasoning=_REASONS,
+    api_surface="chat",
+)
+OPENAI_SPEC = ModelSpec(
+    id="gpt-5.5",
+    provider="openai",
+    client=lambda spec, key: OpenAIClient(client=openai_sdk_client(key), spec=spec),
+    price=_PRICE,
+    knowledge_cutoff="2025-12",
+    context_window=272_000,
+    reasoning=_REASONS,
+    api_surface="chat",
 )
 
 
@@ -246,7 +275,9 @@ async def test_anthropic_request_carries_image_and_tool_result_images() -> None:
     create = CapturingCreate(
         ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
     )
-    async for _ in AnthropicClient(client=anthropic_sdk(create)).complete(IMAGE_REQUEST):
+    async for _ in AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC).complete(
+        IMAGE_REQUEST
+    ):
         pass
     messages = create.kwargs["messages"]
     assert messages[0]["content"][1] == {
@@ -271,7 +302,9 @@ async def test_anthropic_caches_tools_system_and_growing_conversation() -> None:
             )
         }
     )
-    async for _ in AnthropicClient(client=anthropic_sdk(create)).complete(request):
+    async for _ in AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC).complete(
+        request
+    ):
         pass
     assert create.kwargs["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
     assert create.kwargs["system"] == [
@@ -288,7 +321,9 @@ async def test_anthropic_caches_tools_system_and_growing_conversation() -> None:
 
 async def test_openai_request_carries_image_url_and_lifts_tool_result_images() -> None:
     create = CapturingCreate(([openai_text("ok"), openai_usage(prompt=1, completion=1)], None))
-    async for _ in OpenAIClient(client=openai_sdk(create)).complete(IMAGE_REQUEST):
+    async for _ in OpenAIClient(client=openai_sdk(create), spec=OPENAI_SPEC).complete(
+        IMAGE_REQUEST
+    ):
         pass
     messages = create.kwargs["messages"]
     assert {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}} in messages[1][
@@ -306,7 +341,9 @@ async def test_openai_request_sends_max_completion_tokens() -> None:
     """Reasoning-tier OpenAI models reject the legacy `max_tokens` parameter outright, so the
     budget must ride `max_completion_tokens` — the judge model pin surfaced this live."""
     create = CapturingCreate(([openai_text("ok"), openai_usage(prompt=1, completion=1)], None))
-    async for _ in OpenAIClient(client=openai_sdk(create)).complete(IMAGE_REQUEST):
+    async for _ in OpenAIClient(client=openai_sdk(create), spec=OPENAI_SPEC).complete(
+        IMAGE_REQUEST
+    ):
         pass
     assert create.kwargs["max_completion_tokens"] == IMAGE_REQUEST.max_tokens
     assert "max_tokens" not in create.kwargs
@@ -385,7 +422,7 @@ async def test_anthropic_maps_deltas_then_single_usage() -> None:
             None,
         )
     )
-    events = await collect(AnthropicClient(client=anthropic_sdk(create)))
+    events = await collect(AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC))
     assert events == [
         TextDelta(text="Hel"),
         TextDelta(text="lo"),
@@ -396,7 +433,7 @@ async def test_anthropic_maps_deltas_then_single_usage() -> None:
 async def test_anthropic_stream_without_usage_raises() -> None:
     create = ScriptedCreate(([anthropic_message_start(), anthropic_text("x")], None))
     with pytest.raises(RuntimeError, match="model stream produced no usage"):
-        await collect(AnthropicClient(client=anthropic_sdk(create)))
+        await collect(AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC))
 
 
 async def test_openai_maps_deltas_then_single_usage() -> None:
@@ -411,7 +448,7 @@ async def test_openai_maps_deltas_then_single_usage() -> None:
             None,
         )
     )
-    events = await collect(OpenAIClient(client=openai_sdk(create)))
+    events = await collect(OpenAIClient(client=openai_sdk(create), spec=OPENAI_SPEC))
     assert events == [
         TextDelta(text="a"),
         TextDelta(text="b"),
@@ -421,14 +458,14 @@ async def test_openai_maps_deltas_then_single_usage() -> None:
 
 async def test_openai_usage_without_cached_tokens_reads_zero() -> None:
     create = ScriptedCreate(([openai_text("a"), openai_usage(prompt=3, completion=2)], None))
-    events = await collect(OpenAIClient(client=openai_sdk(create)))
+    events = await collect(OpenAIClient(client=openai_sdk(create), spec=OPENAI_SPEC))
     assert events[-1] == Usage(input_tokens=3, output_tokens=2)
 
 
 async def test_openai_stream_without_usage_raises() -> None:
     create = ScriptedCreate(([openai_text("a")], None))
     with pytest.raises(RuntimeError, match="model stream produced no usage"):
-        await collect(OpenAIClient(client=openai_sdk(create)))
+        await collect(OpenAIClient(client=openai_sdk(create), spec=OPENAI_SPEC))
 
 
 @dataclass(frozen=True)
@@ -444,7 +481,7 @@ class ProviderHarness:
 PROVIDERS = [
     pytest.param(
         ProviderHarness(
-            build=lambda create: AnthropicClient(client=anthropic_sdk(create)),
+            build=lambda create: AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC),
             error_type=anthropic.APIStatusError,
             timeout_type=anthropic.APITimeoutError,
             max_retries=ANTHROPIC_MAX_RETRIES,
@@ -462,7 +499,7 @@ PROVIDERS = [
     ),
     pytest.param(
         ProviderHarness(
-            build=lambda create: OpenAIClient(client=openai_sdk(create)),
+            build=lambda create: OpenAIClient(client=openai_sdk(create), spec=OPENAI_SPEC),
             error_type=openai.APIStatusError,
             timeout_type=openai.APITimeoutError,
             max_retries=OPENAI_MAX_RETRIES,
@@ -585,7 +622,7 @@ async def test_anthropic_iteration_timeout_before_first_event_retries(
             None,
         ),
     )
-    events = await collect(AnthropicClient(client=anthropic_sdk(create)))
+    events = await collect(AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC))
     assert create.calls == 2
     assert events[0] == TextDelta(text="ok")
     assert isinstance(events[-1], Usage)
@@ -616,7 +653,7 @@ async def test_anthropic_mid_stream_server_error_retries_then_succeeds(
             None,
         ),
     )
-    events = await collect(AnthropicClient(client=anthropic_sdk(create)))
+    events = await collect(AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC))
     assert create.calls == 2
     assert events[0] == TextDelta(text="ok")
     assert isinstance(events[-1], Usage)
@@ -639,7 +676,9 @@ async def test_anthropic_iteration_timeout_after_first_event_raises() -> None:
     )
     received = []
     with pytest.raises(httpx.ReadTimeout):
-        async for event in AnthropicClient(client=anthropic_sdk(create)).complete(REQUEST):
+        async for event in AnthropicClient(
+            client=anthropic_sdk(create), spec=ANTHROPIC_SPEC
+        ).complete(REQUEST):
             received.append(event)
     assert received == [TextDelta(text="partial")]
     assert create.calls == 1
@@ -657,7 +696,7 @@ async def test_anthropic_truncation_raises() -> None:
         )
     )
     with pytest.raises(ModelResponseTruncated):
-        await collect(AnthropicClient(client=anthropic_sdk(create)))
+        await collect(AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC))
 
 
 async def test_anthropic_refusal_raises() -> None:
@@ -671,7 +710,7 @@ async def test_anthropic_refusal_raises() -> None:
         )
     )
     with pytest.raises(ModelRefusal):
-        await collect(AnthropicClient(client=anthropic_sdk(create)))
+        await collect(AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC))
     assert create.calls == 1
 
 
@@ -683,7 +722,7 @@ async def test_openai_truncation_raises() -> None:
         )
     )
     with pytest.raises(ModelResponseTruncated):
-        await collect(OpenAIClient(client=openai_sdk(create)))
+        await collect(OpenAIClient(client=openai_sdk(create), spec=OPENAI_SPEC))
 
 
 async def test_anthropic_empty_completion_retries_then_succeeds() -> None:
@@ -701,7 +740,7 @@ async def test_anthropic_empty_completion_retries_then_succeeds() -> None:
             None,
         ),
     )
-    events = await collect(AnthropicClient(client=anthropic_sdk(create)))
+    events = await collect(AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC))
     assert create.calls == 2
     assert events == [
         TextDelta(text="recovered"),
@@ -717,7 +756,7 @@ async def test_openai_empty_completion_retries_then_succeeds() -> None:
             None,
         ),
     )
-    events = await collect(OpenAIClient(client=openai_sdk(create)))
+    events = await collect(OpenAIClient(client=openai_sdk(create), spec=OPENAI_SPEC))
     assert create.calls == 2
     assert events == [
         TextDelta(text="recovered"),
@@ -731,7 +770,7 @@ async def test_anthropic_persistent_empty_degrades_to_empty() -> None:
         None,
     )
     create = ScriptedCreate(*([empty] * (ANTHROPIC_MAX_EMPTY_RETRIES + 1)))
-    events = await collect(AnthropicClient(client=anthropic_sdk(create)))
+    events = await collect(AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC))
     assert create.calls == ANTHROPIC_MAX_EMPTY_RETRIES + 1
     assert events == [Usage(input_tokens=1, output_tokens=0)]
 
@@ -739,7 +778,7 @@ async def test_anthropic_persistent_empty_degrades_to_empty() -> None:
 async def test_openai_persistent_empty_degrades_to_empty() -> None:
     empty = ([openai_finish("stop"), openai_usage(prompt=1, completion=0)], None)
     create = ScriptedCreate(*([empty] * (OPENAI_MAX_EMPTY_RETRIES + 1)))
-    events = await collect(OpenAIClient(client=openai_sdk(create)))
+    events = await collect(OpenAIClient(client=openai_sdk(create), spec=OPENAI_SPEC))
     assert create.calls == OPENAI_MAX_EMPTY_RETRIES + 1
     assert events == [Usage(input_tokens=1, output_tokens=0)]
 
@@ -755,7 +794,9 @@ async def test_anthropic_default_request_enables_adaptive_thinking_at_high_effor
     create = CapturingCreate(
         ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
     )
-    async for _ in AnthropicClient(client=anthropic_sdk(create)).complete(REQUEST):
+    async for _ in AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC).complete(
+        REQUEST
+    ):
         pass
     assert create.kwargs["thinking"] == {"type": "adaptive"}
     assert create.kwargs["output_config"] == {"effort": "high"}
@@ -765,7 +806,7 @@ async def test_anthropic_reasoning_off_omits_the_thinking_block() -> None:
     create = CapturingCreate(
         ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
     )
-    async for _ in AnthropicClient(client=anthropic_sdk(create)).complete(
+    async for _ in AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC).complete(
         REQUEST.model_copy(update={"reasoning": "off"})
     ):
         pass
@@ -775,20 +816,20 @@ async def test_anthropic_reasoning_off_omits_the_thinking_block() -> None:
 
 async def test_openai_default_request_carries_reasoning_effort() -> None:
     create = CapturingCreate(([openai_text("ok"), openai_usage(prompt=1, completion=1)], None))
-    async for _ in OpenAIClient(client=openai_sdk(create)).complete(REQUEST):
+    async for _ in OpenAIClient(client=openai_sdk(create), spec=OPENAI_SPEC).complete(REQUEST):
         pass
     assert create.kwargs["reasoning_effort"] == "high"
 
 
 async def test_openai_reasoning_off_omits_reasoning_effort() -> None:
     create = CapturingCreate(([openai_text("ok"), openai_usage(prompt=1, completion=1)], None))
-    async for _ in OpenAIClient(client=openai_sdk(create)).complete(
+    async for _ in OpenAIClient(client=openai_sdk(create), spec=OPENAI_SPEC).complete(
         REQUEST.model_copy(update={"reasoning": "medium"})
     ):
         pass
     assert create.kwargs["reasoning_effort"] == "medium"
     off = CapturingCreate(([openai_text("ok"), openai_usage(prompt=1, completion=1)], None))
-    async for _ in OpenAIClient(client=openai_sdk(off)).complete(
+    async for _ in OpenAIClient(client=openai_sdk(off), spec=OPENAI_SPEC).complete(
         REQUEST.model_copy(update={"reasoning": "off"})
     ):
         pass
@@ -814,6 +855,100 @@ def test_registry_resolves_auto_to_an_overridden_default(tmp_path: Path) -> None
     assert registry.resolve("auto") == "claude-sonnet-5"
 
 
+def test_registry_spec_is_keyed_by_exact_id_and_fails_loud(tmp_path: Path) -> None:
+    registry = model_registry(_config(tmp_path), ())
+    assert registry.spec("gpt-5.6-terra").api_surface == "responses"
+    with pytest.raises(ValueError, match="no model registered for id 'nope'"):
+        registry.spec("nope")
+
+
+def test_registry_rejects_two_specs_for_one_id(tmp_path: Path) -> None:
+    clash = core_model_specs("ANTHROPIC_API_KEY", "OPENAI_API_KEY")[0]
+    dup = Manifest(name="dup", version="1", models=(clash,))
+    with pytest.raises(ValueError, match="two model specs registered for id"):
+        model_registry(_config(tmp_path), (dup,))
+
+
+async def test_registry_builds_core_clients_from_their_specs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    anthropic_wire = object()
+    openai_wire = object()
+    monkeypatch.setattr("ufo.models.catalog.anthropic_sdk_client", lambda key: anthropic_wire)
+    monkeypatch.setattr("ufo.models.catalog.openai_sdk_client", lambda key: openai_wire)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    registry = model_registry(_config(tmp_path), ())
+    with ws(uuid4()):
+        anthropic_client = await registry.client_for("claude-opus-4-8")
+        openai_client = await registry.client_for("gpt-5.4")
+    assert isinstance(anthropic_client, AnthropicClient)
+    assert anthropic_client.client is anthropic_wire
+    assert anthropic_client.spec is registry.spec("claude-opus-4-8")
+    assert isinstance(openai_client, OpenAIClient)
+    assert openai_client.client is openai_wire
+    assert openai_client.spec is registry.spec("gpt-5.4")
+
+
+def test_responses_request_carries_tools_and_reasoning_together() -> None:
+    """The #568 fix: a responses-surface model renders `tools` and reasoning in ONE legal request —
+    the shape gpt-5.6-terra accepts, where /v1/chat/completions would 400."""
+    request = REQUEST.model_copy(
+        update={
+            "model": "gpt-5.6-terra",
+            "reasoning": "high",
+            "tools": (ToolSchema(name="t", description="d", input_schema={"type": "object"}),),
+        }
+    )
+    kwargs = responses_request(request)
+    assert kwargs["reasoning"] == {"effort": "high"}
+    assert [tool["name"] for tool in kwargs["tools"]] == ["t"]
+
+
+async def test_chat_drops_reasoning_with_tools_when_the_model_forbids_the_pair() -> None:
+    spec = ModelSpec(
+        id="gpt-chat-only",
+        provider="openai",
+        client=lambda spec, key: OpenAIClient(client=openai_sdk_client(key), spec=spec),
+        price=_PRICE,
+        knowledge_cutoff="2025-12",
+        context_window=272_000,
+        reasoning=ReasoningSupport(supported=True, tools_with_reasoning=False),
+        api_surface="chat",
+    )
+    create = CapturingCreate(([openai_text("ok"), openai_usage(prompt=1, completion=1)], None))
+    request = REQUEST.model_copy(
+        update={
+            "reasoning": "medium",
+            "tools": (ToolSchema(name="t", description="d", input_schema={"type": "object"}),),
+        }
+    )
+    async for _ in OpenAIClient(client=openai_sdk(create), spec=spec).complete(request):
+        pass
+    assert "tools" in create.kwargs
+    assert "reasoning_effort" not in create.kwargs
+
+
+async def test_anthropic_drops_reasoning_with_tools_when_the_model_forbids_the_pair() -> None:
+    spec = replace(
+        ANTHROPIC_SPEC,
+        reasoning=ReasoningSupport(supported=True, tools_with_reasoning=False),
+    )
+    create = CapturingCreate(
+        ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
+    )
+    request = REQUEST.model_copy(
+        update={
+            "tools": (ToolSchema(name="t", description="d", input_schema={"type": "object"}),),
+        }
+    )
+    async for _ in AnthropicClient(client=anthropic_sdk(create), spec=spec).complete(request):
+        pass
+    assert "tools" in create.kwargs
+    assert "thinking" not in create.kwargs
+    assert "output_config" not in create.kwargs
+
+
 async def test_anthropic_enables_parallel_tool_use() -> None:
     create = CapturingCreate(
         ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
@@ -823,13 +958,17 @@ async def test_anthropic_enables_parallel_tool_use() -> None:
             "tools": (ToolSchema(name="first", description="one", input_schema={"type": "object"}),)
         }
     )
-    async for _ in AnthropicClient(client=anthropic_sdk(create)).complete(request):
+    async for _ in AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC).complete(
+        request
+    ):
         pass
     assert create.kwargs["tool_choice"] == {"type": "auto", "disable_parallel_tool_use": False}
     bare = CapturingCreate(
         ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
     )
-    async for _ in AnthropicClient(client=anthropic_sdk(bare)).complete(REQUEST):
+    async for _ in AnthropicClient(client=anthropic_sdk(bare), spec=ANTHROPIC_SPEC).complete(
+        REQUEST
+    ):
         pass
     assert "tool_choice" not in bare.kwargs
 
@@ -877,7 +1016,9 @@ async def test_anthropic_forced_tool_choice_compels_the_named_tool() -> None:
             "reasoning": "off",
         }
     )
-    async for _ in AnthropicClient(client=anthropic_sdk(create)).complete(request):
+    async for _ in AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC).complete(
+        request
+    ):
         pass
     assert create.kwargs["tool_choice"] == {
         "type": "tool",
@@ -898,7 +1039,7 @@ async def test_openai_forced_tool_choice_compels_the_named_tool() -> None:
             "reasoning": "off",
         }
     )
-    async for _ in OpenAIClient(client=openai_sdk(create)).complete(request):
+    async for _ in OpenAIClient(client=openai_sdk(create), spec=OPENAI_SPEC).complete(request):
         pass
     assert create.kwargs["parallel_tool_calls"] is False
     assert create.kwargs["tool_choice"] == {"type": "function", "function": {"name": "finish"}}
@@ -911,10 +1052,58 @@ async def test_openai_enables_parallel_tool_calls() -> None:
             "tools": (ToolSchema(name="first", description="one", input_schema={"type": "object"}),)
         }
     )
-    async for _ in OpenAIClient(client=openai_sdk(create)).complete(request):
+    async for _ in OpenAIClient(client=openai_sdk(create), spec=OPENAI_SPEC).complete(request):
         pass
     assert create.kwargs["parallel_tool_calls"] is True
     bare = CapturingCreate(([openai_text("ok"), openai_usage(prompt=1, completion=1)], None))
-    async for _ in OpenAIClient(client=openai_sdk(bare)).complete(REQUEST):
+    async for _ in OpenAIClient(client=openai_sdk(bare), spec=OPENAI_SPEC).complete(REQUEST):
         pass
     assert "parallel_tool_calls" not in bare.kwargs
+
+
+@pytest.mark.parametrize("cutoff", ["February 2026", "2026-13", "2026-00", "26-02"])
+def test_model_spec_rejects_a_non_machine_date_cutoff(cutoff: str) -> None:
+    with pytest.raises(ValueError, match="is not YYYY-MM"):
+        ModelSpec(
+            id="x",
+            provider="openai",
+            client=lambda spec, key: OpenAIClient(client=openai_sdk_client(key), spec=spec),
+            price=_PRICE,
+            knowledge_cutoff=cutoff,
+            context_window=1,
+            reasoning=_REASONS,
+            api_surface="chat",
+        )
+
+
+def test_model_spec_rejects_tools_with_reasoning_without_support() -> None:
+    with pytest.raises(ValueError, match="tools_with_reasoning without reasoning support"):
+        ModelSpec(
+            id="x",
+            provider="openai",
+            client=lambda spec, key: OpenAIClient(client=openai_sdk_client(key), spec=spec),
+            price=_PRICE,
+            knowledge_cutoff="2026-02",
+            context_window=1,
+            reasoning=ReasoningSupport(supported=False, tools_with_reasoning=True),
+            api_surface="chat",
+        )
+
+
+async def test_chat_omits_reasoning_when_the_model_does_not_support_it() -> None:
+    spec = ModelSpec(
+        id="no-reason",
+        provider="openai",
+        client=lambda spec, key: OpenAIClient(client=openai_sdk_client(key), spec=spec),
+        price=_PRICE,
+        knowledge_cutoff="2026-01",
+        context_window=1,
+        reasoning=ReasoningSupport(supported=False, tools_with_reasoning=False),
+        api_surface="chat",
+    )
+    create = CapturingCreate(([openai_text("ok"), openai_usage(prompt=1, completion=1)], None))
+    async for _ in OpenAIClient(client=openai_sdk(create), spec=spec).complete(
+        REQUEST.model_copy(update={"reasoning": "medium"})
+    ):
+        pass
+    assert "reasoning_effort" not in create.kwargs

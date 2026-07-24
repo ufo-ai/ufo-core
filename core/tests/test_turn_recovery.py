@@ -14,7 +14,7 @@ import subprocess
 import sys
 import time
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -25,16 +25,15 @@ from dbos import DBOS, DBOSClient, SetWorkflowID
 from sqlalchemy.engine import make_url
 from ufo_ext_index_default import DefaultIndex
 
-from ufo.accounting import CORE_PRICING
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
 from ufo.connectors import ConnectorRegistry
 from ufo.db import workspace_tx
 from ufo.ext.loader import skill_registry
-from ufo.ext.manifest import ModelProviderSpec
 from ufo.hub import InProcessHub
 from ufo.loop import queue as loop_queue
 from ufo.loop.subagents import SubagentRegistry
+from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.models.interface import (
     ModelEvent,
     ModelRequest,
@@ -210,13 +209,15 @@ async def test_crash_mid_turn_recovers_without_re_executing_completed_work(
     execs: list[tuple[str, ...]] = []
     crashed = [False]
     registry = ModelRegistry(
-        providers=(
-            ModelProviderSpec(
-                name="crash",
-                matches=lambda model: True,
-                client=lambda model, key: _CrashOnceModel(crashed=crashed),
-            ),
-        ),
+        specs={
+            spec.id: replace(
+                spec,
+                client=lambda spec, key: _CrashOnceModel(crashed=crashed),
+                key_slot="",
+                key_env="",
+            )
+            for spec in CORE_MODEL_SPECS
+        },
         pricing=CORE_PRICING,
         auto_model="claude-opus-4-8",
     )

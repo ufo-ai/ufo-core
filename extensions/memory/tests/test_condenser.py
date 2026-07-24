@@ -10,7 +10,7 @@ store. The seam test proves the memory extension registers two independent page_
 import hashlib
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -33,7 +33,7 @@ from ufo_ext_memory.store import (
     memory_item,
 )
 
-from ufo.accounting import CORE_PRICING, Pricing
+from ufo.accounting import Pricing
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ModelAccess, ScopedStore
@@ -42,10 +42,10 @@ from ufo.ext.manifest import (
     HookOutcome,
     HookSpec,
     Manifest,
-    ModelProviderSpec,
 )
 from ufo.indexing import OWNER_KIND_MEMORY_ITEM, Chunk
 from ufo.jobs import PageChangeRunner, SandboxReaper, TurnDispatcher, core_jobs
+from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.models.interface import ModelClient, ModelEvent, ModelRequest, TextDelta
 from ufo.models.registry import ModelRegistry
 from ufo.sandbox.local import LocalCarrier
@@ -93,11 +93,10 @@ class StubModelClient:
 
 def _registry(client: StubModelClient) -> ModelRegistry:
     return ModelRegistry(
-        providers=(
-            ModelProviderSpec(
-                name="stub", matches=lambda model: True, client=lambda model, key: client
-            ),
-        ),
+        specs={
+            spec.id: replace(spec, client=lambda spec, key: client, key_slot="", key_env="")
+            for spec in CORE_MODEL_SPECS
+        },
         pricing=CORE_PRICING,
         auto_model=AUTO_MODEL,
     )

@@ -217,7 +217,10 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             resolved = agent.model_copy(update={"model": runtime.registry.resolve(agent.model)})
             tools = ToolRegistry(tuple(tool for tool in all_tools if not tool.profile_only))
             system_prompt = render_system_prompt(
-                agent.prompt, sections, skills=skills.index(), model=resolved.model
+                agent.prompt,
+                sections,
+                skills=skills.index(),
+                knowledge_cutoff=runtime.registry.spec(resolved.model).knowledge_cutoff,
             )
             max_rounds = MAIN_ROUND_LIMIT
             output_model = None
@@ -265,6 +268,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             compaction=Compaction(
                 client=model,
                 model=resolved.model,
+                context_window=runtime.registry.spec(resolved.model).context_window,
                 blob=runtime.blob,
                 conversation_id=turn.conversation_id,
                 hooks=hooks,

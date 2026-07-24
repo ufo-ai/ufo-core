@@ -431,7 +431,7 @@ async def test_a_summary_with_trailing_characters_still_parses(tmp_path: Path) -
 def test_round_output_budget_fits_under_the_compaction_trigger() -> None:
     """Providers require input + max_tokens <= window and the derived trigger is window less the
     summary reserve and buffer, so with the window cancelled the reserve plus buffer must cover a
-    round's full output budget — for every window in MODEL_CONTEXT_WINDOW and the default."""
+    round's full output budget — for every model's context window (the smallest being the base)."""
     assert MAX_OUTPUT_TOKENS <= COMPACTION_SUMMARY_MAX_TOKENS + AUTOCOMPACT_BUFFER_TOKENS
 
 

@@ -6,9 +6,9 @@ import pytest
 from fastapi import FastAPI
 
 from ufo import serve
-from ufo.accounting import CORE_PRICING
 from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
 from ufo.ext.manifest import CredentialSlot, InjectionTarget, Manifest
+from ufo.models.catalog import CORE_PRICING
 from ufo.proxy_serve import OWNER_DSN_ENV, model_rule_base
 from ufo.sandbox.proxy.rules import ANTHROPIC_HOST, ScopeRule
 from ufo.sandbox.session import EGRESS_CA_CERT_ENV

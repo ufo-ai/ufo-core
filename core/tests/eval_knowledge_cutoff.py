@@ -143,7 +143,9 @@ class KnowledgeCutoffEval:
 
     async def run(self) -> None:
         arms = {
-            "with-block": render_system_prompt(AGENT_PROMPT, (), model=EVAL_MODEL).content,
+            "with-block": render_system_prompt(
+                AGENT_PROMPT, (), knowledge_cutoff="2026-01"
+            ).content,
             "no-block": render_template(
                 SHELL.replace(KNOWLEDGE_CUTOFF_SLOT, ""), AGENT_PROMPT, {}, (), ()
             ).content,

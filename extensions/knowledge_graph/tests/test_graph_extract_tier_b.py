@@ -24,10 +24,11 @@ from ufo_ext_knowledge_graph.store import (
     render_subgraph,
 )
 
-from ufo.accounting import CORE_PRICING, Pricing
+from ufo.accounting import Pricing
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ModelAccess
+from ufo.models.catalog import CORE_PRICING
 from ufo.models.interface import (
     ModelClient,
     ModelEvent,

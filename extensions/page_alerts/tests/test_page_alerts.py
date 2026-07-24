@@ -25,10 +25,11 @@ from ufo_ext_page_alerts.alerts import (
 )
 from ufo_ext_page_alerts.manifest import NAME, manifest
 
-from ufo.accounting import CORE_PRICING, Pricing
+from ufo.accounting import Pricing
 from ufo.db import workspace_tx
 from ufo.ext.context import ScopedStore, context_for
 from ufo.ext.manifest import HookContext, PageChangeBatch
+from ufo.models.catalog import CORE_PRICING
 from ufo.models.interface import ModelClient, ModelRequest, TextDelta
 from ufo.schema import tables
 from ufo.schema.records import WRITEBACK_PENDING, Agent, Turn, Usage

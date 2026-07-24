@@ -184,9 +184,7 @@ def _check_models(manifest: Manifest) -> None:
         return
     registry = model_registry(_config(), (manifest,))
     for spec in manifest.models:
-        assert spec in registry.providers
-        for model_id, _price in spec.prices:
-            assert spec.matches(model_id)
+        assert registry.spec(spec.id) is spec
 
 
 def _check_sources(manifest: Manifest) -> None:
@@ -303,7 +301,7 @@ def _check_prompt_sections(manifest: Manifest) -> None:
         return
     sections = tuple((section.name, section.body) for section in manifest.prompt_sections)
     rendered = render_system_prompt(
-        "You are the workspace assistant.", sections, model="claude-opus-4-8"
+        "You are the workspace assistant.", sections, knowledge_cutoff="2026-01"
     )
     assert rendered.digest.startswith("sha256:")
     for section in manifest.prompt_sections:

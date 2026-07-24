@@ -2,7 +2,7 @@ import asyncio
 import json
 import secrets
 from collections.abc import AsyncIterator, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from uuid import UUID, uuid4
 
@@ -18,18 +18,18 @@ from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_ext_web.surface import CHAT_PAGE, SESSION_COOKIE, _sse
 from ufo_testsupport.stream_gate import GatingHub, StreamGate, release_when_running
 
-from ufo.accounting import CORE_PRICING, record_egress_request, record_turn_usage
+from ufo.accounting import record_egress_request, record_turn_usage
 from ufo.bearer import mint_token
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
 from ufo.connectors import ConnectorRegistry
 from ufo.db import workspace_tx
 from ufo.ext.loader import skill_registry
-from ufo.ext.manifest import ModelProviderSpec
 from ufo.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
 from ufo.hub import InProcessHub, SkillLoad, ToolCall
 from ufo.loop import queue as loop_queue
 from ufo.loop.subagents import SubagentRegistry
+from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.models.interface import ModelEvent, ModelRequest, TextDelta
 from ufo.models.registry import ModelRegistry
 from ufo.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
@@ -69,13 +69,10 @@ class StandInModel:
 
 
 STANDIN_REGISTRY = ModelRegistry(
-    providers=(
-        ModelProviderSpec(
-            name="standin",
-            matches=lambda model: True,
-            client=lambda model, key: StandInModel(),
-        ),
-    ),
+    specs={
+        spec.id: replace(spec, client=lambda spec, key: StandInModel(), key_slot="", key_env="")
+        for spec in CORE_MODEL_SPECS
+    },
     pricing=CORE_PRICING,
     auto_model="claude-opus-4-8",
 )

@@ -33,13 +33,14 @@ from ufo_ext_self_improvement.model import ModelAccessLeg
 from ufo_ext_self_improvement.proposer import PromptProposer
 from ufo_ext_self_improvement.replay import ReplayEvaluation
 
-from ufo.accounting import CORE_PRICING, TOKENS_DIMENSION, Pricing
+from ufo.accounting import TOKENS_DIMENSION, Pricing
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ModelAccess, Trajectory, context_for
 from ufo.ext.loader import load_manifests
 from ufo.governance import prompt_digest
 from ufo.loop.transcript import Transcript
+from ufo.models.catalog import CORE_PRICING
 from ufo.models.interface import (
     Message,
     ModelClient,

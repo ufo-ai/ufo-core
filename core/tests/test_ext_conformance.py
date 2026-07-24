@@ -615,7 +615,7 @@ def test_pack_prompt_section_reaches_the_rendered_system_prompt() -> None:
     manifest = _sample_manifest()
     sections = tuple((section.name, section.body) for section in manifest.prompt_sections)
     rendered = render_system_prompt(
-        "You are the workspace assistant.", sections, model="claude-opus-4-8"
+        "You are the workspace assistant.", sections, knowledge_cutoff="2026-01"
     )
     assert sample.SECTION_BODY in rendered.content
     assert "You are the workspace assistant." in rendered.content
@@ -632,7 +632,7 @@ async def test_sample_skill_parses_indexes_and_mounts_with_its_script() -> None:
 
     assert sample.SKILL_NAME in dict(registry.index())
     prompt = render_system_prompt(
-        "You are the assistant.", (), skills=registry.index(), model="claude-opus-4-8"
+        "You are the assistant.", (), skills=registry.index(), knowledge_cutoff="2026-01"
     )
     assert sample.SKILL_NAME in prompt.content
 

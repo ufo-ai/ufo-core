@@ -1,123 +1,98 @@
-"""The model backend registry: which client serves a model, and the price table that prices it.
-
-Core ships direct Anthropic + OpenAI clients; a model-provider extension contributes more through
-its Manifest `models` point. `model_registry` folds core's two providers and every manifest's into
-one ordered table — core first — that the turn loop selects a client from and the accounting layer
-prices against. A provider resolves its own API key when the turn selects it, so a serve missing one
-key runs fine until an agent pinned to that backend actually runs; a model no provider claims fails
-loud rather than guessing a backend."""
+"""The model registry: one `ModelSpec` per model, keyed by exact id — the single point every seam
+funnels through for routing, pricing, and the model's facts. `model_registry` folds core's specs and
+every manifest-contributed spec into one table; a duplicate id fails loud at build and an unknown id
+fails loud at `spec`, rather than across a mid-turn 400, a render crash, and a silent zero bill. A
+provider resolves its own api key when the turn selects it, so a serve missing one key runs fine
+until an agent pinned to that backend actually runs. See RFC 0018."""
 
 from dataclasses import dataclass
 
-from ufo.accounting import Pricing, pricing_with
 from ufo.config import Config
 from ufo.credentials import CredentialSlotUnset
-from ufo.ext.manifest import Manifest, ModelProviderSpec
-from ufo.models.anthropic import AnthropicClient, anthropic_sdk_client
-from ufo.models.interface import (
-    ANTHROPIC_MODEL_PREFIXES,
-    AUTO_MODEL,
-    OPENAI_MODEL_PREFIXES,
-    PROVIDER_ANTHROPIC,
-    PROVIDER_OPENAI,
-    ModelClient,
-)
-from ufo.models.openai import OpenAIClient, openai_sdk_client
+from ufo.ext.manifest import Manifest
+from ufo.models.catalog import core_model_specs
+from ufo.models.interface import AUTO_MODEL, PROVIDER_ANTHROPIC, PROVIDER_OPENAI, ModelClient
+from ufo.models.pricing import Pricing, pricing_from
+from ufo.models.spec import ModelSpec
 from ufo.workspace import ws_current
-
-ANTHROPIC_KEY_SLOT = "anthropic_api_key"
-OPENAI_KEY_SLOT = "openai_api_key"
 
 
 @dataclass(frozen=True)
 class ModelRegistry:
-    """The active model backends as one ordered table — core's direct clients first, then every
-    manifest-contributed provider — with the merged price table their entries build. `client_for`
-    returns the client of the first provider whose matcher claims the model id; `pricing` prices any
-    model against the merged table; `model_key_env` is onboarding's eager key check. A model no
-    provider claims fails loud."""
+    """The active models as one id-keyed table — core's direct specs first, then every
+    manifest-contributed spec — with the merged price table their entries build. `client_for` builds
+    the client of the spec registered under an id; `pricing` prices any model against the merged
+    table; `model_key_env` is onboarding's eager key check. An id no spec describes fails loud."""
 
-    providers: tuple[ModelProviderSpec, ...]
+    specs: dict[str, ModelSpec]
     pricing: Pricing
     auto_model: str
 
     def resolve(self, model: str) -> str:
         """Map the model-agnostic `auto` sentinel to the deploy's configured concrete model; a
-        pinned id passes through. An agent projection keeps its declared value — resolution is a
-        runtime concern the turn applies before selecting a client and pricing the run."""
+        pinned id passes through."""
         return self.auto_model if model == AUTO_MODEL else model
+
+    def spec(self, model: str) -> ModelSpec:
+        """The spec registered under `model`, or a loud failure — the one seam every fact reads
+        through, so an unknown id fails here once rather than at each consuming layer."""
+        try:
+            return self.specs[model]
+        except KeyError as miss:
+            raise ValueError(f"no model registered for id {model!r}") from miss
 
     async def client_for(self, model: str) -> ModelClient:
         """The client serving `model`, built for the ambient workspace from the key resolved for its
-        provider — the workspace's BYOK secret if set, else the platform default from env. Built per
+        spec — the workspace's BYOK secret if set, else the platform default from env. Built per
         call so a workspace's own key is honoured and a rotated platform key takes effect without a
-        restart. Fetching the key asserts a bound workspace (`ws_current`), so a call is always
-        attributable to the workspace that made it; a key set nowhere fails loud."""
-        spec = self._provider_for(model)
+        restart. Fetching the key asserts a bound workspace (`ws_current`); a key set nowhere fails
+        loud."""
+        spec = self.spec(model)
         if not spec.key_slot and not spec.key_env:
-            return spec.client(model, "")
+            return spec.client(spec, "")
         try:
             key = await ws_current().credential(spec.key_slot, spec.key_env or None)
         except CredentialSlotUnset as unset:
             needed = spec.key_env or spec.key_slot.upper()
             raise RuntimeError(
-                f"model provider {spec.name!r} needs a key: set env {needed} or the workspace's "
+                f"model {model!r} needs a key: set env {needed} or the workspace's "
                 f"{spec.key_slot!r} BYOK slot"
             ) from unset
-        return spec.client(model, key)
+        return spec.client(spec, key)
 
     def key_slot_for(self, model: str) -> str | None:
-        """The BYOK slot whose stored value would key this model's calls — the same provider
-        resolution `client_for` applies, total instead of loud: an unclaimed model (a historical
-        ledger row from a removed provider) or a keyless provider answers None, so a billing
-        export labels it platform-served rather than wedging on it."""
-        spec = next((spec for spec in self.providers if spec.matches(model)), None)
+        """The BYOK slot whose stored value would key this model's calls — total instead of loud: an
+        unclaimed model (a historical ledger row from a removed spec) or a keyless spec answers
+        None, so a billing export labels it platform-served rather than wedging on it."""
+        spec = self.specs.get(model)
         if spec is None or not spec.key_slot:
             return None
         return spec.key_slot
 
     def model_key_env(self, model: str, config: Config) -> str | None:
         """The env var onboarding requires set before this model's first turn: a core provider's
-        configured key, or None for a contributed provider that resolves its own key lazily at turn
+        configured key, or None for a contributed spec that resolves its own key lazily at turn
         time — an env core cannot name to check eagerly."""
-        name = self._provider_for(model).name
-        if name == PROVIDER_ANTHROPIC:
+        provider = self.spec(model).provider
+        if provider == PROVIDER_ANTHROPIC:
             return config.models.anthropic_api_key_env
-        if name == PROVIDER_OPENAI:
+        if provider == PROVIDER_OPENAI:
             return config.models.openai_api_key_env
         return None
 
-    def _provider_for(self, model: str) -> ModelProviderSpec:
-        provider = next((spec for spec in self.providers if spec.matches(model)), None)
-        if provider is None:
-            raise ValueError(f"no model provider serves model {model!r}")
-        return provider
-
 
 def model_registry(config: Config, manifests: tuple[Manifest, ...]) -> ModelRegistry:
-    """Core's two direct backends followed by every extension-contributed provider, and the price
-    table merging their entries over core's rates. Core is first, so a bare Anthropic/OpenAI id
-    always resolves to its direct client; a contributed provider serves only what core does not."""
-    core = (
-        ModelProviderSpec(
-            name=PROVIDER_ANTHROPIC,
-            matches=lambda model: model.startswith(ANTHROPIC_MODEL_PREFIXES),
-            client=lambda model, key: AnthropicClient(client=anthropic_sdk_client(key)),
-            key_slot=ANTHROPIC_KEY_SLOT,
-            key_env=config.models.anthropic_api_key_env,
-        ),
-        ModelProviderSpec(
-            name=PROVIDER_OPENAI,
-            matches=lambda model: model.startswith(OPENAI_MODEL_PREFIXES),
-            client=lambda model, key: OpenAIClient(client=openai_sdk_client(key)),
-            key_slot=OPENAI_KEY_SLOT,
-            key_env=config.models.openai_api_key_env,
-        ),
-    )
-    providers = (*core, *(spec for manifest in manifests for spec in manifest.models))
-    contributed = {model: price for spec in providers for model, price in spec.prices}
+    """Core's direct specs followed by every extension-contributed spec, indexed by id, and the
+    price table their entries build. A duplicate id — two specs claiming one slug — fails loud, so a
+    contributed model never silently shadows a core one."""
+    core = core_model_specs(config.models.anthropic_api_key_env, config.models.openai_api_key_env)
+    specs: dict[str, ModelSpec] = {}
+    for spec in (*core, *(spec for manifest in manifests for spec in manifest.models)):
+        if spec.id in specs:
+            raise ValueError(f"two model specs registered for id {spec.id!r}")
+        specs[spec.id] = spec
     return ModelRegistry(
-        providers=providers,
-        pricing=pricing_with(contributed),
+        specs=specs,
+        pricing=pricing_from({model: spec.price for model, spec in specs.items()}),
         auto_model=config.models.auto_model,
     )

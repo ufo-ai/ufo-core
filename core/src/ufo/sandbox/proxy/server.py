@@ -40,15 +40,15 @@ from uuid import UUID
 import sqlalchemy as sa
 
 from ufo.accounting import (
-    CORE_PRICING,
     TOKENS_DIMENSION,
-    Pricing,
     record_egress_request,
     record_sandbox_tokens,
 )
 from ufo.connectors import CliCredential, ForwardedResponse
 from ufo.db import workspace_tx
 from ufo.grants import GrantStore
+from ufo.models.catalog import CORE_PRICING
+from ufo.models.pricing import Pricing
 from ufo.o11y import emit_metric, log
 from ufo.sandbox.proxy.rules import (
     ANTHROPIC_HOST,

@@ -1,0 +1,74 @@
+"""One frozen record per model — the single source of truth for how a model is routed, billed, and
+called. Every seam reads its fact off a ModelSpec through the registry; no seam keeps its own
+per-model table. A model no registry entry describes fails loud at `registry.spec(id)` rather than
+across a mid-turn 400, a render crash, and a silent zero bill. See RFC 0018."""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Literal
+
+from ufo.models.interface import ModelClient, ToolSchema
+from ufo.models.pricing import ModelPrice
+from ufo.schema.records import ReasoningEffort
+
+KNOWLEDGE_CUTOFF_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+
+ApiSurface = Literal["chat", "responses"]
+
+
+@dataclass(frozen=True)
+class ReasoningSupport:
+    """Whether a model does extended reasoning, and whether reasoning composes with tool use on its
+    api surface. A client drops reasoning from a tool round when the model declares that combination
+    unsupported."""
+
+    supported: bool
+    tools_with_reasoning: bool
+
+
+@dataclass(frozen=True)
+class ModelSpec:
+    """Everything one model is: its provider and client builder, its price, its knowledge cutoff,
+    its context window, its reasoning capability, and the api surface it is called on. The registry
+    keys these by `id`; a seam reads `registry.spec(id).<fact>` instead of owning a per-model dict.
+
+    `client` builds the `ModelClient` from this spec and the api key the registry resolves, once per
+    turn. `knowledge_cutoff` is a machine date (`YYYY-MM`) rendered to a human month at the prompt
+    seam. `key_slot`/`key_env` name where the registry resolves the api key: the workspace's BYOK
+    secret under `key_slot`, else the platform default in env `key_env`; both empty ⇒ keyless."""
+
+    id: str
+    provider: str
+    client: Callable[[ModelSpec, str], ModelClient]
+    price: ModelPrice
+    knowledge_cutoff: str
+    context_window: int
+    reasoning: ReasoningSupport
+    api_surface: ApiSurface
+    key_slot: str = ""
+    key_env: str = ""
+
+    def __post_init__(self) -> None:
+        if not KNOWLEDGE_CUTOFF_RE.match(self.knowledge_cutoff):
+            raise ValueError(
+                f"model {self.id!r} knowledge_cutoff {self.knowledge_cutoff!r} is not YYYY-MM"
+            )
+        if self.reasoning.tools_with_reasoning and not self.reasoning.supported:
+            raise ValueError(
+                f"model {self.id!r} declares tools_with_reasoning without reasoning support"
+            )
+
+    def default_reasoning(
+        self, requested: ReasoningEffort, tools: tuple[ToolSchema, ...]
+    ) -> ReasoningEffort:
+        """The reasoning effort actually sent: the requested effort when the model supports
+        reasoning and its api surface composes reasoning with this request's tools, forced `off`
+        otherwise."""
+        if not self.reasoning.supported:
+            return "off"
+        if tools and not self.reasoning.tools_with_reasoning:
+            return "off"
+        return requested

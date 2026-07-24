@@ -129,8 +129,6 @@ class ModelClient(Protocol):
 
 PROVIDER_ANTHROPIC = "anthropic"
 PROVIDER_OPENAI = "openai"
-ANTHROPIC_MODEL_PREFIXES = ("claude-",)
-OPENAI_MODEL_PREFIXES = ("gpt-", "o1", "o3", "o4", "chatgpt-")
 AUTO_MODEL = "auto"
 
 

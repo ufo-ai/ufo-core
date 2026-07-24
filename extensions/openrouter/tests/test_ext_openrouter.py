@@ -4,6 +4,7 @@ prices its slugs. The client is driven against a scripted OpenAI-SDK stub — a 
 SDK; the ModelEvents and recorded request kwargs are what the tests assert, never the stub."""
 
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -14,7 +15,13 @@ from openai.types.chat.chat_completion_chunk import Choice, ChoiceDelta
 from openai.types.completion_usage import CompletionUsage, PromptTokensDetails
 
 from ufo.config import BlobConfig, Config, DatabaseConfig
-from ufo.models.interface import Message, ModelRequest, ModelResponseTruncated, TextDelta
+from ufo.models.interface import (
+    Message,
+    ModelRequest,
+    ModelResponseTruncated,
+    TextDelta,
+    ToolSchema,
+)
 from ufo.models.registry import model_registry
 from ufo.schema.records import Usage
 from ufo.workspace import ws
@@ -78,9 +85,12 @@ async def _aiter(chunks: list[ChatCompletionChunk]) -> AsyncIterator[ChatComplet
         yield chunk
 
 
-def _client(create: ScriptedCreate) -> openrouter.OpenRouterModelClient:
+def _client(
+    create: ScriptedCreate,
+    spec: openrouter.ModelSpec = openrouter.OPENROUTER_MODEL_SPECS[0],
+) -> openrouter.OpenRouterModelClient:
     sdk = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
-    return openrouter.OpenRouterModelClient(client=sdk)
+    return openrouter.OpenRouterModelClient(client=sdk, spec=spec)
 
 
 def test_openrouter_slug_maps_bare_ids_and_passes_slugs_through() -> None:
@@ -129,6 +139,39 @@ async def test_reasoning_off_omits_the_reasoning_budget() -> None:
     assert create.calls[0]["extra_body"] == {}
 
 
+async def test_model_without_reasoning_omits_the_reasoning_budget() -> None:
+    create = ScriptedCreate(
+        [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))]
+    )
+    spec = replace(
+        openrouter.OPENROUTER_MODEL_SPECS[0],
+        reasoning=openrouter.ReasoningSupport(supported=False, tools_with_reasoning=False),
+    )
+    async for _ in _client(create, spec).complete(REQUEST):
+        pass
+    assert create.calls[0]["extra_body"] == {}
+
+
+async def test_model_without_tools_with_reasoning_omits_the_reasoning_budget() -> None:
+    create = ScriptedCreate(
+        [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))]
+    )
+    spec = replace(
+        openrouter.OPENROUTER_MODEL_SPECS[0],
+        reasoning=openrouter.ReasoningSupport(supported=True, tools_with_reasoning=False),
+    )
+    request = REQUEST.model_copy(
+        update={
+            "tools": (
+                ToolSchema(name="search", description="Search", input_schema={"type": "object"}),
+            )
+        }
+    )
+    async for _ in _client(create, spec).complete(request):
+        pass
+    assert create.calls[0]["extra_body"] == {}
+
+
 async def test_dead_provider_completion_reroutes_excluding_that_provider() -> None:
     dead = [_chunk(finish="stop", provider="deadco"), _chunk(usage=_usage(1, 0))]
     good = [_chunk(content="recovered"), _chunk(finish="stop"), _chunk(usage=_usage(2, 3))]
@@ -148,12 +191,12 @@ async def test_length_finish_raises_truncated() -> None:
         [event async for event in _client(create).complete(REQUEST)]
 
 
-def test_manifest_registers_a_catch_all_model_provider_with_slug_prices() -> None:
+def test_manifest_registers_slug_pinned_specs() -> None:
     manifest = openrouter.manifest()
-    assert len(manifest.models) == 1
-    provider = manifest.models[0]
-    assert provider.matches("anything/at-all") is True
-    assert dict(provider.prices)["z-ai/glm-5.2"].output == 3_000_000
+    by_id = {spec.id: spec for spec in manifest.models}
+    assert set(by_id) == {"google/gemini-2.5-pro", "z-ai/glm-5.2"}
+    assert by_id["z-ai/glm-5.2"].price.output == 3_000_000
+    assert by_id["z-ai/glm-5.2"].knowledge_cutoff == "2026-03"
 
 
 async def test_model_client_requires_its_key(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
@@ -179,6 +222,7 @@ async def test_registry_selects_openrouter_and_prices_its_slug(
     with ws(uuid4()):
         client = await registry.client_for("google/gemini-2.5-pro")
     assert isinstance(client, openrouter.OpenRouterModelClient)
+    assert client.spec is registry.spec("google/gemini-2.5-pro")
     priced = registry.pricing.micro_usd(
         "google/gemini-2.5-pro", Usage(input_tokens=1_000_000, output_tokens=1_000_000)
     )

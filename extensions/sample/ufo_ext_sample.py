@@ -57,7 +57,6 @@ from ufo.sdk.manifest import (
     InjectionTarget,
     Manifest,
     MemorySearchProviderSpec,
-    ModelProviderSpec,
     OnboardingStep,
     PageChangeBatch,
     PostCompact,
@@ -74,7 +73,15 @@ from ufo.sdk.manifest import (
     SubagentToolGrant,
 )
 from ufo.sdk.memory import MemoryMatch
-from ufo.sdk.models import ModelEvent, ModelPrice, ModelRequest, TextDelta, Usage
+from ufo.sdk.models import (
+    ModelEvent,
+    ModelPrice,
+    ModelRequest,
+    ModelSpec,
+    ReasoningSupport,
+    TextDelta,
+    Usage,
+)
 from ufo.sdk.objects import (
     OBJECT_LIST_PAGE,
     ObjectKind,
@@ -1061,11 +1068,15 @@ def manifest() -> Manifest:
         indexes=(IndexBackendSpec(name=INDEX_BACKEND, factory=lambda ctx: SampleIndex()),),
         embeds=(EmbedBackendSpec(name=EMBED_BACKEND, factory=lambda ctx: SampleEmbed()),),
         models=(
-            ModelProviderSpec(
-                name=MODEL_PROVIDER_NAME,
-                matches=lambda model: model == SAMPLE_MODEL,
-                client=lambda model, key: SampleModelClient(model=model),
-                prices=((SAMPLE_MODEL, SAMPLE_MODEL_PRICE),),
+            ModelSpec(
+                id=SAMPLE_MODEL,
+                provider=MODEL_PROVIDER_NAME,
+                client=lambda spec, key: SampleModelClient(model=spec.id),
+                price=SAMPLE_MODEL_PRICE,
+                knowledge_cutoff="2026-01",
+                context_window=200_000,
+                reasoning=ReasoningSupport(supported=True, tools_with_reasoning=True),
+                api_surface="chat",
             ),
         ),
         hubs=(HubSpec(backend=HUB_BACKEND, build=lambda _url: InProcessHub()),),

@@ -5,9 +5,8 @@ spec it is an extension, never core. It speaks the OpenAI Chat Completions wire 
 `openrouter.ai/api/v1`, so it reuses the SDK's `openai_messages` translation and `openai_sdk_client`
 factory and adds only what is OpenRouter's own: an id->slug projection, a reasoning-effort budget on
 `extra_body`, and a dead-provider re-route that excludes an upstream returning an empty completion.
-The manifest contributes one catch-all model provider — core's direct clients claim bare
-Anthropic/OpenAI ids first, so this serves everything else — plus the rates for the slugs it
-pins."""
+The manifest enumerates one complete `ModelSpec` per slug it offers — price, cutoff, context window,
+reasoning — so the registry serves those ids exactly like any other, with no catch-all router."""
 
 import asyncio
 from collections.abc import AsyncIterator
@@ -18,12 +17,14 @@ import openai
 from openai.types.chat import ChatCompletionChunk
 from openai.types.completion_usage import CompletionUsage
 
-from ufo.sdk.manifest import Manifest, ModelProviderSpec
+from ufo.sdk.manifest import Manifest
 from ufo.sdk.models import (
     ModelEvent,
     ModelPrice,
     ModelRequest,
     ModelResponseTruncated,
+    ModelSpec,
+    ReasoningSupport,
     TextDelta,
     ToolCallDelta,
     ToolCallStart,
@@ -45,14 +46,8 @@ INITIAL_RETRY_DELAY_SECONDS = 2.0
 MAX_RETRY_DELAY_SECONDS = 60.0
 MAX_EMPTY_PROVIDER_RETRIES = 3
 
-# OpenRouter slug-pinned rates in micro-USD per million tokens (openrouter.ai public prices).
-OPENROUTER_PRICES: tuple[tuple[str, ModelPrice], ...] = (
-    (
-        "google/gemini-2.5-pro",
-        ModelPrice(input=1_000_000, output=10_000_000, cache_read=0, cache_write=0),
-    ),
-    ("z-ai/glm-5.2", ModelPrice(input=1_000_000, output=3_000_000, cache_read=0, cache_write=0)),
-)
+OPENROUTER_CONTEXT_WINDOW = 200_000
+_REASONS = ReasoningSupport(supported=True, tools_with_reasoning=True)
 
 
 def openrouter_slug(model: str) -> str:
@@ -97,9 +92,10 @@ class OpenRouterModelClient:
     returned no text and no tool calls is a dead upstream — the client re-issues excluding that
     provider up to MAX_EMPTY_PROVIDER_RETRIES, then degrades to the empty result for the turn loop's
     nudge. The request's `reasoning` effort rides `extra_body` as the thinking budget OpenRouter
-    derives from max_tokens; `off` omits it."""
+    derives from max_tokens when the model's spec supports it; `off` omits it."""
 
     client: openai.AsyncOpenAI
+    spec: ModelSpec
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         delay = INITIAL_RETRY_DELAY_SECONDS
@@ -175,8 +171,9 @@ class OpenRouterModelClient:
         self, request: ModelRequest, ignore_providers: frozenset[str]
     ) -> dict[str, Any]:
         extra_body: dict[str, Any] = {}
-        if request.reasoning != "off":
-            extra_body["reasoning"] = {"effort": request.reasoning}
+        effort = self.spec.default_reasoning(request.reasoning, request.tools)
+        if effort != "off":
+            extra_body["reasoning"] = {"effort": effort}
         if ignore_providers:
             extra_body["provider"] = {"ignore": sorted(ignore_providers)}
         kwargs: dict[str, Any] = {
@@ -202,22 +199,41 @@ class OpenRouterModelClient:
         return kwargs
 
 
-def _model_client(model: str, key: str) -> OpenRouterModelClient:
-    return OpenRouterModelClient(client=openai_sdk_client(key, base_url=OPENROUTER_BASE_URL))
+def _model_client(spec: ModelSpec, key: str) -> OpenRouterModelClient:
+    return OpenRouterModelClient(
+        client=openai_sdk_client(key, base_url=OPENROUTER_BASE_URL),
+        spec=spec,
+    )
+
+
+def _openrouter(id: str, price: ModelPrice, cutoff: str) -> ModelSpec:
+    return ModelSpec(
+        id=id,
+        provider=PROVIDER_NAME,
+        client=_model_client,
+        price=price,
+        knowledge_cutoff=cutoff,
+        context_window=OPENROUTER_CONTEXT_WINDOW,
+        reasoning=_REASONS,
+        api_surface="chat",
+        key_slot=OPENROUTER_KEY_SLOT,
+        key_env=OPENROUTER_API_KEY_ENV,
+    )
+
+
+OPENROUTER_MODEL_SPECS = (
+    _openrouter(
+        "google/gemini-2.5-pro",
+        ModelPrice(input=1_000_000, output=10_000_000, cache_read=0, cache_write=0),
+        "2025-01",
+    ),
+    _openrouter(
+        "z-ai/glm-5.2",
+        ModelPrice(input=1_000_000, output=3_000_000, cache_read=0, cache_write=0),
+        "2026-03",
+    ),
+)
 
 
 def manifest() -> Manifest:
-    return Manifest(
-        name=NAME,
-        version=VERSION,
-        models=(
-            ModelProviderSpec(
-                name=PROVIDER_NAME,
-                matches=lambda model: True,
-                client=_model_client,
-                key_slot=OPENROUTER_KEY_SLOT,
-                key_env=OPENROUTER_API_KEY_ENV,
-                prices=OPENROUTER_PRICES,
-            ),
-        ),
-    )
+    return Manifest(name=NAME, version=VERSION, models=OPENROUTER_MODEL_SPECS)

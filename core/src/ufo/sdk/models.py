@@ -2,9 +2,6 @@
 
 An extension types against these here rather than reaching into core internals."""
 
-from ufo.accounting import (
-    ModelPrice as ModelPrice,
-)
 from ufo.models.anthropic import (
     AnthropicClient as AnthropicClient,
 )
@@ -64,6 +61,18 @@ from ufo.models.openai import (
 )
 from ufo.models.openai import (
     openai_sdk_client as openai_sdk_client,
+)
+from ufo.models.pricing import (
+    ModelPrice as ModelPrice,
+)
+from ufo.models.spec import (
+    ApiSurface as ApiSurface,
+)
+from ufo.models.spec import (
+    ModelSpec as ModelSpec,
+)
+from ufo.models.spec import (
+    ReasoningSupport as ReasoningSupport,
 )
 from ufo.schema.records import (
     Usage as Usage,

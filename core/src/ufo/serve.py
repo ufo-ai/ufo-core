@@ -18,7 +18,6 @@ from starlette.responses import Response
 from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from ufo.accounting import Pricing
 from ufo.blob import BlobStore, blob_store_for
 from ufo.browser import CdpProvider
 from ufo.config import (
@@ -67,6 +66,7 @@ from ufo.loop.profiles import CORE_SUBAGENT_PROFILES
 from ufo.loop.queue import Runtime, init_runtime
 from ufo.loop.subagents import SubagentRegistry
 from ufo.memory import DEFAULT_MEMORY_SEARCH_PROVIDER
+from ufo.models.pricing import Pricing
 from ufo.models.registry import model_registry
 from ufo.o11y import init_o11y, log
 from ufo.proxy_serve import OWNER_DSN_ENV, model_rule_base

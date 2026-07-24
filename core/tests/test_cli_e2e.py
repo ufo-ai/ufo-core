@@ -16,6 +16,7 @@ import socket
 import threading
 import time
 from collections.abc import AsyncIterator, Iterator
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -32,7 +33,6 @@ from ufo_ext_ufo.manifest import manifest as ufo_manifest
 from ufo_testsupport.tables import DELETE_ORDER
 
 from ufo import cli
-from ufo.accounting import CORE_PRICING
 from ufo.bearer import mint_token
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config, load_config
@@ -40,10 +40,10 @@ from ufo.connectors import ConnectorRegistry
 from ufo.credentials import CredentialSlotUnset, CredentialStore
 from ufo.db import dispose_db, init_db, workspace_tx
 from ufo.ext.loader import skill_registry
-from ufo.ext.manifest import ModelProviderSpec
 from ufo.hub import InProcessHub
 from ufo.loop import queue as loop_queue
 from ufo.loop.subagents import SubagentRegistry
+from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.models.interface import ModelEvent, ModelRequest, TextDelta
 from ufo.models.registry import ModelRegistry
 from ufo.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
@@ -348,13 +348,10 @@ class StandInModel:
 
 
 STANDIN_REGISTRY = ModelRegistry(
-    providers=(
-        ModelProviderSpec(
-            name="standin",
-            matches=lambda model: True,
-            client=lambda model, key: StandInModel(),
-        ),
-    ),
+    specs={
+        spec.id: replace(spec, client=lambda spec, key: StandInModel(), key_slot="", key_env="")
+        for spec in CORE_MODEL_SPECS
+    },
     pricing=CORE_PRICING,
     auto_model="claude-opus-4-8",
 )
