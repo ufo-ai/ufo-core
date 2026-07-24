@@ -277,12 +277,18 @@ allocation, delivery registration, and enqueue recovery remain one implementatio
 | Web | `extensions/web` | live (hub tail) | web session → member (adopted from CLI) | session (private) |
 | Slackbot | `extensions/slack` | durable (writeback) | Slack user → member (linked; a Slack-confirmed same-domain email joins as new) | channel:thread_ts (shared) |
 | Debug | `extensions/debugger` | live (hub tail) | gateway bearer whose email domain is `OPERATOR_EMAIL_DOMAIN`; `?ws=` re-scopes to any workspace | — (read-only; admits nothing) |
+| Memory explorer | `extensions/memory` | live (page + JSON read) | gateway bearer whose email domain is `OPERATOR_EMAIL_DOMAIN`; `?ws=` re-scopes to any workspace | — (read-only; admits nothing) |
 
-The debug surface is the one operator-audience surface — the `ufoctl`-verbs audience, not a member
-action. Its `identify` is the entire authorization: the operator-domain bearer picks the target
-workspace (a UUID or a customer domain via `uuid5(NAMESPACE_DNS, domain)`), core binds it, and every
-read below (conversations, turns with terminal outcomes and subagent children, transcripts,
-compaction records, workspace files, a live SSE tail) is RLS-scoped by construction.
+The debug and memory-explorer surfaces are the operator-audience surfaces — the `ufoctl`-verbs
+audience, not a member action. They share one operator web session (`ufo.sdk.operator`, one
+`ufo_debug` cookie): the operator-domain bearer's `identify` is the entire authorization — it picks
+the target workspace (a UUID or a customer domain via `uuid5(NAMESPACE_DNS, domain)`), core binds it,
+and every read is RLS-scoped by construction. The debugger reads a workspace's sessions
+(conversations, turns with terminal outcomes and subagent children, transcripts, compaction records,
+workspace files, a live SSE tail); the memory explorer reads its durable memory store — every
+`memory_item`, shared and per-member, live and superseded, indexed and due, carrying the
+recall-decay signals recall itself applies. Each surface reads only its owning extension's data, so
+neither reaches a core internal nor the other extension's tables.
 
 Two-way attachments stream end to end, never buffering a whole file: an inbound Slack file streams
 from `url_private` into the conversation's workspace before the turn runs; a shared file

@@ -39,7 +39,9 @@ from ufo.sdk.manifest import (
 )
 from ufo.sdk.memory import DEFAULT_MEMORY_SEARCH_PROVIDER, MemoryMatch
 from ufo.sdk.o11y import log
+from ufo.sdk.operator import resolve_operator_workspace
 from ufo.sdk.sources import SHARED_SUBJECT, member_subject
+from ufo.sdk.surfaces import SurfaceSpec
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_memory.condenser import (
     MIN_CLUSTER_FACTS,
@@ -68,6 +70,8 @@ from ufo_ext_memory.store import (
     recall_subjects,
     store_for,
 )
+from ufo_ext_memory.surface import ROUTES as MEMORY_ROUTES
+from ufo_ext_memory.surface import SURFACE_MEMORY
 
 NAME = "memory"
 VERSION = "0.1.0"
@@ -418,6 +422,11 @@ def manifest() -> Manifest:
         memory_search=(
             MemorySearchProviderSpec(
                 name=DEFAULT_MEMORY_SEARCH_PROVIDER, build=MemorySearchService
+            ),
+        ),
+        surfaces=(
+            SurfaceSpec(
+                name=SURFACE_MEMORY, routes=MEMORY_ROUTES, identify=resolve_operator_workspace
             ),
         ),
     )

@@ -3,8 +3,9 @@
 whose email domain is the operator's."""
 
 from ufo.sdk.manifest import Manifest
+from ufo.sdk.operator import resolve_operator_workspace
 from ufo.sdk.surfaces import SurfaceSpec
-from ufo_ext_debugger.surface import ROUTES, SURFACE_DEBUG, resolve_operator_workspace
+from ufo_ext_debugger.surface import ROUTES, SURFACE_DEBUG
 
 NAME = "debugger"
 VERSION = "0.1.0"

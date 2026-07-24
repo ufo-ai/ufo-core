@@ -54,6 +54,7 @@ EMBED_CLAIM_LEASE_SECONDS = 300
 TYPE_DIVERSITY_RATIO = 0.6
 MAX_CONFIDENCE = 10
 DEFAULT_CONFIDENCE = 5
+MEMORY_INVENTORY_LIMIT = 500
 HALFLIFE_DAYS: dict[str, float] = {
     "fact": 365.0,
     "preference": 180.0,
@@ -109,6 +110,91 @@ def recall_subjects(member_id: UUID | None) -> frozenset[str]:
     if member_id is None:
         return frozenset({SHARED_SUBJECT})
     return frozenset({member_subject(member_id), SHARED_SUBJECT})
+
+
+class MemoryInventoryItem(BaseModel):
+    """One stored memory as the operator explorer reads it — the whole row plus the derived recall
+    signals, so both how it was ingested and how it decays are visible without re-deriving them.
+
+    Ingestion/creation: `source_ref` is what produced it (a tool write, a synced source, a
+    consolidation); `created_at` is when it was committed; `embedding_digest` NULL means it is still
+    due for the index job (not yet chunked/embedded), and `embedding_claimed_at` set means the
+    indexer currently holds a lease on it. Recall/decay: `half_life_days` is the recency half-life
+    for its kind (None for episodic/semantic, which never decay) and `decay_factor` is the live
+    multiplier recall applies to its relevance (`(confidence/10)·0.5**(age_days/half_life)` for
+    facts, else 1.0). Lifecycle: `superseded_by` non-NULL means consolidation replaced it; `subject`
+    encodes shared-vs-member visibility."""
+
+    subject: str
+    body: str
+    item_class: ItemClass
+    memory_kind: MemoryKind
+    confidence: int
+    source_ref: str | None
+    embedding_digest: str | None
+    embedding_claimed_at: datetime | None
+    superseded_by: UUID | None
+    created_at: datetime
+    age_days: float
+    half_life_days: float | None
+    decay_factor: float
+
+
+async def inventory(
+    transaction: Transaction, workspace_id: UUID
+) -> tuple[MemoryInventoryItem, ...]:
+    """Every memory_item in the workspace, newest first — the whole durable store an operator
+    explores, not a recall: no query, no similarity, no diversity cap, superseded rows kept. Each
+    row carries its ingestion state and the live recall-decay signals (age, half-life, and the exact
+    decay multiplier recall would apply now), computed against one `now` so the whole listing is a
+    consistent snapshot. The newest `MEMORY_INVENTORY_LIMIT` rows are read over the
+    `memory_item_inventory` index on `(workspace_id, created_at)`, so this is a bounded index scan —
+    not a full-table scan and sort — and the `LIMIT` bounds what's serialized; one workspace's large
+    store never stalls the shared request loop. Scoping is both the ambient RLS binding the opener
+    carries and the explicit workspace predicate; grouping by `subject` (shared vs a member's
+    private space) is the reader's to do."""
+    async with transaction() as connection:
+        rows = (
+            (
+                await connection.execute(
+                    sa.select(memory_item)
+                    .where(memory_item.c.workspace_id == workspace_id)
+                    .order_by(memory_item.c.created_at.desc(), memory_item.c.id)
+                    .limit(MEMORY_INVENTORY_LIMIT)
+                )
+            )
+            .mappings()
+            .all()
+        )
+    now = datetime.now(UTC)
+    return tuple(
+        MemoryInventoryItem(
+            subject=row["subject"],
+            body=row["body"],
+            item_class=row["item_class"],
+            memory_kind=row["memory_kind"],
+            confidence=row["confidence"],
+            source_ref=row["source_ref"],
+            embedding_digest=row["embedding_digest"],
+            embedding_claimed_at=row["embedding_claimed_at"],
+            superseded_by=row["superseded_by"],
+            created_at=row["created_at"],
+            age_days=max(0.0, (now - _aware(row["created_at"])).total_seconds() / 86400.0),
+            half_life_days=half_life_days(row["item_class"], row["memory_kind"]),
+            decay_factor=decay_multiplier(
+                row["item_class"],
+                row["memory_kind"],
+                row["confidence"],
+                row["created_at"],
+                now,
+            ),
+        )
+        for row in rows
+    )
+
+
+def _aware(when: datetime) -> datetime:
+    return when if when.tzinfo else when.replace(tzinfo=UTC)
 
 
 class MemoryWrite(BaseModel):
@@ -214,18 +300,34 @@ class Recalled:
     recall_mode: str | None = None
 
 
-def decay_factor(item: Recalled, now: datetime) -> float:
-    """Recency decay applies to fact items only (per-`memory_kind` half-lives: fact/preference/
-    decision/event/task); episodic/semantic carry no half-life and rank on relevance alone. A
-    fact's factor is `(confidence / 10) * 0.5 ** (age_days / halflife)` — gbrain
-    `effectiveConfidence`."""
-    if item.item_class != FACT or item.created_at is None:
+def half_life_days(item_class: str, memory_kind: str) -> float | None:
+    """The recency half-life recall decays this item by, or None when it carries none: only facts
+    decay (per-`memory_kind` half-lives: fact/preference/decision/event/task); episodic/semantic
+    rank on relevance alone."""
+    if item_class != FACT:
+        return None
+    return HALFLIFE_DAYS.get(memory_kind, HALFLIFE_DAYS[KIND_FACT])
+
+
+def decay_multiplier(
+    item_class: str, memory_kind: str, confidence: int, created_at: datetime | None, now: datetime
+) -> float:
+    """The factor recall multiplies an item's relevance by — gbrain `effectiveConfidence`. A fact's
+    is `(confidence / 10) * 0.5 ** (age_days / halflife)`; every other class carries no decay and
+    stays 1.0. The one home for the decay math, so recall's ranking and the explorer's reported
+    weight are the same number."""
+    halflife = half_life_days(item_class, memory_kind)
+    if halflife is None or created_at is None:
         return 1.0
-    base = item.confidence / MAX_CONFIDENCE
-    halflife = HALFLIFE_DAYS.get(item.memory_kind, HALFLIFE_DAYS[KIND_FACT])
-    created = item.created_at if item.created_at.tzinfo else item.created_at.replace(tzinfo=UTC)
-    age_days = max(0.0, (now - created).total_seconds() / 86400.0)
+    base = confidence / MAX_CONFIDENCE
+    age_days = max(0.0, (now - _aware(created_at)).total_seconds() / 86400.0)
     return base * (0.5 ** (age_days / halflife))
+
+
+def decay_factor(item: Recalled, now: datetime) -> float:
+    return decay_multiplier(
+        item.item_class, item.memory_kind, item.confidence, item.created_at, now
+    )
 
 
 def enforce_type_diversity(rows: tuple[Recalled, ...], limit: int) -> tuple[Recalled, ...]:

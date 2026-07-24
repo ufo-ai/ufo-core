@@ -17,90 +17,24 @@ app."""
 
 from collections.abc import AsyncIterator
 from pathlib import Path
-from uuid import NAMESPACE_DNS, UUID, uuid5
+from uuid import UUID
 
-from ufo.sdk.bearer import verified_claims
 from ufo.sdk.http import (
     HTMLResponse,
     JSONResponse,
-    RedirectResponse,
     Request,
     Response,
     StreamingResponse,
-    set_session_cookie,
 )
 from ufo.sdk.hub import CostTick, LiveFrame, Parked, SkillLoad, Terminal, TextDelta, ToolCall
-from ufo.sdk.surfaces import OPERATOR_EMAIL_DOMAIN, SurfaceAuth, SurfaceContext, SurfaceRoute
+from ufo.sdk.operator import bind_operator_session
+from ufo.sdk.surfaces import SurfaceContext, SurfaceRoute
 
 SURFACE_DEBUG = "debug"
-DEBUG_COOKIE = "ufo_debug"
-TOKEN_FIELD = "token"
 SLACK_SURFACE = "slack"
 SLACK_TEAM_PREFIX = "team:"
 APP_FILE = Path(__file__).parent / "static" / "index.html"
 APP_HTML = APP_FILE.read_text() if APP_FILE.is_file() else None
-
-
-def _email_domain(email: str) -> str:
-    local, _, domain = email.strip().lower().rpartition("@")
-    return domain if local and domain else ""
-
-
-async def _bearer(request: Request) -> str:
-    """The request's bearer: the Authorization header, the session cookie, or — for the one POST
-    that opens a session — the form body. Never a query parameter, so the long-lived credential
-    stays out of URLs, access logs, and browser history."""
-    scheme, _, header_token = request.headers.get("authorization", "").partition(" ")
-    if scheme.lower() == "bearer" and header_token.strip():
-        return header_token.strip()
-    cookie = request.cookies.get(DEBUG_COOKIE, "").strip()
-    if cookie:
-        return cookie
-    if request.method == "POST":
-        posted = (await request.form()).get(TOKEN_FIELD, "")
-        if isinstance(posted, str):
-            return posted.strip()
-    return ""
-
-
-async def resolve_operator_workspace(request: Request, _auth: SurfaceAuth) -> UUID | None:
-    """The workspace this operator request is scoped to, or None to reject. The domain gate is
-    the whole authorization: the verified bearer's email domain must equal the operator's domain
-    before `?ws=` may re-scope the request to any workspace in the fleet."""
-    token = await _bearer(request)
-    if not token:
-        return None
-    claims = verified_claims(token)
-    if claims is None:
-        return None
-    claimed_workspace, email = claims
-    if _email_domain(email) != OPERATOR_EMAIL_DOMAIN:
-        return None
-    target = request.query_params.get("ws", "").strip()
-    if not target:
-        try:
-            return UUID(claimed_workspace)
-        except ValueError:
-            return None
-    try:
-        return UUID(target)
-    except ValueError:
-        return uuid5(NAMESPACE_DNS, target.lower())
-
-
-async def bind_session(ctx: SurfaceContext, request: Request) -> Response:
-    """Open a session: land the POSTed bearer as the httponly session cookie and redirect into the
-    app. The token crosses only in the form body — never a URL — so access logs and browser
-    history hold no credential; the identify resolver has already verified this exact form token
-    before the handler runs. The cookie is `lax`, not `strict`, because arrival IS a cross-site
-    navigation (the apex login page posts here, a Slack footer links here) and the redirected GET
-    must already carry it."""
-    posted = (await request.form()).get(TOKEN_FIELD, "")
-    if not isinstance(posted, str) or not posted.strip():
-        return JSONResponse({"error": "token form field is required"}, status_code=400)
-    response = RedirectResponse(str(request.url), status_code=303)
-    set_session_cookie(response, DEBUG_COOKIE, posted.strip(), samesite="lax")
-    return response
 
 
 async def app_page(ctx: SurfaceContext, request: Request) -> Response:
@@ -245,7 +179,7 @@ def _uuid_param(request: Request, name: str) -> UUID | None:
 
 ROUTES = (
     SurfaceRoute(method="GET", path="", handler=app_page),
-    SurfaceRoute(method="POST", path="", handler=bind_session),
+    SurfaceRoute(method="POST", path="", handler=bind_operator_session),
     SurfaceRoute(method="GET", path="api/workspace", handler=workspace_meta),
     SurfaceRoute(method="GET", path="api/conversations", handler=conversations),
     SurfaceRoute(

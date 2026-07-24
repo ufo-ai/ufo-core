@@ -46,6 +46,12 @@ export function App() {
             )}
           </span>
         )}
+        <a
+          className="cross-link"
+          href={`/surface/memory${params.ws ? `?ws=${encodeURIComponent(params.ws)}` : ""}`}
+        >
+          memory explorer →
+        </a>
       </header>
       <main>
         {error ? (

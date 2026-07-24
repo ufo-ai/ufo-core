@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>memory explorer</title>
+<style>
+  :root {
+    --bg: #f7f7f8; --panel: #fff; --ink: #1a1a1e; --muted: #6b6b76;
+    --line: #e3e3e8; --accent: #4b5bd6; --due: #b45309; --gone: #9ca3af;
+    --chip: #eef0fb; --shared: #0e7490;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16171b; --panel: #1e1f24; --ink: #ececf1; --muted: #9a9aa5;
+      --line: #2c2d34; --accent: #8b96f0; --due: #f0b040; --gone: #6b7280;
+      --chip: #2a2c3a; --shared: #38bdf8;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #16171b; --panel: #1e1f24; --ink: #ececf1; --muted: #9a9aa5;
+    --line: #2c2d34; --accent: #8b96f0; --due: #f0b040; --gone: #6b7280;
+    --chip: #2a2c3a; --shared: #38bdf8;
+  }
+  :root[data-theme="light"] {
+    --bg: #f7f7f8; --panel: #fff; --ink: #1a1a1e; --muted: #6b6b76;
+    --line: #e3e3e8; --accent: #4b5bd6; --due: #b45309; --gone: #9ca3af;
+    --chip: #eef0fb; --shared: #0e7490;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    position: sticky; top: 0; z-index: 2; background: var(--panel);
+    border-bottom: 1px solid var(--line); padding: 14px 20px;
+    display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap;
+  }
+  h1 { font-size: 15px; margin: 0; font-weight: 650; letter-spacing: .01em; }
+  .scope { color: var(--muted); font-size: 12px; }
+  .scope code { background: var(--chip); padding: 1px 6px; border-radius: 5px; }
+  #filter {
+    margin-left: auto; background: var(--bg); color: var(--ink);
+    border: 1px solid var(--line); border-radius: 7px; padding: 6px 10px;
+    font: inherit; min-width: 220px;
+  }
+  main { padding: 20px; max-width: 1200px; margin: 0 auto; }
+  .group { margin-bottom: 28px; }
+  .group > h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--muted); margin: 0 0 8px; display: flex; gap: 8px; align-items: center;
+  }
+  .group > h2 .subj { color: var(--ink); font-weight: 650; text-transform: none; letter-spacing: 0; }
+  .group.shared > h2 .subj { color: var(--shared); }
+  .count { color: var(--muted); font-weight: 400; }
+  .scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { text-align: left; padding: 9px 12px; vertical-align: top; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; white-space: nowrap; }
+  tr:last-child td { border-bottom: none; }
+  tr.gone td { color: var(--gone); }
+  td.body { min-width: 320px; white-space: pre-wrap; }
+  .chip { display: inline-block; background: var(--chip); border-radius: 5px; padding: 1px 7px; font-size: 12px; white-space: nowrap; }
+  .flag { font-size: 11px; border-radius: 5px; padding: 1px 7px; white-space: nowrap; margin-right: 4px; }
+  .flag.due { color: var(--due); border: 1px solid var(--due); }
+  .flag.gone { color: var(--gone); border: 1px solid var(--gone); }
+  td.when { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .note { color: var(--muted); padding: 40px 4px; text-align: center; }
+  .err { color: #d33; }
+  code.ref { color: var(--muted); word-break: break-all; font-size: 12px; }
+  .src { display: block; margin-top: 3px; }
+  .decay { display: flex; align-items: center; gap: 7px; justify-content: flex-end; }
+  .decay .bar { width: 46px; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+  .decay .bar > i { display: block; height: 100%; background: var(--accent); }
+  .decay .val { font-variant-numeric: tabular-nums; min-width: 30px; }
+  .decay.none { color: var(--muted); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; vertical-align: baseline; }
+  .dot.indexed { background: #16a34a; }
+  .dot.indexing { background: var(--accent); }
+  .dot.due { background: var(--due); }
+  .state { white-space: nowrap; font-size: 12px; color: var(--muted); }
+  details.legend { margin: 0 0 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; }
+  details.legend summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+  details.legend dl { margin: 10px 0 2px; display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; font-size: 12.5px; }
+  details.legend dt { color: var(--ink); font-weight: 600; }
+  details.legend dd { margin: 0; color: var(--muted); }
+  .cross-link { font-size: 12px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 7px; text-decoration: none; color: var(--ink); white-space: nowrap; }
+  .cross-link:hover { border-color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>memory explorer</h1>
+  <span class="scope" id="scope"></span>
+  <a class="cross-link" id="debuglink" href="/surface/debug">← session debugger</a>
+  <input id="filter" type="search" placeholder="filter by text or subject…" autocomplete="off" />
+</header>
+<main id="main">
+  <details class="legend">
+    <summary>what the columns mean</summary>
+    <dl>
+      <dt>ingestion</dt>
+      <dd><span class="dot indexed"></span>indexed (chunked &amp; embedded)&nbsp;·&nbsp;<span class="dot indexing"></span>indexing (indexer holds a lease)&nbsp;·&nbsp;<span class="dot due"></span>due (committed, not yet embedded — recall reaches it via the lexical tail)</dd>
+      <dt>source</dt>
+      <dd>what produced the memory: a tool write, a synced source page, or a consolidation summary</dd>
+      <dt>decay</dt>
+      <dd>the live multiplier recall applies to relevance — <code>(confidence / 10) × 0.5 ^ (age / half-life)</code>. Facts only; episodic &amp; semantic never decay (shown as —)</dd>
+      <dt>half-life</dt>
+      <dd>per kind: fact 365d · preference 180d · decision 120d · event 30d · task 14d</dd>
+      <dt>superseded</dt>
+      <dd>a consolidation pass replaced this fact with a semantic summary; kept here, dropped from recall</dd>
+    </dl>
+  </details>
+  <div id="rows"><p class="note">loading…</p></div>
+</main>
+<script>
+  const base = location.pathname.replace(/\/+$/, "");
+  const rowsEl = document.getElementById("rows");
+  const scopeEl = document.getElementById("scope");
+  const filterEl = document.getElementById("filter");
+  const params = new URLSearchParams(location.search);
+  const ws = (params.get("ws") || "").trim();
+  scopeEl.innerHTML = ws
+    ? "workspace <code>" + escapeHtml(ws) + "</code>"
+    : "authenticated workspace";
+  document.getElementById("debuglink").href = "/surface/debug" + location.search;
+
+  let all = [];
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => (
+      { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+    ));
+  }
+
+  function fmtTime(iso) {
+    const d = new Date(iso);
+    return isNaN(d) ? iso : d.toISOString().replace("T", " ").replace(/\.\d+Z$/, "Z");
+  }
+
+  function subjectLabel(subject) {
+    if (subject === "shared") return "shared";
+    if (subject.startsWith("member:")) return "member " + subject.slice(7);
+    return subject;
+  }
+
+  function fmtAge(days) {
+    if (days < 1 / 24) return Math.round(days * 24 * 60) + "m";
+    if (days < 1) return (days * 24).toFixed(1) + "h";
+    if (days < 100) return days.toFixed(days < 10 ? 1 : 0) + "d";
+    return Math.round(days) + "d";
+  }
+
+  function ingestHtml(m) {
+    if (m.embedding_digest) {
+      const short = m.embedding_digest.replace(/^sha256:/, "").slice(0, 10);
+      return '<span class="state"><span class="dot indexed"></span>indexed <code class="ref">' + escapeHtml(short) + "</code></span>";
+    }
+    if (m.embedding_claimed_at) return '<span class="state"><span class="dot indexing"></span>indexing</span>';
+    return '<span class="state"><span class="dot due"></span>due</span>';
+  }
+
+  function decayHtml(m) {
+    if (m.half_life_days == null) return '<div class="decay none">—</div>';
+    const pct = Math.max(0, Math.min(1, m.decay_factor)) * 100;
+    return (
+      '<div class="decay" title="(confidence/10) × 0.5^(age/half-life)">' +
+        '<span class="bar"><i style="width:' + pct.toFixed(0) + '%"></i></span>' +
+        '<span class="val">' + m.decay_factor.toFixed(2) + "</span>" +
+      "</div>"
+    );
+  }
+
+  function render() {
+    const q = filterEl.value.trim().toLowerCase();
+    const rows = q
+      ? all.filter(m => (m.body + " " + m.subject + " " + (m.source_ref || "")).toLowerCase().includes(q))
+      : all;
+    if (!rows.length) {
+      rowsEl.innerHTML = '<p class="note">' + (all.length ? "no memories match the filter." : "no memories in this workspace.") + "</p>";
+      return;
+    }
+    const groups = new Map();
+    for (const m of rows) {
+      if (!groups.has(m.subject)) groups.set(m.subject, []);
+      groups.get(m.subject).push(m);
+    }
+    const order = [...groups.keys()].sort((a, b) =>
+      a === "shared" ? -1 : b === "shared" ? 1 : a.localeCompare(b)
+    );
+    rowsEl.innerHTML = order.map(subject => {
+      const items = groups.get(subject);
+      const isShared = subject === "shared";
+      return (
+        '<section class="group' + (isShared ? " shared" : "") + '">' +
+          '<h2><span class="subj">' + escapeHtml(subjectLabel(subject)) + "</span>" +
+            '<span class="count">' + items.length + (items.length === 1 ? " memory" : " memories") + "</span></h2>" +
+          '<div class="scroll"><table><thead><tr>' +
+            "<th>kind</th><th>class</th><th>memory</th><th>conf</th><th>decay</th><th>half-life</th><th>age</th><th>created</th><th>ingestion</th>" +
+          "</tr></thead><tbody>" +
+          items.map(rowHtml).join("") +
+          "</tbody></table></div>" +
+        "</section>"
+      );
+    }).join("");
+  }
+
+  function rowHtml(m) {
+    const source = m.source_ref
+      ? '<span class="src"><code class="ref">' + escapeHtml(m.source_ref) + "</code></span>"
+      : "";
+    const superseded = m.superseded_by
+      ? ' <span class="flag gone" title="replaced by consolidation: ' + escapeHtml(m.superseded_by) + '">superseded</span>'
+      : "";
+    const halfLife = m.half_life_days == null ? "—" : m.half_life_days + "d";
+    return (
+      '<tr class="' + (m.superseded_by ? "gone" : "") + '">' +
+        '<td><span class="chip">' + escapeHtml(m.memory_kind) + "</span></td>" +
+        "<td>" + escapeHtml(m.item_class) + "</td>" +
+        '<td class="body">' + escapeHtml(m.body) + superseded + source + "</td>" +
+        '<td class="num">' + m.confidence + "</td>" +
+        "<td>" + decayHtml(m) + "</td>" +
+        '<td class="num">' + halfLife + "</td>" +
+        '<td class="num">' + fmtAge(m.age_days) + "</td>" +
+        '<td class="when">' + escapeHtml(fmtTime(m.created_at)) + "</td>" +
+        "<td>" + ingestHtml(m) + "</td>" +
+      "</tr>"
+    );
+  }
+
+  filterEl.addEventListener("input", render);
+
+  fetch(base + "/api/memories" + location.search, { credentials: "same-origin" })
+    .then(r => {
+      if (!r.ok) throw new Error("request failed (" + r.status + ")");
+      return r.json();
+    })
+    .then(data => { all = data; render(); })
+    .catch(e => {
+      rowsEl.innerHTML = '<p class="note err">could not load memories: ' + escapeHtml(e.message) + "</p>";
+    });
+</script>
+</body>
+</html>
