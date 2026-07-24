@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import ClassVar
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
 from ufo.sdk.objects import MemberOwnedObjects, ObjectKind, ObjectOwner, OwnedRow, OwnerRequired
 from ufo.sdk.scheduling import ScheduledTask, ScheduleStore
@@ -45,6 +45,17 @@ class ScheduledTaskSpec(BaseModel):
     description: str = Field(
         default="", description="One line shown in listings; the prompt stands in when empty."
     )
+    expires_at: datetime | None = Field(
+        default=None,
+        description="Absolute UTC timestamp after which the task is cancelled before firing.",
+    )
+
+    @field_validator("expires_at")
+    @classmethod
+    def validate_utc_expiry(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() != timedelta(0)):
+            raise ValueError("expires_at must be a UTC timestamp")
+        return value
 
 
 class PauseAndWaitInput(BaseModel):
@@ -98,7 +109,10 @@ class ScheduledTaskObjects(MemberOwnedObjects[ScheduledTaskSpec]):
         if task is None:
             return None
         return ScheduledTaskSpec(
-            schedule=task.schedule, prompt=task.prompt, description=task.description
+            schedule=task.schedule,
+            prompt=task.prompt,
+            description=task.description,
+            expires_at=task.expires_at,
         )
 
     async def _status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
@@ -125,6 +139,9 @@ class ScheduledTaskObjects(MemberOwnedObjects[ScheduledTaskSpec]):
             "last_run_at": (
                 None if inspection.last_run_at is None else inspection.last_run_at.isoformat()
             ),
+            "expires_at": (
+                None if inspection.expires_at is None else inspection.expires_at.isoformat()
+            ),
             "updated_at": inspection.updated_at.isoformat(),
             "last_run": last_run,
         }
@@ -149,6 +166,7 @@ class ScheduledTaskObjects(MemberOwnedObjects[ScheduledTaskSpec]):
             description=spec.description,
             next_run_at=next_fire(schedule, datetime.now(UTC)),
             created_by_member_id=ctx.acting_member_id,
+            expires_at=spec.expires_at,
         )
 
     async def _delete_owned(self, ctx: ToolContext, name: str, owner: ObjectOwner) -> None:

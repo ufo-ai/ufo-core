@@ -10,7 +10,7 @@ state (a queued turn) → an agent can run it, with nothing but the external que
 import asyncio
 import json
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 import pytest
@@ -21,6 +21,7 @@ from ufo_ext_scheduled_tasks.runner import ScheduledTaskRunner
 from ufo_ext_scheduled_tasks.tools import (
     SCHEDULED_TASK_KIND,
     PauseAndWaitInput,
+    ScheduledTaskSpec,
     pause_and_wait,
 )
 
@@ -30,7 +31,7 @@ from ufo.ext.loader import skill_registry, turn_tools
 from ufo.jobs import JobRunner, bindings_from
 from ufo.loop.engine import _claim_turn
 from ufo.objects import OwnerRequired, UnknownObject
-from ufo.scheduling import ONE_TIME_SCHEDULE, ScheduleStore
+from ufo.scheduling import ONE_TIME_SCHEDULE, ScheduleStore, due_task_workspaces
 from ufo.schema import tables
 from ufo.schema.records import WRITEBACK_PENDING, Agent, TerminalFrame, Turn
 from ufo.surfaces.admission import Admission, AdmissionInvoker, MemberAdmission
@@ -46,12 +47,23 @@ def _object_tool(name: str) -> ToolDef:
     return next(tool for tool in tools if tool.name == name)
 
 
-def _task_manifest(name: str, schedule: str, prompt: str, description: str = "") -> str:
+def _task_manifest(
+    name: str,
+    schedule: str,
+    prompt: str,
+    description: str = "",
+    expires_at: datetime | None = None,
+) -> str:
     return yaml.safe_dump(
         {
             "kind": SCHEDULED_TASK_KIND,
             "name": name,
-            "spec": {"schedule": schedule, "prompt": prompt, "description": description},
+            "spec": {
+                "schedule": schedule,
+                "prompt": prompt,
+                "description": description,
+                "expires_at": expires_at,
+            },
         }
     )
 
@@ -835,7 +847,8 @@ async def test_member_admission_wins_against_an_already_claimed_pause(db: None) 
         )
         await dbos.entered.wait()
         try:
-            assert await runner._fire(store, claimed, datetime.now(UTC)) is None
+            fire_at = datetime.now(UTC)
+            assert await runner._fire(store, claimed, fire_at, fire_at) is None
         finally:
             dbos.release.set()
         turn_id = await member_turn
@@ -920,7 +933,7 @@ async def test_member_message_takes_over_a_timer_waiting_to_enqueue(db: None) ->
             0,
         )
         [claimed] = await store.claim_due(now, 300)
-        timer_fire = asyncio.create_task(runner._fire(store, claimed, now))
+        timer_fire = asyncio.create_task(runner._fire(store, claimed, now, now))
         await dbos.entered.wait()
         turn_id = await member_admission.admit(
             conversation_id,
@@ -970,7 +983,7 @@ async def test_member_takes_over_the_timer_while_internal_work_queues(db: None) 
             0,
         )
         [claimed] = await store.claim_due(now, 300)
-        timer_fire = asyncio.create_task(runner._fire(store, claimed, now))
+        timer_fire = asyncio.create_task(runner._fire(store, claimed, now, now))
         await dbos.entered.wait()
         internal_turn = await invoker.invoke(
             conversation_id, agent_id, "internal work", "internal-between"
@@ -1289,6 +1302,223 @@ async def test_runner_fires_due_task_into_a_turn(db: None) -> None:
         assert status["last_run"]["turn_id"] == str(turns[0]["id"])
         assert status["last_run"]["response"] == "found 3 new replies"
         assert status["updated_at"] is not None
+
+
+async def test_task_horizon_round_trips_through_spec_and_status(db: None) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    creator = await _member(workspace_id)
+    expires_at = datetime.now(UTC) + timedelta(days=7)
+    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator)
+    with ws(workspace_id):
+        await _dispatch(
+            _object_tool("object_apply"),
+            ctx,
+            manifest=_task_manifest(
+                "seven-day-digest",
+                DAILY_9AM,
+                "send the digest",
+                expires_at=expires_at,
+            ),
+        )
+        fetched = yaml.safe_load(
+            await _dispatch(
+                _object_tool("object_get"),
+                ctx,
+                kind=SCHEDULED_TASK_KIND,
+                name="seven-day-digest",
+            )
+        )
+    assert datetime.fromisoformat(fetched["spec"]["expires_at"]) == expires_at
+    assert datetime.fromisoformat(fetched["status"]["expires_at"]) == expires_at
+
+
+def test_task_expiry_requires_utc() -> None:
+    with pytest.raises(ValueError, match="UTC"):
+        ScheduledTaskSpec(
+            schedule=DAILY_9AM,
+            prompt="send the digest",
+            expires_at=datetime(2026, 8, 1, tzinfo=UTC).astimezone(timezone(timedelta(hours=-4))),
+        )
+
+
+async def test_expired_task_is_cancelled_without_invoking(db: None) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    dbos = StubDbos()
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
+    )
+    with ws(workspace_id):
+        await ScheduleStore().create(
+            conversation_id,
+            agent_id,
+            "expired-digest",
+            DAILY_9AM,
+            "send the digest",
+            "send the digest",
+            datetime.now(UTC) + timedelta(days=1),
+            expires_at=datetime.now(UTC) - timedelta(seconds=1),
+        )
+        await ScheduledTaskRunner(ctx=_runner_ctx(invoker)).run()
+        tasks = await ScheduleStore().list()
+    assert tasks == ()
+    assert await _turns(conversation_id) == []
+    assert dbos.enqueued == []
+
+
+async def test_expiry_after_claim_cancels_before_invoking(db: None) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    now = datetime.now(UTC)
+    claim_at = now - timedelta(seconds=1)
+    dbos = StubDbos()
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
+    )
+    store = ScheduleStore(invoker)
+    runner = ScheduledTaskRunner(ctx=_runner_ctx(invoker))
+    with ws(workspace_id):
+        await store.create(
+            conversation_id,
+            agent_id,
+            "claim-race-digest",
+            DAILY_9AM,
+            "send the digest",
+            "send the digest",
+            claim_at,
+            expires_at=now,
+        )
+        [claimed] = await store.claim_due(claim_at, 300)
+        assert await runner._fire(store, claimed, claim_at, now) is None
+        tasks = await store.list()
+    assert tasks == ()
+    assert await _turns(conversation_id) == []
+    assert dbos.enqueued == []
+
+
+async def test_unclaimed_task_cannot_be_retired(db: None) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    now = datetime.now(UTC)
+    store = ScheduleStore()
+    with ws(workspace_id):
+        task = await store.create(
+            conversation_id,
+            agent_id,
+            "unclaimed-digest",
+            DAILY_9AM,
+            "send the digest",
+            "send the digest",
+            now + timedelta(days=1),
+            expires_at=now,
+        )
+        with pytest.raises(ValueError, match="unclaimed"):
+            await store.retire_if_expired(task, now)
+
+
+async def test_future_expiry_allows_claimed_task_to_invoke(db: None) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    now = datetime.now(UTC)
+    dbos = StubDbos()
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
+    )
+    store = ScheduleStore(invoker)
+    runner = ScheduledTaskRunner(ctx=_runner_ctx(invoker))
+    with ws(workspace_id):
+        await store.create(
+            conversation_id,
+            agent_id,
+            "unexpired-digest",
+            DAILY_9AM,
+            "send the digest",
+            "send the digest",
+            now,
+            expires_at=now + timedelta(minutes=1),
+        )
+        [claimed] = await store.claim_due(now, 300)
+        assert await runner._fire(store, claimed, now, now) is None
+        [remaining] = await store.list()
+    [turn] = await _turns(conversation_id)
+    assert remaining.last_run_at is not None
+    assert remaining.last_run_at.replace(tzinfo=UTC) == now
+    assert dbos.enqueued == [str(turn["id"])]
+
+
+async def test_batch_backlog_does_not_skip_next_cron_occurrence(db: None) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    tick_at = datetime.now(UTC).replace(second=30, microsecond=0)
+    expiry_checked_at = tick_at + timedelta(seconds=31)
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=StubDbos(), durable_surfaces=frozenset()),
+        workspace_id=workspace_id,
+    )
+    store = ScheduleStore(invoker)
+    runner = ScheduledTaskRunner(ctx=_runner_ctx(invoker))
+    with ws(workspace_id):
+        await store.create(
+            conversation_id,
+            agent_id,
+            "minutely-digest",
+            "* * * * *",
+            "send the digest",
+            "send the digest",
+            tick_at,
+        )
+        [claimed] = await store.claim_due(tick_at, 300)
+        assert await runner._fire(store, claimed, tick_at, expiry_checked_at) is None
+        [remaining] = await store.list()
+    expected = tick_at.replace(second=0) + timedelta(minutes=1)
+    assert remaining.next_run_at.replace(tzinfo=UTC) == expected
+    assert remaining.last_run_at is not None
+    assert remaining.last_run_at.replace(tzinfo=UTC) == tick_at
+
+
+async def test_expired_stale_claim_never_invokes(db: None) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    now = datetime.now(UTC)
+    expires_at = now + timedelta(minutes=1)
+    dbos = StubDbos()
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
+    )
+    store = ScheduleStore(invoker)
+    runner = ScheduledTaskRunner(ctx=_runner_ctx(invoker))
+    with ws(workspace_id):
+        await store.create(
+            conversation_id,
+            agent_id,
+            "reclaimed-digest",
+            DAILY_9AM,
+            "send the digest",
+            "send the digest",
+            now,
+            expires_at=expires_at,
+        )
+        [claimed] = await store.claim_due(now, 1)
+        [reclaimed] = await store.claim_due(now + timedelta(seconds=2), 300)
+        assert await runner._fire(store, claimed, now, expires_at) is None
+        [remaining] = await store.list()
+    assert remaining.claim_id == reclaimed.claim_id
+    assert await _turns(conversation_id) == []
+    assert dbos.enqueued == []
+
+
+async def test_expired_task_with_future_fire_is_a_workspace_candidate(db: None) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    now = datetime.now(UTC)
+    with ws(workspace_id):
+        await ScheduleStore().create(
+            conversation_id,
+            agent_id,
+            "expired-before-next-fire",
+            DAILY_9AM,
+            "send the digest",
+            "send the digest",
+            now + timedelta(days=1),
+            expires_at=now - timedelta(seconds=1),
+        )
+        assert await due_task_workspaces()() == (workspace_id,)
+        assert await ScheduleStore().claim_due(now, 300) == ()
+        tasks = await ScheduleStore().list()
+    assert tasks == ()
 
 
 async def test_update_from_another_conversation_keeps_reporting_home(db: None) -> None:

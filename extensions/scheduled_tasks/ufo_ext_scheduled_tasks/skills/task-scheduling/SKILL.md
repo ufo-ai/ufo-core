@@ -28,6 +28,7 @@ spec:
   schedule: "0 * * * *"
   prompt: Check the inbox for new investor replies and notify if any arrived.
   description: Hourly investor inbox check
+  expires_at: "2026-08-01T00:00:00Z"
 ```
 
 Re-applying an existing name updates it in place and re-points reporting to the conversation you
@@ -72,8 +73,9 @@ User: "Watch my inbox for investor replies and notify me immediately"
 - Confirm before creating a scheduled task or increasing/ambiguously changing run frequency; each
   run costs credits. After checking the current schedule (`object_get`), skip only updates that
   clearly keep or lower frequency. When unsure, confirm.
-- Recurring tasks use a cron `schedule` and persist until deleted (one-shot `run_at` is not
-  supported)
+- Recurring tasks use a cron `schedule` and persist until deleted or their optional UTC
+  `expires_at`; the platform cancels an expired task before another run. One-shot `run_at` is not
+  supported.
 - When both day-of-month and day-of-week restrict a recurring task, both constraints must match.
   For example, `0 12 1-7 * 1` runs on the first Monday of each month.
 - Do NOT delegate durable scheduled workflows to subagents — they don't hold the object tools

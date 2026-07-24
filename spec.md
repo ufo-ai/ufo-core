@@ -54,6 +54,7 @@ Tables (all keyed by `workspace_id`, `created_at`, `updated_at`):
 | `ledger` | Metered usage: every model and tool call, priced. |
 | `spend_cap` | Caps by scope (`workspace` \| `member` \| `agent`), dimension, window; `reject` or `park` on breach. |
 | `job` | Recurring/one-time background work (source sync, page-change fan-out, extension jobs). |
+| `scheduled_task` | Member-owned recurring agent invocation with optional UTC expiry, enforced before invocation. |
 
 ## Agent loop
 

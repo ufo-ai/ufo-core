@@ -398,6 +398,7 @@ scheduled_task = sa.Table(
     sa.Column("description", sa.Text, nullable=False),
     sa.Column("next_run_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("last_run_at", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("origin_seq", sa.Integer, nullable=True),
     sa.Column("resume_turn_id", sa.Uuid, nullable=True),
     sa.Column("last_turn_id", sa.Uuid, nullable=True),

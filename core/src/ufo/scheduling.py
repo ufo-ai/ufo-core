@@ -42,6 +42,7 @@ class ScheduledTask:
     description: str
     next_run_at: datetime
     last_run_at: datetime | None
+    expires_at: datetime | None
     origin_seq: int | None
     resume_turn_id: UUID | None
     claim_id: str | None
@@ -61,6 +62,7 @@ class TaskInspection:
     surface: str
     next_run_at: datetime
     last_run_at: datetime | None
+    expires_at: datetime | None
     updated_at: datetime
     last_turn_id: UUID | None
     last_turn_status: str | None
@@ -78,10 +80,31 @@ _COLUMNS = (
     tables.scheduled_task.c.description,
     tables.scheduled_task.c.next_run_at,
     tables.scheduled_task.c.last_run_at,
+    tables.scheduled_task.c.expires_at,
     tables.scheduled_task.c.origin_seq,
     tables.scheduled_task.c.resume_turn_id,
     tables.scheduled_task.c.claimed_by,
 )
+
+
+def _utc(value: datetime | None) -> datetime | None:
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=UTC)
+
+
+def _claim_available(now: datetime) -> sa.ColumnElement[bool]:
+    return sa.or_(
+        tables.scheduled_task.c.claimed_by.is_(None),
+        tables.scheduled_task.c.claim_expires_at < now,
+    )
+
+
+def _expired(now: datetime) -> sa.ColumnElement[bool]:
+    return sa.and_(
+        tables.scheduled_task.c.expires_at.is_not(None),
+        tables.scheduled_task.c.expires_at <= now,
+    )
 
 
 def _task(row: sa.RowMapping) -> ScheduledTask:
@@ -96,6 +119,7 @@ def _task(row: sa.RowMapping) -> ScheduledTask:
         description=row["description"],
         next_run_at=row["next_run_at"],
         last_run_at=row["last_run_at"],
+        expires_at=_utc(row["expires_at"]),
         origin_seq=row["origin_seq"],
         resume_turn_id=row["resume_turn_id"],
         claim_id=row["claimed_by"],
@@ -103,24 +127,25 @@ def _task(row: sa.RowMapping) -> ScheduledTask:
 
 
 def due_task_workspaces() -> WorkspaceCandidates:
-    """The candidate seam the scheduled-task runner declares: the workspaces holding a task due to
-    fire — one distinct `workspace_id` per workspace with a due, unclaimed-or-expired row, read in
-    one `owner_tx` (the RLS-bypass path) so the dispatcher binds only those. Core owns the
-    `scheduled_task` table, so it owns this query and hands the runner a ready selector — the
-    extension never reaches `owner_tx`. The claim lease is folded in, matching the runner's own
-    `claim_due`, so a workspace whose only due task is mid-fire under a lease is not reopened."""
+    """The scheduled-task runner's candidate seam: one workspace holding either a due task or an
+    expired task ready for removal. The expiry sweep does not wait for `next_run_at`. One
+    `owner_tx` read crosses workspace RLS only to return workspace ids; the runner binds each
+    workspace before touching its tasks. Claim availability matches `claim_due`, so a workspace
+    whose matching tasks are under live leases is not reopened."""
 
     async def candidates() -> tuple[UUID, ...]:
         now = datetime.now(UTC)
+        claim_available = _claim_available(now)
+        expired = _expired(now)
         async with owner_tx() as connection:
             rows = (
                 await connection.execute(
                     sa.select(tables.scheduled_task.c.workspace_id)
                     .where(
-                        tables.scheduled_task.c.next_run_at <= now,
+                        claim_available,
                         sa.or_(
-                            tables.scheduled_task.c.claimed_by.is_(None),
-                            tables.scheduled_task.c.claim_expires_at < now,
+                            expired,
+                            tables.scheduled_task.c.next_run_at <= now,
                         ),
                     )
                     .distinct()
@@ -158,6 +183,7 @@ class ScheduleStore:
         description: str,
         next_run_at: datetime,
         created_by_member_id: UUID | None = None,
+        expires_at: datetime | None = None,
     ) -> ScheduledTask:
         """Upsert a schedule row by name: an existing name is re-pointed at the new cadence and
         prompt and its claim cleared, while its reporting conversation stays where it was created —
@@ -178,6 +204,7 @@ class ScheduleStore:
             next_run_at,
             None,
             created_by_member_id,
+            expires_at,
         )
         if task is None:
             raise RuntimeError("recurring task upsert produced no task")
@@ -204,6 +231,7 @@ class ScheduleStore:
             next_run_at,
             origin_seq,
             created_by_member_id,
+            None,
         )
 
     async def _upsert(
@@ -217,6 +245,7 @@ class ScheduleStore:
         next_run_at: datetime,
         origin_seq: int | None,
         created_by_member_id: UUID | None,
+        expires_at: datetime | None,
     ) -> ScheduledTask | None:
         async with workspace_tx() as connection:
             (
@@ -282,6 +311,7 @@ class ScheduleStore:
                 "next_run_at": effective_next_run_at,
                 "last_run_at": None,
                 "last_turn_id": None,
+                "expires_at": expires_at,
                 "origin_seq": origin_seq,
                 "resume_turn_id": resume_turn_id,
                 "claimed_by": None,
@@ -305,6 +335,7 @@ class ScheduleStore:
                         next_run_at=effective_next_run_at,
                         last_run_at=None,
                         last_turn_id=None,
+                        expires_at=expires_at,
                         origin_seq=origin_seq,
                         resume_turn_id=resume_turn_id,
                         claimed_by=None,
@@ -337,6 +368,7 @@ class ScheduleStore:
             description=description,
             next_run_at=effective_next_run_at,
             last_run_at=None,
+            expires_at=expires_at,
             origin_seq=origin_seq,
             resume_turn_id=resume_turn_id,
             claim_id=None,
@@ -373,23 +405,21 @@ class ScheduleStore:
     async def claim_due(
         self, now: datetime, lease_seconds: int, limit: int = CLAIM_BATCH_MAX_TASKS
     ) -> tuple[ScheduledTask, ...]:
-        """Lease up to `limit` of the oldest-due tasks at `now` in one atomic UPDATE: a due,
-        unclaimed-or-expired row is stamped with a fresh claim and returned. Because the claim and
-        the read are the same statement, two overlapping polls partition the due set rather than
-        both firing it — the loser's WHERE no longer matches the rows the winner claimed. The cap
-        bounds one sweep's fires to what its lease can cover; the remainder stays due and the next
-        sweep claims it."""
+        """Remove claim-available expired tasks, then lease up to `limit` oldest-due tasks in the
+        same transaction. The lease UPDATE stamps and returns its rows atomically, so overlapping
+        polls partition the due set rather than both firing it. The cap bounds one sweep's fires to
+        what its lease can cover; the remainder stays due for the next sweep."""
         claim = uuid4().hex
         expires = now + timedelta(seconds=lease_seconds)
+        expired = _expired(now)
+        claim_available = _claim_available(now)
         due = (
             sa.select(tables.scheduled_task.c.id)
             .where(
                 tables.scheduled_task.c.workspace_id == self.workspace_id,
                 tables.scheduled_task.c.next_run_at <= now,
-                sa.or_(
-                    tables.scheduled_task.c.claimed_by.is_(None),
-                    tables.scheduled_task.c.claim_expires_at < now,
-                ),
+                sa.not_(expired),
+                claim_available,
             )
             .order_by(tables.scheduled_task.c.next_run_at, tables.scheduled_task.c.id)
             .limit(limit)
@@ -397,6 +427,13 @@ class ScheduleStore:
             .cte("due_scheduled_task")
         )
         async with workspace_tx() as connection:
+            await connection.execute(
+                sa.delete(tables.scheduled_task).where(
+                    tables.scheduled_task.c.workspace_id == self.workspace_id,
+                    expired,
+                    claim_available,
+                )
+            )
             rows = (
                 (
                     await connection.execute(
@@ -405,10 +442,8 @@ class ScheduleStore:
                             tables.scheduled_task.c.id.in_(sa.select(due.c.id)),
                             tables.scheduled_task.c.workspace_id == self.workspace_id,
                             tables.scheduled_task.c.next_run_at <= now,
-                            sa.or_(
-                                tables.scheduled_task.c.claimed_by.is_(None),
-                                tables.scheduled_task.c.claim_expires_at < now,
-                            ),
+                            sa.not_(expired),
+                            claim_available,
                         )
                         .values(
                             claimed_by=claim,
@@ -422,6 +457,22 @@ class ScheduleStore:
                 .all()
             )
         return tuple(_task(row) for row in rows)
+
+    async def retire_if_expired(self, task: ScheduledTask, now: datetime) -> bool:
+        """Cancel an exact claimed task whose expiry passed before invocation."""
+        if task.claim_id is None:
+            raise ValueError("an unclaimed scheduled task cannot be retired")
+        if task.expires_at is None or task.expires_at > now:
+            return False
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.delete(tables.scheduled_task).where(
+                    tables.scheduled_task.c.workspace_id == self.workspace_id,
+                    tables.scheduled_task.c.id == task.id,
+                    tables.scheduled_task.c.claimed_by == task.claim_id,
+                )
+            )
+        return True
 
     async def reschedule(
         self,
@@ -467,6 +518,7 @@ class ScheduleStore:
                 tables.scheduled_task.c.conversation_id,
                 tables.scheduled_task.c.next_run_at,
                 tables.scheduled_task.c.last_run_at,
+                tables.scheduled_task.c.expires_at,
                 tables.scheduled_task.c.updated_at,
                 tables.scheduled_task.c.last_turn_id,
                 tables.conversation.c.surface,
@@ -495,6 +547,7 @@ class ScheduleStore:
             surface=row["surface"],
             next_run_at=row["next_run_at"],
             last_run_at=row["last_run_at"],
+            expires_at=_utc(row["expires_at"]),
             updated_at=row["updated_at"],
             last_turn_id=row["last_turn_id"],
             last_turn_status=row["turn_status"],
