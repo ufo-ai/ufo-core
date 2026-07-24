@@ -214,6 +214,65 @@ def board_presentation(
     )
 
 
+OOXML_PARTS = {
+    ".docx": "word/document.xml",
+    ".pptx": "ppt/presentation.xml",
+    ".xlsx": "xl/workbook.xml",
+}
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+PNG_TRAILER = b"IEND\xae\x42\x60\x82"
+JPEG_MAGIC = b"\xff\xd8\xff"
+JPEG_TRAILER = b"\xff\xd9"
+
+
+def valid_image(content: bytes) -> ArtifactCheck:
+    """A complete raster image — PNG or JPEG, the two `pdftoppm` emits — checked at both ends like
+    `valid_pdf`: the magic header AND the terminating chunk (PNG `IEND`, JPEG `EOI`). A render
+    killed mid-write keeps its header but loses its trailer, so a header-only check would pass a
+    truncated page that then fails opaquely as a provider 4xx when the vision judge reads it."""
+    if content.startswith(PNG_MAGIC):
+        return valid_png(content)
+    if content.startswith(JPEG_MAGIC):
+        if not content.endswith(JPEG_TRAILER):
+            return ArtifactCheck(False, "JPEG is truncated (no EOI trailer)")
+        return ArtifactCheck(True, f"well-formed JPEG, {len(content)} bytes")
+    return ArtifactCheck(False, "not a PNG or JPEG image")
+
+
+def valid_pdf(content: bytes) -> ArtifactCheck:
+    """A well-formed PDF: the `%PDF-` header and an `%%EOF` trailer. Cheap floor beneath the visual
+    judge so a garbage deliverable fails before any vision tokens are spent."""
+    if not content.startswith(b"%PDF-"):
+        return ArtifactCheck(False, "not a PDF (missing %PDF- header)")
+    if b"%%EOF" not in content:
+        return ArtifactCheck(False, "PDF has no %%EOF trailer")
+    return ArtifactCheck(True, f"well-formed PDF, {len(content)} bytes")
+
+
+def valid_png(content: bytes) -> ArtifactCheck:
+    if not content.startswith(PNG_MAGIC):
+        return ArtifactCheck(False, "not a PNG image")
+    if not content.endswith(PNG_TRAILER):
+        return ArtifactCheck(False, "PNG is truncated (no IEND trailer)")
+    return ArtifactCheck(True, f"well-formed PNG, {len(content)} bytes")
+
+
+def office_document(content: bytes, part: str) -> ArtifactCheck:
+    """A valid OOXML package (bounded zip) carrying `[Content_Types].xml` and the format's root
+    part — `word/document.xml`, `ppt/presentation.xml`, or `xl/workbook.xml`."""
+    try:
+        with ZipFile(BytesIO(content)) as archive:
+            _bounded_zip(archive)
+            names = set(archive.namelist())
+    except (ArtifactInvalid, BadZipFile) as error:
+        return ArtifactCheck(False, f"invalid office document: {error}")
+    if "[Content_Types].xml" not in names:
+        return ArtifactCheck(False, "not an OOXML package (no [Content_Types].xml)")
+    if part not in names:
+        return ArtifactCheck(False, f"OOXML package is missing {part}")
+    return ArtifactCheck(True, f"valid OOXML package with {part}")
+
+
 def _bounded_paths(entries: Iterable[tuple[str, int]]) -> None:
     total = 0
     for count, (raw_name, size) in enumerate(entries, 1):

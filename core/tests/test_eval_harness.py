@@ -7,7 +7,7 @@ turn row and the transcript the agent would have produced, then returns the turn
 real work — invoke, reconstruct, grade — is what the tests assert, read back through the corpus."""
 
 import asyncio
-from base64 import urlsafe_b64decode
+from base64 import b64encode, urlsafe_b64decode
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -39,6 +39,8 @@ from evals.driver import (
     seed_candidate_agent,
 )
 from evals.harness.capability import (
+    MAX_LINKED_ARTIFACT_BYTES,
+    MAX_LINKED_TOTAL_BYTES,
     CapabilityCase,
     CapabilityOutput,
     CapabilityReference,
@@ -48,6 +50,8 @@ from evals.harness.capability import (
     ToolInvocation,
     TurnLog,
     WorkspaceFile,
+    _linked_artifacts,
+    _page_images,
     grading_statement,
     run_capability_case,
 )
@@ -59,9 +63,14 @@ from evals.harness.judge import (
     MAX_CRITERION_CHARS,
     MAX_INSTRUCTION_CHARS,
     MAX_REASON_CHARS,
+    MAX_VISUAL_PAGES,
+    VISUAL_JUDGE_SYSTEM,
     CriterionVerdict,
+    JudgeLeg,
     ModelJudge,
+    _extract_json_object,
     rubric_pass,
+    visual_rubric_pass,
 )
 from evals.harness.registry import EvalTask, capability_task, gather_cases
 from evals.harness.scorers import (
@@ -69,6 +78,7 @@ from evals.harness.scorers import (
     exact_scorer,
     lane_scorer,
     local_fs_scorer,
+    rendered_pages_scorer,
     required_tools_scorer,
     restraint_scorer,
     shared_artifact_scorer,
@@ -90,6 +100,7 @@ from evals.registry import (
     SCENARIO_SIMULATOR_MODEL,
     SEMANTIC_JUDGE_MODEL,
     TASKS,
+    VISUAL_JUDGE_MODEL,
     selected_run_tasks,
 )
 from ufo.accounting import Pricing
@@ -102,6 +113,7 @@ from ufo.governance import Governance, prompt_digest
 from ufo.loop.transcript import Transcript
 from ufo.models.catalog import CORE_PRICING
 from ufo.models.interface import (
+    MAX_IMAGE_BYTES_PER_REQUEST,
     ImageBlock,
     ImageSource,
     Message,
@@ -109,6 +121,7 @@ from ufo.models.interface import (
     ModelEvent,
     ModelRequest,
     ModelResponseTruncated,
+    TextBlock,
     TextDelta,
     ToolResultBlock,
     ToolUseBlock,
@@ -157,6 +170,8 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
     assert tasks["object_tools"].simulator_model is None
     assert tasks["object_tools_flows"].judge_model == SEMANTIC_JUDGE_MODEL
     assert tasks["object_tools_flows"].simulator_model == SCENARIO_SIMULATOR_MODEL
+    assert tasks["document_visual"].judge_model == VISUAL_JUDGE_MODEL
+    assert tasks["document_visual"].simulator_model is None
     assert all(
         task.judge_model is None and task.simulator_model is None
         for name, task in tasks.items()
@@ -168,6 +183,7 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
             "memory_hygiene",
             "object_tools",
             "object_tools_flows",
+            "document_visual",
         }
     )
 
@@ -670,6 +686,9 @@ class TruncatedJudge:
 
 @dataclass
 class RecordingJudge:
+    """Records the last messages it was handed and returns one canned pass, so a text case and a
+    visual case can both assert what reached the judge."""
+
     messages: tuple[Message, ...] = ()
 
     async def complete(self, system: str, messages: tuple[Message, ...]) -> str:
@@ -683,12 +702,36 @@ class UncalledJudge:
         raise AssertionError("invalid rubric input reached the model judge")
 
 
+@dataclass
+class SplitJudge:
+    """Passes the answer rubric but fails the visual rubric, keyed on which system prompt it gets,
+    so a mixed case proves the sample aggregation is all() rather than any()."""
+
+    async def complete(self, system: str, messages: tuple[Message, ...]) -> str:
+        if system == VISUAL_JUDGE_SYSTEM:
+            return '{"items":[{"passed":false,"reason":"box clipped at the right margin"}]}'
+        return '{"items":[{"passed":true,"reason":"answers clearly"}]}'
+
+
 @dataclass(frozen=True)
 class StaticTarget:
     judge: RecordingJudge | None = None
 
     async def run(self, case: CapabilityCase) -> TargetResult:
         return TargetResult(CapabilityOutput("evidence", ()), clean=True)
+
+
+@dataclass(frozen=True)
+class ArtifactTarget:
+    """A clean turn that shared the given artifacts, for exercising the visual-judge path."""
+
+    artifacts: tuple[SharedArtifact, ...]
+    judge: JudgeLeg | None = None
+
+    async def run(self, case: CapabilityCase) -> TargetResult:
+        return TargetResult(
+            CapabilityOutput("ANSWER: shared", (), artifacts=self.artifacts), clean=True
+        )
 
 
 @dataclass
@@ -1277,6 +1320,24 @@ async def test_model_judge_runs_through_case_runner_and_bills_workspace(db: None
     assert ledger.amount == 10
 
 
+async def test_visual_judge_parses_a_prose_wrapped_verdict_through_the_metered_leg(
+    db: None, tmp_path
+) -> None:
+    workspace_id = await _workspace()
+    client = StubModelClient(
+        'I looked closely.\n{"items":[{"passed":false,"reason":"box clipped at left"}]}',
+        Usage(input_tokens=9, output_tokens=4),
+    )
+    judge = ModelJudge(ModelAccess(StubResolver(MODEL, CORE_PRICING, client)), reasoning="high")
+    page = ImageBlock(source=ImageSource(media_type="image/png", data="cGl4"))
+
+    with ws(workspace_id):
+        verdict = await visual_rubric_pass("an org chart", (page,), ("no clipping",), judge)
+
+    assert not verdict.passed
+    assert verdict.criteria == (CriterionVerdict("no clipping", False, "box clipped at left"),)
+
+
 async def test_skill_scorer_rejects_first_distractor_through_case_runner(
     db: None, tmp_path
 ) -> None:
@@ -1812,6 +1873,311 @@ async def test_rubric_input_is_json_fenced_even_when_the_answer_contains_the_def
         "candidateAnswer": answer,
         "rubric": ["criterion"],
     }
+
+
+def _image_page(tag: str = "x") -> ImageBlock:
+    return ImageBlock(source=ImageSource(media_type="image/png", data=tag))
+
+
+def _png_bytes(tag: bytes = b"") -> bytes:
+    """A complete PNG (magic header + IEND trailer) so it clears rendered_pages_scorer's
+    valid_image check; `tag` distinguishes one page's bytes from another's."""
+    return b"\x89PNG\r\n\x1a\n" + tag + b"IEND\xae\x42\x60\x82"
+
+
+async def test_visual_rubric_leads_with_the_page_images_and_fences_the_request() -> None:
+    judge = RecordingJudge()
+    pages = (_image_page("first"), _image_page("second"))
+
+    verdict = await visual_rubric_pass("build a memo", pages, ("no text is clipped",), judge)
+
+    assert verdict.passed
+    content = judge.messages[0].content
+    assert isinstance(content, tuple)
+    assert content[:2] == pages
+    prompt = content[2]
+    assert isinstance(prompt, TextBlock)
+    lines = prompt.text.splitlines()
+    assert lines[0] == lines[-1]
+    assert lines[0] not in lines[1]
+    assert loads(lines[1]) == {"instruction": "build a memo", "rubric": ["no text is clipped"]}
+
+
+def test_extract_json_object_pulls_the_balanced_object_out_of_prose() -> None:
+    payload = '{"items":[{"passed":true,"reason":"a } brace in a string"}]}'
+    assert _extract_json_object(f"Here is my review:\n```json\n{payload}\n```") == payload
+    assert _extract_json_object(payload) == payload
+    assert _extract_json_object("no json here") == "no json here"
+    assert _extract_json_object(f"The header box {{ rounded }} is fine. {payload}") == payload
+    assert _extract_json_object(f'The 12" gap is otherwise fine. {payload}') == payload
+    assert _extract_json_object(f'{payload}\nNote: this covers all "items" requested.') == payload
+
+
+def test_extract_json_object_takes_the_final_verdict_over_an_earlier_valid_one() -> None:
+    final = '{"items":[{"passed":false,"reason":"clipped at right margin"}]}'
+    echoed = '{"items":[{"passed":true,"reason":"brief evidence"}]}'
+    draft = '{"items":[{"passed":true,"reason":"looks fine"}]}'
+
+    assert _extract_json_object(f"I will respond in the shape {echoed}. Now: {final}") == final
+    assert _extract_json_object(f"Draft: {draft}\nWait, on closer look: {final}") == final
+    wrapped = f'{{"final": {final}}}'
+    assert _extract_json_object(f"Draft: {draft} then corrected: {wrapped}") == final
+
+
+def test_extract_json_object_rejects_a_stray_fragment_when_the_real_answer_is_malformed() -> None:
+    raw = '{"items":[{"passed":false,"reason":"said "clip {"items":[{"passed":true}]}" here"}]}'
+
+    assert _extract_json_object(raw, expected=2) == raw
+
+
+def test_extract_json_object_survives_deeply_nested_input() -> None:
+    raw = '{"a":' + "[" * 40000 + "]" * 40000 + "}"
+
+    assert _extract_json_object(raw) == raw
+
+
+async def test_visual_rubric_fails_before_the_model_when_no_pages_were_shared() -> None:
+    verdict = await visual_rubric_pass("build a memo", (), ("no clipping",), UncalledJudge())
+
+    assert not verdict.passed
+    assert verdict.reason == "no rendered page images to judge"
+
+
+def test_page_images_does_not_silently_truncate_past_the_budget() -> None:
+    pages = tuple(
+        SharedArtifact(f"page-{index}.png", b"\x89PNG\r\n\x1a\n")
+        for index in range(MAX_VISUAL_PAGES + 3)
+    )
+
+    assert len(_page_images(pages)) == MAX_VISUAL_PAGES + 3
+
+
+async def test_visual_rubric_rejects_pages_over_the_image_byte_budget() -> None:
+    big = _image_page("x" * (MAX_IMAGE_BYTES_PER_REQUEST // 2 + 1))
+
+    verdict = await visual_rubric_pass(
+        "build a memo", (big, big), ("no clipping",), UncalledJudge()
+    )
+
+    assert not verdict.passed
+    assert "byte budget" in verdict.reason
+
+
+async def test_visual_rubric_rejects_more_pages_than_the_judge_budget() -> None:
+    pages = tuple(_image_page() for _ in range(MAX_VISUAL_PAGES + 1))
+
+    verdict = await visual_rubric_pass("build a memo", pages, ("no clipping",), UncalledJudge())
+
+    assert not verdict.passed
+    assert verdict.reason == f"more than {MAX_VISUAL_PAGES} rendered pages to judge"
+
+
+async def test_visual_rubric_rejects_an_oversized_instruction() -> None:
+    verdict = await visual_rubric_pass(
+        "i" * (MAX_INSTRUCTION_CHARS + 1), (_image_page(),), ("no clipping",), UncalledJudge()
+    )
+
+    assert not verdict.passed
+    assert verdict.reason == f"instruction exceeds {MAX_INSTRUCTION_CHARS} characters"
+
+
+async def test_visual_rubric_enforces_the_shared_rubric_boundaries() -> None:
+    page = (_image_page(),)
+
+    empty = await visual_rubric_pass("build a memo", page, (), UncalledJudge())
+    blank = await visual_rubric_pass("build a memo", page, ("ok", " "), UncalledJudge())
+
+    assert empty.reason == "rubric must contain at least one criterion"
+    assert blank.reason == "rubric criterion 2 is empty"
+
+
+async def test_visual_case_runs_the_ordered_page_images_through_the_judge() -> None:
+    judge = RecordingJudge()
+    first, second = _png_bytes(b"1"), _png_bytes(b"2")
+    artifacts = (
+        SharedArtifact("memo.docx", b"PK\x03\x04"),
+        SharedArtifact("page-2.png", second),
+        SharedArtifact("page-1.png", first),
+    )
+    case = CapabilityCase(
+        "memo", "build a memo", rendered_pages_scorer(1), visual_rubric=("no text is clipped",)
+    )
+
+    result = await run_capability_case(case, ArtifactTarget(artifacts, judge))
+
+    assert result.passed
+    content = judge.messages[0].content
+    assert isinstance(content, tuple)
+    images = [block for block in content if isinstance(block, ImageBlock)]
+    assert len(images) == 2
+    assert images[0].source.data == b64encode(first).decode()
+    assert images[1].source.data == b64encode(second).decode()
+
+
+async def test_visual_case_fails_deterministically_when_no_page_was_rendered() -> None:
+    judge = RecordingJudge()
+    case = CapabilityCase(
+        "memo", "build a memo", rendered_pages_scorer(1), visual_rubric=("no text is clipped",)
+    )
+
+    result = await run_capability_case(
+        case, ArtifactTarget((SharedArtifact("memo.docx", b"PK\x03\x04"),), judge)
+    )
+
+    assert not result.passed
+    assert "rendered page image" in result.reason
+    assert judge.messages == ()
+
+
+async def test_visual_case_fails_closed_without_a_model_judge() -> None:
+    case = CapabilityCase(
+        "memo", "build a memo", rendered_pages_scorer(1), visual_rubric=("no clipping",)
+    )
+
+    result = await run_capability_case(
+        case, ArtifactTarget((SharedArtifact("page-1.png", _png_bytes()),))
+    )
+
+    assert not result.passed
+    assert "semantic rubric requires a model judge" in result.reason
+
+
+def test_linked_artifacts_embed_bounded_data_uris() -> None:
+    png = b"\x89PNG\r\n\x1a\n" + b"x" * 32
+    docx = b"PK\x03\x04" + b"y" * 32
+    huge = b"z" * (MAX_LINKED_ARTIFACT_BYTES + 1)
+
+    linked = _linked_artifacts(
+        (
+            SharedArtifact("page-1.png", png),
+            SharedArtifact("memo.docx", docx),
+            SharedArtifact("scan.png", huge),
+        )
+    )
+
+    by_name = {cast(dict[str, str], item)["name"]: cast(dict[str, str], item) for item in linked}
+    assert set(by_name) == {"page-1.png", "memo.docx"}
+    assert by_name["page-1.png"]["mediaType"] == "image/png"
+    assert by_name["page-1.png"]["dataUri"].startswith("data:image/png;base64,")
+    assert by_name["memo.docx"]["mediaType"].endswith("wordprocessingml.document")
+    assert by_name["memo.docx"]["dataUri"].startswith("data:application/vnd")
+
+
+def test_linked_artifacts_stop_at_the_cumulative_budget() -> None:
+    each = MAX_LINKED_ARTIFACT_BYTES // 2
+    per_budget = MAX_LINKED_TOTAL_BYTES // each
+    pages = tuple(
+        SharedArtifact(f"page-{index}.png", b"\x89PNG\r\n\x1a\n" + b"x" * each)
+        for index in range(per_budget + 3)
+    )
+
+    linked = _linked_artifacts(pages)
+
+    assert 0 < len(linked) <= per_budget
+    assert len(linked) < len(pages)
+
+
+def test_linked_artifacts_map_each_document_type_to_its_media_type() -> None:
+    names = ["a.pdf", "b.pptx", "c.xlsx", "d.gif", "e.webp", "f.svg", "g.bin"]
+    linked = [
+        cast(dict[str, str], item)
+        for item in _linked_artifacts(tuple(SharedArtifact(name, b"x") for name in names))
+    ]
+    media = {item["name"]: item["mediaType"] for item in linked}
+
+    assert media["a.pdf"] == "application/pdf"
+    assert media["b.pptx"].endswith("presentationml.presentation")
+    assert media["c.xlsx"].endswith("spreadsheetml.sheet")
+    assert media["d.gif"] == "image/gif"
+    assert media["e.webp"] == "image/webp"
+    assert media["f.svg"] == "image/svg+xml"
+    assert media["g.bin"] == "application/octet-stream"
+    assert all(item["dataUri"].startswith(f"data:{item['mediaType']};base64,") for item in linked)
+
+
+async def test_visual_case_report_links_every_shared_file() -> None:
+    artifacts = (
+        SharedArtifact("memo.docx", b"PK\x03\x04" + b"y" * 20),
+        SharedArtifact("page-1.png", _png_bytes(b"x" * 20)),
+    )
+    case = CapabilityCase(
+        "memo", "build a memo", rendered_pages_scorer(1), visual_rubric=("no clipping",)
+    )
+
+    result = await run_capability_case(case, ArtifactTarget(artifacts, RecordingJudge()))
+
+    attempt = cast(list[dict[str, object]], result.evidence["attempts"])[0]
+    linked = cast(list[dict[str, str]], attempt["artifactContents"])
+    assert {item["name"] for item in linked} == {"memo.docx", "page-1.png"}
+    assert all(item["dataUri"].startswith("data:") for item in linked)
+    assert result.evidence["visualRubric"] == ["no clipping"]
+
+
+async def test_case_with_text_and_visual_rubric_aggregates_both_verdicts() -> None:
+    case = CapabilityCase(
+        "both",
+        "build it",
+        rendered_pages_scorer(1),
+        rubric=("answers clearly",),
+        visual_rubric=("no clipping",),
+    )
+
+    result = await run_capability_case(
+        case, ArtifactTarget((SharedArtifact("page-1.png", _png_bytes()),), RecordingJudge())
+    )
+
+    assert result.passed
+    attempt = cast(list[dict[str, object]], result.evidence["attempts"])[0]
+    judged = cast(list[dict[str, str]], attempt["judge"])
+    assert [item["criterion"] for item in judged] == ["answers clearly", "no clipping"]
+
+
+async def test_case_fails_overall_when_only_the_visual_rubric_fails() -> None:
+    case = CapabilityCase(
+        "both",
+        "build it",
+        rendered_pages_scorer(1),
+        rubric=("answers clearly",),
+        visual_rubric=("no clipping",),
+    )
+
+    result = await run_capability_case(
+        case, ArtifactTarget((SharedArtifact("page-1.png", _png_bytes()),), SplitJudge())
+    )
+
+    assert not result.passed
+    judged = cast(
+        list[dict[str, object]],
+        cast(list[dict[str, object]], result.evidence["attempts"])[0]["judge"],
+    )
+    assert [(item["criterion"], item["passed"]) for item in judged] == [
+        ("answers clearly", True),
+        ("no clipping", False),
+    ]
+
+
+def test_capability_task_requires_a_judge_for_a_visual_rubric() -> None:
+    cases = (
+        CapabilityCase("memo", "build a memo", rendered_pages_scorer(1), visual_rubric=("x",)),
+    )
+
+    with pytest.raises(ValueError, match="semantic rubrics but no judge model"):
+        capability_task("visual", cases)
+
+    task = capability_task("visual", cases, judge_model=VISUAL_JUDGE_MODEL)
+    assert task.judge_model == VISUAL_JUDGE_MODEL
+    assert task.judge_revision == JUDGE_REVISION
+
+
+def test_visual_case_payload_pins_the_revision_and_records_the_rubric() -> None:
+    case = CapabilityCase(
+        "memo", "build a memo", rendered_pages_scorer(1), visual_rubric=("no text is clipped",)
+    )
+
+    payload = case.payload()
+
+    assert payload["visualRubric"] == ["no text is clipped"]
+    assert payload["judgeRevision"] == JUDGE_REVISION
 
 
 def test_capability_output_reconstructs_calls_and_errors() -> None:

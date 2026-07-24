@@ -7,14 +7,27 @@ from tarfile import open as open_tar
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from evals.harness.artifact_checks import (
+    JPEG_MAGIC,
+    JPEG_TRAILER,
     MAX_ARCHIVE_ENTRIES,
     MAX_EXPANDED_BYTES,
     MAX_PART_BYTES,
+    OOXML_PARTS,
+    PNG_MAGIC,
+    PNG_TRAILER,
+    office_document,
+    valid_image,
+    valid_pdf,
+    valid_png,
 )
 from evals.harness.capability import CapabilityOutput, SharedArtifact, ToolInvocation
 from evals.harness.scorers import (
     board_presentation_scorer,
     forecast_workbook_scorer,
+    office_document_scorer,
+    pdf_document_scorer,
+    png_image_scorer,
+    rendered_pages_scorer,
     site_archive_scorer,
 )
 
@@ -221,3 +234,114 @@ async def test_presentation_scorer_requires_six_noted_slides_and_editable_chart(
     assert not (await grader(_output("board.pptx", _presentation(note_offset=1)))).passed
     assert not (await grader(_output("board.pptx", _presentation(embedding=False)))).passed
     assert not (await grader(_output("board.pptx", _presentation(valid_embedding=False)))).passed
+
+
+def _png(body: bytes = b"pixels") -> bytes:
+    return PNG_MAGIC + body + PNG_TRAILER
+
+
+def _pdf(body: bytes = b"1 0 obj\n<<>>\nendobj\n", *, eof: bool = True) -> bytes:
+    return b"%PDF-1.7\n" + body + (b"%%EOF\n" if eof else b"")
+
+
+def _ooxml(suffix: str, *, content_types: bool = True, root: bool = True) -> bytes:
+    parts: dict[str, str | bytes] = {}
+    if content_types:
+        parts["[Content_Types].xml"] = "<Types/>"
+    if root:
+        parts[OOXML_PARTS[suffix]] = "<root/>"
+    parts["docProps/core.xml"] = "<props/>"
+    return _zip(parts)
+
+
+def _delivery(files: dict[str, bytes]) -> CapabilityOutput:
+    return CapabilityOutput(
+        "",
+        tuple(
+            ToolInvocation(
+                "share_file",
+                {"file_path": f"/workspace/{name}"},
+                f'{{"name":"{name}"}}',
+                has_result=True,
+            )
+            for name in files
+        ),
+        artifacts=tuple(SharedArtifact(name, content) for name, content in files.items()),
+    )
+
+
+def test_valid_pdf_requires_header_and_trailer() -> None:
+    assert valid_pdf(_pdf()).passed
+    assert not valid_pdf(b"%PDF- but truncated").passed
+    assert not valid_pdf(_pdf(eof=False)).passed
+    assert not valid_pdf(b"not a pdf").passed
+
+
+def test_valid_png_requires_the_signature() -> None:
+    assert valid_png(_png()).passed
+    assert not valid_png(b"\x89PNGnope").passed
+    assert not valid_png(_pdf()).passed
+    truncated = valid_png(PNG_MAGIC + b"partial pixel data")
+    assert not truncated.passed
+    assert "truncated" in truncated.reason
+
+
+def test_valid_image_accepts_png_and_jpeg_and_rejects_truncation() -> None:
+    assert valid_image(_png()).passed
+    assert valid_image(JPEG_MAGIC + b"pixels" + JPEG_TRAILER).passed
+    assert not valid_image(JPEG_MAGIC + b"pixels").passed
+    assert not valid_image(PNG_MAGIC + b"partial").passed
+    assert not valid_image(b"GIF89a not supported").passed
+
+
+def test_office_document_requires_content_types_and_root_part() -> None:
+    assert office_document(_ooxml(".docx"), OOXML_PARTS[".docx"]).passed
+    assert not office_document(_ooxml(".docx", content_types=False), OOXML_PARTS[".docx"]).passed
+    assert not office_document(_ooxml(".docx", root=False), OOXML_PARTS[".docx"]).passed
+    assert not office_document(b"not a zip", OOXML_PARTS[".docx"]).passed
+    assert not office_document(_ooxml(".pptx"), OOXML_PARTS[".xlsx"]).passed
+
+
+async def test_office_document_scorer_reads_the_shared_package() -> None:
+    grader = office_document_scorer(".docx")
+
+    assert (await grader(_output("memo.docx", _ooxml(".docx")))).passed
+    assert not (await grader(_output("memo.docx", _ooxml(".docx", root=False)))).passed
+    assert not (await grader(_output("memo.pdf", _pdf()))).passed
+
+
+async def test_pdf_and_png_scorers_read_shared_bytes() -> None:
+    assert (await pdf_document_scorer()(_output("invoice.pdf", _pdf()))).passed
+    assert not (await pdf_document_scorer()(_output("invoice.pdf", b"junk"))).passed
+    assert (await png_image_scorer()(_output("chart.png", _png()))).passed
+    assert not (await png_image_scorer()(_output("chart.png", b"junk"))).passed
+
+
+async def test_rendered_pages_scorer_counts_shared_page_images() -> None:
+    grader = rendered_pages_scorer(2)
+
+    delivery = _delivery({"memo.docx": _ooxml(".docx"), "page-1.png": _png(), "page-2.png": _png()})
+    assert (await grader(delivery)).passed
+    one_page = _delivery({"memo.docx": _ooxml(".docx"), "page-1.png": _png()})
+    assert not (await grader(one_page)).passed
+    assert not (await rendered_pages_scorer(1)(_output("memo.docx", _ooxml(".docx")))).passed
+
+
+async def test_rendered_pages_scorer_rejects_overflow_past_max_pages() -> None:
+    grader = rendered_pages_scorer(1, 1)
+
+    assert (await grader(_delivery({"memo.docx": _ooxml(".docx"), "page-1.png": _png()}))).passed
+    overflow = _delivery({"memo.docx": _ooxml(".docx"), "page-1.png": _png(), "page-2.png": _png()})
+    verdict = await grader(overflow)
+    assert not verdict.passed
+    assert "more than the 1" in verdict.reason
+
+
+async def test_rendered_pages_scorer_rejects_a_corrupt_page_image() -> None:
+    grader = rendered_pages_scorer(1, 1)
+
+    corrupt = _delivery({"memo.docx": _ooxml(".docx"), "page-1.png": PNG_MAGIC + b"partial"})
+    verdict = await grader(corrupt)
+
+    assert not verdict.passed
+    assert "not a valid image" in verdict.reason

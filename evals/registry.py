@@ -6,6 +6,7 @@ from evals import (
     basics,
     browser_nav,
     coding_subagent,
+    document_visual,
     memory_hygiene,
     object_tools,
     pdf_build,
@@ -25,6 +26,7 @@ from evals.skill_loading.runner import skill_loading_task
 
 SEMANTIC_JUDGE_MODEL = "gpt-5.4-mini"
 SCENARIO_SIMULATOR_MODEL = "claude-haiku-4-5"
+VISUAL_JUDGE_MODEL = "claude-sonnet-4-6"
 
 DEFAULT_TASKS: tuple[EvalTask, ...] = (
     capability_task("basics", basics.CASES),
@@ -60,6 +62,13 @@ TASKS: tuple[EvalTask, ...] = (
         simulator_model=SCENARIO_SIMULATOR_MODEL,
     ),
     skill_loading_task(SKILL_LOADING_CASES),
+    capability_task(
+        "document_visual",
+        document_visual.CASES,
+        judge_model=VISUAL_JUDGE_MODEL,
+        judge_max_tokens=16_000,
+        judge_reasoning="high",
+    ),
     scenario_task("memory_hygiene", memory_hygiene.CASES, simulator_model=SCENARIO_SIMULATOR_MODEL),
     capability_task("yc_recall", yc_recall.CASES),
     capability_task("yc_workflows", yc_workflows.CASES),

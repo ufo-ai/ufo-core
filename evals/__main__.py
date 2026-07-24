@@ -31,6 +31,9 @@ from ufo_ext_memory.events import MEMORY_RECALL_EVENT
 
 from evals.compaction.runner import CompactionRun, load_compaction
 from evals.compaction.target import CompactionTarget
+from evals.document_visual import (
+    WORKFLOW_WAIT_SECONDS as DOCUMENT_VISUAL_WORKFLOW_WAIT_SECONDS,
+)
 from evals.driver import (
     CANDIDATE_AGENT_NAME,
     WORKFLOW_WAIT_SECONDS,
@@ -392,6 +395,8 @@ def main(argv: list[str] | None = None) -> None:
         workflow_wait_seconds = JOBBENCH_WORKFLOW_WAIT_SECONDS
     if wandr_tasks is not None:
         workflow_wait_seconds = WANDR_WORKFLOW_WAIT_SECONDS
+    if tasks and all(task.name == "document_visual" for task in tasks):
+        workflow_wait_seconds = DOCUMENT_VISUAL_WORKFLOW_WAIT_SECONDS
     reports, agent_prompt = asyncio.run(
         _run(
             config,

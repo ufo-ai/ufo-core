@@ -7,6 +7,7 @@ retain text, completion, and error state; the agent's configured tool set remain
 from __future__ import annotations
 
 import re
+from base64 import b64encode
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from hashlib import sha256
@@ -17,10 +18,32 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from evals.harness.harness import EvalCaseResult, Json, JsonObject, infra_error
-from evals.harness.judge import JUDGE_REVISION, CriterionVerdict, rubric_pass
+from evals.harness.judge import (
+    JUDGE_REVISION,
+    CriterionVerdict,
+    RubricVerdict,
+    rubric_pass,
+    visual_rubric_pass,
+)
 from ufo.schema.records import TurnStatus
-from ufo.sdk.models import Message
+from ufo.sdk.models import ImageBlock, ImageSource, Message
 from ufo.transcript import CompactionSummary
+
+PAGE_IMAGE_MEDIA_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
+PAGE_IMAGE_SUFFIXES = tuple(PAGE_IMAGE_MEDIA_TYPES)
+ARTIFACT_MEDIA_TYPES = {
+    **PAGE_IMAGE_MEDIA_TYPES,
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".svg": "image/svg+xml",
+    ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
+ARTIFACT_MEDIA_DEFAULT = "application/octet-stream"
+MAX_LINKED_ARTIFACT_BYTES = 4 * 1024 * 1024
+MAX_LINKED_TOTAL_BYTES = 12 * 1024 * 1024
 
 if TYPE_CHECKING:
     from evals.harness.target import CapabilityTarget
@@ -193,7 +216,9 @@ class CapabilityCase:
     """A message and its deterministic and semantic criteria. `web_dependent` infra-excludes an
     external outage; `samples` re-runs the case and passes if any sample passes; `digest_tag`
     stabilizes the suite digest. `member_key`, when set, is the exact email of the workspace member
-    whose private memory the eval conversation may recall."""
+    whose private memory the eval conversation may recall. `rubric` judges the answer text;
+    `visual_rubric` judges the rendered page images the turn shared — both reach the model judge
+    only after the deterministic grader passes, and both require a judge model on the task."""
 
     name: str
     message: str
@@ -202,6 +227,7 @@ class CapabilityCase:
     web_dependent: bool = False
     digest_tag: str = ""
     rubric: tuple[str, ...] = ()
+    visual_rubric: tuple[str, ...] = ()
     member_key: str | None = None
     workspace_files: tuple[WorkspaceFile, ...] = ()
     prior_messages: tuple[str, ...] = ()
@@ -221,7 +247,9 @@ class CapabilityCase:
             "grader": self.digest_tag or self.name,
             "rubric": list(self.rubric),
         }
-        if self.rubric:
+        if self.visual_rubric:
+            payload["visualRubric"] = list(self.visual_rubric)
+        if self.rubric or self.visual_rubric:
             payload["judgeRevision"] = JUDGE_REVISION
         if self.member_key is not None:
             payload["memberKey"] = self.member_key
@@ -277,6 +305,7 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
                 "calls": calls,
                 "toolErrors": list(sample_output.tool_errors),
                 "artifacts": [artifact.name for artifact in sample_output.artifacts],
+                "artifactContents": _linked_artifacts(sample_output.artifacts),
                 "artifactReferences": [
                     {
                         "name": artifact.name,
@@ -315,6 +344,7 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
         "message": case.message,
         "grading": grading_statement(case.grader) or None,
         "rubric": list(case.rubric),
+        "visualRubric": list(case.visual_rubric),
         "memberKey": case.member_key,
         "webDependent": case.web_dependent,
         "selectedAttempt": selected_index,
@@ -348,7 +378,7 @@ async def sample_capability(case: CapabilityCase, target: CapabilityTarget) -> C
             result.output, CapabilityVerdict(False, result.failure_reason), result.trajectory
         )
     deterministic = await case.grader(result.output)
-    if not deterministic.passed or not case.rubric:
+    if not deterministic.passed or not (case.rubric or case.visual_rubric):
         return CapabilitySample(result.output, deterministic, result.trajectory)
     if target.judge is None:
         return CapabilitySample(
@@ -356,16 +386,74 @@ async def sample_capability(case: CapabilityCase, target: CapabilityTarget) -> C
             CapabilityVerdict(False, "semantic rubric requires a model judge"),
             result.trajectory,
         )
-    verdict = await rubric_pass(case.message, result.output.response, case.rubric, target.judge)
+    verdicts: list[RubricVerdict] = []
+    if case.rubric:
+        verdicts.append(
+            await rubric_pass(case.message, result.output.response, case.rubric, target.judge)
+        )
+    if case.visual_rubric:
+        pages = _page_images(result.output.artifacts)
+        verdicts.append(
+            await visual_rubric_pass(case.message, pages, case.visual_rubric, target.judge)
+        )
+    reason = "; ".join((deterministic.reason, *(verdict.reason for verdict in verdicts)))
     return CapabilitySample(
         result.output,
         CapabilityVerdict(
-            verdict.passed,
-            f"{deterministic.reason}; {verdict.reason}",
-            deterministic.evidence,
+            all(verdict.passed for verdict in verdicts), reason, deterministic.evidence
         ),
         result.trajectory,
-        judge=verdict.criteria,
+        judge=tuple(criterion for verdict in verdicts for criterion in verdict.criteria),
+    )
+
+
+def _linked_artifacts(artifacts: tuple[SharedArtifact, ...]) -> list[Json]:
+    """Each shared artifact as a bounded, embeddable data URI so the offline report previews images
+    inline and offers every deliverable as a download — the report carries the whole record and
+    reaches no blob store. An artifact past the per-file or cumulative budget is omitted here; its
+    name, digest, and size still record under artifactReferences."""
+    linked: list[Json] = []
+    total = 0
+    for artifact in artifacts:
+        size = len(artifact.content)
+        if size > MAX_LINKED_ARTIFACT_BYTES or total + size > MAX_LINKED_TOTAL_BYTES:
+            continue
+        total += size
+        media_type = ARTIFACT_MEDIA_TYPES.get(
+            PurePosixPath(artifact.name).suffix.lower(), ARTIFACT_MEDIA_DEFAULT
+        )
+        linked.append(
+            {
+                "name": artifact.name,
+                "mediaType": media_type,
+                "dataUri": f"data:{media_type};base64,{b64encode(artifact.content).decode()}",
+            }
+        )
+    return linked
+
+
+def _page_images(artifacts: tuple[SharedArtifact, ...]) -> tuple[ImageBlock, ...]:
+    """Every shared rendered page image, ordered by name, as base64 image blocks. A visual case
+    that shared no page image, more than the page budget, or more image bytes than the request
+    allows yields them all unchanged — `_visual_boundary_error` then decides, failing the case loud
+    rather than this silently judging an empty deck, an arbitrary truncated subset, or a set the
+    provider's `trim_images` would drop oldest-first."""
+    pages = sorted(
+        (artifact for artifact in artifacts if artifact.name.lower().endswith(PAGE_IMAGE_SUFFIXES)),
+        key=lambda artifact: artifact.name,
+    )
+    return tuple(
+        ImageBlock(
+            source=ImageSource(
+                media_type=next(
+                    media_type
+                    for suffix, media_type in PAGE_IMAGE_MEDIA_TYPES.items()
+                    if page.name.lower().endswith(suffix)
+                ),
+                data=b64encode(page.content).decode(),
+            )
+        )
+        for page in pages
     )
 
 

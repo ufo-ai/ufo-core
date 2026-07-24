@@ -11,12 +11,18 @@ import re
 from collections.abc import Callable
 
 from evals.harness.artifact_checks import (
+    OOXML_PARTS,
     ArtifactCheck,
     board_presentation,
     forecast_workbook,
+    office_document,
     site_archive,
+    valid_image,
+    valid_pdf,
+    valid_png,
 )
 from evals.harness.capability import (
+    PAGE_IMAGE_SUFFIXES,
     CapabilityOutput,
     CapabilityVerdict,
     DescribedGrader,
@@ -225,6 +231,59 @@ def board_presentation_scorer(expected_slides: int, expected_revenue: tuple[int,
             f"{', '.join(map(str, expected_revenue))}"
         ),
     )
+
+
+def office_document_scorer(suffix: str) -> Grader:
+    """Pass iff a well-formed OOXML deliverable of `suffix` (.docx/.pptx/.xlsx) is shared."""
+    part = OOXML_PARTS[suffix]
+    return shared_artifact_scorer(
+        suffix, lambda content: office_document(content, part), expectation=f"a valid {suffix}"
+    )
+
+
+def pdf_document_scorer() -> Grader:
+    return shared_artifact_scorer(".pdf", valid_pdf, expectation="a well-formed PDF")
+
+
+def png_image_scorer() -> Grader:
+    return shared_artifact_scorer(".png", valid_png, expectation="a well-formed PNG image")
+
+
+def rendered_pages_scorer(min_pages: int = 1, max_pages: int | None = None) -> Grader:
+    """Pass iff the turn shared between `min_pages` and `max_pages` rendered page images — the
+    pixels the visual judge grades. The upper bound is the objective page-fit check: a document
+    asked to be one page that spills onto a second (an orphaned near-empty page, a wide sheet
+    LibreOffice broke across pages) shares more images than it should and fails here, before the
+    judge. Independent of the source document scorer, so a case can require both the document and a
+    render that fits."""
+
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        pages = [
+            artifact
+            for artifact in output.artifacts
+            if artifact.name.lower().endswith(PAGE_IMAGE_SUFFIXES)
+        ]
+        if len(pages) < min_pages:
+            return CapabilityVerdict(
+                False, f"shared {len(pages)} rendered page image(s), need >= {min_pages}"
+            )
+        if max_pages is not None and len(pages) > max_pages:
+            return CapabilityVerdict(
+                False,
+                f"rendered {len(pages)} pages, more than the {max_pages} this deliverable should "
+                "span — it overflowed or split across pages",
+            )
+        corrupt = next((page for page in pages if not valid_image(page.content).passed), None)
+        if corrupt is not None:
+            return CapabilityVerdict(False, f"rendered page {corrupt.name!r} is not a valid image")
+        return CapabilityVerdict(True, f"{len(pages)} rendered page image(s)")
+
+    bound = (
+        f"at least {min_pages}"
+        if max_pages is None
+        else (f"exactly {min_pages}" if min_pages == max_pages else f"{min_pages}-{max_pages}")
+    )
+    return DescribedGrader(f"shares {bound} valid rendered page image(s)", grade)
 
 
 def _delivered_artifact(output: CapabilityOutput, suffix: str) -> SharedArtifact | None:

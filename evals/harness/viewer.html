@@ -236,6 +236,10 @@ pre {
 .attempt, .call { margin: 7px 0; border: 1px solid var(--line); border-radius: 5px; background: var(--panel); }
 .attempt > summary, .call > summary { padding: 9px 10px; cursor: pointer; font-family: var(--mono); font-size: 11px; }
 .attempt-body, .call-body { padding: 0 10px 11px; }
+.artifact-grid { display: flex; flex-wrap: wrap; gap: 10px; }
+.artifact { display: flex; flex-direction: column; gap: 5px; max-width: 220px; }
+.artifact-thumb { max-width: 220px; max-height: 300px; border: 1px solid var(--line); border-radius: 4px; background: #fff; display: block; }
+.artifact-link { font-family: var(--mono); font-size: 11px; word-break: break-all; }
 .call-grid { display: grid; gap: 9px; }
 .trajectory-link { color: var(--blue); font: 11px var(--mono); text-decoration: none; }
 .trajectory-link:hover { text-decoration: underline; }
@@ -507,9 +511,9 @@ function callMarkup(attState) {
   };
 }
 const ATTEMPT_KEYS = new Set(['passed', 'reason', 'response', 'calls', 'toolErrors', 'artifacts',
-  'artifactReferences', 'artifactError', 'tokens', 'costMicroUsd', 'compactions',
+  'artifactContents', 'artifactReferences', 'artifactError', 'tokens', 'costMicroUsd', 'compactions',
   'compactionRecords', 'log', 'grader', 'judge', 'turns', 'stopped', 'trajectory']);
-const CASE_EVIDENCE_KEYS = new Set(['message', 'grading', 'rubric', 'memberKey', 'webDependent',
+const CASE_EVIDENCE_KEYS = new Set(['message', 'grading', 'rubric', 'visualRubric', 'memberKey', 'webDependent',
   'reconstructed', 'selectedAttempt', 'attempts', 'user', 'maxTurns', 'claims', 'claimVerdicts',
   'claimCoverage', 'enabledTools', 'exposedTools', 'omittedEnabledTools', 'referenceTools',
   'referenceServers', 'enabledCatalogServers']);
@@ -611,14 +615,30 @@ function compactionsMarkup(attempt) {
   return `<div class="section"><div class="section-title">Compactions · ${records.length}</div>${records.map(compactionMarkup).join('')}</div>`;
 }
 function artifactsMarkup(attempt) {
-  const references = attempt.artifactReferences;
+  const contents = attempt.artifactContents || [];
+  const references = attempt.artifactReferences || [];
   const error = attempt.artifactError ? `<pre>${h(attempt.artifactError)}</pre>` : '';
-  if (Array.isArray(references) && references.length) {
-    const rows = references.map(ref => `${ref.name} · ${ref.sizeBytes} bytes · ${ref.digest}`).join('\n');
-    return `<div class="section"><div class="section-title">Artifacts · ${references.length}</div><pre>${h(rows)}</pre>${error}</div>`;
-  }
-  const artifacts = attempt.artifacts || [];
-  return `<div class="section"><div class="section-title">Artifacts</div><pre>${h(artifacts.length ? artifacts.join('\n') : 'None')}</pre>${error}</div>`;
+  const linked = new Set(contents.map(item => item.name));
+  const tiles = contents.map(item => {
+    const rasterImageSafeToOpenInline = typeof item.mediaType === 'string'
+      && item.mediaType.indexOf('image/') === 0
+      && item.mediaType !== 'image/svg+xml';
+    const preview = rasterImageSafeToOpenInline
+      ? `<a href="${item.dataUri}" target="_blank" rel="noopener"><img class="artifact-thumb" src="${item.dataUri}" alt="${h(item.name)}"></a>`
+      : '';
+    return `<div class="artifact">${preview}<a class="artifact-link" download="${h(item.name)}" href="${item.dataUri}">${h(item.name)}</a></div>`;
+  }).join('');
+  const extras = references.filter(ref => !linked.has(ref.name))
+    .map(ref => `${ref.name} · ${ref.sizeBytes} bytes · ${ref.digest}`).join('\n');
+  const names = attempt.artifacts || [];
+  const count = references.length || contents.length || names.length;
+  const body = [
+    tiles ? `<div class="artifact-grid">${tiles}</div>` : '',
+    extras ? `<pre>${h(extras)}</pre>` : '',
+    (!tiles && !extras) ? `<pre>${h(names.length ? names.join('\n') : 'None')}</pre>` : '',
+    error,
+  ].join('');
+  return `<div class="section"><div class="section-title">Artifacts · ${count}</div>${body}</div>`;
 }
 function attemptMarkup(attempt, index, selected, kind) {
   const attState = attemptState(attempt);
@@ -761,10 +781,12 @@ function detailMarkup(base, current, before, after) {
   const item = caseByName(after, state.caseName);
   const evidence = (item || prior || {}).evidence || {};
   const rubric = evidence.rubric || [];
+  const visualRubric = evidence.visualRubric || [];
   const grading = typeof evidence.grading === 'string' ? evidence.grading : '';
   const criteria = [
     grading ? `[grader] ${grading}` : '',
-    ...rubric.map(value => `[judge rubric] ${value}`)
+    ...rubric.map(value => `[judge rubric] ${value}`),
+    ...visualRubric.map(value => `[visual rubric] ${value}`)
   ].filter(Boolean);
   const setup = setupMeta(evidence);
   const prompt = evidence.message === null
