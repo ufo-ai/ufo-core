@@ -66,6 +66,7 @@ from ufo.loop.profiles import CORE_SUBAGENT_PROFILES
 from ufo.loop.queue import Runtime, init_runtime
 from ufo.loop.subagents import SubagentRegistry
 from ufo.memory import DEFAULT_MEMORY_SEARCH_PROVIDER
+from ufo.models.catalog_skill import model_catalog_skill
 from ufo.models.pricing import Pricing
 from ufo.models.registry import model_registry
 from ufo.o11y import init_o11y, log
@@ -168,7 +169,7 @@ def run() -> None:
         subagent_grants=turn_subagent_grants(manifests),
         manifests=manifests,
         registry=registry,
-        skills=skill_registry(manifests),
+        skills=skill_registry(manifests, (model_catalog_skill(registry),)),
         credentials=credentials,
         index=index,
         embed=embed,

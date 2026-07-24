@@ -62,8 +62,10 @@ terminal frame. A client's wait always ends — the terminal state commits on th
 
 - **Tool calling** — typed registry; per-call metering; results bounded before hitting the model.
 - **Skill loading** — skills are folders of files (SKILL.md + assets), mounted into the sandbox on
-  `load_skill`. **A skill ships with the thing it teaches**: core ships exactly two — `sandbox`,
-  `delegation` — teaching core's own builtins; an extension's skills ride its manifest (the `memory`
+  `load_skill`. **A skill ships with the thing it teaches**: core ships exactly two folder skills —
+  `sandbox`, `delegation` — teaching core's own builtins, and generates a `model-catalog` skill from
+  the model registry at serve so the models a member can pin stay documented from the same records
+  the runtime routes and bills on (RFC 0018); an extension's skills ride its manifest (the `memory`
   skill ships with the memory extension); a pack may add pack-level skills of its own (see Packs).
   Every-turn content belongs in the system prompt, situational/long content in skills; skills carry
   workflows, never restated tool docs (the tool's description is authoritative).

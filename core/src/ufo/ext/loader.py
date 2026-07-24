@@ -377,12 +377,15 @@ def core_object_kinds(manifests: tuple[Manifest, ...]) -> tuple[BoundKind, ...]:
     return (BoundKind(kind=kind, extension=None, context=None),)
 
 
-def skill_registry(manifests: tuple[Manifest, ...]) -> SkillRegistry:
+def skill_registry(
+    manifests: tuple[Manifest, ...], generated: tuple[RuntimeSkill, ...] = ()
+) -> SkillRegistry:
     """The loadable-skill set for the deploy: core's skills plus every active pack's contributed
     skills — each spec's parent and its nested children — parsed from disk once at boot (sync file
-    I/O, off the loop). A pack skill whose name collides with a core skill or another pack's is
-    refused loud here, so no reader downstream — the `load_skill` resolver or the `{{skill_index}}`
-    render — has to disambiguate."""
+    I/O, off the loop), plus any boot-`generated` skills (the model-catalog rendered from the live
+    registry). A skill whose name collides with one already registered is refused loud here, so no
+    reader downstream — the `load_skill` resolver or the `{{skill_index}}` render — has to
+    disambiguate."""
     by_name: dict[str, RuntimeSkill] = dict(CORE_SKILLS_BY_NAME)
     for manifest in manifests:
         for spec in manifest.skills:
@@ -393,6 +396,10 @@ def skill_registry(manifests: tuple[Manifest, ...]) -> SkillRegistry:
                         f"which is already registered"
                     )
                 by_name[skill.name] = skill
+    for skill in generated:
+        if skill.name in by_name:
+            raise ValueError(f"generated skill {skill.name!r} is already registered")
+        by_name[skill.name] = skill
     return SkillRegistry(by_name)
 
 
