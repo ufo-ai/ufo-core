@@ -231,6 +231,8 @@ class YcSource:
                     source_ref=f"{collection}/{row.record_id}",
                     digest="sha256:" + hashlib.sha256(rendered.encode()).hexdigest(),
                     body=rendered,
+                    stream=collection,
+                    title=row.description or row.link,
                 )
             )
         return tuple(pages)
@@ -262,6 +264,8 @@ class YcSource:
                     source_ref=f"{collection}/{row.record_id}",
                     digest="sha256:" + hashlib.sha256(rendered.encode()).hexdigest(),
                     body=rendered,
+                    stream=collection,
+                    title=row.link,
                 )
             )
         return tuple(pages)

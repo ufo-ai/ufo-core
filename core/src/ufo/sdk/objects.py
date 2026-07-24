@@ -14,6 +14,9 @@ from ufo.objects import (
     ObjectKind as ObjectKind,
 )
 from ufo.objects import (
+    ObjectListQuery as ObjectListQuery,
+)
+from ufo.objects import (
     ObjectOwner as ObjectOwner,
 )
 from ufo.objects import (
@@ -36,4 +39,7 @@ from ufo.objects import (
 )
 from ufo.objects import (
     VerbNotSupported as VerbNotSupported,
+)
+from ufo.objects import (
+    object_page as object_page,
 )

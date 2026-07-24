@@ -397,11 +397,15 @@ class SourceRecord:
 @dataclass(frozen=True)
 class PageRecord:
     """One live synced page as `ExtensionContext.source_pages` reads it: its identity, the source
-    row it belongs to, the visibility subject, the content digest, and the blob reference — the
-    body stays by reference, never inlined. A value object — never leaves the process."""
+    row it belongs to, browse metadata, visibility subject, content digest, and blob reference —
+    the body stays by reference, never inlined. A value object — never leaves the process."""
 
     id: UUID
     source_id: UUID
+    stream: str
+    title: str
+    source_created_at: str | None
+    source_updated_at: str | None
     subject: str
     digest: str
     body_ref: str
@@ -594,6 +598,10 @@ class ExtensionContext:
             sa.select(
                 tables.page.c.id,
                 tables.page.c.source_id,
+                tables.page.c.stream,
+                tables.page.c.title,
+                tables.page.c.source_created_at,
+                tables.page.c.source_updated_at,
                 tables.page.c.subject,
                 tables.page.c.digest,
                 tables.page.c.body_ref,
@@ -614,6 +622,10 @@ class ExtensionContext:
             PageRecord(
                 id=row["id"],
                 source_id=row["source_id"],
+                stream=row["stream"],
+                title=row["title"],
+                source_created_at=row["source_created_at"],
+                source_updated_at=row["source_updated_at"],
                 subject=row["subject"],
                 digest=row["digest"],
                 body_ref=row["body_ref"],

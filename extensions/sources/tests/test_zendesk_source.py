@@ -99,6 +99,30 @@ async def test_ticket_comments_lift_comment_child_events() -> None:
     assert _refs(result) == {"ticket_comments/c1"}
     body = result.pages[0].body
     assert '"ticket_id": 9' in body or "'ticket_id': 9" in body
+    assert result.pages[0].created_at == "2023-11-14T22:13:20.000000+00:00"
+
+
+async def test_ticket_comments_preserve_a_string_event_timestamp() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v2/incremental/ticket_events.json"
+        return httpx.Response(
+            200,
+            json={
+                "ticket_events": [
+                    {
+                        "ticket_id": 9,
+                        "timestamp": "2026-02-01T00:00:00Z",
+                        "child_events": [
+                            {"id": "c1", "event_type": "Comment", "body": "hello"},
+                        ],
+                    }
+                ],
+                "end_of_stream": True,
+            },
+        )
+
+    result = await _fetch("ticket_comments", handle)
+    assert result.pages[0].created_at == "2026-02-01T00:00:00.000000+00:00"
 
 
 async def test_stream_skipped_on_refusal() -> None:

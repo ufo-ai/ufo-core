@@ -2,28 +2,30 @@
 
 A page is one document the core sync driver landed from a registered `source` — its identity is the
 `page` row the driver owns, so names are the row id (`<uuid>`), id-shaped exactly as the grammar
-admits. The kind is the read-and-forget surface over those rows: list and get read metadata through
-the sanctioned `ExtensionContext.source_pages` accessor (the body stays by reference, never
-inlined) scoped to the caller's own visibility subjects, and delete tombstones one page through
-`forget_page` so the existing page-change pipeline reaps its derived index state. Pages are
+admits. The kind is the read-and-forget surface over those rows: list and get read browse metadata
+through the sanctioned `ExtensionContext.source_pages` accessor and get reads the body through the
+turn's blob capability, scoped to the caller's own visibility subjects; delete tombstones one page
+through `forget_page` so the existing page-change pipeline reaps its derived index state. Pages are
 produced by the sync driver, never authored, so create and update raise `VerbNotSupported`; delete
 is owner-gated.
 """
 
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from ufo.sdk.context import ExtensionContext, JsonValue
 from ufo.sdk.objects import (
-    OBJECT_LIST_PAGE,
     ObjectKind,
+    ObjectListQuery,
     ObjectPage,
     ObjectRow,
     OwnerRequired,
     VerbNotSupported,
+    object_page,
 )
 from ufo.sdk.sources import SHARED_SUBJECT, member_subject
 from ufo.sdk.tools import ToolContext
@@ -34,16 +36,22 @@ PAGES_ARE_SYNCED = (
 )
 PAGE_FORGET_GATE = "only the workspace owner can forget a synced page"
 SUMMARY_MAX = 120
+PAGE_BODY_MAX_BYTES = 65_536
 
 
 class PageSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    source_id: str = Field(description="The stable id of the source binding that landed the page.")
     source: str = Field(description="The content-source provider the page synced from.")
+    stream: str = Field(description="The provider stream, such as issues or pull_requests.")
+    title: str = Field(description="The page's human-readable title.")
+    created_at: str = Field(description="The provider creation time, or first sync time.")
+    updated_at: str = Field(description="The provider update time, or last content change time.")
     subject: str = Field(description="The page's visibility subject: 'shared' or 'member:<id>'.")
     digest: str = Field(description="The content digest of the page body at last sync.")
-    body_ref: str = Field(
-        description="Reference to the page body in the blob store; the body is never inlined."
-    )
+    body_ref: str = Field(description="Reference to the page body in the blob store.")
+    body: str = Field(description="The page body, bounded to the first 65,536 UTF-8 bytes.")
+    body_truncated: bool = Field(description="Whether the body exceeded the object read bound.")
 
 
 def _require_ext(ctx: ToolContext) -> ExtensionContext:
@@ -61,11 +69,28 @@ def _audience_subjects(ctx: ToolContext) -> frozenset[str]:
     return frozenset({SHARED_SUBJECT, member_subject(ctx.audience_member_id)})
 
 
+def _page_timestamp(provider_value: str | None, row_value: datetime) -> str:
+    if provider_value is None:
+        parsed = row_value if row_value.tzinfo is not None else row_value.replace(tzinfo=UTC)
+    else:
+        try:
+            parsed = datetime.fromisoformat(provider_value.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise ValueError(f"invalid page timestamp {provider_value!r}") from error
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError(f"page timestamp lacks a timezone: {provider_value!r}")
+    return parsed.astimezone(UTC).isoformat(timespec="microseconds")
+
+
 @dataclass(frozen=True)
 class _Page:
     id: UUID
     source_id: UUID
     backend: str
+    stream: str
+    title: str
+    source_created_at: str | None
+    source_updated_at: str | None
     subject: str
     digest: str
     body_ref: str
@@ -76,13 +101,33 @@ class _Page:
     def name(self) -> str:
         return str(self.id)
 
-    def spec(self) -> PageSpec:
+    def spec(self, body: str, body_truncated: bool) -> PageSpec:
         return PageSpec(
-            source=self.backend, subject=self.subject, digest=self.digest, body_ref=self.body_ref
+            source_id=str(self.source_id),
+            source=self.backend,
+            stream=self.stream,
+            title=self.title,
+            created_at=_page_timestamp(self.source_created_at, self.created_at),
+            updated_at=_page_timestamp(self.source_updated_at, self.updated_at),
+            subject=self.subject,
+            digest=self.digest,
+            body_ref=self.body_ref,
+            body=body,
+            body_truncated=body_truncated,
         )
 
     def summary(self) -> str:
-        return f"{self.backend} page ({self.subject}), {self.digest}"[:SUMMARY_MAX]
+        return f"{self.title} — {self.backend}/{self.stream} ({self.subject})"[:SUMMARY_MAX]
+
+    def fields(self) -> dict[str, JsonValue]:
+        return {
+            "source_id": str(self.source_id),
+            "source": self.backend,
+            "stream": self.stream,
+            "title": self.title,
+            "created_at": _page_timestamp(self.source_created_at, self.created_at),
+            "updated_at": _page_timestamp(self.source_updated_at, self.updated_at),
+        }
 
 
 @dataclass(frozen=True)
@@ -93,19 +138,42 @@ class PageObjects:
     page-change pipeline clears its derived index state. Only the workspace owner may forget a
     page."""
 
-    async def list(self, ctx: ToolContext, query: str, cursor: str) -> ObjectPage:
-        pages = [
-            page for page in await self._pages(ctx) if query in page.name or query in page.summary()
-        ]
-        pages.sort(key=lambda page: page.name)
-        remaining = [page for page in pages if page.name > cursor] if cursor else pages
-        page_rows, rest = remaining[:OBJECT_LIST_PAGE], remaining[OBJECT_LIST_PAGE:]
-        rows = tuple(ObjectRow(name=page.name, summary=page.summary()) for page in page_rows)
-        return ObjectPage(rows=rows, next_cursor=page_rows[-1].name if rest else None)
+    async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
+        rows = tuple(
+            ObjectRow(name=page.name, summary=page.summary(), fields=page.fields())
+            for page in await self._pages(ctx)
+        )
+        return object_page(rows, query)
 
     async def get(self, ctx: ToolContext, name: str) -> PageSpec | None:
         page = await self._find(ctx, name)
-        return None if page is None else page.spec()
+        if page is None:
+            return None
+        chunks: list[bytes] = []
+        size = 0
+        stream = ctx.blob.get_stream(page.body_ref)
+        try:
+            async for chunk in stream:
+                remaining = PAGE_BODY_MAX_BYTES + 1 - size
+                chunks.append(chunk[:remaining])
+                size += len(chunk[:remaining])
+                if size > PAGE_BODY_MAX_BYTES:
+                    break
+        finally:
+            if isinstance(stream, AsyncGenerator):
+                await stream.aclose()
+        content = b"".join(chunks)
+        bounded = content[:PAGE_BODY_MAX_BYTES]
+        try:
+            body = bounded.decode("utf-8")
+        except UnicodeDecodeError as error:
+            if len(content) <= PAGE_BODY_MAX_BYTES or error.reason != "unexpected end of data":
+                raise
+            body = bounded[: error.start].decode("utf-8")
+        return page.spec(
+            body,
+            len(content) > PAGE_BODY_MAX_BYTES,
+        )
 
     async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
         page = await self._find(ctx, name)
@@ -142,6 +210,10 @@ class PageObjects:
                 id=record.id,
                 source_id=record.source_id,
                 backend=backends.get(record.source_id, ""),
+                stream=record.stream,
+                title=record.title,
+                source_created_at=record.source_created_at,
+                source_updated_at=record.source_updated_at,
                 subject=record.subject,
                 digest=record.digest,
                 body_ref=record.body_ref,
@@ -160,13 +232,15 @@ PAGE_OBJECT = ObjectKind(
         "sync driver."
     ),
     guidance=(
-        "List and get synced pages by kind and name (the page's row id); the spec carries the "
-        "source provider, visibility subject, content digest, and a blob reference — the body is "
-        "never inlined. Pages are landed by the content-sync driver, so create and update are "
+        "List synced pages with exact `filters` on source_id, source, stream, title, created_at, "
+        "or updated_at and `order_by` any of those fields; for example, filter one source's issues "
+        "and order by created_at desc. Get by name returns those fields plus a bounded page body. "
+        "Pages are landed by the content-sync driver, so create and update are "
         "refused; only the workspace owner can delete (forget) a page, which tombstones it and "
         "clears its derived index state. A source subscription's change alert references the "
         "changed pages by name so you can object_get them here."
     ),
     spec_model=PageSpec,
     store=PageObjects(),
+    list_fields=frozenset({"source_id", "source", "stream", "title", "created_at", "updated_at"}),
 )

@@ -98,8 +98,9 @@ terminal frame. A client's wait always ends — the terminal state commits on th
 - **Minimal built-in tools** — `bash`, `read`, `write`, `edit`,
   `ask_user`, `request_credentials`, `spawn_subagent`, `load_skill`, `share_file`, and the five
   object verbs (`object_list`/`get`/`explain`/`apply`/`delete`) over extension-registered kinds
-  (RFC 0017) — one generic CRUD surface instead of per-extension config tools. Everything else
-  arrives via extensions.
+  (RFC 0017) — one generic CRUD surface instead of per-extension config tools. Object lists accept
+  exact first-class-field filters and field ordering; gets return the kind's readable spec.
+  Everything else arrives via extensions.
   Two tools where one would do is a defect. `share_file` ports the shipped design: byte custody in
   the blob store, a TTL-bound token URL served by core's artifact route — no token, no bytes.
 

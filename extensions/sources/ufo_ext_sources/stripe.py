@@ -231,7 +231,7 @@ class StripeConnector(RestConnector):
             if extra_params:
                 params.update(extra_params)
             data = await self._get(client, path, params=params)
-            records = data.get("data") or []
+            records = [self._browse_record(record, stream) for record in data.get("data") or []]
             if records:
                 yield records
             if not data.get("has_more"):
@@ -240,6 +240,29 @@ class StripeConnector(RestConnector):
             if not isinstance(last, dict) or not last.get("id"):
                 return
             starting_after = str(last["id"])
+
+    @staticmethod
+    def _browse_record(record: dict[str, Any], stream: StreamSpec) -> dict[str, Any]:
+        normalized = dict(record)
+        for field in ("created_at", "updated_at"):
+            value = normalized.get(field)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                normalized[field] = datetime.fromtimestamp(value, UTC).isoformat()
+        created_value = normalized.get("created")
+        if (
+            normalized.get("created_at") is None
+            and isinstance(created_value, (int, float))
+            and not isinstance(created_value, bool)
+        ):
+            normalized["created_at"] = datetime.fromtimestamp(created_value, UTC).isoformat()
+        cursor_value = normalized.get(stream.cursor_field) if stream.cursor_field else None
+        if (
+            normalized.get("updated_at") is None
+            and isinstance(cursor_value, (int, float))
+            and not isinstance(cursor_value, bool)
+        ):
+            normalized["updated_at"] = datetime.fromtimestamp(cursor_value, UTC).isoformat()
+        return normalized
 
     async def _paginate_substream(
         self, client: httpx.AsyncClient, stream: StreamSpec

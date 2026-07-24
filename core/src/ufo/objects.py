@@ -18,11 +18,20 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from typing import ClassVar, Protocol, get_args
+from dataclasses import field as dataclass_field
+from typing import ClassVar, Literal, Protocol, get_args
 from uuid import UUID
 
 import yaml
-from pydantic import BaseModel, SecretBytes, SecretStr, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretBytes,
+    SecretStr,
+    ValidationError,
+    model_validator,
+)
 from pydantic.errors import PydanticInvalidForJsonSchema
 
 from ufo.ext.context import ExtensionContext, JsonValue
@@ -35,6 +44,8 @@ KIND_NAME_PATTERN = re.compile(r"[a-z][a-z0-9_]*")
 OBJECT_MANIFEST_MAX_BYTES = 65_536
 OBJECT_LIST_PAGE = 50
 ENVELOPE_KEYS = frozenset({"kind", "name", "spec"})
+
+type _SortRank = Literal[0, 1, 2, 3]
 
 
 class UnknownKind(ValueError):
@@ -67,19 +78,151 @@ class OwnerRequired(ValueError):
 
 @dataclass(frozen=True)
 class ObjectRow:
-    """One instance in a listing: its name and a one-line summary — never a full spec."""
+    """One instance in a listing: its name, one-line summary, and lightweight fields a caller may
+    filter or order on — never a full spec."""
 
     name: str
     summary: str
+    fields: Mapping[str, JsonValue] = dataclass_field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ObjectListQuery:
+    """The one listing contract every kind implements. `filters` are exact field matches;
+    `order_by` names `name`, `summary`, or a row field; `cursor` is a returned continuation
+    token."""
+
+    query: str = ""
+    filters: Mapping[str, JsonValue] = dataclass_field(default_factory=dict)
+    order_by: str = "name"
+    order: Literal["asc", "desc"] = "asc"
+    cursor: str = ""
+    supported_fields: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
 class ObjectPage:
-    """One page of a kind's instances. `next_cursor` is opaque to core: the store mints it and
-    resolves it on the next call; None means the listing is complete."""
+    """One page of a kind's instances. `next_cursor` is an opaque continuation token for the
+    caller; None means the listing is complete."""
 
     rows: tuple[ObjectRow, ...]
     next_cursor: str | None = None
+
+
+class _ObjectCursor(BaseModel):
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    order_by: str
+    order: Literal["asc", "desc"]
+    rank: _SortRank
+    value: str | int | float
+    name: str
+
+    @model_validator(mode="after")
+    def validate_rank(self) -> "_ObjectCursor":
+        match self.rank, self.value:
+            case (0, "") | (1, int()) | (2, int() | float()) | (3, str()):
+                return self
+            case _:
+                raise ValueError("cursor value does not match its sort rank")
+
+
+def object_page(rows: tuple[ObjectRow, ...], query: ObjectListQuery) -> ObjectPage:
+    """Apply the shared search/filter/order/page semantics to one kind's lightweight rows."""
+    reserved = {"name", "summary"}
+    collisions = reserved.intersection(field for row in rows for field in row.fields)
+    if collisions:
+        raise ValueError(f"object list fields collide with reserved fields: {sorted(collisions)}")
+    undeclared = {
+        field for row in rows for field in row.fields if field not in query.supported_fields
+    }
+    if undeclared:
+        raise ValueError(f"object list rows carry undeclared fields: {sorted(undeclared)}")
+    available = reserved.union(query.supported_fields)
+    requested = set(query.filters)
+    if not requested.issubset(available):
+        raise ValueError(
+            f"unknown object list filters {sorted(requested - available)}; "
+            f"available fields: {sorted(available)}"
+        )
+    if query.order_by not in available:
+        raise ValueError(
+            f"unknown object list order field {query.order_by!r}; "
+            f"available fields: {sorted(available)}"
+        )
+
+    def value(row: ObjectRow, name: str) -> JsonValue:
+        if name == "name":
+            return row.name
+        if name == "summary":
+            return row.summary
+        return row.fields.get(name)
+
+    matched = [
+        row
+        for row in rows
+        if (
+            query.query.casefold() in row.name.casefold()
+            or query.query.casefold() in row.summary.casefold()
+            or any(
+                query.query.casefold() in value.casefold()
+                for value in row.fields.values()
+                if isinstance(value, str)
+            )
+        )
+        and all(value(row, name) == expected for name, expected in query.filters.items())
+    ]
+
+    ordered = sorted(
+        matched,
+        key=lambda row: (_sortable(value(row, query.order_by), query.order_by), row.name),
+        reverse=query.order == "desc",
+    )
+    if query.cursor:
+        try:
+            cursor = _ObjectCursor.model_validate_json(bytes.fromhex(query.cursor))
+        except (ValueError, ValidationError) as error:
+            raise ValueError("invalid object list cursor") from error
+        if (cursor.order_by, cursor.order) != (query.order_by, query.order):
+            raise ValueError("object list cursor does not match the requested order")
+        boundary = ((cursor.rank, cursor.value), cursor.name)
+        ordered = [
+            row
+            for row in ordered
+            if (
+                (_sortable(value(row, query.order_by), query.order_by), row.name) > boundary
+                if query.order == "asc"
+                else (_sortable(value(row, query.order_by), query.order_by), row.name) < boundary
+            )
+        ]
+    page, rest = ordered[:OBJECT_LIST_PAGE], ordered[OBJECT_LIST_PAGE:]
+    if not rest:
+        return ObjectPage(rows=tuple(page))
+    rank, boundary_value = _sortable(value(page[-1], query.order_by), query.order_by)
+    cursor = _ObjectCursor(
+        order_by=query.order_by,
+        order=query.order,
+        rank=rank,
+        value=boundary_value,
+        name=page[-1].name,
+    )
+    return ObjectPage(rows=tuple(page), next_cursor=cursor.model_dump_json().encode().hex())
+
+
+def _sortable(value: JsonValue, field_name: str) -> tuple[_SortRank, str | int | float]:
+    match value:
+        case None:
+            return (0, "")
+        case bool():
+            return (1, int(value))
+        case int() | float():
+            return (2, value)
+        case str():
+            return (3, value)
+        case _:
+            raise ValueError(
+                f"object list field {field_name!r} contains a non-scalar value and cannot order"
+            )
 
 
 class ObjectStore[SpecT: BaseModel](Protocol):
@@ -89,7 +232,7 @@ class ObjectStore[SpecT: BaseModel](Protocol):
     mapping is the honest type. Handlers raise `VerbNotSupported` / `OwnerRequired` / domain
     `ValueError`s; each renders as the tool error."""
 
-    async def list(self, ctx: ToolContext, query: str, cursor: str) -> ObjectPage: ...
+    async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage: ...
 
     async def get(self, ctx: ToolContext, name: str) -> SpecT | None: ...
 
@@ -138,24 +281,15 @@ class MemberOwnedObjects[SpecT: BaseModel]:
     mutate_requires_speaker: ClassVar[bool] = False
     delete_requires_speaker: ClassVar[bool] = False
 
-    async def list(self, ctx: ToolContext, query: str, cursor: str) -> ObjectPage:
+    async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
         is_owner = await ctx.speaker_is_owner()
         acting = ctx.acting_member_id
-        rows = sorted(
-            (
-                row
-                for row in await self._owned_rows(ctx)
-                if self._visible(row.owner, acting, is_owner)
-                and (query in row.name or query in row.summary)
-            ),
-            key=lambda row: row.name,
+        rows = tuple(
+            ObjectRow(name=row.name, summary=row.summary)
+            for row in await self._owned_rows(ctx)
+            if self._visible(row.owner, acting, is_owner)
         )
-        remaining = [row for row in rows if row.name > cursor] if cursor else rows
-        page, rest = remaining[:OBJECT_LIST_PAGE], remaining[OBJECT_LIST_PAGE:]
-        return ObjectPage(
-            rows=tuple(ObjectRow(name=row.name, summary=row.summary) for row in page),
-            next_cursor=page[-1].name if rest else None,
-        )
+        return object_page(rows, query)
 
     async def get(self, ctx: ToolContext, name: str) -> SpecT | None:
         owner = await self._owner(ctx, name)
@@ -239,13 +373,15 @@ class ObjectKind[SpecT: BaseModel]:
     what mutations the kind accepts and by whom, the guidance `object_explain` returns verbatim —
     a kind that replaces bespoke tools carries their tuned descriptions ~verbatim there, so no
     instruction is lost with the tool — the model every authored spec validates against, and the
-    store whose handlers do the work."""
+    store whose handlers do the work. `list_fields` declares every lightweight field its rows
+    produce, so filter and order validation is independent of whether any rows currently exist."""
 
     name: str
     description: str
     guidance: str
     spec_model: type[SpecT]
     store: ObjectStore[SpecT]
+    list_fields: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -280,6 +416,9 @@ def object_registry(bound: tuple[BoundKind, ...]) -> dict[str, BoundKind]:
 
 def _validate_spec_model(owner: str, kind: ObjectKind) -> None:
     label = f"{owner!r} object kind {kind.name!r}"
+    unknown_list_fields = kind.list_fields.difference(kind.spec_model.model_fields)
+    if unknown_list_fields:
+        raise ValueError(f"{label}: list fields are not spec fields: {sorted(unknown_list_fields)}")
     for model in _reachable_models(kind.spec_model):
         if model.model_config.get("extra") != "forbid":
             raise ValueError(f'{label}: spec model {model.__name__} must set extra="forbid"')
@@ -331,6 +470,9 @@ def _annotation_types(annotation: object) -> tuple[object, ...]:
 class ObjectListInput(BaseModel):
     kind: str = ""
     query: str = ""
+    filters: dict[str, JsonValue] = Field(default_factory=dict)
+    order_by: str = "name"
+    order: Literal["asc", "desc"] = "asc"
     cursor: str = ""
 
 
@@ -367,7 +509,8 @@ class ObjectVerbs:
                 description=(
                     "List workspace objects. With no arguments, lists every registered kind with "
                     "its description. With a kind, lists that kind's instances one line each — "
-                    "`query` filters (each kind interprets it; substring by default) and a "
+                    "`query` searches names, summaries, and string fields; `filters` exactly "
+                    "matches first-class fields, and `order_by` with `order` sorts by a field. A "
                     "returned `next_cursor` passed back as `cursor` fetches the next page. Use "
                     "object_get for one instance's full spec."
                 ),
@@ -429,9 +572,21 @@ class ObjectVerbs:
             ]
             return _json_result({"kinds": kinds})
         bound = self._resolve(args.kind)
-        page = await bound.kind.store.list(self._bound_ctx(ctx, bound), args.query, args.cursor)
+        page = await bound.kind.store.list(
+            self._bound_ctx(ctx, bound),
+            ObjectListQuery(
+                query=args.query,
+                filters=args.filters,
+                order_by=args.order_by,
+                order=args.order,
+                cursor=args.cursor,
+                supported_fields=bound.kind.list_fields,
+            ),
+        )
         listing: dict[str, JsonValue] = {
-            "objects": [{"name": row.name, "summary": row.summary} for row in page.rows]
+            "objects": [
+                {"name": row.name, "summary": row.summary, **row.fields} for row in page.rows
+            ]
         }
         if page.next_cursor is not None:
             listing["next_cursor"] = page.next_cursor

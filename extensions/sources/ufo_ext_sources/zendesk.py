@@ -274,8 +274,14 @@ class ZendeskConnector(RestConnector):
                         continue
                     enriched = dict(child)
                     enriched["ticket_id"] = event.get("ticket_id")
-                    if "created_at" not in enriched and event.get("timestamp"):
-                        enriched["created_at"] = event["timestamp"]
+                    created_at = enriched.get("created_at", event.get("timestamp"))
+                    if created_at is not None:
+                        enriched["created_at"] = (
+                            datetime.fromtimestamp(created_at, UTC).isoformat()
+                            if isinstance(created_at, (int, float))
+                            and not isinstance(created_at, bool)
+                            else created_at
+                        )
                     comments.append(enriched)
             if comments:
                 yield comments

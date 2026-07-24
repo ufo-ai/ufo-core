@@ -17,7 +17,15 @@ from pydantic import BaseModel, ConfigDict, Field
 from ufo.db import workspace_tx
 from ufo.ext.context import JsonValue
 from ufo.governance import prompt_digest
-from ufo.objects import ObjectKind, ObjectPage, ObjectRow, OwnerRequired, VerbNotSupported
+from ufo.objects import (
+    ObjectKind,
+    ObjectListQuery,
+    ObjectPage,
+    ObjectRow,
+    OwnerRequired,
+    VerbNotSupported,
+    object_page,
+)
 from ufo.schema import tables
 from ufo.tools.context import ToolContext
 from ufo.workspace import ws_current
@@ -45,7 +53,7 @@ class AgentObjects:
     owner-gated; the prompt is proposal-owned and rendered read-only in status; the row's name is
     the object's name."""
 
-    async def list(self, ctx: ToolContext, query: str, cursor: str) -> ObjectPage:
+    async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
@@ -54,13 +62,12 @@ class AgentObjects:
                     .order_by(tables.agent.c.name)
                 )
             ).all()
-        matched = [row for row in rows if query in row.name or query in row.model]
-        remaining = [row for row in matched if row.name > cursor] if cursor else matched
-        return ObjectPage(
+        return object_page(
             rows=tuple(
                 ObjectRow(name=row.name, summary=f"the workspace agent, on {row.model}")
-                for row in remaining
-            )
+                for row in rows
+            ),
+            query=query,
         )
 
     async def get(self, ctx: ToolContext, name: str) -> AgentSpec | None:

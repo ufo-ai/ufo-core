@@ -155,6 +155,9 @@ async def test_blocks_walk_recurses_and_render_extracts_block_text() -> None:
     paragraph_body = next(p.body for p in result.pages if p.source_ref == "blocks/b1")
     assert "Ship the launch by Friday" in paragraph_body
     assert "rich_text" not in paragraph_body
+    assert next(p.title for p in result.pages if p.source_ref == "blocks/b1") == (
+        "Ship the launch by Friday"
+    )
 
     nested_body = next(p.body for p in result.pages if p.source_ref == "blocks/b2")
     assert "[x] Draft the email" in nested_body
@@ -187,6 +190,7 @@ async def test_comments_fan_out_per_page_and_render_the_body() -> None:
     result = await _fetch("comments", _comments_handler())
     assert {page.source_ref for page in result.pages} == {"comments/cm1"}
     assert "Looks good to me" in result.pages[0].body
+    assert result.pages[0].title == "Looks good to me"
 
 
 async def test_users_collection_renders_name_and_email() -> None:

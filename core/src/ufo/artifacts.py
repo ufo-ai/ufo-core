@@ -32,7 +32,14 @@ from ufo.artifact_token import (
 from ufo.blob import BlobNotFound
 from ufo.db import workspace_tx
 from ufo.ext.context import JsonValue
-from ufo.objects import OBJECT_LIST_PAGE, ObjectKind, ObjectPage, ObjectRow, VerbNotSupported
+from ufo.objects import (
+    ObjectKind,
+    ObjectListQuery,
+    ObjectPage,
+    ObjectRow,
+    VerbNotSupported,
+    object_page,
+)
 from ufo.schema import tables
 from ufo.tools.context import ToolContext
 from ufo.workspace import ws_current
@@ -99,19 +106,19 @@ class ArtifactObjects:
     so `apply` and `delete` fetching the current spec never write into the workspace as a side
     effect."""
 
-    async def list(self, ctx: ToolContext, query: str, cursor: str) -> ObjectPage:
-        needle = query.casefold()
-        groups = [
-            (name, shares)
+    async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
+        rows = tuple(
+            ObjectRow(
+                name=name,
+                summary=_summary(shares),
+                fields={
+                    "filename": shares[0].filename,
+                    "subject": shares[0].subject or "",
+                },
+            )
             for name, shares in await self._groups()
-            if needle in name
-            or needle in shares[0].filename.casefold()
-            or needle in (shares[0].subject or "").casefold()
-        ]
-        remaining = [(n, s) for n, s in groups if n > cursor] if cursor else groups
-        page, rest = remaining[:OBJECT_LIST_PAGE], remaining[OBJECT_LIST_PAGE:]
-        rows = tuple(ObjectRow(name=name, summary=_summary(shares)) for name, shares in page)
-        return ObjectPage(rows=rows, next_cursor=page[-1][0] if rest else None)
+        )
+        return object_page(rows, query)
 
     async def get(self, ctx: ToolContext, name: str) -> ArtifactSpec | None:
         shares = await self._find(name)
@@ -250,4 +257,5 @@ ARTIFACT_OBJECT = ObjectKind(
     ),
     spec_model=ArtifactSpec,
     store=ArtifactObjects(),
+    list_fields=frozenset({"filename", "subject"}),
 )

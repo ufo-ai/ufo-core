@@ -264,6 +264,12 @@ async def test_sample_is_discovered_via_its_entry_point() -> None:
     assert {spec.backend for spec in manifest.search_providers} == {sample.SEARCH_PROVIDER}
 
 
+@pytest.mark.parametrize("topic", ["", "\n", " \t"])
+def test_sample_source_requires_a_nonempty_topic(topic: str) -> None:
+    with pytest.raises(ValueError):
+        sample.SampleSourceConfig(topic=topic)
+
+
 def test_core_selects_a_manifest_contributed_hub() -> None:
     """The `hubs` seam end to end: core's boot-time selection knows only the in-process default, so
     resolving the sample's backend name proves the Manifest `hubs` point flowed into selection.

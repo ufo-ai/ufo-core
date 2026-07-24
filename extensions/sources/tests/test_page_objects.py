@@ -1,14 +1,18 @@
 """The `page` object kind end to end: synced pages read through the object verbs, forgotten by
 the owner.
 
-Rows are seeded where the sync driver lands them; the tests drive list/get/status through the real
-tool dispatch, prove create and update are refused naming the sync driver, and prove delete
-tombstones the row and is owner-gated.
+Rows are landed through the sync driver for the producer-consumer proof and seeded directly for
+row-specific cases. The tests drive list/get/status through the real tool dispatch, prove create
+and update are refused naming the sync driver, and prove delete tombstones the row and is
+owner-gated.
 """
 
 import json
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import ClassVar
 from uuid import UUID, uuid4
 
 import pytest
@@ -16,9 +20,10 @@ import sqlalchemy as sa
 import yaml
 from cryptography.fernet import Fernet
 from ufo_ext_sources.manifest import NAME, manifest
-from ufo_ext_sources.pages import PAGE_KIND
+from ufo_ext_sources.pages import PAGE_BODY_MAX_BYTES, PAGE_KIND, PageObjects, _page_timestamp
 from ufo_ext_sources.registry import CONNECTORS
 
+from ufo.blob import FilesystemBlobStore
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import context_for
@@ -27,7 +32,9 @@ from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.connectors import ConnectorRegistry
 from ufo.sdk.objects import OwnerRequired, VerbNotSupported
+from ufo.sdk.sources import ConnectorSourceConfig, Page, SourceAuth, SyncResult
 from ufo.sdk.tools import ToolContext
+from ufo.sources.sync import SyncDriver
 from ufo.tools.registry import ToolDef
 from ufo.workspace import ws
 
@@ -43,6 +50,17 @@ class _Workspace:
     member_id: UUID
     agent_id: UUID
     conversation_id: UUID
+
+
+@dataclass(frozen=True)
+class _PageSource:
+    page: Page
+    config_model: ClassVar[type[ConnectorSourceConfig]] = ConnectorSourceConfig
+
+    async def fetch(
+        self, config: ConnectorSourceConfig, cursor: str | None, auth: SourceAuth
+    ) -> SyncResult:
+        return SyncResult(pages=(self.page,))
 
 
 async def _workspace() -> _Workspace:
@@ -104,11 +122,13 @@ _TOOLS: dict[str, ToolDef] = {
 }
 
 
-def _context(state: _Workspace, *, speaker_id: UUID | None = None) -> ToolContext:
+def _context(
+    state: _Workspace, blob: FilesystemBlobStore, *, speaker_id: UUID | None = None
+) -> ToolContext:
     ext = context_for(NAME, DECLARED_PROVIDERS)
     return ToolContext(
         sandbox=None,
-        blob=None,
+        blob=blob,
         turn=Turn(
             id=uuid4(),
             workspace_id=state.workspace_id,
@@ -130,8 +150,8 @@ def _context(state: _Workspace, *, speaker_id: UUID | None = None) -> ToolContex
     )
 
 
-async def _seed_source(state: _Workspace, backend: str) -> UUID:
-    source_id = uuid4()
+async def _seed_source(state: _Workspace, backend: str, *, source_id: UUID | None = None) -> UUID:
+    source_id = uuid4() if source_id is None else source_id
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.source).values(
@@ -148,9 +168,22 @@ async def _seed_source(state: _Workspace, backend: str) -> UUID:
 
 
 async def _seed_page(
-    state: _Workspace, source_id: UUID, subject: str = "shared", tombstone: bool = False
+    state: _Workspace,
+    source_id: UUID,
+    blob: FilesystemBlobStore,
+    *,
+    stream: str = "issues",
+    title: str = "Fix the flux capacitor",
+    source_created_at: str | None = "2026-07-09T00:00:00Z",
+    body: str | None = None,
+    subject: str = "shared",
+    tombstone: bool = False,
+    page_id: UUID | None = None,
 ) -> UUID:
-    page_id = uuid4()
+    page_id = uuid4() if page_id is None else page_id
+    body_ref = f"pages/{page_id}"
+    content = f"# {title}\n\nIssue body" if body is None else body
+    await blob.put(body_ref, content.encode())
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.page).values(
@@ -158,7 +191,11 @@ async def _seed_page(
                 workspace_id=state.workspace_id,
                 source_id=source_id,
                 digest="sha256:abc",
-                body_ref="pages/abc",
+                body_ref=body_ref,
+                stream=stream,
+                title=title,
+                source_created_at=source_created_at,
+                source_updated_at=source_created_at,
                 subject=subject,
                 tombstone=tombstone,
                 created_at=datetime(2026, 7, 9, tzinfo=UTC),
@@ -189,74 +226,378 @@ def test_manifest_declares_the_page_kind() -> None:
     assert {kind.name for kind in declared.objects} >= {PAGE_KIND}
 
 
-async def test_pages_list_and_read_through_the_verbs(db: None) -> None:
+async def test_sync_driver_page_metadata_round_trips_through_object_verbs(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
     state = await _workspace()
-    with ws(state.workspace_id):
-        source_id = await _seed_source(state, "asana")
-        page_id = await _seed_page(state, source_id)
-        ctx = _context(state)
+    blob = FilesystemBlobStore(root=tmp_path)
+    source_id = await _seed_source(state, "probe")
+    page = Page(
+        source_ref="issues/ENG-42",
+        digest="sha256:issue",
+        body="Issue body",
+        stream="issues",
+        title="Fix launch sequencing",
+        created_at="2026-07-01T12:00:00Z",
+        updated_at="2026-07-23T18:30:00Z",
+    )
+    driver = SyncDriver(
+        backends={"probe": _PageSource(page)},
+        blob=blob,
+        postgres=database_url.startswith("postgresql"),
+    )
 
-        listing = json.loads(await _text(_TOOLS["object_list"], ctx, kind=PAGE_KIND))
-        assert [row["name"] for row in listing["objects"]] == [str(page_id)]
-        assert "asana" in listing["objects"][0]["summary"]
+    with ws(state.workspace_id):
+        await driver.run()
+        ctx = _context(state, blob)
+        listing = json.loads(
+            await _text(
+                _TOOLS["object_list"],
+                ctx,
+                kind=PAGE_KIND,
+                filters={"source_id": str(source_id), "stream": page.stream},
+                order_by="updated_at",
+                order="desc",
+            )
+        )
+        assert len(listing["objects"]) == 1
+        listed = listing["objects"][0]
+        assert listed["source_id"] == str(source_id)
+        assert listed["source"] == "probe"
+        assert listed["stream"] == page.stream
+        assert listed["title"] == page.title
+        assert listed["created_at"] == "2026-07-01T12:00:00.000000+00:00"
+        assert listed["updated_at"] == "2026-07-23T18:30:00.000000+00:00"
 
         fetched = yaml.safe_load(
-            await _text(_TOOLS["object_get"], ctx, kind=PAGE_KIND, name=str(page_id))
+            await _text(_TOOLS["object_get"], ctx, kind=PAGE_KIND, name=listed["name"])
         )
-        assert fetched["spec"] == {
-            "source": "asana",
-            "subject": "shared",
-            "digest": "sha256:abc",
-            "body_ref": "pages/abc",
-        }
+        assert fetched["spec"]["source_id"] == str(source_id)
+        assert fetched["spec"]["stream"] == page.stream
+        assert fetched["spec"]["title"] == page.title
+        assert fetched["spec"]["created_at"] == "2026-07-01T12:00:00.000000+00:00"
+        assert fetched["spec"]["updated_at"] == "2026-07-23T18:30:00.000000+00:00"
+        assert fetched["spec"]["body"] == page.body
+
+
+async def test_pages_list_filter_order_and_read_body_through_the_verbs(
+    db: None, tmp_path: Path
+) -> None:
+    state = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    with ws(state.workspace_id):
+        source_id = await _seed_source(state, "asana", source_id=UUID(int=2))
+        newest = await _seed_page(
+            state,
+            source_id,
+            blob,
+            title="Newest issue",
+            source_created_at="2026-07-11T00:00:00Z",
+            page_id=UUID(int=1),
+        )
+        await _seed_page(
+            state,
+            source_id,
+            blob,
+            title="Older issue",
+            source_created_at="2026-07-10T00:00:00Z",
+            page_id=UUID(int=2),
+        )
+        await _seed_page(
+            state,
+            source_id,
+            blob,
+            stream="pull_requests",
+            title="Newest pull request",
+            source_created_at="2026-07-12T00:00:00Z",
+            page_id=UUID(int=3),
+        )
+        other_source_id = await _seed_source(state, "github", source_id=UUID(int=1))
+        await _seed_page(
+            state,
+            other_source_id,
+            blob,
+            title="Other source issue",
+            source_created_at="2026-07-08T00:00:00Z",
+            page_id=UUID(int=4),
+        )
+        ctx = _context(state, blob)
+
+        listing = json.loads(
+            await _text(
+                _TOOLS["object_list"],
+                ctx,
+                kind=PAGE_KIND,
+                filters={"source_id": str(source_id), "stream": "issues"},
+                order_by="created_at",
+                order="desc",
+            )
+        )
+        assert [row["title"] for row in listing["objects"]] == ["Newest issue", "Older issue"]
+        assert listing["objects"][0]["source"] == "asana"
+        assert listing["objects"][0]["stream"] == "issues"
+
+        by_source_id = json.loads(
+            await _text(
+                _TOOLS["object_list"],
+                ctx,
+                kind=PAGE_KIND,
+                order_by="source_id",
+            )
+        )
+        assert [row["source_id"] for row in by_source_id["objects"]] == sorted(
+            row["source_id"] for row in by_source_id["objects"]
+        )
+        by_stream = json.loads(
+            await _text(
+                _TOOLS["object_list"],
+                ctx,
+                kind=PAGE_KIND,
+                order_by="stream",
+            )
+        )
+        assert [row["stream"] for row in by_stream["objects"]] == sorted(
+            row["stream"] for row in by_stream["objects"]
+        )
+
+        for field_name, value in (
+            ("source", "asana"),
+            ("title", "Newest issue"),
+            ("updated_at", "2026-07-11T00:00:00.000000+00:00"),
+        ):
+            by_field = json.loads(
+                await _text(
+                    _TOOLS["object_list"],
+                    ctx,
+                    kind=PAGE_KIND,
+                    filters={field_name: value},
+                    order_by=field_name,
+                )
+            )
+            assert any(row["name"] == str(newest) for row in by_field["objects"])
+
+        fetched = yaml.safe_load(
+            await _text(_TOOLS["object_get"], ctx, kind=PAGE_KIND, name=str(newest))
+        )
+        assert fetched["spec"]["source_id"] == str(source_id)
+        assert fetched["spec"]["stream"] == "issues"
+        assert fetched["spec"]["title"] == "Newest issue"
+        assert fetched["spec"]["created_at"] == "2026-07-11T00:00:00.000000+00:00"
+        assert fetched["spec"]["body"] == "# Newest issue\n\nIssue body"
+        assert fetched["spec"]["body_truncated"] is False
         assert fetched["status"]["backend"] == "asana"
         assert fetched["status"]["source_id"] == str(source_id)
 
 
-async def test_tombstoned_pages_never_list(db: None) -> None:
+async def test_pages_order_timestamp_variants_chronologically(db: None, tmp_path: Path) -> None:
     state = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    with ws(state.workspace_id):
+        source_id = await _seed_source(state, "probe")
+        older = await _seed_page(
+            state,
+            source_id,
+            blob,
+            title="Whole second",
+            source_created_at="2026-07-23T18:30:00Z",
+        )
+        newer = await _seed_page(
+            state,
+            source_id,
+            blob,
+            title="Half second later",
+            source_created_at="2026-07-23T14:30:00.500000-04:00",
+        )
+        listing = json.loads(
+            await _text(
+                _TOOLS["object_list"],
+                _context(state, blob),
+                kind=PAGE_KIND,
+                order_by="created_at",
+                order="desc",
+            )
+        )
+        assert [row["name"] for row in listing["objects"]] == [str(newer), str(older)]
+        assert [row["created_at"] for row in listing["objects"]] == [
+            "2026-07-23T18:30:00.500000+00:00",
+            "2026-07-23T18:30:00.000000+00:00",
+        ]
+
+
+async def test_pages_without_provider_timestamps_use_row_timestamps(
+    db: None, tmp_path: Path
+) -> None:
+    state = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    with ws(state.workspace_id):
+        source_id = await _seed_source(state, "probe")
+        page_id = await _seed_page(state, source_id, blob, source_created_at=None)
+        ctx = _context(state, blob)
+
+        listing = json.loads(await _text(_TOOLS["object_list"], ctx, kind=PAGE_KIND))
+        listed = next(row for row in listing["objects"] if row["name"] == str(page_id))
+        assert listed["created_at"] == "2026-07-09T00:00:00.000000+00:00"
+        assert listed["updated_at"] == "2026-07-09T00:00:00.000000+00:00"
+
+        fetched = yaml.safe_load(
+            await _text(_TOOLS["object_get"], ctx, kind=PAGE_KIND, name=str(page_id))
+        )
+        assert fetched["spec"]["created_at"] == "2026-07-09T00:00:00.000000+00:00"
+        assert fetched["spec"]["updated_at"] == "2026-07-09T00:00:00.000000+00:00"
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("not-a-time", "invalid page timestamp"),
+        ("2026-07-23T18:30:00", "lacks a timezone"),
+    ],
+)
+def test_page_timestamp_rejects_invalid_values(value: str, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        _page_timestamp(value, datetime(2026, 7, 9, tzinfo=UTC))
+
+
+async def test_page_get_bounds_an_oversized_body(db: None, tmp_path: Path) -> None:
+    state = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
     with ws(state.workspace_id):
         source_id = await _seed_source(state, "asana")
-        await _seed_page(state, source_id, tombstone=True)
-        ctx = _context(state)
+        page_id = await _seed_page(
+            state,
+            source_id,
+            blob,
+            body="x" * (PAGE_BODY_MAX_BYTES - 1) + "🙂",
+        )
+        fetched = yaml.safe_load(
+            await _text(
+                _TOOLS["object_get"],
+                _context(state, blob),
+                kind=PAGE_KIND,
+                name=str(page_id),
+            )
+        )
+        assert fetched["spec"]["body"] == "x" * (PAGE_BODY_MAX_BYTES - 1)
+        assert "�" not in fetched["spec"]["body"]
+        assert fetched["spec"]["body_truncated"] is True
+
+
+async def test_page_get_rejects_corrupted_utf8(db: None, tmp_path: Path) -> None:
+    state = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    with ws(state.workspace_id):
+        source_id = await _seed_source(state, "asana")
+        page_id = await _seed_page(state, source_id, blob)
+        await blob.put(f"pages/{page_id}", b"corrupted\xff")
+        with pytest.raises(UnicodeDecodeError):
+            await PageObjects().get(_context(state, blob), str(page_id))
+
+
+async def test_page_get_rejects_corruption_at_the_truncation_boundary(
+    db: None, tmp_path: Path
+) -> None:
+    state = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    with ws(state.workspace_id):
+        source_id = await _seed_source(state, "asana")
+        page_id = await _seed_page(state, source_id, blob)
+        content = b"x" * (PAGE_BODY_MAX_BYTES - 1) + b"\xff" + b"tail"
+        await blob.put(f"pages/{page_id}", content)
+        with pytest.raises(UnicodeDecodeError):
+            await PageObjects().get(_context(state, blob), str(page_id))
+
+
+async def test_page_get_closes_an_oversized_body_stream(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    closed = False
+    original_get_stream = FilesystemBlobStore.get_stream
+
+    async def observed_get_stream(store: FilesystemBlobStore, key: str) -> AsyncIterator[bytes]:
+        nonlocal closed
+        try:
+            async for chunk in original_get_stream(store, key):
+                yield chunk
+        finally:
+            closed = True
+
+    monkeypatch.setattr(FilesystemBlobStore, "get_stream", observed_get_stream)
+    with ws(state.workspace_id):
+        source_id = await _seed_source(state, "asana")
+        page_id = await _seed_page(
+            state,
+            source_id,
+            blob,
+            body="x" * (PAGE_BODY_MAX_BYTES + 1),
+        )
+        await _text(
+            _TOOLS["object_get"],
+            _context(state, blob),
+            kind=PAGE_KIND,
+            name=str(page_id),
+        )
+        assert closed is True
+
+
+async def test_tombstoned_pages_never_list(db: None, tmp_path: Path) -> None:
+    state = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    with ws(state.workspace_id):
+        source_id = await _seed_source(state, "asana")
+        await _seed_page(state, source_id, blob, tombstone=True)
+        ctx = _context(state, blob)
         listing = json.loads(await _text(_TOOLS["object_list"], ctx, kind=PAGE_KIND))
         assert listing["objects"] == []
 
 
-async def test_create_and_update_are_refused_naming_the_sync_driver(db: None) -> None:
+async def test_create_and_update_are_refused_naming_the_sync_driver(
+    db: None, tmp_path: Path
+) -> None:
     state = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
     apply_tool = _TOOLS["object_apply"]
     manifest_text = yaml.safe_dump(
         {
             "kind": PAGE_KIND,
             "name": str(uuid4()),
             "spec": {
+                "source_id": str(uuid4()),
                 "source": "asana",
+                "stream": "issues",
+                "title": "Issue",
+                "created_at": "2026-07-09T00:00:00Z",
+                "updated_at": "2026-07-09T00:00:00Z",
                 "subject": "shared",
                 "digest": "sha256:abc",
                 "body_ref": "pages/abc",
+                "body": "body",
+                "body_truncated": False,
             },
         }
     )
     with ws(state.workspace_id), pytest.raises(VerbNotSupported, match="sync"):
         await apply_tool.handler(
-            _context(state), apply_tool.input_model.model_validate({"manifest": manifest_text})
+            _context(state, blob),
+            apply_tool.input_model.model_validate({"manifest": manifest_text}),
         )
 
 
-async def test_delete_tombstones_and_is_owner_gated(db: None) -> None:
+async def test_delete_tombstones_and_is_owner_gated(db: None, tmp_path: Path) -> None:
     state = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
     delete_tool = _TOOLS["object_delete"]
     with ws(state.workspace_id):
         source_id = await _seed_source(state, "asana")
-        page_id = await _seed_page(state, source_id)
+        page_id = await _seed_page(state, source_id, blob)
         args = delete_tool.input_model.model_validate({"kind": PAGE_KIND, "name": str(page_id)})
         with pytest.raises(OwnerRequired):
-            await delete_tool.handler(_context(state, speaker_id=state.member_id), args)
+            await delete_tool.handler(_context(state, blob, speaker_id=state.member_id), args)
         assert await _tombstone(state, page_id) in (False, 0)
 
         deleted = json.loads(
-            await _text(delete_tool, _context(state), kind=PAGE_KIND, name=str(page_id))
+            await _text(delete_tool, _context(state, blob), kind=PAGE_KIND, name=str(page_id))
         )
         assert deleted["deleted"] is True
         assert deleted["spec"]["source"] == "asana"

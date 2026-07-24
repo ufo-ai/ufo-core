@@ -59,7 +59,12 @@ def _users_handler() -> Callable[[httpx.Request], httpx.Response]:
                 json={
                     "data": {
                         "users": [
-                            {"id": "u1", "name": "Ada", "email": "ada@x.com", "created_at": "2026"}
+                            {
+                                "id": "u1",
+                                "name": "Ada",
+                                "email": "ada@x.com",
+                                "created_at": "2026-01-01",
+                            }
                         ]
                     }
                 },

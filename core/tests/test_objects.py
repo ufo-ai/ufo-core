@@ -43,13 +43,16 @@ from ufo.objects import (
     InvalidName,
     MemberOwnedObjects,
     ObjectKind,
+    ObjectListQuery,
     ObjectOwner,
+    ObjectRow,
     OwnedRow,
     OwnerRequired,
     SpecValidationFailed,
     UnknownKind,
     UnknownObject,
     VerbNotSupported,
+    object_page,
     object_registry,
 )
 from ufo.sandbox.local import LocalCarrier
@@ -182,6 +185,32 @@ async def test_widget_crud_round_trips_through_the_verbs(db: None) -> None:
         kinds = json.loads(await _text(tools, "object_list", ctx))["kinds"]
         assert {row["kind"] for row in kinds} >= {sample.WIDGET_KIND, sample.RELIC_KIND}
 
+        empty = json.loads(
+            await _text(
+                tools,
+                "object_list",
+                ctx,
+                kind=sample.WIDGET_KIND,
+                filters={"color": "teal"},
+            )
+        )
+        assert empty["objects"] == []
+        list_tool = tools["object_list"]
+        with pytest.raises(ValueError, match="unknown object list filters"):
+            await list_tool.handler(
+                ctx,
+                list_tool.input_model.model_validate(
+                    {"kind": sample.WIDGET_KIND, "filters": {"colour": "teal"}}
+                ),
+            )
+        with pytest.raises(ValueError, match="unknown object list order field"):
+            await list_tool.handler(
+                ctx,
+                list_tool.input_model.model_validate(
+                    {"kind": sample.WIDGET_KIND, "order_by": "weight"}
+                ),
+            )
+
         created = json.loads(
             await _text(tools, "object_apply", ctx, manifest=_widget_manifest("anvil"))
         )
@@ -311,7 +340,7 @@ async def test_list_pages_with_cursor_and_query(db: None) -> None:
 
         first = json.loads(await _text(tools, "object_list", ctx, kind=sample.WIDGET_KIND))
         assert len(first["objects"]) == OBJECT_LIST_PAGE
-        assert first["next_cursor"] == first["objects"][-1]["name"]
+        assert first["next_cursor"]
 
         second = json.loads(
             await _text(
@@ -327,6 +356,113 @@ async def test_list_pages_with_cursor_and_query(db: None) -> None:
             await _text(tools, "object_list", ctx, kind=sample.WIDGET_KIND, query="w-003")
         )
         assert [row["name"] for row in filtered["objects"]] == ["w-003"]
+
+        by_field = json.loads(
+            await _text(
+                tools,
+                "object_list",
+                ctx,
+                kind=sample.WIDGET_KIND,
+                filters={"color": "teal"},
+                order_by="size",
+                order="desc",
+            )
+        )
+        assert len(by_field["objects"]) == OBJECT_LIST_PAGE
+        assert by_field["objects"][0]["color"] == "teal"
+        assert by_field["objects"][0]["size"] == 1
+
+
+def test_object_page_cursor_survives_a_removed_boundary_row() -> None:
+    rows = tuple(
+        ObjectRow(name=f"w-{index:03d}", summary="", fields={"size": index % 3})
+        for index in range(OBJECT_LIST_PAGE + 5)
+    )
+    query = ObjectListQuery(
+        order_by="size",
+        order="desc",
+        supported_fields=frozenset({"size"}),
+    )
+    first = object_page(rows, query)
+    assert first.next_cursor is not None
+    remaining = tuple(row for row in rows if row.name != first.rows[-1].name)
+    second = object_page(remaining, replace(query, cursor=first.next_cursor))
+
+    ordered = sorted(
+        rows,
+        key=lambda row: (row.fields["size"], row.name),
+        reverse=True,
+    )
+    assert [row.name for row in second.rows] == [row.name for row in ordered[OBJECT_LIST_PAGE:]]
+
+
+def test_object_page_rejects_a_cursor_from_another_name_order() -> None:
+    rows = tuple(
+        ObjectRow(name=f"w-{index:03d}", summary="") for index in range(OBJECT_LIST_PAGE + 5)
+    )
+    first = object_page(rows, ObjectListQuery(order="asc"))
+    assert first.next_cursor is not None
+    with pytest.raises(ValueError, match="cursor does not match the requested order"):
+        object_page(rows, ObjectListQuery(order="desc", cursor=first.next_cursor))
+
+
+def test_object_page_rejects_a_malformed_cursor() -> None:
+    rows = (ObjectRow(name="widget", summary=""),)
+    with pytest.raises(ValueError, match="invalid object list cursor"):
+        object_page(rows, ObjectListQuery(cursor="not-hex"))
+
+
+def test_object_page_rejects_a_cursor_with_an_invalid_sort_rank() -> None:
+    rows = (ObjectRow(name="widget", summary=""),)
+    cursor = (
+        json.dumps(
+            {
+                "order_by": "name",
+                "order": "asc",
+                "rank": 0,
+                "value": "widget",
+                "name": "widget",
+            }
+        )
+        .encode()
+        .hex()
+    )
+    with pytest.raises(ValueError, match="invalid object list cursor") as caught:
+        object_page(rows, ObjectListQuery(cursor=cursor))
+    assert "cursor value does not match its sort rank" in str(caught.value.__cause__)
+
+
+def test_object_page_rejects_a_cursor_with_an_unknown_field() -> None:
+    rows = (ObjectRow(name="widget", summary=""),)
+    cursor = (
+        json.dumps(
+            {
+                "order_by": "name",
+                "order": "asc",
+                "rank": 3,
+                "value": "widget",
+                "name": "widget",
+                "unexpected": True,
+            }
+        )
+        .encode()
+        .hex()
+    )
+    with pytest.raises(ValueError, match="invalid object list cursor") as caught:
+        object_page(rows, ObjectListQuery(cursor=cursor))
+    assert "Extra inputs are not permitted" in str(caught.value.__cause__)
+
+
+def test_object_page_rejects_reserved_row_fields() -> None:
+    rows = (ObjectRow(name="widget", summary="", fields={"name": "shadow"}),)
+    with pytest.raises(ValueError, match="collide with reserved fields"):
+        object_page(rows, ObjectListQuery())
+
+
+def test_object_page_rejects_undeclared_row_fields() -> None:
+    rows = (ObjectRow(name="widget", summary="", fields={"color": "teal"}),)
+    with pytest.raises(ValueError, match="rows carry undeclared fields"):
+        object_page(rows, ObjectListQuery())
 
 
 def test_member_owned_kinds_gate_through_the_shared_base() -> None:
@@ -391,7 +527,7 @@ class _SecretSpec(BaseModel):
 
 
 def test_boot_fails_on_a_gate_violating_kind() -> None:
-    def kind_of(spec_model: type[BaseModel]) -> Manifest:
+    def kind_of(spec_model: type[BaseModel], list_fields: frozenset[str] = frozenset()) -> Manifest:
         return Manifest(
             name="probe",
             version="0",
@@ -402,6 +538,7 @@ def test_boot_fails_on_a_gate_violating_kind() -> None:
                     guidance="g",
                     spec_model=spec_model,
                     store=sample.WidgetStore(),
+                    list_fields=list_fields,
                 ),
             ),
         )
@@ -412,6 +549,8 @@ def test_boot_fails_on_a_gate_violating_kind() -> None:
         validate_ext_tools((kind_of(_SecretSpec),), None)
     with pytest.raises(ValueError, match="JSON-representable"):
         validate_ext_tools((kind_of(_UnrenderableSpec),), None)
+    with pytest.raises(ValueError, match="list fields are not spec fields"):
+        validate_ext_tools((kind_of(sample.WidgetSpec, frozenset({"weight"})),), None)
 
 
 async def _agent_row(
@@ -703,6 +842,30 @@ async def test_share_file_lands_an_artifact_object_and_get_copies_the_latest_bac
         listing = json.loads(await _text(tools, "object_list", ctx, kind=ARTIFACT_KIND))
         assert [row["name"] for row in listing["objects"]] == [name]
         assert "report.txt" in listing["objects"][0]["summary"]
+        assert listing["objects"][0]["filename"] == "report.txt"
+        assert listing["objects"][0]["subject"] == "Q3 numbers"
+        by_filename = json.loads(
+            await _text(
+                tools,
+                "object_list",
+                ctx,
+                kind=ARTIFACT_KIND,
+                filters={"filename": "report.txt"},
+                order_by="filename",
+            )
+        )
+        assert [row["name"] for row in by_filename["objects"]] == [name]
+        by_subject = json.loads(
+            await _text(
+                tools,
+                "object_list",
+                ctx,
+                kind=ARTIFACT_KIND,
+                filters={"subject": "Q3 numbers"},
+                order_by="subject",
+            )
+        )
+        assert [row["name"] for row in by_subject["objects"]] == [name]
         filtered = json.loads(
             await _text(tools, "object_list", ctx, kind=ARTIFACT_KIND, query="no-such-share")
         )

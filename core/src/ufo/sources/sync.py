@@ -12,9 +12,9 @@ writes each page's body to the blob store, and upserts page rows — skipping on
 digest, tombstoning the ones a full-snapshot fetch no longer holds or a delta fetch explicitly
 deletes. It writes NO chunks: a changed page just bumps its `updated_at`, and `PageFeed` — the seam
 threaded onto an extension's context — replays those changes to a downstream indexer under a
-`(updated_at, id)` cursor. The core `page` row carries only substrate (digest, body, subject,
-tombstone); derivation state lives in the indexer's own mirror. The driver polls; it never fires on
-the writes it makes."""
+`(updated_at, id)` cursor. The core `page` row carries source substrate and browse metadata;
+derivation state lives in the indexer's own mirror. The driver polls; it never fires on the writes
+it makes."""
 
 import asyncio
 import hashlib
@@ -27,7 +27,7 @@ from typing import ClassVar, Protocol, TypeVar
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import sqlalchemy as sa
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from ufo.blob import BlobStore
 from ufo.config import SourceConfig, SourceEntry
@@ -47,14 +47,48 @@ DUE_BATCH_MAX_SOURCES = 50
 SOURCE_BLOB_PREFIX = "sources"
 
 
+def normalize_page_timestamp(value: str) -> str:
+    if value.isdigit():
+        try:
+            raw = int(value)
+            seconds = raw / 1_000 if len(value) >= 13 else raw
+            parsed = datetime.fromtimestamp(seconds, UTC)
+        except (OSError, OverflowError, ValueError) as error:
+            raise ValueError(f"invalid page timestamp {value!r}") from error
+    else:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise ValueError(f"invalid page timestamp {value!r}") from error
+        if parsed.tzinfo is None:
+            if len(value) == 10 and parsed.time() == datetime.min.time():
+                parsed = parsed.replace(tzinfo=UTC)
+            else:
+                raise ValueError(f"page timestamp lacks a timezone: {value!r}")
+        elif parsed.utcoffset() is None:
+            raise ValueError(f"page timestamp lacks a timezone: {value!r}")
+    return parsed.astimezone(UTC).isoformat(timespec="microseconds")
+
+
 class Page(BaseModel):
     """One fetched document: its stable key within the source, a content digest for change
-    detection, and the body the driver stores in the blob; the source row's subject scopes its
-    recall — a backend never declares disclosure."""
+    detection, lightweight browse metadata, and the body the driver stores in the blob; the source
+    row's subject scopes its recall — a backend never declares disclosure."""
 
     source_ref: str
     digest: str
     body: str
+    stream: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    created_at: str | None = None
+    updated_at: str | None = None
+
+    @field_validator("created_at", "updated_at")
+    @classmethod
+    def normalize_timestamp(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalize_page_timestamp(value)
 
 
 class SyncResult(BaseModel):
@@ -145,6 +179,8 @@ class FolderSource:
                 source_ref=source_ref,
                 digest="sha256:" + hashlib.sha256(text.encode()).hexdigest(),
                 body=text,
+                stream="files",
+                title=source_ref,
             )
             for source_ref, text in entries
         )
@@ -223,6 +259,22 @@ class ClaimedSource:
     subject: str
     cursor: str | None
     consecutive_errors: int
+
+
+@dataclass(frozen=True)
+class PageBrowse:
+    id: UUID
+    stream: str
+    title: str
+    source_created_at: str | None
+    source_updated_at: str | None
+
+
+@dataclass(frozen=True)
+class ChangedPage:
+    browse: PageBrowse
+    body_ref: str
+    digest: str
 
 
 @dataclass(frozen=True)
@@ -343,38 +395,82 @@ class SyncDriver:
     async def _commit(self, source: ClaimedSource, result: SyncResult) -> None:
         prior = await self._prior_pages(source.source_id)
         fetched: list[UUID] = []
-        changed: list[tuple[UUID, str, str]] = []
+        changed: list[ChangedPage] = []
+        metadata: list[PageBrowse] = []
         for page in result.pages:
             page_id = page_id_for(source.source_id, page.source_ref)
             fetched.append(page_id)
             existing = prior.get(page_id)
-            if existing is None or existing[0] != page.digest or existing[1]:
+            browse = PageBrowse(
+                id=page_id,
+                stream=page.stream,
+                title=page.title,
+                source_created_at=page.created_at,
+                source_updated_at=page.updated_at,
+            )
+            if existing is None or existing[:2] != (page.digest, False):
                 body_ref = f"{SOURCE_BLOB_PREFIX}/{source.source_id}/{page_id}"
                 await self.blob.put(body_ref, page.body.encode())
-                changed.append((page_id, body_ref, page.digest))
+                changed.append(
+                    ChangedPage(
+                        browse=browse,
+                        body_ref=body_ref,
+                        digest=page.digest,
+                    )
+                )
+            elif existing[2] != browse:
+                metadata.append(browse)
         deleted = [page_id_for(source.source_id, ref) for ref in result.deletes]
-        await self._write(source, result.next_cursor, changed, fetched, deleted, result.snapshot)
+        await self._write(
+            source,
+            result.next_cursor,
+            changed,
+            metadata,
+            fetched,
+            deleted,
+            result.snapshot,
+        )
 
-    async def _prior_pages(self, source_id: UUID) -> dict[UUID, tuple[str, bool]]:
+    async def _prior_pages(self, source_id: UUID) -> dict[UUID, tuple[str, bool, PageBrowse]]:
         async with workspace_tx() as connection:
             rows = (
                 (
                     await connection.execute(
                         sa.select(
-                            tables.page.c.id, tables.page.c.digest, tables.page.c.tombstone
+                            tables.page.c.id,
+                            tables.page.c.digest,
+                            tables.page.c.tombstone,
+                            tables.page.c.stream,
+                            tables.page.c.title,
+                            tables.page.c.source_created_at,
+                            tables.page.c.source_updated_at,
                         ).where(tables.page.c.source_id == source_id)
                     )
                 )
                 .mappings()
                 .all()
             )
-        return {row["id"]: (row["digest"], bool(row["tombstone"])) for row in rows}
+        return {
+            row["id"]: (
+                row["digest"],
+                bool(row["tombstone"]),
+                PageBrowse(
+                    id=row["id"],
+                    stream=row["stream"],
+                    title=row["title"],
+                    source_created_at=row["source_created_at"],
+                    source_updated_at=row["source_updated_at"],
+                ),
+            )
+            for row in rows
+        }
 
     async def _write(
         self,
         source: ClaimedSource,
         next_cursor: str | None,
-        changed: list[tuple[UUID, str, str]],
+        changed: list[ChangedPage],
+        metadata: list[PageBrowse],
         fetched: list[UUID],
         deleted: list[UUID],
         snapshot: bool,
@@ -386,32 +482,51 @@ class SyncDriver:
         now = datetime.now(UTC)
         async with workspace_tx() as connection:
             workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
-            for page_id, body_ref, digest in changed:
+            for changed_page in changed:
                 updated = await connection.execute(
                     sa.update(tables.page)
                     .values(
-                        digest=digest,
-                        body_ref=body_ref,
+                        digest=changed_page.digest,
+                        body_ref=changed_page.body_ref,
+                        stream=changed_page.browse.stream,
+                        title=changed_page.browse.title,
+                        source_created_at=changed_page.browse.source_created_at,
+                        source_updated_at=changed_page.browse.source_updated_at,
                         subject=source.subject,
                         tombstone=False,
                         updated_at=now,
                     )
-                    .where(tables.page.c.id == page_id)
+                    .where(tables.page.c.id == changed_page.browse.id)
                 )
                 if updated.rowcount == 0:
                     await connection.execute(
                         sa.insert(tables.page).values(
-                            id=page_id,
+                            id=changed_page.browse.id,
                             workspace_id=workspace_id,
                             source_id=source.source_id,
-                            digest=digest,
-                            body_ref=body_ref,
+                            digest=changed_page.digest,
+                            body_ref=changed_page.body_ref,
+                            stream=changed_page.browse.stream,
+                            title=changed_page.browse.title,
+                            source_created_at=changed_page.browse.source_created_at,
+                            source_updated_at=changed_page.browse.source_updated_at,
                             subject=source.subject,
                             tombstone=False,
                             created_at=now,
                             updated_at=now,
                         )
                     )
+            for browse_page in metadata:
+                await connection.execute(
+                    sa.update(tables.page)
+                    .values(
+                        stream=browse_page.stream,
+                        title=browse_page.title,
+                        source_created_at=browse_page.source_created_at,
+                        source_updated_at=browse_page.source_updated_at,
+                    )
+                    .where(tables.page.c.id == browse_page.id)
+                )
             if deleted:
                 await connection.execute(
                     sa.update(tables.page)

@@ -57,6 +57,14 @@ async def test_charges_walk_has_more_with_starting_after() -> None:
     assert _refs(result) == {"charges/ch_1", "charges/ch_2"}
     assert result.snapshot is False
     assert seen and all(version == STRIPE_VERSION for version in seen)
+    assert {page.updated_at for page in result.pages} == {
+        "1970-01-01T00:01:40.000000+00:00",
+        "1970-01-01T00:03:20.000000+00:00",
+    }
+    assert {page.created_at for page in result.pages} == {
+        "1970-01-01T00:01:40.000000+00:00",
+        "1970-01-01T00:03:20.000000+00:00",
+    }
 
 
 async def test_charges_incremental_sends_created_filter() -> None:

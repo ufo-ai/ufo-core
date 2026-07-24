@@ -206,6 +206,10 @@ async def _pages() -> list[sa.RowMapping]:
                 await connection.execute(
                     sa.select(
                         tables.page.c.source_id,
+                        tables.page.c.stream,
+                        tables.page.c.title,
+                        tables.page.c.source_created_at,
+                        tables.page.c.source_updated_at,
                         tables.page.c.subject,
                         tables.page.c.digest,
                         tables.page.c.body_ref,
@@ -963,6 +967,66 @@ async def _tombstone(page_id: UUID) -> bool:
         )
 
 
+def test_page_requires_browse_metadata() -> None:
+    page = {
+        "source_ref": "docs/launch",
+        "digest": "sha256:launch",
+        "body": "Launch window",
+        "stream": "docs",
+        "title": "Launch window",
+    }
+    for field_name in ("stream", "title"):
+        with pytest.raises(ValueError):
+            Page.model_validate(page | {field_name: ""})
+
+
+def test_page_normalizes_browse_timestamps() -> None:
+    page = Page(
+        source_ref="docs/launch",
+        digest="sha256:launch",
+        body="Launch window",
+        stream="docs",
+        title="Launch window",
+        created_at="2026-07-23T14:30:00.5-04:00",
+        updated_at="2026-07-23T18:30:00Z",
+    )
+    assert page.created_at == "2026-07-23T18:30:00.500000+00:00"
+    assert page.updated_at == "2026-07-23T18:30:00.000000+00:00"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("2026-07-23", "2026-07-23T00:00:00.000000+00:00"),
+        ("1700000000", "2023-11-14T22:13:20.000000+00:00"),
+        ("1700000000000", "2023-11-14T22:13:20.000000+00:00"),
+    ],
+)
+def test_page_normalizes_provider_timestamp_shapes(value: str, expected: str) -> None:
+    page = Page(
+        source_ref="docs/launch",
+        digest="sha256:launch",
+        body="Launch window",
+        stream="docs",
+        title="Launch window",
+        created_at=value,
+    )
+    assert page.created_at == expected
+
+
+@pytest.mark.parametrize("value", ["not-a-time", "2026-07-23T18:30:00"])
+def test_page_rejects_invalid_browse_timestamps(value: str) -> None:
+    with pytest.raises(ValueError, match="timestamp"):
+        Page(
+            source_ref="docs/launch",
+            digest="sha256:launch",
+            body="Launch window",
+            stream="docs",
+            title="Launch window",
+            created_at=value,
+        )
+
+
 async def _seed_prior_page(workspace_id: UUID, source_id: UUID, source_ref: str) -> UUID:
     """A page a prior snapshot of the source already landed and indexed — active, unrelated to the
     delta run under test."""
@@ -996,6 +1060,8 @@ async def test_cursor_expired_clears_stored_cursor_and_next_run_refetches(
         source_ref="doc",
         digest="sha256:fresh",
         body="the launch window opens at dawn",
+        stream="docs",
+        title="Launch window",
     )
     driver, backend = _scripted_driver(
         [
@@ -1018,7 +1084,72 @@ async def test_cursor_expired_clears_stored_cursor_and_next_run_refetches(
     assert backend.cursors == ["stale-token", None]
     assert refetched["cursor"] == "fresh-token"
     assert refetched["consecutive_errors"] == 0
-    assert len(await _pages()) == 1
+    pages = await _pages()
+    assert len(pages) == 1
+    assert pages[0]["stream"] == page.stream
+    assert pages[0]["title"] == page.title
+
+
+async def test_sync_persists_backend_page_browse_metadata(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    await _seed_scripted_source(workspace_id, None)
+    page = Page(
+        source_ref="issues/ENG-42",
+        digest="sha256:issue",
+        body="Issue body",
+        stream="issues",
+        title="Fix launch sequencing",
+        created_at="2026-07-01T12:00:00Z",
+        updated_at="2026-07-23T18:30:00Z",
+    )
+    driver, _ = _scripted_driver(
+        [SyncResult(pages=(page,))],
+        database_url,
+        tmp_path / "blobs",
+    )
+
+    await _sync(driver)
+
+    stored = (await _pages())[0]
+    assert stored["stream"] == page.stream
+    assert stored["title"] == page.title
+    assert stored["source_created_at"] == page.created_at
+    assert stored["source_updated_at"] == page.updated_at
+
+
+async def test_sync_refreshes_browse_metadata_without_replaying_unchanged_content(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    await _seed_scripted_source(workspace_id, None)
+    original = Page(
+        source_ref="issues/ENG-42",
+        digest="sha256:issue",
+        body="Issue body",
+        stream="issues",
+        title="Launch sequence",
+        updated_at="2026-07-23T18:30:00Z",
+    )
+    refreshed = original.model_copy(
+        update={"title": "Fix launch sequencing", "updated_at": "2026-07-24T09:00:00Z"}
+    )
+    driver, _ = _scripted_driver(
+        [SyncResult(pages=(original,)), SyncResult(pages=(refreshed,))],
+        database_url,
+        tmp_path / "blobs",
+    )
+
+    await _sync(driver)
+    stamped = (await _pages())[0]["updated_at"]
+    await _make_due()
+    await _sync(driver)
+
+    stored = (await _pages())[0]
+    assert stored["title"] == refreshed.title
+    assert stored["source_updated_at"] == refreshed.updated_at
+    assert stored["updated_at"] == stamped
 
 
 async def test_consecutive_errors_back_off_and_a_success_resets_the_counter(
@@ -1066,6 +1197,8 @@ async def test_delta_delete_tombstones_only_named_page_never_blanket_sweeps(
         source_ref="delta/doc",
         digest="sha256:delta",
         body="the launch window opens at dawn",
+        stream="docs",
+        title="Launch window",
     )
     delta_id = page_id_for(source_id, "delta/doc")
     driver, _ = _scripted_driver(
@@ -1099,6 +1232,8 @@ async def test_snapshot_fetch_tombstones_prior_pages_absent_from_the_fetch(
         source_ref="kept/doc",
         digest="sha256:kept",
         body="the mascot is a friendly otter named pip",
+        stream="docs",
+        title="Mascot",
     )
     kept_id = page_id_for(source_id, "kept/doc")
     driver, _ = _scripted_driver(

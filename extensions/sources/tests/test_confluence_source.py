@@ -184,6 +184,7 @@ async def test_comments_render_the_body() -> None:
     result = await _fetch("comments", handle)
     assert _refs(result) == {"comments/cloud-1:cm1"}
     assert "Looks good & ready" in result.pages[0].body
+    assert result.pages[0].title == "Looks good & ready"
 
 
 async def test_groups_and_audit_streams_are_runnable() -> None:

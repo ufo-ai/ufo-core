@@ -214,6 +214,8 @@ class NotionConnector(RestConnector):
                 body = _user_text(record)
             case _:
                 return super().render(record, stream)
+        if not title:
+            title = body.splitlines()[0] if body else super().render(record, stream)[0]
         heading = f"# notion {stream.name}: {title}".rstrip()
         return title, f"{heading}\n\n{body}".rstrip()
 

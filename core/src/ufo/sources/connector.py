@@ -364,12 +364,20 @@ class Connector(ABC):
 
     def render(self, record: dict[str, Any], stream: StreamSpec) -> tuple[str, str]:
         """One record as `(title, body)` for recall. The default titles from the first present
-        title-like key and dumps the record's JSON beneath it; a content provider overrides this to
-        emit prose (a doc's text, an email's body) so the page recalls as readable content."""
+        non-empty title-like key or its provider identity and dumps the record's JSON beneath it; a
+        content provider overrides this to emit prose (a doc's text, an email's body) so the page
+        recalls as readable content."""
         title = next(
-            (record[key] for key in TITLE_KEYS if isinstance(record.get(key), str)),
-            "",
+            (record[key] for key in TITLE_KEYS if isinstance(record.get(key), str) and record[key]),
+            None,
         )
+        if title is None:
+            ref = record.get(stream.primary_key)
+            if not isinstance(ref, (str, int)) or str(ref) == "":
+                raise ValueError(
+                    f"record must supply a non-empty title or {stream.primary_key!r} identity"
+                )
+            title = f"{stream.name}/{ref}"
         return (
             title,
             f"# {self.name} {stream.name}: {title}\n\n{json.dumps(record, sort_keys=True)}",

@@ -18,7 +18,7 @@ from typing import ClassVar
 from uuid import UUID
 
 import sqlalchemy as sa
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from ufo.sdk.authproxy import AuthProxySpec, Credential
 from ufo.sdk.bearer import workspace_claim
@@ -83,12 +83,13 @@ from ufo.sdk.models import (
     Usage,
 )
 from ufo.sdk.objects import (
-    OBJECT_LIST_PAGE,
     ObjectKind,
+    ObjectListQuery,
     ObjectPage,
     ObjectRow,
     OwnerRequired,
     VerbNotSupported,
+    object_page,
 )
 from ufo.sdk.sandbox import (
     WORKSPACE_DIR,
@@ -315,17 +316,18 @@ class WidgetStore:
     delete gates on the workspace owner — so the conformance tests drive create, update, paging,
     owner refusal, and delete through the real verbs and read back through this public store."""
 
-    async def list(self, ctx: ToolContext, query: str, cursor: str) -> ObjectPage:
+    async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
         entries = await self._ext(ctx).store.list(WIDGET_KEY_PREFIX)
-        names = [
-            name
-            for key, _value in entries
-            if query in (name := key.removeprefix(WIDGET_KEY_PREFIX))
-        ]
-        remaining = [name for name in names if name > cursor] if cursor else names
-        page, rest = remaining[:OBJECT_LIST_PAGE], remaining[OBJECT_LIST_PAGE:]
-        rows = tuple(ObjectRow(name=name, summary=f"a {name} widget") for name in page)
-        return ObjectPage(rows=rows, next_cursor=page[-1] if rest else None)
+        rows = tuple(
+            ObjectRow(
+                name=name,
+                summary=f"a {name} widget",
+                fields=WidgetSpec.model_validate(value).model_dump(mode="json"),
+            )
+            for key, value in entries
+            if (name := key.removeprefix(WIDGET_KEY_PREFIX))
+        )
+        return object_page(rows, query)
 
     async def get(self, ctx: ToolContext, name: str) -> WidgetSpec | None:
         value = await self._ext(ctx).store.get(WIDGET_KEY_PREFIX + name)
@@ -355,10 +357,11 @@ class RelicStore:
     """The read-only probe store: one canned instance with live status, every mutation refused —
     the shape a system-produced kind (pages, conversations) takes."""
 
-    async def list(self, ctx: ToolContext, query: str, cursor: str) -> ObjectPage:
-        if query and query not in RELIC_NAME:
-            return ObjectPage(rows=())
-        return ObjectPage(rows=(ObjectRow(name=RELIC_NAME, summary=RELIC_INSCRIPTION),))
+    async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
+        return object_page(
+            (ObjectRow(name=RELIC_NAME, summary=RELIC_INSCRIPTION),),
+            query,
+        )
 
     async def get(self, ctx: ToolContext, name: str) -> RelicSpec | None:
         return RelicSpec(inscription=RELIC_INSCRIPTION) if name == RELIC_NAME else None
@@ -379,7 +382,7 @@ class SampleSourceConfig(BaseModel):
     """The sample source's typed per-source config — a distinct shape from the folder backend's, so
     it proves a backend carries its own typed parameters, never a shared bag."""
 
-    topic: str
+    topic: str = Field(min_length=1, pattern=r"\S")
 
 
 @dataclass(frozen=True)
@@ -395,7 +398,13 @@ class SampleSource:
         self, config: SampleSourceConfig, cursor: str | None, auth: SourceAuth
     ) -> SyncResult:
         digest = "sha256:" + hashlib.sha256(config.topic.encode()).hexdigest()
-        page = Page(source_ref=SOURCE_REF, digest=digest, body=config.topic)
+        page = Page(
+            source_ref=SOURCE_REF,
+            digest=digest,
+            body=config.topic,
+            stream="topics",
+            title=next(line.strip() for line in config.topic.splitlines() if line.strip()),
+        )
         return SyncResult(pages=(page,), next_cursor=None)
 
 
@@ -965,6 +974,7 @@ def manifest() -> Manifest:
                 guidance=WIDGET_GUIDANCE,
                 spec_model=WidgetSpec,
                 store=WidgetStore(),
+                list_fields=frozenset({"color", "size"}),
             ),
             ObjectKind(
                 name=RELIC_KIND,

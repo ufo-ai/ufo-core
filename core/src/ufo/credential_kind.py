@@ -21,11 +21,12 @@ from pydantic import BaseModel, ConfigDict
 from ufo.db import workspace_tx
 from ufo.ext.context import JsonValue
 from ufo.objects import (
-    OBJECT_LIST_PAGE,
+    ObjectListQuery,
     ObjectPage,
     ObjectRow,
     OwnerRequired,
     VerbNotSupported,
+    object_page,
 )
 from ufo.schema import tables
 from ufo.tools.context import ToolContext
@@ -71,7 +72,7 @@ class CredentialObjects:
 
     slots: tuple[DeclaredSlot, ...]
 
-    async def list(self, ctx: ToolContext, query: str, cursor: str) -> ObjectPage:
+    async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
         named = self._named()
         filled = await self._filled_slots()
         rows = [
@@ -84,10 +85,7 @@ class CredentialObjects:
             )
             for name, slot in sorted(named.items())
         ]
-        matched = [row for row in rows if query in row.name or query in row.summary]
-        remaining = [row for row in matched if row.name > cursor] if cursor else matched
-        page, rest = remaining[:OBJECT_LIST_PAGE], remaining[OBJECT_LIST_PAGE:]
-        return ObjectPage(rows=tuple(page), next_cursor=page[-1].name if rest else None)
+        return object_page(tuple(rows), query)
 
     async def get(self, ctx: ToolContext, name: str) -> CredentialSpec | None:
         slot = self._named().get(name)

@@ -18,6 +18,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from ufo.connectors import Credential
 from ufo.sources import backend as backend_module
@@ -63,6 +64,11 @@ class _FeedConnector(Connector):
             self.closed = True
 
 
+class _EmptyTitleConnector(_FeedConnector):
+    def render(self, record: dict[str, Any], stream: StreamSpec) -> tuple[str, str]:
+        return "", json.dumps(record, sort_keys=True)
+
+
 class _NoAuthProxy:
     async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
         return Credential(bearer="unused")
@@ -104,8 +110,65 @@ async def test_capped_run_resumes_at_the_last_native_checkpoint(
     ]
     result = await _fetch(stream, feed)
     assert len(result.pages) == 5
+    assert result.pages[0].stream == "items"
+    assert result.pages[0].updated_at == "2026-01-01T00:00:00.000000+00:00"
+    assert result.pages[0].title == "items/1"
     assert result.next_cursor == "ck3"
     assert result.snapshot is False
+
+
+async def test_connector_backend_rejects_an_empty_rendered_title() -> None:
+    stream = StreamSpec(name="items", source_object="items")
+    with pytest.raises(ValidationError, match="title"):
+        await _run(_EmptyTitleConnector(stream, [[{"id": 1}]]), stream)
+
+
+async def test_cursor_field_supplies_updated_at_when_provider_value_is_absent() -> None:
+    stream = StreamSpec(name="items", source_object="items", cursor_field="watermark")
+    result = await _fetch(
+        stream,
+        [[{"id": 1, "watermark": "2026-07-23T18:30:00Z"}]],
+    )
+    assert result.pages[0].updated_at == "2026-07-23T18:30:00.000000+00:00"
+
+
+async def test_opaque_cursor_field_does_not_supply_updated_at() -> None:
+    stream = StreamSpec(name="items", source_object="items", cursor_field="checkpoint")
+    result = await _fetch(stream, [[{"id": 1, "checkpoint": "ck-1"}]])
+    assert result.pages[0].updated_at is None
+
+
+async def test_large_numeric_cursor_field_does_not_supply_updated_at() -> None:
+    stream = StreamSpec(name="items", source_object="items", cursor_field="checkpoint")
+    result = await _fetch(stream, [[{"id": 1, "checkpoint": "9" * 100}]])
+    assert result.pages[0].updated_at is None
+
+
+async def test_default_render_rejects_record_without_title_or_identity() -> None:
+    stream = StreamSpec(name="items", source_object="items")
+    with pytest.raises(ValueError, match="non-empty title or 'id' identity"):
+        await _fetch(stream, [[{"body": "untitled"}]])
+
+
+@pytest.mark.parametrize(
+    ("record", "field"),
+    [
+        ({"id": 1, "created_at": 1_753_296_600}, "created_at"),
+        (
+            {
+                "id": 1,
+                "updated_at": 1_753_296_600,
+                "watermark": "2026-07-23T18:30:00Z",
+            },
+            "updated_at",
+        ),
+        ({"id": 1, "watermark": 1_753_296_600}, "watermark"),
+    ],
+)
+async def test_connector_rejects_non_string_timestamps(record: dict[str, Any], field: str) -> None:
+    stream = StreamSpec(name="items", source_object="items", cursor_field="watermark")
+    with pytest.raises(ValueError, match=field):
+        await _fetch(stream, [[record]])
 
 
 async def test_capped_run_without_checkpoint_stores_the_envelope(

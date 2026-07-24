@@ -20,7 +20,13 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.manifest import Manifest, SkillSpec
-from ufo.sdk.objects import OBJECT_LIST_PAGE, ObjectKind, ObjectPage, ObjectRow
+from ufo.sdk.objects import (
+    ObjectKind,
+    ObjectListQuery,
+    ObjectPage,
+    ObjectRow,
+    object_page,
+)
 from ufo.sdk.sandbox import workspace_path
 from ufo.sdk.skills import RuntimeSkill, parse_skill_content
 from ufo.sdk.tools import ToolContext
@@ -112,19 +118,13 @@ class SkillObjects:
     `UserSkillStore.save` has always run — shadow refusal, per-workspace cap, SKILL.md parse.
     Any member may mutate; a skill can never shadow a built-in."""
 
-    async def list(self, ctx: ToolContext, query: str, cursor: str) -> ObjectPage:
+    async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
         ext = _require_ext(ctx)
-        skills = [
-            skill
-            for skill in await UserSkillStore(ext).load_all(ext.store.workspace_id)
-            if query in skill.name or query in skill.description
-        ]
-        remaining = [skill for skill in skills if skill.name > cursor] if cursor else skills
-        page, rest = remaining[:OBJECT_LIST_PAGE], remaining[OBJECT_LIST_PAGE:]
         rows = tuple(
-            ObjectRow(name=skill.name, summary=skill.description[:SUMMARY_MAX]) for skill in page
+            ObjectRow(name=skill.name, summary=skill.description[:SUMMARY_MAX])
+            for skill in await UserSkillStore(ext).load_all(ext.store.workspace_id)
         )
-        return ObjectPage(rows=rows, next_cursor=page[-1].name if rest else None)
+        return object_page(rows, query)
 
     async def get(self, ctx: ToolContext, name: str) -> UserSkillSpec | None:
         files = await self._files(ctx, name)

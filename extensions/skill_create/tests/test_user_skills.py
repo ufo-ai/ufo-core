@@ -483,7 +483,7 @@ async def test_apply_enforces_the_cap_but_allows_a_reapply(
     assert [(skill.name, skill.description) for skill in loaded] == [("one", "1b")]
 
 
-async def test_list_orders_filters_and_pages(db: None, tmp_path) -> None:
+async def test_list_orders_and_filters(db: None, tmp_path) -> None:
     workspace_id = await _workspace()
     ctx = _tool_ctx(workspace_id, None, tmp_path)
     apply = _object_tool("object_apply")
@@ -498,9 +498,5 @@ async def test_list_orders_filters_and_pages(db: None, tmp_path) -> None:
         filtered = json.loads(
             await _dispatch(_object_tool("object_list"), ctx, kind=SKILL_KIND, query="second")
         )
-        paged = json.loads(
-            await _dispatch(_object_tool("object_list"), ctx, kind=SKILL_KIND, cursor="alpha")
-        )
     assert [row["name"] for row in listing["objects"]] == ["alpha", "beta", "gamma"]
     assert [row["name"] for row in filtered["objects"]] == ["beta"]
-    assert [row["name"] for row in paged["objects"]] == ["beta", "gamma"]
