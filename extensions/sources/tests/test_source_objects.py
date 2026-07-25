@@ -21,7 +21,6 @@ from ufo_ext_sources.manifest import NAME, manifest
 from ufo_ext_sources.pages import PAGE_KIND
 from ufo_ext_sources.registry import CONNECTORS
 from ufo_ext_sources.tools import (
-    DIRECT_ACCOUNT,
     SOURCE_KIND,
     _binding_name,
     _subscribers_map,
@@ -37,6 +36,7 @@ from ufo.grants import GrantStore
 from ufo.objects import UnknownObject
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
+from ufo.sdk.authproxy import DIRECT_ACCOUNT
 from ufo.sdk.connectors import ConnectorEntry, ConnectorRegistry
 from ufo.sdk.manifest import HookContext, PageChangeBatch
 from ufo.sdk.objects import OwnerRequired, VerbNotSupported

@@ -25,9 +25,10 @@ injects it itself), and resolves the feed-sync `Credential` for that provider's 
 extension (Composio, Pipedream) declares one per provider through the `connectors` Manifest point;
 `serve` merges every declaration into the one `ConnectorRegistry`, threads it onto the turn's
 ToolContext for the dynamic connector tools, and hands it to the sync runner as its auth proxy —
-`credential` routes a brokered provider to its own broker and any other to the deploy-selected
-fallback backend (`[connectors] auth_backend`, the `auth_proxies` Manifest point), so one deploy
-brokers gmail through one broker and github through another while BYOK providers keep `direct`."""
+`credential` routes a source holding a broker grant to that provider's broker and a source holding
+`DIRECT_ACCOUNT` (the member set a key, not a grant) to the deploy-selected fallback backend
+(`[connectors] auth_backend`, the `auth_proxies` Manifest point), so one deploy brokers gmail
+through one broker and github through another while keyed providers sync through `direct`."""
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -58,6 +59,15 @@ class Credential:
         if self.headers:
             return "Credential(<headers: redacted>)"
         return "Credential(<empty>)"
+
+
+DIRECT_ACCOUNT = "default"
+"""The account handle a feed-sync source carries when it authenticates with the workspace's own
+provider key instead of a broker grant — the routing signal `ConnectorRegistry.credential` reads to
+reach the fallback backend. A source registers with it when the member set the provider's credential
+rather than connecting an account, so the run replays the decision registration made. It has to be
+the handle that carries it: a broker's open namespace claims every slug, so the provider name alone
+cannot tell a keyed source from a granted one."""
 
 
 class AuthProxy(Protocol):
@@ -264,8 +274,10 @@ class ConnectorRegistry:
     `serve` builds from the manifests' `connectors` points. The dynamic connector tools read
     `entries` and `search_catalog` to list providers and dispatch through `entry` to the owning
     broker (`entry` resolves an unregistered slug through the resolver, else fails loud); the sync
-    runner uses the registry as its auth proxy — `credential` routes a registered provider to its
-    own broker, an unregistered slug to the resolver's broker, and any other to the fallback."""
+    runner uses the registry as its auth proxy — `credential` routes on the source's account handle
+    first, since a `DIRECT_ACCOUNT` source has no grant for any broker to resolve: it goes to the
+    fallback, and a granted account goes to its provider's broker (registered, else the resolver's),
+    falling back for a provider no installed broker claims."""
 
     entries: Mapping[str, ConnectorEntry]
     resolver: ConnectorResolver | None = None
@@ -287,13 +299,14 @@ class ConnectorRegistry:
         return await self.resolver.catalog(query, limit)
 
     async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
-        found = self.entries.get(provider)
-        if found is not None:
-            return await found.broker.credential(workspace_id, provider, account)
-        if self.resolver is not None:
-            return await self.resolver.entry(provider).broker.credential(
-                workspace_id, provider, account
-            )
+        if account != DIRECT_ACCOUNT:
+            found = self.entries.get(provider)
+            if found is not None:
+                return await found.broker.credential(workspace_id, provider, account)
+            if self.resolver is not None:
+                return await self.resolver.entry(provider).broker.credential(
+                    workspace_id, provider, account
+                )
         if self.fallback is not None:
             return await self.fallback.credential(workspace_id, provider, account)
         raise RuntimeError(

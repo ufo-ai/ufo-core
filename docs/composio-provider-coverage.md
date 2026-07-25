@@ -235,18 +235,25 @@ need, then deleting its `BANNED` line — no other code change. That path exists
 It does **not** exist for the missing-tool bans, which need Composio to ship a tool, nor for
 `googlephotos`, where Google itself restricts the API to app-created media.
 
-## Open finding: the `direct` BYOK fallback is unreachable
+## BYOK sync: routed on the account handle
 
-`ConnectorRegistry.credential` resolves an unregistered slug through `resolver.entry(provider)`
-unconditionally, and `ComposioResolver.entry` claims any slug. The `fallback` branch — the `direct`
-auth proxy and the 48 per-connector `CredentialSlot`s the sources manifest declares — is therefore
-never reached in a deploy with the composio extension installed. Consequences:
+The thirteen above have no Composio grant to sync through, so their only path is a member-added key
+through the `direct` auth proxy. `ConnectorRegistry.credential` picks the backend from the source's
+**account handle**: `DIRECT_ACCOUNT` — what registration stores when the member set the provider's
+credential instead of connecting an account — resolves through the deploy's fallback backend, and a
+connected-account id resolves through its provider's broker. The provider name cannot carry that
+decision, because `ComposioResolver.entry` claims every slug; routing on the name alone sent every
+keyed source to Composio, which holds no account for it, and failed every run.
 
-- Every sources connector depends on a Composio grant; a member-supplied API key cannot drive sync.
-- The thirteen disabled providers have no credential path at all, so their `SourceProvider` and
-  credential slot are declared with no working consumer.
+`claims` is deliberately not the signal: it is the connectability/ban gate, so a scope-limited ban
+(`attio`) would fall through to BYOK correctly while a missing-tool ban (`gorgias`) would fall
+through wrongly. The handle says what the source actually holds.
 
-Routing `credential` through `claims` would send exactly those slugs to `direct` and make BYOK sync
-live. That changes sync routing for every non-connectable slug and revives 48 credential slots, so it
-is left as a decision rather than folded into this change; the sources connectors are kept intact
-pending it.
+Twelve of the thirteen sync on a raw key as-is — each connector adapts it to the scheme its service
+expects (`klaviyo`'s `Klaviyo-API-Key`, HTTP Basic for `freshdesk`, `ashby`, `bamboohr`, `chargebee`
+and `recurly`, `active_campaign`'s `Api-Token`, a plain bearer for `brex`, `deel`, `rippling`,
+`recruitee` and `facebook_ads`). **`xero` still cannot**: every call needs a `xero-tenant-id` header
+naming one org inside the grant, and `XeroConnector` sets it only when constructed with a tenant —
+the source factory constructs it with none. Xero also issues no static API key (OAuth 2.0 only, and a
+custom-connection token expires in 30 minutes), so a BYOK slot is the wrong shape for it. It needs
+per-connector work, not a routing change.

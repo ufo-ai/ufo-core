@@ -38,7 +38,7 @@ from ufo.config import (
     ResearchConfig,
     SandboxConfig,
 )
-from ufo.connectors import UnknownBrokerTool
+from ufo.connectors import DIRECT_ACCOUNT, UnknownBrokerTool
 from ufo.credentials import CredentialSlotUnset, CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import (
@@ -397,11 +397,13 @@ def test_core_selects_a_manifest_contributed_auth_proxy() -> None:
         _select_auth_proxy(_connectors_config(sample.AUTH_PROXY_BACKEND), (manifest,), None)
 
 
-async def test_connector_registry_routes_a_brokered_provider_to_its_own_broker() -> None:
+async def test_connector_registry_routes_a_credential_by_account_then_provider() -> None:
     """The `ConnectorRegistry` half of the connectors seam: `serve`'s registry build folds the
-    sample's ConnectorProvider — label and broker included — and `credential` routes the sample
-    provider to the sample broker while an unregistered provider falls back to the deploy-selected
-    auth backend. With no fallback installed, an unregistered provider fails loud."""
+    sample's ConnectorProvider — label and broker included — and `credential` routes on the source's
+    account handle first. A granted account reaches its provider's broker; `DIRECT_ACCOUNT` reaches
+    the deploy-selected auth backend even for a provider whose broker is installed, because such a
+    source holds no grant for that broker to resolve. A provider no broker claims falls back too.
+    With no fallback installed, both fallback routes fail loud."""
     manifest = _sample_manifest()
     store = _credential_store()
     workspace_id = uuid4()
@@ -413,12 +415,16 @@ async def test_connector_registry_routes_a_brokered_provider_to_its_own_broker()
     assert entry.label == sample.CONNECTOR_LABEL
     brokered = await registry.credential(workspace_id, sample.CONNECTOR_PROVIDER, "acct-9")
     assert brokered.bearer == f"{sample.BROKER_BEARER_PREFIX}acct-9"
+    keyed = await registry.credential(workspace_id, sample.CONNECTOR_PROVIDER, DIRECT_ACCOUNT)
+    assert keyed.bearer == sample.AUTH_PROXY_BEARER
     fallback = await registry.credential(workspace_id, "unbrokered", "acct-9")
     assert fallback.bearer == sample.AUTH_PROXY_BEARER
 
     bare = _connector_registry(
         _connectors_config(None), (replace(manifest, auth_proxies=()),), store
     )
+    with pytest.raises(RuntimeError, match="no connector broker"):
+        await bare.credential(workspace_id, sample.CONNECTOR_PROVIDER, DIRECT_ACCOUNT)
     with pytest.raises(RuntimeError, match="no connector broker"):
         await bare.credential(workspace_id, "unbrokered", "acct-9")
     with pytest.raises(KeyError, match="no installed connector"):

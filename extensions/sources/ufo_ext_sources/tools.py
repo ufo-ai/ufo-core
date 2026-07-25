@@ -29,6 +29,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
+from ufo.sdk.authproxy import DIRECT_ACCOUNT
 from ufo.sdk.connectors import ConnectorRegistry
 from ufo.sdk.context import CredentialSlotUnset, ExtensionContext
 from ufo.sdk.manifest import HookContext, HookOutcome, PageChangeBatch
@@ -46,7 +47,6 @@ from ufo_ext_sources.pages import PAGE_KIND
 from ufo_ext_sources.registry import CONNECTORS
 
 SOURCE_KIND = "source"
-DIRECT_ACCOUNT = "default"
 NAME_DIGEST_HEX = 8
 SUMMARY_MAX = 120
 SUBSCRIBERS_PREFIX = "subscribers:"
@@ -429,7 +429,10 @@ class SourceObjects(MemberOwnedObjects[SourceSpec]):
         """The account a source authenticates as. An explicitly registered connector always uses its
         broker; an open provider the broker namespace serves uses the broker once an account is
         connected, else its direct BYOK credential when one is declared — so a member picks the path
-        by connecting an account or setting a key, never a flag."""
+        by connecting an account or setting a key, never a flag. The handle returned here IS that
+        choice: it lands in `ConnectorSourceConfig.account`, and every run replays it through
+        `ConnectorRegistry.credential`, which sends `DIRECT_ACCOUNT` to the deploy's fallback
+        backend and a connected account to its broker."""
         ext = _require_ext(ctx)
         registry = _require_connectors(ctx)
         explicit = spec.provider in registry.entries

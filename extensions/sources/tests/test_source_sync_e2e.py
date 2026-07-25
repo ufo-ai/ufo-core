@@ -1,5 +1,7 @@
-"""Brokered source registration through durable pages and the memory tool."""
+"""Source registration through durable pages and the memory tool, on both auth paths: a broker grant
+resolving through its broker, and a member-added key resolving through the `direct` backend."""
 
+import asyncio
 import base64
 import json
 from dataclasses import dataclass, replace
@@ -17,26 +19,42 @@ import ufo_ext_memory.manifest as memory_manifest
 import ufo_ext_pipedream.client as pipedream
 import ufo_ext_pipedream.manifest as pipedream_manifest
 import ufo_ext_sources.manifest as sources_manifest
+from cryptography.fernet import Fernet
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import PageIndexer
+from ufo_ext_sources.direct import DirectAuthProxy
+from ufo_ext_sources.klaviyo import KLAVIYO_REVISION, KlaviyoConnector
 from ufo_ext_sources.tools import SourceObjects, SourceSpec, _binding_name
 
 from ufo.blob import FilesystemBlobStore
-from ufo.connectors import ConnectorEntry, ConnectorRegistry
+from ufo.config import Config
+from ufo.connectors import DIRECT_ACCOUNT, AuthProxy, ConnectorEntry, ConnectorRegistry
+from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import context_for
 from ufo.grants import GrantStore
 from ufo.indexing import TextChunker
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
-from ufo.serve import _source_backends
+from ufo.serve import _select_auth_proxy, _source_backends
 from ufo.sources.sync import CorePageFeed, SyncDriver
 from ufo.tools.context import ToolContext
-from ufo.workspace import ws
+from ufo.workspace import init_workspace_credentials, ws, ws_current
 
 ASANA_ACCOUNT = "ca_asana_e2e"
 GMAIL_ACCOUNT = "apn_gmail_e2e"
+KLAVIYO_KEY = "pk_live_byok_e2e"
+KLAVIYO_PROFILE = {
+    "type": "profile",
+    "id": "p1",
+    "attributes": {
+        "email": "ada@windward.test",
+        "organization": "Windward Summit Logistics",
+        "title": "Fleet operations lead",
+        "updated": "2026-02-01T00:00:00+00:00",
+    },
+}
 
 
 class StubEmbed:
@@ -126,7 +144,7 @@ def _context(state: State, grants: GrantStore, connectors: ConnectorRegistry) ->
     )
 
 
-def _registry(manifest: object, provider: str) -> ConnectorRegistry:
+def _registry(manifest: object, provider: str, fallback: AuthProxy) -> ConnectorRegistry:
     explicit = {connector.oauth.provider: connector for connector in manifest.connectors}.get(
         provider
     )
@@ -135,7 +153,27 @@ def _registry(manifest: object, provider: str) -> ConnectorRegistry:
         if explicit is not None
         else {}
     )
-    return ConnectorRegistry(entries=entries, resolver=manifest.connector_resolver)
+    return ConnectorRegistry(
+        entries=entries, resolver=manifest.connector_resolver, fallback=fallback
+    )
+
+
+def _selected_fallback(store: CredentialStore, broker: object) -> DirectAuthProxy:
+    """The fallback backend a deploy installing sources plus a broker extension actually gets, built
+    by core's own boot selection rather than by hand: sources registers `direct`, a broker extension
+    registers none, so the sole backend is automatic with `[connectors] auth_backend` unset."""
+    fallback = _select_auth_proxy(
+        Config.model_validate(
+            {
+                "database": {"url": "sqlite+aiosqlite:///unused.db"},
+                "blob": {"backend": "filesystem", "root": "/tmp/unused"},
+            }
+        ),
+        (sources_manifest.manifest(), broker),
+        store,
+    )
+    assert isinstance(fallback, DirectAuthProxy)
+    return fallback
 
 
 async def _register_grant(
@@ -306,14 +344,21 @@ async def test_brokered_source_reaches_memory_search(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A granted source syncs through its broker with the `direct` fallback installed alongside —
+    the deploy shape the account-handle routing has to keep. The fallback's store holds no key for
+    either provider, so a source that took it would fail its run and recall nothing."""
     state = await _state()
     grants = GrantStore()
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     if provider == "asana":
         client = composio.ComposioClient(
             api_key="test", transport=_composio_transport(state.workspace_id)
         )
         monkeypatch.setattr(composio, "composio_client", lambda: client)
-        connectors = _registry(composio_manifest.manifest(), provider)
+        broker_manifest = composio_manifest.manifest()
+        connectors = _registry(
+            broker_manifest, provider, _selected_fallback(store, broker_manifest)
+        )
         account, host, stream, query = (
             ASANA_ACCOUNT,
             "app.asana.com",
@@ -328,7 +373,10 @@ async def test_brokered_source_reaches_memory_search(
             transport=_pipedream_transport(state.workspace_id),
         )
         monkeypatch.setattr(pipedream, "pipedream_client", lambda: client)
-        connectors = _registry(pipedream_manifest.manifest(), provider)
+        broker_manifest = pipedream_manifest.manifest()
+        connectors = _registry(
+            broker_manifest, provider, _selected_fallback(store, broker_manifest)
+        )
         account, host, stream, query = (
             GMAIL_ACCOUNT,
             "gmail.googleapis.com",
@@ -338,8 +386,100 @@ async def test_brokered_source_reaches_memory_search(
     await _register_grant(state, grants, provider, account, host)
     context = _context(state, grants, connectors)
 
+    resolved = await connectors.credential(state.workspace_id, provider, account)
+    assert resolved.transport is not None
+    assert resolved.bearer is None
+
     recalled = await _sync_and_search(
         state, context, provider, account, stream, query, database_url, tmp_path / provider
     )
 
     assert query.lower() in recalled.lower()
+
+
+async def _klaviyo_listener(seen: list[tuple[str, dict[str, str]]]) -> asyncio.Server:
+    """The provider's own host as a real listener: the direct backend resolves a `bearer`, not a
+    broker transport, so the connector builds its own client and dials a socket. This is what that
+    dial reaches, and `seen` is the request line and headers it actually carried."""
+    payload = json.dumps({"data": [KLAVIYO_PROFILE], "links": {"next": None}}).encode()
+
+    async def answer(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        head = (await reader.readuntil(b"\r\n\r\n")).decode()
+        lines = head.split("\r\n")
+        headers = {
+            name.lower(): value
+            for name, _, value in (line.partition(": ") for line in lines[1:])
+            if name
+        }
+        seen.append((lines[0].split(" ")[1], headers))
+        writer.write(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+            b"Connection: close\r\nContent-Length: %d\r\n\r\n" % len(payload) + payload
+        )
+        await writer.drain()
+        writer.close()
+
+    return await asyncio.start_server(answer, "127.0.0.1", 0)
+
+
+async def test_keyed_source_reaches_memory_search_with_the_broker_namespace_installed(
+    db: None,
+    database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The BYOK path in the deploy shape that broke it: composio's open namespace is installed and
+    claims every slug, including klaviyo — which composio cannot broker at all. The source carries
+    `DIRECT_ACCOUNT`, so its run must resolve through the `direct` backend instead.
+
+    Nothing between the member's key and the provider wire is stood in for: the key is stored
+    encrypted and read back through the workspace credential store, the fallback is the one core's
+    boot selection builds, and the provider is a real socket — so the proof is the `Authorization`
+    header klaviyo's own scheme put on the request. Composio's client answers 404 to everything and
+    records each call; an empty record is the broker never being asked."""
+    state = await _state()
+    broker_calls: list[str] = []
+
+    def composio_handler(request: httpx.Request) -> httpx.Response:
+        broker_calls.append(request.url.path)
+        return httpx.Response(404, json={"path": request.url.path})
+
+    client = composio.ComposioClient(
+        api_key="test", transport=httpx.MockTransport(composio_handler)
+    )
+    monkeypatch.setattr(composio, "composio_client", lambda: client)
+    broker_manifest = composio_manifest.manifest()
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    init_workspace_credentials(store)
+    connectors = _registry(broker_manifest, "klaviyo", _selected_fallback(store, broker_manifest))
+    context = _context(state, GrantStore(), connectors)
+
+    seen: list[tuple[str, dict[str, str]]] = []
+    listener = await _klaviyo_listener(seen)
+    monkeypatch.setattr(
+        KlaviyoConnector, "base_url", f"http://127.0.0.1:{listener.sockets[0].getsockname()[1]}"
+    )
+    try:
+        with ws(state.workspace_id):
+            await ws_current().put_credential("klaviyo", KLAVIYO_KEY)
+        recalled = await _sync_and_search(
+            state,
+            context,
+            "klaviyo",
+            DIRECT_ACCOUNT,
+            "profiles",
+            "windward summit logistics",
+            database_url,
+            tmp_path / "klaviyo",
+        )
+    finally:
+        listener.close()
+        await listener.wait_closed()
+
+    assert "windward summit logistics" in recalled.lower()
+    assert broker_calls == []
+    assert len(seen) == 1
+    target, headers = seen[0]
+    assert target.startswith("/api/profiles")
+    assert headers["authorization"] == f"Klaviyo-API-Key {KLAVIYO_KEY}"
+    assert headers["revision"] == KLAVIYO_REVISION

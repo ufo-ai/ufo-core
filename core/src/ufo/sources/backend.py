@@ -82,14 +82,14 @@ class _BackfillEnvelope(BaseModel):
 
 
 class ConnectorSourceConfig(BaseModel):
-    """Which account + stream one connector source row syncs. `account` is the handle the auth proxy
-    resolves the credential for (a broker connected-account id under Composio, a label under the
-    direct backend, whose key is keyed by the provider name); `stream` is the connector stream this
-    row pulls. `base_url` overrides the connector's host for a per-tenant provider (Freshdesk's
-    `https://<account>.freshdesk.com`, Zendesk's `<subdomain>.zendesk.com`), whose connector class
-    leaves `base_url` empty; it is part of the config the `source_row_id` hashes, so two tenants of
-    the same provider settle on distinct rows. The backend never reads a raw token — it asks the
-    proxy for a `Credential`."""
+    """Which account + stream one connector source row syncs. `account` is the handle the registry
+    routes the credential on (a broker connected-account id under Composio, `DIRECT_ACCOUNT` under
+    the direct backend, whose key is keyed by the provider name instead); `stream` is the connector
+    stream this row pulls. `base_url` overrides the connector's host for a per-tenant provider
+    (Freshdesk's `https://<account>.freshdesk.com`, Zendesk's `<subdomain>.zendesk.com`), whose
+    connector class leaves `base_url` empty; it is part of the config the `source_row_id` hashes, so
+    two tenants of the same provider settle on distinct rows. The backend never reads a raw token —
+    it asks the proxy for a `Credential`."""
 
     account: str
     stream: str
