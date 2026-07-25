@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import pickle
 import zlib
 from base64 import b64decode, b64encode
@@ -521,17 +522,25 @@ class RecordingCarrier:
         default_factory=lambda: ExecResult(stdout="", stderr="", exit_code=0)
     )
     calls: list[tuple[str, ...]] = field(default_factory=list)
-    stdins: list[bytes] = field(default_factory=list)
+    writes: list[tuple[str, bytes]] = field(default_factory=list)
+    operations: list[str] = field(default_factory=list)
+    write_error: Exception | None = None
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         return SandboxHandle(conversation_id=spec.conversation_id, container_id="test")
 
     async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], stdin: bytes, timeout_s: int
+        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
     ) -> ExecResult:
         self.calls.append(argv)
-        self.stdins.append(stdin)
+        self.operations.append(f"exec:{argv[-1]}")
         return self.result
+
+    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None:
+        self.operations.append(f"write:{path}")
+        if self.write_error is not None:
+            raise self.write_error
+        self.writes.append((path, content))
 
     async def destroy(self, handle: SandboxHandle) -> None: ...
 
@@ -1616,16 +1625,35 @@ async def test_a_truncation_salvages_the_partial_to_a_workspace_file_and_feeds_t
     assert stored is not None
     assert Message(role="user", content=feedback) in stored.messages
     assert stored.messages[-1] == Message(role="assistant", content="recovered")
-    writes = [
-        (argv, stdin)
-        for argv, stdin in zip(carrier.calls, carrier.stdins, strict=True)
-        if len(argv) >= 3 and "cat >" in argv[2]
-    ]
-    assert len(writes) == 1
-    write_argv, write_stdin = writes[0]
-    assert write_argv[-1] == path
     salvaged = 'Writing the report now.\n\n[tool call: write_report]\n{"content": "chapter one'
-    assert write_stdin == salvaged.encode()
+    assert carrier.writes == [(path, salvaged.encode())]
+
+
+async def test_a_truncation_recovers_when_the_salvage_write_fails(
+    db: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The salvage is an optimisation, not the recovery: an unwritable workspace must not turn a
+    recoverable truncation into a dead turn. The round retries on the correction alone — the same
+    message a truncation with nothing to salvage already sends — and the dropped partial is loud in
+    the log, since the model cannot see that it lost it."""
+    turn = await _seed_turn("queued", None)
+    partial = "Writing the report now."
+    model = TruncateThenAnswerModel(truncations=1, partial=(TextDelta(text=partial),))
+    carrier = RecordingCarrier(write_error=OSError("workspace is unwritable"))
+    engine = _engine(turn, model, tmp_path, carrier=carrier)
+
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        frame = await engine.run()
+
+    assert frame.status == "done"
+    assert frame.text == "recovered"
+    assert model.calls == 2
+    assert Message(role="user", content=TRUNCATION_FEEDBACK) in model.answered_with
+    assert not any(TOOL_OUTPUT_DIR in message.content for message in model.answered_with)
+    failed = [r.ufo for r in caplog.records if r.getMessage() == "tool.offload_failed"]
+    assert len(failed) == 1
+    assert failed[0]["error_class"] == "OSError"
+    assert failed[0]["chars"] == len(partial)
 
 
 async def test_a_salvage_ensures_the_offload_directory_before_it_writes(
@@ -1639,12 +1667,8 @@ async def test_a_salvage_ensures_the_offload_directory_before_it_writes(
     carrier = RecordingCarrier()
     frame = await _engine(turn, model, tmp_path, carrier=carrier).run()
     assert frame.status == "done"
-    ensures = [
-        i
-        for i, argv in enumerate(carrier.calls)
-        if argv[-1] == TOOL_OUTPUT_DIR and "mkdir -p" in argv[2]
-    ]
-    writes = [i for i, argv in enumerate(carrier.calls) if len(argv) >= 3 and "cat >" in argv[2]]
+    ensures = [i for i, op in enumerate(carrier.operations) if op == f"exec:{TOOL_OUTPUT_DIR}"]
+    writes = [i for i, op in enumerate(carrier.operations) if op.startswith("write:")]
     assert ensures and writes and ensures[0] < writes[0]
 
 
@@ -1724,6 +1748,28 @@ async def test_a_non_truncation_stream_error_still_fails_the_turn_immediately(
         ).one()
     assert row.status == "failed"
     assert TerminalFrame.model_validate(row.terminal).error_class == "RuntimeError"
+
+
+async def test_the_terminal_log_carries_the_error_class_and_never_the_message(
+    db: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failed turn is diagnosable from logs alone. The frame already persists the error; logging
+    only the status is what forced a live failure to be reconstructed from sampled traces. The
+    message stays behind: `str(error)` is raw text — a sandbox write failure carries the command's
+    own stderr, which can echo the egress proxy URL that embeds the turn's run token — and `log`
+    redacts by field name, never by value, so the class is the only part safe to export. The bounded
+    message lives on the persisted frame for anyone diagnosing from the record."""
+    turn = await _seed_turn("queued", None)
+    engine = _engine(turn, StreamErrorModel(), tmp_path)
+
+    with caplog.at_level(logging.INFO, logger="ufo"), pytest.raises(ModelStreamError):
+        await engine.run()
+
+    terminal = [r.ufo for r in caplog.records if r.getMessage() == "turn.terminal"]
+    assert len(terminal) == 1
+    assert terminal[0]["status"] == "failed"
+    assert terminal[0]["error_class"] == "RuntimeError"
+    assert "error_message" not in terminal[0]
 
 
 async def test_cancel_winning_mid_round_keeps_cancelled_terminal_bills_and_preserves_inbound(
@@ -2132,15 +2178,85 @@ async def test_dispatch_offloads_an_oversize_nonerror_result_and_keeps_a_preview
         total=total, path=path
     )
     assert full not in block.content
-    writes = [
-        (argv, stdin)
-        for argv, stdin in zip(carrier.calls, carrier.stdins, strict=True)
-        if len(argv) >= 3 and "cat >" in argv[2]
-    ]
-    assert len(writes) == 1
-    write_argv, write_stdin = writes[0]
-    assert write_argv[-1] == path
-    assert write_stdin == full.encode()
+    assert carrier.writes == [(path, full.encode())]
+
+
+async def test_dispatch_bounds_the_result_when_the_offload_write_fails(
+    db: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failed offload must not end the turn: the tool itself succeeded, so the result degrades to
+    the bounded text the model can still work from. The live failure this covers took down a
+    583k-token turn because the write raised out of dispatch. Degrading silently would trade a dead
+    turn for a model quietly losing the tail, so the log carries the write's own error class and the
+    size that went missing."""
+    turn = await _seed_turn("queued", None)
+    total = MAX_TOOL_RESULT_CHARS + 500
+    full = "a" * total
+    carrier = RecordingCarrier(write_error=OSError("workspace is unwritable"))
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path, carrier=carrier),
+        tools=ToolRegistry((_fixed_result_tool("big", full),)),
+    )
+    context = ToolContext(
+        sandbox=engine.sandbox,
+        blob=engine.blob,
+        turn=engine.turn,
+        agent=engine.agent,
+        spawn=engine.spawn,
+        speaker_member_id=engine.turn.speaker_member_id,
+        audience_member_id=engine.audience_member_id,
+        artifact_token_secret=engine.artifact_token_secret,
+        grants=engine.grants,
+    )
+
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        block = await engine._dispatch(context, ToolUseBlock(id="c1", name="big", input={}))
+
+    assert not block.is_error
+    assert block.content == _bounded(full)
+    failed = [r.ufo for r in caplog.records if r.getMessage() == "tool.offload_failed"]
+    assert len(failed) == 1
+    assert failed[0]["error_class"] == "OSError"
+    assert failed[0]["chars"] == total
+
+
+async def test_dispatch_bounds_the_result_when_the_offload_directory_cannot_be_reclaimed(
+    db: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The offload's other plumbing step fails the same way: a squatter the reclaim cannot remove
+    leaves nowhere to write, and the result degrades exactly as a failed write does rather than
+    taking the turn down before the write is even attempted."""
+    turn = await _seed_turn("queued", None)
+    total = MAX_TOOL_RESULT_CHARS + 500
+    full = "a" * total
+    carrier = RecordingCarrier(
+        result=ExecResult(stdout="", stderr="cannot reclaim .tool-output", exit_code=1)
+    )
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path, carrier=carrier),
+        tools=ToolRegistry((_fixed_result_tool("big", full),)),
+    )
+    context = ToolContext(
+        sandbox=engine.sandbox,
+        blob=engine.blob,
+        turn=engine.turn,
+        agent=engine.agent,
+        spawn=engine.spawn,
+        speaker_member_id=engine.turn.speaker_member_id,
+        audience_member_id=engine.audience_member_id,
+        artifact_token_secret=engine.artifact_token_secret,
+        grants=engine.grants,
+    )
+
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        block = await engine._dispatch(context, ToolUseBlock(id="c1", name="big", input={}))
+
+    assert not block.is_error
+    assert block.content == _bounded(full)
+    assert carrier.writes == []
+    failed = [r.ufo for r in caplog.records if r.getMessage() == "tool.offload_failed"]
+    assert len(failed) == 1
+    assert failed[0]["error_class"] == "OSError"
 
 
 async def test_dispatch_offload_preview_is_walled_for_an_untrusted_tool(

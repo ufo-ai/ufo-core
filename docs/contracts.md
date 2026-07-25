@@ -104,7 +104,8 @@ share_file`. Registry rejects a second registration of an existing name.
 ```python
 class Carrier(Protocol):
     async def create(self, spec: SandboxSpec) -> SandboxHandle: ...      # create-or-attach
-    async def exec(self, h: SandboxHandle, argv: tuple[str, ...], *, stdin: bytes, timeout_s: int) -> ExecResult: ...
+    async def exec(self, h: SandboxHandle, argv: tuple[str, ...], *, timeout_s: int) -> ExecResult: ...
+    async def write(self, h: SandboxHandle, path: str, content: bytes) -> None: ...  # copy-in
     async def route(self, h: SandboxHandle, port: int) -> str: ...       # serving URL
     async def destroy(self, h: SandboxHandle) -> None: ...
 class SandboxSpec(BaseModel):  conversation_id: UUID; image_digest: str; mount: MountSpec; proxy: ProxyEndpoint

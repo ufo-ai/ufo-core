@@ -161,8 +161,16 @@ class Carrier(Protocol):
     async def create(self, spec: SandboxSpec) -> SandboxHandle: ...
 
     async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], stdin: bytes, timeout_s: int
+        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
     ) -> ExecResult: ...
+
+    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None:
+        """Write `content` to the absolute workspace `path`, creating parent directories — the
+        copy-in that pairs with `export`'s copy-out. Each carrier supplies its own (e2b uploads
+        through its filesystem API, docker streams over a real stdin), because bytes must never ride
+        `exec`'s argv: a carrier whose command API takes a shell string has to inline them, which
+        the provider rejects once they are large — exactly when a caller offloads a large result."""
+        ...
 
     async def export(self, handle: SandboxHandle, path: str, blob: BlobStore, key: str) -> None:
         """Stream a workspace file straight into `blob` under `key`, never buffering it whole in the
@@ -218,20 +226,11 @@ class SandboxSession:
         return await self.carrier.exec(
             self.handle,
             ("bash", "-lc", command),
-            stdin=b"",
             timeout_s=timeout_s if timeout_s is not None else DEFAULT_EXEC_TIMEOUT_SECONDS,
         )
 
     async def write_file(self, path: str, content: bytes) -> None:
-        target = workspace_path(path)
-        result = await self.carrier.exec(
-            self.handle,
-            ("sh", "-c", 'mkdir -p "$(dirname "$1")" && cat > "$1"', "sh", target),
-            stdin=content,
-            timeout_s=30,
-        )
-        if result.exit_code != 0:
-            raise OSError(result.stderr.strip() or f"write failed: {path}")
+        await self.carrier.write(self.handle, workspace_path(path), content)
 
     async def ensure_tool_output_dir(self) -> bool:
         """Guarantee the engine's private `.tool-output` offload dir exists, reclaiming a
@@ -251,7 +250,6 @@ class SandboxSession:
                 "sh",
                 TOOL_OUTPUT_DIR,
             ),
-            stdin=b"",
             timeout_s=30,
         )
         if result.exit_code != 0:
@@ -261,7 +259,7 @@ class SandboxSession:
     async def file_exists(self, path: str) -> bool:
         target = workspace_path(path)
         result = await self.carrier.exec(
-            self.handle, ("sh", "-c", 'test -f "$1"', "sh", target), stdin=b"", timeout_s=30
+            self.handle, ("sh", "-c", 'test -f "$1"', "sh", target), timeout_s=30
         )
         return result.exit_code == 0
 
@@ -278,7 +276,6 @@ class SandboxSession:
         result = await self.carrier.exec(
             self.handle,
             ("sbxfs", op, json.dumps(params, separators=(",", ":"))),
-            stdin=b"",
             timeout_s=DEFAULT_EXEC_TIMEOUT_SECONDS,
         )
         stdout = result.stdout.strip()

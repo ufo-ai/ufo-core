@@ -37,8 +37,10 @@ class _UntouchedCarrier:
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         raise AssertionError(SANDBOX_UNTOUCHED)
 
+    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None: ...
+
     async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], stdin: bytes, timeout_s: int
+        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
     ) -> ExecResult:
         raise AssertionError(SANDBOX_UNTOUCHED)
 

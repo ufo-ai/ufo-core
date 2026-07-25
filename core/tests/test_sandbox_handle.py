@@ -88,6 +88,8 @@ class _ResumeRecordingCarrier:
         self.specs.append(spec)
         return SandboxHandle(conversation_id=spec.conversation_id, container_id=self.container_id)
 
+    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None: ...
+
     async def exec(self, *args: object, **kwargs: object) -> object:
         raise AssertionError("open_sandbox never execs")
 

@@ -30,8 +30,10 @@ class FakeCarrier:
     host_ports: list[int] = field(default_factory=list)
     host_value: str = FAKE_HOST
 
+    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None: ...
+
     async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], stdin: bytes, timeout_s: int
+        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
     ) -> ExecResult:
         command = argv[-1]
         self.commands.append(command)
@@ -46,8 +48,10 @@ class FakeCarrier:
 
 @dataclass
 class FailingCarrier:
+    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None: ...
+
     async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], stdin: bytes, timeout_s: int
+        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
     ) -> ExecResult:
         return ExecResult(stdout="", stderr="Chromium is required", exit_code=127)
 

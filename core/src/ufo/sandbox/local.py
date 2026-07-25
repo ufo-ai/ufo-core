@@ -25,6 +25,7 @@ from ufo.sandbox.session import (
     SENTINEL_MODEL_KEY,
     WORKSPACE_DIR,
     ExecResult,
+    MountSpec,
     SandboxHandle,
     SandboxSpec,
 )
@@ -57,7 +58,7 @@ class LocalCarrier:
     _scratch: Path = field(default_factory=_provision_scratch)
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
-        root = _root(spec.mount.host_path)
+        root = _root(spec.mount)
         await asyncio.to_thread(root.mkdir, parents=True, exist_ok=True)
         ca_path = self._scratch / CA_FILENAME
         await asyncio.to_thread(ca_path.write_bytes, spec.proxy.ca_cert.encode())
@@ -87,23 +88,23 @@ class LocalCarrier:
         )
 
     async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], stdin: bytes, timeout_s: int
+        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
     ) -> ExecResult:
         """Run one command as a host subprocess in the workspace. The `/workspace` paths the tools
         pass are logical, so each argv element is rewritten to the host workspace directory before
         the subprocess sees it, and the command inherits the turn's egress environment."""
-        root = _root(handle.mount.host_path if handle.mount else None)
+        root = _root(handle.mount)
         rewritten = tuple(arg.replace(WORKSPACE_DIR, str(root)) for arg in argv)
         process = await asyncio.create_subprocess_exec(
             *rewritten,
             cwd=str(root),
             env=dict(handle.egress_env),
-            stdin=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(stdin), timeout=timeout_s)
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_s)
         except TimeoutError:
             process.kill()
             await process.wait()
@@ -114,13 +115,18 @@ class LocalCarrier:
             exit_code=process.returncode or 0,
         )
 
+    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None:
+        """The workspace is a host directory, so the copy-in is a host write under it — off the
+        loop, since the filesystem has no async API."""
+        target = _host_path(handle, path)
+        await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(target.write_bytes, content)
+
     async def export(self, handle: SandboxHandle, path: str, blob: BlobStore, key: str) -> None:
         """The workspace is a host directory, so the produced file already lives under it — hand its
         path to the blob store, which streams it in without the host process holding it whole,
         the large-attachment path distinct from the bounded read."""
-        root = _root(handle.mount.host_path if handle.mount else None)
-        rel = PurePosixPath(path).relative_to(WORKSPACE_DIR)
-        await blob.put_file(key, root / rel)
+        await blob.put_file(key, _host_path(handle, path))
 
     async def destroy(self, handle: SandboxHandle) -> None:
         """The workspace is the durable bind mount and the egress env lives on each turn's handle,
@@ -137,7 +143,13 @@ class LocalCarrier:
         )
 
 
-def _root(host_path: str | None) -> Path:
-    if host_path is None:
+def _root(mount: MountSpec | None) -> Path:
+    if mount is None or mount.host_path is None:
         raise RuntimeError("the local carrier requires a filesystem workspace mount")
-    return Path(host_path)
+    return Path(mount.host_path)
+
+
+def _host_path(handle: SandboxHandle, path: str) -> Path:
+    """The host location of a logical `/workspace` path — the workspace is a host directory, so a
+    copy-in writes here and a copy-out reads here."""
+    return _root(handle.mount) / PurePosixPath(path).relative_to(WORKSPACE_DIR)

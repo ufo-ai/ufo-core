@@ -45,9 +45,7 @@ async def test_create_exec_export_and_destroy_in_a_temp_dir(tmp_path: Path) -> N
     assert handle.container_id == LOCAL_CONTAINER_ID
     assert workspace.is_dir()
 
-    result = await carrier.exec(
-        handle, ("bash", "-lc", "echo hi > out.txt && printf done"), b"", 30
-    )
+    result = await carrier.exec(handle, ("bash", "-lc", "echo hi > out.txt && printf done"), 30)
     assert result.exit_code == 0
     assert result.stdout == "done"
     assert (workspace / "out.txt").read_text() == "hi\n"
@@ -64,7 +62,7 @@ async def test_exec_rewrites_the_logical_workspace_path(tmp_path: Path) -> None:
     carrier = LocalCarrier()
     handle = await carrier.create(_spec(workspace))
 
-    await carrier.exec(handle, ("bash", "-lc", "printf x > /workspace/w.txt"), b"", 30)
+    await carrier.exec(handle, ("bash", "-lc", "printf x > /workspace/w.txt"), 30)
 
     assert (workspace / "w.txt").read_text() == "x"
 
@@ -74,7 +72,7 @@ async def test_exec_carries_the_egress_environment(tmp_path: Path) -> None:
     handle = await carrier.create(_spec(tmp_path / "workspace"))
 
     result = await carrier.exec(
-        handle, ("bash", "-lc", 'printf "%s|%s" "$HTTPS_PROXY" "$ANTHROPIC_API_KEY"'), b"", 30
+        handle, ("bash", "-lc", 'printf "%s|%s" "$HTTPS_PROXY" "$ANTHROPIC_API_KEY"'), 30
     )
 
     proxy, sentinel = result.stdout.split("|")
@@ -82,20 +80,24 @@ async def test_exec_carries_the_egress_environment(tmp_path: Path) -> None:
     assert sentinel == SENTINEL_MODEL_KEY
 
 
-async def test_exec_pipes_stdin(tmp_path: Path) -> None:
+async def test_write_creates_parents_for_a_payload_too_large_for_a_command_line(
+    tmp_path: Path,
+) -> None:
     carrier = LocalCarrier()
-    handle = await carrier.create(_spec(tmp_path / "workspace"))
+    workspace = tmp_path / "workspace"
+    handle = await carrier.create(_spec(workspace))
+    content = b"x" * (2 * 1024 * 1024)
 
-    result = await carrier.exec(handle, ("bash", "-lc", "cat"), b"piped-in", 30)
+    await carrier.write(handle, "/workspace/nested/deeper/big.txt", content)
 
-    assert result.stdout == "piped-in"
+    assert (workspace / "nested" / "deeper" / "big.txt").read_bytes() == content
 
 
 async def test_exec_maps_a_timeout_to_the_timeout_code(tmp_path: Path) -> None:
     carrier = LocalCarrier()
     handle = await carrier.create(_spec(tmp_path / "workspace"))
 
-    result = await carrier.exec(handle, ("bash", "-lc", "sleep 5"), b"", 1)
+    result = await carrier.exec(handle, ("bash", "-lc", "sleep 5"), 1)
 
     assert result.exit_code == EXEC_TIMEOUT_CODE
 
@@ -180,8 +182,8 @@ async def test_exec_env_rides_the_handle_not_the_conversation(tmp_path: Path) ->
     second = await carrier.create(replace(base, run_token="turn-b", env={"GH_TOKEN": "sent-b"}))
 
     probe = ("bash", "-lc", 'printf "%s|%s" "$HTTPS_PROXY" "${GH_TOKEN:-none}"')
-    result_a = await carrier.exec(first, probe, b"", 30)
-    result_b = await carrier.exec(second, probe, b"", 30)
+    result_a = await carrier.exec(first, probe, 30)
+    result_b = await carrier.exec(second, probe, 30)
 
     assert result_a.stdout == f"http://turn-a:@127.0.0.1:{PROXY_PORT}|none"
     assert result_b.stdout == f"http://turn-b:@127.0.0.1:{PROXY_PORT}|sent-b"

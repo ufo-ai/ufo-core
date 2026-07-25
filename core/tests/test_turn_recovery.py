@@ -91,8 +91,10 @@ class _CountingCarrier:
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         return SandboxHandle(conversation_id=spec.conversation_id, container_id="test")
 
+    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None: ...
+
     async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], stdin: bytes, timeout_s: int
+        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
     ) -> ExecResult:
         self.execs.append(tuple(argv))
         return ExecResult(stdout="hi\n", stderr="", exit_code=0)

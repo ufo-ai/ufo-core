@@ -9,7 +9,6 @@ this extension-contributed carrier — never the fake, which is only the depende
 The two exceptions raised are the real e2b types, so the mapping is exercised against the classes
 the live SDK throws."""
 
-import base64
 import shlex
 import subprocess
 from dataclasses import dataclass, field, replace
@@ -406,7 +405,7 @@ async def test_exec_runs_under_the_turn_egress_env() -> None:
     carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
     handle = await carrier.create(_spec(uuid4()))
 
-    await carrier.exec(handle, ("bash", "-lc", "curl https://example.com"), b"", 60)
+    await carrier.exec(handle, ("bash", "-lc", "curl https://example.com"), 60)
 
     envs = sdk.sandboxes["sbx-1"].commands.envs[-1]
     assert envs is not None
@@ -507,7 +506,7 @@ async def test_create_resumes_a_prior_process_sandbox_and_exec_works() -> None:
         INSTALL_CA_COMMAND,
         INSTALL_CA_COMMAND,
     ]
-    result = await restarted.exec(resumed, ("bash", "-lc", "echo hi"), b"", 60)
+    result = await restarted.exec(resumed, ("bash", "-lc", "echo hi"), 60)
     assert result.exit_code == 0
 
 
@@ -535,7 +534,7 @@ async def test_exec_runs_the_joined_command_in_the_workspace_and_maps_the_result
     handle = await carrier.create(_spec(uuid4()))
     sdk.sandboxes["sbx-1"].commands.result = _Result("hello\n", "", 0)
 
-    result = await carrier.exec(handle, ("bash", "-lc", "echo hi"), b"", 60)
+    result = await carrier.exec(handle, ("bash", "-lc", "echo hi"), 60)
 
     assert result == ExecResult(stdout="hello\n", stderr="", exit_code=0)
     command, cwd, timeout = sdk.sandboxes["sbx-1"].commands.runs[-1]
@@ -544,18 +543,19 @@ async def test_exec_runs_the_joined_command_in_the_workspace_and_maps_the_result
     assert timeout == 60
 
 
-async def test_exec_pipes_stdin_through_base64() -> None:
+async def test_write_uploads_through_the_filesystem_api() -> None:
+    """The bytes go through `files.write`, never the command line: inlining them is what e2b rejects
+    once the payload is large, exactly when a caller offloads an oversized tool result."""
     sdk = _Sdk()
     carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
     handle = await carrier.create(_spec(uuid4()))
+    content = b"x" * (2 * 1024 * 1024)
 
-    await carrier.exec(handle, ("sh", "-c", 'cat > "$1"', "sh", "/workspace/f"), b"payload", 30)
+    await carrier.write(handle, "/workspace/f", content)
 
-    command = sdk.sandboxes["sbx-1"].commands.runs[-1][0]
-    assert command.startswith("printf %s ")
-    assert "| base64 -d | " in command
-    assert base64.b64encode(b"payload").decode() in command
-    assert command.endswith("sh -c 'cat > \"$1\"' sh /workspace/f")
+    sandbox = sdk.sandboxes["sbx-1"]
+    assert ("/workspace/f", content) in sandbox.files.written
+    assert not any("base64" in command for command, _, _ in sandbox.commands.runs)
 
 
 async def test_exec_maps_a_nonzero_exit_to_the_command_result() -> None:
@@ -566,7 +566,7 @@ async def test_exec_maps_a_nonzero_exit_to_the_command_result() -> None:
         stderr="boom", stdout="partial", exit_code=3, error="boom"
     )
 
-    result = await carrier.exec(handle, ("bash", "-lc", "false"), b"", 60)
+    result = await carrier.exec(handle, ("bash", "-lc", "false"), 60)
 
     assert result == ExecResult(stdout="partial", stderr="boom", exit_code=3)
 
@@ -577,7 +577,7 @@ async def test_exec_maps_a_timeout_to_the_timeout_code() -> None:
     handle = await carrier.create(_spec(uuid4()))
     sdk.sandboxes["sbx-1"].commands.raises = TimeoutException("timed out")
 
-    result = await carrier.exec(handle, ("bash", "-lc", "sleep 999"), b"", 1)
+    result = await carrier.exec(handle, ("bash", "-lc", "sleep 999"), 1)
 
     assert result.exit_code == EXEC_TIMEOUT_CODE
     assert "timed out" in result.stderr
@@ -732,8 +732,8 @@ async def test_exec_env_rides_the_handle_not_the_conversation() -> None:
     first = await carrier.create(replace(_spec(conversation), run_token="turn-a"))
     second = await carrier.create(replace(_spec(conversation), run_token="turn-b"))
 
-    await carrier.exec(first, ("bash", "-lc", "true"), b"", 60)
-    await carrier.exec(second, ("bash", "-lc", "true"), b"", 60)
+    await carrier.exec(first, ("bash", "-lc", "true"), 60)
+    await carrier.exec(second, ("bash", "-lc", "true"), 60)
 
     envs = sdk.sandboxes["sbx-1"].commands.envs
     assert envs[-2] is not None and envs[-2]["HTTPS_PROXY"] == "https://turn-a:@sandbox-proxy.test"
@@ -749,7 +749,7 @@ async def test_spec_env_joins_the_exec_env() -> None:
         replace(_spec(uuid4()), env={"GH_TOKEN": "UFO_SENTINEL_GRANT_acct-1"})
     )
 
-    await carrier.exec(handle, ("bash", "-lc", "gh api user"), b"", 60)
+    await carrier.exec(handle, ("bash", "-lc", "gh api user"), 60)
 
     envs = sdk.sandboxes["sbx-1"].commands.envs[-1]
     assert envs is not None

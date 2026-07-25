@@ -267,7 +267,7 @@ async def test_exec_carries_the_turn_env_and_run_bakes_none(
     assert run_argv[run_argv.index("--network") + 1] == (f"ufo-sandbox-{spec.conversation_id.hex}")
     assert run_argv[run_argv.index("--cap-drop") + 1] == "NET_RAW"
 
-    await carrier.exec(handle, ("bash", "-lc", "gh api user"), b"", 30)
+    await carrier.exec(handle, ("bash", "-lc", "gh api user"), 30)
 
     exec_argv = calls[-1]
     proxy_url = "http://turn-a:@host.docker.internal:8080"
@@ -597,10 +597,54 @@ async def test_attach_to_a_running_container_carries_the_second_turns_env(
         return 0, b"", b""
 
     monkeypatch.setattr(docker_ext, "_docker", record_docker)
-    await carrier.exec(second, ("bash", "-lc", "gh api user"), b"", 30)
+    await carrier.exec(second, ("bash", "-lc", "gh api user"), 30)
 
     exec_argv = exec_calls[-1]
     assert "HTTPS_PROXY=http://turn-b:@host.docker.internal:8080" in exec_argv
     assert "GH_TOKEN=UFO_SENTINEL_GRANT_acct-b" in exec_argv
     assert "HTTPS_PROXY=http://turn-a:@host.docker.internal:8080" not in exec_argv
     assert "GH_TOKEN=UFO_SENTINEL_GRANT_acct-a" not in exec_argv
+
+
+async def test_write_streams_the_content_over_stdin_and_never_on_the_command_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The invariant the write seam exists for: a payload reaches the container through `docker exec
+    -i`'s stdin, never as an argv element. The real-container proof is the 26 MB write in
+    test_file_tools.py; this pins the call shape, which no successful write can distinguish."""
+    calls: list[tuple[tuple[str, ...], bytes]] = []
+
+    async def record_docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60):
+        calls.append((argv, stdin))
+        return 0, b"", b""
+
+    monkeypatch.setattr(docker_ext, "_docker", record_docker)
+    carrier = DockerCarrier()
+    handle = SandboxHandle(conversation_id=uuid4(), container_id="cid1")
+    content = b"x" * (2 * 1024 * 1024)
+
+    await carrier.write(handle, "/workspace/notes/report.txt", content)
+
+    argv, stdin = calls[-1]
+    assert stdin == content
+    assert not any(content[:64].decode() in arg for arg in argv)
+    assert argv[:3] == ("exec", "-i", "cid1")
+    assert argv[-1] == "/workspace/notes/report.txt"
+    assert 'mkdir -p "$(dirname "$1")" && cat > "$1"' in argv
+
+
+async def test_write_raises_with_the_container_error_on_a_nonzero_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed copy-in is loud: the caller (the engine's offload) decides how to degrade, so the
+    carrier must not swallow it into a silently truncated file."""
+
+    async def failing_docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60):
+        return 1, b"", b"cat: /workspace/x: No space left on device\n"
+
+    monkeypatch.setattr(docker_ext, "_docker", failing_docker)
+    carrier = DockerCarrier()
+    handle = SandboxHandle(conversation_id=uuid4(), container_id="cid1")
+
+    with pytest.raises(OSError, match="No space left on device"):
+        await carrier.write(handle, "/workspace/x", b"payload")

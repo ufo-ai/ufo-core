@@ -193,8 +193,10 @@ class _UntouchedCarrier:
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         raise AssertionError(SANDBOX_UNTOUCHED)
 
+    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None: ...
+
     async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], stdin: bytes, timeout_s: int
+        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
     ) -> ExecResult:
         raise AssertionError(SANDBOX_UNTOUCHED)
 
@@ -603,6 +605,21 @@ def test_config_backend_selects_a_manifest_contributed_carrier() -> None:
     manifest = _sample_manifest()
     carrier = _select_carrier(_carrier_config(sample.CARRIER_NAME), (manifest,))
     assert isinstance(carrier, sample.SampleCarrier)
+
+
+async def test_a_workspace_write_reaches_the_manifest_contributed_carrier() -> None:
+    """The copy-in half of the carriers seam: core's `write_file` hands the bytes to the carrier's
+    own `write` under the resolved workspace path, so the sample reads back exactly what core copied
+    in — never through `exec`, whose command line is what a provider rejects once a payload is
+    large. The size limit itself is the real carriers' proof; this is the dispatch."""
+    manifest = _sample_manifest()
+    carrier = _select_carrier(_carrier_config(sample.CARRIER_NAME), (manifest,))
+    assert isinstance(carrier, sample.SampleCarrier)
+    handle = SandboxHandle(conversation_id=uuid4(), container_id="test")
+
+    await SandboxSession(carrier=carrier, handle=handle).write_file("notes/report.txt", b"payload")
+
+    assert carrier.written == {"/workspace/notes/report.txt": b"payload"}
 
 
 def test_an_unregistered_backend_fails_loud() -> None:

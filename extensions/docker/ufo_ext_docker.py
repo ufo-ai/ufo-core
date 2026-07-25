@@ -42,6 +42,7 @@ from ufo.sdk.sandbox import (
 CARRIER_NAME = "docker"
 CONTAINER_NAME_PREFIX = "ufo-sbx-"
 CREATE_TIMEOUT_SECONDS = 120
+WRITE_TIMEOUT_SECONDS = 30
 DEFAULT_NETWORK = "ufo-sandbox"
 HOST_GATEWAY_NAME = "host.docker.internal"
 HOST_GATEWAY_MAPPING = f"{HOST_GATEWAY_NAME}:host-gateway"
@@ -146,19 +147,37 @@ class DockerCarrier:
             raise
 
     async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], stdin: bytes, timeout_s: int
+        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
     ) -> ExecResult:
         env_args = tuple(
             arg for name, value in handle.egress_env.items() for arg in ("--env", f"{name}={value}")
         )
         code, stdout, stderr = await _docker(
-            "exec", "-i", *env_args, handle.container_id, *argv, stdin=stdin, timeout_s=timeout_s
+            "exec", *env_args, handle.container_id, *argv, timeout_s=timeout_s
         )
         return ExecResult(
             stdout=stdout.decode(errors="replace"),
             stderr=stderr.decode(errors="replace"),
             exit_code=code,
         )
+
+    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None:
+        """`docker exec -i` gives the container a real stdin, so the bytes stream in over it and
+        never enter the command line."""
+        code, _, stderr = await _docker(
+            "exec",
+            "-i",
+            handle.container_id,
+            "sh",
+            "-c",
+            'mkdir -p "$(dirname "$1")" && cat > "$1"',
+            "sh",
+            path,
+            stdin=content,
+            timeout_s=WRITE_TIMEOUT_SECONDS,
+        )
+        if code != 0:
+            raise OSError(stderr.decode(errors="replace").strip() or f"write failed: {path}")
 
     async def export(self, handle: SandboxHandle, path: str, blob: BlobStore, key: str) -> None:
         """Copy a produced workspace file to `key` without the host process ever holding the bytes

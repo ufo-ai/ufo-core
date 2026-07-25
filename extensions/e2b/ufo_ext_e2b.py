@@ -21,7 +21,6 @@ directly. The reaper reclaims a sandbox a prior process created by reconnecting 
 pausing it — the conversation's durable `sandbox_handle` is the map, so idle reclaim no longer
 leans on the provider's own timeout alone."""
 
-import base64
 import os
 import shlex
 from dataclasses import dataclass, field
@@ -286,20 +285,16 @@ class E2BCarrier:
             return False
 
     async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], stdin: bytes, timeout_s: int
+        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
     ) -> ExecResult:
-        """Run one command through the sandbox's `commands.run`. e2b takes a shell
-        string with no stdin channel, so argv is quoted into one command and any stdin rides in
-        base64 through the sandbox's own `base64 -d` — the write path the file tools depend on. A
+        """Run one command through the sandbox's `commands.run`. e2b takes a shell string, so argv
+        is quoted into one command — bytes reach the workspace through `write`, never here. A
         non-zero exit and a command timeout arrive as SDK exceptions, mapped to the ExecResult the
-        session reads exactly as the shell's own exit code would. The command runs under the turn's
-        egress env, so its every network call routes through the proxy with the turn's run token —
-        the raw model key never enters the sandbox and every request is metered."""
+        session reads exactly as the shell's own exit code would. It runs under the turn's egress
+        env, so its every network call routes through the proxy with the turn's run token — the raw
+        model key never enters the sandbox and every request is metered."""
         sandbox = await self._sandbox(handle)
         command = shlex.join(argv)
-        if stdin:
-            payload = shlex.quote(base64.b64encode(stdin).decode())
-            command = f"printf %s {payload} | base64 -d | {command}"
         try:
             result = await sandbox.commands.run(
                 command,
@@ -312,6 +307,13 @@ class E2BCarrier:
         except TimeoutException as error:
             return ExecResult(stdout="", stderr=str(error), exit_code=EXEC_TIMEOUT_CODE)
         return ExecResult(stdout=result.stdout, stderr=result.stderr, exit_code=result.exit_code)
+
+    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None:
+        """Upload through the sandbox's filesystem API, which creates the parent directories and
+        streams the body as its own request — e2b's only channel that carries bytes off the command
+        line, since `commands.run` takes a shell string with no stdin."""
+        sandbox = await self._sandbox(handle)
+        await sandbox.files.write(path, content)
 
     async def export(self, handle: SandboxHandle, path: str, blob: BlobStore, key: str) -> None:
         """Promote a produced workspace file into the artifact store with a server-side copy inside

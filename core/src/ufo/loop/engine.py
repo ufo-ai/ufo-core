@@ -871,7 +871,8 @@ class TurnEngine:
                     path = await self._offload(
                         f"truncated-{self.turn.id}-{round_index}.txt", error.partial_output
                     )
-                    feedback += TRUNCATION_SALVAGE_NOTICE.format(path=path)
+                    if path is not None:
+                        feedback += TRUNCATION_SALVAGE_NOTICE.format(path=path)
                 messages = (*messages, Message(role="user", content=feedback))
                 continue
             await self._publish_cost(usage_events)
@@ -1345,16 +1346,31 @@ class TurnEngine:
             tool_use_id=result.tool_use_id, content=blocks, is_error=result.is_error
         )
 
-    async def _offload(self, name: str, content: str) -> str:
+    async def _offload(self, name: str, content: str) -> str | None:
         """Write `content` into the turn's private `.tool-output` dir and return its path, ensuring
         the directory exists first. A member write (or bash) can leave a file squatting the name,
         which the bare `mkdir -p` in the write step cannot reclaim — left unhandled it fails
-        `File exists` and poisons every later offload and salvage in the workspace."""
-        if await self.sandbox.ensure_tool_output_dir():
-            emit_metric("sandbox_tool_output_dir_reclaimed_total")
-            log("sandbox.tool_output_dir_reclaimed", turn_id=str(self.turn.id))
+        `File exists` and poisons every later offload and salvage in the workspace.
+
+        None means the write failed, and every caller degrades on it rather than lose the turn to
+        plumbing: a turn that reached this point has already done its work. Loud, because what
+        degrades is invisible to the model — it silently loses either a result's tail or its own
+        salvaged partial."""
         path = f"{TOOL_OUTPUT_DIR}/{name}"
-        await self.sandbox.write_file(path, content.encode())
+        try:
+            if await self.sandbox.ensure_tool_output_dir():
+                emit_metric("sandbox_tool_output_dir_reclaimed_total")
+                log("sandbox.tool_output_dir_reclaimed", turn_id=str(self.turn.id))
+            await self.sandbox.write_file(path, content.encode())
+        except Exception as error:
+            emit_metric("tool_offload_failed_total")
+            log(
+                "tool.offload_failed",
+                turn_id=str(self.turn.id),
+                error_class=type(error).__name__,
+                chars=len(content),
+            )
+            return None
         return path
 
     @DBOS.step(preemptible=True)
@@ -1432,8 +1448,11 @@ class TurnEngine:
             content = _bounded(content)
         elif len(content) > MAX_TOOL_RESULT_CHARS:
             path = await self._offload(f"{call.id}.txt", content)
-            content = content[:TOOL_RESULT_PREVIEW_CHARS] + OFFLOAD_NOTICE.format(
-                total=len(content), path=path
+            content = (
+                content[:TOOL_RESULT_PREVIEW_CHARS]
+                + OFFLOAD_NOTICE.format(total=len(content), path=path)
+                if path is not None
+                else _bounded(content)
             )
         if untrusted:
             walled = content.replace(UNTRUSTED_RESULT_CLOSE, UNTRUSTED_RESULT_CLOSE_ESCAPE)
@@ -1574,7 +1593,12 @@ class TurnEngine:
             return None
         await self._publish(Terminal(frame=frame))
         emit_metric("turn_terminal_total", status=frame.status)
-        log("turn.terminal", turn_id=str(self.turn.id), status=frame.status)
+        log(
+            "turn.terminal",
+            turn_id=str(self.turn.id),
+            status=frame.status,
+            error_class=frame.error_class or "",
+        )
         return frame
 
     async def _commit_once(

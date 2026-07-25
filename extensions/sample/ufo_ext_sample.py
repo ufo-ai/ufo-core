@@ -908,17 +908,24 @@ class SampleCarrier:
     """A trivial in-process carrier the probe registers so `serve`'s backend selection has a
     manifest-contributed carrier to choose. It implements the whole Carrier protocol without a real
     container: `exec` echoes the argv it received (so a selection test can prove the carrier it got
-    is this one), `export` copies the requested path into the blob store, and create/destroy are
+    is this one), `write` keeps the bytes it was handed under their path (so a test reads back what
+    core copied in), `export` copies the requested path into the blob store, and create/destroy are
     inert. It proves the `carriers` seam — that core selects an extension's carrier — never a real
     sandbox; the Docker and e2b carriers keep that proof."""
+
+    def __init__(self) -> None:
+        self.written: dict[str, bytes] = {}
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         return SandboxHandle(conversation_id=spec.conversation_id, container_id=CARRIER_CONTAINER)
 
     async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], stdin: bytes, timeout_s: int
+        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
     ) -> ExecResult:
         return ExecResult(stdout=" ".join(argv), stderr="", exit_code=0)
+
+    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None:
+        self.written[path] = content
 
     async def export(self, handle: SandboxHandle, path: str, blob: BlobStore, key: str) -> None:
         await blob.put(key, path.encode())

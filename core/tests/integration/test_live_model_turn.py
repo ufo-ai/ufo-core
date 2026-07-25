@@ -57,8 +57,10 @@ class _StandInCarrier:
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         return SandboxHandle(conversation_id=spec.conversation_id, container_id="live-model")
 
+    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None: ...
+
     async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], stdin: bytes, timeout_s: int
+        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
     ) -> ExecResult:
         return ExecResult(stdout="", stderr="", exit_code=0)
 

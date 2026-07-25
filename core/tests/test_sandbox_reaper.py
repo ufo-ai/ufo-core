@@ -58,6 +58,8 @@ class RecordingCarrier:
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         raise AssertionError("the reaper never creates a sandbox")
 
+    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None: ...
+
     async def exec(self, *args: object, **kwargs: object) -> object:
         raise AssertionError("the reaper never execs in a sandbox")
 

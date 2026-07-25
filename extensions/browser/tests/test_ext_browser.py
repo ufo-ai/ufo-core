@@ -156,10 +156,12 @@ class WritesCarrier:
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         raise AssertionError("browser tools do not create containers")
 
+    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None:
+        self.writes.append((path, content))
+
     async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], stdin: bytes, timeout_s: int
+        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
     ) -> ExecResult:
-        self.writes.append((argv[-1], stdin))
         return ExecResult(stdout="", stderr="", exit_code=0)
 
     async def destroy(self, handle: SandboxHandle) -> None:
