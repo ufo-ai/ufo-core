@@ -2,8 +2,8 @@
 
 Docker is core's default carrier; this extension registers `e2b` on the `carriers` Manifest point,
 so a deploy that sets `[sandbox] backend = "e2b"` runs its sandboxes on E2B without core naming the
-provider. The e2b SDK is synchronous, so every provider call crosses `asyncio.to_thread` — the one
-blocking boundary tolerated, kept to the named SDK callable it wraps. `create` opens a fresh sandbox
+provider. Every provider call is awaited on the SDK's async client, so a turn's sandbox I/O never
+occupies a thread or the loop while it waits. `create` opens a fresh sandbox
 on the deploy's template, resumes the conversation's in-process one, or — when this process holds
 none — reconnects the sandbox a prior process left, from the id core seeds on `spec.resume_id` off
 the conversation's durable handle; `exec` runs a command through `commands.run`; `export` promotes a
@@ -21,7 +21,6 @@ directly. The reaper reclaims a sandbox a prior process created by reconnecting 
 pausing it — the conversation's durable `sandbox_handle` is the map, so idle reclaim no longer
 leans on the provider's own timeout alone."""
 
-import asyncio
 import base64
 import os
 import shlex
@@ -31,7 +30,7 @@ from typing import Protocol, cast
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from e2b import Sandbox as E2BSdkSandbox
+from e2b import AsyncSandbox as E2BSdkSandbox
 from e2b.exceptions import SandboxNotFoundException, TimeoutException
 from e2b.sandbox.commands.command_handle import CommandExitException
 from e2b.sandbox.sandbox_api import SandboxLifecycle
@@ -124,21 +123,24 @@ class E2BCommandResult(Protocol):
 
 
 class E2BCommands(Protocol):
-    def run(
+    """The SDK's own signatures, mirrored: `timeout` is e2b's keyword, not a timeout this repo
+    offers, so it cannot become an `asyncio.timeout` around the call."""
+
+    async def run(
         self,
         cmd: str,
         *,
         cwd: str | None = None,
         envs: dict[str, str] | None = None,
         user: str | None = None,
-        timeout: float | None = None,
+        timeout: float | None = None,  # noqa: ASYNC109
     ) -> E2BCommandResult: ...
 
 
 class E2BFiles(Protocol):
-    def make_dir(self, path: str, *, user: str | None = None) -> bool: ...
+    async def make_dir(self, path: str, *, user: str | None = None) -> bool: ...
 
-    def write(self, path: str, data: str | bytes, *, user: str | None = None) -> object: ...
+    async def write(self, path: str, data: str | bytes, *, user: str | None = None) -> object: ...
 
 
 class E2BSandbox(Protocol):
@@ -147,23 +149,29 @@ class E2BSandbox(Protocol):
     commands: E2BCommands
     files: E2BFiles
 
-    def pause(self, **opts: object) -> bool: ...
+    async def pause(self, **opts: object) -> bool: ...
 
     def get_host(self, port: int) -> str: ...
 
 
 class E2BSdk(Protocol):
-    def create(
+    async def create(
         self,
         *,
         template: str,
-        timeout: int,
+        timeout: int,  # noqa: ASYNC109
         metadata: dict[str, str],
         lifecycle: SandboxLifecycle,
         api_key: str,
     ) -> E2BSandbox: ...
 
-    def connect(self, sandbox_id: str, *, timeout: int, api_key: str) -> E2BSandbox: ...
+    async def connect(
+        self,
+        sandbox_id: str,
+        *,
+        timeout: int,  # noqa: ASYNC109
+        api_key: str,
+    ) -> E2BSandbox: ...
 
 
 E2B_SDK = cast(E2BSdk, E2BSdkSandbox)
@@ -183,22 +191,18 @@ class E2BCarrier:
         live = self._live.get(spec.conversation_id)
         resume_id = live.sandbox_id if live is not None else spec.resume_id
         if resume_id is not None:
-            sandbox = await asyncio.to_thread(
-                self.sdk.connect,
-                resume_id,
-                timeout=self.timeout_seconds,
-                api_key=self.api_key,
+            sandbox = await self.sdk.connect(
+                resume_id, timeout=self.timeout_seconds, api_key=self.api_key
             )
         else:
-            sandbox = await asyncio.to_thread(
-                self.sdk.create,
+            sandbox = await self.sdk.create(
                 template=self.template,
                 timeout=self.timeout_seconds,
                 metadata={CONVERSATION_METADATA_KEY: str(spec.conversation_id)},
                 lifecycle=E2B_LIFECYCLE,
                 api_key=self.api_key,
             )
-            await asyncio.to_thread(sandbox.files.make_dir, WORKSPACE_DIR)
+            await sandbox.files.make_dir(WORKSPACE_DIR)
         self._live[spec.conversation_id] = sandbox
         await self._install_ca(sandbox, spec.proxy.ca_cert)
         await self._mount_s3(
@@ -215,13 +219,10 @@ class E2BCarrier:
         )
 
     async def _install_ca(self, sandbox: E2BSandbox, ca_cert: str) -> None:
-        await asyncio.to_thread(sandbox.files.write, CA_STAGING_PATH, ca_cert, user="root")
+        await sandbox.files.write(CA_STAGING_PATH, ca_cert, user="root")
         try:
-            await asyncio.to_thread(
-                sandbox.commands.run,
-                INSTALL_CA_COMMAND,
-                user="root",
-                timeout=CA_INSTALL_TIMEOUT_SECONDS,
+            await sandbox.commands.run(
+                INSTALL_CA_COMMAND, user="root", timeout=CA_INSTALL_TIMEOUT_SECONDS
             )
         except CommandExitException as error:
             detail = (error.stderr or error.stdout or "").strip()
@@ -231,7 +232,7 @@ class E2BCarrier:
         """Bring the conversation's workspace S3 prefix up at /workspace over s3fs. Runs on every
         create/resume and skips a mount the health probe passes, so a shared sandbox never remounts
         under an in-flight dispatch. Writes the private endpoint token, then runs mount
-        orchestration as root through the sync SDK off the loop. The s3fs daemon drops to its
+        orchestration as root. The s3fs daemon drops to its
         dedicated user, refreshes scoped credentials through the local relay, and reaches S3
         directly; neither path carries the agent's egress env."""
         if mount.kind != "s3":
@@ -244,23 +245,14 @@ class E2BCarrier:
             or mount.region is None
         ):
             raise RuntimeError("s3 workspace mount is missing its credential token or endpoint")
-        await asyncio.to_thread(
-            sandbox.commands.run,
-            prepare_token_staging_command(),
-            user="root",
-            timeout=MOUNT_TIMEOUT_SECONDS,
+        await sandbox.commands.run(
+            prepare_token_staging_command(), user="root", timeout=MOUNT_TIMEOUT_SECONDS
         )
-        await asyncio.to_thread(
-            sandbox.files.write,
-            SANDBOX_FS_TOKEN_STAGING_PATH,
-            mount.credential_token,
-            user="root",
+        await sandbox.files.write(
+            SANDBOX_FS_TOKEN_STAGING_PATH, mount.credential_token, user="root"
         )
-        await asyncio.to_thread(
-            sandbox.commands.run,
-            install_token_command(),
-            user="root",
-            timeout=MOUNT_TIMEOUT_SECONDS,
+        await sandbox.commands.run(
+            install_token_command(), user="root", timeout=MOUNT_TIMEOUT_SECONDS
         )
         if await self._mount_healthy(sandbox):
             return
@@ -274,15 +266,8 @@ class E2BCarrier:
         )
         prepare, mount_cmd = mount_scripts(WORKSPACE_DIR, s3fs, credential_url)
         try:
-            await asyncio.to_thread(
-                sandbox.commands.run, prepare, user="root", timeout=MOUNT_TIMEOUT_SECONDS
-            )
-            await asyncio.to_thread(
-                sandbox.commands.run,
-                mount_cmd,
-                user="root",
-                timeout=MOUNT_TIMEOUT_SECONDS,
-            )
+            await sandbox.commands.run(prepare, user="root", timeout=MOUNT_TIMEOUT_SECONDS)
+            await sandbox.commands.run(mount_cmd, user="root", timeout=MOUNT_TIMEOUT_SECONDS)
         except CommandExitException as error:
             detail = (error.stderr or error.stdout or "").strip()
             raise RuntimeError(f"sandbox-fs mount failed: {detail}") from error
@@ -291,8 +276,7 @@ class E2BCarrier:
 
     async def _mount_healthy(self, sandbox: E2BSandbox) -> bool:
         try:
-            await asyncio.to_thread(
-                sandbox.commands.run,
+            await sandbox.commands.run(
                 mount_health_check(WORKSPACE_DIR),
                 user="root",
                 timeout=MOUNT_HEALTH_CHECK_TIMEOUT_SECONDS,
@@ -304,7 +288,7 @@ class E2BCarrier:
     async def exec(
         self, handle: SandboxHandle, argv: tuple[str, ...], stdin: bytes, timeout_s: int
     ) -> ExecResult:
-        """Run one command through the sandbox's synchronous `commands.run`. e2b takes a shell
+        """Run one command through the sandbox's `commands.run`. e2b takes a shell
         string with no stdin channel, so argv is quoted into one command and any stdin rides in
         base64 through the sandbox's own `base64 -d` — the write path the file tools depend on. A
         non-zero exit and a command timeout arrive as SDK exceptions, mapped to the ExecResult the
@@ -317,8 +301,7 @@ class E2BCarrier:
             payload = shlex.quote(base64.b64encode(stdin).decode())
             command = f"printf %s {payload} | base64 -d | {command}"
         try:
-            result = await asyncio.to_thread(
-                sandbox.commands.run,
+            result = await sandbox.commands.run(
                 command,
                 cwd=WORKSPACE_DIR,
                 envs={**SANDBOX_ENV, **handle.egress_env},
@@ -364,26 +347,20 @@ class E2BCarrier:
         live = self._live.pop(handle.conversation_id, None)
         if live is None and handle.container_id:
             try:
-                live = await asyncio.to_thread(
-                    self.sdk.connect,
-                    handle.container_id,
-                    timeout=self.timeout_seconds,
-                    api_key=self.api_key,
+                live = await self.sdk.connect(
+                    handle.container_id, timeout=self.timeout_seconds, api_key=self.api_key
                 )
             except SandboxNotFoundException:
                 return
         if live is not None:
-            await asyncio.to_thread(live.pause, api_key=self.api_key)
+            await live.pause(api_key=self.api_key)
 
     async def _sandbox(self, handle: SandboxHandle) -> E2BSandbox:
         live = self._live.get(handle.conversation_id)
         if live is not None:
             return live
-        sandbox = await asyncio.to_thread(
-            self.sdk.connect,
-            handle.container_id,
-            timeout=self.timeout_seconds,
-            api_key=self.api_key,
+        sandbox = await self.sdk.connect(
+            handle.container_id, timeout=self.timeout_seconds, api_key=self.api_key
         )
         self._live[handle.conversation_id] = sandbox
         return sandbox

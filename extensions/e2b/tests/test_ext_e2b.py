@@ -1,4 +1,4 @@
-"""The e2b carrier extension against a fake standing in for the synchronous e2b SDK.
+"""The e2b carrier extension against a fake standing in for the async e2b SDK.
 
 The e2b service is not reachable from CI, so a fake plays the provider — it records the calls the
 carrier makes and returns canned results in the SDK's exact shape (a create/connect factory whose
@@ -76,14 +76,14 @@ class _Commands:
     timeout_on: tuple[str, ...] = ()
     timeout_counts: dict[str, int] = field(default_factory=dict)
 
-    def run(
+    async def run(
         self,
         cmd: str,
         *,
         cwd: str | None = None,
         envs: dict[str, str] | None = None,
         user: str | None = None,
-        timeout: float | None = None,
+        timeout: float | None = None,  # noqa: ASYNC109
     ) -> _Result:
         self.runs.append((cmd, cwd, timeout))
         self.users.append(user)
@@ -114,15 +114,15 @@ class _Files:
     write_users: list[str | None] = field(default_factory=list)
     reads: list[str] = field(default_factory=list)
 
-    def read(self, path: str, format: str) -> bytes:
+    async def read(self, path: str, format: str) -> bytes:
         self.reads.append(path)
         return b""
 
-    def make_dir(self, path: str, *, user: str | None = None) -> bool:
+    async def make_dir(self, path: str, *, user: str | None = None) -> bool:
         self.made_dirs.append(path)
         return True
 
-    def write(self, path: str, data: str | bytes, *, user: str | None = None) -> object:
+    async def write(self, path: str, data: str | bytes, *, user: str | None = None) -> object:
         self.written.append((path, data))
         self.write_users.append(user)
         return None
@@ -136,7 +136,7 @@ class _Sandbox:
     paused: int = 0
     traffic_access_token: str | None = "traffic-tok"
 
-    def pause(self, **opts: object) -> bool:
+    async def pause(self, **opts: object) -> bool:
         self.paused += 1
         return True
 
@@ -156,11 +156,11 @@ class _Sdk:
     command_timeout_counts: dict[str, int] = field(default_factory=dict)
     not_found: frozenset[str] = frozenset()
 
-    def create(
+    async def create(
         self,
         *,
         template: str,
-        timeout: int,
+        timeout: int,  # noqa: ASYNC109
         metadata: dict[str, str],
         lifecycle: object,
         api_key: str,
@@ -188,7 +188,13 @@ class _Sdk:
         )
         return sandbox
 
-    def connect(self, sandbox_id: str, *, timeout: int, api_key: str) -> _Sandbox:
+    async def connect(
+        self,
+        sandbox_id: str,
+        *,
+        timeout: int,  # noqa: ASYNC109
+        api_key: str,
+    ) -> _Sandbox:
         self.connected.append(sandbox_id)
         if sandbox_id in self.not_found:
             raise SandboxNotFoundException(f"Paused sandbox {sandbox_id} not found")
