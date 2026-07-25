@@ -206,6 +206,10 @@ data "kubectl_file_documents" "hosted" {
     ses_sender           = var.ses_sender
     ses_region           = var.region
     gateway_ses_role_arn = module.platform.gateway_ses_role_arn
+
+    # The signup Slack Connect inviter, off until the operator token is populated and proven.
+    slack_connect_enabled = var.slack_connect_enabled ? "true" : "false"
+    slack_connect_team_id = var.slack_connect_team_id
   })
 }
 
@@ -219,6 +223,8 @@ data "kubectl_file_documents" "cluster_services" {
     secret_postgres = module.platform.secret_names.postgres
     secret_platform = module.platform.secret_names.platform
     secret_api_keys = module.platform.secret_names.api_keys
+
+    secret_gateway_slack_connect = module.platform.secret_names.gateway_slack_connect
   })
 }
 

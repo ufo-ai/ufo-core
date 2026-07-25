@@ -1,5 +1,6 @@
 """The hosted onboarding server and shared-workspace resolver."""
 
+import asyncio
 import hashlib
 import logging
 import os
@@ -32,6 +33,7 @@ from ufo_control.gateway_invite import (
     InviteExpired,
 )
 from ufo_control.gateway_shared import SharedWorkspaces, serve_dsn
+from ufo_control.gateway_slack_connect import ensure_delivery_table, slack_connect_from_env
 from ufo_control.gateway_store import OnboardClaim, OnboardStore
 from ufo_control.gateway_token import TOKEN_SECRET_ENV, mint_token
 from ufo_control.gateway_web import LOGIN_PAGE, WEB_CHANNEL, parse_directives
@@ -254,6 +256,10 @@ def gateway_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        """Every environment read precedes `init_db`, so a misconfigured deploy fails startup before
+        the shared engine exists and never leaves one half-initialized. The Slack Connect inviter
+        then runs as a task beside the request path, never inside it: onboarding resolves a
+        workspace and signs the member in whether or not Slack is reachable."""
         nonlocal state
         owner_url = owner_dsn()
         serve_url = serve_dsn()
@@ -264,10 +270,13 @@ def gateway_app() -> FastAPI:
         await store.ensure_table()
         invites = InviteCodes(pool=pool)
         await invites.ensure_table()
-        init_db(serve_url)
+        await ensure_delivery_table(pool)
         invite_required = _invite_required()
         if not invite_required:
             logger.warning("gateway.invite_gate.disabled")
+        inviter = slack_connect_from_env(pool)
+        if inviter is None:
+            logger.info("gateway.slack_connect.disabled")
         state = GatewayState(
             pool=pool,
             onboarding=Onboarding(
@@ -288,9 +297,14 @@ def gateway_app() -> FastAPI:
             owner_role=_dsn_role(owner_url),
             serve_role=_dsn_role(serve_url),
         )
+        init_db(serve_url)
+        deliveries = None if inviter is None else asyncio.create_task(inviter.run())
         try:
             yield
         finally:
+            if deliveries is not None:
+                deliveries.cancel()
+                await asyncio.gather(deliveries, return_exceptions=True)
             state = None
             await dispose_db()
             await pool.close()

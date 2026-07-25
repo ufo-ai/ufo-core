@@ -3,6 +3,8 @@
 import asyncio
 import logging
 import os
+import uuid
+from datetime import UTC, datetime
 
 import asyncpg
 import click
@@ -15,6 +17,7 @@ from opentelemetry.sdk.resources import Resource
 
 from ufo_control.gateway_email import invite_email, public_apex_host
 from ufo_control.gateway_invite import InviteCodes, InviteError
+from ufo_control.gateway_slack_connect import rearm_failed_delivery
 from ufo_control.rls import bootstrap_policies, ensure_serve_role, owner_dsn
 
 DEFAULT_HOST = "0.0.0.0"
@@ -83,6 +86,25 @@ async def _mint_invite(object_number: int) -> str:
         await pool.close()
     subject, body = invite_email(minted.object_number, minted.code, minted.expires_at, apex_host)
     return f"Subject: {subject}\n\n{body}"
+
+
+@main.command(name="slack-connect-retry")
+@click.argument("onboard_claim_id", type=click.UUID)
+def slack_connect_retry(onboard_claim_id: uuid.UUID) -> None:
+    """Re-arm one failed signup Slack Connect delivery once its cause is corrected."""
+    failed_at = asyncio.run(_rearm_slack_connect(onboard_claim_id))
+    if failed_at is None:
+        raise click.ClickException(f"no failed slack connect delivery for claim {onboard_claim_id}")
+    stamp = failed_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M")
+    click.echo(f"slack connect delivery {onboard_claim_id} re-armed, failed since {stamp} UTC")
+
+
+async def _rearm_slack_connect(onboard_claim_id: uuid.UUID) -> datetime | None:
+    pool = await asyncpg.create_pool(dsn=owner_dsn(), min_size=1, max_size=1)
+    try:
+        return await rearm_failed_delivery(pool, onboard_claim_id)
+    finally:
+        await pool.close()
 
 
 @main.command(name="rls-bootstrap")

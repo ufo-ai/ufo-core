@@ -14,6 +14,7 @@ import asyncpg
 import pytest
 
 from ufo_control.gateway_invite import InviteCodes
+from ufo_control.gateway_slack_connect import ensure_delivery_table
 from ufo_control.gateway_store import OnboardStore
 from ufo_control.rls import POSTGRES_OWNER_DSN_ENV
 
@@ -62,6 +63,7 @@ async def _prepare_schema() -> None:
             )
         await OnboardStore(pool=pool).ensure_table()
         await InviteCodes(pool=pool).ensure_table()
+        await ensure_delivery_table(pool)
     finally:
         await pool.close()
 
@@ -108,7 +110,7 @@ def gateway_postgres(monkeypatch_session: pytest.MonkeyPatch) -> Iterator[str]:
 async def store(gateway_postgres: str) -> AsyncIterator[OnboardStore]:
     pool = await asyncpg.create_pool(gateway_postgres)
     async with pool.acquire() as connection:
-        await connection.execute("truncate ufo_control.onboard_claim")
+        await connection.execute("truncate ufo_control.onboard_claim cascade")
         await connection.execute("truncate ufo_control.invite_code")
         await connection.execute("delete from member")
         await connection.execute("delete from agent")

@@ -2,8 +2,9 @@
 
 import asyncio
 import re
+import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from uuid import UUID
@@ -14,6 +15,7 @@ from fastapi.testclient import TestClient
 from ufo.bearer import verify_token
 
 import ufo_control.gateway as gateway
+from ufo_control import gateway_slack_connect
 from ufo_control.gateway import TOKEN_SECRET_ENV, WORKSPACE_BASE_URL_ENV, gateway_app
 from ufo_control.gateway_email import (
     AWS_ROLE_ARN_ENV,
@@ -22,9 +24,20 @@ from ufo_control.gateway_email import (
 )
 from ufo_control.gateway_invite import InviteCodes
 from ufo_control.gateway_shared import SERVE_DSN_ENV
+from ufo_control.gateway_slack_connect import (
+    BOT_TOKEN_ENV,
+    ENABLED_ENV,
+    TABLE,
+    TEAM_ID_ENV,
+    SlackConnectInviter,
+)
 
 TOKEN_SECRET = "test-token-secret"
 WORKSPACE_URL = "https://app.testing.flyingobject.ai"
+OPERATOR_TEAM_ID = "T0PERATOR"
+UNREACHABLE_SLACK = "http://127.0.0.1:1"
+DELIVERY_POLL_SECONDS = 0.05
+DELIVERY_TIMEOUT_SECONDS = 20.0
 
 
 @dataclass
@@ -230,6 +243,83 @@ def test_http_onboarding_joins_and_returns_a_surface_verified_token(
     assert uuid.uuid5(uuid.NAMESPACE_DNS, "httpco.io") not in asyncio.run(
         _workspace_ids(gateway_postgres)
     )
+
+
+def test_signup_completes_and_delivery_runs_while_slack_is_unreachable(
+    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The gateway lifespan owns the Slack Connect worker, and Slack owns none of signup: with the
+    Web API unreachable the member still signs in, and the delivery row records the outage."""
+    _configure(monkeypatch, tmp_path, gateway_postgres)
+    monkeypatch.setenv(ENABLED_ENV, "true")
+    monkeypatch.setenv(BOT_TOKEN_ENV, "xoxb-unreachable")
+    monkeypatch.setenv(TEAM_ID_ENV, OPERATOR_TEAM_ID)
+    monkeypatch.setattr(gateway_slack_connect, "SLACK_API_BASE", UNREACHABLE_SLACK)
+    from_env = gateway.slack_connect_from_env
+
+    def promptly(pool: asyncpg.Pool) -> SlackConnectInviter:
+        inviter = from_env(pool)
+        assert inviter is not None
+        return replace(inviter, poll_interval=DELIVERY_POLL_SECONDS)
+
+    monkeypatch.setattr(gateway, "slack_connect_from_env", promptly)
+    sender = RecordingSender()
+    monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
+    code = asyncio.run(_mint_invite(gateway_postgres, 11))
+    email = "founder@slackco.io"
+    headers = {"x-ufo-session": "slack-connect-flow", "x-ufo-installed": "1"}
+    with TestClient(gateway_app()) as client:
+        client.post("/v1/onboard/ufo", headers=headers, content="")
+        client.post("/v1/onboard/ufo", headers=headers, content=email)
+        client.post("/v1/onboard/ufo", headers=headers, content=sender.sent[email])
+        signed_in = client.post("/v1/onboard/ufo", headers=headers, content=code)
+        assert f"signed in: {email}" in signed_in.text
+        row = _await_attempted_delivery(gateway_postgres, email)
+    assert row["state"] == "pending"
+    assert row["channel_name"] == "ext-slackco-flyingobject"
+    assert row["channel_id"] is None
+    assert row["last_error"].startswith("auth.test transport failure")
+
+
+def test_enabled_slack_connect_without_a_token_fails_startup(
+    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _configure(monkeypatch, tmp_path, gateway_postgres)
+    monkeypatch.setenv(ENABLED_ENV, "true")
+    monkeypatch.delenv(BOT_TOKEN_ENV, raising=False)
+    with pytest.raises(RuntimeError, match=BOT_TOKEN_ENV), TestClient(gateway_app()):
+        pass
+
+
+async def _mint_invite(dsn: str, object_number: int) -> str:
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=1)
+    try:
+        return (await InviteCodes(pool=pool).mint(object_number)).code
+    finally:
+        await pool.close()
+
+
+def _await_attempted_delivery(dsn: str, email: str) -> asyncpg.Record:
+    deadline = time.monotonic() + DELIVERY_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        row = asyncio.run(_delivery_row(dsn, email))
+        if row is not None and row["last_error"] is not None:
+            return row
+        time.sleep(DELIVERY_POLL_SECONDS)
+    raise AssertionError(f"no slack connect delivery was attempted for {email}")
+
+
+async def _delivery_row(dsn: str, email: str) -> asyncpg.Record | None:
+    connection = await asyncpg.connect(dsn)
+    try:
+        return await connection.fetchrow(
+            f"select d.* from {TABLE} d"
+            " join ufo_control.onboard_claim c on c.id = d.onboard_claim_id"
+            " where c.email = $1",
+            email,
+        )
+    finally:
+        await connection.close()
 
 
 def test_http_onboarding_refuses_an_ambiguous_domain(

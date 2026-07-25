@@ -83,6 +83,14 @@ spec:
             - name: UFO_CONTROL_SERVE_DSN
               valueFrom:
                 secretKeyRef: {name: ufo-serve, key: UFO_CONTROL_SERVE_DSN}
+            # The signup Slack Connect inviter: UFO's own operator-workspace app, reached only from
+            # this pod. Enabled, the gateway refuses to start without both the token and the team it
+            # must belong to.
+            - {name: UFO_CONTROL_SLACK_CONNECT_ENABLED, value: "${slack_connect_enabled}"}
+            - {name: UFO_CONTROL_SLACK_CONNECT_TEAM_ID, value: "${slack_connect_team_id}"}
+            - name: UFO_CONTROL_SLACK_CONNECT_BOT_TOKEN
+              valueFrom:
+                secretKeyRef: {name: ufo-gateway-slack-connect, key: bot-token}
           readinessProbe:
             httpGet: {path: /healthz, port: http}
           livenessProbe:

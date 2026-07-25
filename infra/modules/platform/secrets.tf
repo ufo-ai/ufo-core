@@ -175,3 +175,21 @@ resource "aws_secretsmanager_secret_version" "api_keys" {
     ignore_changes = [secret_string] # Values are managed out-of-band.
   }
 }
+
+# The signup Slack Connect bot token — UFO's own operator-workspace app (control/slack-connect-app.yaml),
+# outbound Web API only. Its own secret, not an api-keys property: only the gateway pod reads it, so it
+# is never projected into ufo-platform-secrets and never reaches serve, an extension, or a workspace
+# credential slot. Seeded empty; the real token is populated out-of-band and never enters state.
+resource "aws_secretsmanager_secret" "gateway_slack_connect" {
+  name = "${local.secret_prefix}/gateway-slack-connect"
+  tags = local.tags
+}
+
+resource "aws_secretsmanager_secret_version" "gateway_slack_connect" {
+  secret_id     = aws_secretsmanager_secret.gateway_slack_connect.id
+  secret_string = jsonencode({ "bot-token" = "" })
+
+  lifecycle {
+    ignore_changes = [secret_string] # The token is managed out-of-band.
+  }
+}

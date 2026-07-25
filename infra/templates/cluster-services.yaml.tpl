@@ -80,6 +80,20 @@ spec:
     - {secretKey: UFO_EGRESS_CA_CERT, remoteRef: {key: ${secret_platform}, property: egress-ca-cert}}
     - {secretKey: UFO_TOKEN_SECRET, remoteRef: {key: ${secret_platform}, property: ufo-token-secret}}
 ---
+# The signup Slack Connect bot token. Its own Secret, read by the ufo-gateway pod through an explicit
+# secretKeyRef — never part of ufo-platform-secrets, so no envFrom can hand it to serve or a sandbox.
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: ufo-gateway-slack-connect
+  namespace: ${namespace}
+spec:
+  refreshInterval: 1h
+  secretStoreRef: {name: ufo-aws-sm, kind: ClusterSecretStore}
+  target: {name: ufo-gateway-slack-connect}
+  data:
+    - {secretKey: bot-token, remoteRef: {key: ${secret_gateway_slack_connect}, property: bot-token}}
+---
 # The shared egress proxy's stable CA certificate and key.
 apiVersion: external-secrets.io/v1beta1
 kind: ExternalSecret

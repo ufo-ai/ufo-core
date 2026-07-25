@@ -32,3 +32,15 @@ variable "cloudflare_api_token" {
   sensitive   = true
   description = "Cloudflare API token (Zone:DNS:Edit on flyingobject.ai) for external-dns + cert-manager DNS-01. Supply via TF_VAR_cloudflare_api_token; never commit."
 }
+
+variable "slack_connect_enabled" {
+  type        = bool
+  default     = false
+  description = "Send each newly invited customer a Slack Connect invitation from the operator Slack workspace. Requires the out-of-band bot token and slack_connect_team_id."
+}
+
+variable "slack_connect_team_id" {
+  type        = string
+  default     = ""
+  description = "Team ID of UFO's own operator Slack workspace. The gateway refuses to mutate channels in any other team."
+}

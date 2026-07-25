@@ -93,9 +93,10 @@ output "redis_endpoint" {
 output "secret_names" {
   description = "Secrets Manager entries ESO syncs into the cluster."
   value = {
-    postgres = aws_secretsmanager_secret.postgres.name
-    platform = aws_secretsmanager_secret.platform.name
-    api_keys = aws_secretsmanager_secret.api_keys.name
+    postgres              = aws_secretsmanager_secret.postgres.name
+    platform              = aws_secretsmanager_secret.platform.name
+    api_keys              = aws_secretsmanager_secret.api_keys.name
+    gateway_slack_connect = aws_secretsmanager_secret.gateway_slack_connect.name
   }
 }
 

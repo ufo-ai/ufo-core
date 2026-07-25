@@ -32,6 +32,7 @@ browser ------>|  GET /login -> sign-in page (app host)     |
                |       +--> email code workflow             |
                |       +--> invite_code burn (create only)  |
                |       +--> bearer token                    |
+               |  slack connect delivery (background poll)  |
                +--------------------------------------------+
                                       |
                                       | token + workspace directives -> ~/.ufo/
@@ -106,6 +107,47 @@ expiry, one live code per object), and redeeming consumes the code and stamps th
 never re-asks for it. `SharedWorkspaces.exists` decides create versus join. An unknown, expired,
 or consumed code re-asks with its exact ledger state; an unknown one points at the waitlist.
 
+## Signup Slack Connect invitation
+
+A claim that both burned an invite code and created a workspace — `invite_id` and
+`resulting_workspace_id` both set — earns one public channel in UFO's *own* Slack workspace and one
+Slack-generated Slack Connect invitation to the email that signed up. A member joining an existing
+workspace never burns a code, so the same test excludes them, and only the earliest completed claim
+of a workspace materializes: one channel per customer, never a second invitation.
+
+The completed claim is the durable event source. `gateway_slack_connect.py` polls it on both gateway
+replicas, materializes `ufo_control.slack_connect_delivery` rows, and claims one due row under a
+lease (`FOR UPDATE SKIP LOCKED`, compare-and-set on `worker_id` for every write). Signup itself
+never waits: `Onboarding._resolve` signs the member in whether or not Slack is reachable.
+
+```text
+completed invite-wall claim
+  |
+  +-- materialize   one delivery row, channel name ext-<domain-label>-flyingobject
+  +-- claim         lease one due row; an expired lease is another replica's to recover
+  +-- auth.test     the token must name UFO_CONTROL_SLACK_CONNECT_TEAM_ID, else the row fails
+  +-- create        the deterministic channel; name_taken resolves by exact-name lookup
+  +-- reconcile     only when invite_attempted_at is set: outgoing invite, else channel sharing
+  +-- inviteShared  the claim's email, external_limited=true — a private, post-only channel
+  +-- delivered     invitation id persisted, then the row settles
+```
+
+The unique channel is the idempotency boundary: a lost create response recovers by name, a lost
+invitation response recovers from Slack's own state, and ambiguity Slack will not expose lands
+`failed` rather than sending a blind duplicate. Transport failures, 429 (bounded `Retry-After`),
+5xx, and documented transient Slack errors return the row to `pending` behind a bounded schedule;
+authentication, scope, plan, policy, invalid-email, and inconsistent-channel errors are terminal.
+`ufo-control slack-connect-retry <claim-id>` re-arms one failed row after its cause is fixed — it
+never sends directly and never touches a delivered row.
+
+UFO's app here (`control/slack-connect-app.yaml`) is not the customer-installed Slack app below. It
+lives only in the operator workspace, makes outbound Web API calls only, and holds one gateway-only
+bot token (`UFO_CONTROL_SLACK_CONNECT_BOT_TOKEN`, its own Secret through an explicit `secretKeyRef`
+— never `ufo-platform-secrets`, `ufo-serve`, an extension, or a workspace `CredentialSlot`).
+`UFO_CONTROL_SLACK_CONNECT_ENABLED` defaults to false; enabled, a missing token or team ID fails
+gateway startup. Rotation is: update the Secrets Manager value, wait for External Secrets, restart
+the gateway deployment.
+
 ## Web login
 
 The whole browser sign-in flow is same-origin on the **app host** (`app.<env>`), the sole
@@ -137,6 +179,8 @@ The gate is the server's; the page merely renders what arrives.
 
 ## Connecting Slack
 
+This is the app a *customer* installs in their own Slack workspace — nothing to do with the signup
+inviter above, which represents UFO in UFO's workspace and shares none of its credentials.
 The `assistant_hosted` shared fleet activates the `slack` extension alongside the ufo chat surface.
 There are two install paths — both land the same per-workspace bot token and identity record, and
 the agent drives either in chat with `slack_connect` (default `method="oauth"`).
@@ -262,7 +306,10 @@ the deploy Slack app's env secrets, and its `slack_connect` / `slack_app_manifes
 
 ## Operational edges
 
-- Gateway environment is validated at process startup.
+- Gateway environment is validated at process startup, before the shared engine is initialized.
+- The signup Slack Connect token is the gateway's alone; a team-ID mismatch fails that delivery for
+  operator review instead of mutating a channel, and no persisted error, log line, or repr carries
+  the token. The poller itself only ever stops on shutdown, so no fault strands later signups.
 - The `flyingobject.ai` domain is onboarded in Cloudflare Email Sending; the edge binding permits
   only `no-reply@flyingobject.ai` as its sender.
 - The ufo surface requires `UFO_TOKEN_SECRET`; a missing secret is a configuration error, not a 401.
@@ -285,6 +332,8 @@ control/src/ufo_control/
   gateway_web.py          the /login page + JSON rendering of the same wire
   gateway_claim.py        email -> 6-digit code -> constant-time verify
   gateway_invite.py       one-time invite codes gating workspace creation
+  gateway_slack_connect.py
+                          the signup Slack Connect delivery: table, client, leased workflow
   gateway_token.py        bearer minting
   gateway_shared.py       workspace/member/default-agent writes
   gateway_store.py        claim custody
