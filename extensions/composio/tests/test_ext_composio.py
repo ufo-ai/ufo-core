@@ -74,7 +74,28 @@ COMPOSIO_USER = "ufo_ws"
 GITHUB_SLUG = "GITHUB_LIST_PULL_REQUESTS"
 UNKNOWN_SLUG = "GITHUB_DEFINITELY_NOT_A_TOOL"
 TOOL_DESCRIPTION = "List pull requests on a repository."
-TOOLKIT_CATALOG = {"github": "GitHub", "notion": "Notion", "stripe": "Stripe"}
+BANNED_SLUG = "attio"
+TOOLKIT_CATALOG = {
+    "github": ("GitHub", ["OAUTH2"], 871),
+    "notion": ("Notion", ["OAUTH2"], 45),
+    "stripe": ("Stripe", ["OAUTH2"], 425),
+    "xero": ("Xero", [], 53),
+    BANNED_SLUG: ("Attio", ["OAUTH2"], 99),
+}
+"""The catalog Composio answers with, as `(label, managed auth schemes, tool count)`, holding one
+of each shape the namespace refuses. `xero` is the real shape of a toolkit Composio brokers but
+holds no managed credentials for — the consent leg has no client to ride. `attio` is the opposite,
+and the reason the ban cannot be derived: fully credentialed, rich in tools, yet on `BANNED`."""
+
+
+def _toolkit_record(slug: str) -> dict[str, object]:
+    label, schemes, tools = TOOLKIT_CATALOG[slug]
+    return {
+        "slug": slug,
+        "name": label,
+        "composio_managed_auth_schemes": schemes,
+        "meta": {"tools_count": tools},
+    }
 
 
 @pytest.fixture(autouse=True)
@@ -139,15 +160,14 @@ def _composio_handler(
             )
         if method == "GET" and "/toolkits/" in path:
             slug = path.rsplit("/", 1)[-1]
-            label = TOOLKIT_CATALOG.get(slug)
-            if label is None:
+            if slug not in TOOLKIT_CATALOG:
                 return httpx.Response(404, json={"error": "unknown toolkit"})
-            return httpx.Response(200, json={"slug": slug, "name": label})
+            return httpx.Response(200, json=_toolkit_record(slug))
         if method == "GET" and path.endswith("/toolkits"):
             search = (request.url.params.get("search") or "").lower()
             items = [
-                {"slug": slug, "name": label}
-                for slug, label in TOOLKIT_CATALOG.items()
+                _toolkit_record(slug)
+                for slug, (label, _, _) in TOOLKIT_CATALOG.items()
                 if not search or search in slug or search in label.lower()
             ]
             return httpx.Response(200, json={"items": items})
@@ -191,7 +211,7 @@ async def test_composio_client_confirms_an_active_accounts_owner() -> None:
     assert account.account_id == COMPOSIO_ACCOUNT
 
 
-async def test_toolkit_label_rejects_a_path_traversing_slug_without_calling() -> None:
+async def test_connectable_toolkit_rejects_a_path_traversing_slug_without_calling() -> None:
     """A member-supplied provider slug that isn't a plain toolkit identifier is no toolkit and never
     reaches the URL — else a `/` or `..` would traverse out of `/toolkits` to any same-host Composio
     endpoint under the deploy's key (httpx resolves `..` against the base path)."""
@@ -200,9 +220,101 @@ async def test_toolkit_label_rejects_a_path_traversing_slug_without_calling() ->
         raise AssertionError(f"a malformed slug must not reach Composio: {request.url}")
 
     client = composio.ComposioClient(api_key="test", transport=httpx.MockTransport(explode))
-    assert await client.toolkit_label("../../../etc/passwd") is None
-    assert await client.toolkit_label("tool/kit") is None
-    assert await client.toolkit_label("with space") is None
+    assert await client.connectable_toolkit("../../../etc/passwd") is None
+    assert await client.connectable_toolkit("tool/kit") is None
+    assert await client.connectable_toolkit("with space") is None
+
+
+@pytest.mark.parametrize(
+    ("toolkit", "expected"),
+    [
+        ({"composio_managed_auth_schemes": ["OAUTH2"], "meta": {"tools_count": 61}}, True),
+        ({"composio_managed_auth_schemes": [], "meta": {"tools_count": 53}}, False),
+        ({"composio_managed_auth_schemes": ["OAUTH2"], "meta": {"tools_count": 0}}, False),
+        ({"composio_managed_auth_schemes": [], "meta": {"tools_count": 0}}, False),
+        ({"meta": {"tools_count": 61}}, False),
+        ({"composio_managed_auth_schemes": ["OAUTH2"]}, False),
+        ({}, False),
+        ({"composio_managed_auth_schemes": "OAUTH2", "meta": {"tools_count": 61}}, False),
+        ({"composio_managed_auth_schemes": ["OAUTH2"], "meta": "61"}, False),
+        ({"composio_managed_auth_schemes": ["OAUTH2"], "meta": {"tools_count": "61"}}, False),
+        ({"composio_managed_auth_schemes": ["OAUTH2"], "meta": {"tools_count": 6.1}}, False),
+    ],
+)
+def test_connectable_requires_managed_credentials_and_tools(
+    toolkit: dict[str, object], expected: bool
+) -> None:
+    """A toolkit is connectable only when Composio holds managed credentials for it AND it catalogs
+    tools: the consent leg rides managed auth (Composio refuses to create a managed auth config
+    without credentials) and a toolkit with no tools brokers nothing. A record missing either key —
+    or carrying one under a type Composio never sends, which a truthiness check would wave
+    through — answers no rather than assuming a default."""
+    assert composio.connectable("notion", toolkit) is expected
+
+
+def test_connectable_refuses_a_banned_toolkit_however_well_credentialed() -> None:
+    """A toolkit on `BANNED` connects fine and catalogs plenty of tools, yet is withheld — so it is
+    refused on the slug alone, before the credential checks."""
+    record: dict[str, object] = {
+        "composio_managed_auth_schemes": ["OAUTH2"],
+        "meta": {"tools_count": 99},
+    }
+    assert composio.connectable(BANNED_SLUG, record) is False
+    assert composio.connectable("notion", record) is True
+
+
+def test_connectable_bans_on_the_callers_slug_not_the_payloads() -> None:
+    """The ban keys on the slug the caller validated, never one read back out of the record — a
+    detail payload that omits or renames `slug` must not silently open a banned toolkit, and one
+    that carries a different slug must not close an allowed one."""
+    banned: dict[str, object] = {
+        "composio_managed_auth_schemes": ["OAUTH2"],
+        "meta": {"tools_count": 99},
+    }
+    assert composio.connectable(BANNED_SLUG, banned) is False
+    assert composio.connectable(BANNED_SLUG, {**banned, "slug": "notion"}) is False
+    assert composio.connectable("notion", {**banned, "slug": BANNED_SLUG}) is True
+
+
+@pytest.mark.parametrize("cased", ["attio", "Attio", "ATTIO", "AtTiO"])
+def test_connectable_bans_whatever_the_casing(cased: str) -> None:
+    """Composio resolves a toolkit path case-insensitively — `/toolkits/AtTiO` answers for `attio` —
+    so an exact-case ban would be walked past by capitalising the slug."""
+    record: dict[str, object] = {
+        "composio_managed_auth_schemes": ["OAUTH2"],
+        "meta": {"tools_count": 99},
+    }
+    assert composio.connectable(cased, record) is False
+
+
+def test_every_banned_reason_names_the_gap() -> None:
+    """Each entry carries the gap that justifies it — the list is the record of why, so an entry
+    without a reason is an unexplained ban the next reader cannot re-evaluate — and the keys stay
+    alphabetical so a new one lands where a reader looks for it. Comparing key lists, not dicts:
+    dict equality ignores order, so `BANNED == dict(sorted(...))` holds for any dict at all."""
+    assert all(reason.strip() for reason in composio.BANNED.values())
+    assert list(composio.BANNED) == sorted(composio.BANNED)
+
+
+async def test_connectable_toolkit_refuses_a_toolkit_composio_cannot_broker() -> None:
+    """A toolkit Composio lists but holds no managed credentials for is not connectable, so the slug
+    is refused before a consent link is minted — the link would die at `POST /auth_configs`. A
+    banned slug is refused over the same path despite answering with credentials and 99 tools, so
+    the check is proven through the client, not only by calling `connectable` directly."""
+    client = _mock_client()
+    assert await client.connectable_toolkit("notion") == "Notion"
+    assert await client.connectable_toolkit("xero") is None
+    assert await client.connectable_toolkit(BANNED_SLUG) is None
+
+
+async def test_connect_flow_refuses_a_banned_toolkit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A member naming a banned slug is turned away at the connect request — the consumer end of
+    `BANNED`, which a resolver that stopped consulting `connectable` would silently break."""
+    monkeypatch.setattr(composio, "composio_client", _mock_client)
+    flow = _connect_flow(_credentials(), _config(), (composio_manifest.manifest(),))
+    assert flow is not None
+    with pytest.raises(UnknownProvider):
+        await flow.validate_provider(BANNED_SLUG)
 
 
 async def test_composio_client_refuses_an_account_owned_by_a_foreign_user() -> None:
@@ -593,13 +705,16 @@ async def test_connect_flow_validates_a_toolkit_slug_against_the_live_catalog(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A member connecting an unregistered slug is validated against Composio's catalog, so a real
-    toolkit passes and a typo fails loud at connect time rather than minting a dead consent link."""
+    toolkit passes while a typo — or a toolkit Composio cannot broker for this deploy — fails loud
+    at connect time rather than minting a dead consent link."""
     monkeypatch.setattr(composio, "composio_client", _mock_client)
     flow = _connect_flow(_credentials(), _config(), (composio_manifest.manifest(),))
     assert flow is not None
     await flow.validate_provider("notion")
     with pytest.raises(UnknownProvider):
         await flow.validate_provider("definitelynotatoolkit")
+    with pytest.raises(UnknownProvider):
+        await flow.validate_provider("xero")
 
 
 async def test_list_external_tools_surfaces_the_open_catalog(
@@ -614,6 +729,34 @@ async def test_list_external_tools_surfaces_the_open_catalog(
     rows = {row["source_id"] for row in payload["connectors"]}
     assert "notion" in rows
     assert "stripe" not in rows
+
+
+async def test_list_toolkits_filters_each_item_of_a_mixed_page() -> None:
+    """One catalog page carries connectable and refused toolkits together, so the filter runs per
+    item — an empty query returns the whole fixture and only the two refused slugs are dropped."""
+    rows = await _mock_client().list_toolkits("", 50)
+    slugs = {slug for slug, _ in rows}
+    assert slugs == {"github", "notion", "stripe"}
+    assert rows, "a mixed page must still yield its connectable toolkits"
+
+
+async def test_list_external_tools_never_offers_an_unbrokerable_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Discovery surfaces only services the member can go on to connect — a toolkit Composio holds
+    no managed credentials for, and one that is banned, are both filtered out of the catalog, so the
+    agent never names either."""
+    monkeypatch.setattr(composio, "composio_client", _mock_client)
+    result = await list_external_tools(
+        _ctx(uuid4(), uuid4(), uuid4(), None),
+        ListExternalToolsInput(
+            queries=("xero", BANNED_SLUG, "notion"), user_description="find accounting and a crm"
+        ),
+    )
+    rows = {row["source_id"] for row in json.loads(result.content[0].text)["connectors"]}
+    assert "xero" not in rows
+    assert BANNED_SLUG not in rows
+    assert "notion" in rows, "filtering the refused must not drop their connectable siblings"
 
 
 async def test_list_external_tools_fans_multiple_queries_across_the_catalog(

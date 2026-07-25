@@ -38,6 +38,9 @@ FILES_UPLOAD_PATH = "/files/upload/request"
 TOOLKITS_PATH = "/toolkits"
 NOT_FOUND_STATUS = 404
 TOOLKIT_SLUG = re.compile(r"[A-Za-z0-9_-]+\Z")
+MANAGED_AUTH_SCHEMES_KEY = "composio_managed_auth_schemes"
+TOOLKIT_META_KEY = "meta"
+TOOLS_COUNT_KEY = "tools_count"
 COMPOSIO_TRANSFER_HOSTS = ("temp.4d4f16c61d89ec64e760039c4ec50717.r2.cloudflarestorage.com",)
 FILE_UPLOADABLE_KEY = "file_uploadable"
 
@@ -81,6 +84,64 @@ class ComposioUpload:
 CONNECTORS: dict[str, ConnectorSpec] = {
     "github": ConnectorSpec("GitHub", "api.github.com", cli_env="GH_TOKEN"),
 }
+
+
+BANNED: dict[str, str] = {
+    "apaleo": "no reservation, availability or rate tool — only property and unit setup",
+    "attio": "record writes need record_permission:read-write, ungranted — a read-only CRM",
+    "blackbaud": "no constituent tool, and the one gift write needs a batch it cannot create",
+    "boldsign": "no tool retrieves a signed document — the signature round trip never closes",
+    "confluence": "creating a page and listing spaces need read:space, ungranted",
+    "digital_ocean": "the managed grant is read-only, so nothing can be provisioned",
+    "discord": "no message or channel tool at all — user OAuth cannot reach chat content",
+    "dynamics365": "no read tool for contacts, accounts or opportunities — only leads and invoices",
+    "freshbooks": "no invoice, payment or expense tool — only client and project lookups",
+    "google_classroom": "no tool enters or returns a grade on a submission",
+    "googlephotos": "the grant sees only app-created media, never the member's own library",
+    "googlesuper": "restates gmail, drive, calendar and meet under one slug, reachable differently",
+    "gorgias": "no tool posts a reply into a ticket",
+    "greenhouse": "advancing, rejecting and noting a candidate all need ungranted scopes",
+    "linear": "no server-side filter for issue state or label",
+    "mural": "a sticky note is its only write — cannot create a board or edit anything",
+    "omnisend": "no tool creates or sends a campaign",
+    "servicem8": "no tool updates a job after creation, or creates the customer it is for",
+    "square": "only the customer directory is granted — no payments, orders or invoices",
+    "yandex": "the grant authorizes identity alone; Disk reads only others' public files",
+    "ynab": "no tool enters or categorises a transaction, only scheduled ones",
+    "zoho_desk": "ticket threads are read-only — no tool answers the customer",
+}
+"""Toolkits the open namespace declines to claim, each mapped to the gap that disqualifies it.
+
+Judgement, not a derived gate: the gaps are visible in the live catalog but not safely computable
+from it, because scope metadata both over- and under-reports. Every entry's evidence, and the rule
+for what earns one, is in docs/composio-provider-coverage.md."""
+
+
+def connectable(slug: str, toolkit: Mapping[str, object]) -> bool:
+    """Whether a member can reach a toolkit's tools through this deploy: `slug` is the identifier
+    the caller already trusts, `toolkit` the record Composio's catalog carries for it (either the
+    search item or the detail payload).
+
+    The ban is keyed on the caller's slug, never on one read back out of `toolkit` — the detail
+    payload echoing a `slug` field is Composio's to change, and a gate that silently no-ops when a
+    remote drops a field is no gate. It is matched case-folded: Composio resolves a toolkit path
+    case-insensitively (`/toolkits/AtTiO` answers for `attio`), so an exact-case test would let any
+    banned slug through under a different capitalisation. The credential facts have no such
+    alternative and are read off the record.
+
+    Three preconditions, and a toolkit failing any brokers nothing worth having here. The consent
+    leg rides Composio-managed credentials (`_auth_config` creates a managed config when the project
+    holds none), so a toolkit Composio holds no managed credentials for cannot mint a working link —
+    `POST /auth_configs` refuses it outright. A toolkit cataloguing no tool has nothing for the
+    dynamic connector tools to search or execute. And a toolkit named in `BANNED` is withheld by
+    judgement. Checked before a slug is claimed rather than after, so the
+    failure lands on the connect request instead of a dead grant."""
+    if slug.lower() in BANNED:
+        return False
+    schemes = toolkit.get(MANAGED_AUTH_SCHEMES_KEY)
+    meta = toolkit.get(TOOLKIT_META_KEY)
+    tools = meta.get(TOOLS_COUNT_KEY) if isinstance(meta, Mapping) else None
+    return bool(isinstance(schemes, list) and schemes and isinstance(tools, int) and tools > 0)
 
 
 class ComposioError(RuntimeError):
@@ -155,13 +216,12 @@ class ComposioClient:
     async def tool_schema(self, slug: str) -> dict[str, object]:
         return await self._get(f"/tools/{slug}")
 
-    async def toolkit_label(self, slug: str) -> str | None:
-        """The member-facing name Composio holds for a toolkit slug, or None when Composio brokers
-        no such toolkit — the existence check `ComposioResolver.claims` runs so a typo'd slug fails
-        loud at connect time rather than minting a dead consent link. A slug carrying anything but a
-        toolkit identifier's charset is no toolkit and never reaches the URL — `/` or `.` would
-        otherwise let a member-supplied string traverse out of the toolkits path to any same-host
-        Composio endpoint under this deploy's key."""
+    async def connectable_toolkit(self, slug: str) -> str | None:
+        """The member-facing name Composio holds for a toolkit this deploy can broker per
+        `connectable`, else None — the check `ComposioResolver.claims` runs. A slug carrying
+        anything but a toolkit identifier's charset is no toolkit and never reaches the URL — `/`
+        or `.` would otherwise let a member-supplied string traverse out of the toolkits path to
+        any same-host Composio endpoint under this deploy's key."""
         if not TOOLKIT_SLUG.match(slug):
             return None
         try:
@@ -170,12 +230,15 @@ class ComposioClient:
             if error.status == NOT_FOUND_STATUS:
                 return None
             raise
+        if not connectable(slug, payload):
+            return None
         name = payload.get("name")
         return name if isinstance(name, str) and name else slug
 
     async def list_toolkits(self, query: str, limit: int) -> tuple[tuple[str, str], ...]:
-        """Search Composio's toolkit catalog, returning `(slug, label)` for each match — the open
-        set the discovery tool surfaces, never bounded by the explicitly registered connectors."""
+        """Search Composio's toolkit catalog, returning `(slug, label)` for each connectable match —
+        the open set the discovery tool surfaces, never bounded by the explicitly registered
+        connectors and never offering a service the member cannot then connect."""
         params = {"limit": str(limit)}
         if query:
             params["search"] = query
@@ -186,7 +249,7 @@ class ComposioClient:
             if not isinstance(item, dict):
                 continue
             slug = item.get("slug")
-            if not isinstance(slug, str) or not slug:
+            if not isinstance(slug, str) or not slug or not connectable(slug, item):
                 continue
             name = item.get("name")
             rows.append((slug, name if isinstance(name, str) and name else slug))
