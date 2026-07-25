@@ -11,6 +11,8 @@ ROOT = Path(__file__).parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
 MONITORS = ROOT / "infra" / "envs" / "testing" / "monitors.tf"
 RUN_URL = "https://github.com/metalcraftai/ufo/actions/runs/30120902872"
+DATADOG_STATUS_OK = 0
+DATADOG_STATUS_CRITICAL = 2
 
 
 def _workflow(path: Path) -> dict[str, object]:
@@ -69,6 +71,7 @@ def _report(tmp_path: Path, outcome: str) -> tuple[str, dict[str, object]]:
     curl.chmod(0o755)
     payload = stubs / "payload.json"
     url = stubs / "url.txt"
+    literals = {name: str(value) for name, value in environment.items() if "${{" not in str(value)}
     subprocess.run(
         ["bash", "-e", "-c", script],
         check=True,
@@ -77,12 +80,25 @@ def _report(tmp_path: Path, outcome: str) -> tuple[str, dict[str, object]]:
             "CURL_PAYLOAD": str(payload),
             "CURL_URL": str(url),
             "DD_API_KEY": "deploy-reporter-key",
-            "DD_EVENT_URL": str(environment["DD_EVENT_URL"]),
+            **literals,
             "GATE_OUTCOME": outcome,
             "RUN_URL": RUN_URL,
         },
     )
-    return url.read_text(), json.loads(payload.read_text())
+    submitted = json.loads(payload.read_text())
+    assert isinstance(submitted, list)
+    assert len(submitted) == 1
+    reported = submitted[0]
+    assert isinstance(reported, dict)
+    return url.read_text(), reported
+
+
+def _facets(reported: dict[str, object]) -> set[str]:
+    """The facet names a submitted check carries, which is all a monitor may group by."""
+    tags = reported["tags"]
+    assert isinstance(tags, list)
+    named = {str(tag).split(":", 1)[0] for tag in tags}
+    return named | {"host"} if reported.get("host_name") else named
 
 
 def test_every_main_push_triggers_deployment() -> None:
@@ -173,29 +189,31 @@ def test_every_main_deploy_conclusion_reaches_datadog(tmp_path: Path) -> None:
 
     posted_to, failed = _report(tmp_path, "failure")
     assert urlparse(posted_to).hostname == urlparse(api_url.group(1)).hostname
-    assert failed["title"] == "Deploy (testing) failed on main"
-    assert failed["text"] == RUN_URL
+    assert failed["message"] == RUN_URL
 
     _, succeeded = _report(tmp_path, "success")
-    assert succeeded["title"] == "Deploy (testing) succeeded on main"
+    assert succeeded["message"] == RUN_URL
 
 
-def test_the_deploy_monitor_selects_exactly_the_failed_conclusion(tmp_path: Path) -> None:
+def test_the_deploy_monitor_watches_the_check_the_reporter_submits(tmp_path: Path) -> None:
     query = _monitor_attribute("deploy_failed", "query")
-    parsed = re.fullmatch(r'events\("([^"]+)"\)\.rollup\("count"\)\.last\("15m"\) > (\d+)', query)
+    parsed = re.fullmatch(
+        r'"([\w.]+)"\.over\("([^"]+)"\)\.by\("([^"]+)"\)\.last\((\d+)\)\.count_by_status\(\)', query
+    )
     assert parsed
-    assert _monitor_attribute("deploy_failed", "critical") == parsed.group(2)
-    terms = set(parsed.group(1).split())
-
-    def facets(event: dict[str, object]) -> set[str]:
-        tags = event["tags"]
-        assert isinstance(tags, list)
-        return {*tags, f"status:{event['alert_type']}"}
+    check, scope, grouping = parsed.group(1), parsed.group(2), parsed.group(3)
+    submissions = int(parsed.group(4))
+    assert 1 <= int(_monitor_attribute("deploy_failed", "critical")) <= submissions
 
     _, failed = _report(tmp_path, "failure")
     _, succeeded = _report(tmp_path, "success")
-    assert terms == facets(failed)
-    assert not terms <= facets(succeeded)
+    assert failed["check"] == check
+    assert succeeded["check"] == check
+    assert scope in failed["tags"]
+    assert scope in succeeded["tags"]
+    assert grouping in _facets(failed)
+    assert failed["status"] == DATADOG_STATUS_CRITICAL
+    assert succeeded["status"] == DATADOG_STATUS_OK
 
 
 def test_every_monitor_notifies_a_reachable_handle() -> None:

@@ -253,24 +253,28 @@ jobs:
           esac
 
       # A stuck deploy leaves the previous pods running and emitting logs, so the telemetry monitor
-      # reads it as green — main's deploy conclusion has to be its own signal. Every conclusion is
-      # reported, not only failures: the success path drives the same key, endpoint and payload, so
-      # a reporter that stops working turns the next deploy red instead of going quiet.
+      # reads it as green — main's deploy conclusion has to be its own signal. It is a service check
+      # rather than an event because the fleet running stale images is a state, not a moment: the
+      # check holds CRITICAL until a later main deploy submits OK, which is also what clears the
+      # alert. Every conclusion is submitted, so a reporter that stops working fails this step.
       - name: Report the deploy conclusion to Datadog
         if: always() && github.ref_name == 'main'
         env:
-          DD_EVENT_URL: https://api.us5.datadoghq.com/api/v1/events
+          DD_CHECK_URL: https://api.us5.datadoghq.com/api/v1/check_run
+          DEPLOY_CHECK: ufo.deploy.main
+          DD_STATUS_OK: "0"
+          DD_STATUS_CRITICAL: "2"
           GATE_OUTCOME: ${{ steps.gate.outcome }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           test -n "$DD_API_KEY" || { echo 'DD_API_KEY secret is unset' >&2; exit 1; }
           if [ "$GATE_OUTCOME" = success ]; then
-            STATUS=success VERB=succeeded
+            STATUS="$DD_STATUS_OK"
           else
-            STATUS=error VERB=failed
+            STATUS="$DD_STATUS_CRITICAL"
           fi
-          curl -sS --fail-with-body -X POST "$DD_EVENT_URL" \
+          curl -sS --fail-with-body -X POST "$DD_CHECK_URL" \
             -H "DD-API-KEY: $DD_API_KEY" -H 'Content-Type: application/json' \
-            -d "$(jq -n --arg status "$STATUS" --arg verb "$VERB" --arg url "$RUN_URL" \
-              '{title: "Deploy (testing) \($verb) on main", text: $url, alert_type: $status,
-                tags: ["env:testing", "deploy:main"]}')"
+            -d "$(jq -n --arg check "$DEPLOY_CHECK" --argjson status "$STATUS" --arg url "$RUN_URL" \
+              '[{check: $check, host_name: "github-actions", status: $status, message: $url,
+                 tags: ["env:testing"]}]')"

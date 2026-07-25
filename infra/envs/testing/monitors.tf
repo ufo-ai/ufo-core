@@ -22,17 +22,20 @@ resource "datadog_monitor" "telemetry_silent" {
 }
 
 # The deploy's own verdict. A stuck rollout keeps the previous pods alive and talking, so the
-# silence monitor above is blind to it. The `deployment` job posts every main conclusion to the
-# event stream; this consumes the error half. No no-data clause: deploys are merge-driven, so a
-# quiet weekend is not an incident — a reporter that breaks fails the deploy step instead.
+# silence monitor above is blind to it. The `deployment` job submits every main conclusion as the
+# `ufo.deploy.main` service check, which holds its last status: the alert is the fleet's current
+# state rather than a window over a moment, and a later successful deploy is what clears it. The
+# check name is this signal's whole namespace, so nothing else can land in it. No no-data clause:
+# deploys are merge-driven, so a quiet weekend is not an incident — a reporter that breaks fails
+# the deploy step instead.
 resource "datadog_monitor" "deploy_failed" {
   name    = "ufo testing deploy failed on main"
-  type    = "event-v2 alert"
-  query   = "events(\"env:testing deploy:main status:error\").rollup(\"count\").last(\"15m\") > 0"
-  message = "Deploy (testing) failed on main: the fleet is still running the previous images. Open the run linked from the event, then fix forward or revert. @slack-alerts @ops@flyingobject.ai"
+  type    = "service check"
+  query   = "\"ufo.deploy.main\".over(\"env:testing\").by(\"host\").last(1).count_by_status()"
+  message = "Deploy (testing) failed on main: the fleet is still running the previous images. Open the run linked from the check, then fix forward or revert. @slack-alerts @ops@flyingobject.ai"
 
   monitor_thresholds {
-    critical = 0
+    critical = 1
   }
 
   tags = ["env:testing", "managed-by:terraform"]
