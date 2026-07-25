@@ -31,6 +31,7 @@ AWS_DEFAULT_REGION_ENV = "AWS_DEFAULT_REGION"
 PROVIDER_TIMEOUT_SECONDS = 60.0
 
 ANTHROPIC_CONTEXT_WINDOW = 200_000
+ANTHROPIC_LONG_CONTEXT_WINDOW = 1_000_000
 OPENAI_CONTEXT_WINDOW = 272_000
 GPT_OSS_CONTEXT_WINDOW = 128_000
 REASONS = ReasoningSupport(supported=True, tools_with_reasoning=True)
@@ -70,14 +71,20 @@ def _openai_client(spec: ModelSpec, key: str) -> OpenAIClient:
     return OpenAIClient(client=openai_sdk_client(key, base), spec=spec)
 
 
-def _anthropic(id: str, price: ModelPrice, cutoff: str) -> ModelSpec:
+def _anthropic(
+    id: str,
+    price: ModelPrice,
+    cutoff: str,
+    *,
+    context_window: int = ANTHROPIC_CONTEXT_WINDOW,
+) -> ModelSpec:
     return ModelSpec(
         id=id,
         provider=PROVIDER_NAME,
         client=_anthropic_client,
         price=price,
         knowledge_cutoff=cutoff,
-        context_window=ANTHROPIC_CONTEXT_WINDOW,
+        context_window=context_window,
         reasoning=REASONS,
         api_surface="chat",
         key_slot=BEDROCK_KEY_SLOT,
@@ -107,6 +114,12 @@ BEDROCK_MODEL_SPECS = (
         "anthropic.claude-fable-5",
         ModelPrice(10_000_000, 50_000_000, 1_000_000, 12_500_000),
         "2026-01",
+    ),
+    _anthropic(
+        "anthropic.claude-opus-5",
+        ModelPrice(5_000_000, 25_000_000, 500_000, 6_250_000),
+        "2026-05",
+        context_window=ANTHROPIC_LONG_CONTEXT_WINDOW,
     ),
     _anthropic(
         "anthropic.claude-opus-4-8",

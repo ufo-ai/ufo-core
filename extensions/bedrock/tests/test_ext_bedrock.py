@@ -26,6 +26,8 @@ def test_manifest_registers_mantle_specs() -> None:
     assert by_id["openai.gpt-oss-120b"].price.output == 600_000
     assert by_id["openai.gpt-5.5"].price.output == 30_000_000
     assert by_id["anthropic.claude-opus-4-8"].knowledge_cutoff == "2026-01"
+    assert by_id["anthropic.claude-opus-5"].context_window == 1_000_000
+    assert by_id["anthropic.claude-opus-5"].knowledge_cutoff == "2026-05"
     for spec in manifest.models:
         assert spec.provider == "bedrock"
         assert spec.key_slot == "bedrock_api_key"

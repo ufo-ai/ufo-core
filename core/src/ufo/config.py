@@ -14,7 +14,7 @@ CONFIG_PATH_ENV = "UFO_CONFIG"
 DEFAULT_CONFIG_PATH = Path("ufo.toml")
 IN_PROCESS_BACKEND = "in_process"
 DEFAULT_CDP_PROVIDER = "sandbox_chrome"
-DEFAULT_AUTO_MODEL = "claude-opus-4-8"
+DEFAULT_AUTO_MODEL = "claude-opus-5"
 DEFAULT_PROXY_PORT = 8888
 
 

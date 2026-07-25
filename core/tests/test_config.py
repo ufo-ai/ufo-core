@@ -143,7 +143,7 @@ def test_models_reasoning_and_auto_default(tmp_path: Path) -> None:
     path.write_text(VALID)
     config = load_config(path)
     assert config.models.reasoning_effort == "high"
-    assert config.models.auto_model == "claude-opus-4-8"
+    assert config.models.auto_model == "claude-opus-5"
 
 
 def test_models_reasoning_and_auto_parse(tmp_path: Path) -> None:

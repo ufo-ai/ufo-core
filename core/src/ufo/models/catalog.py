@@ -15,6 +15,7 @@ ANTHROPIC_KEY_ENV = "ANTHROPIC_API_KEY"
 OPENAI_KEY_ENV = "OPENAI_API_KEY"
 
 ANTHROPIC_CONTEXT_WINDOW = 200_000
+ANTHROPIC_LONG_CONTEXT_WINDOW = 1_000_000
 OPENAI_CONTEXT_WINDOW = 272_000
 
 REASONS_WITH_TOOLS = ReasoningSupport(supported=True, tools_with_reasoning=True)
@@ -28,14 +29,21 @@ def _openai_client(spec: ModelSpec, key: str) -> OpenAIClient:
     return OpenAIClient(client=openai_sdk_client(key), spec=spec)
 
 
-def _anthropic(id: str, price: ModelPrice, cutoff: str, key_env: str) -> ModelSpec:
+def _anthropic(
+    id: str,
+    price: ModelPrice,
+    cutoff: str,
+    key_env: str,
+    *,
+    context_window: int = ANTHROPIC_CONTEXT_WINDOW,
+) -> ModelSpec:
     return ModelSpec(
         id=id,
         provider=PROVIDER_ANTHROPIC,
         client=_anthropic_client,
         price=price,
         knowledge_cutoff=cutoff,
-        context_window=ANTHROPIC_CONTEXT_WINDOW,
+        context_window=context_window,
         reasoning=REASONS_WITH_TOOLS,
         api_surface="chat",
         key_slot=ANTHROPIC_KEY_SLOT,
@@ -64,13 +72,21 @@ def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[Model
     """Core's direct backends, built with the key-env names the deploy configured. `gpt-5.6-terra`
     is called on the Responses surface (`api_surface="responses"`) — it rejects `tools` +
     `reasoning_effort` together on `/v1/chat/completions` (#568), so it declares the surface that
-    renders the legal request rather than tripping a mid-turn 400."""
+    renders the legal request rather than tripping a mid-turn 400. `claude-opus-5` carries the
+    1M-token context window it ships with, at Opus-tier pricing unchanged from Opus 4.8."""
     return (
         _anthropic(
             "claude-fable-5",
             ModelPrice(10_000_000, 50_000_000, 1_000_000, 12_500_000),
             "2026-01",
             anthropic_key_env,
+        ),
+        _anthropic(
+            "claude-opus-5",
+            ModelPrice(5_000_000, 25_000_000, 500_000, 6_250_000),
+            "2026-05",
+            anthropic_key_env,
+            context_window=ANTHROPIC_LONG_CONTEXT_WINDOW,
         ),
         _anthropic(
             "claude-opus-4-8",

@@ -846,8 +846,18 @@ def _config(tmp_path: Path, models: ModelsConfig | None = None) -> Config:
 
 def test_registry_resolves_auto_to_the_configured_default(tmp_path: Path) -> None:
     registry = model_registry(_config(tmp_path), ())
-    assert registry.resolve("auto") == "claude-opus-4-8"
+    assert registry.resolve("auto") == "claude-opus-5"
     assert registry.resolve("claude-sonnet-5") == "claude-sonnet-5"
+
+
+def test_catalog_registers_opus_5_with_its_long_context_window(tmp_path: Path) -> None:
+    registry = model_registry(_config(tmp_path), ())
+    spec = registry.spec("claude-opus-5")
+    assert spec.provider == "anthropic"
+    assert spec.context_window == 1_000_000
+    assert spec.knowledge_cutoff == "2026-05"
+    assert spec.price.input == 5_000_000
+    assert spec.price.output == 25_000_000
 
 
 def test_registry_resolves_auto_to_an_overridden_default(tmp_path: Path) -> None:
