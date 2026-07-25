@@ -173,7 +173,8 @@ jobs:
         env:
           E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
         run: |
-          UFO_SANDBOX_FS_TOKEN_SECRET="$(terraform -chdir="$TF_DIR" output -raw sandbox_fs_token)" \
+          UFO_EGRESS_CA_CERT="$(terraform -chdir="$TF_DIR" output -raw sandbox_proxy_ca_cert)" \
+            UFO_SANDBOX_FS_TOKEN_SECRET="$(terraform -chdir="$TF_DIR" output -raw sandbox_fs_token)" \
             uv run python sandbox/mount_gate.py \
             --bucket "$(terraform -chdir="$TF_DIR" output -raw blob_bucket)" \
             --region "$AWS_REGION" \

@@ -165,6 +165,7 @@ def test_mount_gate_exercises_the_refreshing_credential_endpoint() -> None:
     gate = next(step for step in steps if step.get("name") == "Gate sandbox workspace mount")
     script = gate["run"]
     assert isinstance(script, str)
+    assert "output -raw sandbox_proxy_ca_cert" in script
     assert "output -raw sandbox_fs_token" in script
     assert "output -raw sandbox_proxy_url" in script
     assert "--role-arn" not in script

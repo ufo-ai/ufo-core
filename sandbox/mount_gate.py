@@ -18,7 +18,12 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 from e2b import Sandbox
-from ufo_ext_e2b import E2B_TEMPLATE_NAME
+from ufo_ext_e2b import (
+    CA_INSTALL_TIMEOUT_SECONDS,
+    CA_STAGING_PATH,
+    E2B_TEMPLATE_NAME,
+    INSTALL_CA_COMMAND,
+)
 
 from ufo.sandbox.fs_creds import (
     SANDBOX_FS_CREDENTIAL_PATH,
@@ -36,7 +41,7 @@ from ufo.sandbox.fs_mount import (
     prepare_token_staging_command,
     s3fs_command,
 )
-from ufo.sandbox.session import WORKSPACE_DIR
+from ufo.sandbox.session import EGRESS_CA_CERT_ENV, WORKSPACE_DIR
 
 SANDBOX_TIMEOUT_SECONDS = 180
 EXERCISE_TIMEOUT_SECONDS = 60
@@ -53,6 +58,7 @@ rm gate.txt
 
 @dataclass(frozen=True)
 class _MountGateRecipe:
+    ca_cert: str
     token: str
     prepare_token_staging: str
     root_commands: tuple[str, ...]
@@ -63,10 +69,13 @@ def _mount_gate_recipe(
     bucket: str,
     region: str,
     proxy_url: str,
+    ca_cert: str | None,
     token_secret: str | None,
     conversation: UUID,
     now: datetime,
 ) -> _MountGateRecipe:
+    if not ca_cert:
+        raise RuntimeError(f"{EGRESS_CA_CERT_ENV} is required")
     if not token_secret:
         raise RuntimeError(f"{SANDBOX_FS_TOKEN_SECRET_ENV} is required")
     token = issue_sandbox_fs_gate_token(
@@ -85,6 +94,7 @@ def _mount_gate_recipe(
     credential_url = f"{proxy_url.rstrip('/')}{SANDBOX_FS_CREDENTIAL_PATH.rstrip('/')}"
     prepare, mount = mount_scripts(WORKSPACE_DIR, s3fs, credential_url)
     return _MountGateRecipe(
+        ca_cert=ca_cert,
         token=token,
         prepare_token_staging=prepare_token_staging_command(),
         root_commands=(
@@ -107,12 +117,19 @@ def main() -> None:
         bucket=args.bucket,
         region=args.region,
         proxy_url=args.proxy_url,
+        ca_cert=os.environ.get(EGRESS_CA_CERT_ENV),
         token_secret=os.environ.get(SANDBOX_FS_TOKEN_SECRET_ENV),
         conversation=conversation,
         now=datetime.now(UTC),
     )
     sandbox = Sandbox.create(template=E2B_TEMPLATE_NAME, timeout=SANDBOX_TIMEOUT_SECONDS)
     try:
+        sandbox.files.write(CA_STAGING_PATH, recipe.ca_cert, user="root")
+        sandbox.commands.run(
+            INSTALL_CA_COMMAND,
+            user="root",
+            timeout=CA_INSTALL_TIMEOUT_SECONDS,
+        )
         sandbox.files.make_dir(WORKSPACE_DIR)
         sandbox.commands.run(
             recipe.prepare_token_staging,
