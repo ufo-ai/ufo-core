@@ -162,10 +162,10 @@ async def test_drain_reports_a_poll_reconnect_and_collects_secret_prompts() -> N
 
     display = _TurnDisplay(out=io.StringIO(), err=io.StringIO(), tty=False)
     with_secret = await _drain_lines(
-        display, "secret\tsealed-blob\texa_api\tPaste your Exa key\n", "ask\t>\n"
+        display, "secret\tsealed-blob\texa_api_key\tPaste your Exa key\n", "ask\t>\n"
     )
     assert with_secret.poll_seconds is None
-    assert with_secret.secrets == [("sealed-blob", "exa_api", "Paste your Exa key")]
+    assert with_secret.secrets == [("sealed-blob", "exa_api_key", "Paste your Exa key")]
 
 
 async def test_drain_fails_loud_on_a_non_200() -> None:
@@ -214,10 +214,10 @@ async def test_fulfill_secret_fails_loud_on_a_non_200(monkeypatch: pytest.Monkey
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(handler), base_url="http://fleet"
     ) as client:
-        with pytest.raises(click.ClickException, match="could not store exa_api"):
+        with pytest.raises(click.ClickException, match="could not store exa_api_key"):
             await _ChatStream(
                 client=client, path="/surface/ufo/main", headers={}, display=display
-            )._fulfill_secret("sealed", "exa_api", "Key?")
+            )._fulfill_secret("sealed", "exa_api_key", "Key?")
 
 
 def test_run_turn_surfaces_a_dropped_connection_as_a_clean_error(

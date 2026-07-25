@@ -69,7 +69,7 @@ spec:
     - {secretKey: PIPEDREAM_GMAIL_OAUTH_APP_ID, remoteRef: {key: ${secret_api_keys}, property: pipedream-gmail-oauth-app-id}}
     - {secretKey: E2B_API_KEY, remoteRef: {key: ${secret_api_keys}, property: e2b-api-key}}
     - {secretKey: TURBOPUFFER_API_KEY, remoteRef: {key: ${secret_api_keys}, property: turbopuffer-api-key}}
-    - {secretKey: EXA_API, remoteRef: {key: ${secret_api_keys}, property: exa-api-key}}
+    - {secretKey: EXA_API_KEY, remoteRef: {key: ${secret_api_keys}, property: exa-api-key}}
     - {secretKey: METRONOME_BEARER_TOKEN, remoteRef: {key: ${secret_api_keys}, property: metronome-bearer-token}}
     # This deploy's one Slack app: client id/secret run the OAuth install exchange, the signing
     # secret verifies every inbound event — all read in-process by serve, never injected at the proxy.

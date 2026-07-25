@@ -245,34 +245,38 @@ async def _read_credential(slot: str) -> str:
 
 def test_credential_set_round_trips_into_the_store_the_surface_reads(cli_home: CliRunner) -> None:
     _init(cli_home)
-    result = cli_home.invoke(cli.main, ["credential", "set", "exa_api"], input="exa-cli-secret\n")
+    result = cli_home.invoke(
+        cli.main, ["credential", "set", "exa_api_key"], input="exa-cli-secret\n"
+    )
     assert result.exit_code == 0, result.output
     assert "exa-cli-secret" not in result.output
-    assert asyncio.run(_read_credential("exa_api")) == "exa-cli-secret"
+    assert asyncio.run(_read_credential("exa_api_key")) == "exa-cli-secret"
 
 
 def test_init_does_not_seed_platform_credentials_into_the_store(
     cli_home: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A platform default the environment provides is read live at use, never copied into the
-    workspace at init — so the store holds no seeded exa_api. CredentialAccess resolves it live
+    workspace at init — so the store holds no seeded exa_api_key. CredentialAccess resolves it live
     from env (see the onboarding tests), so a rotation is never shadowed by a stale copy."""
-    monkeypatch.setenv("EXA_API", "exa-env-seeded")
+    monkeypatch.setenv("EXA_API_KEY", "exa-env-seeded")
     _init(cli_home)
     with pytest.raises(CredentialSlotUnset):
-        asyncio.run(_read_credential("exa_api"))
+        asyncio.run(_read_credential("exa_api_key"))
 
 
 def test_credential_set_rejects_an_undeclared_slot(cli_home: CliRunner) -> None:
     _init(cli_home)
     result = cli_home.invoke(cli.main, ["credential", "set", "no_such_slot"], input="value\n")
     assert result.exit_code != 0
-    assert "exa_api" in result.output
+    assert "exa_api_key" in result.output
 
 
 def test_credential_list_reports_set_and_unset_without_values(cli_home: CliRunner) -> None:
     _init(cli_home)
-    setting = cli_home.invoke(cli.main, ["credential", "set", "exa_api"], input="exa-cli-secret\n")
+    setting = cli_home.invoke(
+        cli.main, ["credential", "set", "exa_api_key"], input="exa-cli-secret\n"
+    )
     assert setting.exit_code == 0, setting.output
     listed = cli_home.invoke(cli.main, ["credential", "list"])
     assert listed.exit_code == 0, listed.output
@@ -280,7 +284,7 @@ def test_credential_list_reports_set_and_unset_without_values(cli_home: CliRunne
     statuses = {
         line.split()[0]: line.split()[-1] for line in listed.output.splitlines() if line.strip()
     }
-    assert statuses["exa_api"] == "set"
+    assert statuses["exa_api_key"] == "set"
     assert statuses["mcp_servers"] == "unset"
 
 

@@ -3,10 +3,10 @@
 `ExaSearchProvider` runs host-side in the serve process — it reads the workspace's BYOK Exa key in
 process through the scoped `CredentialAccess`, shapes each Exa request body, and sends it to
 `api.exa.ai` over async httpx, mapping the response into the seam's `SearchResults`/`FetchedPage`.
-The raw key never enters the sandbox: the `exa_api` credential slot the Manifest declares is a plain
-host-side slot with no wire-injection, so the egress proxy derives no rule for it. The research
-extension's tools call this backend through the turn's `ToolContext`; a deploy selects it with
-`[research] search_provider = "exa"`."""
+The raw key never enters the sandbox: the `exa_api_key` credential slot the Manifest declares is
+a plain host-side slot with no wire-injection, so the egress proxy derives no rule for it. The
+research extension's tools call this backend through the turn's `ToolContext`; a deploy selects
+it with `[research] search_provider = "exa"`."""
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -22,7 +22,7 @@ type Json = str | int | float | bool | None | list["Json"] | dict[str, "Json"]
 NAME = "exa"
 VERSION = "0.1.0"
 EXA_BACKEND = "exa"
-EXA_SLOT = "exa_api"
+EXA_SLOT = "exa_api_key"
 EXA_HOST = "api.exa.ai"
 EXA_API_KEY_HEADER = "x-api-key"
 EXA_TIMEOUT_SECONDS = 30

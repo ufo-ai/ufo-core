@@ -30,6 +30,14 @@ def test_hosted_serve_receives_the_bedrock_mantle_api_key() -> None:
     )
 
 
+def test_hosted_serve_receives_the_exa_api_key() -> None:
+    assert (
+        "{secretKey: EXA_API_KEY, "
+        "remoteRef: {key: ${secret_api_keys}, property: exa-api-key}}"
+        in CLUSTER_SERVICES_TEMPLATE.read_text()
+    )
+
+
 def test_app_host_ingress_routes_login_to_gateway_and_product_to_serve() -> None:
     """The shared app host fronts both the onboarding gateway and the serve fleet behind one
     ingress, so the sign-in flow is same-origin with the product it deposits members into. The

@@ -1964,7 +1964,7 @@ async def test_final_fire_eval_requires_result_then_check_in() -> None:
             ToolInvocation(
                 name="search_web",
                 input={"queries": ["McCarren Park events"]},
-                result="CredentialSlotUnset: exa_api",
+                result="CredentialSlotUnset: exa_api_key",
                 has_result=True,
                 is_error=True,
             ),

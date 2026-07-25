@@ -67,7 +67,7 @@ def test_manifest_declares_a_host_side_slot_and_the_exa_search_backend() -> None
     manifest = exa.manifest()
     assert manifest.name == "exa"
     (slot,) = manifest.credentials
-    assert slot.name == "exa_api"
+    assert slot.name == "exa_api_key"
     assert slot.injection is None
     (spec,) = manifest.search_providers
     assert spec.backend == "exa"
@@ -117,6 +117,30 @@ async def test_search_posts_one_exa_search_body_and_maps_the_results(db: None) -
     )
     assert hit.highlights == ("h1", "h2")
     assert results.answer is None
+
+
+async def test_search_reads_the_platform_exa_api_key(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+    init_workspace_credentials(None)
+    monkeypatch.setenv("EXA_API_KEY", EXA_KEY)
+    recorder = _Recorder({"results": []})
+    provider = exa.ExaSearchProvider(
+        credentials=context_for(exa.NAME, frozenset({exa.EXA_SLOT})).credentials,
+        transport=httpx.MockTransport(recorder.handle),
+    )
+
+    with ws(workspace_id):
+        await provider.search(SearchQuery(query="alpha", num_results=5))
+
+    assert recorder.requests[-1].headers["x-api-key"] == EXA_KEY
 
 
 async def test_search_omits_domain_and_recency_filters_when_unset(db: None) -> None:
