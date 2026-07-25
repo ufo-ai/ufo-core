@@ -3,6 +3,14 @@ name: Claude Code Review
 on:
   pull_request:
     types: [opened, synchronize, ready_for_review, reopened]
+    # Generated handbook pages are refreshed wholesale by the handbook pipeline and
+    # are not gated on AI review; the hand-written README/regenerate.sh/tool.patch in
+    # the same directory, and any other path, are reviewed normally.
+    paths-ignore:
+      - 'docs/handbook/overview.md'
+      - 'docs/handbook/index.md'
+      - 'docs/handbook/register.md'
+      - 'docs/handbook/stage-*.md'
   workflow_dispatch:
     inputs:
       pr:
