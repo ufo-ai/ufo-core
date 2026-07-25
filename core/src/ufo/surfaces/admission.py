@@ -32,6 +32,7 @@ message whose speaker never resolved to a member is refused rather than answered
 
 import asyncio
 from dataclasses import dataclass
+from datetime import UTC
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -122,16 +123,41 @@ class Admission:
             None,
         )
 
-    async def invoke_scheduled(self, workspace_id: UUID, task: ScheduledTask) -> UUID | None:
+    async def invoke_scheduled(
+        self,
+        workspace_id: UUID,
+        task: ScheduledTask,
+        runtime_instruction: str | None = None,
+    ) -> UUID | None:
         if task.claim_id is None:
             raise ValueError("an unclaimed scheduled task cannot be invoked")
+        if task.schedule == ONE_TIME_SCHEDULE and runtime_instruction is not None:
+            raise ValueError("a one-time workflow pause cannot carry a runtime instruction")
+        scheduled_fire = task.next_run_at
+        if scheduled_fire.tzinfo is None:
+            scheduled_fire = scheduled_fire.replace(tzinfo=UTC)
+        scheduled_fire_iso = scheduled_fire.astimezone(UTC).isoformat().replace("+00:00", "Z")
         firing_key = f"{task.id}:{task.next_run_at.isoformat()}"
+        inbound = task.prompt
+        if task.schedule != ONE_TIME_SCHEDULE:
+            inbound = (
+                "<scheduled_task>\n"
+                f"scheduled_fire: {scheduled_fire_iso}\n"
+                "</scheduled_task>\n"
+                f"{task.prompt}"
+            )
+            if runtime_instruction is not None:
+                inbound += (
+                    "\n<scheduled_task_instruction>\n"
+                    f"{runtime_instruction}\n"
+                    "</scheduled_task_instruction>"
+                )
         try:
             return await self._admit(
                 workspace_id,
                 task.conversation_id,
                 task.agent_id,
-                task.prompt,
+                inbound,
                 None,
                 firing_key,
                 None,
@@ -723,8 +749,10 @@ class AdmissionInvoker:
             context=context,
         )
 
-    async def invoke_scheduled(self, task: ScheduledTask) -> UUID | None:
-        return await self.admission.invoke_scheduled(self.workspace_id, task)
+    async def invoke_scheduled(
+        self, task: ScheduledTask, runtime_instruction: str | None = None
+    ) -> UUID | None:
+        return await self.admission.invoke_scheduled(self.workspace_id, task, runtime_instruction)
 
 
 @dataclass(frozen=True)

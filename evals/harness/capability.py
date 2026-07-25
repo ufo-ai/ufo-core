@@ -9,8 +9,9 @@ from __future__ import annotations
 import re
 from base64 import b64encode
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from hashlib import sha256
+from inspect import getmodule, getsource
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from uuid import UUID
@@ -165,6 +166,14 @@ class CapabilityOutput:
 
 
 type Grader = Callable[[CapabilityOutput], Awaitable[CapabilityVerdict]]
+type CapabilityFollowup = Callable[[CapabilityOutput], Awaitable[str | None]]
+
+
+def _followup_digest(followup: CapabilityFollowup) -> str:
+    module = getmodule(followup)
+    if module is None:
+        raise RuntimeError(f"followup {followup!r} has no source module")
+    return sha256(f"{getsource(followup)}\n{getsource(module)}".encode()).hexdigest()
 
 
 @runtime_checkable
@@ -216,9 +225,11 @@ class CapabilityCase:
     """A message and its deterministic and semantic criteria. `web_dependent` infra-excludes an
     external outage; `samples` re-runs the case and passes if any sample passes; `digest_tag`
     stabilizes the suite digest. `member_key`, when set, is the exact email of the workspace member
-    whose private memory the eval conversation may recall. `rubric` judges the answer text;
-    `visual_rubric` judges the rendered page images the turn shared — both reach the model judge
-    only after the deterministic grader passes, and both require a judge model on the task."""
+    whose private memory the eval conversation may recall. `followup`, when set, derives one second
+    inbound from the first turn's output and durable state; returning None grades the first turn.
+    `rubric` judges the answer text; `visual_rubric` judges the rendered page images the turn shared
+    — both reach the model judge only after the deterministic grader passes, and both require a
+    judge model on the task."""
 
     name: str
     message: str
@@ -232,6 +243,7 @@ class CapabilityCase:
     workspace_files: tuple[WorkspaceFile, ...] = ()
     prior_messages: tuple[str, ...] = ()
     references: tuple[CapabilityReference, ...] = ()
+    followup: CapabilityFollowup | None = None
 
     def __post_init__(self) -> None:
         paths = tuple(reference.path for reference in self.references)
@@ -274,6 +286,8 @@ class CapabilityCase:
                 }
                 for reference in self.references
             ]
+        if self.followup is not None:
+            payload["followup"] = _followup_digest(self.followup)
         return payload
 
 
@@ -377,6 +391,42 @@ async def sample_capability(case: CapabilityCase, target: CapabilityTarget) -> C
         return CapabilitySample(
             result.output, CapabilityVerdict(False, result.failure_reason), result.trajectory
         )
+    if case.followup is not None:
+        message = await case.followup(result.output)
+        if message is not None:
+            trajectory = result.trajectory
+            if trajectory is None:
+                return CapabilitySample(
+                    result.output,
+                    CapabilityVerdict(False, "followup requires the first turn trajectory"),
+                    None,
+                )
+            first_output = result.output
+            result = await target.step(
+                trajectory.conversation_id,
+                message,
+                f"{case.name}:followup:{trajectory.conversation_id}",
+            )
+            result = replace(
+                result,
+                output=replace(
+                    result.output,
+                    tokens=first_output.tokens + result.output.tokens,
+                    cost_micro_usd=first_output.cost_micro_usd + result.output.cost_micro_usd,
+                    artifacts=first_output.artifacts,
+                    artifact_references=first_output.artifact_references,
+                    artifact_error=first_output.artifact_error,
+                    log=first_output.log,
+                    compactions=first_output.compactions,
+                    compaction_records=first_output.compaction_records,
+                ),
+            )
+            if not result.clean:
+                return CapabilitySample(
+                    result.output,
+                    CapabilityVerdict(False, result.failure_reason),
+                    result.trajectory,
+                )
     deterministic = await case.grader(result.output)
     if not deterministic.passed or not (case.rubric or case.visual_rubric):
         return CapabilitySample(result.output, deterministic, result.trajectory)

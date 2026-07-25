@@ -16,8 +16,9 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 import yaml
+from ufo_ext_scheduled_tasks.cron import next_fire
 from ufo_ext_scheduled_tasks.manifest import NAME, RUNNER_JOB, manifest
-from ufo_ext_scheduled_tasks.runner import ScheduledTaskRunner
+from ufo_ext_scheduled_tasks.runner import FINAL_FIRE_INSTRUCTION, ScheduledTaskRunner
 from ufo_ext_scheduled_tasks.tools import (
     SCHEDULED_TASK_KIND,
     PauseAndWaitInput,
@@ -25,6 +26,13 @@ from ufo_ext_scheduled_tasks.tools import (
     pause_and_wait,
 )
 
+from evals.harness.capability import CapabilityOutput, ToolInvocation
+from evals.object_tools import (
+    BOUNDED_INFORMATIONAL_FIRES,
+    _graded_bounded_daily,
+    _graded_final_fire_result_and_check_in,
+    _graded_operational_task_stays_open,
+)
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, context_for
 from ufo.ext.loader import skill_registry, turn_tools
@@ -297,8 +305,7 @@ async def test_pause_and_wait_runs_tool_to_timer_to_resumed_turn(db: None) -> No
         turns = await _turns(conversation_id)
         assert len(turns) == 1
         assert turns[0]["agent_id"] == agent_id
-        assert "Resume the paused workflow" in turns[0]["inbound"]
-        assert "member@example.com" in turns[0]["inbound"]
+        assert turns[0]["inbound"] == waiting["prompt"]
         async with workspace_tx() as connection:
             resume_turn_id = (
                 await connection.execute(sa.select(tables.scheduled_task.c.resume_turn_id))
@@ -914,6 +921,27 @@ async def test_rearmed_pause_rejects_the_old_claim(db: None) -> None:
     assert await _turns(conversation_id) == []
 
 
+async def test_one_time_pause_rejects_runtime_instruction(db: None) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    now = datetime.now(UTC)
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=StubDbos(), durable_surfaces=frozenset()),
+        workspace_id=workspace_id,
+    )
+    with ws(workspace_id):
+        await ScheduleStore().pause(
+            conversation_id,
+            agent_id,
+            "resume workflow",
+            "waiting",
+            now - timedelta(minutes=1),
+            1,
+        )
+        [claimed] = await ScheduleStore().claim_due(now, 300)
+        with pytest.raises(ValueError, match="one-time workflow pause"):
+            await invoker.invoke_scheduled(claimed, "unexpected")
+
+
 async def test_member_message_takes_over_a_timer_waiting_to_enqueue(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     now = datetime.now(UTC)
@@ -1264,7 +1292,12 @@ async def test_runner_fires_due_task_into_a_turn(db: None) -> None:
 
         turns = await _turns(conversation_id)
         assert len(turns) == 1
-        assert turns[0]["inbound"] == "check inbox"
+        assert turns[0]["inbound"] == (
+            "<scheduled_task>\n"
+            f"scheduled_fire: {due_at.isoformat().replace('+00:00', 'Z')}\n"
+            "</scheduled_task>\n"
+            "check inbox"
+        )
         assert turns[0]["admission_source"] == "scheduled"
         assert turns[0]["status"] == "queued"
         assert dbos.enqueued == [str(turns[0]["id"])]
@@ -1302,6 +1335,48 @@ async def test_runner_fires_due_task_into_a_turn(db: None) -> None:
         assert status["last_run"]["turn_id"] == str(turns[0]["id"])
         assert status["last_run"]["response"] == "found 3 new replies"
         assert status["updated_at"] is not None
+
+
+async def test_runner_replaces_final_permitted_fire_with_check_in(db: None) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    tick_at = datetime.now(UTC)
+    due_at = tick_at - timedelta(minutes=1)
+    expires_at = next_fire(DAILY_9AM, tick_at)
+    dbos = StubDbos()
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
+    )
+    store = ScheduleStore(invoker)
+    with ws(workspace_id):
+        await store.create(
+            conversation_id,
+            agent_id,
+            "bounded-daily",
+            DAILY_9AM,
+            "check inbox",
+            "check inbox",
+            due_at,
+            expires_at=expires_at,
+        )
+        [claimed] = await store.claim_due(tick_at, 300)
+        assert (
+            await ScheduledTaskRunner(ctx=_runner_ctx(invoker))._fire(
+                store, claimed, tick_at, tick_at
+            )
+            is None
+        )
+        [advanced] = await store.list()
+    [turn] = await _turns(conversation_id)
+    assert turn["inbound"] == (
+        "<scheduled_task>\n"
+        f"scheduled_fire: {due_at.isoformat().replace('+00:00', 'Z')}\n"
+        "</scheduled_task>\n"
+        "check inbox\n"
+        "<scheduled_task_instruction>\n"
+        f"{FINAL_FIRE_INSTRUCTION}\n"
+        "</scheduled_task_instruction>"
+    )
+    assert advanced.next_run_at.replace(tzinfo=UTC) == expires_at
 
 
 async def test_task_horizon_round_trips_through_spec_and_status(db: None) -> None:
@@ -1730,9 +1805,190 @@ async def test_pause_rows_never_surface_as_objects(db: None) -> None:
 
 
 def test_task_scheduling_skill_parses_and_indexes() -> None:
-    index = dict(skill_registry((manifest(),)).index())
+    registry = skill_registry((manifest(),))
+    index = dict(registry.index())
     assert "task-scheduling" in index
     assert manifest().requires == ("memory_search",)
+
+
+async def test_bounded_daily_eval_rejects_open_ended_and_accepts_ten_fires(db: None) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    first_fire = datetime(2026, 8, 1, 9, tzinfo=UTC)
+    final_fire = first_fire
+    for _ in range(BOUNDED_INFORMATIONAL_FIRES - 1):
+        final_fire = next_fire(DAILY_9AM, final_fire)
+    expires_at = next_fire(DAILY_9AM, final_fire)
+    store = ScheduleStore()
+    with ws(workspace_id):
+        await store.create(
+            conversation_id,
+            agent_id,
+            "mccarren-park-events",
+            DAILY_9AM,
+            "Report McCarren Park events.",
+            "McCarren Park events",
+            first_fire,
+        )
+        assert not (await _graded_bounded_daily(CapabilityOutput("", ()))).passed
+        await store.create(
+            conversation_id,
+            agent_id,
+            "mccarren-park-events",
+            DAILY_9AM,
+            "Report McCarren Park events. On the final scheduled fire, also offer Continue same "
+            "cadence, Change cadence, or Stop.",
+            "McCarren Park events",
+            first_fire,
+            expires_at=expires_at,
+        )
+        assert not (await _graded_bounded_daily(CapabilityOutput("", ()))).passed
+        await store.create(
+            conversation_id,
+            agent_id,
+            "mccarren-park-events",
+            DAILY_9AM,
+            "Report McCarren Park events.",
+            "McCarren Park events",
+            first_fire,
+            expires_at=expires_at,
+        )
+        assert (await _graded_bounded_daily(CapabilityOutput("", ()))).passed
+
+
+async def test_operational_eval_requires_an_open_ended_task(db: None) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    first_fire = datetime(2026, 8, 1, 9, tzinfo=UTC)
+    store = ScheduleStore()
+    with ws(workspace_id):
+        await store.create(
+            conversation_id,
+            agent_id,
+            "credential-refresh",
+            "0 * * * *",
+            "Refresh integration credentials so synchronization keeps access.",
+            "Credential refresh",
+            first_fire,
+            expires_at=first_fire + timedelta(days=1),
+        )
+        assert not (await _graded_operational_task_stays_open(CapabilityOutput("", ()))).passed
+        await store.create(
+            conversation_id,
+            agent_id,
+            "credential-refresh",
+            "0 * * * *",
+            "Refresh integration credentials so synchronization keeps access.",
+            "Credential refresh",
+            first_fire,
+        )
+        assert (await _graded_operational_task_stays_open(CapabilityOutput("", ()))).passed
+
+
+async def test_final_fire_eval_requires_result_then_check_in() -> None:
+    no_question = CapabilityOutput("", ())
+    assert not (await _graded_final_fire_result_and_check_in(no_question)).passed
+    question_without_report = CapabilityOutput(
+        "",
+        (
+            ToolInvocation(
+                name="object_apply",
+                input={},
+                result="created",
+                has_result=True,
+            ),
+            ToolInvocation(
+                name="ask_user",
+                input={
+                    "title": "Keep this task running?",
+                    "questions": [
+                        {
+                            "question": "What should I do next?",
+                            "options": [
+                                {"label": "Continue daily"},
+                                {"label": "Change cadence"},
+                                {"label": "Stop"},
+                            ],
+                        }
+                    ],
+                },
+                result="waiting",
+                has_result=True,
+            ),
+        ),
+    )
+    assert not (await _graded_final_fire_result_and_check_in(question_without_report)).passed
+    searched_without_result = CapabilityOutput(
+        "",
+        (
+            ToolInvocation(
+                name="object_apply",
+                input={},
+                result="created",
+                has_result=True,
+            ),
+            ToolInvocation(
+                name="search_web",
+                input={"queries": ["McCarren Park events"]},
+                result="No listed events.",
+                has_result=True,
+            ),
+            ToolInvocation(
+                name="ask_user",
+                input={
+                    "title": "Keep this task running?",
+                    "questions": [
+                        {
+                            "question": "What should I do next?",
+                            "options": [
+                                {"label": "Continue daily"},
+                                {"label": "Change cadence"},
+                                {"label": "Stop"},
+                            ],
+                        }
+                    ],
+                },
+                result="waiting",
+                has_result=True,
+            ),
+        ),
+    )
+    assert not (await _graded_final_fire_result_and_check_in(searched_without_result)).passed
+    result_and_question = CapabilityOutput(
+        "McCarren Park today: Unable to retrieve event listings. Keep this running?",
+        (
+            ToolInvocation(
+                name="object_apply",
+                input={},
+                result="created",
+                has_result=True,
+            ),
+            ToolInvocation(
+                name="search_web",
+                input={"queries": ["McCarren Park events"]},
+                result="CredentialSlotUnset: exa_api",
+                has_result=True,
+                is_error=True,
+            ),
+            ToolInvocation(
+                name="ask_user",
+                input={
+                    "title": "Keep this task running?",
+                    "questions": [
+                        {
+                            "question": "What should I do next?",
+                            "options": [
+                                {"label": "Continue daily"},
+                                {"label": "Change cadence"},
+                                {"label": "Stop"},
+                            ],
+                        }
+                    ],
+                },
+                result="waiting",
+                has_result=True,
+            ),
+        ),
+    )
+    assert (await _graded_final_fire_result_and_check_in(result_and_question)).passed
 
 
 def test_manifest_exposes_pause_as_a_side_effecting_tool() -> None:
@@ -1765,7 +2021,12 @@ async def test_manifest_job_fires_through_job_runner(db: None) -> None:
             await runner.fire(f"{NAME}:{RUNNER_JOB}", workspace_id)
     turns = await _turns(conversation_id)
     assert len(turns) == 1
-    assert turns[0]["inbound"] == "check inbox"
+    assert turns[0]["inbound"] == (
+        "<scheduled_task>\n"
+        f"scheduled_fire: {due_at.isoformat().replace('+00:00', 'Z')}\n"
+        "</scheduled_task>\n"
+        "check inbox"
+    )
 
 
 async def test_invoke_without_invoker_fails_loud(db: None) -> None:

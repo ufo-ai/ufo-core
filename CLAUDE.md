@@ -40,6 +40,25 @@ gate forbids `core` internals in `extensions/`.
 Generated text and code are as succinct as possible — specs, docs, commits, code. Keep every
 hard-to-vary decision; cut the words around it. Prefer a table to prose. One example, not three.
 
+## Skills
+
+Creating or editing a Skill requires reading and applying
+[Designing, Refining, and Maintaining Agent Skills at Perplexity](https://research.perplexity.ai/articles/designing-refining-and-maintaining-agent-skills-at-perplexity)
+as a review gate:
+
+- Write evals first from real queries, known failures, and neighbor confusion. A description change
+  requires positive and negative loading evals; a body change requires an end-to-end behavior eval.
+- Make the description a ≤50-word routing trigger beginning `Load when`; name member intent and
+  never summarize the workflow.
+- Keep only non-obvious procedure, taste, and gotchas the agent would otherwise miss. Use imperative
+  form, maximize signal per token, and delete generic tool instructions or system-prompt repeats.
+- Keep `SKILL.md` as the hub. Put deterministic repeated logic in `scripts/`, heavy conditional
+  knowledge in `references/`, and output material in `assets/`; name exactly when to read each.
+- Prefer negative examples for known traps. Treat every Skill as a context tax and every routing
+  edit as a possible regression in adjacent Skills.
+- Forward-test non-trivial changes on realistic tasks without leaking the intended answer. A Skill
+  change is incomplete until its focused evals and validation pass.
+
 ## Code style
 
 - **Lean and concrete by default** — small direct implementations; three similar lines beat a

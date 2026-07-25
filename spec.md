@@ -54,7 +54,7 @@ Tables (all keyed by `workspace_id`, `created_at`, `updated_at`):
 | `ledger` | Metered usage: every model and tool call, priced. |
 | `spend_cap` | Caps by scope (`workspace` \| `member` \| `agent`), dimension, window; `reject` or `park` on breach. |
 | `job` | Recurring/one-time background work (source sync, page-change fan-out, extension jobs). |
-| `scheduled_task` | Member-owned recurring agent invocation with optional UTC expiry, enforced before invocation. |
+| `scheduled_task` | Member-owned recurring agent invocation with optional UTC expiry, enforced before invocation. Each recurring turn carries the exact claimed UTC occurrence; when its following occurrence reaches expiry, runtime adds a continuation check-in to the completed work. One-time workflow pauses keep their raw resume prompt. |
 
 ## Agent loop
 

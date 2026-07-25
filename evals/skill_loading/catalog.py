@@ -796,10 +796,11 @@ CASES: tuple[SkillLoadCase, ...] = (
         workspace_files=(DECK_STUB,),
     ),
     SkillLoadCase(
-        "xlsx-three-statement-model",
-        "Build a three-statement financial model in Excel with assumptions, formulas, scenario "
-        "inputs, and summary charts.",
+        "xlsx-shift-schedule",
+        "Build an editable employee shift schedule in Excel with coverage formulas, role "
+        "validation, and a weekly staffing chart.",
         expected="office-xlsx",
+        forbidden=("task-scheduling",),
     ),
     SkillLoadCase(
         "xlsx-cleanup-validation",
@@ -920,6 +921,11 @@ CASES: tuple[SkillLoadCase, ...] = (
     SkillLoadCase(
         "schedule-cancel-check",
         "Cancel the recurring competitor-news check.",
+        expected="task-scheduling",
+    ),
+    SkillLoadCase(
+        "schedule-one-time-reminder",
+        "Remind me once tomorrow afternoon to submit the permit application.",
         expected="task-scheduling",
     ),
     SkillLoadCase(

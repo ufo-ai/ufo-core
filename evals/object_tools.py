@@ -9,12 +9,14 @@ real `ScheduleStore`, and grades the finished conversation against the rows that
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 import yaml
 from ufo_ext_scheduled_tasks.cron import next_fire
+from ufo_ext_scheduled_tasks.runner import FINAL_FIRE_INSTRUCTION
 
 from evals.driver import EVAL_SURFACE
 from evals.harness.capability import (
@@ -41,6 +43,8 @@ METRICS_NAME = "weekly-metrics"
 METRICS_SCHEDULE = "0 17 * * 1"
 OUTREACH_NAME = "investor-outreach"
 OUTREACH_SCHEDULE = "0 8 * * *"
+BOUNDED_INFORMATIONAL_FIRES = 10
+EVAL_OWNER_EMAIL = "evals@localhost"
 SEEDED = {
     DIGEST_NAME: ("Summarize new investor replies from the inbox.", DIGEST_SCHEDULE),
     WATCH_NAME: ("Check competitor pricing pages for changes.", WATCH_SCHEDULE),
@@ -163,6 +167,100 @@ async def _graded_restraint(output: CapabilityOutput) -> CapabilityVerdict:
     return CapabilityVerdict(True, "no row was created")
 
 
+async def _graded_bounded_daily(output: CapabilityOutput) -> CapabilityVerdict:
+    rows = await _rows_about("mccarren", "park")
+    if not rows:
+        return CapabilityVerdict(False, "no durable row carries the McCarren Park task")
+    row = rows[-1]
+    if row.expires_at is None:
+        return CapabilityVerdict(False, "the daily informational task has no expires_at")
+    fire = row.next_run_at
+    if fire.tzinfo is None:
+        fire = fire.replace(tzinfo=UTC)
+    allowed_fires = 0
+    while fire < row.expires_at and allowed_fires <= BOUNDED_INFORMATIONAL_FIRES:
+        allowed_fires += 1
+        fire = next_fire(row.schedule, fire)
+    if allowed_fires != BOUNDED_INFORMATIONAL_FIRES or fire != row.expires_at:
+        return CapabilityVerdict(
+            False,
+            f"expires_at bounds {allowed_fires} fires and does not equal fire "
+            f"{BOUNDED_INFORMATIONAL_FIRES + 1}",
+        )
+    embedded_mechanics = [
+        term
+        for term in (
+            "scheduled_fire",
+            "scheduled fire",
+            "ask_user",
+            "continue same cadence",
+            "change cadence",
+            "check-in",
+        )
+        if term in row.prompt.lower()
+    ]
+    if embedded_mechanics:
+        return CapabilityVerdict(
+            False,
+            f"the durable task prompt embeds {', '.join(embedded_mechanics)}",
+        )
+    return CapabilityVerdict(True, "ten fires end with a runtime check-in before expiry")
+
+
+async def _graded_final_fire_result_and_check_in(
+    output: CapabilityOutput,
+) -> CapabilityVerdict:
+    applies = [index for index, call in enumerate(output.calls) if call.name == "object_apply"]
+    final_calls = output.calls[applies[-1] + 1 :] if applies else ()
+    asks = [call for call in final_calls if call.name == "ask_user"]
+    if len(asks) != 1 or final_calls[-1] != asks[0]:
+        return CapabilityVerdict(False, "ask_user was not the final fire's final tool")
+    ask = asks[0]
+    if not ask.succeeded:
+        return CapabilityVerdict(False, "the final fire did not call ask_user successfully")
+    if not any(call.name == "search_web" for call in final_calls):
+        return CapabilityVerdict(False, "the final fire did not attempt the scheduled search")
+    if not output.response.lower().startswith("mccarren park today:"):
+        return CapabilityVerdict(False, "the closing response omitted the scheduled result")
+    question = json.dumps(ask.input).lower()
+    missing = [choice for choice in ("continue", "change", "stop") if choice not in question]
+    if missing:
+        return CapabilityVerdict(
+            False, f"the check-in question lacks choices for {', '.join(missing)}"
+        )
+    return CapabilityVerdict(
+        True,
+        "the final fire reports its result and asks whether to continue, change, or stop",
+    )
+
+
+async def _graded_operational_task_stays_open(output: CapabilityOutput) -> CapabilityVerdict:
+    rows = await _rows_about("credential", "synchronization")
+    if not rows:
+        return CapabilityVerdict(False, "no durable credential-refresh task was created")
+    if rows[-1].expires_at is not None:
+        return CapabilityVerdict(False, "the operational task has an expiry")
+    return CapabilityVerdict(True, "the operational task stays open-ended")
+
+
+async def _mccarren_final_fire(_output: CapabilityOutput) -> str | None:
+    rows = await _rows_about("mccarren", "park")
+    if not rows or rows[-1].expires_at is None:
+        return None
+    fire = rows[-1].next_run_at
+    if fire.tzinfo is None:
+        fire = fire.replace(tzinfo=UTC)
+    for _ in range(BOUNDED_INFORMATIONAL_FIRES - 1):
+        fire = next_fire(rows[-1].schedule, fire)
+    scheduled_fire = fire.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    return (
+        f"<scheduled_task>\nscheduled_fire: {scheduled_fire}\n</scheduled_task>\n"
+        f"{rows[-1].prompt}\n"
+        f"<scheduled_task_instruction>\n{FINAL_FIRE_INSTRUCTION}\n"
+        "</scheduled_task_instruction>"
+    )
+
+
 CASES = (
     CapabilityCase(
         "O01-one-shot-refusal",
@@ -241,6 +339,41 @@ CASES = (
             "a cadence the member never gave.",
         ),
         digest_tag="object-tools:cadence-restraint",
+    ),
+    CapabilityCase(
+        "O08-bounded-daily-check-in",
+        "Send me a DM every day at 9am Eastern with events happening in McCarren Park. Start each "
+        'update with "McCarren Park today:". Set it up now — 9am works, so don\'t ask me anything '
+        "else.",
+        combine(
+            DescribedGrader(
+                "the durable task permits ten fires, adds a continuation check-in to fire 10, "
+                "and expires at fire 11",
+                _graded_bounded_daily,
+            ),
+            DescribedGrader(
+                "the actual runtime final-fire input searches, reports the final result, then "
+                "calls ask_user with continue, change, and stop",
+                _graded_final_fire_result_and_check_in,
+            ),
+            _no_jargon(),
+        ),
+        digest_tag="object-tools:bounded-daily-check-in",
+        member_key=EVAL_OWNER_EMAIL,
+        followup=_mccarren_final_fire,
+    ),
+    CapabilityCase(
+        "O09-operational-task-stays-open",
+        "At the top of every hour, refresh our production integration credentials so downstream "
+        "synchronization never loses access. Set it up now — don't ask me anything else.",
+        combine(
+            DescribedGrader(
+                "the credential-refresh scheduled_task is created without expires_at",
+                _graded_operational_task_stays_open,
+            ),
+            _no_jargon(),
+        ),
+        digest_tag="object-tools:operational-task-stays-open",
     ),
 )
 

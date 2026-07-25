@@ -1,6 +1,6 @@
 ---
 name: task-scheduling
-description: Load before creating, changing, or cancelling recurring tasks, notifications, or reminders — one-time reminders are not supported and this skill explains what to offer instead.
+description: Load when a member asks to create, change, or cancel a recurring task, notification, or reminder, or asks for a one-time reminder.
 ---
 # Task Scheduling
 
@@ -23,16 +23,33 @@ each fire. Every run searches memory for relevant context before the task starts
 
 ```yaml
 kind: scheduled_task
-name: investor-inbox-check
+name: competitor-price-digest
 spec:
-  schedule: "0 * * * *"
-  prompt: Check the inbox for new investor replies and notify if any arrived.
-  description: Hourly investor inbox check
-  expires_at: "2026-08-01T00:00:00Z"
+  schedule: "0 14 * * *"
+  prompt: Report noteworthy competitor price changes.
+  description: Daily competitor price digest
+  expires_at: "2026-08-11T14:00:00Z"
 ```
 
 Re-applying an existing name updates it in place and re-points reporting to the conversation you
 applied it from. `object_explain` with `kind: scheduled_task` shows the spec schema.
+
+### Bound frequent informational tasks
+
+For a recurring task that fires daily or more often and can safely stop:
+
+1. Honor the user's duration or run count; otherwise enumerate ten permitted occurrences starting
+   with the first future fire.
+2. Set `expires_at` to occurrence 11, not occurrence 10. Occurrence 10 completes its task and adds
+   a check-in offering `Continue same cadence`, `Change cadence`, and `Stop`.
+3. Re-apply the same name with a new bound only after explicit confirmation.
+
+Keep `prompt` limited to the recurring work. Never embed an expiry date, occurrence count, or
+continuation instruction; runtime adds the final-fire check-in.
+
+Leave `expires_at` unset only when pausing could itself harm an external-service operation:
+credential refresh, synchronization, keep-alive work, or monitoring where a gap loses required
+coverage. Reading an external service for an informational digest is not an exception.
 
 COMMUNICATION RULE: When talking to users, NEVER say "cron" or "cron job". Use friendly terms like
 "recurring task", "scheduled task", or "automatic check".
@@ -72,7 +89,8 @@ User: "Watch my inbox for investor replies and notify me immediately"
 
 - Confirm before creating a scheduled task or increasing/ambiguously changing run frequency; each
   run costs credits. After checking the current schedule (`object_get`), skip only updates that
-  clearly keep or lower frequency. When unsure, confirm.
+  clearly keep or lower frequency. Treat an explicit "set it up" or "go ahead" as confirmation.
+  When unsure, confirm.
 - Recurring tasks use a cron `schedule` and persist until deleted or their optional UTC
   `expires_at`; the platform cancels an expired task before another run. One-shot `run_at` is not
   supported.
@@ -83,7 +101,7 @@ User: "Watch my inbox for investor replies and notify me immediately"
   use one task per disjoint cadence.
 - **Never gate task execution on exact-minute wall-clock equality.** Scheduled runs have startup
   latency, so an exact-minute gate silently skips fires. Phrase any time-of-day gate as a
-  tolerance window or as a comparison against the scheduled fire time from the task header.
+  tolerance window or compare against the `<scheduled_task>` header's `scheduled_fire`.
 
 ## Stopping a recurring task
 

@@ -50,7 +50,9 @@ class ScheduledTask:
 
 
 class ScheduleInvoker(Protocol):
-    async def invoke_scheduled(self, task: ScheduledTask) -> UUID | None: ...
+    async def invoke_scheduled(
+        self, task: ScheduledTask, runtime_instruction: str | None = None
+    ) -> UUID | None: ...
 
 
 @dataclass(frozen=True)
@@ -168,10 +170,12 @@ class ScheduleStore:
     def workspace_id(self) -> UUID:
         return ws_current().workspace_id
 
-    async def invoke(self, task: ScheduledTask) -> UUID | None:
+    async def invoke(
+        self, task: ScheduledTask, runtime_instruction: str | None = None
+    ) -> UUID | None:
         if self._invoker is None:
             raise RuntimeError("scheduled invoke requires an invoker; none is wired")
-        return await self._invoker.invoke_scheduled(task)
+        return await self._invoker.invoke_scheduled(task, runtime_instruction)
 
     async def create(
         self,

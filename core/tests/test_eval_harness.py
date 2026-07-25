@@ -1854,6 +1854,81 @@ async def test_semantic_case_preserves_deterministic_grader_evidence() -> None:
     ]
 
 
+async def test_capability_followup_uses_the_first_conversation_and_grades_the_second() -> None:
+    conversation_id = uuid4()
+    stepped: list[tuple[UUID, str, str]] = []
+
+    async def followup(output: CapabilityOutput) -> str:
+        assert output.response == "created"
+        return "fire the created task"
+
+    @dataclass
+    class FollowupTarget:
+        judge: None = None
+
+        async def run(self, case: CapabilityCase) -> TargetResult:
+            return TargetResult(
+                CapabilityOutput("created", (), tokens=2, cost_micro_usd=3),
+                clean=True,
+                trajectory=EvalTrajectory(
+                    conversation_id=conversation_id,
+                    turn_id=uuid4(),
+                    status="done",
+                    messages=(Message(role="assistant", content="created"),),
+                ),
+            )
+
+        async def step(
+            self, continued_conversation_id: UUID, message: str, idempotency_key: str
+        ) -> TargetResult:
+            stepped.append((continued_conversation_id, message, idempotency_key))
+            return TargetResult(
+                CapabilityOutput("asked", (), tokens=5, cost_micro_usd=7),
+                clean=True,
+                trajectory=EvalTrajectory(
+                    conversation_id=continued_conversation_id,
+                    turn_id=uuid4(),
+                    status="done",
+                    messages=(Message(role="assistant", content="asked"),),
+                ),
+            )
+
+    case = CapabilityCase(
+        "continued",
+        "create",
+        exact_scorer("asked"),
+        followup=followup,
+    )
+    result = await run_capability_case(case, FollowupTarget())  # type: ignore[arg-type]
+
+    assert result.passed
+    assert stepped == [
+        (conversation_id, "fire the created task", f"continued:followup:{conversation_id}")
+    ]
+    attempt = cast(list[dict[str, object]], result.evidence["attempts"])[0]
+    assert attempt["tokens"] == 7
+    assert attempt["costMicroUsd"] == 10
+    assert "followup" in case.payload()
+
+
+async def test_capability_none_followup_grades_the_first_output() -> None:
+    async def followup(output: CapabilityOutput) -> None:
+        assert output.response == "evidence"
+
+    case = CapabilityCase(
+        "no-followup",
+        "inspect",
+        exact_scorer("evidence"),
+        followup=followup,
+    )
+
+    result = await run_capability_case(case, StaticTarget())  # type: ignore[arg-type]
+
+    assert result.passed
+    attempt = cast(list[dict[str, object]], result.evidence["attempts"])[0]
+    assert attempt["response"] == "evidence"
+
+
 async def test_rubric_input_is_json_fenced_even_when_the_answer_contains_the_default_fence() -> (
     None
 ):

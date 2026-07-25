@@ -19,6 +19,13 @@ from ufo.sdk.scheduling import ONE_TIME_SCHEDULE, ScheduledTask, ScheduleStore
 from ufo_ext_scheduled_tasks.cron import next_fire
 
 CLAIM_LEASE_SECONDS = 300
+FINAL_FIRE_INSTRUCTION = (
+    "This is the final permitted fire. Complete the scheduled task and settle its result; an "
+    "external-tool failure is a result, not a reason to retry after the check-in. Then call "
+    'ask_user as the final tool with choices "Continue same cadence", "Change cadence", and '
+    '"Stop". After ask_user returns, call no more tools; close with the task result and '
+    "continuation question."
+)
 
 
 @dataclass(frozen=True)
@@ -49,17 +56,27 @@ class ScheduledTaskRunner:
         failure: str | None = None
         if await scheduler.retire_if_expired(task, expiry_checked_at):
             return None
+        following_fire = (
+            next_fire(task.schedule, tick_at) if task.schedule != ONE_TIME_SCHEDULE else None
+        )
+        runtime_instruction = (
+            FINAL_FIRE_INSTRUCTION
+            if following_fire is not None
+            and task.expires_at is not None
+            and following_fire >= task.expires_at
+            else None
+        )
         try:
-            turn_id = await scheduler.invoke(task)
+            turn_id = await scheduler.invoke(task, runtime_instruction)
         except Exception as raised:
             failure = f"{task.name} ({type(raised).__name__})"
         else:
             if turn_id is None:
                 return None
-        if task.schedule != ONE_TIME_SCHEDULE and failure is None:
+        if following_fire is not None and failure is None:
             await scheduler.reschedule(
                 task,
-                next_fire(task.schedule, tick_at),
+                following_fire,
                 tick_at,
                 turn_id,
             )
