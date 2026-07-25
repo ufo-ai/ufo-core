@@ -85,10 +85,16 @@ def _summary(task: ScheduledTask) -> str:
 @dataclass(frozen=True)
 class ScheduledTaskObjects(MemberOwnedObjects[ScheduledTaskSpec]):
     """The kind's handlers over `ScheduleStore`: a task is private to the member who created it, so
-    only that member or the workspace owner sees and mutates it — the per-member visibility and
+    only that member or the workspace owner sees and deletes it — the per-member visibility and
     ownership gate is the base's. This kind supplies the task rows, their specs and status, and the
     upsert/cancel domain acts. Each apply binds the applying turn's conversation and agent, so a
-    later fire re-enters that conversation as that agent, acting on behalf of the creator."""
+    later fire re-enters that conversation as that agent, acting on behalf of the creator.
+
+    Editing is narrower than deleting: an upsert keeps the original creator, so an owner's edit of
+    another member's task would fire the owner's prompt as that member, against their private
+    memory and connections. Only the creator edits a task that has one. A task created on a turn
+    with no acting member has no creator to act as, so the workspace owner administers it — the
+    base already admits none but the owner to a creatorless row."""
 
     kind_name: ClassVar[str] = SCHEDULED_TASK_KIND
     mutate_gate: ClassVar[str] = SCHEDULE_GATE
@@ -154,7 +160,8 @@ class ScheduledTaskObjects(MemberOwnedObjects[ScheduledTaskSpec]):
         old: ScheduledTaskSpec | None,
         owner: ObjectOwner | None,
     ) -> None:
-        if owner is not None and owner.member_id != ctx.acting_member_id:
+        creator = None if owner is None else owner.member_id
+        if creator is not None and creator != ctx.acting_member_id:
             raise OwnerRequired(SCHEDULE_GATE)
         schedule = validate_cron(spec.schedule)
         await _require_scheduler(ctx).create(

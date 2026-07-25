@@ -2291,6 +2291,32 @@ async def test_reapply_preserves_the_original_creator(db: None) -> None:
     assert tasks[0].schedule == "0 17 * * 1"
 
 
+async def test_owner_edits_a_task_no_member_created(db: None) -> None:
+    """A task applied on a turn with no acting member is stored creatorless, and the workspace
+    owner administers it: there is no creator to fire the prompt as, so the creator gate that
+    protects another member's task must not deny the owner a creatorless one."""
+    workspace_id, agent_id, conversation_id = await _seed()
+    owner = await _member(workspace_id, created_at=datetime(2020, 1, 1, tzinfo=UTC))
+    owner_ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=owner)
+    apply = _object_tool("object_apply")
+    with ws(workspace_id):
+        await ScheduleStore().create(
+            conversation_id,
+            agent_id,
+            "intel",
+            DAILY_9AM,
+            "v1",
+            "v1",
+            datetime.now(UTC),
+            created_by_member_id=None,
+        )
+        await _dispatch(apply, owner_ctx, manifest=_task_manifest("intel", "0 17 * * 1", "v2"))
+        tasks = await ScheduleStore().list()
+    assert tasks[0].prompt == "v2"
+    assert tasks[0].schedule == "0 17 * * 1"
+    assert tasks[0].created_by_member_id is None
+
+
 async def test_owner_may_delete_but_not_edit_another_members_task(db: None) -> None:
     """The workspace owner administers a member's task — it stays visible and deletable to the
     owner — but the owner cannot edit its prompt: an edit would run the owner's prompt as the
